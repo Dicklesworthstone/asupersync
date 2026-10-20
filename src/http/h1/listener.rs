@@ -5,7 +5,8 @@
 //! for capacity limits and [`ShutdownSignal`] for graceful drain.
 
 use crate::http::h1::server::{
-    Http1Config, Http1ServeOutcome, Http1Server, Http1StreamingServer, IntoHttp1Response,
+    Http1Config, Http1ServeOutcome, Http1Server, Http1StreamingConfig, Http1StreamingServer,
+    IntoHttp1Response,
 };
 use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h1::types::{Request, Response};
@@ -390,6 +391,7 @@ pub struct Http1Listener<F> {
     listener: H1AcceptSource,
     handler: Arc<F>,
     config: Http1ListenerConfig,
+    streaming_config: Option<Http1StreamingConfig>,
     shutdown_signal: ShutdownSignal,
     connection_manager: ConnectionManager,
     stats: Arc<Http1ListenerStats>,
@@ -468,6 +470,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -493,6 +496,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -542,6 +546,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -594,6 +599,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -644,6 +650,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -958,6 +965,7 @@ impl<F> Http1Listener<F> {
             listener,
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -982,8 +990,15 @@ where
     ///
     /// Returns shutdown statistics upon completion.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
-        self.run_with(runtime, spawn_stream_connection::<F, Fut, R>)
-            .await
+        self.run_with(
+            runtime,
+            |stream, guard, handler, config, shutdown, in_flight, runtime| {
+                spawn_stream_connection::<F, Fut, R>(
+                    stream, guard, handler, config.connection, shutdown, in_flight, runtime,
+                )
+            },
+        )
+        .await
     }
 
     /// Like [`Self::run`], but each connection task is spawned with `cx`, so
@@ -1007,7 +1022,7 @@ where
                             stream,
                             guard,
                             handler,
-                            config,
+                            config.connection,
                             shutdown_signal,
                             in_flight_requests,
                         )
@@ -1048,7 +1063,7 @@ where
                             stream,
                             guard,
                             handler,
-                            config,
+                            config.connection,
                             shutdown_signal,
                             in_flight_requests,
                         )
@@ -1100,7 +1115,7 @@ where
                     stream,
                     guard,
                     handler,
-                    config,
+                    config.connection,
                     shutdown,
                     in_flight,
                     acceptor.clone(),
@@ -1143,7 +1158,7 @@ where
                             stream,
                             guard,
                             handler,
-                            config,
+                            config.connection,
                             shutdown,
                             in_flight,
                             acceptor,
@@ -1264,6 +1279,26 @@ where
 }
 
 impl<F> Http1Listener<F> {
+    /// Configure live-body admission, queue backpressure, and unread-body drain.
+    ///
+    /// The connection settings replace this listener's HTTP connection
+    /// configuration. All streaming, produced-response, and SSE entry points,
+    /// including HTTPS, receive the complete configuration. Listener capacity,
+    /// shutdown budgets, and the time source remain separately configured by
+    /// [`Http1ListenerConfig`]. Buffered entry points use only its connection
+    /// settings.
+    ///
+    /// Pass the configuration returned by
+    /// [`crate::web::Router::into_http1_streaming_parts`] or
+    /// [`crate::web::Router::into_http1_produced_parts`] here to enforce static
+    /// route limits before `100 Continue` or incoming-body admission.
+    #[must_use]
+    pub fn with_streaming_config(mut self, config: Http1StreamingConfig) -> Self {
+        self.config.http_config = config.connection.clone();
+        self.streaming_config = Some(config);
+        self
+    }
+
     async fn run_with<Spawn>(
         self,
         runtime: &RuntimeHandle,
@@ -1275,7 +1310,7 @@ impl<F> Http1Listener<F> {
                 H1Stream,
                 ConnectionGuard,
                 Arc<F>,
-                Http1Config,
+                Http1StreamingConfig,
                 ShutdownSignal,
                 Arc<AtomicUsize>,
                 &RuntimeHandle,
@@ -1314,7 +1349,7 @@ impl<F> Http1Listener<F> {
                 H1Stream,
                 ConnectionGuard,
                 Arc<F>,
-                Http1Config,
+                Http1StreamingConfig,
                 ShutdownSignal,
                 Arc<AtomicUsize>,
             ) -> Result<ConnectionTask, SpawnError>
@@ -1414,7 +1449,10 @@ impl<F> Http1Listener<F> {
 
             // Spawn connection handler
             let handler = Arc::clone(&self.handler);
-            let http_config = self.config.http_config.clone();
+            let http_config = self.streaming_config.as_ref().map_or_else(
+                || Http1StreamingConfig::from(self.config.http_config.clone()),
+                Clone::clone,
+            );
             let shutdown_signal = self.shutdown_signal.clone();
             let in_flight_requests = Arc::clone(&self.in_flight_requests);
             let handle = match spawn_connection(
@@ -2199,7 +2237,7 @@ async fn serve_owned_streaming_connection<F, Fut>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
 ) where
@@ -2227,7 +2265,7 @@ async fn serve_owned_produced_connection<F, Fut>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
 ) where
@@ -2258,7 +2296,7 @@ async fn serve_owned_sse_connection<F, Fut, S>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
 ) where
@@ -2288,7 +2326,7 @@ fn spawn_streaming_connection<F, Fut>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
     runtime: &RuntimeHandle,
@@ -2324,7 +2362,7 @@ fn spawn_produced_connection<F, Fut>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
     runtime: &RuntimeHandle,
@@ -2357,7 +2395,7 @@ fn spawn_sse_connection<F, Fut, S>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
     runtime: &RuntimeHandle,

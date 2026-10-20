@@ -50,6 +50,9 @@ mod owned;
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) use owned::OwnedRequests;
 
+#[cfg(test)]
+mod admission_tests;
+
 /// Inputs shared by legacy and opt-in scheduler-owned dispatch.
 #[derive(Clone)]
 pub(super) struct RequestExecutionConfig {
@@ -310,6 +313,18 @@ pub struct Http1StreamingConfig {
     pub unread_body_drain_bytes: u64,
     /// Maximum time spent synchronizing unread request-body EOF.
     pub unread_body_drain_timeout: Duration,
+    request_body_policy: Option<Http1RequestBodyPolicy>,
+}
+
+#[derive(Clone)]
+struct Http1RequestBodyPolicy(
+    Arc<dyn Fn(&RequestHead) -> Result<Option<u64>, Response> + Send + Sync>,
+);
+
+impl std::fmt::Debug for Http1RequestBodyPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Http1RequestBodyPolicy(..)")
+    }
 }
 
 impl Default for Http1StreamingConfig {
@@ -327,6 +342,7 @@ impl From<Http1Config> for Http1StreamingConfig {
             unread_body_drain_frames: 8,
             unread_body_drain_bytes: 512 * 1024,
             unread_body_drain_timeout: Duration::from_millis(500),
+            request_body_policy: None,
         }
     }
 }
@@ -340,6 +356,42 @@ impl std::ops::Deref for Http1StreamingConfig {
 }
 
 impl Http1StreamingConfig {
+    /// Resolve static request-body policy from a validated head, before body
+    /// allocation, checked obligation admission, or `100 Continue`.
+    ///
+    /// The callback runs once per request and may tighten the connection's
+    /// total-body ceiling. `None` leaves that ceiling in force. Declared
+    /// lengths above the effective limit receive `413`; chunked bodies use
+    /// the same limit while streaming. Limits are local to this request and
+    /// cannot restrict a later request on the keep-alive connection.
+    ///
+    /// Returning a final response refuses admission and closes the connection
+    /// without running a handler or draining the unadmitted body. A panic or
+    /// an interim refusal response becomes `500`. The callback should perform
+    /// only static route/policy selection; request middleware runs later in
+    /// the request task and may further tighten policy.
+    /// Multiple calls compose in order: an earlier refusal short-circuits,
+    /// and accepted ceilings are combined by taking their minimum.
+    #[must_use]
+    pub fn with_request_body_policy(
+        mut self,
+        policy: impl Fn(&RequestHead) -> Result<Option<u64>, Response> + Send + Sync + 'static,
+    ) -> Self {
+        let next = Http1RequestBodyPolicy(Arc::new(policy));
+        self.request_body_policy = Some(match self.request_body_policy.take() {
+            None => next,
+            Some(previous) => Http1RequestBodyPolicy(Arc::new(move |head| {
+                let earlier = (previous.0)(head)?;
+                let later = (next.0)(head)?;
+                Ok(match (earlier, later) {
+                    (Some(earlier), Some(later)) => Some(earlier.min(later)),
+                    (earlier, later) => earlier.or(later),
+                })
+            })),
+        });
+        self
+    }
+
     /// Replaces the connection-wide HTTP/1 configuration.
     #[must_use]
     pub fn connection(mut self, connection: Http1Config) -> Self {
@@ -363,6 +415,64 @@ impl Http1StreamingConfig {
         self.unread_body_drain_timeout = timeout;
         self
     }
+}
+
+/// The same head-only gate precedes all streaming, produced, and SSE bodies.
+/// Preserve the shared configuration so a tight route never changes later
+/// requests' admission, queue sizes, or unread-body drain policy.
+fn admit_streaming_request_head(
+    config: &Arc<Http1StreamingConfig>,
+    head: &RequestHead,
+    body_kind: BodyKind,
+) -> Result<Arc<Http1StreamingConfig>, Response> {
+    let transport_limit = u64::try_from(config.max_body_size).unwrap_or(u64::MAX);
+    let route_limit = match config.request_body_policy.as_ref() {
+        Some(policy) => {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (policy.0)(head))) {
+                Ok(Ok(limit)) => limit,
+                Ok(Err(response)) => return Err(streaming_admission_refusal(head, response)),
+                Err(_) => {
+                    return Err(streaming_admission_refusal(
+                        head,
+                        hop_error_response(head.version, 500, "request body policy failed"),
+                    ));
+                }
+            }
+        }
+        None => None,
+    };
+    let limit = route_limit.map_or(transport_limit, |limit| limit.min(transport_limit));
+    if matches!(body_kind, BodyKind::ContentLength(length) if length > limit) {
+        return Err(streaming_admission_refusal(
+            head,
+            hop_error_response(
+                head.version,
+                413,
+                "[ASUP-E505] request body exceeds the configured limit",
+            ),
+        ));
+    }
+    if limit == transport_limit {
+        return Ok(Arc::clone(config));
+    }
+    let mut admitted = (**config).clone();
+    // The limit was met with a usize-valued transport ceiling above.
+    admitted.connection.max_body_size = usize::try_from(limit).unwrap_or(config.max_body_size);
+    Ok(Arc::new(admitted))
+}
+
+fn streaming_admission_refusal(head: &RequestHead, mut response: Response) -> Response {
+    if !(200..=599).contains(&response.status)
+        || (head.method != Method::Head && declared_length_mismatches_body(&response))
+    {
+        response = hop_error_response(head.version, 500, "invalid request body policy response");
+    }
+    response.version = head.version;
+    add_connection_close(&mut response);
+    if head.method == Method::Head {
+        suppress_response_body_for_head(&mut response);
+    }
+    response
 }
 
 /// Parses the client `Request-Timeout` header into a duration.
@@ -2050,6 +2160,20 @@ where
                 state.phase = ConnectionPhase::Closing;
                 break;
             }
+            let request_config = match admit_streaming_request_head(
+                &execution_config,
+                &head,
+                body_kind,
+            ) {
+                Ok(config) => config,
+                Err(response) => {
+                    state.phase = ConnectionPhase::Writing;
+                    response_write.write_streaming_response(cx, &mut io, response).await?;
+                    state.requests_served += 1;
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+            };
             if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
                 let response = expectation_response(head.version, expectation)
                     .expect("100-continue expectation must have a response");
@@ -2078,7 +2202,7 @@ where
                     head,
                     body_kind,
                     peer_addr,
-                    config: Arc::clone(&execution_config),
+                    config: request_config,
                     request: RequestExecutionConfig {
                         budget: request_budget,
                         started_at: request_now,
@@ -2690,6 +2814,21 @@ where
         let _ = response_write.close_transport(&mut io).await;
         return Ok(state);
     }
+    let request_config = match admit_streaming_request_head(
+        &Arc::new(config.clone()),
+        &head,
+        body_kind,
+    ) {
+        Ok(config) => config,
+        Err(response) => {
+            state.phase = ConnectionPhase::Writing;
+            response_write.write_streaming_response(cx, &mut io, response).await?;
+            state.requests_served = 1;
+            state.phase = ConnectionPhase::Closing;
+            let _ = response_write.close_transport(&mut io).await;
+            return Ok(state);
+        }
+    };
     if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
         let response = expectation_response(head.version, expectation)
             .expect("100-continue expectation must have a response");
@@ -2718,7 +2857,7 @@ where
                 head,
                 body_kind,
                 peer_addr,
-                config: Arc::new(config.clone()),
+                config: request_config,
                 request: RequestExecutionConfig {
                     budget: request_budget,
                     started_at: request_now,

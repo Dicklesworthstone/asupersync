@@ -63,8 +63,8 @@ use crate::http::body::{Body, Frame as BodyFrame};
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use crate::http::h1::OutgoingBody;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::http::h1::server::{Http1Response, Http1Upgrade};
-#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+use crate::http::h1::server::{Http1Response, Http1StreamingConfig, Http1Upgrade};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::stream::RequestHead;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
@@ -3470,7 +3470,8 @@ impl Router {
     /// [`crate::web::StreamingRawBody`] as their final extractor to consume the
     /// live, bounded body queue. Existing buffered extractors deliberately fail
     /// closed on this entry point instead of observing an empty compatibility
-    /// body.
+    /// body. Use [`Self::into_http1_streaming_parts`] to apply static route
+    /// policy before the listener creates the body or its checked obligation.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn into_http1_streaming_handler(
@@ -3486,6 +3487,64 @@ impl Router {
                     .await
             })
         }
+    }
+
+    /// Bind HTTP/1 static route admission and live-body dispatch to one router.
+    ///
+    /// Pass the returned handler and configuration to
+    /// [`crate::http::h1::server::Http1StreamingServer::with_config`].
+    /// For a listener, bind the handler with its ordinary listener
+    /// configuration, then install the returned streaming configuration with
+    /// [`crate::http::h1::listener::Http1Listener::with_streaming_config`].
+    /// Route selection and monotonic server/router/route body policy resolve
+    /// from the validated head before any request body, body obligation, or
+    /// `100 Continue` is admitted. Request-local middleware can still tighten
+    /// the policy during dispatch. The transport retains its own body ceiling.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn into_http1_streaming_parts(
+        self,
+        config: Http1StreamingConfig,
+    ) -> (
+        impl Fn(Cx, StreamingServerRequest) -> HttpHandlerFuture + Clone + Send + Sync + 'static,
+        Http1StreamingConfig,
+    ) {
+        let router = Arc::new(self);
+        let admission = Arc::clone(&router);
+        let config = config
+            .with_request_body_policy(move |head| admission.http1_streaming_body_policy(head));
+        let handler = move |cx: Cx, request| -> HttpHandlerFuture {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                router
+                    .handle_http1_streaming_request_with_cx(&cx, request)
+                    .await
+            })
+        };
+        (handler, config)
+    }
+
+    /// Resolve a validated HTTP/1 request head's static route body ceiling.
+    ///
+    /// This performs the same route and mount selection as dispatch, including
+    /// the selected route's policy for a method-not-allowed response and the
+    /// selected router's policy for fallback/404 responses. It runs no handler
+    /// or middleware, reads no body, and creates no request task or obligation.
+    /// `None` leaves the transport's ceiling in force. The transport validates
+    /// headers and checks the declared length before admitting body ownership,
+    /// then enforces the same ceiling as decoded body bytes arrive. Dynamic
+    /// middleware policy remains a dispatch concern and can only tighten the
+    /// admitted ceiling.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn http1_streaming_body_policy(
+        &self,
+        head: &RequestHead,
+    ) -> Result<Option<u64>, HttpResponse> {
+        let (path, _) = split_http_request_target(&head.uri);
+        let request = Request::new(head.method.as_str(), path);
+        self.streaming_body_policy_limit(&request)
+            .map(|limit| limit.map(|bytes| bytes as u64))
+            .map_err(http_response_from_web)
     }
 
     /// Convert this router into a production HTTP/1 produced-response handler.
@@ -3509,7 +3568,8 @@ impl Router {
     /// request/response progress. The Router trace covers handler dispatch and
     /// final response-head binding; producer lifetime remains observable
     /// through the HTTP/1 listener/request lifecycle rather than that handler
-    /// duration record.
+    /// duration record. Use [`Self::into_http1_produced_parts`] to bind static
+    /// request-body admission to this same router before body ownership begins.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn into_http1_produced_handler(
@@ -3525,6 +3585,45 @@ impl Router {
                     .await
             })
         }
+    }
+
+    /// Bind HTTP/1 produced responses to head-only static body-policy admission.
+    ///
+    /// Pass the returned values to
+    /// [`crate::http::h1::server::Http1StreamingServer::with_config_produced`].
+    /// A produced listener takes the returned configuration through
+    /// [`crate::http::h1::listener::Http1Listener::with_streaming_config`]
+    /// after binding its handler.
+    /// Admission and dispatch share the same immutable router, following
+    /// [`Self::into_http1_streaming_parts`]'s route and policy semantics while
+    /// retaining the produced response contract of
+    /// [`Self::into_http1_produced_handler`].
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn into_http1_produced_parts(
+        self,
+        config: Http1StreamingConfig,
+    ) -> (
+        impl Fn(Cx, StreamingServerRequest) -> Http1ProducedHandlerFuture
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+        Http1StreamingConfig,
+    ) {
+        let router = Arc::new(self);
+        let admission = Arc::clone(&router);
+        let config = config
+            .with_request_body_policy(move |head| admission.http1_streaming_body_policy(head));
+        let handler = move |cx: Cx, request| -> Http1ProducedHandlerFuture {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                router
+                    .handle_http1_produced_request_with_cx(&cx, request)
+                    .await
+            })
+        };
+        (handler, config)
     }
 
     /// Convert this router into an HTTP/2 handler with live request bodies.
@@ -3929,10 +4028,7 @@ impl Router {
     /// ordinary policy merger on an empty, header-free probe, following the
     /// exact route/nest precedence used by dispatch. No handler, request body,
     /// request region, or request-local middleware is created in this phase.
-    #[cfg(all(
-        not(target_arch = "wasm32"),
-        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
-    ))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn streaming_body_policy_limit(&self, request: &Request) -> Result<Option<usize>, Response> {
         fn extend_policy_extensions(target: &mut Extensions, source: &Extensions) {
             // Carry only policy types: copying unrelated extensions could
@@ -4942,3 +5038,7 @@ fn strip_prefix(path: &str, prefix: &str) -> Option<String> {
 #[cfg(test)]
 #[path = "router_inline_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "router/http1_admission_tests.rs"]
+mod http1_admission_tests;
