@@ -1878,6 +1878,7 @@
             waker: &Waker,
         ) {
             with_driver(driver, || {
+                let waker = waker.clone();
                 let (armed, stranded, displaced) =
                     registration
                         .lock()
@@ -1906,6 +1907,72 @@
                 );
                 self.count.0.fetch_add(1, Ordering::SeqCst);
             }
+        }
+
+        #[test]
+        fn driverless_context_retires_live_registration_when_fallback_is_unavailable() {
+            let model = Arc::new(LabReactorModel::new());
+            let driver = IoDriverHandle::new(model.clone());
+            let source = source();
+            let mut registration = ReactorRegistration::new();
+            let (count, waker) = counted_waker();
+            assert_eq!(
+                arm_on(&mut registration, &source, &driver, &waker).unwrap(),
+                Armed::Parked
+            );
+            let token = registration.as_ref().unwrap().token();
+
+            // No Cx can mean a caller is driving this registration manually.
+            // Preserve that path, including its token and readiness interest.
+            let _manual = Cx::set_current(None);
+            assert_eq!(
+                registration
+                    .arm(&source, Interest::READABLE, &waker)
+                    .unwrap(),
+                Armed::Parked
+            );
+            assert_eq!(registration.as_ref().unwrap().token(), token);
+            assert_eq!(model.fault_stats(ReactorOperation::Register).attempts, 1);
+            model
+                .schedule_ready(token, Interest::READABLE, Duration::ZERO)
+                .unwrap();
+
+            // A present, driverless Cx is different: its executor cannot
+            // service this still-live dispatcher. Even failed fallback startup
+            // must leave the caller able to re-poll instead of parked on it.
+            let ambient = Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+            );
+            let _current = Cx::set_current(Some(ambient));
+            let _withheld = fallback_io_test_hooks::WithholdFallbackDriver::new();
+            assert!(registration_needs_migration(
+                registration.as_ref().unwrap(),
+                false
+            ));
+            assert!(
+                !registration_needs_migration(registration.as_ref().unwrap(), true),
+                "an existing fallback registration already has the right owner"
+            );
+            assert_eq!(
+                registration
+                    .arm(&source, Interest::READABLE, &waker)
+                    .unwrap(),
+                Armed::SelfWake
+            );
+            assert!(registration.is_none());
+            assert!(driver.is_empty());
+            assert_eq!(model.registration_count(), 0);
+            assert_eq!(model.fault_stats(ReactorOperation::Deregister).attempts, 1);
+            assert_eq!(
+                driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+                0
+            );
+            assert_eq!(count.0.load(Ordering::SeqCst), 0);
         }
 
         #[test]

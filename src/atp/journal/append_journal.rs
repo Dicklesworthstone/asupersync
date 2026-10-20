@@ -16,6 +16,8 @@ mod compaction;
 
 // The writer must not acknowledge a frame that its own recovery reader refuses.
 const MAX_JOURNAL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+// A fully read frame with unconsumed bytes is ambiguous, not a torn tail.
+const TRAILING_JOURNAL_BYTES: &str = "trailing bytes in journal entry";
 
 /// Journal record types for tracking transfer progress
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -814,7 +816,7 @@ impl JournalRecord {
     fn decode_payload(data: &[u8]) -> Result<Self, JournalError> {
         let mut cursor = DecodeCursor::new(data);
         let tag = cursor.read_u8()?;
-        match tag {
+        let record = match tag {
             0 => Ok(Self::Offer {
                 transfer_id: cursor.read_string()?,
                 object_id: cursor.read_object_id()?,
@@ -920,7 +922,9 @@ impl JournalRecord {
             other => Err(JournalError::Deserialization(format!(
                 "unknown journal record tag {other}"
             ))),
-        }
+        }?;
+        cursor.finish()?;
+        Ok(record)
     }
 }
 
@@ -1120,7 +1124,7 @@ impl<'a> DecodeCursor<'a> {
             Ok(())
         } else {
             Err(JournalError::Deserialization(
-                "trailing bytes in journal entry".to_string(),
+                TRAILING_JOURNAL_BYTES.to_owned(),
             ))
         }
     }
@@ -1752,6 +1756,15 @@ impl AppendJournal {
                 // ubs:ignore - internal binary decode, not JWT
                 Ok(entry) => entry,
                 Err(error) => {
+                    // These bytes were read as a complete frame, and the inner
+                    // or outer decoder found an unexplained suffix. Treating it
+                    // as a recoverable tail could hide a terminal record. Keep
+                    // the whole log for inspection, even at physical EOF.
+                    if matches!(&error, JournalError::Deserialization(message)
+                        if message == TRAILING_JOURNAL_BYTES)
+                    {
+                        return Outcome::Err(error);
+                    }
                     match reader.fill_buf() {
                         Ok(remaining) if !remaining.is_empty() => return Outcome::Err(error),
                         Ok(_) => {}
@@ -1853,3 +1866,7 @@ pub struct JournalStats {
 #[cfg(test)]
 #[path = "append_journal_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "append_journal/strict_decode_tests.rs"]
+mod strict_decode_tests;

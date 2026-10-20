@@ -104,7 +104,8 @@ mod lifecycle {
     use asupersync::Cx;
     use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
     use asupersync::net::TcpStream;
-    use asupersync::runtime::{Runtime, yield_now};
+    use asupersync::runtime::reactor::IoReactorBackend;
+    use asupersync::runtime::{Runtime, RuntimeBuilder, yield_now};
     use std::future::{Future, poll_fn};
     use std::io::{self, Read, Write};
     use std::net::{Shutdown, SocketAddr, TcpListener};
@@ -411,6 +412,110 @@ mod lifecycle {
             peer.join(ACK);
             assert!(source.shutdown_timeout(Duration::from_secs(5)));
             assert!(destination.shutdown_timeout(Duration::from_secs(5)));
+        }
+    }
+
+    #[test]
+    fn driverless_destination_repeatedly_adopts_from_a_live_source() {
+        let _deadline = Deadline::new("live runtime to fallback and back");
+        for destination_current in [true, false] {
+            let source = build(true);
+            let builder = if destination_current {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::new().worker_threads(2)
+            };
+            let destination = builder
+                .enable_platform_reactor(false)
+                .build()
+                .expect("build runtime without an I/O driver");
+            assert_eq!(
+                destination.io_reactor_capability_snapshot().backend(),
+                IoReactorBackend::Unavailable
+            );
+            let (mut stream, peer) = Peer::connect(&source);
+            let original = identity(&stream);
+            source.block_on(async {
+                for round in 0_u8..4 {
+                    park_read(&mut stream).await;
+                    // A's worker remains on loan while B has no driver to
+                    // adopt the registration. Only the fallback pump can
+                    // deliver B's readiness until this nested call returns.
+                    destination.block_on(async {
+                        receive(&mut stream, &peer.commands, &[b'F', round]).await;
+                        assert_eq!(identity(&stream), original);
+                    });
+                    receive(&mut stream, &peer.commands, &[b'A', round]).await;
+                    assert_eq!(identity(&stream), original);
+                }
+                finish(&mut stream, &peer.commands).await;
+            });
+            drop(stream);
+            peer.join(ACK);
+            assert!(source.shutdown_timeout(Duration::from_secs(5)));
+            assert!(destination.shutdown_timeout(Duration::from_secs(5)));
+        }
+    }
+
+    #[test]
+    fn driverless_destination_adopts_after_shutdown_with_a_retained_source_context() {
+        let _deadline = Deadline::new("fallback adoption after retained-context shutdown");
+        for source_current in [true, false] {
+            for destination_current in [true, false] {
+                for explicit_shutdown in [false, true] {
+                    let source = build(source_current);
+                    let (mut stream, peer) = Peer::connect(&source);
+                    let original = identity(&stream);
+                    let retained = source.block_on(async {
+                        park_read(&mut stream).await;
+                        Cx::current().expect("retain the source runtime's context")
+                    });
+                    #[cfg(feature = "test-internals")]
+                    let old_driver = retained
+                        .io_driver_handle()
+                        .expect("source runtime has an I/O driver");
+                    if explicit_shutdown {
+                        assert!(source.shutdown_timeout(Duration::from_secs(5)));
+                    } else {
+                        drop(source);
+                    }
+                    #[cfg(feature = "test-internals")]
+                    assert!(
+                        !old_driver.is_empty(),
+                        "the retained context keeps the old pending registration alive"
+                    );
+
+                    let builder = if destination_current {
+                        RuntimeBuilder::current_thread()
+                    } else {
+                        RuntimeBuilder::new().worker_threads(2)
+                    };
+                    let destination = builder
+                        .enable_platform_reactor(false)
+                        .build()
+                        .expect("build driverless destination");
+                    assert_eq!(
+                        destination.io_reactor_capability_snapshot().backend(),
+                        IoReactorBackend::Unavailable
+                    );
+                    destination.block_on(async {
+                        receive(&mut stream, &peer.commands, RESPONSE).await;
+                        assert_eq!(identity(&stream), original);
+                        #[cfg(feature = "test-internals")]
+                        assert!(
+                            old_driver.is_empty(),
+                            "fallback adoption removes the unserviced registration"
+                        );
+                        finish(&mut stream, &peer.commands).await;
+                    });
+                    drop(stream);
+                    peer.join(ACK);
+                    assert!(destination.shutdown_timeout(Duration::from_secs(5)));
+                    drop(retained);
+                    #[cfg(feature = "test-internals")]
+                    drop(old_driver);
+                }
+            }
         }
     }
 

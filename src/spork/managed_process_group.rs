@@ -1179,5 +1179,8 @@ async fn run_controller<M: Send + 'static>(cx: &Cx, shared: &Arc<Shared<M>>) -> 
     std::mem::take(&mut controller.report)
 }
 
+// `spork.rs` loads this file through `#[path]`, which makes a bare `mod tests;`
+// resolve to `src/spork/tests.rs`; name the sibling directory explicitly.
 #[cfg(test)]
+#[path = "managed_process_group/tests.rs"]
 mod tests;

@@ -60,6 +60,49 @@
         assert_eq!(new_reactor.registration_count(), 0);
     }
 
+    #[test]
+    fn connect_waiter_leaves_live_driver_for_driverless_context() {
+        use crate::net::udp::fallback_io_test_support::signal_waker;
+        use crate::runtime::IoDriverHandle;
+        use crate::runtime::reactor::Reactor;
+        use crate::runtime::reactor_model::{LabReactorModel, ReactorOperation};
+        use crate::types::{Budget, RegionId, TaskId};
+        use std::sync::atomic::Ordering;
+
+        let (socket, _peer) = net::UnixStream::pair().expect("socket pair");
+        let reactor = Arc::new(LabReactorModel::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let (signal, waker, _wakes) = signal_waker();
+        let task = Context::from_waker(&waker);
+        let mut registration = Some(
+            driver
+                .register(&socket, Interest::WRITABLE, waker.clone())
+                .expect("connect registration"),
+        );
+        let token = registration.as_ref().unwrap().token();
+        let _manual = Cx::set_current(None);
+        rearm_connect_registration(&mut registration, &task).expect("manual driver rearm");
+        assert_eq!(registration.as_ref().unwrap().token(), token);
+        assert_eq!(reactor.fault_stats(ReactorOperation::Modify).attempts, 1);
+
+        let ambient = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+        );
+        let _current = Cx::set_current(Some(ambient));
+        rearm_connect_registration(&mut registration, &task).expect("driverless handoff");
+
+        assert!(registration.is_none());
+        assert!(driver.is_empty());
+        assert_eq!(reactor.registration_count(), 0);
+        assert_eq!(reactor.fault_stats(ReactorOperation::Modify).attempts, 1);
+        assert_eq!(signal.hits.load(Ordering::SeqCst), 0);
+    }
+
     /// GH#67 follow-up (asupersync-tx9j0f): a `UnixStream` polled with no
     /// I/O driver on the current `Cx` parks on the process-global fallback
     /// driver instead of re-waking itself into a hot loop.
@@ -183,7 +226,12 @@
         use super::*;
         use crate::net::udp::fallback_io_test_support::signal_waker;
         use crate::net::unix::SocketAncillary;
+        use crate::runtime::IoDriverHandle;
+        use crate::runtime::reactor::Reactor;
+        use crate::runtime::reactor_model::LabReactorModel;
+        use crate::types::{Budget, RegionId, TaskId};
         use std::io::Write;
+        use std::sync::atomic::Ordering;
         use std::time::Duration;
 
         /// Writes into `stream` until its send direction would block.
@@ -199,6 +247,276 @@
                     }
                 }
             }
+        }
+
+        fn with_driver<T>(driver: &IoDriverHandle, poll: impl FnOnce() -> T) -> T {
+            let ambient = Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            let _guard = Cx::set_current(Some(ambient));
+            poll()
+        }
+
+        // Real recvmsg/sendmsg calls establish both WouldBlock states. The
+        // model supplies just one direction's event, independent of kernel
+        // timing, so losing that direction during migration cannot be hidden
+        // by simultaneous readiness in the other direction.
+        fn assert_opposite_interest_survives_handoff(reader_first: bool) {
+            let models = [
+                Arc::new(LabReactorModel::new()),
+                Arc::new(LabReactorModel::new()),
+            ];
+            let drivers = [
+                IoDriverHandle::new(models[0].clone()),
+                IoDriverHandle::new(models[1].clone()),
+            ];
+            let (stream, peer) = UnixStream::pair().expect("socket pair");
+            fill_send_buffer(&stream);
+            let (reader_signal, reader_waker, _reader_rx) = signal_waker();
+            let (writer_signal, writer_waker, _writer_rx) = signal_waker();
+            let mut read_buf = [0u8; 8];
+            let mut read_ancillary = SocketAncillary::new(64);
+            let mut write_ancillary = SocketAncillary::new(64);
+            let payload = [7u8; 8];
+            let mut recv = Box::pin(stream.recv_with_ancillary(&mut read_buf, &mut read_ancillary));
+            let mut send = Box::pin(stream.send_with_ancillary(&payload, &mut write_ancillary));
+
+            for (driver, read) in drivers.iter().zip([reader_first, !reader_first]) {
+                assert!(
+                    with_driver(driver, || {
+                        if read {
+                            recv.as_mut().poll(&mut Context::from_waker(&reader_waker))
+                        } else {
+                            send.as_mut().poll(&mut Context::from_waker(&writer_waker))
+                        }
+                    })
+                    .is_pending()
+                );
+            }
+            assert_eq!(stream.registration.lock().shared_waiter_count(), 2);
+            assert_eq!(models[0].registration_count(), 0);
+            assert_eq!(models[1].registration_count(), 1);
+            assert_eq!(
+                stream.registration.lock().as_ref().unwrap().interest(),
+                Interest::both(),
+                "the second runtime must retain the first waiter's direction"
+            );
+
+            // Repeated transfers must preserve the union without scheduling
+            // peers on ordinary rearm. Both calls remain blocked throughout.
+            for next in [0, 1, 0, 1] {
+                assert!(
+                    with_driver(&drivers[next], || {
+                        if (next == 0) == reader_first {
+                            recv.as_mut().poll(&mut Context::from_waker(&reader_waker))
+                        } else {
+                            send.as_mut().poll(&mut Context::from_waker(&writer_waker))
+                        }
+                    })
+                    .is_pending()
+                );
+                let registration = stream.registration.lock();
+                let active = registration.as_ref().unwrap();
+                assert!(active.belongs_to(&drivers[next]));
+                assert_eq!(active.interest(), Interest::both());
+                assert_eq!(models[next].registration_count(), 1);
+                assert_eq!(models[1 - next].registration_count(), 0);
+            }
+            assert_eq!(reader_signal.hits.load(Ordering::SeqCst), 0);
+            assert_eq!(writer_signal.hits.load(Ordering::SeqCst), 0);
+
+            let ready = if reader_first {
+                (&*peer.inner).write_all(b"r").expect("peer read payload");
+                Interest::READABLE
+            } else {
+                let mut drained = [0u8; 65_536];
+                loop {
+                    match (&*peer.inner).read(&mut drained) {
+                        Ok(0) => panic!("peer closed while draining the send buffer"),
+                        Ok(_) => {}
+                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(err) => panic!("draining the send buffer: {err}"),
+                    }
+                }
+                Interest::WRITABLE
+            };
+            let token = stream.registration.lock().as_ref().unwrap().token();
+            models[1].set_ready(token, ready).unwrap();
+            assert_eq!(
+                drivers[1]
+                    .turn_with(Some(Duration::ZERO), |_, _| {})
+                    .unwrap(),
+                1,
+                "the preserved direction alone must dispatch the shared waiter"
+            );
+            assert_eq!(reader_signal.hits.load(Ordering::SeqCst), 1);
+            assert_eq!(writer_signal.hits.load(Ordering::SeqCst), 1);
+            assert_eq!(stream.registration.lock().shared_waiter_count(), 0);
+
+            with_driver(&drivers[0], || {
+                if reader_first {
+                    assert!(matches!(
+                        recv.as_mut().poll(&mut Context::from_waker(&reader_waker)),
+                        Poll::Ready(Ok(1))
+                    ));
+                    assert!(
+                        send.as_mut()
+                            .poll(&mut Context::from_waker(&writer_waker))
+                            .is_pending()
+                    );
+                } else {
+                    assert!(matches!(
+                        send.as_mut().poll(&mut Context::from_waker(&writer_waker)),
+                        Poll::Ready(Ok(len)) if len == payload.len()
+                    ));
+                    assert!(
+                        recv.as_mut()
+                            .poll(&mut Context::from_waker(&reader_waker))
+                            .is_pending()
+                    );
+                }
+            });
+            assert_eq!(
+                stream.registration.lock().as_ref().unwrap().interest(),
+                if reader_first {
+                    Interest::WRITABLE
+                } else {
+                    Interest::READABLE
+                },
+                "a completed direction must not survive the next migration"
+            );
+            drop(recv);
+            drop(send);
+            if reader_first {
+                assert_eq!(&read_buf[..1], b"r");
+            } else {
+                let mut delivered = [0u8; 8];
+                (&*peer.inner)
+                    .read_exact(&mut delivered)
+                    .expect("ancillary writer payload");
+                assert_eq!(delivered, payload);
+            }
+            assert_eq!(stream.registration.lock().shared_waiter_count(), 0);
+            drop(stream);
+            drop(peer);
+            for (model, driver) in models.iter().zip(&drivers) {
+                assert_eq!(model.registration_count(), 0);
+                assert!(driver.is_empty());
+            }
+            assert_eq!(reader_signal.hits.load(Ordering::SeqCst), 1);
+            assert_eq!(writer_signal.hits.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn ancillary_handoff_keeps_parked_reader_interest() {
+            assert_opposite_interest_survives_handoff(true);
+        }
+
+        #[test]
+        fn ancillary_handoff_keeps_parked_writer_interest() {
+            assert_opposite_interest_survives_handoff(false);
+        }
+
+        #[test]
+        fn cancelled_ancillary_handoff_rearms_survivor_without_stale_interest() {
+            let old_model = Arc::new(LabReactorModel::new());
+            let new_model = Arc::new(LabReactorModel::new());
+            let old_driver = IoDriverHandle::new(old_model.clone());
+            let new_driver = IoDriverHandle::new(new_model.clone());
+            let (stream, peer) = UnixStream::pair().expect("socket pair");
+            fill_send_buffer(&stream);
+            let (reader_signal, reader_waker, _reader_rx) = signal_waker();
+            let (writer_signal, writer_waker, _writer_rx) = signal_waker();
+            let mut buf = [0u8; 8];
+            let mut read_ancillary = SocketAncillary::new(64);
+            let mut write_ancillary = SocketAncillary::new(64);
+            let mut recv = Box::pin(stream.recv_with_ancillary(&mut buf, &mut read_ancillary));
+            let mut send = Box::pin(stream.send_with_ancillary(b"cancelled", &mut write_ancillary));
+            assert!(
+                with_driver(&old_driver, || {
+                    recv.as_mut().poll(&mut Context::from_waker(&reader_waker))
+                })
+                .is_pending()
+            );
+            assert!(
+                with_driver(&new_driver, || {
+                    send.as_mut().poll(&mut Context::from_waker(&writer_waker))
+                })
+                .is_pending()
+            );
+            let token = stream.registration.lock().as_ref().unwrap().token();
+            assert_eq!(stream.registration.lock().shared_waiter_count(), 2);
+            assert_eq!(
+                stream.registration.lock().as_ref().unwrap().interest(),
+                Interest::both()
+            );
+            new_model
+                .schedule_ready(token, Interest::READABLE, Duration::ZERO)
+                .unwrap();
+            let cancelled = with_driver(&new_driver, || {
+                Cx::current().unwrap().set_cancel_requested(true);
+                send.as_mut().poll(&mut Context::from_waker(&writer_waker))
+            });
+            assert!(
+                matches!(cancelled, Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted)
+            );
+            drop(send);
+            assert_eq!(reader_signal.hits.load(Ordering::SeqCst), 1);
+            assert_eq!(writer_signal.hits.load(Ordering::SeqCst), 0);
+            assert_eq!(stream.registration.lock().shared_waiter_count(), 0);
+
+            // Departure already scheduled the survivor. A queued event on
+            // that same registration must not revive the cancelled writer.
+            assert_eq!(
+                new_driver
+                    .turn_with(Some(Duration::ZERO), |_, _| {})
+                    .unwrap(),
+                1
+            );
+            assert_eq!(reader_signal.hits.load(Ordering::SeqCst), 1);
+            assert_eq!(writer_signal.hits.load(Ordering::SeqCst), 0);
+            assert!(
+                with_driver(&old_driver, || {
+                    recv.as_mut().poll(&mut Context::from_waker(&reader_waker))
+                })
+                .is_pending()
+            );
+            assert_eq!(
+                stream.registration.lock().as_ref().unwrap().interest(),
+                Interest::READABLE
+            );
+            assert_eq!(new_model.registration_count(), 0);
+            let token = stream.registration.lock().as_ref().unwrap().token();
+            (&*peer.inner).write_all(b"r").expect("survivor payload");
+            old_model.set_ready(token, Interest::READABLE).unwrap();
+            assert_eq!(
+                old_driver
+                    .turn_with(Some(Duration::ZERO), |_, _| {})
+                    .unwrap(),
+                1
+            );
+            assert_eq!(reader_signal.hits.load(Ordering::SeqCst), 2);
+            assert!(with_driver(&old_driver, || {
+                matches!(
+                    recv.as_mut().poll(&mut Context::from_waker(&reader_waker)),
+                    Poll::Ready(Ok(1))
+                )
+            }));
+            drop(recv);
+            assert_eq!(&buf[..1], b"r");
+            assert_eq!(stream.registration.lock().shared_waiter_count(), 0);
+            drop(stream);
+            drop(peer);
+            assert_eq!(old_model.registration_count(), 0);
+            assert_eq!(new_model.registration_count(), 0);
+            assert!(old_driver.is_empty());
+            assert!(new_driver.is_empty());
+            assert_eq!(writer_signal.hits.load(Ordering::SeqCst), 0);
         }
 
         #[test]

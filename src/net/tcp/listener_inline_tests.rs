@@ -109,6 +109,169 @@
     }
 
     #[test]
+    fn replacing_accept_waker_allows_drop_to_reenter_registration() {
+        struct Retired {
+            waiters: std::sync::Weak<AcceptWaiters>,
+            dropped: Arc<AtomicUsize>,
+            reentered: Arc<AtomicUsize>,
+        }
+        impl Wake for Retired {
+            fn wake(self: Arc<Self>) {
+                panic!("replacing a waker must not wake the previous task");
+            }
+        }
+        impl Drop for Retired {
+            fn drop(&mut self) {
+                let waiters = self.waiters.upgrade().expect("live waiter list");
+                let unlocked = waiters.waiters.try_lock().is_some();
+                if unlocked {
+                    waiters.register(Some(100), Waker::noop());
+                    self.reentered.fetch_add(1, Ordering::SeqCst);
+                }
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let waiters = Arc::new(AcceptWaiters::default());
+        let owner = waiters.next_owner();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let reentered = Arc::new(AtomicUsize::new(0));
+        let retired = Waker::from(Arc::new(Retired {
+            waiters: Arc::downgrade(&waiters),
+            dropped: Arc::clone(&dropped),
+            reentered: Arc::clone(&reentered),
+        }));
+        waiters.register(Some(owner), &retired);
+        waiters.register(Some(owner), &retired);
+        assert_eq!(waiters.waiters.lock().len(), 1);
+        drop(retired);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let replacement = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+
+        waiters.register(Some(owner), &replacement);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            reentered.load(Ordering::SeqCst),
+            1,
+            "the old waker's final drop must run outside the waiter lock"
+        );
+        waiters.register(Some(owner), &replacement);
+        {
+            let registered = waiters.waiters.lock();
+            assert_eq!(registered.len(), 2);
+            assert!(registered.iter().any(|entry| {
+                entry.owner == Some(owner) && entry.waker.will_wake(&replacement)
+            }));
+            assert!(registered.iter().any(|entry| entry.owner == Some(100)));
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        waiters.wake_all();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(waiters.waiters.lock().is_empty());
+    }
+
+    #[test]
+    fn evicting_anonymous_accept_waker_reenters_after_atomic_replacement() {
+        struct Evicted {
+            waiters: std::sync::Weak<AcceptWaiters>,
+            incoming: Waker,
+            reentered: Arc<AtomicUsize>,
+            dropped_unlocked: Arc<AtomicUsize>,
+        }
+        impl Wake for Evicted {
+            fn wake(self: Arc<Self>) {
+                let waiters = self.waiters.upgrade().expect("live waiter list");
+                let published = waiters.waiters.try_lock().is_some_and(|registered| {
+                    registered
+                        .iter()
+                        .filter(|entry| entry.owner.is_none())
+                        .count()
+                        == 32
+                        && registered.iter().any(|entry| {
+                            entry.owner.is_none() && entry.waker.will_wake(&self.incoming)
+                        })
+                });
+                if published {
+                    // This is the newest anonymous entry. Reentry must see
+                    // it already installed, deduplicate, and evict nobody.
+                    waiters.register(None, &self.incoming);
+                    self.reentered.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        impl Drop for Evicted {
+            fn drop(&mut self) {
+                let waiters = self.waiters.upgrade().expect("live waiter list");
+                if waiters.waiters.try_lock().is_some() {
+                    self.dropped_unlocked.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let waiters = Arc::new(AcceptWaiters::default());
+        for owner in 0..40 {
+            waiters.register(Some(owner), Waker::noop());
+        }
+        let hits = Arc::new(AtomicUsize::new(0));
+        let incoming = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+        let reentered = Arc::new(AtomicUsize::new(0));
+        let dropped_unlocked = Arc::new(AtomicUsize::new(0));
+        let evicted = Waker::from(Arc::new(Evicted {
+            waiters: Arc::downgrade(&waiters),
+            incoming: incoming.clone(),
+            reentered: Arc::clone(&reentered),
+            dropped_unlocked: Arc::clone(&dropped_unlocked),
+        }));
+        waiters.register(None, &evicted);
+        drop(evicted);
+        for _ in 0..31 {
+            let parked = Waker::from(Arc::new(CountingWaker {
+                hits: Arc::clone(&hits),
+            }));
+            waiters.register(None, &parked);
+        }
+        assert_eq!(reentered.load(Ordering::SeqCst), 0);
+        waiters.register(None, &incoming);
+        assert_eq!(
+            reentered.load(Ordering::SeqCst),
+            1,
+            "eviction must wake after unlocking and publishing the newcomer"
+        );
+        assert_eq!(dropped_unlocked.load(Ordering::SeqCst), 1);
+        waiters.register(None, &incoming);
+        {
+            let registered = waiters.waiters.lock();
+            assert_eq!(
+                registered
+                    .iter()
+                    .filter(|entry| entry.owner.is_none())
+                    .count(),
+                32
+            );
+            assert_eq!(
+                registered
+                    .iter()
+                    .filter(|entry| entry.owner.is_some())
+                    .count(),
+                40
+            );
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "other waiters stayed parked"
+        );
+        waiters.wake_all();
+        assert_eq!(hits.load(Ordering::SeqCst), 32);
+        assert!(waiters.waiters.lock().is_empty());
+    }
+
+    #[test]
     fn owner_departure_wakes_survivors_outside_the_waiter_lock() {
         struct Retired {
             waiters: std::sync::Weak<AcceptWaiters>,
@@ -165,7 +328,11 @@
 
         waiters.remove(retired_owner);
         waiters.remove(survivor_owner);
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "stale departures do not wake");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "stale departures do not wake"
+        );
         assert_eq!(waiters.waiters.lock().len(), 1);
         waiters.wake_all();
         let late_hits = Arc::new(AtomicUsize::new(0));
@@ -174,7 +341,11 @@
         }));
         waiters.register(Some(101), &late);
         waiters.remove(100);
-        assert_eq!(late_hits.load(Ordering::SeqCst), 0, "fired ticket is a no-op");
+        assert_eq!(
+            late_hits.load(Ordering::SeqCst),
+            0,
+            "fired ticket is a no-op"
+        );
         assert_eq!(waiters.waiters.lock()[0].owner, Some(101));
     }
 
