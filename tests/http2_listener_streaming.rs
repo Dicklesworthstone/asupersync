@@ -43,6 +43,9 @@ use futures_lite::future::zip;
 
 const INITIAL_WINDOW: usize = 65_535;
 
+#[path = "http2_listener_streaming/obligation_tests.rs"]
+mod obligation_tests;
+
 fn run(workers: usize, future: impl Future<Output = ()> + 'static) {
     let builder = if workers == 1 {
         RuntimeBuilder::current_thread()
@@ -462,6 +465,8 @@ fn h2_live_produced_echoes_before_upload_eof_in_the_same_request_region() {
                 let stream = client.open("POST", "/duplex", Some(11), false).await;
                 let request_cx = entered_rx.recv(&cx).await.unwrap();
                 assert_ne!(request_cx.region_id(), cx.region_id());
+                let runtime = Runtime::current_handle().unwrap();
+                let credit = obligation_tests::pending_credit(&runtime, &request_cx).await;
                 client.data(stream, Bytes::from_static(b"prefix-"), false).await;
                 let mut head_seen = false;
                 let mut prefix = Vec::new();
@@ -504,6 +509,10 @@ fn h2_live_produced_echoes_before_upload_eof_in_the_same_request_region() {
                 }
                 assert_eq!(tail, b"tail");
                 wait_region_closed(&request_cx).await;
+                assert_eq!(
+                    obligation_tests::assert_retired(&runtime, &request_cx, None).await,
+                    credit,
+                );
                 wait_requests_drained(&in_flight).await;
                 client.survivor().await;
                 client

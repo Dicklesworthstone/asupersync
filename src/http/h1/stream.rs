@@ -40,6 +40,11 @@ mod obligation;
 pub(crate) use obligation::IncomingBodyAdmissionError;
 #[cfg(not(target_arch = "wasm32"))]
 use obligation::IncomingBodyObligation;
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+))]
+pub(crate) use obligation::FramedIncomingBodyGuard;
 
 /// Chunk-extension bytes a request body may carry beyond its data bytes.
 const CHUNK_EXTENSION_ALLOWANCE_BYTES: u64 = 16 * 1024;
@@ -565,6 +570,11 @@ struct IncomingBodyShared {
         any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
     ))]
     framed_consumer_error: Mutex<Option<IncomingBodyError>>,
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
+    framed_holder_waker: Mutex<Option<Waker>>,
     #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
     framed_consumed_data: AtomicU64,
     #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
@@ -599,6 +609,63 @@ impl IncomingBodyShared {
     ))]
     fn wake_framed_producer(&self) {
         let waker = self.framed_consumer_waker.lock().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    /// The wire producer and the task-local owner share one terminal decision.
+    /// Holding the error lock serializes that decision without putting any
+    /// obligation settlement, channel operation, or waker callback under it.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
+    fn set_framed_terminal(
+        &self,
+        result: Result<(), IncomingBodyError>,
+    ) -> Result<(), IncomingBodyError> {
+        let mut terminal_error = self.terminal_error.lock();
+        match IncomingProducerTerminal::load(&self.producer_terminal) {
+            IncomingProducerTerminal::Finished => Ok(()),
+            IncomingProducerTerminal::Failed => Err(terminal_error
+                .clone()
+                .unwrap_or(IncomingBodyError::SourceDisconnected)),
+            IncomingProducerTerminal::Open => {
+                let terminal = match &result {
+                    Ok(()) => IncomingProducerTerminal::Finished,
+                    Err(error) => {
+                        *terminal_error = Some(error.clone());
+                        IncomingProducerTerminal::Failed
+                    }
+                };
+                self.producer_terminal.store(terminal as u8, Ordering::Release);
+                result
+            }
+        }
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
+    fn framed_terminal(&self) -> Option<Result<(), IncomingBodyError>> {
+        let error = self.terminal_error.lock();
+        match IncomingProducerTerminal::load(&self.producer_terminal) {
+            IncomingProducerTerminal::Open => None,
+            IncomingProducerTerminal::Finished => Some(Ok(())),
+            IncomingProducerTerminal::Failed => Some(Err(error
+                .clone()
+                .unwrap_or(IncomingBodyError::SourceDisconnected))),
+        }
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
+    fn wake_framed_holder(&self) {
+        let waker = self.framed_holder_waker.lock().take();
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -739,6 +806,11 @@ impl IncomingRequestBody {
                 any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
             ))]
             framed_consumer_error: Mutex::new(None),
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+            ))]
+            framed_holder_waker: Mutex::new(None),
             #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
             framed_consumed_data: AtomicU64::new(0),
             #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
@@ -761,6 +833,55 @@ impl IncomingRequestBody {
         };
         let writer = IncomingRequestBodyWriter::new(tx, kind, shared);
         (writer, body)
+    }
+
+    /// Admit a framed body under its actual request task after route policy.
+    ///
+    /// The protocol may retain the writer in a connection driver, but the
+    /// returned guard must run the entire request task's body work. It owns
+    /// the registered credit and settles it before that task retires, even if
+    /// the driver has not observed a panic or cancellation yet. A declared
+    /// zero length remains pending until the protocol explicitly finishes.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
+    pub(crate) fn framed_channel_with_limits_checked(
+        cx: &Cx,
+        declared_length: Option<u64>,
+        frame_capacity: usize,
+        queued_byte_limit: usize,
+        max_body_size: u64,
+    ) -> Result<
+        (FramedIncomingRequestBodyWriter, Self, FramedIncomingBodyGuard),
+        IncomingBodyAdmissionError,
+    > {
+        if let Some(actual) = declared_length
+            && actual > max_body_size
+        {
+            return Err(IncomingBodyAdmissionError::Policy(
+                IncomingBodyError::BodyTooLarge {
+                    actual: Some(actual),
+                    limit: max_body_size,
+                },
+            ));
+        }
+        let obligation = IncomingBodyObligation::admit(cx)?;
+        let (writer, body) = Self::framed_channel_with_limits(
+            cx,
+            declared_length,
+            frame_capacity,
+            queued_byte_limit,
+        );
+        body.tighten_max_body_size(max_body_size);
+        let mut writer = writer.max_body_size(max_body_size);
+        writer.checked_owner = Some(cx.clone());
+        let guard = FramedIncomingBodyGuard::new(
+            obligation,
+            Arc::clone(&body.shared),
+            writer.sender.as_ref().expect("new open framed body").downgrade(),
+        );
+        Ok((writer, body, guard))
     }
 
     /// Create a body only after transport and caller-selected static policy
@@ -829,6 +950,7 @@ impl IncomingRequestBody {
         let writer = FramedIncomingRequestBodyWriter {
             sender: wire_writer.sender.take(),
             shared: Arc::clone(&body.shared),
+            checked_owner: None,
             pending: None,
             cancel_registration: None,
             declared_length,
@@ -1254,6 +1376,10 @@ struct FramedIncomingCancellation {
 pub(crate) struct FramedIncomingRequestBodyWriter {
     sender: Option<mpsc::Sender<QueuedIncomingFrame>>,
     shared: Arc<IncomingBodyShared>,
+    // A checked task can acknowledge cancellation and drop its body inside a
+    // user poll before the guard observes that poll's return. The connection
+    // driver must not classify that known cancellation as ordinary abandon.
+    checked_owner: Option<Cx>,
     pending: Option<FramedIncomingSend>,
     cancel_registration: Option<FramedIncomingCancellation>,
     declared_length: Option<u64>,
@@ -1313,6 +1439,13 @@ impl FramedIncomingRequestBodyWriter {
         self.shared.consumer_dropped()
     }
 
+    fn consumer_drop_error(&self) -> IncomingBodyError {
+        self.checked_owner
+            .as_ref()
+            .filter(|owner| owner.is_cancel_requested())
+            .map_or(IncomingBodyError::ConsumerDropped, IncomingBodyError::cancelled)
+    }
+
     /// Take the DATA bytes delivered to the consumer since the previous call.
     ///
     /// Register the connection driver's waker before draining the count so a
@@ -1346,7 +1479,9 @@ impl FramedIncomingRequestBodyWriter {
     /// Register the transport driver's waker even when no DATA send is pending.
     /// This makes an idle handler's early body drop stop receive promptly.
     /// A body failure returns its exact error, so a listener cannot mistake a
-    /// caught validation error for an ordinary early response.
+    /// caught validation error for an ordinary early response. A task guard's
+    /// unfinished-input stop is also visible before a descendant consumes it;
+    /// `ConsumerDropped` retains the ordinary early-response classification.
     pub(crate) fn poll_consumer_dropped(
         &self,
         task_cx: &mut Context<'_>,
@@ -1354,10 +1489,18 @@ impl FramedIncomingRequestBodyWriter {
         let mut incoming = Some(task_cx.waker().clone());
         let mut registered = self.shared.framed_consumer_waker.lock();
         let terminal = self.shared.consumer_terminal.load(Ordering::Acquire);
-        if terminal == IncomingConsumerTerminal::Dropped as u8
+        let producer_failed = IncomingProducerTerminal::load(&self.shared.producer_terminal)
+            == IncomingProducerTerminal::Failed;
+        if producer_failed
+            || terminal == IncomingConsumerTerminal::Dropped as u8
             || terminal == IncomingConsumerTerminal::Failed as u8
         {
-            let result = if terminal == IncomingConsumerTerminal::Failed as u8 {
+            let result = if producer_failed {
+                match self.terminal_error() {
+                    IncomingBodyError::ConsumerDropped => Ok(()),
+                    error => Err(error),
+                }
+            } else if terminal == IncomingConsumerTerminal::Failed as u8 {
                 Err(self
                     .shared
                     .framed_consumer_error
@@ -1365,7 +1508,10 @@ impl FramedIncomingRequestBodyWriter {
                     .clone()
                     .unwrap_or(IncomingBodyError::SourceDisconnected))
             } else {
-                Ok(())
+                match self.consumer_drop_error() {
+                    IncomingBodyError::ConsumerDropped => Ok(()),
+                    error => Err(error),
+                }
             };
             let retired = registered.take();
             drop(registered);
@@ -1605,29 +1751,32 @@ impl FramedIncomingRequestBodyWriter {
             self.fail(error.clone());
             return Err(error);
         }
-        self.shared
-            .producer_terminal
-            .store(IncomingProducerTerminal::Finished as u8, Ordering::Release);
+        if let Err(error) = self.shared.set_framed_terminal(Ok(())) {
+            self.fail(error.clone());
+            return Err(error);
+        }
         let retired_waker = self.shared.framed_consumer_waker.lock().take();
         drop(retired_waker);
         self.clear_cancellation();
         self.sender.take();
+        self.shared.wake_framed_holder();
         Ok(())
     }
 
     /// Preserve the first transport failure and release every pending permit.
     pub(crate) fn fail(&mut self, error: IncomingBodyError) {
-        if !self.is_done() {
-            *self.shared.terminal_error.lock() = Some(error);
-            self.shared
-                .producer_terminal
-                .store(IncomingProducerTerminal::Failed as u8, Ordering::Release);
-        }
+        let error = if error == IncomingBodyError::ConsumerDropped {
+            self.consumer_drop_error()
+        } else {
+            error
+        };
+        let _ = self.shared.set_framed_terminal(Err(error));
         let retired_waker = self.shared.framed_consumer_waker.lock().take();
         drop(retired_waker);
         self.clear_cancellation();
         self.pending.take();
         self.sender.take();
+        self.shared.wake_framed_holder();
     }
 }
 
@@ -1637,7 +1786,11 @@ impl FramedIncomingRequestBodyWriter {
 ))]
 impl Drop for FramedIncomingRequestBodyWriter {
     fn drop(&mut self) {
-        self.fail(IncomingBodyError::SourceDisconnected);
+        let error = self.checked_owner
+            .as_ref()
+            .filter(|owner| owner.is_cancel_requested())
+            .map_or(IncomingBodyError::SourceDisconnected, IncomingBodyError::cancelled);
+        self.fail(error);
         #[cfg(feature = "http2-streaming")]
         {
             let retired_waker = self.shared.framed_consumed_waker.lock().take();
