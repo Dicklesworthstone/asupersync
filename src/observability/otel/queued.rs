@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 
 /// Maximum admitted batches, including the batch currently being delivered.
 pub const OTLP_EXPORT_QUEUE_MAX_BATCHES: usize = 64;
-/// Maximum admitted snapshot string bytes, including the in-flight batch.
+/// Maximum admitted snapshot string or encoded trace bytes, including the in-flight batch.
 ///
 /// Container overhead and temporary protobuf/HTTP encodings are additional;
 /// finite point/attribute limits bound those independently.
@@ -48,6 +48,7 @@ struct QueueState {
 enum Payload {
     Metrics(MetricsSnapshot),
     Logs(LogsSnapshot),
+    Traces(Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -121,6 +122,51 @@ impl ExportQueue {
         Ok(Consumer { queue: self })
     }
 
+    fn admit_traces(
+        &self,
+        exporter: &OtlpHttpExporter,
+        requests: Vec<Vec<u8>>,
+    ) -> Result<usize, ExportError> {
+        let count = requests.len();
+        if count == 0 {
+            return Ok(0);
+        }
+        let config = exporter.snapshot_config();
+        let configuration_bytes = config_bytes(&config)?;
+        let mut bytes = configuration_bytes.checked_mul(count).ok_or_else(queue_full)?;
+        for request in &requests {
+            if request.len() > OWNED_OTLP_DEFAULT_REQUEST_BYTES {
+                return Err(ExportError::new("otlp.queue.encoded_batch_too_large"));
+            }
+            add_bytes(&mut bytes, request.len())?;
+        }
+        let mut state = self.state.lock();
+        let retained_batches = state.stats.retained_batches.checked_add(count).ok_or_else(queue_full)?;
+        let retained_bytes = state.stats.retained_bytes.checked_add(bytes).ok_or_else(queue_full)?;
+        if retained_batches > OTLP_EXPORT_QUEUE_MAX_BATCHES
+            || retained_bytes > OTLP_EXPORT_QUEUE_MAX_BYTES
+        {
+            return Err(queue_full());
+        }
+        // One collection is one admission decision. Publishing a prefix here
+        // would make a capacity retry duplicate the earlier accepted spans.
+        for request in requests {
+            let bytes = request.len() + configuration_bytes;
+            state.pending.push_back(Batch {
+                payload: Payload::Traces(request),
+                config: config.clone(),
+                legacy_retry_compatibility: exporter.legacy_retry_compatibility,
+                bytes,
+            });
+        }
+        state.stats.retained_batches = retained_batches;
+        state.stats.retained_bytes = retained_bytes;
+        state.stats.queued_batches = state.pending.len();
+        drop(state);
+        self.ready.notify_one();
+        Ok(count)
+    }
+
     fn take(&self) -> Option<Delivery<'_>> {
         let mut state = self.state.lock();
         let batch = state.pending.pop_front()?;
@@ -155,6 +201,7 @@ impl Delivery<'_> {
         let body = match &batch.payload {
             Payload::Metrics(snapshot) => encode_metrics(snapshot, point_time, &batch.config)?,
             Payload::Logs(snapshot) => snapshot.to_otlp_protobuf(),
+            Payload::Traces(body) => body.clone(),
         };
         if body.len() > OWNED_OTLP_DEFAULT_REQUEST_BYTES {
             return Err(ExportError::new("otlp.queue.encoded_batch_too_large"));
@@ -187,6 +234,34 @@ impl Drop for Delivery<'_> {
 }
 
 impl OtlpHttpExporter {
+    /// Validate and enqueue an entire finite trace collection without network I/O.
+    ///
+    /// All encoded requests are admitted together, or none are admitted. Queue
+    /// limits include the complete encoded requests and each request's captured
+    /// destination/resource/authentication configuration, including in-flight
+    /// delivery. The mapper's separate finite allocation limits apply before
+    /// admission; one temporary request copy is retained during delivery.
+    ///
+    /// Returns the number of admitted requests, not acknowledged spans. Drive
+    /// `flush_queued` or `run_queued` inside an explicit Cx to deliver them. Trace
+    /// timestamps are retained; the metrics timestamp argument does not replace
+    /// them. Unsampled collections enqueue nothing. A later delivery error must
+    /// not be treated as permission to re-enqueue the entire collection, since
+    /// preceding requests or the collector may already have accepted spans.
+    pub fn enqueue_owned_traces(
+        &self,
+        traces: &OwnedOtlpTraces,
+        spans: &[OtlpTraceSpanInput<'_>],
+    ) -> Result<usize, ExportError> {
+        self.validate_for_export().map_err(ExportError::from)?;
+        let attributes = self.resource_attributes.iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let collection = traces.collect(spans, &attributes)
+            .map_err(|error| ExportError::new(error.to_string()))?;
+        self.export_queue.admit_traces(self, collection.into_requests())
+    }
+
     pub(super) fn enqueue_metrics(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
         let bytes = metrics_bytes(metrics)?;
         // Refuse here what delivery could never encode: more than 1000 points
@@ -546,3 +621,7 @@ fn encode_metrics(
 #[cfg(test)]
 #[path = "queued_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "queued_trace_tests.rs"]
+mod trace_tests;
