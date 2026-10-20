@@ -31,6 +31,11 @@ struct FaultIo {
     interrupted_flushes: usize,
     calls: usize,
     shutdown_calls: usize,
+    buffer_capacity: Option<usize>,
+    buffered: Vec<u8>,
+    capacity_waiter: Option<Waker>,
+    capacity_stalls: usize,
+    max_buffered: usize,
 }
 
 impl FaultIo {
@@ -45,6 +50,11 @@ impl FaultIo {
             interrupted_flushes: 0,
             calls: 0,
             shutdown_calls: 0,
+            buffer_capacity: None,
+            buffered: Vec::new(),
+            capacity_waiter: None,
+            capacity_stalls: 0,
+            max_buffered: 0,
         }
     }
 }
@@ -77,6 +87,18 @@ impl AsyncWrite for FaultIo {
         if let Some(kind) = self.write_error {
             return Poll::Ready(Err(kind.into()));
         }
+        if let Some(capacity) = self.buffer_capacity {
+            let remaining = capacity - self.buffered.len();
+            if remaining == 0 && !buf.is_empty() {
+                self.capacity_stalls += 1;
+                self.capacity_waiter = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+            let n = remaining.min(buf.len());
+            self.buffered.extend_from_slice(&buf[..n]);
+            self.max_buffered = self.max_buffered.max(self.buffered.len());
+            return Poll::Ready(Ok(n));
+        }
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 
@@ -95,7 +117,18 @@ impl AsyncWrite for FaultIo {
         if let Some(kind) = self.flush_error {
             return Poll::Ready(Err(kind.into()));
         }
-        Pin::new(&mut self.inner).poll_flush(cx)
+        let this = &mut *self;
+        while !this.buffered.is_empty() {
+            let n = std::task::ready!(Pin::new(&mut this.inner).poll_write(cx, &this.buffered))?;
+            if n == 0 {
+                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+            }
+            this.buffered.drain(..n);
+            if let Some(waiter) = this.capacity_waiter.take() {
+                waiter.wake();
+            }
+        }
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -471,6 +504,271 @@ fn interrupted_final_handshake_flush_keeps_bindings_unavailable_until_success() 
                         server.tls_exporter_channel_binding().unwrap()
                     );
                 }
+            });
+        }
+    }
+}
+
+fn read_plaintext(stream: &mut Stream, expected: &[u8]) {
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut received = vec![0; expected.len()];
+    let mut offset = 0;
+    while offset < received.len() {
+        let mut buf = ReadBuf::new(&mut received[offset..]);
+        assert!(matches!(
+            Pin::new(&mut *stream).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(!buf.filled().is_empty(), "EOF before all accepted bytes arrived");
+        offset += buf.filled().len();
+    }
+    assert_eq!(received, expected);
+}
+
+#[test]
+fn bounded_transport_capacity_does_not_deadlock_handshakes() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        run_pair(version, false, move |mut client, mut server| {
+            client.io.buffer_capacity = Some(7);
+            server.io.buffer_capacity = Some(11);
+            let mut cx = Context::from_waker(Waker::noop());
+            // Only drive the public handshake operation. Neither the driver
+            // nor a background task flushes the bounded transport for TLS.
+            for _ in 0..128 {
+                for stream in [&mut client, &mut server] {
+                    if !stream.is_ready() {
+                        assert!(matches!(
+                            stream.tls_exporter_channel_binding(),
+                            Err(TlsError::Rustls(rustls::Error::HandshakeNotComplete))
+                        ));
+                        if let Poll::Ready(result) = stream.poll_handshake(&mut cx) {
+                            result.expect("bounded transport handshake");
+                        }
+                    }
+                }
+                if client.is_ready() && server.is_ready() {
+                    break;
+                }
+            }
+            assert!(client.is_ready() && server.is_ready(), "capacity deadlocked TLS");
+            for stream in [&client, &server] {
+                assert_eq!(stream.protocol_version(), Some(version.version));
+                assert!(stream.io.capacity_stalls > 0, "must reach actual buffer exhaustion");
+                assert_eq!(stream.io.max_buffered, stream.io.buffer_capacity.unwrap());
+                assert!(stream.io.buffered.is_empty());
+                assert!(!stream.conn.wants_write());
+                assert!(!stream.transport_needs_flush);
+            }
+            if version.version == rustls::ProtocolVersion::TLSv1_3 {
+                assert_eq!(
+                    client.tls_exporter_channel_binding().unwrap(),
+                    server.tls_exporter_channel_binding().unwrap()
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn bounded_transport_flush_and_both_shutdown_apis_deliver_all_records() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            for operation in [
+                FlushOperation::Application,
+                FlushOperation::TlsShutdown,
+                FlushOperation::TransportShutdown,
+            ] {
+                run_pair(version, true, move |mut client, mut server| {
+                    let (stream, peer) = if client_side {
+                        (&mut client, &mut server)
+                    } else {
+                        (&mut server, &mut client)
+                    };
+                    stream.io.buffer_capacity = Some(7);
+                    let binding = stream.tls_exporter_channel_binding().ok();
+                    let message = [0xA5; 257];
+                    queue_plaintext(stream, &message);
+                    let mut cx = Context::from_waker(Waker::noop());
+                    assert!(matches!(
+                        poll_operation(stream, &mut cx, operation),
+                        Poll::Ready(Ok(()))
+                    ));
+                    assert!(stream.io.capacity_stalls > 0);
+                    assert_eq!(stream.io.max_buffered, 7);
+                    assert!(stream.io.buffered.is_empty());
+                    assert!(!stream.conn.wants_write());
+                    assert!(!stream.transport_needs_flush);
+                    read_plaintext(peer, &message);
+                    let mut extra = [0; 1];
+                    let mut buf = ReadBuf::new(&mut extra);
+                    let after = Pin::new(&mut *peer).poll_read(&mut cx, &mut buf);
+                    if matches!(operation, FlushOperation::Application) {
+                        assert!(after.is_pending());
+                        assert_eq!(stream.tls_exporter_channel_binding().ok(), binding);
+                        assert_eq!(peer.tls_exporter_channel_binding().ok(), binding);
+                    } else {
+                        assert!(matches!(after, Poll::Ready(Ok(()))));
+                        assert!(peer.read_closed && stream.shutdown_flushed);
+                        assert_binding_revoked(stream);
+                        assert_binding_revoked(peer);
+                    }
+                    assert!(buf.filled().is_empty(), "plaintext was duplicated");
+                    assert_eq!(
+                        stream.io.shutdown_calls,
+                        usize::from(matches!(operation, FlushOperation::TransportShutdown))
+                    );
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn bounded_transport_pending_and_interrupted_flushes_keep_partial_records() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            run_pair(version, true, move |mut client, mut server| {
+                let (stream, peer) = if client_side {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
+                let binding = stream.tls_exporter_channel_binding().ok();
+                stream.io.buffer_capacity = Some(7);
+                stream.io.block_flush = true;
+                let message = [0x5A; 257];
+                queue_plaintext(stream, &message);
+                let mut cx = Context::from_waker(Waker::noop());
+                for _ in 0..2 {
+                    assert!(Pin::new(&mut *stream).poll_flush(&mut cx).is_pending());
+                    assert!(stream.conn.wants_write());
+                    assert!(stream.transport_needs_flush);
+                    assert_eq!(stream.io.buffered.len(), 7);
+                    assert!(stream.is_ready());
+                }
+                let mut bytes = [0; 1];
+                let mut buf = ReadBuf::new(&mut bytes);
+                assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
+                assert!(buf.filled().is_empty());
+                // The task that resumes a pending flush may have a new waker.
+                stream.io.block_flush = false;
+                stream.io.interrupted_flushes = 1;
+                let counter = Arc::new(WakeCount::default());
+                let waker = Waker::from(Arc::clone(&counter));
+                let mut cx = Context::from_waker(&waker);
+                assert!(Pin::new(&mut *stream).poll_flush(&mut cx).is_pending());
+                assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+                assert!(stream.transport_needs_flush && stream.conn.wants_write());
+                assert_eq!(stream.io.buffered.len(), 7);
+                assert!(matches!(
+                    Pin::new(&mut *stream).poll_flush(&mut cx),
+                    Poll::Ready(Ok(()))
+                ));
+                assert!(!stream.transport_needs_flush);
+                assert!(stream.io.buffered.is_empty());
+                read_plaintext(peer, &message);
+                let mut buf = ReadBuf::new(&mut bytes);
+                assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
+                assert!(buf.filled().is_empty());
+                assert_eq!(stream.tls_exporter_channel_binding().ok(), binding);
+                assert_eq!(peer.tls_exporter_channel_binding().ok(), binding);
+            });
+        }
+    }
+}
+
+#[test]
+fn bounded_transport_flush_failure_after_acceptance_is_sticky() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::BrokenPipe] {
+                run_pair(version, true, move |mut client, mut server| {
+                    let (stream, peer) = if client_side {
+                        (&mut client, &mut server)
+                    } else {
+                        (&mut server, &mut client)
+                    };
+                    stream.io.buffer_capacity = Some(7);
+                    stream.io.flush_error = Some(kind);
+                    let message = [0xC3; 257];
+                    let mut cx = Context::from_waker(Waker::noop());
+                    assert!(matches!(
+                        Pin::new(&mut *stream).poll_write(&mut cx, &message),
+                        Poll::Ready(Ok(n)) if n == message.len()
+                    ));
+                    assert_eq!(stream.io.capacity_stalls, 1);
+                    assert_eq!(stream.io.buffered.len(), 7);
+                    assert!(stream.is_closed());
+                    assert_binding_revoked(stream);
+                    stream.io.flush_error = None;
+                    let calls = stream.io.calls;
+                    for _ in 0..3 {
+                        assert!(matches!(
+                            Pin::new(&mut *stream).poll_write(&mut cx, &message),
+                            Poll::Ready(Err(error)) if error.kind() == kind
+                        ));
+                        for operation in [
+                            FlushOperation::Application,
+                            FlushOperation::TlsShutdown,
+                            FlushOperation::TransportShutdown,
+                        ] {
+                            assert!(matches!(
+                                poll_operation(stream, &mut cx, operation),
+                                Poll::Ready(Err(error)) if error.kind() == kind
+                            ));
+                        }
+                        assert_eq!(stream.io.calls, calls);
+                    }
+                    let mut bytes = [0; 1];
+                    let mut buf = ReadBuf::new(&mut bytes);
+                    assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
+                    assert!(buf.filled().is_empty());
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn successful_flush_does_not_spin_on_a_still_blocked_transport() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            run_pair(version, true, move |mut client, mut server| {
+                let (stream, peer) = if client_side {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
+                let mut cx = Context::from_waker(Waker::noop());
+                let first = b"already accepted";
+                let second = b"still blocked";
+                assert!(matches!(
+                    Pin::new(&mut *stream).poll_write(&mut cx, first),
+                    Poll::Ready(Ok(n)) if n == first.len()
+                ));
+                assert!(stream.transport_needs_flush);
+                stream.io.block_write = true;
+                let calls = stream.io.calls;
+                assert!(matches!(
+                    Pin::new(&mut *stream).poll_write(&mut cx, second),
+                    Poll::Ready(Ok(n)) if n == second.len()
+                ));
+                // One blocked write, one flush, one retry: no new bytes were
+                // accepted by the transport, so another flush cannot help.
+                assert_eq!(stream.io.calls - calls, 3);
+                assert!(!stream.transport_needs_flush);
+                assert!(stream.conn.wants_write());
+                let calls = stream.io.calls;
+                assert!(Pin::new(&mut *stream).poll_flush(&mut cx).is_pending());
+                assert_eq!(stream.io.calls - calls, 1);
+                stream.io.block_write = false;
+                assert!(matches!(
+                    Pin::new(&mut *stream).poll_flush(&mut cx),
+                    Poll::Ready(Ok(()))
+                ));
+                let mut expected = first.to_vec();
+                expected.extend_from_slice(second);
+                read_plaintext(peer, &expected);
             });
         }
     }
