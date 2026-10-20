@@ -786,7 +786,11 @@ mod journal_cancellation {
                             transfer_id: "cancelled-transfer".to_owned(), reason: "application stopped".to_owned(),
                             timestamp: 12, auth_tag: AuthenticationTag::zero(),
                         }).unwrap();
-                        assert_cancelled(&journal); // Prove the misleading final summary.
+                        // The shared summary now rejects the contradictory history
+                        // before cancellation's own validator can interpret it.
+                        assert!(matches!(journal.get_resume_summary("cancelled-transfer"),
+                            Outcome::Err(JournalError::Deserialization(reason))
+                                if reason == "resume cancellation conflicts with an earlier terminal decision"));
                     }
                     if case == 3 {
                         drop(journal);
@@ -809,9 +813,15 @@ mod journal_cancellation {
                         _ => {}
                     }
                     let report = writer.cancel_to_journal(&cx, input).await.unwrap();
-                    if case == 3 {
+                    if case < 4 || case == 7 {
+                        let expected = match case {
+                            0..=2 => "cancellation journal: Deserialization failed: resume cancellation conflicts with an earlier terminal decision",
+                            3 => "cancellation journal: Deserialization failed: resume journal record authentication failed",
+                            7 => "cancellation journal: Deserialization failed: resume offer total_size conflict",
+                            _ => unreachable!(),
+                        };
                         assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::WriteFailed(reason))
-                            if reason.starts_with("cancellation journal:")));
+                            if reason == expected));
                     } else {
                         assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::VerificationFailed(_))));
                     }

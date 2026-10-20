@@ -5,7 +5,8 @@
 //! for capacity limits and [`ShutdownSignal`] for graceful drain.
 
 use crate::http::h1::server::{
-    Http1Config, Http1ServeOutcome, Http1Server, Http1StreamingServer, IntoHttp1Response,
+    Http1Config, Http1ServeOutcome, Http1Server, Http1StreamingConfig, Http1StreamingServer,
+    IntoHttp1Response,
 };
 use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h1::types::{Request, Response};
@@ -390,6 +391,7 @@ pub struct Http1Listener<F> {
     listener: H1AcceptSource,
     handler: Arc<F>,
     config: Http1ListenerConfig,
+    streaming_config: Option<Http1StreamingConfig>,
     shutdown_signal: ShutdownSignal,
     connection_manager: ConnectionManager,
     stats: Arc<Http1ListenerStats>,
@@ -468,6 +470,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -493,6 +496,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -542,6 +546,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -594,6 +599,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -644,6 +650,7 @@ where
             listener: H1AcceptSource::Tcp(tcp_listener),
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -699,6 +706,63 @@ where
         )
         .await
     }
+
+    /// Serve live incoming request bodies over HTTPS in owned request tasks.
+    ///
+    /// This has [`Self::run_streaming_owned_in`]'s bounded body delivery and
+    /// request-subtree retirement guarantees. TLS handshakes use the acceptor's
+    /// timeout or the HTTP idle timeout, admit only HTTP/1.1 ALPN (or absent
+    /// ALPN), and participate in connection capacity and cancellation. Buffered
+    /// responses and TLS reuse wait for the complete request subtree to close.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub async fn run_streaming_tls_owned_in(
+        self,
+        cx: &Cx,
+        acceptor: TlsAcceptor,
+    ) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                let acceptor = acceptor.clone();
+                spawner
+                    .spawn(move |connection_cx| async move {
+                        let _guard = guard;
+                        let peer_addr = stream.peer_addr();
+                        let Some(stream) = accept_http1_tls(
+                            stream,
+                            acceptor,
+                            config.idle_timeout,
+                            &shutdown,
+                            Some(connection_cx.clone()),
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        let server = Http1StreamingServer::with_config(
+                            move |request_cx, request| handler(request_cx, request),
+                            config,
+                        )
+                        .with_shutdown_signal(shutdown)
+                        .with_in_flight_requests(in_flight);
+                        if let Err(error) = server
+                            .serve_owned_with_peer_addr(&connection_cx, stream, peer_addr)
+                            .await
+                        {
+                            connection_cx.trace(&format!(
+                                "h1_owned_streaming_tls_connection_failed: {error}"
+                            ));
+                        }
+                        let _ = connection_cx.checkpoint();
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
 }
 
 impl<F, Fut, S> Http1Listener<F>
@@ -711,6 +775,98 @@ where
     pub async fn run_sse(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
         self.run_with(runtime, spawn_sse_connection::<F, Fut, S>)
             .await
+    }
+
+    /// Serve live SSE with a real request task and child region per response.
+    ///
+    /// The handler, incoming-body driver, SSE source, and response writes run
+    /// under the request's task context. Successful terminal framing waits
+    /// for that task, its descendants, and its finalizers to retire. Listener
+    /// drain includes the complete request lifetime; cancellation after the
+    /// response starts closes the stream without a successful terminator.
+    /// Each produced response uses the established one-response connection
+    /// policy of [`Http1StreamingServer::serve_sse_owned`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn run_sse_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                spawner
+                    .spawn(move |connection_cx| {
+                        serve_owned_sse_connection(
+                            connection_cx,
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown,
+                            in_flight,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
+
+    /// Serve owned live SSE responses over HTTPS.
+    ///
+    /// The SSE source and body writes run in an actual request task, with
+    /// successful terminal framing released only after request-subtree close.
+    /// The acceptor controls TLS policy; non-HTTP/1.1 ALPN is refused before
+    /// dispatch, and handshake cancellation releases the connection slot.
+    /// Request cancellation after response admission truncates the stream.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub async fn run_sse_tls_owned_in(
+        self,
+        cx: &Cx,
+        acceptor: TlsAcceptor,
+    ) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                let acceptor = acceptor.clone();
+                spawner
+                    .spawn(move |connection_cx| async move {
+                        let _guard = guard;
+                        let peer_addr = stream.peer_addr();
+                        let Some(stream) = accept_http1_tls(
+                            stream,
+                            acceptor,
+                            config.idle_timeout,
+                            &shutdown,
+                            Some(connection_cx.clone()),
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        let server = Http1StreamingServer::with_config_sse(
+                            move |request_cx, request| handler(request_cx, request),
+                            config,
+                        )
+                        .with_shutdown_signal(shutdown)
+                        .with_in_flight_requests(in_flight);
+                        if let Err(error) = server
+                            .serve_sse_owned_with_peer_addr(&connection_cx, stream, peer_addr)
+                            .await
+                        {
+                            connection_cx.trace(&format!(
+                                "h1_owned_sse_tls_connection_failed: {error}"
+                            ));
+                        }
+                        let _ = connection_cx.checkpoint();
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
     }
 }
 
@@ -809,6 +965,7 @@ impl<F> Http1Listener<F> {
             listener,
             handler: Arc::new(handler),
             config,
+            streaming_config: None,
             shutdown_signal,
             connection_manager,
             stats,
@@ -833,8 +990,15 @@ where
     ///
     /// Returns shutdown statistics upon completion.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
-        self.run_with(runtime, spawn_stream_connection::<F, Fut, R>)
-            .await
+        self.run_with(
+            runtime,
+            |stream, guard, handler, config, shutdown, in_flight, runtime| {
+                spawn_stream_connection::<F, Fut, R>(
+                    stream, guard, handler, config.connection, shutdown, in_flight, runtime,
+                )
+            },
+        )
+        .await
     }
 
     /// Like [`Self::run`], but each connection task is spawned with `cx`, so
@@ -858,7 +1022,7 @@ where
                             stream,
                             guard,
                             handler,
-                            config,
+                            config.connection,
                             shutdown_signal,
                             in_flight_requests,
                         )
@@ -899,7 +1063,7 @@ where
                             stream,
                             guard,
                             handler,
-                            config,
+                            config.connection,
                             shutdown_signal,
                             in_flight_requests,
                         )
@@ -951,7 +1115,7 @@ where
                     stream,
                     guard,
                     handler,
-                    config,
+                    config.connection,
                     shutdown,
                     in_flight,
                     acceptor.clone(),
@@ -994,7 +1158,7 @@ where
                             stream,
                             guard,
                             handler,
-                            config,
+                            config.connection,
                             shutdown,
                             in_flight,
                             acceptor,
@@ -1017,9 +1181,124 @@ where
         self.run_with(runtime, spawn_produced_connection::<F, Fut>)
             .await
     }
+
+    /// Serve framed responses in actual request tasks and child regions.
+    ///
+    /// Incoming-body delivery, the handler, response producer, and wire
+    /// progress share the request task's capability context. Successful final
+    /// framing is withheld until the request subtree closes, without buffering
+    /// the whole response. A cancellation or failed finalizer after response
+    /// admission closes the connection without certifying a complete response.
+    /// This keeps the established one-response connection policy and accepts
+    /// the listener's TCP, Unix, and handed-off transports.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn run_produced_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                spawner
+                    .spawn(move |connection_cx| {
+                        serve_owned_produced_connection(
+                            connection_cx,
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown,
+                            in_flight,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
+
+    /// Serve owned framed response producers over HTTPS.
+    ///
+    /// This combines [`Self::run_produced_owned_in`]'s request ownership and
+    /// final-framing barrier with bounded, cancellation-aware TLS handshakes.
+    /// Only HTTP/1.1 (or absent) ALPN reaches the handler. Connection accounting
+    /// covers both the handshake and the complete produced-response lifetime.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub async fn run_produced_tls_owned_in(
+        self,
+        cx: &Cx,
+        acceptor: TlsAcceptor,
+    ) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                let acceptor = acceptor.clone();
+                spawner
+                    .spawn(move |connection_cx| async move {
+                        let _guard = guard;
+                        let peer_addr = stream.peer_addr();
+                        let Some(stream) = accept_http1_tls(
+                            stream,
+                            acceptor,
+                            config.idle_timeout,
+                            &shutdown,
+                            Some(connection_cx.clone()),
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        let server = Http1StreamingServer::with_config_produced(
+                            move |request_cx, request| handler(request_cx, request),
+                            config,
+                        )
+                        .with_shutdown_signal(shutdown)
+                        .with_in_flight_requests(in_flight);
+                        if let Err(error) = server
+                            .serve_produced_owned_with_peer_addr(
+                                &connection_cx,
+                                stream,
+                                peer_addr,
+                            )
+                            .await
+                        {
+                            connection_cx.trace(&format!(
+                                "h1_owned_produced_tls_connection_failed: {error}"
+                            ));
+                        }
+                        let _ = connection_cx.checkpoint();
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
 }
 
 impl<F> Http1Listener<F> {
+    /// Configure live-body admission, queue backpressure, and unread-body drain.
+    ///
+    /// The connection settings replace this listener's HTTP connection
+    /// configuration. All streaming, produced-response, and SSE entry points,
+    /// including HTTPS, receive the complete configuration. Listener capacity,
+    /// shutdown budgets, and the time source remain separately configured by
+    /// [`Http1ListenerConfig`]. Buffered entry points use only its connection
+    /// settings.
+    ///
+    /// Pass the configuration returned by
+    /// [`crate::web::Router::into_http1_streaming_parts`] or
+    /// [`crate::web::Router::into_http1_produced_parts`] here to enforce static
+    /// route limits before `100 Continue` or incoming-body admission.
+    #[must_use]
+    pub fn with_streaming_config(mut self, config: Http1StreamingConfig) -> Self {
+        self.config.http_config = config.connection.clone();
+        self.streaming_config = Some(config);
+        self
+    }
+
     async fn run_with<Spawn>(
         self,
         runtime: &RuntimeHandle,
@@ -1031,7 +1310,7 @@ impl<F> Http1Listener<F> {
                 H1Stream,
                 ConnectionGuard,
                 Arc<F>,
-                Http1Config,
+                Http1StreamingConfig,
                 ShutdownSignal,
                 Arc<AtomicUsize>,
                 &RuntimeHandle,
@@ -1070,7 +1349,7 @@ impl<F> Http1Listener<F> {
                 H1Stream,
                 ConnectionGuard,
                 Arc<F>,
-                Http1Config,
+                Http1StreamingConfig,
                 ShutdownSignal,
                 Arc<AtomicUsize>,
             ) -> Result<ConnectionTask, SpawnError>
@@ -1170,7 +1449,10 @@ impl<F> Http1Listener<F> {
 
             // Spawn connection handler
             let handler = Arc::clone(&self.handler);
-            let http_config = self.config.http_config.clone();
+            let http_config = self.streaming_config.as_ref().map_or_else(
+                || Http1StreamingConfig::from(self.config.http_config.clone()),
+                Clone::clone,
+            );
             let shutdown_signal = self.shutdown_signal.clone();
             let in_flight_requests = Arc::clone(&self.in_flight_requests);
             let handle = match spawn_connection(
@@ -1955,7 +2237,7 @@ async fn serve_owned_streaming_connection<F, Fut>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
 ) where
@@ -1976,12 +2258,75 @@ async fn serve_owned_streaming_connection<F, Fut>(
     let _ = cx.checkpoint();
 }
 
+/// Serve a native connection with an owned produced-response exchange.
+#[cfg(not(target_arch = "wasm32"))]
+async fn serve_owned_produced_connection<F, Fut>(
+    cx: Cx,
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1StreamingConfig,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
+{
+    let _guard = guard;
+    let peer_addr = stream.peer_addr();
+    let server = Http1StreamingServer::with_config_produced(
+        move |request_cx, request| handler(request_cx, request),
+        config,
+    )
+    .with_shutdown_signal(shutdown_signal)
+    .with_in_flight_requests(in_flight_requests);
+    if let Err(error) = server
+        .serve_produced_owned_with_peer_addr(&cx, stream, peer_addr)
+        .await
+    {
+        cx.trace(&format!("h1_owned_produced_connection_failed: {error}"));
+    }
+    let _ = cx.checkpoint();
+}
+
+/// Serve a native connection with an owned live-SSE exchange.
+#[cfg(not(target_arch = "wasm32"))]
+async fn serve_owned_sse_connection<F, Fut, S>(
+    cx: Cx,
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1StreamingConfig,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1SseResponse<S>> + Send + 'static,
+    S: StreamingSseSource + Send + 'static,
+{
+    let _guard = guard;
+    let peer_addr = stream.peer_addr();
+    let server = Http1StreamingServer::with_config_sse(
+        move |request_cx, request| handler(request_cx, request),
+        config,
+    )
+    .with_shutdown_signal(shutdown_signal)
+    .with_in_flight_requests(in_flight_requests);
+    if let Err(error) = server
+        .serve_sse_owned_with_peer_addr(&cx, stream, peer_addr)
+        .await
+    {
+        cx.trace(&format!("h1_owned_sse_connection_failed: {error}"));
+    }
+    let _ = cx.checkpoint();
+}
+
 /// Spawn a connection whose request heads are dispatched before body EOF.
 fn spawn_streaming_connection<F, Fut>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
     runtime: &RuntimeHandle,
@@ -2017,7 +2362,7 @@ fn spawn_produced_connection<F, Fut>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
     runtime: &RuntimeHandle,
@@ -2050,7 +2395,7 @@ fn spawn_sse_connection<F, Fut, S>(
     stream: H1Stream,
     guard: ConnectionGuard,
     handler: Arc<F>,
-    config: Http1Config,
+    config: Http1StreamingConfig,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
     runtime: &RuntimeHandle,

@@ -177,8 +177,8 @@ fn unordered_verified_and_written_records_do_not_override_replay_admission() {
             let (journal, bitmaps) = recover_journal_and_bitmap(
                 &Cx::current().unwrap(), &path, &root.path().join("bitmaps"), &key(),
             ).await.unwrap();
-            // The summary's set intersection alone is deliberately insufficient.
-            assert_eq!(journal.get_resume_summary("ordered").unwrap().durable_bytes, 8);
+            // The shared summary now rejects stale credit as well as replay does.
+            assert_eq!(journal.get_resume_summary("ordered").unwrap().durable_bytes, u64::from(corrected) * 8);
             assert_eq!(bitmaps["ordered"].entry_count(), usize::from(corrected));
             assert_eq!(bitmaps["ordered"].get_chunk_state(0), corrected.then_some(ChunkState::Written));
         });

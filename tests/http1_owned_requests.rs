@@ -348,7 +348,8 @@ async fn cancellation_joins_cleanup(cx: Cx) {
         let child = child_parked.recv(&cx).await.unwrap();
         assert_eq!(body.region_id(), child.region_id());
         if force_close {
-            shutdown.begin_force_close();
+            assert!(shutdown.begin_drain(Duration::from_secs(5)));
+            assert!(shutdown.begin_force_close());
         } else {
             serving.abort_with_reason(CancelReason::user("owned H1 parent cancellation"));
         }

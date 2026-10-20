@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod storage;
 mod compaction;
+mod resume;
 
 // The writer must not acknowledge a frame that its own recovery reader refuses.
 const MAX_JOURNAL_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -1358,7 +1359,13 @@ impl AppendJournal {
         Outcome::Ok(entries)
     }
 
-    /// Reconstruct resumable transfer progress from the crash-safe journal index.
+    /// Reconstruct authenticated, ordered progress from the journal index.
+    ///
+    /// A reusable range needs Verified followed by Written in its current
+    /// receive/repair attempt. Contradictory identity, geometry or terminal
+    /// history refuses the summary; raw records remain available for diagnosis.
+    /// Legacy offerless receipts remain representable, but are not sufficient
+    /// authority for physical restoration. This does not read or fsync payload.
     pub fn get_resume_summary(
         &self,
         transfer_id: &str,
@@ -1517,118 +1524,7 @@ impl AppendJournal {
         transfer_id: &str,
         entries: &[JournalEntry],
     ) -> Result<TransferResumeSummary, JournalError> {
-        let mut total_size = None;
-        let mut last_sequence = None;
-        let mut terminal_status = None;
-        let mut verified_chunks: HashMap<ResumeChunkKey, [u8; 32]> = HashMap::new();
-        let mut written_chunks: HashSet<ResumeChunkKey> = HashSet::new();
-
-        for entry in entries {
-            last_sequence = Some(entry.sequence);
-            match &entry.record {
-                JournalRecord::Offer {
-                    total_size: offered_size,
-                    ..
-                } => match total_size {
-                    None => total_size = Some(*offered_size),
-                    Some(existing) if existing == *offered_size => {}
-                    Some(existing) => {
-                        return Err(JournalError::Deserialization(format!(
-                            "resume offer total_size conflict: previous {existing}, recovered {offered_size}"
-                        )));
-                    }
-                },
-                JournalRecord::ChunkVerified {
-                    chunk_offset,
-                    chunk_size,
-                    verified_hash,
-                    ..
-                } => {
-                    let key = ResumeChunkKey {
-                        chunk_offset: *chunk_offset,
-                        chunk_size: *chunk_size,
-                    };
-                    match verified_chunks.get(&key) {
-                        Some(existing_hash) if existing_hash != verified_hash => {
-                            return Err(JournalError::Deserialization(format!(
-                                "resume chunk verified hash conflict at offset {} size {}",
-                                chunk_offset, chunk_size
-                            )));
-                        }
-                        Some(_) => {}
-                        None => {
-                            verified_chunks.insert(key, *verified_hash);
-                        }
-                    }
-                }
-                JournalRecord::ChunkWritten {
-                    chunk_offset,
-                    chunk_size,
-                    ..
-                } => {
-                    written_chunks.insert(ResumeChunkKey {
-                        chunk_offset: *chunk_offset,
-                        chunk_size: *chunk_size,
-                    });
-                }
-                JournalRecord::CommitIntent { .. } => {
-                    terminal_status = Some(TransferResumeStatus::CommitIntentPending);
-                }
-                JournalRecord::CommitComplete {
-                    final_path,
-                    committed_size,
-                    ..
-                } => {
-                    terminal_status = Some(TransferResumeStatus::Committed {
-                        final_path: final_path.clone(),
-                        committed_size: *committed_size,
-                    });
-                }
-                JournalRecord::Cancellation { reason, .. } => {
-                    terminal_status = Some(TransferResumeStatus::Cancelled {
-                        reason: reason.clone(),
-                    });
-                }
-                JournalRecord::Rollback {
-                    rollback_reason,
-                    checkpoint_sequence,
-                    ..
-                } => {
-                    terminal_status = Some(TransferResumeStatus::RolledBack {
-                        reason: rollback_reason.clone(),
-                        checkpoint_sequence: *checkpoint_sequence,
-                    });
-                }
-                JournalRecord::Accept { .. }
-                | JournalRecord::ChunkReceived { .. }
-                | JournalRecord::RepairDecode { .. }
-                | JournalRecord::CompactionBoundary { .. }
-                | JournalRecord::ProofDigest { .. } => {}
-            }
-        }
-
-        let status = terminal_status.unwrap_or(if entries.is_empty() {
-            TransferResumeStatus::Unknown
-        } else {
-            TransferResumeStatus::Resumable
-        });
-
-        let (durable_chunks, durable_bytes, contiguous_prefix_bytes) =
-            if matches!(status, TransferResumeStatus::Resumable) {
-                Self::durable_resume_chunks(&verified_chunks, &written_chunks, total_size)?
-            } else {
-                (Vec::new(), 0, 0)
-            };
-
-        Ok(TransferResumeSummary {
-            transfer_id: transfer_id.to_string(),
-            status,
-            total_size,
-            durable_chunks,
-            durable_bytes,
-            contiguous_prefix_bytes,
-            last_sequence,
-        })
+        resume::build(transfer_id, entries)
     }
 
     fn durable_resume_chunks(

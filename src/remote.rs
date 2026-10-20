@@ -112,7 +112,9 @@ pub mod typed;
 mod write_progress;
 pub use typed::{
     PreparedTypedRemoteCall, TypedRemoteComputation, TypedRemoteError, TypedRemoteHandle,
-    TypedRemoteLimits, TypedRemoteOutcome, TypedRemoteStage, spawn_remote_typed,
+    TypedRemoteLimits, TypedRemoteOutcome, TypedRemoteRunError, TypedRemoteRunHandle,
+    TypedRemoteRunReply, TypedRemoteRunReport, TypedRemoteStage, spawn_remote_typed,
+    spawn_remote_typed_owned,
 };
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use admission::{

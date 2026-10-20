@@ -5,13 +5,17 @@
 //! then withheld from the connection until the actual request subtree closes.
 
 use super::{
-    Http1Response, HttpError, IntoHttp1Response, Request, RequestExecutionConfig,
+    Http1Response, HttpError, IntoHttp1Response, ProducedHopOutcome, ProducedRequestExecution,
+    Request, RequestExecutionConfig,
     ServerHopOutcome, ServerRequestRegion, ShutdownPhase, StreamingRequestExecution,
-    StreamingRequestOutcome, drive_incoming_body, join_streaming_handler_and_body,
+    StreamingRequestOutcome, drive_incoming_body, execute_produced_request_flow,
+    join_streaming_handler_and_body,
 };
 use crate::bytes::BytesMut;
 use crate::cx::{ChildRegion, ChildRegionSpec, Cx};
-use crate::http::h1::stream::{IncomingRequestBody, StreamingServerRequest};
+use crate::http::h1::stream::{
+    Http1ProducedResponse, IncomingBodyAdmissionError, IncomingRequestBody, StreamingServerRequest,
+};
 use crate::http::h1::types::Response;
 use crate::http::listener_cancel::ListenerCancellation;
 use crate::io::{AsyncRead, AsyncWrite};
@@ -102,12 +106,47 @@ impl OwnedRequests {
             move |body_cx, region| async move {
                 let mut transport = StreamingTransport::take(task_transport);
                 let (io, read_buffer) = transport.parts();
-                let (writer, body) = IncomingRequestBody::channel_with_limits(
+                let (writer, body) = match IncomingRequestBody::channel_with_limits_checked(
                     &body_cx,
                     body_kind,
                     config.incoming_body_frame_capacity,
                     config.incoming_body_queued_bytes,
-                );
+                    u64::try_from(config.max_body_size).unwrap_or(u64::MAX),
+                ) {
+                    Ok(channel) => channel,
+                    Err(error) => {
+                        let outcome = match error {
+                            IncomingBodyAdmissionError::Policy(error) => {
+                                StreamingRequestOutcome::BodyFailed(error)
+                            }
+                            IncomingBodyAdmissionError::Cancelled { kind } => {
+                                let hop = if matches!(kind, CancelKind::Deadline | CancelKind::Timeout) {
+                                    ServerHopOutcome::DeadlineExceeded
+                                } else {
+                                    ServerHopOutcome::Cancelled
+                                };
+                                StreamingRequestOutcome::Complete { hop, drain: None }
+                            }
+                            IncomingBodyAdmissionError::Runtime(_)
+                            | IncomingBodyAdmissionError::RuntimeRequired => {
+                                StreamingRequestOutcome::Complete {
+                                    hop: ServerHopOutcome::Ok(super::hop_error_response(
+                                        head.version, 503, "request body admission unavailable",
+                                    )),
+                                    drain: None,
+                                }
+                            }
+                        };
+                        return region
+                            .run_with_protocol_drain(
+                                source,
+                                Some(body_cx.clone()),
+                                drain_grace,
+                                async move { outcome },
+                            )
+                            .await;
+                    }
+                };
                 let request = StreamingServerRequest {
                     head,
                     peer_addr,
@@ -156,6 +195,58 @@ impl OwnedRequests {
             Some(ServerHopOutcome::Panicked(message)) => terminal(ServerHopOutcome::Panicked(message)),
         };
         Ok((io, read_buffer, outcome))
+    }
+
+    pub(super) async fn execute_produced<F, Fut, T>(
+        self,
+        handler: Arc<F>,
+        io: T,
+        read_buffer: BytesMut,
+        execution: ProducedRequestExecution,
+    ) -> Result<(T, ProducedHopOutcome), HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let transport = Arc::new(parking_lot::Mutex::new(Some((io, read_buffer))));
+        let task_transport = Arc::clone(&transport);
+        let config = execution.streaming.request.clone();
+        let source = config.source;
+        let drain_grace = config.drain_grace;
+        let outcome = run_owned_request(&self.owner, config, move |body_cx, region| async move {
+            // Keep transport outside the protocol future: expiry may discard
+            // the exchange but must retain I/O for an early 503 or a truncated
+            // close. Reclaim it only after the whole request subtree retires.
+            let mut transport = StreamingTransport::take(task_transport);
+            let (io, read_buffer) = transport.parts();
+            let flow = execute_produced_request_flow(
+                &body_cx, io, read_buffer, handler, execution, true,
+            );
+            let outcome = region
+                .run_with_protocol_drain(source, Some(body_cx.clone()), drain_grace, flow)
+                .await;
+            match outcome {
+                ServerHopOutcome::Ok(Err(HttpError::Io(error))) => {
+                    // An application error source may own a checked token.
+                    // Retire that opaque source in the request task instead
+                    // of carrying an obligation into the region-close wait.
+                    let snapshot = error.raw_os_error().map_or_else(
+                        || std::io::Error::new(error.kind(), error.to_string()),
+                        std::io::Error::from_raw_os_error,
+                    );
+                    drop(error);
+                    ServerHopOutcome::Ok(Err(HttpError::Io(snapshot)))
+                }
+                outcome => outcome,
+            }
+        })
+        .await?;
+        let (io, _read_buffer) = transport
+            .lock()
+            .take()
+            .ok_or_else(|| ownership_error("produced request omitted its transport return"))?;
+        Ok((io, outcome))
     }
 }
 
