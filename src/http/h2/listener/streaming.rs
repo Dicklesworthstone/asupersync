@@ -5,8 +5,8 @@ use crate::bytes::{Bytes, BytesCursor};
 use crate::channel::oneshot;
 use crate::http::body::{HeaderName, HeaderValue};
 use crate::http::h1::stream::{
-    FramedIncomingRequestBodyWriter, IncomingBodyError, IncomingRequestBody, RequestHead,
-    StreamingServerRequest,
+    FramedIncomingRequestBodyWriter, IncomingBodyAdmissionError, IncomingBodyError,
+    IncomingRequestBody, RequestHead, StreamingServerRequest,
 };
 use std::task::Context;
 
@@ -27,6 +27,7 @@ type StreamingHandler = Arc<
 enum StreamingHopResponse {
     Buffered(Http2Response),
     Produced(Http2ProducerOutcome),
+    AdmissionRefused(IncomingBodyAdmissionError),
 }
 
 /// Opt-in live request-body configuration for [`Http2Listener`].
@@ -173,6 +174,13 @@ struct BodySource {
     failure: Arc<parking_lot::Mutex<Option<IncomingBodyError>>>,
 }
 
+enum BodyPublication {
+    Admitted(BodySource),
+    /// The request owner refused checked admission without creating a body.
+    /// Its coordinator still publishes the ordinary terminal response.
+    Refused,
+}
+
 impl Drop for BodySource {
     fn drop(&mut self) {
         // Publication may race connection loss before the driver receives the
@@ -196,7 +204,7 @@ impl Drop for BodySource {
 }
 
 struct LiveRequest {
-    publication: Option<oneshot::Receiver<BodySource>>,
+    publication: Option<oneshot::Receiver<BodyPublication>>,
     source: Option<BodySource>,
     coordinator: Option<Pin<Box<CatchUnwind<JoinHandle<()>>>>>,
     // A ring, so taking each chunk off the front never moves the rest of a
@@ -216,6 +224,18 @@ struct LiveRequest {
 }
 
 impl LiveRequest {
+    fn receive_publication(&mut self, publication: BodyPublication) {
+        self.publication = None;
+        match publication {
+            BodyPublication::Admitted(source) => self.source = Some(source),
+            BodyPublication::Refused => {
+                self.abandoned = true;
+                self.pending_data.clear();
+                self.pending_trailers = None;
+            }
+        }
+    }
+
     /// Stop taking request input while the response path keeps the stream.
     fn abandon(&mut self, error: IncomingBodyError) {
         self.abandoned = true;
@@ -233,9 +253,9 @@ impl LiveRequest {
         self.failed = true;
         *self.failure.lock() = Some(error.clone());
         if let Some(mut publication) = self.publication.take()
-            && let Ok(source) = publication.try_recv()
+            && let Ok(publication) = publication.try_recv()
         {
-            self.source = Some(source);
+            self.receive_publication(publication);
         }
         self.pending_data.clear();
         self.pending_trailers = None;
@@ -271,9 +291,8 @@ impl LiveRequest {
             match publication.poll_recv_uninterruptible(poll_cx) {
                 Poll::Pending => return Ok((progress, 0)),
                 Poll::Ready(Err(_)) => return Err(IncomingBodyError::SourceDisconnected),
-                Poll::Ready(Ok(source)) => {
-                    self.publication = None;
-                    self.source = Some(source);
+                Poll::Ready(Ok(publication)) => {
+                    self.receive_publication(publication);
                     progress = true;
                 }
             }
@@ -561,85 +580,114 @@ impl StreamingRequests {
                     idle_timeout: None,
                 },
                 move |request_cx| async move {
-                    let (writer, body) = IncomingRequestBody::framed_channel_with_limits(
-                        &request_cx,
-                        declared_length,
-                        REQUEST_FRAME_CAPACITY,
-                        queue_bytes,
-                    );
-                    let writer = writer
+                    let (writer, body, ownership) =
+                        match IncomingRequestBody::framed_channel_with_limits_checked(
+                            &request_cx,
+                            declared_length,
+                            REQUEST_FRAME_CAPACITY,
+                            queue_bytes,
+                            max_body_size,
+                        ) {
+                            Ok(admitted) => admitted,
+                            Err(error) => {
+                                let _ = publisher.send_blocking(BodyPublication::Refused);
+                                return StreamingHopResponse::AdmissionRefused(error);
+                            }
+                        };
+                    let mut writer = writer
                         .max_body_size(max_body_size)
                         .max_trailers_size(REQUEST_CHUNK_BYTES);
-                    if publisher
-                        .send_blocking(BodySource {
-                            cx: request_cx.clone(),
-                            writer,
-                            cancel_on_drop: true,
-                            failure: source_failure,
+                    // The driver receives the writer, while the actual request
+                    // task retains its checked credit and synchronous drop
+                    // backstop through the handler and deferred producer.
+                    let work = async move {
+                        // Only HEADERS with END_STREAM certify an empty body.
+                        // Content-Length: 0 without that flag stays open.
+                        if end_stream && let Err(error) = writer.finish(&request_cx) {
+                            let _ = publisher.send_blocking(BodyPublication::Refused);
+                            let error = match error {
+                                IncomingBodyError::Cancelled { kind } => {
+                                    IncomingBodyAdmissionError::Cancelled { kind }
+                                }
+                                error => IncomingBodyAdmissionError::Policy(error),
+                            };
+                            return StreamingHopResponse::AdmissionRefused(error);
+                        }
+                        if publisher
+                            .send_blocking(BodyPublication::Admitted(BodySource {
+                                cx: request_cx.clone(),
+                                writer,
+                                cancel_on_drop: true,
+                                failure: source_failure,
+                            }))
+                            .is_err()
+                        {
+                            return StreamingHopResponse::Buffered(invalid_h2_response_fallback());
+                        }
+                        match handler(StreamingServerRequest {
+                            head,
+                            peer_addr,
+                            body,
                         })
-                        .is_err()
-                    {
-                        return StreamingHopResponse::Buffered(invalid_h2_response_fallback());
-                    }
-                    match handler(StreamingServerRequest {
-                        head,
-                        peer_addr,
-                        body,
-                    })
-                    .await
-                    {
-                        H2DispatchResponse::Buffered(response) => {
-                            StreamingHopResponse::Buffered(response)
-                        }
-                        H2DispatchResponse::Produced(plan) => {
-                            let validation = if suppress_response_body {
-                                validate_h2_produced_head_for_queue(&plan.response)
-                            } else {
-                                validate_h2_produced_response_for_queue(&plan.response)
-                            };
-                            if validation.is_err() {
-                                return StreamingHopResponse::Buffered(
-                                    invalid_h2_response_fallback(),
-                                );
+                        .await
+                        {
+                            H2DispatchResponse::Buffered(response) => {
+                                StreamingHopResponse::Buffered(response)
                             }
-                            if suppress_response_body {
-                                return StreamingHopResponse::Buffered(
-                                    plan.response.into_h2_response(),
-                                );
-                            }
+                            H2DispatchResponse::Produced(plan) => {
+                                let validation = if suppress_response_body {
+                                    validate_h2_produced_head_for_queue(&plan.response)
+                                } else {
+                                    validate_h2_produced_response_for_queue(&plan.response)
+                                };
+                                if validation.is_err() {
+                                    return StreamingHopResponse::Buffered(
+                                        invalid_h2_response_fallback(),
+                                    );
+                                }
+                                if suppress_response_body {
+                                    return StreamingHopResponse::Buffered(
+                                        plan.response.into_h2_response(),
+                                    );
+                                }
 
-                            // The producer and incoming body share this actual
-                            // admitted child Cx. Returning a plan never closes
-                            // the child or transfers production to an orphan.
-                            let (response, body, sender, producer) =
-                                plan.into_parts(&request_cx);
-                            let Ok(permit) = body_response_sender.reserve(&request_cx).await else {
-                                return StreamingHopResponse::Produced(
-                                    Http2ProducerOutcome::Cancelled,
-                                );
-                            };
-                            if permit
-                                .try_send(FunnelItem::ProducedStart {
-                                    stream_id,
-                                    response,
-                                    body,
-                                    cancellation: ProducedCancellationGuard::new(request_cx.clone()),
-                                    guard: body_guard,
-                                })
-                                .is_err()
-                            {
-                                return StreamingHopResponse::Produced(
-                                    Http2ProducerOutcome::Cancelled,
-                                );
+                                // The producer and incoming body share this actual
+                                // admitted child Cx. Returning a plan never closes
+                                // the child or transfers production to an orphan.
+                                let (response, body, sender, producer) =
+                                    plan.into_parts(&request_cx);
+                                let Ok(permit) = body_response_sender.reserve(&request_cx).await
+                                else {
+                                    return StreamingHopResponse::Produced(
+                                        Http2ProducerOutcome::Cancelled,
+                                    );
+                                };
+                                if permit
+                                    .try_send(FunnelItem::ProducedStart {
+                                        stream_id,
+                                        response,
+                                        body,
+                                        cancellation: ProducedCancellationGuard::new(
+                                            request_cx.clone(),
+                                        ),
+                                        guard: body_guard,
+                                    })
+                                    .is_err()
+                                {
+                                    return StreamingHopResponse::Produced(
+                                        Http2ProducerOutcome::Cancelled,
+                                    );
+                                }
+                                started_by_body.store(true, Ordering::Release);
+                                let result = producer(request_cx.clone(), sender).await;
+                                StreamingHopResponse::Produced(classify_h2_producer_hop(
+                                    Some(ServerHopOutcome::Ok(result)),
+                                    &request_cx,
+                                ))
                             }
-                            started_by_body.store(true, Ordering::Release);
-                            let result = producer(request_cx.clone(), sender).await;
-                            StreamingHopResponse::Produced(classify_h2_producer_hop(
-                                Some(ServerHopOutcome::Ok(result)),
-                                &request_cx,
-                            ))
                         }
-                    }
+                    };
+                    ownership.run(work).await
                 },
             )
             .await;
@@ -670,6 +718,10 @@ impl StreamingRequests {
                         hop: ServerHopOutcome::Ok(StreamingHopResponse::Buffered(response)),
                         ..
                     }) => Some(response),
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::Ok(StreamingHopResponse::AdmissionRefused(error)),
+                        ..
+                    }) => admission_refusal_response(error),
                     Ok(OwnedH2HopCompletion {
                         hop: ServerHopOutcome::DeadlineExceeded,
                         ..
@@ -897,16 +949,18 @@ impl StreamingRequests {
             return false;
         };
         if let Some(publication) = &mut entry.publication
-            && let Ok(source) = publication.try_recv()
+            && let Ok(publication) = publication.try_recv()
         {
-            entry.publication = None;
-            entry.source = Some(source);
+            entry.receive_publication(publication);
         }
         if !entry.failed {
             if let Some(source) = &entry.source
                 && let Poll::Ready(Err(error)) = source.writer.poll_consumer_dropped(poll_cx)
             {
-                if matches!(error, IncomingBodyError::Cancelled { .. }) {
+                if matches!(
+                    error,
+                    IncomingBodyError::ConsumerDropped | IncomingBodyError::Cancelled { .. }
+                ) {
                     entry.abandon(error);
                 } else {
                     let code = body_error_code(&error);
@@ -975,6 +1029,32 @@ impl StreamingRequests {
             }
         }
     }
+}
+
+fn admission_refusal_response(error: IncomingBodyAdmissionError) -> Option<Http2Response> {
+    let response = match error {
+        IncomingBodyAdmissionError::Policy(_) => {
+            Response::new(413, "Payload Too Large", Vec::new())
+        }
+        IncomingBodyAdmissionError::Cancelled { kind }
+            if matches!(kind, CancelKind::Deadline | CancelKind::Timeout) =>
+        {
+            Response::new(
+                503,
+                "Service Unavailable",
+                HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
+            )
+        }
+        IncomingBodyAdmissionError::Cancelled { .. } => return None,
+        IncomingBodyAdmissionError::Runtime(_) | IncomingBodyAdmissionError::RuntimeRequired => {
+            Response::new(
+                503,
+                "Service Unavailable",
+                b"request body admission unavailable".to_vec(),
+            )
+        }
+    };
+    Some(response.into_h2_response())
 }
 
 fn body_error_code(error: &IncomingBodyError) -> ErrorCode {

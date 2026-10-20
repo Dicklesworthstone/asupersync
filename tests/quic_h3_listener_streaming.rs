@@ -292,23 +292,36 @@ mod native_h3_listener_live {
         use super::*;
         use std::pin::Pin;
         use std::sync::Mutex;
+        use std::sync::atomic::AtomicBool;
 
         use asupersync::bytes::Buf;
         use asupersync::http::body::{Body, Frame};
         use asupersync::http::h1::stream::IncomingBodyError;
         use asupersync::http::h3_native::{H3Frame, qpack_encode_request_field_section};
         use asupersync::net::quic_native::StreamId;
+        use asupersync::record::{ObligationAbortReason, ObligationKind};
+        use asupersync::runtime::{Runtime, RuntimeHandle};
+        use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
+        use asupersync::types::ObligationId;
         use asupersync::web::{RequestBodyPolicy, StreamingRawBody};
 
         fn run(workers: usize, future: impl Future<Output = ()> + Send + 'static) {
+            run_with_state(workers, workers > 1, future);
+        }
+
+        fn run_with_state(
+            workers: usize,
+            sharded: bool,
+            future: impl Future<Output = ()> + Send + 'static,
+        ) {
             let builder = if workers == 1 {
                 asupersync::runtime::RuntimeBuilder::current_thread()
             } else {
                 asupersync::runtime::RuntimeBuilder::multi_thread()
                     .worker_threads(workers)
-                    .with_sharded_state(true)
             };
             let runtime = builder
+                .with_sharded_state(sharded)
                 .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
                 .build()
                 .unwrap();
@@ -322,6 +335,136 @@ mod native_h3_listener_live {
             runtime.block_on(runtime.handle().spawn(parent));
             managed_assert_runtime_cleanup(&runtime);
             assert_eq!(runtime.draining_region_count(), 0);
+        }
+
+        fn body_events<'a>(trace: &'a [TraceEvent], request: &Cx) -> Vec<(usize, &'a TraceEvent)> {
+            trace
+                .iter()
+                .enumerate()
+                .filter(|(_, event)| {
+                    matches!(event.data,
+                        TraceData::Obligation { task, region, kind: ObligationKind::IoOp, .. }
+                        if task == request.task_id() && region == request.region_id()
+                    )
+                })
+                .collect()
+        }
+
+        fn body_credit_id(events: &[(usize, &TraceEvent)]) -> ObligationId {
+            let (_, first) = events.first().expect("checked body reserved one credit");
+            assert_eq!(first.kind, TraceEventKind::ObligationReserve);
+            let TraceData::Obligation { obligation, .. } = first.data else {
+                unreachable!("body event filter retains obligations");
+            };
+            obligation
+        }
+
+        async fn pending_body_credit(request: &Cx) -> ObligationId {
+            let runtime = Runtime::current_handle().unwrap();
+            loop {
+                let trace = runtime.trace_snapshot().expect("native runtime trace");
+                let events = body_events(&trace, request);
+                if !events.is_empty() {
+                    assert_eq!(events.len(), 1, "the parked body has one unsettled credit");
+                    let credit = body_credit_id(&events);
+                    let holder = runtime
+                        .task_inspector(Default::default())
+                        .unwrap()
+                        .inspect_task(request.task_id())
+                        .expect("the actual body holder remains live");
+                    assert!(!holder.is_terminal());
+                    assert_eq!(holder.region_id, request.region_id());
+                    assert!(holder.obligations.contains(&credit));
+                    return credit;
+                }
+                // Admission is checked synchronously; its registry projection
+                // follows through the owner mailbox. Wait for that event.
+                asupersync::runtime::yield_now().await;
+            }
+        }
+
+        fn assert_body_settlement(
+            trace: &[TraceEvent],
+            request: &Cx,
+            credit: ObligationId,
+            aborted: Option<ObligationAbortReason>,
+        ) -> usize {
+            let events = body_events(trace, request);
+            assert_eq!(events.len(), 2, "one body reserve and one terminal settlement");
+            assert_eq!(body_credit_id(&events), credit);
+            assert_eq!(
+                events[1].1.kind,
+                if aborted.is_some() {
+                    TraceEventKind::ObligationAbort
+                } else {
+                    TraceEventKind::ObligationCommit
+                }
+            );
+            assert!(matches!(events[1].1.data,
+                TraceData::Obligation { obligation, abort_reason, .. }
+                if obligation == credit && abort_reason == aborted
+            ));
+            events[1].0
+        }
+
+        async fn settled_body_credit_while_live(
+            request: &Cx,
+            aborted: Option<ObligationAbortReason>,
+        ) -> ObligationId {
+            let runtime = Runtime::current_handle().unwrap();
+            loop {
+                let trace = runtime.trace_snapshot().expect("native runtime trace");
+                let events = body_events(&trace, request);
+                if events.len() >= 2 {
+                    let credit = body_credit_id(&events);
+                    assert_body_settlement(&trace, request, credit, aborted);
+                    let holder = runtime
+                        .task_inspector(Default::default())
+                        .unwrap()
+                        .inspect_task(request.task_id())
+                        .expect("the handler gate retains the original body holder");
+                    assert!(!holder.is_terminal());
+                    assert!(!holder.obligations.contains(&credit));
+                    return credit;
+                }
+                asupersync::runtime::yield_now().await;
+            }
+        }
+
+        fn assert_body_holder_retired(
+            request: &Cx,
+            credit: ObligationId,
+            aborted: Option<ObligationAbortReason>,
+        ) {
+            let runtime = Runtime::current_handle().unwrap();
+            let trace = runtime.trace_snapshot().expect("native runtime trace");
+            let settled = assert_body_settlement(&trace, request, credit, aborted);
+            let retired = trace
+                .iter()
+                .position(|event| {
+                    event.kind == TraceEventKind::Complete
+                        && matches!(event.data, TraceData::Task { task, .. }
+                            if task == request.task_id())
+                })
+                .expect("the actual request holder retired");
+            assert!(settled < retired, "body credit must settle before holder retirement");
+        }
+
+        fn request_ownership_counts(runtime: &RuntimeHandle) -> (usize, usize) {
+            let trace = runtime.trace_snapshot().expect("native runtime trace");
+            let regions = trace
+                .iter()
+                .filter(|event| event.kind == TraceEventKind::RegionCreated)
+                .count();
+            let credits = trace
+                .iter()
+                .filter(|event| {
+                    event.kind == TraceEventKind::ObligationReserve
+                        && matches!(event.data,
+                            TraceData::Obligation { kind: ObligationKind::IoOp, .. })
+                })
+                .count();
+            (regions, credits)
         }
 
         fn config(queue_bytes: usize) -> NativeH3ListenerConfig {
@@ -1150,11 +1293,17 @@ mod native_h3_listener_live {
                     let expected_handler = expected.clone();
                     let (parked_tx, mut parked_rx) = asupersync::channel::oneshot::channel();
                     let parked_slot = Arc::new(Mutex::new(Some(parked_tx)));
+                    let (eof_tx, mut eof_rx) = asupersync::channel::oneshot::channel();
+                    let eof_slot = Arc::new(Mutex::new(Some(eof_tx)));
+                    let (release_tx, release_rx) = asupersync::channel::oneshot::channel();
+                    let release_slot = Arc::new(Mutex::new(Some(release_rx)));
                     let router = Router::new().route(
                         "/live",
                         post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
                             move |request_cx: Cx, mut body: StreamingRawBody| {
                                 let mut parked = parked_slot.lock().unwrap().take();
+                                let eof = eof_slot.lock().unwrap().take().unwrap();
+                                let mut release = release_slot.lock().unwrap().take().unwrap();
                                 let expected = expected_handler.clone();
                                 async move {
                                     let mut received = Vec::new();
@@ -1185,6 +1334,8 @@ mod native_h3_listener_live {
                                         parked.is_none(),
                                         "prefix was consumed before client FIN"
                                     );
+                                    eof.send(&request_cx, ()).unwrap();
+                                    release.recv(&request_cx).await.unwrap();
                                     Response::new(StatusCode::OK, received)
                                 }
                             },
@@ -1210,7 +1361,14 @@ mod native_h3_listener_live {
                         assert_ne!(request_cx.task_id(), cx.task_id());
                         assert_ne!(request_cx.region_id(), cx.region_id());
                         assert!(!request_cx.is_cancel_requested());
+                        let credit = pending_body_credit(&request_cx).await;
                         write_data(&cx, &mut owner, stream, TAIL, true).await;
+                        eof_rx.recv(&cx).await.unwrap();
+                        assert_eq!(
+                            settled_body_credit_while_live(&request_cx, None).await,
+                            credit,
+                        );
+                        release_tx.send(&cx, ()).unwrap();
                         receive_response(
                             &cx,
                             &mut owner,
@@ -1220,6 +1378,8 @@ mod native_h3_listener_live {
                             &expected,
                         )
                         .await;
+                        wait_region_closed(&request_cx).await;
+                        assert_body_holder_retired(&request_cx, credit, None);
                         shutdown_tx.send(&cx, ()).unwrap();
                         acknowledge_shutdown_goaway(
                             &cx,
@@ -1259,7 +1419,7 @@ mod native_h3_listener_live {
                                     if poll.is_pending() {
                                         assert!(!body.is_end_stream());
                                         if let Some(signal) = parked.take() {
-                                            signal.send(&request_cx, ()).unwrap();
+                                            signal.send(&request_cx, request_cx.clone()).unwrap();
                                         }
                                     }
                                     poll
@@ -1281,7 +1441,8 @@ mod native_h3_listener_live {
                 let client = async {
                     let (mut owner, mut session) = connect(&cx, address, 62).await;
                     let stream = open_upload(&cx, &mut owner, "/empty", Some(0)).await;
-                    parked_rx.recv(&cx).await.unwrap();
+                    let request_cx = parked_rx.recv(&cx).await.unwrap();
+                    let credit = pending_body_credit(&request_cx).await;
                     owner
                         .connection_mut()
                         .write_stream(&cx, stream, Bytes::new(), true)
@@ -1296,6 +1457,8 @@ mod native_h3_listener_live {
                         b"explicit FIN",
                     )
                     .await;
+                    wait_region_closed(&request_cx).await;
+                    assert_body_holder_retired(&request_cx, credit, None);
                     shutdown_tx.send(&cx, ()).unwrap();
                     acknowledge_shutdown_goaway(&cx, &mut owner, &mut session, stream.0 + 4, None)
                         .await;
@@ -1855,6 +2018,8 @@ mod native_h3_listener_live {
                 });
                 let client = async {
                     let (mut owner, mut session) = connect(&cx, address, 65).await;
+                    let runtime = Runtime::current_handle().unwrap();
+                    let ownership = request_ownership_counts(&runtime);
                     let stream = open_upload(&cx, &mut owner, "/limited", Some(5)).await;
                     receive_cancelled(
                         &cx,
@@ -1865,6 +2030,7 @@ mod native_h3_listener_live {
                     )
                     .await;
                     assert_eq!(calls.load(Ordering::SeqCst), 0);
+                    assert_eq!(request_ownership_counts(&runtime), ownership);
                     response(
                         &cx,
                         &mut owner,
@@ -1953,6 +2119,7 @@ mod native_h3_listener_live {
                         let stream = open_upload(&cx, &mut owner, "/reset", None).await;
                         let request_cx: Cx = parked_rx.recv(&cx).await.unwrap();
                         assert!(!request_cx.is_cancel_requested());
+                        let credit = pending_body_credit(&request_cx).await;
                         owner
                             .connection_mut()
                             .reset_stream(
@@ -1969,6 +2136,11 @@ mod native_h3_listener_live {
                         )
                         .await
                         .expect("peer reset must retire the parked body without another packet");
+                        assert_body_holder_retired(
+                            &request_cx,
+                            credit,
+                            Some(ObligationAbortReason::Error),
+                        );
                         assert_eq!(
                             *terminal.lock().unwrap(),
                             Some(IncomingBodyError::ClientAborted)
@@ -2014,6 +2186,162 @@ mod native_h3_listener_live {
                     assert_eq!(report.failed_connections, 0);
                     assert!(!report.drain_timed_out);
                 });
+            }
+        }
+
+        #[test]
+        fn authenticated_listener_body_panic_settles_before_a_suspended_pump_observes_retirement() {
+            for workers in [1, 2] {
+                for sharded in [false, true] {
+                    run_with_state(workers, sharded, async {
+                        let cx = Cx::current().unwrap();
+                        let (parked_tx, mut parked_rx) = asupersync::channel::oneshot::channel();
+                        let parked_slot = Arc::new(Mutex::new(Some(parked_tx)));
+                        let (panic_tx, panic_rx) = asupersync::channel::oneshot::channel();
+                        let panic_slot = Arc::new(Mutex::new(Some(panic_rx)));
+                        let retired = Arc::new(AtomicUsize::new(0));
+                        let handler_retired = Arc::clone(&retired);
+                        let router = Router::new()
+                            .route(
+                                "/panic",
+                                post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                                    move |request_cx: Cx, mut body: StreamingRawBody| {
+                                        let mut parked = parked_slot.lock().unwrap().take();
+                                        let mut panic = panic_slot.lock().unwrap().take().unwrap();
+                                        let retired = Arc::clone(&handler_retired);
+                                        async move {
+                                            let _retired = ProducerRetired(retired);
+                                            let mut panic_wait = std::pin::pin!(panic.recv(&request_cx));
+                                            std::future::poll_fn(|task_cx| {
+                                                assert!(Pin::new(&mut body)
+                                                    .poll_frame(task_cx)
+                                                    .is_pending());
+                                                if let Some(parked) = parked.take() {
+                                                    parked
+                                                        .send(&request_cx, request_cx.clone())
+                                                        .unwrap();
+                                                }
+                                                match panic_wait.as_mut().poll(task_cx) {
+                                                    Poll::Pending => Poll::<()>::Pending,
+                                                    Poll::Ready(Ok(())) => {
+                                                        panic!("causal H3 body holder panic")
+                                                    }
+                                                    Poll::Ready(Err(error)) => {
+                                                        panic!("panic gate disconnected: {error}")
+                                                    }
+                                                }
+                                            })
+                                            .await;
+                                            Response::new(StatusCode::OK, "must not be emitted")
+                                        }
+                                    },
+                                )),
+                            )
+                            .route(
+                                "/survivor",
+                                post(FnHandler::new(|| Response::new(StatusCode::OK, "survived"))),
+                            );
+                        let listener = bind(&cx, router, config(8)).await;
+                        let address = listener.local_addr();
+                        let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                        let pump_paused = AtomicBool::new(false);
+                        let pump_waker = Mutex::new(None::<Waker>);
+                        let serving = async {
+                            let mut serving = std::pin::pin!(listener.serve_with_shutdown(&cx, async {
+                                shutdown_rx.recv(&cx).await.unwrap();
+                            }));
+                            std::future::poll_fn(|task_cx| {
+                                if pump_paused.load(Ordering::Acquire) {
+                                    *pump_waker.lock().unwrap() = Some(task_cx.waker().clone());
+                                    Poll::Pending
+                                } else {
+                                    serving.as_mut().poll(task_cx)
+                                }
+                            })
+                            .await
+                        };
+                        let client = async {
+                            let (mut owner, mut session) = connect(&cx, address, 69).await;
+                            let stream = open_upload(&cx, &mut owner, "/panic", None).await;
+                            let request_cx = parked_rx.recv(&cx).await.unwrap();
+                            let credit = pending_body_credit(&request_cx).await;
+                            // Stop polling the public serve future while the
+                            // independently scheduled request unwinds. The
+                            // published writer cannot repair the credit from
+                            // its connection callback before holder retirement.
+                            pump_paused.store(true, Ordering::Release);
+                            panic_tx.send(&cx, ()).unwrap();
+                            let runtime = Runtime::current_handle().unwrap();
+                            std::future::poll_fn(|task_cx| {
+                                let trace = runtime.trace_snapshot().expect("native runtime trace");
+                                let completed = trace.iter().any(|event| {
+                                    event.kind == TraceEventKind::Complete
+                                        && matches!(event.data, TraceData::Task { task, .. }
+                                            if task == request_cx.task_id())
+                                });
+                                if completed {
+                                    Poll::Ready(())
+                                } else {
+                                    task_cx.waker().wake_by_ref();
+                                    Poll::Pending
+                                }
+                            })
+                            .await;
+                            assert_eq!(retired.load(Ordering::SeqCst), 1);
+                            assert_body_holder_retired(
+                                &request_cx,
+                                credit,
+                                Some(ObligationAbortReason::Error),
+                            );
+                            assert!(runtime
+                                .diagnostics()
+                                .unwrap()
+                                .explain_region_open(request_cx.region_id())
+                                .region_state
+                                .is_some());
+                            pump_paused.store(false, Ordering::Release);
+                            let wake = pump_waker.lock().unwrap().take();
+                            if let Some(wake) = wake {
+                                wake.wake();
+                            }
+                            receive_cancelled(
+                                &cx,
+                                &mut owner,
+                                &mut session,
+                                stream,
+                                asupersync::http::h3_quic::H3_REQUEST_CANCELLED,
+                            )
+                            .await;
+                            wait_region_closed(&request_cx).await;
+                            response(
+                                &cx,
+                                &mut owner,
+                                &mut session,
+                                "/survivor",
+                                &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                                b"survived",
+                            )
+                            .await;
+                            shutdown_tx.send(&cx, ()).unwrap();
+                            acknowledge_shutdown_goaway(
+                                &cx,
+                                &mut owner,
+                                &mut session,
+                                stream.0 + 8,
+                                None,
+                            )
+                            .await;
+                        };
+                        let (report, ()) = zip(serving, client).await;
+                        let report = report.unwrap();
+                        assert_eq!(report.completed_requests, 1);
+                        assert_eq!(report.cancelled_requests, 1);
+                        assert_eq!(report.refused_requests, 0);
+                        assert_eq!(report.failed_connections, 0);
+                        assert_eq!(report.failed_request_cleanups, 0);
+                        assert!(!report.drain_timed_out);
+                    });
+                }
             }
         }
 
@@ -2103,6 +2431,11 @@ mod native_h3_listener_live {
                         !request_cx.is_cancel_requested(),
                         "acknowledging input stop must preserve response ownership"
                     );
+                    let credit = settled_body_credit_while_live(
+                        &request_cx,
+                        Some(ObligationAbortReason::Error),
+                    )
+                    .await;
                     release_tx.send(&cx, ()).unwrap();
                     receive_response(
                         &cx,
@@ -2114,6 +2447,11 @@ mod native_h3_listener_live {
                     )
                     .await;
                     wait_region_closed(&request_cx).await;
+                    assert_body_holder_retired(
+                        &request_cx,
+                        credit,
+                        Some(ObligationAbortReason::Error),
+                    );
                     response(
                         &cx,
                         &mut owner,
