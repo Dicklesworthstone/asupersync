@@ -353,6 +353,17 @@ impl<IO> TlsStream<IO> {
             .as_ref()
             .map(|(kind, message)| io::Error::new(*kind, message.clone()))
     }
+
+    /// Preserve the same reader error whether negotiation was driven by
+    /// poll_read, poll_write, or a direct poll_handshake call. Closed alone
+    /// would otherwise turn a failed handshake into an apparently clean EOF.
+    fn fail_handshake(&mut self, error: TlsError) -> TlsError {
+        self.state = TlsState::Closed;
+        // Match the existing AsyncRead handshake adapter's io::Error::other.
+        // The first handshake caller still receives its original TlsError.
+        self.read_error = Some((io::ErrorKind::Other, error.to_string()));
+        error
+    }
 }
 
 #[cfg(not(feature = "tls"))]
@@ -385,6 +396,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// A failed handshake or a stream whose local shutdown has started cannot
     /// be restarted. Subsequent polls return [`TlsError::Io`] with
     /// [`io::ErrorKind::NotConnected`]; create a new connection instead.
+    /// After handshake failure, nonempty reads retain the failure as an
+    /// [`io::ErrorKind::Other`] error rather than reporting a clean EOF.
     pub fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TlsError>> {
         // rustls may have completed its part before our final transport flush
         // fails. Its is_handshaking() flag alone cannot authorize a retry: that
@@ -414,23 +427,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                 #[cfg(feature = "tracing-integration")]
                 error!(error = %e, "TLS error during handshake");
                 self.flush_alert_best_effort(cx);
-                self.state = TlsState::Closed;
-                return Poll::Ready(Err(TlsError::Handshake(e.to_string())));
+                return Poll::Ready(Err(self.fail_handshake(TlsError::Handshake(e.to_string()))));
             }
 
             let mut write_would_block = false;
             while self.conn.wants_write() {
                 match self.poll_write_tls(cx) {
                     Poll::Ready(Ok(0)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Handshake(
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Handshake(
                             "connection closed during handshake".into(),
-                        )));
+                        ))));
                     }
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Io(e)));
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Io(e))));
                     }
                     Poll::Pending => {
                         write_would_block = true;
@@ -445,8 +455,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                 match self.poll_flush_transport(cx) {
                     Poll::Ready(Ok(())) => {}
                     Poll::Ready(Err(e)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Io(e)));
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Io(e))));
                     }
                     Poll::Pending => write_would_block = true,
                 }
@@ -471,15 +480,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             if self.conn.wants_read() {
                 match self.poll_read_tls(cx) {
                     Poll::Ready(Ok(0)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Handshake(
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Handshake(
                             "connection closed during handshake".into(),
-                        )));
+                        ))));
                     }
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Io(e)));
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Io(e))));
                     }
                     Poll::Pending => return Poll::Pending,
                 }
@@ -529,14 +536,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// fatal alert that names the reason (RFC 8446 §6.2), for example a
     /// refused client certificate. Without it the peer sees a bare EOF and
     /// cannot tell a refusal from a dropped connection, so it retries
-    /// (br-asupersync-bi2462.86.3). Never waits: a write that would block
-    /// abandons the alert.
+    /// (br-asupersync-bi2462.86.3). Never waits: a pending write or flush
+    /// abandons the alert without replacing the original TLS failure.
     fn flush_alert_best_effort(&mut self, cx: &mut Context<'_>) {
         while self.conn.wants_write() {
             match self.poll_write_tls(cx) {
                 Poll::Ready(Ok(written)) if written > 0 => {}
-                _ => break,
+                _ => return,
             }
+        }
+        // write_tls drains rustls, not an underlying buffered transport. Even
+        // a tiny alert can fit wholly in that buffer and never reach the peer
+        // before the failed stream is dropped. Make one final flush attempt.
+        if self.transport_needs_flush {
+            let _ = self.poll_flush_transport(cx);
         }
     }
 
