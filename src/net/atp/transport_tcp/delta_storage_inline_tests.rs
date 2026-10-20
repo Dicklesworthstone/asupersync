@@ -303,3 +303,236 @@ fn native_pending_spool_io_cancels_before_the_started_syscall_is_released() {
         assert_eq!(acquisitions_before_release, 1);
     }
 }
+
+struct FragmentedBaseline<'a> {
+    bytes: &'a [u8],
+    max_read: usize,
+    interruptions: usize,
+    calls: Arc<AtomicUsize>,
+}
+
+impl std::io::Read for FragmentedBaseline<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.interruptions > 0 {
+            self.interruptions -= 1;
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        let count = self.max_read.min(buffer.len()).min(self.bytes.len());
+        buffer[..count].copy_from_slice(&self.bytes[..count]);
+        self.bytes = &self.bytes[count..];
+        Ok(count)
+    }
+}
+
+#[test]
+fn baseline_batches_resume_short_reads_and_eintr_without_reallocating() {
+    let expected: Vec<u8> = (0..193).map(|i| (i % 251) as u8).collect();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let reader = FragmentedBaseline {
+        bytes: &expected,
+        max_read: 1,
+        interruptions: 65,
+        calls: Arc::clone(&calls),
+    };
+    let mut state = BaselineRead {
+        reader: Some(reader),
+        path: Arc::new(PathBuf::from("fragmented-baseline")),
+        key: key(&expected),
+        buffer: vec![0xa5; expected.len()],
+        filled: 0,
+    };
+    let allocation = state.buffer.as_ptr();
+    state = state.read_batch().unwrap();
+    assert_eq!(state.filled, 0, "exhausting EINTR attempts is not EOF");
+    assert_eq!(calls.load(Ordering::SeqCst), 64);
+    assert!(state.reader.is_some());
+    let mut jobs = 1;
+    while state.reader.is_some() {
+        let before = calls.load(Ordering::SeqCst);
+        state = state.read_batch().unwrap();
+        jobs += 1;
+        assert!(calls.load(Ordering::SeqCst) - before <= 64);
+        assert_eq!(state.buffer.as_ptr(), allocation);
+        assert!(jobs < 10, "the scripted source must make progress");
+    }
+    assert_eq!(state.filled, expected.len());
+    assert_eq!(state.buffer, expected);
+    assert_eq!(calls.load(Ordering::SeqCst), 65 + expected.len());
+}
+
+#[test]
+fn baseline_batch_stops_at_the_exact_range_without_an_eof_probe() {
+    let mut reader = b"payload-trailing-content".as_slice();
+    let state = BaselineRead {
+        reader: Some(&mut reader),
+        path: Arc::new(PathBuf::from("indexed-baseline")),
+        key: key(b"payload"),
+        buffer: vec![0; 7],
+        filled: 0,
+    }
+    .read_batch()
+    .unwrap();
+    assert!(state.reader.is_none(), "the first job completes the range");
+    assert_eq!(state.buffer, b"payload");
+    drop(state);
+    assert_eq!(reader, b"-trailing-content");
+}
+
+#[test]
+fn baseline_batches_distinguish_truncation_content_drift_and_read_errors() {
+    for bytes in [b"pay".as_slice(), b"PAYLOAD".as_slice()] {
+        let state = BaselineRead {
+            reader: Some(bytes),
+            path: Arc::new(PathBuf::from("changed-baseline")),
+            key: key(b"payload"),
+            buffer: vec![0xa5; 7],
+            filled: 0,
+        };
+        match state.read_batch() {
+            Err(TransportError::Source(message)) if bytes.len() < 7 => {
+                assert!(message.contains("changed-baseline"));
+                assert!(message.contains("3 of 7"));
+            }
+            Err(TransportError::Integrity(_)) if bytes.len() == 7 => {}
+            _ => panic!("partial or changed bytes must never be published as verified"),
+        }
+    }
+    struct FailingRead(bool);
+    impl std::io::Read for FailingRead {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 {
+                return Err(std::io::Error::other("read-failure-sentinel"));
+            }
+            self.0 = true;
+            buffer[0] = b'p';
+            Ok(1)
+        }
+    }
+    let result = BaselineRead {
+        reader: Some(FailingRead(false)),
+        path: Arc::new(PathBuf::from("failing-baseline")),
+        key: key(b"payload"),
+        buffer: vec![0xa5; 7],
+        filled: 0,
+    }
+    .read_batch();
+    assert!(matches!(result, Err(TransportError::Source(message))
+        if message.contains("failing-baseline") && message.contains("read-failure-sentinel")));
+}
+
+#[test]
+fn native_baseline_worker_reads_reuse_scratch_through_maximum_chunk_size() {
+    run(async {
+        let cx = Cx::current().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("baseline");
+        let maximum = usize::try_from(MAX_COMPRESSED_CHUNK_RAW).unwrap();
+        let bytes: Vec<u8> = (0..maximum + 31).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let source = BaselineChunk::new(Arc::new(path), 17);
+        let mut scratch = vec![0xa5; maximum];
+        let allocation = scratch.as_ptr() as usize;
+        for length in [1, 63, 64, 65, 128 * 1024, 256 * 1024, maximum] {
+            let expected = &bytes[17..17 + length];
+            source.read_verified(&cx, &key(expected), &mut scratch).await.unwrap();
+            assert_eq!(scratch, expected);
+            assert_eq!(scratch.as_ptr() as usize, allocation);
+        }
+    });
+}
+
+#[test]
+fn native_baseline_preflight_refuses_before_taking_scratch_or_opening() {
+    run(async {
+        let cx = Cx::current().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let missing = Arc::new(root.path().join("never-created"));
+        let source = BaselineChunk::new(Arc::clone(&missing), 0);
+        let mut scratch = b"keep-scratch".to_vec();
+        let mut invalid = key(b"payload");
+        for size in [0, u64::from(MAX_COMPRESSED_CHUNK_RAW) + 1] {
+            invalid.size_bytes = size;
+            assert!(matches!(
+                source.read_verified(&cx, &invalid, &mut scratch).await,
+                Err(TransportError::Frame(_))
+            ));
+            assert_eq!(scratch, b"keep-scratch");
+        }
+        let overflow = BaselineChunk::new(Arc::clone(&missing), u64::MAX);
+        assert!(matches!(
+            overflow.read_verified(&cx, &key(b"payload"), &mut scratch).await,
+            Err(TransportError::Frame(_))
+        ));
+        let denied = cx.restrict::<crate::cx::cap::None>();
+        assert!(matches!(
+            denied.with_ambient(source.read_verified(&cx, &key(b"payload"), &mut scratch)).await,
+            Err(TransportError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        let stopped = Cx::for_testing();
+        stopped.cancel_fast(CancelKind::User);
+        assert!(matches!(
+            source.read_verified(&stopped, &key(b"payload"), &mut scratch).await,
+            Err(TransportError::Cancelled)
+        ));
+        assert_eq!(scratch, b"keep-scratch");
+        assert!(!missing.exists());
+    });
+}
+
+#[test]
+fn native_tcp_delta_reconstructs_baseline_ranges_and_spooled_changes() {
+    use super::super::{TransferConfig, receive_once, send_path};
+    use crate::runtime::RuntimeBuilder;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let source_dir = root_path.join("source");
+    let destination = root_path.join("destination");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::create_dir_all(&destination).unwrap();
+    let source = source_dir.join("payload");
+    let received_path = destination.join("payload");
+    let mut baseline = vec![1u8; 3 * 4096];
+    baseline[4096..8192].fill(2);
+    baseline[8192..].fill(3);
+    let mut target = baseline.clone();
+    target[4096..8192].fill(4);
+    std::fs::write(&received_path, &baseline).unwrap();
+    std::fs::write(&source, &target).unwrap();
+    let config = TransferConfig {
+        chunk_size: 4096,
+        idle_timeout: Duration::from_secs(5),
+        accept_timeout: Duration::from_secs(5),
+        ..TransferConfig::default()
+    };
+    let receive_config = config.clone();
+    let (address_tx, address_rx) = mpsc::channel();
+    let receiver = std::thread::spawn(move || {
+        let runtime = RuntimeBuilder::multi_thread().build().unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let listener = crate::net::TcpListener::bind("127.0.0.1:0").await?;
+            address_tx.send(listener.local_addr()?).unwrap();
+            receive_once(&cx, &listener, &destination, receive_config, "receiver").await
+        }))
+    });
+    let address = address_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let runtime = RuntimeBuilder::multi_thread().build().unwrap();
+    let sent = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().unwrap();
+        send_path(&cx, address, &source, config, "sender").await
+    }));
+    // Join before asserting either protocol result so a failure does not
+    // abandon the independent receiver thread.
+    let received = receiver.join().unwrap();
+    let sent = sent.expect("delta sender");
+    let received = received.expect("delta receiver");
+    assert_eq!(sent.bytes_sent, 4096, "only the changed middle chunk crosses TCP");
+    assert_eq!(received.bytes_received, 4096);
+    assert!(sent.receipt.committed && sent.receipt.sha_ok && sent.receipt.merkle_ok);
+    assert!(received.committed);
+    assert_eq!(std::fs::read(received_path).unwrap(), target);
+}

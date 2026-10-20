@@ -9,9 +9,16 @@
 //! completion. Started blocking syscalls may still finish after a wait ends;
 //! this is soft cancellation, not syscall preemption or region-owned draining.
 //! A spool whose cursor may have moved stays failed after an interrupted wait.
+//!
+//! Baseline open, seek, bounded reads and content verification run on the
+//! blocking pool. A job reads at most one validated chunk (1 MiB) and makes at
+//! most 64 read attempts. Short or interrupted reads carry the same allocation
+//! and file into the next job; no job reads past the indexed range. These are
+//! byte/attempt bounds, not syscall-time bounds.
 
 use super::{ContentId, Cx, DeltaContentKey, MAX_COMPRESSED_CHUNK_RAW, TransportError};
 use crate::io::AsyncReadExt;
+use crate::net::atp::transport_common::read_bounded_chunk;
 use std::future::{Future, poll_fn};
 use std::path::PathBuf;
 use std::pin::pin;
@@ -42,21 +49,86 @@ impl BaselineChunk {
             self.offset
                 .checked_add(key.size_bytes)
                 .ok_or_else(|| TransportError::Frame("delta baseline range overflows u64".into()))?;
-            let source_error =
-                |error| TransportError::Source(format!("{}: {error}", self.path.display()));
-            let mut file = crate::fs::File::open(self.path.as_path())
-                .await
-                .map_err(source_error)?;
-            file.seek(std::io::SeekFrom::Start(self.offset))
-                .await
-                .map_err(source_error)?;
-            cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-            scratch.resize(length, 0);
-            file.read_exact(scratch).await.map_err(source_error)?;
-            cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-            verify_bytes(key, scratch)
+            let path = Arc::clone(&self.path);
+            let offset = self.offset;
+            let key = key.clone();
+            // The allocation moves into the worker instead of being copied
+            // into a new 128 KiB buffer for every File::poll_read handoff.
+            let buffer = std::mem::take(scratch);
+            let mut state = crate::runtime::spawn_blocking(move || {
+                BaselineRead::open(path, offset, key, buffer, length)?.read_batch()
+            })
+            .await?;
+            while state.reader.is_some() {
+                // Also yield in the deterministic inline blocking fallback:
+                // an EINTR-only source must not spin through ready jobs.
+                crate::runtime::yield_now().await;
+                check_io(cx)?;
+                state = crate::runtime::spawn_blocking(move || state.read_batch()).await?;
+            }
+            *scratch = state.buffer;
+            Ok(())
         })
         .await
+    }
+}
+
+/// Owned state crossing a baseline blocking-pool boundary. Generic only so
+/// short reads/EINTR can be tested through the same production batch method.
+struct BaselineRead<R> {
+    reader: Option<R>,
+    path: Arc<PathBuf>,
+    key: DeltaContentKey,
+    buffer: Vec<u8>,
+    filled: usize,
+}
+
+impl BaselineRead<std::fs::File> {
+    fn open(
+        path: Arc<PathBuf>,
+        offset: u64,
+        key: DeltaContentKey,
+        mut buffer: Vec<u8>,
+        length: usize,
+    ) -> Result<Self, TransportError> {
+        use std::io::Seek as _;
+
+        let source_error =
+            |error| TransportError::Source(format!("{}: {error}", path.display()));
+        let mut file = std::fs::File::open(path.as_path()).map_err(source_error)?;
+        file.seek(std::io::SeekFrom::Start(offset)).map_err(source_error)?;
+        buffer.resize(length, 0);
+        Ok(Self {
+            reader: Some(file),
+            path,
+            key,
+            buffer,
+            filled: 0,
+        })
+    }
+}
+
+impl<R: std::io::Read> BaselineRead<R> {
+    fn read_batch(mut self) -> Result<Self, TransportError> {
+        if let Some(reader) = self.reader.as_mut() {
+            let (count, eof) = read_bounded_chunk(reader, &mut self.buffer[self.filled..])
+                .map_err(|error| {
+                    TransportError::Source(format!("{}: {error}", self.path.display()))
+                })?;
+            self.filled += count;
+            if self.filled == self.buffer.len() {
+                // Hash and close on the worker, before bytes are published to
+                // reconstruction. Completion requires no read past the range.
+                verify_bytes(&self.key, &self.buffer)?;
+                self.reader = None;
+            } else if eof {
+                return Err(TransportError::Source(format!(
+                    "{}: delta baseline range ended after {} of {} bytes",
+                    self.path.display(), self.filled, self.buffer.len(),
+                )));
+            }
+        }
+        Ok(self)
     }
 }
 
