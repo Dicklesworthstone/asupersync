@@ -64,6 +64,13 @@ impl TlsState {
 /// This implements `AsyncRead` and `AsyncWrite`, transparently encrypting
 /// and decrypting data over the underlying connection.
 ///
+/// # Write Failures
+///
+/// During `poll_write`, a zero-byte transport write with TLS records pending
+/// fails the stream with `WriteZero`; it is not retryable backpressure. Plaintext
+/// accepted by rustls is counted once before that retained error is reported
+/// by subsequent I/O. A successful write alone does not guarantee delivery.
+///
 /// # Cancel-Safety
 ///
 /// - `poll_read` is cancel-safe (partial reads don't lose data)
@@ -830,7 +837,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         if n == 0 && !buf.is_empty() {
             while self.conn.wants_write() {
                 match self.poll_write_tls(cx) {
-                    Poll::Ready(Ok(0)) => break,
+                    Poll::Ready(Ok(0)) => {
+                        // No new plaintext was accepted. A zero transport
+                        // write cannot free capacity; retrying would spin.
+                        return Poll::Ready(Err(self.fail_write(io::ErrorKind::WriteZero.into())));
+                    }
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(self.fail_write(e))),
                     Poll::Pending => return Poll::Pending,
@@ -855,7 +866,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         // Flush encrypted data to underlying IO
         while self.conn.wants_write() {
             match self.poll_write_tls(cx) {
-                Poll::Ready(Ok(0)) => break,
+                Poll::Ready(Ok(0)) => {
+                    let error = self.fail_write(io::ErrorKind::WriteZero.into());
+                    // Preserve the same acceptance boundary as other fatal
+                    // writes: never invite a retry of already accepted bytes.
+                    return Poll::Ready(if n > 0 { Ok(n) } else { Err(error) });
+                }
                 Poll::Ready(Ok(_)) => {}
                 Poll::Ready(Err(e)) => {
                     let error = self.fail_write(e);
@@ -957,3 +973,7 @@ mod tests;
 #[cfg(all(test, feature = "tls-ring"))]
 #[path = "stream_flush_tests.rs"]
 mod flush_tests;
+
+#[cfg(all(test, feature = "tls-ring"))]
+#[path = "stream_zero_write_tests.rs"]
+mod zero_write_tests;
