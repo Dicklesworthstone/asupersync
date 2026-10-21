@@ -584,3 +584,296 @@ fn native_short_spool_read_fails_without_authorizing_a_prefix() {
         ));
     });
 }
+
+#[test]
+fn native_baseline_type_admission_preserves_regular_hardlink_reuse() {
+    run(async {
+        let cx = Cx::current().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("regular");
+        let alias = root.path().join("hardlink");
+        std::fs::write(&path, b"beforepayloadafter").unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+        let mut scratch = vec![0xa5; 64];
+        let allocation = scratch.as_ptr() as usize;
+        for path in [path, alias] {
+            let source = BaselineChunk::new(Arc::new(path), 6);
+            source.read_verified(&cx, &key(b"payload"), &mut scratch).await.unwrap();
+            assert_eq!(scratch, b"payload");
+            assert_eq!(scratch.as_ptr() as usize, allocation);
+        }
+    });
+}
+
+#[test]
+fn native_baseline_refuses_a_directory_replacing_an_indexed_file() {
+    run(async {
+        let cx = Cx::current().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("baseline");
+        let held = root.path().join("held");
+        std::fs::write(&path, b"payload").unwrap();
+        let source = BaselineChunk::new(Arc::new(path.clone()), 0);
+        source.read_verified(&cx, &key(b"payload"), &mut Vec::new()).await.unwrap();
+        std::fs::rename(&path, &held).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let error = source.read_verified(&cx, &key(b"payload"), &mut Vec::new()).await.unwrap_err();
+        assert!(matches!(error, TransportError::Source(message)
+            if message == format!("{}: delta baseline source must be a plain regular file", path.display())));
+        assert_eq!(std::fs::read(&held).unwrap(), b"payload");
+        assert!(path.is_dir());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn native_baseline_refuses_a_same_content_symlink_replacement() {
+    run(async {
+        let cx = Cx::current().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("baseline");
+        let held = root.path().join("held");
+        std::fs::write(&path, b"beforepayloadafter").unwrap();
+        let source = BaselineChunk::new(Arc::new(path.clone()), 6);
+        source.read_verified(&cx, &key(b"payload"), &mut Vec::new()).await.unwrap();
+        std::fs::rename(&path, &held).unwrap();
+        std::os::unix::fs::symlink(&held, &path).unwrap();
+        let mut scratch = Vec::new();
+        let error = source.read_verified(&cx, &key(b"payload"), &mut scratch).await.unwrap_err();
+        assert!(matches!(error, TransportError::Source(message)
+            if message == format!("{}: delta baseline source must be a plain regular file", path.display())));
+        assert!(scratch.is_empty(), "matching bytes behind a link must not be published");
+        assert_eq!(std::fs::read_link(&path).unwrap(), held);
+        assert_eq!(std::fs::read(&held).unwrap(), b"beforepayloadafter");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn baseline_native_open_refuses_symlink_substitution_after_the_path_check() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("baseline");
+    let held = root.path().join("held");
+    std::fs::write(&path, b"payload").unwrap();
+    // Witness the exact pathname admission that precedes the production open,
+    // then replace the leaf before exercising that native-open boundary.
+    require_regular_baseline(&std::fs::symlink_metadata(&path).unwrap()).unwrap();
+    std::fs::rename(&path, &held).unwrap();
+    std::os::unix::fs::symlink(&held, &path).unwrap();
+    let error = open_baseline_handle(&path).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
+    assert_eq!(std::fs::read(&held).unwrap(), b"payload");
+}
+
+#[cfg(unix)]
+#[test]
+fn native_baseline_fifo_refusal_finishes_before_any_writer_is_opened() {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // Both the complete public-to-this-module read and the native open after
+    // a successful pathname check must refuse a FIFO without needing a writer.
+    for after_path_check in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("baseline");
+        let held = root.path().join("held");
+        std::fs::write(&path, b"payload").unwrap();
+        require_regular_baseline(&std::fs::symlink_metadata(&path).unwrap()).unwrap();
+        let source = BaselineChunk::new(Arc::new(path.clone()), 0);
+        std::fs::rename(&path, &held).unwrap();
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+        let worker_path = path.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .blocking_threads(1, 1)
+                .build()
+                .unwrap();
+            let outcome = runtime.block_on(runtime.handle().spawn(async move {
+                if after_path_check {
+                    crate::runtime::spawn_blocking(move || {
+                        open_baseline_handle(&worker_path).map(drop).map_err(|error| {
+                            TransportError::Source(format!("{}: {error}", worker_path.display()))
+                        })
+                    }).await
+                } else {
+                    let cx = Cx::current().unwrap();
+                    source.read_verified(&cx, &key(b"payload"), &mut Vec::new()).await
+                }
+            }));
+            done_tx.send(outcome).unwrap();
+        });
+        let first = done_rx.recv_timeout(Duration::from_secs(5));
+        let finished_without_writer = first.is_ok();
+        // A regressed blocking open must not strand the test's worker. Only
+        // after the deadline, supply a reader/writer pair so it can return;
+        // the missed pre-writer deadline still makes the test fail.
+        let rescue = if finished_without_writer {
+            None
+        } else {
+            let reader = std::fs::OpenOptions::new().read(true)
+                .custom_flags(libc::O_NONBLOCK).open(&path).unwrap();
+            let writer = std::fs::OpenOptions::new().write(true)
+                .custom_flags(libc::O_NONBLOCK).open(&path).unwrap();
+            Some((reader, writer))
+        };
+        let outcome = first.or_else(|_| done_rx.recv_timeout(Duration::from_secs(5)));
+        let joined = worker.join();
+        drop(rescue);
+        assert!(joined.is_ok(), "native runtime worker must retire");
+        assert!(finished_without_writer, "FIFO refusal required a peer writer");
+        assert!(matches!(outcome.unwrap(), Err(TransportError::Source(message))
+            if message == format!("{}: delta baseline source must be a plain regular file", path.display())));
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+        assert_eq!(std::fs::read(&held).unwrap(), b"payload");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_baseline_refuses_a_device_even_when_its_bytes_would_match() {
+    use std::os::unix::fs::FileTypeExt;
+
+    run(async {
+        let cx = Cx::current().unwrap();
+        let path = PathBuf::from("/dev/zero");
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_char_device());
+        let source = BaselineChunk::new(Arc::new(path.clone()), 0);
+        let mut scratch = Vec::new();
+        let error = source.read_verified(&cx, &key(&[0; 32]), &mut scratch).await.unwrap_err();
+        assert!(matches!(error, TransportError::Source(message)
+            if message == format!("{}: delta baseline source must be a plain regular file", path.display())));
+        assert!(scratch.is_empty());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn native_tcp_delta_rejects_baseline_substitution_after_request_without_publication() {
+    use super::super as tcp;
+    use crate::runtime::RuntimeBuilder;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let destination = root_path.join("destination");
+    std::fs::create_dir(&destination).unwrap();
+    let received_path = destination.join("payload");
+    let held_path = root_path.join("held-baseline");
+    let source_path = root_path.join("source");
+    let mut baseline = vec![1u8; 3 * 4096];
+    baseline[4096..8192].fill(2);
+    baseline[8192..].fill(3);
+    let mut target = baseline.clone();
+    target[4096..8192].fill(4);
+    std::fs::write(&received_path, &baseline).unwrap();
+    std::fs::write(&source_path, &target).unwrap();
+    let config = tcp::TransferConfig {
+        chunk_size: 4096,
+        idle_timeout: Duration::from_secs(5),
+        accept_timeout: Duration::from_secs(5),
+        ..tcp::TransferConfig::default()
+    };
+    let receive_config = config.clone();
+    let receiver_destination = destination.clone();
+    let (address_tx, address_rx) = mpsc::channel();
+    let receiver = std::thread::spawn(move || {
+        let runtime = RuntimeBuilder::multi_thread().build().unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let listener = crate::net::TcpListener::bind("127.0.0.1:0").await?;
+            address_tx.send(listener.local_addr()?).unwrap();
+            tcp::receive_once(&cx, &listener, &receiver_destination, receive_config, "receiver").await
+        }))
+    });
+    let address = match address_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(address) => address,
+        Err(error) => {
+            let result = receiver.join();
+            panic!("receiver failed to publish its address: {error}; {result:?}");
+        }
+    };
+    let switched_path = received_path.clone();
+    let saved_path = held_path.clone();
+    let runtime = RuntimeBuilder::multi_thread().build().unwrap();
+    // A protocol peer, not a fake filesystem: use the real sender's hash and
+    // chunk-manifest builders, then pause at the receiver's ObjectRequest.
+    let peer = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().unwrap();
+        let (size, content_id, content_sha256) =
+            tcp::hash_file_streaming(&source_path, &mut vec![0; 4096]).await?;
+        let digest = tcp::EntryDigest {
+            rel_path: "payload".into(), size, content_id, content_sha256,
+        };
+        let content_root = tcp::flat_merkle_root_from_digests(&[digest]);
+        let entries = [tcp::SourceEntry {
+            rel_path: "payload".into(), abs_path: source_path,
+        }];
+        let delta = tcp::build_delta_manifest_from_entries(
+            content_root.clone(), &entries, &[tcp::EntryMetadata::default()], 4096,
+        ).await?;
+        let manifest = tcp::TransferManifest {
+            transfer_id: tcp::transfer_id_hex(&content_root, size, 1),
+            root_name: "payload".into(), is_directory: false, total_bytes: size,
+            merkle_root_hex: content_root, metadata_root_hex: None, directory_metadata: None,
+            entries: vec![tcp::ManifestEntry {
+                index: 0, rel_path: "payload".into(), size,
+                sha256_hex: tcp::hex_encode(&content_sha256), metadata: None, members: Vec::new(),
+            }],
+            delta_manifest: Some(delta),
+        };
+        let stream = crate::net::TcpStream::connect(address).await?;
+        let mut wire = tcp::FrameTransport::new(stream);
+        let hello = tcp::json_frame(tcp::FrameType::Handshake, &tcp::Hello {
+            protocol: tcp::ATP_TCP_PROTOCOL, role: "sender".into(), peer_id: "baseline-guard-test".into(),
+        })?;
+        tcp::with_transport_timeout(&cx, config.idle_timeout, "test hello", wire.send(&hello)).await?;
+        let ack = tcp::with_transport_timeout(&cx, config.idle_timeout, "test ack", wire.recv()).await?;
+        if ack.frame_type() != tcp::FrameType::HandshakeAck
+            || !tcp::parse_json::<tcp::HelloAck>(&ack)?.accepted
+        {
+            return Err(TransportError::Frame("test peer handshake was not accepted".into()));
+        }
+        let frame = tcp::json_frame(tcp::FrameType::ObjectManifest, &manifest)?;
+        tcp::with_transport_timeout(&cx, config.idle_timeout, "test manifest", wire.send(&frame)).await?;
+        let frame = tcp::with_transport_timeout(&cx, config.idle_timeout, "test request", wire.recv()).await?;
+        if frame.frame_type() != tcp::FrameType::ObjectRequest {
+            return Err(TransportError::Frame("receiver did not emit ObjectRequest".into()));
+        }
+        let request: tcp::DeltaObjectRequest = tcp::parse_json(&frame)?;
+        tcp::sender_validation::validate_request(&manifest, &request)?;
+        if request.mode != tcp::DeltaWireMode::DeltaChunks
+            || request.missing_bytes != 4096 || request.missing_chunks.len() != 1
+            || request.missing_chunks[0].entry_offset != 4096
+        {
+            return Err(TransportError::Frame("fixture did not witness the indexed delta baseline".into()));
+        }
+        // Receiving this request proves the receiver finished indexing the
+        // original regular file. Its unchanged ranges are now replaced by a
+        // link to exactly the same bytes, so hashing alone cannot reject it.
+        std::fs::rename(&switched_path, &saved_path)?;
+        std::os::unix::fs::symlink(&saved_path, &switched_path)?;
+        let frame = tcp::data_frame(0, 4096, &target[4096..8192])?;
+        tcp::with_transport_timeout(&cx, config.idle_timeout, "test changed chunk", wire.send(&frame)).await?;
+        let complete = tcp::Frame::empty(tcp::FrameType::ObjectComplete)
+            .map_err(|error| TransportError::Frame(error.to_string()))?;
+        tcp::with_transport_timeout(&cx, config.idle_timeout, "test complete", wire.send(&complete)).await?;
+        match tcp::with_transport_timeout(&cx, config.idle_timeout, "test rejection", wire.recv()).await {
+            Err(TransportError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
+            Err(error) => Err(error),
+            Ok(_) => Err(TransportError::Frame("rejected baseline produced a protocol success frame".into())),
+        }
+    }));
+    let received = receiver.join().expect("receiver thread must retire");
+    peer.expect("peer must witness the delta request and closed failure session");
+    assert!(matches!(received, Err(TransportError::Source(message))
+        if message == format!("{}: delta baseline source must be a plain regular file", received_path.display())));
+    assert_eq!(std::fs::read_link(&received_path).unwrap(), held_path);
+    assert_eq!(std::fs::read(&held_path).unwrap(), baseline);
+    let entries: Vec<_> = std::fs::read_dir(&destination).unwrap()
+        .map(|entry| entry.unwrap().file_name()).collect();
+    assert_eq!(entries, vec![std::ffi::OsString::from("payload")], "failed receive must reclaim its spool and staging");
+}

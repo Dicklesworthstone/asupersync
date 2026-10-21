@@ -5,6 +5,13 @@
 //! changed since discovery can fail the transfer; it cannot authorize different
 //! content. This is not a filesystem snapshot or a path-confinement API.
 //!
+//! Baseline rereads admit only plain regular files. The path and the opened
+//! handle are checked before seeking, allocating a chunk, or reading content.
+//! Unix opens additionally refuse final symlinks and do not wait for a FIFO
+//! writer; Windows opens and rejects final reparse points rather than following
+//! them. These leaf/type checks do not confine ancestor paths, pin an inode,
+//! or impose a deadline on an ordinary filesystem call.
+//!
 //! Pending storage waits observe cancellation independently of filesystem
 //! completion. Started blocking syscalls may still finish after a wait ends;
 //! this is soft cancellation, not syscall preemption or region-owned draining.
@@ -95,7 +102,7 @@ impl BaselineRead<std::fs::File> {
 
         let source_error =
             |error| TransportError::Source(format!("{}: {error}", path.display()));
-        let mut file = std::fs::File::open(path.as_path()).map_err(source_error)?;
+        let mut file = open_baseline_file(path.as_path()).map_err(source_error)?;
         file.seek(std::io::SeekFrom::Start(offset)).map_err(source_error)?;
         buffer.resize(length, 0);
         Ok(Self {
@@ -106,6 +113,53 @@ impl BaselineRead<std::fs::File> {
             filled: 0,
         })
     }
+}
+
+/// Discovery classified this path earlier, but it may have been replaced while
+/// the peer was sending its missing chunks. A content hash only helps after a
+/// read completes: it cannot make a FIFO open or a device read safe.
+fn open_baseline_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    require_regular_baseline(&std::fs::symlink_metadata(path)?)?;
+    open_baseline_handle(path)
+}
+
+/// Keep the native open and descriptor check together. Path metadata above is
+/// an early refusal, not authority to trust whatever a later open returns.
+fn open_baseline_handle(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        // FILE_FLAG_OPEN_REPARSE_POINT: inspect the final entry itself, never
+        // follow it before the handle's reparse attribute can be checked.
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    require_regular_baseline(&file.metadata()?)?;
+    Ok(file)
+}
+
+fn require_regular_baseline(metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    let regular = metadata.is_file() && !metadata.file_type().is_symlink();
+    #[cfg(windows)]
+    let regular = {
+        use std::os::windows::fs::MetadataExt as _;
+        // FILE_ATTRIBUTE_REPARSE_POINT includes junctions and non-symlink tags.
+        regular && metadata.file_attributes() & 0x0000_0400 == 0
+    };
+    if !regular {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "delta baseline source must be a plain regular file",
+        ));
+    }
+    Ok(())
 }
 
 impl<R: std::io::Read> BaselineRead<R> {
