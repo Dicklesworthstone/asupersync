@@ -17,7 +17,7 @@
 //! byte/attempt bounds, not syscall-time bounds.
 
 use super::{ContentId, Cx, DeltaContentKey, MAX_COMPRESSED_CHUNK_RAW, TransportError};
-use crate::io::AsyncReadExt;
+use crate::net::atp::transport_common::delta::read_full_chunk;
 use crate::net::atp::transport_common::read_bounded_chunk;
 use std::future::{Future, poll_fn};
 use std::path::PathBuf;
@@ -298,7 +298,13 @@ impl DeltaChunkSpool {
             self.phase = SpoolPhase::Failed;
             self.file.seek(std::io::SeekFrom::Start(offset)).await?;
             scratch.resize(length, 0);
-            self.file.read_exact(scratch).await?;
+            let read = read_full_chunk(&mut self.file, scratch).await?;
+            if read != length {
+                return Err(TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "delta spool ended before the indexed chunk was complete",
+                )));
+            }
             cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
             verify_bytes(key, scratch)?;
             self.phase = SpoolPhase::Reading;
