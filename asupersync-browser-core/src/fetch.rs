@@ -23,6 +23,8 @@ use asupersync::types::{WasmAbiVersion, WasmFetchRequest};
 use std::fmt;
 
 pub mod client;
+pub mod stream;
+pub use stream::{FetchStream, FetchStreamLimits, fetch_stream};
 pub use client::{ClientFetch, FetchBytesClient};
 
 #[cfg(target_arch = "wasm32")]
@@ -110,9 +112,16 @@ pub enum FetchBytesError {
         /// Configured maximum request-body bytes.
         limit: usize,
     },
-    /// A received chunk would exceed the response limit. No partial body returns.
+    /// A received chunk would exceed the response limit. Buffered fetches return
+    /// no partial body; chunks already delivered by streaming remain caller-owned.
     ResponseLimit {
         /// Configured maximum retained response-body bytes.
+        limit: usize,
+    },
+    /// A streaming chunk exceeds its separate allocation bound. No bytes from
+    /// that chunk are returned; earlier delivered chunks remain caller-owned.
+    ChunkLimit {
+        /// Configured maximum copied bytes per streaming chunk.
         limit: usize,
     },
     /// Another body read would exceed the explicit read-work budget.
