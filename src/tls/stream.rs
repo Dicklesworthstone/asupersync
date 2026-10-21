@@ -106,6 +106,8 @@ pub struct TlsStream<IO> {
     conn: TlsConnection,
     state: TlsState,
     read_closed: bool,
+    /// Authenticated close_notify received; plaintext may still be buffered.
+    peer_closed: bool,
     /// Our close_notify and preceding records reached the flushed transport.
     shutdown_flushed: bool,
     /// The transport accepted TLS bytes since its last successful flush.
@@ -263,6 +265,7 @@ impl<IO> TlsStream<IO> {
             conn: TlsConnection::Client(conn),
             state: TlsState::Handshaking,
             read_closed: false,
+            peer_closed: false,
             shutdown_flushed: false,
             transport_needs_flush: false,
             read_error: None,
@@ -277,6 +280,7 @@ impl<IO> TlsStream<IO> {
             conn: TlsConnection::Server(conn),
             state: TlsState::Handshaking,
             read_closed: false,
+            peer_closed: false,
             shutdown_flushed: false,
             transport_needs_flush: false,
             read_error: None,
@@ -349,6 +353,16 @@ impl<IO> TlsStream<IO> {
     /// Check if the connection is closed.
     pub fn is_closed(&self) -> bool {
         self.state.is_terminal()
+    }
+
+    /// Record protocol closure independently of application EOF. A packet
+    /// batch can authenticate both application data and close_notify; those
+    /// bytes must remain readable, but the session is no longer open for
+    /// channel binding. Use this path during both handshake and normal reads.
+    fn process_new_packets(&mut self) -> Result<rustls::IoState, rustls::Error> {
+        let state = self.conn.process_new_packets()?;
+        self.peer_closed |= state.peer_has_closed();
+        Ok(state)
     }
 
     fn note_read_eof(&mut self) {
@@ -463,7 +477,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             }
 
             // Process any pending TLS data
-            if let Err(e) = self.conn.process_new_packets() {
+            if let Err(e) = self.process_new_packets() {
                 #[cfg(feature = "tracing-integration")]
                 error!(error = %e, "TLS error during handshake");
                 self.flush_alert_best_effort(cx, write_budget);
@@ -834,7 +848,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                 }
                 Poll::Ready(Ok(_)) => {
                     // Process the new TLS data
-                    if let Err(e) = self.conn.process_new_packets() {
+                    if let Err(e) = self.process_new_packets() {
                         self.flush_alert_best_effort(cx, &mut write_budget);
                         return Poll::Ready(Err(
                             self.fail_read(io::ErrorKind::InvalidData, e.to_string())
@@ -1049,3 +1063,7 @@ mod shutdown_failure_tests;
 #[cfg(all(test, feature = "tls-ring"))]
 #[path = "stream_write_budget_tests.rs"]
 mod write_budget_tests;
+
+#[cfg(all(test, feature = "tls-ring"))]
+#[path = "stream_peer_close_tests.rs"]
+mod peer_close_tests;
