@@ -99,7 +99,17 @@ impl DeltaObjectRequest {
 }
 
 /// Fills `buf` from `reader` until it is full or the reader reports EOF and
-/// returns the byte count (`0` only at EOF).
+/// returns the byte count. An empty buffer returns `0` without polling the
+/// reader; otherwise `0` means EOF.
+///
+/// Interrupted reads are retried without losing the completed prefix unless
+/// the current context's checkpoint acknowledges cancellation; in that case
+/// the original interruption is returned. After 64 read attempts, including
+/// interruptions, the future yields before doing more work. A yield never
+/// becomes a short chunk: only EOF ends a partial chunk. This does not preempt
+/// a syscall or register a cancellation observer for a parked reader. Dropping
+/// the wait can consume a prefix; callers must not restart it as though the
+/// reader had not advanced.
 ///
 /// One `AsyncReadExt::read` is not one chunk: `crate::fs::File`'s poll path
 /// hops to the blocking pool in bounded pieces (128 KiB), so a chunk builder
@@ -112,13 +122,29 @@ where
     R: crate::io::AsyncRead + Unpin,
 {
     use crate::io::AsyncReadExt as _;
+    const READ_ATTEMPTS_PER_TURN: usize = 64;
+
     let mut filled = 0usize;
+    let mut attempts = 0usize;
     while filled < buf.len() {
-        let read = reader.read(&mut buf[filled..]).await?;
-        if read == 0 {
-            break;
+        if attempts == READ_ATTEMPTS_PER_TURN {
+            crate::runtime::yield_now().await;
+            attempts = 0;
         }
-        filled += read;
+        attempts += 1;
+        match reader.read(&mut buf[filled..]).await {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                // Async adapters also use Interrupted for cancellation. Do
+                // not turn their terminal cancellation into an EINTR loop.
+                // checkpoint, rather than is_cancel_requested, honors masks.
+                if crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(filled)
 }

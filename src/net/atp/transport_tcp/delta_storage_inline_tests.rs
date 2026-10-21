@@ -536,3 +536,51 @@ fn native_tcp_delta_reconstructs_baseline_ranges_and_spooled_changes() {
     assert!(received.committed);
     assert_eq!(std::fs::read(received_path).unwrap(), target);
 }
+
+#[test]
+fn native_spool_reads_full_chunks_across_filesystem_poll_boundaries() {
+    run(async {
+        let cx = Cx::current().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("spool");
+        let size = usize::try_from(MAX_COMPRESSED_CHUNK_RAW).unwrap();
+        let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let chunk = key(&payload);
+        let mut spool = DeltaChunkSpool::create(&cx, &path, size as u64).await.unwrap();
+        spool.insert(&cx, chunk.clone(), &payload).await.unwrap();
+        spool.seal(&cx).await.unwrap();
+        let mut scratch = vec![0xa5; size];
+        let allocation = scratch.as_ptr() as usize;
+        for _ in 0..2 {
+            spool.read_verified(&cx, &chunk, &mut scratch).await.unwrap();
+            assert_eq!(scratch, payload);
+            assert_eq!(scratch.as_ptr() as usize, allocation);
+            assert_eq!(spool.phase, SpoolPhase::Reading);
+        }
+    });
+}
+
+#[test]
+fn native_short_spool_read_fails_without_authorizing_a_prefix() {
+    run(async {
+        let cx = Cx::current().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("spool");
+        let payload = vec![0x37; 256 * 1024 + 1];
+        let chunk = key(&payload);
+        let mut spool = DeltaChunkSpool::create(&cx, &path, chunk.size_bytes).await.unwrap();
+        spool.insert(&cx, chunk.clone(), &payload).await.unwrap();
+        spool.seal(&cx).await.unwrap();
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap()
+            .set_len(128 * 1024 + 1).unwrap();
+        let mut scratch = Vec::new();
+        let error = spool.read_verified(&cx, &chunk, &mut scratch).await.unwrap_err();
+        assert!(matches!(error,
+            TransportError::Io(error) if error.kind() == std::io::ErrorKind::UnexpectedEof));
+        assert_eq!(spool.phase, SpoolPhase::Failed);
+        assert!(matches!(
+            spool.read_verified(&cx, &chunk, &mut scratch).await,
+            Err(TransportError::Frame(_))
+        ));
+    });
+}
