@@ -28,6 +28,7 @@ struct BufferedIo {
     read_error: Option<io::ErrorKind>,
     read_eof: bool,
     flush_error: Option<io::ErrorKind>,
+    shutdown_error: Option<io::ErrorKind>,
     calls: usize,
     shutdown_calls: usize,
 }
@@ -39,6 +40,7 @@ impl BufferedIo {
             read_error: None,
             read_eof: false,
             flush_error: None,
+            shutdown_error: None,
             calls: 0,
             shutdown_calls: 0,
         }
@@ -87,6 +89,9 @@ impl AsyncWrite for BufferedIo {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.calls += 1;
         self.shutdown_calls += 1;
+        if let Some(kind) = self.shutdown_error {
+            return Poll::Ready(Err(io::Error::new(kind, "injected shutdown failure")));
+        }
         // The real BufWriter flushes its buffer here before closing the writer.
         Pin::new(&mut self.writer).poll_shutdown(cx)
     }
@@ -359,6 +364,122 @@ fn clean_half_close_still_flushes_and_allows_transport_shutdown() {
                     assert!(matches!(shutdown(endpoint, true), Poll::Ready(Ok(()))));
                     assert_eq!(endpoint.io.shutdown_calls, 1);
                 }
+            });
+        }
+    }
+}
+
+
+#[test]
+fn fatal_close_notify_flush_failures_are_sticky_across_shutdown_apis() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            for transport in [false, true] {
+                for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::BrokenPipe] {
+                    run_pair(version, true, move |mut client, mut server| {
+                        let stream = if client_side { &mut client } else { &mut server };
+                        stream.io.flush_error = Some(kind);
+                        let Poll::Ready(Err(error)) = shutdown(stream, transport) else {
+                            panic!("fatal close-notify flush must fail");
+                        };
+                        assert_eq!(error.kind(), kind);
+                        assert!(stream.is_closed());
+                        assert!(stream.write_error.is_some());
+                        assert!(!stream.shutdown_flushed);
+                        assert_eq!(stream.io.shutdown_calls, 0);
+                        stream.io.flush_error = None;
+                        let calls = stream.io.calls;
+                        for retry_transport in [false, true] {
+                            let Poll::Ready(Err(repeated)) = shutdown(stream, retry_transport) else {
+                                panic!("retained close-notify failure became success");
+                            };
+                            assert_eq!(repeated.kind(), kind);
+                            assert_eq!(repeated.to_string(), error.to_string());
+                            assert_eq!(stream.io.calls, calls);
+                        }
+                        for binding in [
+                            stream.tls_exporter_channel_binding().map(|_| ()),
+                            stream.tls_server_end_point_channel_binding().map(|_| ()),
+                        ] {
+                            assert!(matches!(
+                                binding,
+                                Err(TlsError::Io(error))
+                                    if error.kind() == io::ErrorKind::NotConnected
+                            ));
+                        }
+                    });
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fatal_final_transport_shutdown_failures_cannot_later_report_success() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::BrokenPipe] {
+                run_pair(version, true, move |mut client, mut server| {
+                    let (stream, peer) = if client_side {
+                        (&mut client, &mut server)
+                    } else {
+                        (&mut server, &mut client)
+                    };
+                    stream.io.shutdown_error = Some(kind);
+                    let Poll::Ready(Err(error)) = shutdown(stream, true) else {
+                        panic!("final transport shutdown must fail");
+                    };
+                    assert_eq!(error.kind(), kind);
+                    assert!(stream.is_closed());
+                    assert!(stream.shutdown_flushed);
+                    assert!(stream.write_error.is_some());
+                    assert_eq!(stream.io.shutdown_calls, 1);
+
+                    // close_notify was already flushed before the transport close failed.
+                    let mut bytes = [0; 16];
+                    assert!(matches!(read_once(peer, &mut bytes), Poll::Ready(Ok(0))));
+                    stream.io.shutdown_error = None;
+                    let calls = stream.io.calls;
+                    for transport in [true, false, true] {
+                        let Poll::Ready(Err(repeated)) = shutdown(stream, transport) else {
+                            panic!("retained final shutdown failure became success");
+                        };
+                        assert_eq!(repeated.kind(), kind);
+                        assert_eq!(repeated.to_string(), error.to_string());
+                        assert_eq!(stream.io.calls, calls);
+                    }
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn writezero_during_final_transport_shutdown_remains_retryable() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            run_pair(version, true, move |mut client, mut server| {
+                let (stream, peer) = if client_side {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
+                stream.io.shutdown_error = Some(io::ErrorKind::WriteZero);
+                assert!(matches!(
+                    shutdown(stream, true),
+                    Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::WriteZero
+                ));
+                assert!(stream.state.shutdown_pending());
+                assert!(stream.shutdown_flushed);
+                assert!(stream.write_error.is_none());
+                assert_eq!(stream.io.shutdown_calls, 1);
+
+                stream.io.shutdown_error = None;
+                assert!(matches!(shutdown(stream, true), Poll::Ready(Ok(()))));
+                assert_eq!(stream.io.shutdown_calls, 2);
+                let mut bytes = [0; 16];
+                assert!(matches!(read_once(peer, &mut bytes), Poll::Ready(Ok(0))));
+                assert!(peer.read_closed);
             });
         }
     }
