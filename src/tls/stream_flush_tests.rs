@@ -1059,3 +1059,132 @@ fn pending_or_failed_alert_flush_does_not_replace_the_original_tls_error() {
         }
     }
 }
+
+
+#[test]
+fn peer_certificate_metadata_is_hidden_before_wrapper_handshake_completion() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        run_pair(version, false, move |client, server| {
+            for stream in [&client, &server] {
+                assert!(!stream.handshake_completed);
+                assert!(stream.state.requires_handshake());
+                assert!(stream.peer_leaf_certificate_der().is_none());
+                assert!(stream.peer_certificate_chain_der().is_none());
+            }
+        });
+    }
+}
+
+#[test]
+fn client_certificate_metadata_waits_for_the_final_tls13_transport_flush() {
+    run_pair(&rustls::version::TLS13, false, move |mut client, mut server| {
+        let mut cx = Context::from_waker(Waker::noop());
+
+        // Publish ClientHello, then let the server return its authenticated
+        // certificate/Finished flight. The client will know the certificate
+        // during its next poll, but its own final Finished still must flush.
+        assert!(client.poll_handshake(&mut cx).is_pending());
+        assert!(server.poll_handshake(&mut cx).is_pending());
+
+        client.io.block_flush = true;
+        assert!(client.poll_handshake(&mut cx).is_pending());
+        assert!(
+            !client.conn.is_handshaking(),
+            "rustls must have authenticated the server before the blocked final flush"
+        );
+        assert!(client.conn.peer_leaf_certificate_der().is_some());
+        assert!(client.state.requires_handshake());
+        assert!(!client.handshake_completed);
+        assert!(client.peer_leaf_certificate_der().is_none());
+        assert!(client.peer_certificate_chain_der().is_none());
+
+        client.io.block_flush = false;
+        assert!(matches!(client.poll_handshake(&mut cx), Poll::Ready(Ok(()))));
+        assert!(client.handshake_completed);
+        assert!(client.is_ready());
+
+        let expected = CertificateChain::from_pem(CERT).unwrap().into_inner();
+        assert_eq!(
+            client.peer_leaf_certificate_der().as_deref(),
+            Some(expected[0].as_ref())
+        );
+        assert_eq!(
+            client.peer_certificate_chain_der().unwrap(),
+            expected
+                .iter()
+                .map(|certificate| certificate.as_ref().to_vec())
+                .collect::<Vec<_>>()
+        );
+    });
+}
+
+#[test]
+fn failed_final_tls13_flush_never_publishes_peer_certificate_metadata() {
+    run_pair(&rustls::version::TLS13, false, move |mut client, mut server| {
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(client.poll_handshake(&mut cx).is_pending());
+        assert!(server.poll_handshake(&mut cx).is_pending());
+
+        client.io.flush_error = Some(io::ErrorKind::BrokenPipe);
+        let Poll::Ready(Err(TlsError::Io(error))) = client.poll_handshake(&mut cx) else {
+            panic!("the final wrapper flush must fail");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(
+            !client.conn.is_handshaking(),
+            "rustls had already authenticated the server before wrapper failure"
+        );
+        assert!(client.conn.peer_leaf_certificate_der().is_some());
+        assert!(!client.handshake_completed);
+        assert!(client.is_closed());
+        assert!(client.peer_leaf_certificate_der().is_none());
+        assert!(client.peer_certificate_chain_der().is_none());
+
+        client.io.flush_error = None;
+        assert!(matches!(
+            client.poll_handshake(&mut cx),
+            Poll::Ready(Err(TlsError::Io(error)))
+                if error.kind() == io::ErrorKind::NotConnected
+        ));
+        assert!(client.peer_leaf_certificate_der().is_none());
+        assert!(client.peer_certificate_chain_der().is_none());
+    });
+}
+
+#[test]
+fn established_peer_certificate_metadata_survives_later_connection_close() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        run_pair(version, true, move |mut client, mut server| {
+            let leaf = client
+                .peer_leaf_certificate_der()
+                .expect("established client exposes authenticated server certificate");
+            let chain = client
+                .peer_certificate_chain_der()
+                .expect("established client exposes authenticated server chain");
+            assert!(client.handshake_completed);
+            assert!(!leaf.is_empty());
+            assert_eq!(chain.first().map(Vec::as_slice), Some(leaf.as_slice()));
+
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(matches!(client.poll_shutdown_tls(&mut cx), Poll::Ready(Ok(()))));
+            let mut bytes = [0; 1];
+            let mut buf = ReadBuf::new(&mut bytes);
+            // Process the client's close_notify at the server.
+            assert!(matches!(
+                Pin::new(&mut server).poll_read(&mut cx, &mut buf),
+                Poll::Ready(Ok(()))
+            ));
+            assert!(buf.filled().is_empty());
+
+            assert!(matches!(server.poll_shutdown_tls(&mut cx), Poll::Ready(Ok(()))));
+            let mut buf = ReadBuf::new(&mut bytes);
+            assert!(matches!(
+                Pin::new(&mut client).poll_read(&mut cx, &mut buf),
+                Poll::Ready(Ok(()))
+            ));
+            assert!(client.is_closed());
+            assert_eq!(client.peer_leaf_certificate_der().as_deref(), Some(leaf.as_slice()));
+            assert_eq!(client.peer_certificate_chain_der().as_deref(), Some(chain.as_slice()));
+        });
+    }
+}

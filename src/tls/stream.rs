@@ -111,6 +111,11 @@ pub struct TlsStream<IO> {
     io: IO,
     conn: TlsConnection,
     state: TlsState,
+    /// The wrapper completed negotiation, including its required final
+    /// transport flush. Keep this separate from rustls's internal state so
+    /// certificate metadata cannot make an incomplete/failed handshake look
+    /// established, while remaining inspectable after a later clean close.
+    handshake_completed: bool,
     read_closed: bool,
     /// Authenticated close_notify received; plaintext may still be buffered.
     peer_closed: bool,
@@ -270,6 +275,7 @@ impl<IO> TlsStream<IO> {
             io,
             conn: TlsConnection::Client(conn),
             state: TlsState::Handshaking,
+            handshake_completed: false,
             read_closed: false,
             peer_closed: false,
             shutdown_flushed: false,
@@ -285,6 +291,7 @@ impl<IO> TlsStream<IO> {
             io,
             conn: TlsConnection::Server(conn),
             state: TlsState::Handshaking,
+            handshake_completed: false,
             read_closed: false,
             peer_closed: false,
             shutdown_flushed: false,
@@ -320,20 +327,35 @@ impl<IO> TlsStream<IO> {
         self.conn.sni_hostname()
     }
 
-    /// Returns the DER-encoded leaf peer certificate, if the handshake
-    /// produced one. Required by PostgreSQL SCRAM-SHA-256-PLUS channel
-    /// binding (RFC 5929 `tls-server-end-point`). Returns `None` before
-    /// the handshake is complete or when the peer presented no
-    /// certificate. (br-asupersync-7n2xsi)
+    /// Returns the DER-encoded leaf peer certificate after this stream's
+    /// handshake has completed, including its final transport flush.
+    ///
+    /// Required by PostgreSQL SCRAM-SHA-256-PLUS channel binding (RFC 5929
+    /// `tls-server-end-point`). Rustls may learn a certificate before the
+    /// wrapper can finish or successfully flush negotiation; this getter keeps
+    /// that intermediate state private. It returns `None` before successful
+    /// wrapper completion, after a failed handshake, or when the peer presented
+    /// no certificate. A certificate from a previously established session
+    /// remains inspectable after a later orderly or fatal close.
+    /// (br-asupersync-7n2xsi)
     pub fn peer_leaf_certificate_der(&self) -> Option<Vec<u8>> {
-        self.conn.peer_leaf_certificate_der()
+        self.handshake_completed
+            .then(|| self.conn.peer_leaf_certificate_der())
+            .flatten()
     }
 
     /// Returns the DER-encoded certificates the peer presented, leaf first,
-    /// in the order it sent them. `None` before the handshake is complete or
-    /// when the peer presented no certificate.
+    /// in the order it sent them.
+    ///
+    /// Like [`Self::peer_leaf_certificate_der`], this is unavailable until the
+    /// wrapper has completed and flushed negotiation. It returns `None` for
+    /// incomplete/failed handshakes or when the peer presented no certificate,
+    /// and preserves metadata from a session that was successfully established
+    /// before a later close.
     pub fn peer_certificate_chain_der(&self) -> Option<Vec<Vec<u8>>> {
-        self.conn.peer_certificate_chain_der()
+        self.handshake_completed
+            .then(|| self.conn.peer_certificate_chain_der())
+            .flatten()
     }
 
     /// Get a reference to the underlying IO.
@@ -551,6 +573,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                 if write_would_block {
                     return Poll::Pending;
                 }
+                self.handshake_completed = true;
                 self.state = TlsState::Ready;
                 #[cfg(feature = "tracing-integration")]
                 debug!("TLS handshake complete");
