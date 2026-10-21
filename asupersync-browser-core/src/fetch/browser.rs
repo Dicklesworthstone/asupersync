@@ -6,6 +6,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{AbortController, AbortSignal, ReadableStreamDefaultReader, RequestCredentials, RequestInit, RequestRedirect, Response};
 
+pub(super) mod stream;
+
 #[cfg(test)]
 mod tests;
 
@@ -58,8 +60,8 @@ impl HostFetch {
         init
     }
 
-    async fn run(&mut self, request: &WasmFetchRequest, limits: FetchBytesLimits)
-        -> Result<FetchBytesResponse, FetchBytesError>
+    async fn open_response(&mut self, request: &WasmFetchRequest)
+        -> Result<Response, FetchBytesError>
     {
         let init = self.request_init(request);
         self.check_active()?;
@@ -69,7 +71,13 @@ impl HostFetch {
         // Cancellation dominates an already-queued response or rejection.
         self.check_active()?;
         let value = result.map_err(|_| FetchBytesError::Host { stage: FetchBytesStage::Response })?;
-        let response = value.dyn_into::<Response>().map_err(|_| FetchBytesError::InvalidResponse)?;
+        value.dyn_into::<Response>().map_err(|_| FetchBytesError::InvalidResponse)
+    }
+
+    async fn run(&mut self, request: &WasmFetchRequest, limits: FetchBytesLimits)
+        -> Result<FetchBytesResponse, FetchBytesError>
+    {
+        let response = self.open_response(request).await?;
         self.read_response(response, limits).await
     }
 
