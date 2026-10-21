@@ -98,7 +98,11 @@ pub(super) async fn hash_file_batched(
 
 /// A short read is not EOF. Exhausting the attempt budget (including EINTR)
 /// returns the completed prefix, possibly empty, without inventing EOF.
-fn read_bounded_chunk(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<(usize, bool)> {
+/// The caller bounds bytes with the supplied slice; this helper bounds attempts.
+pub(crate) fn read_bounded_chunk(
+    reader: &mut impl Read,
+    buffer: &mut [u8],
+) -> io::Result<(usize, bool)> {
     if buffer.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

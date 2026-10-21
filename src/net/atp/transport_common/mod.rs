@@ -28,6 +28,7 @@ pub use compression::{
 };
 pub use delta::{DeltaChunkWire, DeltaManifestWire};
 pub(crate) use delta::{DeltaObjectRequest, DeltaWireMode};
+pub(crate) use file_hash::read_bounded_chunk;
 pub use filter::{FilterAction, FilterDecision, FilterError, FilterRule, FilterSet};
 pub use metadata::{
     DirectoryMetadataEntry, DirectoryMetadataManifest, DirtyPathSet, EntryMetadata, FileIdentity,

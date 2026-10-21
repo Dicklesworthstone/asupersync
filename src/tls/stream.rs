@@ -64,6 +64,13 @@ impl TlsState {
 /// This implements `AsyncRead` and `AsyncWrite`, transparently encrypting
 /// and decrypting data over the underlying connection.
 ///
+/// # Write Failures
+///
+/// During `poll_write`, a zero-byte transport write with TLS records pending
+/// fails the stream with `WriteZero`; it is not retryable backpressure. Plaintext
+/// accepted by rustls is counted once before that retained error is reported
+/// by subsequent I/O. A successful write alone does not guarantee delivery.
+///
 /// # Cancel-Safety
 ///
 /// - `poll_read` is cancel-safe (partial reads don't lose data)
@@ -77,6 +84,8 @@ pub struct TlsStream<IO> {
     read_closed: bool,
     /// Our close_notify and preceding records reached the flushed transport.
     shutdown_flushed: bool,
+    /// The transport accepted TLS bytes since its last successful flush.
+    transport_needs_flush: bool,
     /// The error that ended reading, reported again by every later read.
     read_error: Option<(io::ErrorKind, String)>,
     /// A fatal transport write error must not let callers retry accepted
@@ -231,6 +240,7 @@ impl<IO> TlsStream<IO> {
             state: TlsState::Handshaking,
             read_closed: false,
             shutdown_flushed: false,
+            transport_needs_flush: false,
             read_error: None,
             write_error: None,
         }
@@ -244,6 +254,7 @@ impl<IO> TlsStream<IO> {
             state: TlsState::Handshaking,
             read_closed: false,
             shutdown_flushed: false,
+            transport_needs_flush: false,
             read_error: None,
             write_error: None,
         }
@@ -349,6 +360,17 @@ impl<IO> TlsStream<IO> {
             .as_ref()
             .map(|(kind, message)| io::Error::new(*kind, message.clone()))
     }
+
+    /// Preserve the same reader error whether negotiation was driven by
+    /// poll_read, poll_write, or a direct poll_handshake call. Closed alone
+    /// would otherwise turn a failed handshake into an apparently clean EOF.
+    fn fail_handshake(&mut self, error: TlsError) -> TlsError {
+        self.state = TlsState::Closed;
+        // Match the existing AsyncRead handshake adapter's io::Error::other.
+        // The first handshake caller still receives its original TlsError.
+        self.read_error = Some((io::ErrorKind::Other, error.to_string()));
+        error
+    }
 }
 
 #[cfg(not(feature = "tls"))]
@@ -381,6 +403,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// A failed handshake or a stream whose local shutdown has started cannot
     /// be restarted. Subsequent polls return [`TlsError::Io`] with
     /// [`io::ErrorKind::NotConnected`]; create a new connection instead.
+    /// After handshake failure, nonempty reads retain the failure as an
+    /// [`io::ErrorKind::Other`] error rather than reporting a clean EOF.
     pub fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TlsError>> {
         // rustls may have completed its part before our final transport flush
         // fails. Its is_handshaking() flag alone cannot authorize a retry: that
@@ -410,23 +434,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                 #[cfg(feature = "tracing-integration")]
                 error!(error = %e, "TLS error during handshake");
                 self.flush_alert_best_effort(cx);
-                self.state = TlsState::Closed;
-                return Poll::Ready(Err(TlsError::Handshake(e.to_string())));
+                return Poll::Ready(Err(self.fail_handshake(TlsError::Handshake(e.to_string()))));
             }
 
             let mut write_would_block = false;
             while self.conn.wants_write() {
                 match self.poll_write_tls(cx) {
                     Poll::Ready(Ok(0)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Handshake(
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Handshake(
                             "connection closed during handshake".into(),
-                        )));
+                        ))));
                     }
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Io(e)));
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Io(e))));
                     }
                     Poll::Pending => {
                         write_would_block = true;
@@ -438,11 +459,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             // writer, a tunnel that frames on flush), and the peer cannot
             // answer a flight it never received.
             if !write_would_block {
-                match Pin::new(&mut self.io).poll_flush(cx) {
+                match self.poll_flush_transport(cx) {
                     Poll::Ready(Ok(())) => {}
                     Poll::Ready(Err(e)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Io(e)));
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Io(e))));
                     }
                     Poll::Pending => write_would_block = true,
                 }
@@ -467,15 +487,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             if self.conn.wants_read() {
                 match self.poll_read_tls(cx) {
                     Poll::Ready(Ok(0)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Handshake(
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Handshake(
                             "connection closed during handshake".into(),
-                        )));
+                        ))));
                     }
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => {
-                        self.state = TlsState::Closed;
-                        return Poll::Ready(Err(TlsError::Io(e)));
+                        return Poll::Ready(Err(self.fail_handshake(TlsError::Io(e))));
                     }
                     Poll::Pending => return Poll::Pending,
                 }
@@ -525,14 +543,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// fatal alert that names the reason (RFC 8446 §6.2), for example a
     /// refused client certificate. Without it the peer sees a bare EOF and
     /// cannot tell a refusal from a dropped connection, so it retries
-    /// (br-asupersync-bi2462.86.3). Never waits: a write that would block
-    /// abandons the alert.
+    /// (br-asupersync-bi2462.86.3). Never waits: a pending write or flush
+    /// abandons the alert without replacing the original TLS failure.
     fn flush_alert_best_effort(&mut self, cx: &mut Context<'_>) {
         while self.conn.wants_write() {
             match self.poll_write_tls(cx) {
                 Poll::Ready(Ok(written)) if written > 0 => {}
-                _ => break,
+                _ => return,
             }
+        }
+        // write_tls drains rustls, not an underlying buffered transport. Even
+        // a tiny alert can fit wholly in that buffer and never reach the peer
+        // before the failed stream is dropped. Make one final flush attempt.
+        if self.transport_needs_flush {
+            let _ = self.poll_flush_transport(cx);
         }
     }
 
@@ -560,19 +584,54 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             }
         }
 
-        let mut adapter = AsyncWriteAdapter {
-            io: &mut self.io,
-            cx,
-        };
+        loop {
+            let result = {
+                let mut adapter = AsyncWriteAdapter {
+                    io: &mut self.io,
+                    cx,
+                };
+                self.conn.write_tls(&mut adapter)
+            };
+            match result {
+                Ok(n) => {
+                    self.transport_needs_flush |= n > 0;
+                    return Poll::Ready(Ok(n));
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if !self.transport_needs_flush {
+                        return Poll::Pending;
+                    }
+                    // A bounded buffering transport can require a flush to
+                    // accept the rest of this TLS record. Waiting for its
+                    // write readiness before flushing would deadlock. Keep
+                    // the flag across Pending/EINTR, including across polls.
+                    std::task::ready!(self.poll_flush_transport(cx))?;
+                    // A successful flush clears the flag. Retry the write
+                    // once to register readiness again if still blocked;
+                    // without newly accepted bytes we cannot loop on flush.
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+        }
+    }
 
-        match self.conn.write_tls(&mut adapter) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+    /// A signal-interrupted transport flush made no terminal progress. Yield
+    /// with a wake instead of closing a handshake or losing a pending flush.
+    fn poll_flush_transport(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match Pin::new(&mut self.io).poll_flush(cx) {
+            Poll::Ready(Ok(())) => {
+                self.transport_needs_flush = false;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
-            Err(e) => Poll::Ready(Err(e)),
+            result => result,
         }
     }
 
@@ -592,7 +651,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             }
         }
 
-        Pin::new(&mut self.io).poll_flush(cx)
+        self.poll_flush_transport(cx)
     }
 
     /// Shared by both shutdown APIs so neither can skip buffered TLS bytes.
@@ -778,7 +837,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         if n == 0 && !buf.is_empty() {
             while self.conn.wants_write() {
                 match self.poll_write_tls(cx) {
-                    Poll::Ready(Ok(0)) => break,
+                    Poll::Ready(Ok(0)) => {
+                        // No new plaintext was accepted. A zero transport
+                        // write cannot free capacity; retrying would spin.
+                        return Poll::Ready(Err(self.fail_write(io::ErrorKind::WriteZero.into())));
+                    }
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(self.fail_write(e))),
                     Poll::Pending => return Poll::Pending,
@@ -803,7 +866,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         // Flush encrypted data to underlying IO
         while self.conn.wants_write() {
             match self.poll_write_tls(cx) {
-                Poll::Ready(Ok(0)) => break,
+                Poll::Ready(Ok(0)) => {
+                    let error = self.fail_write(io::ErrorKind::WriteZero.into());
+                    // Preserve the same acceptance boundary as other fatal
+                    // writes: never invite a retry of already accepted bytes.
+                    return Poll::Ready(if n > 0 { Ok(n) } else { Err(error) });
+                }
                 Poll::Ready(Ok(_)) => {}
                 Poll::Ready(Err(e)) => {
                     let error = self.fail_write(e);
@@ -833,7 +901,25 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         if let Some(error) = self.retained_write_error() {
             return Poll::Ready(Err(error));
         }
-        self.poll_flush_tls(cx)
+        if let Some((kind, message)) = &self.read_error {
+            // A failed read already revoked this session. Do not publish
+            // queued application records after that terminal boundary.
+            return Poll::Ready(Err(io::Error::new(*kind, message.clone())));
+        }
+        if self.state.is_terminal() && !self.shutdown_flushed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "cannot flush a failed TLS stream",
+            )));
+        }
+        match self.poll_flush_tls(cx) {
+            // Preserve the existing retryable zero-progress flush contract:
+            // records stay queued and the caller is told that none advanced.
+            Poll::Ready(Err(error)) if error.kind() != io::ErrorKind::WriteZero => {
+                Poll::Ready(Err(self.fail_write(error)))
+            }
+            result => result,
+        }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -883,3 +969,11 @@ impl<IO: std::fmt::Debug> std::fmt::Debug for TlsStream<IO> {
 #[cfg(test)]
 #[path = "stream_inline_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "tls-ring"))]
+#[path = "stream_flush_tests.rs"]
+mod flush_tests;
+
+#[cfg(all(test, feature = "tls-ring"))]
+#[path = "stream_zero_write_tests.rs"]
+mod zero_write_tests;

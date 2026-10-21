@@ -4,11 +4,26 @@
 //! Every reused range is re-read and hash-checked before reconstruction. A path
 //! changed since discovery can fail the transfer; it cannot authorize different
 //! content. This is not a filesystem snapshot or a path-confinement API.
+//!
+//! Pending storage waits observe cancellation independently of filesystem
+//! completion. Started blocking syscalls may still finish after a wait ends;
+//! this is soft cancellation, not syscall preemption or region-owned draining.
+//! A spool whose cursor may have moved stays failed after an interrupted wait.
+//!
+//! Baseline open, seek, bounded reads and content verification run on the
+//! blocking pool. A job reads at most one validated chunk (1 MiB) and makes at
+//! most 64 read attempts. Short or interrupted reads carry the same allocation
+//! and file into the next job; no job reads past the indexed range. These are
+//! byte/attempt bounds, not syscall-time bounds.
 
 use super::{ContentId, Cx, DeltaContentKey, MAX_COMPRESSED_CHUNK_RAW, TransportError};
-use crate::io::{AsyncReadExt, AsyncSeekExt};
+use crate::io::AsyncReadExt;
+use crate::net::atp::transport_common::read_bounded_chunk;
+use std::future::{Future, poll_fn};
 use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 #[derive(Debug, Clone)]
 pub(super) struct BaselineChunk {
@@ -28,28 +43,126 @@ impl BaselineChunk {
         key: &DeltaContentKey,
         scratch: &mut Vec<u8>,
     ) -> Result<(), TransportError> {
-        cx.with_ambient(async {
+        run_io(cx, async {
             check_io(cx)?;
             let length = chunk_length(key)?;
             self.offset
                 .checked_add(key.size_bytes)
                 .ok_or_else(|| TransportError::Frame("delta baseline range overflows u64".into()))?;
-            let source_error =
-                |error| TransportError::Source(format!("{}: {error}", self.path.display()));
-            let mut file = crate::fs::File::open(self.path.as_path())
-                .await
-                .map_err(source_error)?;
-            file.seek(std::io::SeekFrom::Start(self.offset))
-                .await
-                .map_err(source_error)?;
-            cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-            scratch.resize(length, 0);
-            file.read_exact(scratch).await.map_err(source_error)?;
-            cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-            verify_bytes(key, scratch)
+            let path = Arc::clone(&self.path);
+            let offset = self.offset;
+            let key = key.clone();
+            // The allocation moves into the worker instead of being copied
+            // into a new 128 KiB buffer for every File::poll_read handoff.
+            let buffer = std::mem::take(scratch);
+            let mut state = crate::runtime::spawn_blocking(move || {
+                BaselineRead::open(path, offset, key, buffer, length)?.read_batch()
+            })
+            .await?;
+            while state.reader.is_some() {
+                // Also yield in the deterministic inline blocking fallback:
+                // an EINTR-only source must not spin through ready jobs.
+                crate::runtime::yield_now().await;
+                check_io(cx)?;
+                state = crate::runtime::spawn_blocking(move || state.read_batch()).await?;
+            }
+            *scratch = state.buffer;
+            Ok(())
         })
         .await
     }
+}
+
+/// Owned state crossing a baseline blocking-pool boundary. Generic only so
+/// short reads/EINTR can be tested through the same production batch method.
+struct BaselineRead<R> {
+    reader: Option<R>,
+    path: Arc<PathBuf>,
+    key: DeltaContentKey,
+    buffer: Vec<u8>,
+    filled: usize,
+}
+
+impl BaselineRead<std::fs::File> {
+    fn open(
+        path: Arc<PathBuf>,
+        offset: u64,
+        key: DeltaContentKey,
+        mut buffer: Vec<u8>,
+        length: usize,
+    ) -> Result<Self, TransportError> {
+        use std::io::Seek as _;
+
+        let source_error =
+            |error| TransportError::Source(format!("{}: {error}", path.display()));
+        let mut file = std::fs::File::open(path.as_path()).map_err(source_error)?;
+        file.seek(std::io::SeekFrom::Start(offset)).map_err(source_error)?;
+        buffer.resize(length, 0);
+        Ok(Self {
+            reader: Some(file),
+            path,
+            key,
+            buffer,
+            filled: 0,
+        })
+    }
+}
+
+impl<R: std::io::Read> BaselineRead<R> {
+    fn read_batch(mut self) -> Result<Self, TransportError> {
+        if let Some(reader) = self.reader.as_mut() {
+            let (count, eof) = read_bounded_chunk(reader, &mut self.buffer[self.filled..])
+                .map_err(|error| {
+                    TransportError::Source(format!("{}: {error}", self.path.display()))
+                })?;
+            self.filled += count;
+            if self.filled == self.buffer.len() {
+                // Hash and close on the worker, before bytes are published to
+                // reconstruction. Completion requires no read past the range.
+                verify_bytes(&self.key, &self.buffer)?;
+                self.reader = None;
+            } else if eof {
+                return Err(TransportError::Source(format!(
+                    "{}: delta baseline range ended after {} of {} bytes",
+                    self.path.display(), self.filled, self.buffer.len(),
+                )));
+            }
+        }
+        Ok(self)
+    }
+}
+
+/// Check the polling caller before installing the explicit owner's context.
+/// Otherwise a restricted caller could resume a parked operation with the
+/// stronger authority captured when it was first created. The observer is
+/// owned by this wait and is dropped on every exit, including abandonment.
+async fn run_io<T>(
+    cx: &Cx,
+    operation: impl Future<Output = Result<T, TransportError>>,
+) -> Result<T, TransportError> {
+    let mut stopped = pin!(cx.cancelled());
+    let mut operation = pin!(cx.with_ambient(operation));
+    poll_fn(|task| {
+        if let Err(error) = crate::cx::io_gate::require_ambient_io("atp::delta_storage") {
+            return Poll::Ready(Err(TransportError::Io(error)));
+        }
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(TransportError::Cancelled));
+        }
+        match operation.as_mut().poll(task) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => {
+                // Register after the first poll to close the check/register
+                // race. A masked request neither aborts nor self-wakes a
+                // parked syscall; checkpoint remains the authority to stop.
+                if stopped.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(TransportError::Cancelled));
+                }
+                Poll::Pending
+            }
+        }
+    })
+    .await
 }
 
 fn check_io(cx: &Cx) -> Result<(), TransportError> {
@@ -68,10 +181,7 @@ fn chunk_length(key: &DeltaContentKey) -> Result<usize, TransportError> {
         .map_err(|_| TransportError::Frame("delta storage chunk exceeds usize::MAX".into()))
 }
 
-pub(super) fn verify_bytes(
-    key: &DeltaContentKey,
-    bytes: &[u8],
-) -> Result<(), TransportError> {
+pub(super) fn verify_bytes(key: &DeltaContentKey, bytes: &[u8]) -> Result<(), TransportError> {
     let length = chunk_length(key)?;
     if bytes.len() != length || ContentId::from_bytes(bytes).to_hex() != key.content_id_hex {
         return Err(TransportError::Integrity(
@@ -102,7 +212,7 @@ impl DeltaChunkSpool {
         path: &std::path::Path,
         limit: u64,
     ) -> Result<Self, TransportError> {
-        cx.with_ambient(async {
+        run_io(cx, async {
             check_io(cx)?;
             let file = super::create_owned_staging_file(path).await?;
             Ok(Self {
@@ -128,7 +238,7 @@ impl DeltaChunkSpool {
         bytes: &[u8],
     ) -> Result<(), TransportError> {
         use crate::io::AsyncWriteExt as _;
-        cx.with_ambient(async {
+        run_io(cx, async {
             check_io(cx)?;
             self.require_phase(SpoolPhase::Writing)?;
             verify_bytes(&key, bytes)?;
@@ -158,7 +268,7 @@ impl DeltaChunkSpool {
 
     pub(super) async fn seal(&mut self, cx: &Cx) -> Result<(), TransportError> {
         use crate::io::AsyncWriteExt as _;
-        cx.with_ambient(async {
+        run_io(cx, async {
             check_io(cx)?;
             if self.phase == SpoolPhase::Reading {
                 return Ok(());
@@ -178,14 +288,13 @@ impl DeltaChunkSpool {
         key: &DeltaContentKey,
         scratch: &mut Vec<u8>,
     ) -> Result<(), TransportError> {
-        cx.with_ambient(async {
+        run_io(cx, async {
             check_io(cx)?;
             self.require_phase(SpoolPhase::Reading)?;
             let length = chunk_length(key)?;
-            let offset = *self
-                .offsets
-                .get(key)
-                .ok_or_else(|| TransportError::Frame("delta spool is missing the requested chunk".into()))?;
+            let offset = *self.offsets.get(key).ok_or_else(|| {
+                TransportError::Frame("delta spool is missing the requested chunk".into())
+            })?;
             self.phase = SpoolPhase::Failed;
             self.file.seek(std::io::SeekFrom::Start(offset)).await?;
             scratch.resize(length, 0);
@@ -208,3 +317,7 @@ impl DeltaChunkSpool {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "delta_storage_inline_tests.rs"]
+mod tests;
