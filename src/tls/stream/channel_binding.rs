@@ -38,7 +38,11 @@ impl<IO> TlsStream<IO> {
     /// Returns [`TlsError::Rustls`] with [`rustls::Error::HandshakeNotComplete`]
     /// before the stream handshake completes, [`TlsError::Configuration`] if
     /// TLS 1.3 was not negotiated, or [`TlsError::Io`] with
-    /// [`io::ErrorKind::NotConnected`] after a failure, shutdown, or read EOF.
+    /// [`io::ErrorKind::NotConnected`] after failure, local shutdown, or a
+    /// processed peer `close_notify`, even while received plaintext remains
+    /// buffered. The getter does not poll for closure; obtain binding material
+    /// before starting the authentication exchange. Reads can still drain
+    /// authenticated buffered bytes after binding access is revoked.
     /// Other exporter failures are preserved as [`TlsError::Rustls`]. No
     /// partial binding data is returned on error.
     pub fn tls_exporter_channel_binding(&self) -> Result<[u8; 32], TlsError> {
@@ -87,7 +91,9 @@ impl<IO> TlsStream<IO> {
     ///
     /// Returns [`TlsError::Rustls`] with [`rustls::Error::HandshakeNotComplete`]
     /// until the stream handshake completes, or [`TlsError::Io`] with
-    /// [`io::ErrorKind::NotConnected`] after failure, shutdown, or read EOF.
+    /// [`io::ErrorKind::NotConnected`] after failure, local shutdown, or a
+    /// processed peer `close_notify`, even before buffered plaintext is drained.
+    /// This getter does not poll for closure or discard that buffered data.
     /// Unsupported protocols, server-role use, and unsupported certificate
     /// signature hashes return [`TlsError::Configuration`]. A missing or
     /// malformed server certificate returns [`TlsError::Certificate`].
@@ -119,6 +125,7 @@ impl<IO> TlsStream<IO> {
     fn ensure_channel_binding_ready(&self, binding: &str) -> Result<(), TlsError> {
         if self.state.is_terminal()
             || self.state.shutdown_pending()
+            || self.peer_closed
             || self.read_closed
             || self.read_error.is_some()
         {
