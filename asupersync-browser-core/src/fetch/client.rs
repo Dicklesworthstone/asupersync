@@ -8,6 +8,9 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
+pub mod stream;
+pub use stream::{ClientBody, ClientStream};
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 
@@ -28,7 +31,9 @@ struct ClientState {
 /// listeners. A reentrant listener cannot bypass capacity by starting a
 /// replacement before the old operation finishes retiring. The credit returns
 /// before terminal completion, even if a caller retains the completed wrapper.
-/// Unpolled requests and bodies already delivered to callers are caller-owned
+/// Streaming calls made with [`Self::stream`] share this same capacity and keep
+/// their credit in the returned body until EOF, error or drop, not just headers.
+/// Unpolled requests and chunks already delivered to callers are caller-owned
 /// storage, outside this client's in-flight bound.
 #[derive(Clone)]
 pub struct FetchBytesClient {

@@ -50,6 +50,18 @@
 //! the connection is in an undefined state and should be dropped. Once the
 //! handshake completes, read/write operations follow the cancel-safety
 //! properties of the underlying I/O traits.
+//!
+//! With TLS enabled, `TlsConnector::connect_with_cx` and
+//! `TlsAcceptor::accept_with_cx` additionally observe the supplied context while
+//! the handshake is parked. Acknowledged cancellation drops the unfinished
+//! connection rather than waiting for another transport event. Existing
+//! certificate, pinning, ALPN, early-data and timeout policies still apply.
+//!
+//! Established streams also provide `read_with_cx`, `write_with_cx`,
+//! `flush_with_cx`, `shutdown_with_cx`, and `shutdown_tls_with_cx`. These borrow
+//! the stream and cancel a pending wait, not the connection. TLS buffers and
+//! shutdown progress stay with the stream; completed byte counts are preserved
+//! even if cancellation races completion. Drop the stream to abort the session.
 
 #[cfg(any(test, feature = "tls"))]
 use crate::cx::Cx;
@@ -63,6 +75,10 @@ mod connector;
 #[cfg(feature = "tls")]
 pub(crate) mod der_min;
 mod error;
+#[cfg(feature = "tls")]
+mod handshake;
+#[cfg(feature = "tls")]
+mod io_context;
 mod stream;
 mod types;
 
