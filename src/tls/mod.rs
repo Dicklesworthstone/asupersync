@@ -154,3 +154,11 @@ fn linked_crypto_provider() -> Option<std::sync::Arc<rustls::crypto::CryptoProvi
 #[cfg(test)]
 #[path = "mod_inline_tests.rs"]
 mod tests;
+
+#[cfg(all(
+    test,
+    feature = "tls-ring",
+    feature = "real-service-e2e",
+    not(target_arch = "wasm32")
+))]
+mod exporter_interop_tests;
