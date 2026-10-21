@@ -679,10 +679,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     ///
     /// Transport write and flush errors are preserved as [`TlsError::Io`]. A
     /// zero-byte write with TLS records still pending returns
-    /// [`io::ErrorKind::WriteZero`], not a successful shutdown.
+    /// [`io::ErrorKind::WriteZero`], not a successful shutdown. A retained
+    /// read or handshake failure is also returned as [`TlsError::Io`], without
+    /// touching the transport. Drop a failed stream rather than attempting to
+    /// gracefully flush data from a session that has already been rejected.
     pub fn poll_shutdown_tls(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TlsError>> {
         if let Some(error) = self.retained_write_error() {
             return Poll::Ready(Err(TlsError::Io(error)));
+        }
+        if let Some((kind, message)) = &self.read_error {
+            return Poll::Ready(Err(TlsError::Io(io::Error::new(*kind, message.clone()))));
         }
         if self.state.is_terminal() {
             return Poll::Ready(Ok(()));
@@ -926,6 +932,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         if let Some(error) = self.retained_write_error() {
             return Poll::Ready(Err(error));
         }
+        if let Some((kind, message)) = &self.read_error {
+            // An inner shutdown may flush (for example BufWriter). Closed
+            // after failure is not a graceful close: do not publish queued
+            // records or turn that failure into a successful shutdown.
+            return Poll::Ready(Err(io::Error::new(*kind, message.clone())));
+        }
         if self.state.is_terminal() {
             return Pin::new(&mut self.io).poll_shutdown(cx);
         }
@@ -977,3 +989,7 @@ mod flush_tests;
 #[cfg(all(test, feature = "tls-ring"))]
 #[path = "stream_zero_write_tests.rs"]
 mod zero_write_tests;
+
+#[cfg(all(test, feature = "tls-ring"))]
+#[path = "stream_shutdown_failure_tests.rs"]
+mod shutdown_failure_tests;
