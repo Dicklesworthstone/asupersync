@@ -91,6 +91,12 @@ impl TlsState {
 /// yielding and keeps partial records in the stream. After plaintext has been
 /// accepted, `poll_write` still reports that byte count rather than `Pending`;
 /// use `poll_flush` to drive all accepted data through the transport.
+/// A read that would otherwise wait also makes bounded progress on queued
+/// writes and transport buffering, so a request is not stranded when its writer
+/// switches to awaiting the response. Available plaintext and read errors take
+/// precedence over that work: a blocked writer does not block incoming data.
+/// Cancelling a read does not roll back previously accepted outgoing bytes.
+/// Output errors encountered by that read are retained as terminal write errors.
 /// An `Interrupted` transport error is retried only if the current context's
 /// checkpoint does not acknowledge cancellation. Cancellation masks remain
 /// effective. This does not add a cancellation observer to parked transports.
@@ -701,8 +707,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// Drain rustls's records and flush transports that buffer accepted writes.
     fn poll_flush_tls(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut write_budget = TLS_WRITE_STEPS_PER_POLL;
+        self.poll_flush_tls_budgeted(cx, &mut write_budget)
+    }
+
+    fn poll_flush_tls_budgeted(
+        &mut self,
+        cx: &mut Context<'_>,
+        write_budget: &mut usize,
+    ) -> Poll<io::Result<()>> {
         while self.conn.wants_write() {
-            match self.poll_write_tls(cx, &mut write_budget) {
+            match self.poll_write_tls(cx, write_budget) {
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -862,7 +876,23 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                 Poll::Ready(Err(e)) => {
                     return Poll::Ready(Err(self.fail_read(e.kind(), e.to_string())));
                 }
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    // A successful earlier write may have left half a record
+                    // queued after backpressure or a cooperative yield. The
+                    // peer cannot answer that request until the record arrives.
+                    // Drive output only AFTER checking input, so a blocked
+                    // writer cannot starve readable data or mask a read failure.
+                    if (self.conn.wants_write() || self.transport_needs_flush)
+                        && let Poll::Ready(Err(error)) =
+                            self.poll_flush_tls_budgeted(cx, &mut write_budget)
+                    {
+                        return Poll::Ready(Err(self.fail_write(error)));
+                    }
+                    // The read already registered readiness. Output either
+                    // registered its own readiness, self-woke on budget/EINTR,
+                    // or completed; only the peer can supply the awaited input.
+                    return Poll::Pending;
+                }
             }
         }
     }
@@ -1067,3 +1097,7 @@ mod write_budget_tests;
 #[cfg(all(test, feature = "tls-ring"))]
 #[path = "stream_peer_close_tests.rs"]
 mod peer_close_tests;
+
+#[cfg(all(test, feature = "tls-ring"))]
+#[path = "stream_read_progress_tests.rs"]
+mod read_progress_tests;
