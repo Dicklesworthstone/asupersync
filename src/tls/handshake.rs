@@ -16,8 +16,11 @@ impl TlsConnector {
     /// is the same established stream, including its channel-binding APIs.
     ///
     /// The supplied context is installed for each handshake poll and for
-    /// destruction of the unfinished handshake. Both the polling caller and
-    /// the supplied context must permit I/O; resuming under a restricted caller
+    /// destruction of the unfinished handshake, including a future dropped
+    /// before its first poll. Creating the future attaches this ownership guard
+    /// but does not poll the transport, start negotiation, or register a waiter.
+    /// Both the polling caller and the supplied context must permit I/O;
+    /// resuming under a restricted caller
     /// cannot borrow stronger authority from an earlier poll.
     ///
     /// # Cancellation
@@ -38,16 +41,16 @@ impl TlsConnector {
     ///
     /// Preserves errors from [`Self::connect`], including timeout and pinning
     /// failures. I/O capability refusal returns `PermissionDenied`.
-    pub async fn connect_with_cx<IO>(
+    pub fn connect_with_cx<IO>(
         &self,
         cx: &Cx,
         domain: &str,
         io: IO,
-    ) -> Result<TlsStream<IO>, TlsError>
+    ) -> impl Future<Output = Result<TlsStream<IO>, TlsError>>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
-        with_cancellation(cx, self.connect(domain, io)).await
+        with_cancellation(cx, self.connect(domain, io))
     }
 }
 
@@ -65,11 +68,15 @@ impl TlsAcceptor {
     /// Preserves [`Self::accept`] errors. Acknowledged cancellation returns
     /// [`TlsError::Io`] with [`io::ErrorKind::Interrupted`]; I/O capability
     /// refusal returns `PermissionDenied`. Cancellation masks are respected.
-    pub async fn accept_with_cx<IO>(&self, cx: &Cx, io: IO) -> Result<TlsStream<IO>, TlsError>
+    pub fn accept_with_cx<IO>(
+        &self,
+        cx: &Cx,
+        io: IO,
+    ) -> impl Future<Output = Result<TlsStream<IO>, TlsError>>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
-        with_cancellation(cx, self.accept(io)).await
+        with_cancellation(cx, self.accept(io))
     }
 }
 
@@ -80,15 +87,15 @@ fn cancelled() -> TlsError {
     ))
 }
 
-async fn with_cancellation<T>(
+fn with_cancellation<T>(
     cx: &Cx,
     operation: impl Future<Output = Result<T, TlsError>>,
-) -> Result<T, TlsError> {
-    let mut stopped = pin!(cx.cancelled());
-    // Keep ownership (including destruction) inside WithAmbient. Checking the
-    // owner on every poll also covers transports with no capability gate of
-    // their own. A completed value rejected by cancellation is dropped here.
-    let mut operation = pin!(cx.with_ambient(async move {
+) -> impl Future<Output = Result<T, TlsError>> {
+    // Attach destruction authority now, not in an async body that may never
+    // be polled. The public entry points must return this future directly:
+    // an outer async fn would capture and drop IO before this guard exists.
+    // This constructs a wrapper only; the handshake itself stays lazy.
+    let operation = cx.with_ambient(async move {
         let mut operation = pin!(operation);
         poll_fn(|task| {
             if let Err(error) = require_ambient_io("tls::handshake") {
@@ -103,31 +110,39 @@ async fn with_cancellation<T>(
             }
         })
         .await
-    }));
-    poll_fn(|task| {
-        // Check the caller before installing the explicit owner's context.
-        if let Err(error) = require_ambient_io("tls::handshake") {
-            return Poll::Ready(Err(TlsError::Io(error)));
-        }
-        if cx.checkpoint().is_err() {
-            return Poll::Ready(Err(cancelled()));
-        }
-        match operation.as_mut().poll(task) {
-            Poll::Ready(result) => Poll::Ready(result),
-            Poll::Pending => {
-                // Register-and-recheck closes cancellation racing the first
-                // Pending. The observer refreshes the current task's waker and
-                // unregisters on drop. A masked request does not self-wake.
-                if stopped.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
-                    return Poll::Ready(Err(cancelled()));
-                }
-                Poll::Pending
+    });
+    async move {
+        let mut stopped = pin!(cx.cancelled());
+        let mut operation = pin!(operation);
+        poll_fn(|task| {
+            // Check the caller before installing the explicit owner's context.
+            if let Err(error) = require_ambient_io("tls::handshake") {
+                return Poll::Ready(Err(TlsError::Io(error)));
             }
-        }
-    })
-    .await
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(cancelled()));
+            }
+            match operation.as_mut().poll(task) {
+                Poll::Ready(result) => Poll::Ready(result),
+                Poll::Pending => {
+                    // Register-and-recheck closes cancellation racing the first
+                    // Pending. The observer refreshes the current task's waker and
+                    // unregisters on drop. A masked request does not self-wake.
+                    if stopped.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                        return Poll::Ready(Err(cancelled()));
+                    }
+                    Poll::Pending
+                }
+            }
+        })
+        .await
+    }
 }
 
 #[cfg(all(test, feature = "tls-ring"))]
 #[path = "handshake_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "tls-ring"))]
+#[path = "handshake_ownership_tests.rs"]
+mod ownership_tests;
