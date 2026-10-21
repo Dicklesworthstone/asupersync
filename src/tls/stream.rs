@@ -405,6 +405,27 @@ impl<IO> TlsStream<IO> {
             .map(|(kind, message)| io::Error::new(*kind, message.clone()))
     }
 
+    /// Classify an error while closing the TLS write side. WriteZero is the
+    /// existing retryable zero-progress signal, and an Interrupted error that
+    /// acknowledges context cancellation belongs to that cancelled wait rather
+    /// than permanently poisoning the stream. Ordinary EINTR yields and wakes.
+    /// Every other transport error is terminal and retained so a later shutdown
+    /// cannot falsely report success after the transport has recovered.
+    fn poll_shutdown_io_error(
+        &mut self,
+        cx: &mut Context<'_>,
+        error: io::Error,
+    ) -> Poll<io::Result<()>> {
+        if error.kind() == io::ErrorKind::Interrupted && interrupted_io_is_retryable() {
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        if matches!(error.kind(), io::ErrorKind::WriteZero | io::ErrorKind::Interrupted) {
+            return Poll::Ready(Err(error));
+        }
+        Poll::Ready(Err(self.fail_write(error)))
+    }
+
     /// Preserve the same reader error whether negotiation was driven by
     /// poll_read, poll_write, or a direct poll_handshake call. Closed alone
     /// would otherwise turn a failed handshake into an apparently clean EOF.
@@ -772,7 +793,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             return Poll::Ready(Ok(()));
         }
 
-        std::task::ready!(self.poll_flush_close_notify(cx)).map_err(TlsError::Io)?;
+        match self.poll_flush_close_notify(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(error)) => {
+                return self
+                    .poll_shutdown_io_error(cx, error)
+                    .map(|result| result.map_err(TlsError::Io));
+            }
+            Poll::Pending => return Poll::Pending,
+        }
 
         if self.read_closed {
             self.state = TlsState::Closed;
@@ -1050,7 +1079,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
                 }
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Err(e)) => self.poll_shutdown_io_error(cx, e),
             Poll::Pending => Poll::Pending,
         }
     }
