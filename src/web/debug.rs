@@ -14,6 +14,16 @@
 //! - `GET /debug/memory-residency` — Memory-residency accounting snapshot as JSON
 //! - `GET /debug/trace` — Recent trace events as JSON
 //! - `GET /debug/ws` — WebSocket endpoint (upgrade + one-shot JSON push)
+//! - `GET /inspector` (also `/debug/inspector`) — Versioned core-model snapshot
+//!   when an inspector provider is installed, otherwise JSON `503`
+//!
+//! Inspector exports default to [`InspectorProfile::Shareable`]. Diagnostic text
+//! requires explicit server-side configuration; request parameters cannot enable
+//! it. Responses are not cacheable, and serialized inspector bodies are limited
+//! to 16 MiB by default. This limit bounds serialized bytes, not the runtime state
+//! captured by a provider. The existing connection cap and socket timeouts apply.
+//! The default listener is loopback-only; this development server provides no
+//! authentication or TLS when configured to bind to other interfaces.
 //!
 //! # Example
 //!
@@ -25,13 +35,17 @@
 //!
 //! let state = Arc::new(Mutex::new(runtime_state));
 //! let st = Arc::clone(&state);
-//! let server = DebugServer::new(
+//! let mut server = DebugServer::new(
 //!     9999,
 //!     Arc::new(move || st.lock().snapshot()),
 //! );
 //! server.start().expect("failed to start debug server");
 //! println!("Dashboard: {}", server.url());
 //! ```
+//!
+//! To expose a live native runtime, including its external task and obligation
+//! tables, add `.with_runtime_inspector(runtime.handle())` before `start()`.
+//! Custom or lab-state providers can use [`DebugServer::with_inspector_snapshot_fn`].
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -40,7 +54,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
-use crate::runtime::{MemoryResidencyAccountingSnapshot, RuntimeSnapshot};
+use crate::observability::{InspectorProfile, InspectorSnapshot, TaskInspectorConfig};
+use crate::runtime::{MemoryResidencyAccountingSnapshot, RuntimeHandle, RuntimeSnapshot};
 use crate::tracing_compat::info;
 use base64::Engine as _;
 use sha1::{Digest, Sha1};
@@ -51,6 +66,35 @@ pub type SnapshotFn = Arc<dyn Fn() -> RuntimeSnapshot + Send + Sync>;
 /// Function that produces a memory-residency accounting snapshot on demand.
 pub type MemoryResidencySnapshotFn =
     Arc<dyn Fn() -> MemoryResidencyAccountingSnapshot + Send + Sync>;
+
+/// Captures a versioned inspector snapshot with the requested text policy.
+///
+/// Return `None` if the source is unavailable. Capture runs on a connection
+/// thread; it must finish promptly and must not drive or wait for runtime work.
+/// The server applies shareable scrubbing again before serialization, even if a
+/// provider returns a full snapshot or labels diagnostic text as shareable.
+pub type InspectorSnapshotFn =
+    Arc<dyn Fn(InspectorProfile) -> Option<InspectorSnapshot> + Send + Sync>;
+
+/// Default upper bound on a serialized inspector response body (16 MiB).
+pub const DEFAULT_INSPECTOR_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone)]
+struct InspectorEndpoint {
+    snapshot_fn: Option<InspectorSnapshotFn>,
+    profile: InspectorProfile,
+    max_response_bytes: usize,
+}
+
+impl Default for InspectorEndpoint {
+    fn default() -> Self {
+        Self {
+            snapshot_fn: None,
+            profile: InspectorProfile::Shareable,
+            max_response_bytes: DEFAULT_INSPECTOR_MAX_RESPONSE_BYTES,
+        }
+    }
+}
 
 /// Configuration for the debug server.
 #[derive(Debug, Clone)]
@@ -85,6 +129,7 @@ pub struct DebugServer {
     port: u16,
     snapshot_fn: SnapshotFn,
     memory_residency_snapshot_fn: MemoryResidencySnapshotFn,
+    inspector: InspectorEndpoint,
     config: DebugServerConfig,
     running: Arc<AtomicBool>,
     local_addr: Option<SocketAddr>,
@@ -98,6 +143,7 @@ impl DebugServer {
             port,
             snapshot_fn,
             memory_residency_snapshot_fn: Self::default_memory_residency_snapshot_fn(),
+            inspector: InspectorEndpoint::default(),
             config: DebugServerConfig::default(),
             running: Arc::new(AtomicBool::new(false)),
             local_addr: None,
@@ -111,6 +157,7 @@ impl DebugServer {
             port,
             snapshot_fn,
             memory_residency_snapshot_fn: Self::default_memory_residency_snapshot_fn(),
+            inspector: InspectorEndpoint::default(),
             config,
             running: Arc::new(AtomicBool::new(false)),
             local_addr: None,
@@ -124,6 +171,54 @@ impl DebugServer {
         snapshot_fn: MemoryResidencySnapshotFn,
     ) -> Self {
         self.memory_residency_snapshot_fn = snapshot_fn;
+        self
+    }
+
+    /// Installs the provider for `GET /inspector` and `GET /debug/inspector`.
+    ///
+    /// With no provider, or when it returns `None`, these routes return JSON
+    /// `503 Service Unavailable`. Existing dashboard routes keep their providers.
+    #[must_use]
+    pub fn with_inspector_snapshot_fn(mut self, snapshot_fn: InspectorSnapshotFn) -> Self {
+        self.inspector.snapshot_fn = Some(snapshot_fn);
+        self
+    }
+
+    /// Binds inspector requests to a native runtime's live record tables.
+    ///
+    /// Each request acquires the runtime's state, task, and obligation tables
+    /// through [`RuntimeHandle::task_inspector`] in their canonical lock order.
+    /// The owned snapshot is serialized only after those locks are released.
+    /// The supplied handle retains its ordinary strong or weak lifetime semantics.
+    #[must_use]
+    pub fn with_runtime_inspector(self, runtime: RuntimeHandle) -> Self {
+        self.with_inspector_snapshot_fn(Arc::new(move |profile| {
+            runtime
+                .task_inspector(TaskInspectorConfig::default())
+                .map(|inspector| inspector.runtime_snapshot(profile))
+        }))
+    }
+
+    /// Sets the inspector text policy at server setup time.
+    ///
+    /// The default is [`InspectorProfile::Shareable`]. Choosing
+    /// [`InspectorProfile::Full`] permits descriptions, source locations, and
+    /// checkpoint messages in HTTP responses. Query parameters never change the
+    /// policy. A provider may still return a more restrictive snapshot.
+    #[must_use]
+    pub fn with_inspector_profile(mut self, profile: InspectorProfile) -> Self {
+        self.inspector.profile = profile;
+        self
+    }
+
+    /// Bounds the serialized inspector body, without truncating its schema.
+    ///
+    /// Oversized snapshots return JSON `503` instead of partial snapshot data.
+    /// The default is [`DEFAULT_INSPECTOR_MAX_RESPONSE_BYTES`]. A zero limit
+    /// rejects every snapshot. This does not limit provider capture allocations.
+    #[must_use]
+    pub fn with_inspector_max_response_bytes(mut self, max_bytes: usize) -> Self {
+        self.inspector.max_response_bytes = max_bytes;
         self
     }
 
@@ -176,6 +271,7 @@ impl DebugServer {
 
         let snapshot_fn = Arc::clone(&self.snapshot_fn);
         let memory_residency_snapshot_fn = Arc::clone(&self.memory_residency_snapshot_fn);
+        let inspector = self.inspector.clone();
         let running = Arc::clone(&self.running);
         let active_connections = Arc::new(AtomicUsize::new(0));
         let max_connections = self.config.max_connections;
@@ -187,6 +283,7 @@ impl DebugServer {
                     &listener,
                     &snapshot_fn,
                     &memory_residency_snapshot_fn,
+                    &inspector,
                     &running,
                     max_connections,
                     &active_connections,
@@ -216,6 +313,7 @@ fn serve_loop(
     listener: &TcpListener,
     snapshot_fn: &SnapshotFn,
     memory_residency_snapshot_fn: &MemoryResidencySnapshotFn,
+    inspector: &InspectorEndpoint,
     running: &AtomicBool,
     max_connections: usize,
     active_connections: &Arc<AtomicUsize>,
@@ -245,6 +343,7 @@ fn serve_loop(
 
                 let snapshot_fn = Arc::clone(snapshot_fn);
                 let memory_residency_snapshot_fn = Arc::clone(memory_residency_snapshot_fn);
+                let inspector = inspector.clone();
                 let active_connections_for_thread = Arc::clone(active_connections);
                 let _ = thread::Builder::new()
                     .name("asupersync-debug-connection".to_string())
@@ -252,7 +351,12 @@ fn serve_loop(
                         let _active_connection =
                             ActiveConnectionGuard::new(Arc::clone(&active_connections_for_thread));
                         let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-                            handle_connection(stream, &snapshot_fn, &memory_residency_snapshot_fn);
+                            handle_connection(
+                                stream,
+                                &snapshot_fn,
+                                &memory_residency_snapshot_fn,
+                                &inspector,
+                            );
                         }));
                     })
                     .map(crate::runtime::spawn_blocking::reap_spawned_thread)
@@ -293,6 +397,7 @@ fn handle_connection(
     mut stream: TcpStream,
     snapshot_fn: &SnapshotFn,
     memory_residency_snapshot_fn: &MemoryResidencySnapshotFn,
+    inspector: &InspectorEndpoint,
 ) {
     let mut reader = if let Ok(read_half) = stream.try_clone() {
         BufReader::new(read_half)
@@ -327,6 +432,9 @@ fn handle_connection(
     }
 
     match path {
+        "/inspector" | "/debug/inspector" => {
+            handle_inspector_request(&mut stream, inspector);
+        }
         "/debug" | "/debug/" => {
             let _ = write_response(
                 &mut stream,
@@ -383,6 +491,96 @@ fn handle_connection(
     }
 
     let _ = stream.shutdown(Shutdown::Both);
+}
+
+fn handle_inspector_request(stream: &mut TcpStream, inspector: &InspectorEndpoint) {
+    let Some(snapshot_fn) = &inspector.snapshot_fn else {
+        let _ = write_inspector_response(stream, 503, br#"{"error":"inspector_unavailable"}"#);
+        return;
+    };
+    let snapshot = match panic::catch_unwind(AssertUnwindSafe(|| snapshot_fn(inspector.profile))) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            let _ = write_inspector_response(stream, 503, br#"{"error":"inspector_unavailable"}"#);
+            return;
+        }
+        Err(payload) => {
+            // A custom panic payload can itself panic on drop. Do not let it
+            // prevent the error response or the connection slot's release.
+            std::mem::forget(payload);
+            let _ =
+                write_inspector_response(stream, 500, br#"{"error":"inspector_capture_failed"}"#);
+            return;
+        }
+    };
+    let snapshot = if inspector.profile == InspectorProfile::Shareable {
+        snapshot.into_shareable()
+    } else {
+        snapshot
+    };
+    let mut body = InspectorJsonBuffer {
+        bytes: Vec::new(),
+        max_bytes: inspector.max_response_bytes,
+        limit_exceeded: false,
+    };
+    // Serialize before sending headers so a limit failure cannot produce a
+    // successful HTTP response containing truncated JSON.
+    match serde_json::to_writer(&mut body, &snapshot) {
+        Ok(()) => {
+            let _ = write_inspector_response(stream, 200, &body.bytes);
+        }
+        Err(_) if body.limit_exceeded => {
+            let _ = write_inspector_response(
+                stream,
+                503,
+                br#"{"error":"inspector_response_too_large"}"#,
+            );
+        }
+        Err(_) => {
+            let _ = write_inspector_response(
+                stream,
+                500,
+                br#"{"error":"inspector_serialization_failed"}"#,
+            );
+        }
+    }
+}
+
+struct InspectorJsonBuffer {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    limit_exceeded: bool,
+}
+
+impl Write for InspectorJsonBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.max_bytes.saturating_sub(self.bytes.len()) {
+            self.limit_exceeded = true;
+            return Err(std::io::Error::other(
+                "inspector response exceeds byte limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn write_inspector_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &[u8],
+) -> std::io::Result<()> {
+    write_response_with_headers(
+        stream,
+        status,
+        "application/json",
+        body,
+        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n",
+    )
 }
 
 fn read_headers<R: BufRead>(reader: &mut R) -> Vec<(String, String)> {
@@ -523,6 +721,16 @@ fn write_response(
     content_type: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    write_response_with_headers(stream, status, content_type, body, "")
+}
+
+fn write_response_with_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra_headers: &str,
+) -> std::io::Result<()> {
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -539,7 +747,7 @@ fn write_response(
         "HTTP/1.1 {status} {status_text}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
-         Connection: close\r\n\
+         {extra_headers}Connection: close\r\n\
          \r\n",
         body.len(),
     )?;

@@ -570,6 +570,27 @@ pub struct InspectorSnapshot {
 }
 
 impl InspectorSnapshot {
+    /// Remove diagnostic text before exporting an already captured snapshot.
+    ///
+    /// This applies the same policy as capturing with
+    /// [`InspectorProfile::Shareable`], including when the snapshot was
+    /// deserialized or supplied by an application callback. Record identities,
+    /// timing, topology, counters, and coverage are preserved.
+    #[must_use]
+    pub fn into_shareable(mut self) -> Self {
+        self.profile = InspectorProfile::Shareable;
+        for task in &mut self.tasks {
+            for checkpoint in &mut task.checkpoint_trail {
+                checkpoint.message = None;
+            }
+        }
+        for obligation in &mut self.obligations {
+            obligation.description = None;
+            obligation.acquired_at = None;
+        }
+        self
+    }
+
     /// Capture caller-borrowed state, including `LabRuntime::state`.
     ///
     /// Use [`TaskInspector::runtime_snapshot`] for a live native runtime: its
