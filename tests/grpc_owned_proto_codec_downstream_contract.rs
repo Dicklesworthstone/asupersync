@@ -21,12 +21,12 @@
 
 #![allow(missing_docs)]
 
-use asupersync::bytes::BytesMut;
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::grpc::codec::{Codec, FramedCodec};
 use asupersync::grpc::protobuf::{
-    ProtoCodec, ProtoCodecError, ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder,
-    ProtobufWireError, ProtobufWireField, ProtobufWireLimits, SymmetricProtoCodec, UnknownFields,
-    WireType, merge_nested_message,
+    DEFAULT_MAX_MESSAGE_SIZE, ProtoCodec, ProtoCodecError, ProtoMessage, ProtobufWireDecoder,
+    ProtobufWireEncoder, ProtobufWireError, ProtobufWireField, ProtobufWireLimits,
+    SymmetricProtoCodec, UnknownFields, WireType, merge_nested_message,
 };
 
 // ---------------------------------------------------------------------------
@@ -279,6 +279,174 @@ fn framing_layer_message_size_limits_reach_the_owned_codec() {
         framed.inner().wire_limits().max_message_len <= 64,
         "the structural decode budget must be tightened alongside the byte ceiling"
     );
+}
+
+#[test]
+fn framing_layer_can_raise_the_default_inbound_limit() {
+    // br-asupersync-fe1plr: an outer frame ceiling must also raise the
+    // automatically selected message, field, and work budgets.
+    let message = Path {
+        label: "x".repeat(DEFAULT_MAX_MESSAGE_SIZE + 1),
+        points: Vec::new(),
+        unknown: UnknownFields::new(),
+    };
+    let limit = 2 * DEFAULT_MAX_MESSAGE_SIZE;
+    let wire = message
+        .encode_to_bytes(ProtobufWireLimits::for_message_size(limit))
+        .expect("encode larger peer message");
+    assert!(wire.len() > DEFAULT_MAX_MESSAGE_SIZE);
+
+    // Build the uncompressed frame independently of the framing encoder.
+    let mut buffer = BytesMut::new();
+    buffer.extend_from_slice(&[0]);
+    buffer.extend_from_slice(
+        &u32::try_from(wire.len())
+            .expect("frame length")
+            .to_be_bytes(),
+    );
+    buffer.extend_from_slice(wire.as_ref());
+    let mut framed =
+        FramedCodec::with_message_size_limits(SymmetricProtoCodec::<Path>::new(), 64, limit);
+    assert_eq!(
+        framed.decode_message(&mut buffer).expect("decode frame"),
+        Some(message),
+    );
+    assert!(buffer.is_empty());
+    assert_eq!(framed.inner().max_encode_message_size(), 64);
+    assert_eq!(
+        framed.inner().wire_limits(),
+        ProtobufWireLimits::for_message_size(limit),
+    );
+}
+
+#[test]
+fn automatic_decode_limits_recover_after_zero_and_small_channel_limits() {
+    let message = Path {
+        label: "resized".repeat(8),
+        points: Vec::new(),
+        unknown: UnknownFields::new(),
+    };
+    let wire = message
+        .encode_to_bytes(ProtobufWireLimits::for_message_size(128))
+        .expect("fixture");
+    let mut codec = SymmetricProtoCodec::<Path>::with_max_size(16);
+    for limit in [0, 8, 128, 4, 64] {
+        codec.set_max_decode_message_size(limit);
+        assert_eq!(
+            codec.wire_limits(),
+            ProtobufWireLimits::for_message_size(limit)
+        );
+        if wire.len() > limit {
+            assert!(matches!(
+                codec.decode(&wire),
+                Err(ProtoCodecError::DecodeMessageTooLarge { size, limit: actual })
+                    if size == wire.len() && actual == limit
+            ));
+        } else {
+            assert_eq!(codec.decode(&wire).expect("raised limit"), message);
+        }
+        if limit == 0 {
+            assert_eq!(codec.decode(&Bytes::new()).expect("empty"), Path::default());
+        }
+    }
+    assert_eq!(codec.max_encode_message_size(), 16);
+}
+
+#[test]
+fn resizing_and_cloning_preserve_all_explicit_wire_limits() {
+    let limits = ProtobufWireLimits::for_message_size(128)
+        .with_max_field_len(12)
+        .with_max_fields(2)
+        .with_max_depth(0)
+        .with_max_work(24);
+    let mut original = SymmetricProtoCodec::<Path>::new().with_wire_limits(limits);
+    original.set_max_decode_message_size(2);
+    let mut codec = original.clone();
+    codec.set_max_decode_message_size(256);
+    assert_eq!(codec.wire_limits(), limits);
+    assert_eq!(original.wire_limits().max_message_len, 2);
+
+    // Fixed, well-formed wire bytes exercise each preserved policy.
+    let field_too_long = Bytes::from_static(b"\x0a\x0dabcdefghijklm");
+    assert!(matches!(
+        codec.decode(&field_too_long),
+        Err(ProtoCodecError::Wire(
+            ProtobufWireError::FieldLimitExceeded {
+                length: 13,
+                limit: 12,
+                ..
+            }
+        ))
+    ));
+    let too_many_fields = Bytes::from_static(b"\x18\x01\x20\x01\x28\x01");
+    assert!(matches!(
+        codec.decode(&too_many_fields),
+        Err(ProtoCodecError::Wire(
+            ProtobufWireError::FieldCountExceeded {
+                count: 3,
+                limit: 2,
+                ..
+            }
+        ))
+    ));
+    let nested = Bytes::from_static(b"\x12\x02\x08\x01");
+    assert!(matches!(
+        codec.decode(&nested),
+        Err(ProtoCodecError::Wire(
+            ProtobufWireError::RecursionLimitExceeded {
+                depth: 1,
+                limit: 0,
+                ..
+            }
+        ))
+    ));
+    let too_much_work =
+        Bytes::from_static(b"\x0a\x0cabcdefghijkl\x18\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01");
+    assert!(matches!(
+        codec.decode(&too_much_work),
+        Err(ProtoCodecError::Wire(
+            ProtobufWireError::WorkLimitExceeded { limit: 24, .. }
+        ))
+    ));
+    assert!(matches!(
+        codec.decode(&Bytes::from(vec![0; 129])),
+        Err(ProtoCodecError::Wire(
+            ProtobufWireError::MessageLimitExceeded {
+                length: 129,
+                limit: 128,
+            }
+        ))
+    ));
+    assert_eq!(
+        codec
+            .decode(&Bytes::from_static(b"\x0a\x02ok"))
+            .expect("within policy")
+            .label,
+        "ok",
+    );
+}
+
+#[test]
+fn replacing_an_explicit_policy_after_resizing_uses_the_new_ceiling() {
+    let mut codec = SymmetricProtoCodec::<Path>::with_max_size(128)
+        .with_wire_limits(ProtobufWireLimits::for_message_size(32));
+    codec.set_max_decode_message_size(4);
+    let mut codec = codec.with_wire_limits(ProtobufWireLimits::for_message_size(64));
+    codec.set_max_decode_message_size(128);
+    assert_eq!(
+        codec.wire_limits(),
+        ProtobufWireLimits::for_message_size(64)
+    );
+
+    let message = Path {
+        label: "x".repeat(40),
+        points: Vec::new(),
+        unknown: UnknownFields::new(),
+    };
+    let wire = message
+        .encode_to_bytes(ProtobufWireLimits::for_message_size(64))
+        .expect("fixture");
+    assert_eq!(codec.decode(&wire).expect("replacement policy"), message);
 }
 
 #[test]
