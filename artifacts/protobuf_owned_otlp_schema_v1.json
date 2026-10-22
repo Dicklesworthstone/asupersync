@@ -147,7 +147,7 @@
       },
       {
         "path": "src/grpc/protobuf_wire.rs",
-        "sha256": "588f70abdbdeb75adf3db6eefab17dfe755483b46d917c049b220eb670c97c19",
+        "sha256": "2aeb621e0897ae30a8486fcc611947a9a7e2b075af2cb6825dd2f56c197935a2",
         "role": "schema-neutral wire and generic budget authority"
       },
       {
@@ -854,7 +854,7 @@
       "max_length_delimited_field_bytes": 4194304,
       "max_wire_fields": 65536,
       "max_wire_depth": 100,
-      "max_wire_work_bytes": 16777216,
+      "max_wire_work_bytes": 436207616,
       "source": "ProtobufWireLimits::default() from the 4 MiB gRPC default"
     },
     "shared_semantic_budget": {
@@ -905,7 +905,7 @@
       "span_id_bytes": 8
     },
     "limit_provenance": [
-      "4 MiB message, 65,536 field, depth 100, and 4x work limits are current owned generic-wire defaults.",
+      "4 MiB message, 65,536 fields, depth 100, and 416 MiB cumulative work are current owned generic-wire defaults. Automatic work is message bytes times (depth + 4); explicit work overrides remain independent.",
       "128 attributes and 4,096 value bytes are current owned logs limits.",
       "The 128 span attributes/events values are conformance-test helper defaults only. The simplified/testing OtlpSpan exporter has an unbounded attribute Vec, no events collection, and a distinct 255-character value truncation, so trace attribute/event/link schema caps are new A3 policy relative to that exporter.",
       "1,000 points per metric aligns with current max_cardinality; 4,096 metrics aligns with current max_metrics.",

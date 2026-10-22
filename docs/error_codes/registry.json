@@ -314,6 +314,26 @@
       "source_refs": ["src/obligation/recovery.rs"]
     },
     {
+      "code": "ASUP-E106",
+      "name": "obligation-projection-inconsistent",
+      "area": "obligations",
+      "status": "live",
+      "summary": "Obligation arena records disagree with checked admission credits, ticket identities, or region accounting.",
+      "probable_causes": [
+        "A reserve, handoff, or terminal projection lost its record or exact generation binding.",
+        "Region admission counters drifted from actual obligation ownership.",
+        "A close attempt encountered a pending arena record despite zero cached region counts."
+      ],
+      "remediation": [
+        "Inspect the typed checkpoint, issue, region generation, obligation id, and ticket in obligation_conservation_report().",
+        "Preserve the first fault and reproduce its reserve, handoff, and resolution sequence in the lab.",
+        "Repair the mismatched lifecycle transition; do not clear counters or force region reclamation."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E106.md",
+      "since": "0.6.0",
+      "source_refs": ["src/runtime/obligation_conservation.rs"]
+    },
+    {
       "code": "ASUP-E201",
       "name": "channel-closed",
       "area": "channels-sync",

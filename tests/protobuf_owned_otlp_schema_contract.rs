@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/protobuf_owned_otlp_schema_v1.json";
 const DOC_PATH: &str = "docs/protobuf_owned_otlp_schema.md";
-const ARTIFACT_SHA256: &str = "a87f6a5a6323d1ffefa0ff1b1d7ca2fc3cbab3e17b158fab394d2a51937a77de";
+const ARTIFACT_SHA256: &str = "70eaae19f400d3d02a6c0c1d20d3f8283c7a22c9034b4ef53a0711b55d294650";
 const DOC_SHA256: &str = "fd133292a5a1c33fbb0315b71b547ebcf9c5dc7b38cf1d10377ba79536946abf";
 const SCHEMA_SIGNATURE_SHA256: &str =
     "2b9311b5c766da1b2fb88262aeb89e125c41f8ea4d8406e534a2e9b42839256b";
@@ -37,7 +37,7 @@ const SERVICE_SIGNATURE_SHA256: &str =
 const ORACLE_PIN_SIGNATURE_SHA256: &str =
     "f8d06b6ad60ce88a932eb3426a68007013ae428270159c57c1a889e46f333544";
 const REPOSITORY_PIN_SIGNATURE_SHA256: &str =
-    "165b6f88a7120152eb41c5fac62ae5ab3a634f522caccf83aa261d441a66253a";
+    "8b29182204e755715e85ae8cf3d649f6d8fe0fb0a2c1f2111d54b4464c993331";
 const DOC_BEGIN: &str = "<!-- BEGIN PROTOBUF OWNED OTLP SCHEMA -->";
 const DOC_END: &str = "<!-- END PROTOBUF OWNED OTLP SCHEMA -->";
 
@@ -1174,7 +1174,7 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
         ("max_length_delimited_field_bytes", 4_194_304),
         ("max_wire_fields", 65_536),
         ("max_wire_depth", 100),
-        ("max_wire_work_bytes", 16_777_216),
+        ("max_wire_work_bytes", 436_207_616),
     ] {
         require_unsigned(generic, key, expected)?;
     }
@@ -1234,7 +1234,10 @@ fn validate_resource_and_implementation(value: &Value) -> ValidationResult {
     let field_bytes = unsigned(generic, "max_length_delimited_field_bytes")?;
     let work_bytes = unsigned(generic, "max_wire_work_bytes")?;
     if field_bytes > message_bytes
-        || message_bytes.checked_mul(4) != Some(work_bytes)
+        || unsigned(generic, "max_wire_depth")?
+            .checked_add(4)
+            .and_then(|passes| message_bytes.checked_mul(passes))
+            != Some(work_bytes)
         || unsigned(
             resources
                 .get("collection_limits")

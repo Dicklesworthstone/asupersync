@@ -174,6 +174,19 @@
     }
 
     #[test]
+    fn runtime_snapshot_export_scrubbing_matches_shareable_capture() {
+        let (full, shareable) = inspector_lab_fixture();
+        let scrubbed = full.into_shareable();
+        assert_eq!(scrubbed, shareable);
+        assert_eq!(scrubbed.clone().into_shareable(), scrubbed);
+
+        // A callback's declared profile must not bypass export scrubbing.
+        let (mut mislabeled, _) = inspector_lab_fixture();
+        mislabeled.profile = InspectorProfile::Shareable;
+        assert_eq!(mislabeled.into_shareable(), shareable);
+    }
+
+    #[test]
     fn runtime_snapshot_ignores_display_filter_and_omits_unclocked_checkpoint_times() {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);

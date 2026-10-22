@@ -611,7 +611,7 @@
     "default_max_message_bytes": 4194304,
     "default_max_wire_fields": 65536,
     "default_max_wire_depth": 100,
-    "default_max_wire_work_bytes": 16777216,
+    "default_max_wire_work_bytes": 436207616,
     "hard_protobuf_message_ceiling_bytes": 2147483647,
     "wire_envelope_configurability": "ProtoMessage encode and decode accept caller-supplied ProtobufWireLimits; the four default_* values are defaults, not immutable schema caps, and remain clamped by the protobuf message ceiling.",
     "max_total_repeated_items": 65536,
@@ -814,8 +814,8 @@
     },
     {
       "path": "src/grpc/protobuf_wire.rs",
-      "sha256": "588f70abdbdeb75adf3db6eefab17dfe755483b46d917c049b220eb670c97c19",
-      "line_count": 1971,
+      "sha256": "2aeb621e0897ae30a8486fcc611947a9a7e2b075af2cb6825dd2f56c197935a2",
+      "line_count": 1993,
       "anchors": ["The encoder is deterministic for the same ordered sequence", "pub struct ProtobufWireLimits"]
     },
     {
@@ -892,8 +892,8 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "e134a7f69b6341e5c6ea5f9f5358df4998bba9af2aa72c9ecd224c21e82aab6d",
-      "line_count": 2237,
+      "sha256": "0a6e74ce66cb9ce9b579b9fcfe42cbf287ae6464f049fe811a3cfcb2bbd1784b",
+      "line_count": 2240,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
     {
@@ -910,7 +910,7 @@
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "a87f6a5a6323d1ffefa0ff1b1d7ca2fc3cbab3e17b158fab394d2a51937a77de",
+      "sha256": "70eaae19f400d3d02a6c0c1d20d3f8283c7a22c9034b4ef53a0711b55d294650",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

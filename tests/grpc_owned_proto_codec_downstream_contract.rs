@@ -26,7 +26,7 @@ use asupersync::grpc::codec::{Codec, FramedCodec};
 use asupersync::grpc::protobuf::{
     DEFAULT_MAX_MESSAGE_SIZE, ProtoCodec, ProtoCodecError, ProtoMessage, ProtobufWireDecoder,
     ProtobufWireEncoder, ProtobufWireError, ProtobufWireField, ProtobufWireLimits,
-    SymmetricProtoCodec, UnknownFields, WireType, merge_nested_message,
+    ProtobufWireMessage, SymmetricProtoCodec, UnknownFields, WireType, merge_nested_message,
 };
 
 // ---------------------------------------------------------------------------
@@ -447,6 +447,249 @@ fn replacing_an_explicit_policy_after_resizing_uses_the_new_ceiling() {
         .encode_to_bytes(ProtobufWireLimits::for_message_size(64))
         .expect("fixture");
     assert_eq!(codec.decode(&wire).expect("replacement policy"), message);
+}
+
+/// `message NestedPayload { NestedPayload child = 1; bytes payload = 2; }`
+#[derive(Debug, Default, Eq, PartialEq)]
+struct NestedPayload {
+    child: Option<Box<Self>>,
+    payload: Vec<u8>,
+}
+
+impl ProtoMessage for NestedPayload {
+    fn encode_fields(&self, encoder: &mut ProtobufWireEncoder) -> Result<(), ProtobufWireError> {
+        if let Some(child) = &self.child {
+            encoder.write_nested_message(1, |nested| child.encode_fields(nested))?;
+        }
+        if !self.payload.is_empty() {
+            encoder.write_bytes(2, &self.payload)?;
+        }
+        Ok(())
+    }
+
+    fn merge_field<'wire>(
+        &mut self,
+        field: &ProtobufWireField<'wire>,
+        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+    ) -> Result<bool, ProtobufWireError> {
+        match field.field_number() {
+            1 => {
+                let child = self.child.get_or_insert_with(Box::default);
+                merge_nested_message(child.as_mut(), field, decoder)?;
+                Ok(true)
+            }
+            2 => {
+                self.payload = field.as_bytes()?.to_vec();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+}
+
+fn nested_payload(payload_len: usize, depth: usize) -> NestedPayload {
+    let mut message = NestedPayload {
+        child: None,
+        payload: vec![b'x'; payload_len],
+    };
+    for _ in 0..depth {
+        message = NestedPayload {
+            child: Some(Box::new(message)),
+            payload: Vec::new(),
+        };
+    }
+    message
+}
+
+// Independent wire fixture: no owned encoder or derive implementation is used
+// to manufacture the bytes that must be accepted by the decoder.
+fn nested_payload_wire(payload_len: usize, depth: usize) -> Bytes {
+    fn wrap(key: u8, payload: &[u8]) -> Vec<u8> {
+        let mut wire = vec![key];
+        let mut length = u64::try_from(payload.len()).expect("wire length");
+        while length >= 0x80 {
+            wire.push((length as u8 & 0x7f) | 0x80);
+            length >>= 7;
+        }
+        wire.push(length as u8);
+        wire.extend_from_slice(payload);
+        wire
+    }
+
+    let mut wire = wrap(0x12, &vec![b'x'; payload_len]);
+    for _ in 0..depth {
+        wire = wrap(0x0a, &wire);
+    }
+    Bytes::from(wire)
+}
+
+#[test]
+fn automatic_work_limits_admit_nested_messages_within_byte_and_depth_limits() {
+    // The small message is 90 wire bytes but needs 430 units of cumulative
+    // work; the large message needs over 16 MiB. Both exceeded the former
+    // four-times-message-ceiling budget despite obeying byte and depth limits.
+    for (payload_len, ceiling) in [
+        (80, 100),
+        (7 * DEFAULT_MAX_MESSAGE_SIZE / 8, DEFAULT_MAX_MESSAGE_SIZE),
+    ] {
+        let message = nested_payload(payload_len, 4);
+        let wire = nested_payload_wire(payload_len, 4);
+        assert!(wire.len() < ceiling);
+        let mut codec = SymmetricProtoCodec::<NestedPayload>::with_max_size(ceiling);
+        assert_eq!(codec.decode(&wire).expect("admitted nested input"), message);
+        assert_eq!(
+            codec.encode(&message).expect("admitted nested output"),
+            wire
+        );
+    }
+}
+
+#[test]
+fn the_default_depth_limit_remains_effective_at_its_boundary() {
+    let message = nested_payload(1, 100);
+    let wire = nested_payload_wire(1, 100);
+    let mut codec = SymmetricProtoCodec::<NestedPayload>::new();
+    assert_eq!(codec.decode(&wire).expect("depth 100 input"), message);
+    assert_eq!(codec.encode(&message).expect("depth 100 output"), wire);
+
+    let message = nested_payload(1, 101);
+    let wire = nested_payload_wire(1, 101);
+    for result in [
+        codec.decode(&wire).map(|_| ()),
+        codec.encode(&message).map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(ProtoCodecError::Wire(
+                ProtobufWireError::RecursionLimitExceeded {
+                    depth: 101,
+                    limit: 100,
+                    ..
+                }
+            ))
+        ));
+    }
+}
+
+#[test]
+fn explicit_work_caps_still_reject_nested_input_and_output() {
+    let message = nested_payload(80, 4);
+    let wire = nested_payload_wire(80, 4);
+    // Setter order must never turn an explicit CPU-work policy into an
+    // automatically enlarged allowance.
+    for limits in [
+        ProtobufWireLimits::for_message_size(100)
+            .with_max_work(400)
+            .with_max_depth(4),
+        ProtobufWireLimits::for_message_size(100)
+            .with_max_depth(4)
+            .with_max_work(400),
+    ] {
+        let mut codec =
+            SymmetricProtoCodec::<NestedPayload>::with_max_size(100).with_wire_limits(limits);
+        for result in [
+            codec.decode(&wire).map(|_| ()),
+            codec.encode(&message).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(ProtoCodecError::Wire(
+                    ProtobufWireError::WorkLimitExceeded { limit: 400, .. }
+                ))
+            ));
+        }
+    }
+}
+
+#[test]
+fn configured_depth_sizes_work_without_relaxing_other_bounds() {
+    let message = nested_payload(80, 4);
+    let wire = nested_payload_wire(80, 4);
+    let limits = ProtobufWireLimits::for_message_size_and_depth(100, 4);
+    let mut codec =
+        SymmetricProtoCodec::<NestedPayload>::with_max_size(100).with_wire_limits(limits);
+    assert_eq!(codec.decode(&wire).expect("configured depth"), message);
+    assert_eq!(codec.encode(&message).expect("configured depth"), wire);
+
+    for limits in [
+        limits.with_max_fields(4),
+        limits.with_max_depth(3),
+        limits.with_max_field_len(79),
+    ] {
+        let mut codec =
+            SymmetricProtoCodec::<NestedPayload>::with_max_size(100).with_wire_limits(limits);
+        assert!(
+            codec.decode(&wire).is_err(),
+            "other decoding limits still apply"
+        );
+        assert!(
+            codec.encode(&message).is_err(),
+            "other encoding limits still apply"
+        );
+    }
+    let mut codec = SymmetricProtoCodec::<NestedPayload>::with_max_size(wire.len() - 1);
+    assert!(codec.decode(&wire).is_err(), "wire ceiling still applies");
+    assert!(
+        codec.encode(&message).is_err(),
+        "wire ceiling still applies"
+    );
+}
+
+#[test]
+fn repeated_root_and_nested_traversals_still_exhaust_shared_work() {
+    let mut message = ProtobufWireMessage::new(
+        &[0x08, 0x01],
+        ProtobufWireLimits::for_message_size_and_depth(2, 0),
+    )
+    .expect("root fixture");
+    for _ in 0..4 {
+        let mut decoder = message.decoder();
+        assert!(decoder.next_field().expect("admitted root pass").is_some());
+        assert!(decoder.next_field().expect("end").is_none());
+    }
+    assert!(matches!(
+        message.decoder().next_field(),
+        Err(ProtobufWireError::WorkLimitExceeded { limit: 8, .. })
+    ));
+    assert_eq!(message.work_used(), 8);
+
+    let mut message = ProtobufWireMessage::new(
+        &[0x0a, 0x02, 0x10, 0x01],
+        ProtobufWireLimits::for_message_size_and_depth(4, 1),
+    )
+    .expect("nested fixture");
+    let mut decoder = message.decoder();
+    let field = decoder.next_field().expect("wrapper").expect("field");
+    for _ in 0..8 {
+        let mut child = decoder.nested_message(&field).expect("child");
+        assert!(child.next_field().expect("admitted child pass").is_some());
+        assert!(child.next_field().expect("end").is_none());
+    }
+    assert!(matches!(
+        decoder.nested_message(&field).expect("child").next_field(),
+        Err(ProtobufWireError::WorkLimitExceeded { limit: 20, .. })
+    ));
+    assert_eq!(message.work_used(), 20);
+}
+
+#[test]
+fn automatic_work_limit_arithmetic_handles_zero_and_overflow() {
+    const ZERO: ProtobufWireLimits = ProtobufWireLimits::for_message_size_and_depth(0, usize::MAX);
+    const LARGE: ProtobufWireLimits =
+        ProtobufWireLimits::for_message_size_and_depth(usize::MAX, usize::MAX);
+    assert_eq!(ZERO.max_work, 0);
+    assert_eq!(LARGE.max_work, usize::MAX);
+    assert_eq!(
+        ProtobufWireLimits::for_message_size_and_depth(32, 0).max_work,
+        128
+    );
+    assert_eq!(
+        ProtobufWireLimits::for_message_size(32)
+            .with_max_work(7)
+            .with_max_depth(0)
+            .max_work,
+        7
+    );
 }
 
 #[test]

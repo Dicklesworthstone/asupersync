@@ -21,6 +21,369 @@
         }
     }
 
+    fn inspector_fixture() -> InspectorSnapshot {
+        let mut lab = crate::LabRuntime::with_seed(41);
+        let root = lab.state.create_root_region(crate::Budget::INFINITE);
+        let (holder, _handle) = lab
+            .state
+            .create_task(root, crate::Budget::INFINITE, std::future::pending::<()>())
+            .unwrap();
+        let cx = lab.state.task(holder).unwrap().cx.as_ref().unwrap().clone();
+        lab.advance_time_to(crate::types::Time::from_secs(2));
+        cx.checkpoint_with("private-http-checkpoint-canary")
+            .unwrap();
+        let obligation = lab
+            .state
+            .create_obligation(
+                crate::record::ObligationKind::Ack,
+                holder,
+                root,
+                Some("private-http-obligation-canary".to_string()),
+            )
+            .unwrap();
+        let snapshot = InspectorSnapshot::from_state(&lab.state, InspectorProfile::Full);
+        lab.state.commit_obligation(obligation).unwrap();
+        snapshot
+    }
+
+    fn inspector_server() -> DebugServer {
+        DebugServer::with_config(
+            0,
+            Arc::new(test_snapshot),
+            DebugServerConfig {
+                print_url: false,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn request_server(server: &DebugServer, method: &str, path: &str) -> String {
+        let mut stream = TcpStream::connect(server.local_addr().unwrap()).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, body) = response
+            .split_once("\r\n\r\n")
+            .expect("complete HTTP response");
+        let length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert_eq!(body.len(), length, "response must have a complete body");
+        response
+    }
+
+    fn response_body(response: &str) -> &str {
+        response.split_once("\r\n\r\n").unwrap().1
+    }
+
+    #[test]
+    fn inspector_http_defaults_to_shareable_and_query_cannot_escalate() {
+        let mut full = inspector_fixture();
+        let expected = full.clone().into_shareable();
+        // Even a provider that mislabels its full data cannot bypass scrubbing.
+        full.profile = InspectorProfile::Shareable;
+        let mut server = inspector_server().with_inspector_snapshot_fn(Arc::new(move |profile| {
+            assert_eq!(profile, InspectorProfile::Shareable);
+            Some(full.clone())
+        }));
+        server.start().unwrap();
+        assert!(server.local_addr().unwrap().ip().is_loopback());
+
+        for path in ["/inspector?profile=full", "/debug/inspector"] {
+            let response = request_server(&server, "GET", path);
+            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+            assert!(response.contains("Content-Type: application/json\r\n"));
+            assert!(response.contains("Cache-Control: no-store\r\n"));
+            assert!(response.contains("X-Content-Type-Options: nosniff\r\n"));
+            assert!(
+                !response
+                    .to_ascii_lowercase()
+                    .contains("access-control-allow-origin")
+            );
+            for canary in [
+                "private-http-checkpoint-canary",
+                "private-http-obligation-canary",
+                "debug_inline_tests.rs",
+            ] {
+                assert!(
+                    !response.contains(canary),
+                    "diagnostic text escaped: {canary}"
+                );
+            }
+            let snapshot: InspectorSnapshot =
+                serde_json::from_str(response_body(&response)).unwrap();
+            assert_eq!(snapshot, expected);
+            let wire: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+            assert_eq!(
+                wire["schema_version"],
+                crate::observability::INSPECTOR_SNAPSHOT_SCHEMA_V1
+            );
+            assert_eq!(wire["counters"]["reserved_obligations"], 1);
+            assert!(wire["tasks"][0]["budget"]["poll_quota"].is_number());
+        }
+
+        // Adding the provider does not replace the dashboard's legacy data.
+        let legacy = request_server(&server, "GET", "/debug/snapshot");
+        assert!(legacy.starts_with("HTTP/1.1 200 OK\r\n"));
+        let wire: serde_json::Value = serde_json::from_str(response_body(&legacy)).unwrap();
+        assert_eq!(wire["timestamp"], 12345);
+    }
+
+    #[test]
+    fn inspector_http_full_profile_requires_server_configuration() {
+        let full = inspector_fixture();
+        let expected = full.clone();
+        let mut server = inspector_server()
+            .with_inspector_snapshot_fn(Arc::new(move |profile| {
+                assert_eq!(profile, InspectorProfile::Full);
+                Some(full.clone())
+            }))
+            .with_inspector_profile(InspectorProfile::Full);
+        server.start().unwrap();
+        let response = request_server(&server, "GET", "/inspector");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.contains("private-http-checkpoint-canary"));
+        assert!(response.contains("private-http-obligation-canary"));
+        assert!(response.contains("debug_inline_tests.rs"));
+        assert!(response.contains("Cache-Control: no-store\r\n"));
+        assert_eq!(
+            serde_json::from_str::<InspectorSnapshot>(response_body(&response)).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn inspector_http_unavailable_and_route_errors_are_distinct() {
+        let mut unconfigured = inspector_server();
+        unconfigured.start().unwrap();
+        for path in ["/inspector", "/debug/inspector"] {
+            let response = request_server(&unconfigured, "GET", path);
+            assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+            let error: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+            assert_eq!(error["error"], "inspector_unavailable");
+        }
+        let unknown = request_server(&unconfigured, "GET", "/inspectors");
+        assert!(unknown.starts_with("HTTP/1.1 404 Not Found\r\n"));
+
+        let captures = Arc::new(AtomicUsize::new(0));
+        let capture_count = Arc::clone(&captures);
+        let mut unavailable = inspector_server().with_inspector_snapshot_fn(Arc::new(move |_| {
+            capture_count.fetch_add(1, Ordering::Relaxed);
+            None
+        }));
+        unavailable.start().unwrap();
+        let method = request_server(&unavailable, "POST", "/inspector");
+        assert!(method.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+        assert_eq!(captures.load(Ordering::Relaxed), 0);
+        let response = request_server(&unavailable, "GET", "/inspector");
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        let error: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+        assert_eq!(error["error"], "inspector_unavailable");
+        assert_eq!(captures.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn inspector_http_response_limit_is_exact_and_never_truncates_json() {
+        let snapshot = inspector_fixture();
+        let shareable = snapshot.clone().into_shareable();
+        let expected_bytes = serde_json::to_vec(&shareable).unwrap();
+        for limit in [expected_bytes.len(), expected_bytes.len() - 1, 0] {
+            let captured = snapshot.clone();
+            let mut server = inspector_server()
+                .with_inspector_snapshot_fn(Arc::new(move |_| Some(captured.clone())))
+                .with_inspector_max_response_bytes(limit);
+            server.start().unwrap();
+            let response = request_server(&server, "GET", "/inspector");
+            let body = response_body(&response);
+            if limit == expected_bytes.len() {
+                assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+                assert_eq!(body.as_bytes(), expected_bytes);
+            } else {
+                assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+                let error: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(error["error"], "inspector_response_too_large");
+                assert!(error.get("tasks").is_none());
+            }
+            assert!(!response.contains("private-http-checkpoint-canary"));
+        }
+    }
+
+    #[test]
+    fn inspector_http_capture_panic_returns_error_and_releases_connection_slot() {
+        let captures = Arc::new(AtomicUsize::new(0));
+        let capture_count = Arc::clone(&captures);
+        let snapshot = inspector_fixture();
+        let mut server = DebugServer::with_config(
+            0,
+            Arc::new(test_snapshot),
+            DebugServerConfig {
+                print_url: false,
+                max_connections: 1,
+                ..Default::default()
+            },
+        )
+        .with_inspector_snapshot_fn(Arc::new(move |_| {
+            assert_ne!(
+                capture_count.fetch_add(1, Ordering::Relaxed),
+                0,
+                "private-panic-canary"
+            );
+            Some(snapshot.clone())
+        }));
+        server.start().unwrap();
+        let failed = request_server(&server, "GET", "/inspector");
+        assert!(failed.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+        assert!(!failed.contains("private-panic-canary"));
+        let error: serde_json::Value = serde_json::from_str(response_body(&failed)).unwrap();
+        assert_eq!(error["error"], "inspector_capture_failed");
+
+        // The previous connection can still be dropping its guard when the
+        // client sees EOF. Allow that guard to release before requiring success.
+        let mut recovered = false;
+        for _ in 0..20 {
+            let response = request_server(&server, "GET", "/inspector");
+            if response.starts_with("HTTP/1.1 200 OK\r\n") {
+                serde_json::from_str::<InspectorSnapshot>(response_body(&response)).unwrap();
+                recovered = true;
+                break;
+            }
+            assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        }
+        assert!(
+            recovered,
+            "provider panic must not consume a connection slot permanently"
+        );
+        assert_eq!(captures.load(Ordering::Relaxed), 2);
+    }
+
+    async fn wait_for_inspector(mut probe: impl FnMut() -> bool) -> bool {
+        for _ in 0..20_000 {
+            if probe() {
+                return true;
+            }
+            crate::runtime::yield_now().await;
+        }
+        probe()
+    }
+
+    #[test]
+    fn inspector_http_native_runtime_obligation_lifecycle_across_state_shapes() {
+        use crate::record::{ObligationKind, ObligationState};
+        use crate::runtime::RuntimeBuilder;
+
+        for workers in [1, 2] {
+            for sharded in [false, true] {
+                let builder = if workers == 1 {
+                    RuntimeBuilder::current_thread()
+                } else {
+                    RuntimeBuilder::multi_thread().worker_threads(workers)
+                };
+                let runtime = builder.with_sharded_state(sharded).build().unwrap();
+                let inspector = runtime.task_inspector(TaskInspectorConfig::default());
+                let mut server = inspector_server().with_runtime_inspector(runtime.handle());
+                server.start().unwrap();
+
+                runtime.block_on(async {
+                    let cx = crate::Cx::current().unwrap();
+                    let holder = cx.task_id();
+                    let token = cx
+                        .try_register_obligation_checked(ObligationKind::Ack, holder)
+                        .unwrap()
+                        .unwrap();
+                    assert!(
+                        wait_for_inspector(|| {
+                            inspector
+                                .runtime_snapshot(InspectorProfile::Shareable)
+                                .obligations
+                                .iter()
+                                .any(|ob| {
+                                    ob.holder == holder && ob.state == ObligationState::Reserved
+                                })
+                        })
+                        .await,
+                        "workers={workers} sharded={sharded}: reservation must be admitted"
+                    );
+
+                    let response = request_server(&server, "GET", "/inspector");
+                    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+                    let held: InspectorSnapshot =
+                        serde_json::from_str(response_body(&response)).unwrap();
+                    assert_eq!(
+                        held.schema_version,
+                        crate::observability::INSPECTOR_SNAPSHOT_SCHEMA_V1
+                    );
+                    assert_eq!(held.profile, InspectorProfile::Shareable);
+                    assert!(held.coverage.record_tables_locked);
+                    assert_eq!(held.coverage.external_obligation_table, sharded);
+                    let obligation = held
+                        .obligations
+                        .iter()
+                        .find(|ob| ob.holder == holder && ob.state == ObligationState::Reserved)
+                        .unwrap();
+                    let obligation_id = obligation.id;
+                    let task = held
+                        .tasks
+                        .iter()
+                        .find(|task| task.details.id == holder)
+                        .unwrap();
+                    let region = held
+                        .regions
+                        .iter()
+                        .find(|region| region.id == cx.region_id())
+                        .unwrap();
+                    assert_eq!(obligation.region, region.id);
+                    assert_eq!(task.details.region_id, region.id);
+                    assert!(task.details.obligations.contains(&obligation_id));
+                    assert!(region.tasks.contains(&holder));
+                    assert_eq!(held.counters.reserved_obligations, 1);
+                    assert!(task.budget.is_some());
+                    assert!(obligation.description.is_none());
+                    assert!(obligation.acquired_at.is_none());
+
+                    assert!(token.commit());
+                    assert!(
+                        wait_for_inspector(|| {
+                            inspector
+                                .runtime_snapshot(InspectorProfile::Shareable)
+                                .obligations
+                                .iter()
+                                .find(|ob| ob.id == obligation_id)
+                                .is_none_or(|ob| ob.state == ObligationState::Committed)
+                        })
+                        .await,
+                        "workers={workers} sharded={sharded}: resolution must be applied"
+                    );
+                    let response = request_server(&server, "GET", "/inspector");
+                    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+                    let resolved: InspectorSnapshot =
+                        serde_json::from_str(response_body(&response)).unwrap();
+                    assert_eq!(resolved.counters.reserved_obligations, 0);
+                    assert!(
+                        resolved
+                            .tasks
+                            .iter()
+                            .all(|task| !task.details.obligations.contains(&obligation_id))
+                    );
+                });
+                server.stop();
+            }
+        }
+    }
+
     #[test]
     fn server_starts_and_serves_snapshot() {
         let snapshot_fn: SnapshotFn = Arc::new(test_snapshot);

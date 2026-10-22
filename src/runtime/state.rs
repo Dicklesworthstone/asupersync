@@ -2261,6 +2261,9 @@ pub struct RuntimeState {
     /// Private association with preaccepted credits; quota lives in RegionRecord.
     admitted_obligations:
         DetHashMap<ObligationId, Arc<crate::runtime::obligation_mailbox::AdmittedObligation>>,
+    /// Optional cross-table projection checks; the lab always enables these.
+    obligation_conservation:
+        Option<crate::runtime::obligation_conservation::ObligationConservationMonitor>,
     /// Current logical time.
     pub now: Time,
     /// The root region.
@@ -2292,6 +2295,8 @@ pub struct RuntimeState {
     timer_driver: Option<TimerDriverHandle>,
     /// Logical clock mode used for task contexts.
     logical_clock_mode: LogicalClockMode,
+    /// Additive lab-only producer; ordinary runtime clock policy is unchanged.
+    task_causality: bool,
     /// Cancel attribution configuration (cause-chain limits, memory caps).
     cancel_attribution: CancelAttributionConfig,
     /// Entropy source for capability-based randomness.
@@ -2597,6 +2602,7 @@ impl RuntimeState {
             tasks: TaskTable::with_capacity(capacity_hints.task_capacity),
             obligations: ObligationTable::with_capacity(capacity_hints.obligation_capacity),
             admitted_obligations: DetHashMap::default(),
+            obligation_conservation: None,
             now: Time::from_nanos(1_000_000_000),
             root_region: None,
             trace: TraceBufferHandle::new(trace_capacity),
@@ -2607,6 +2613,7 @@ impl RuntimeState {
             io_reactor_capability_snapshot: IoReactorCapabilitySnapshot::no_reactor(),
             timer_driver: None,
             logical_clock_mode: LogicalClockMode::Lamport,
+            task_causality: false,
             cancel_attribution: CancelAttributionConfig::default(),
             entropy_source: Arc::new(OsEntropy),
             spawn_authorization_key: None,
@@ -3280,8 +3287,47 @@ impl RuntimeState {
     }
 
     /// Sets the logical clock mode for new task contexts.
+    ///
+    /// This replaces the opt-in lab task-causality policy for subsequently
+    /// constructed contexts. Existing contexts keep their clocks.
     pub fn set_logical_clock_mode(&mut self, mode: LogicalClockMode) {
         self.logical_clock_mode = mode;
+        self.task_causality = false;
+    }
+
+    pub(crate) fn enable_lab_task_causality(&mut self) {
+        self.logical_clock_mode = LogicalClockMode::Vector {
+            node: crate::remote::NodeId::new("lab"),
+        };
+        self.task_causality = true;
+    }
+
+    pub(crate) fn task_causality_runtime(&self) -> Option<u64> {
+        self.task_causality.then_some(self.instance_id)
+    }
+
+    /// Builds one component per full generational task identity. A parent
+    /// snapshot is trusted only when it came from this opt-in runtime.
+    pub(crate) fn build_task_logical_clock(
+        &self,
+        task: TaskId,
+        parent: Option<&(u64, LogicalTime)>,
+    ) -> crate::trace::distributed::LogicalClockHandle {
+        if !self.task_causality {
+            return self
+                .logical_clock_mode
+                .build_handle(self.timer_driver_handle());
+        }
+        let clock = LogicalClockMode::Vector {
+            node: crate::remote::NodeId::new(format!("lab-task:{:016x}", task.as_u64())),
+        }
+        .build_handle(self.timer_driver_handle());
+        if let Some((runtime, time)) = parent
+            && *runtime == self.instance_id
+        {
+            let _ = clock.receive(time);
+        }
+        clock
     }
 
     /// Returns the cancel attribution configuration for this runtime.
@@ -3343,6 +3389,98 @@ impl RuntimeState {
     #[must_use]
     pub fn leak_count(&self) -> u64 {
         self.leak_count
+    }
+
+    /// Enables cross-table obligation projection checks after mailbox drains
+    /// and before region reclamation. The first disagreement remains latched.
+    ///
+    /// Checks reconcile actual arena records, checked-credit decisions, ticket
+    /// bindings, and region accounting. Queued checked Reserve/Handoff receipts
+    /// explicitly defer equality; terminal receipts can be checked before they
+    /// apply. This is not a lifetime ledger or a proof of unprojected legacy
+    /// posts. The native runtime defaults to disabled; the lab enables it.
+    pub fn enable_obligation_conservation_checks(&mut self) {
+        self.obligation_conservation.get_or_insert_with(
+            crate::runtime::obligation_conservation::ObligationConservationMonitor::new,
+        );
+        let _ = self.check_obligation_conservation();
+    }
+
+    /// Latest enabled checkpoint's coverage and first latched fault.
+    #[must_use]
+    pub fn obligation_conservation_report(
+        &self,
+    ) -> Option<crate::runtime::obligation_conservation::ObligationConservationReport> {
+        self.obligation_conservation
+            .as_ref()
+            .map(crate::runtime::obligation_conservation::ObligationConservationMonitor::snapshot)
+    }
+
+    /// Inspects actual obligation projections now, even when automatic checking
+    /// is disabled. An enabled monitor retains its first observed violation.
+    /// A report with deferred regions does not establish projection equality.
+    #[must_use]
+    pub fn check_obligation_conservation(
+        &mut self,
+    ) -> crate::runtime::obligation_conservation::ObligationConservationReport {
+        let gateway = self.obligation_gateway.clone();
+        let report = self.inspect_obligation_projection(
+            gateway.as_ref().map(|gateway| gateway.mailbox().as_ref()),
+            crate::runtime::obligation_conservation::ObligationConservationCheckpoint::Inspection,
+        );
+        if let Some(monitor) = self.obligation_conservation.as_mut() {
+            monitor.record(report);
+            monitor.snapshot()
+        } else {
+            report
+        }
+    }
+
+    pub(crate) fn check_obligation_conservation_after_drain(
+        &mut self,
+        mailbox: &crate::runtime::obligation_mailbox::ObligationMailbox,
+    ) {
+        if self.obligation_conservation.is_none() {
+            return;
+        }
+        let report = self.inspect_obligation_projection(
+            Some(mailbox),
+            crate::runtime::obligation_conservation::ObligationConservationCheckpoint::MailboxDrain,
+        );
+        if let Some(monitor) = self.obligation_conservation.as_mut() {
+            monitor.record(report);
+        }
+    }
+
+    fn inspect_obligation_projection(
+        &self,
+        mailbox: Option<&crate::runtime::obligation_mailbox::ObligationMailbox>,
+        checkpoint: crate::runtime::obligation_conservation::ObligationConservationCheckpoint,
+    ) -> crate::runtime::obligation_conservation::ObligationConservationReport {
+        // Regions remain embedded in sharded runtimes; obligations are in C.
+        // The scanner never takes another runtime/shard lock beneath a region
+        // admission gate, and no user callbacks run during inspection.
+        if let Some(shards) = self.shard_tables.as_ref() {
+            let obligations = shards
+                .obligations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::runtime::obligation_conservation::inspect_projection(
+                &self.regions,
+                &obligations,
+                &self.admitted_obligations,
+                mailbox,
+                checkpoint,
+            )
+        } else {
+            crate::runtime::obligation_conservation::inspect_projection(
+                &self.regions,
+                &self.obligations,
+                &self.admitted_obligations,
+                mailbox,
+                checkpoint,
+            )
+        }
     }
 
     /// Enables an obligation leak monitor, a
@@ -4473,9 +4611,9 @@ impl RuntimeState {
     }
 
     /// Shared value for [`Self::create_task_infrastructure_in`]'s caller
-    /// argument, which admission never reads. Runtime spawn paths pass this
-    /// instead of minting a throwaway system `Cx` (several allocations and a
-    /// global id draw) on every spawn
+    /// argument when no task-origin causal evidence is available. Ordinary
+    /// runtime spawn paths pass this instead of minting a throwaway system
+    /// `Cx` (several allocations and a global id draw) on every spawn
     /// (br-asupersync-issue65-criticisms-kpmoy5.1.9).
     pub(crate) fn unread_caller_cx() -> &'static crate::cx::Cx {
         static CALLER: std::sync::OnceLock<crate::cx::Cx> = std::sync::OnceLock::new();
@@ -4560,8 +4698,6 @@ impl RuntimeState {
     where
         T: Send + 'static,
     {
-        let _ = caller_cx;
-
         // Create the TaskRecord
         let now = self.current_runtime_time();
         let idx = tasks
@@ -4665,9 +4801,8 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(region, task_id));
-        let logical_clock = self
-            .logical_clock_mode
-            .build_handle(self.timer_driver_handle());
+        let parent_causality = caller_cx.task_causality_snapshot();
+        let logical_clock = self.build_task_logical_clock(task_id, parent_causality.as_ref());
         let cx = crate::cx::Cx::new_with_drivers_and_clock(
             region,
             task_id,
@@ -4679,6 +4814,7 @@ impl RuntimeState {
             Some(entropy),
             logical_clock,
         )
+        .with_task_causality_runtime(self.task_causality_runtime())
         .with_blocking_pool_handle(self.blocking_pool_handle())
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
@@ -5134,9 +5270,12 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(region, task_id));
-        let logical_clock = self
-            .logical_clock_mode
-            .build_handle(self.timer_driver_handle());
+        let logical_clock = self.build_task_logical_clock(
+            task_id,
+            inherited
+                .as_ref()
+                .and_then(|handles| handles.task_causality()),
+        );
         let cx = crate::cx::Cx::new_with_drivers_and_clock(
             region,
             task_id,
@@ -5148,6 +5287,7 @@ impl RuntimeState {
             Some(entropy),
             logical_clock,
         )
+        .with_task_causality_runtime(self.task_causality_runtime())
         .with_blocking_pool_handle(self.blocking_pool_handle())
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
@@ -5402,6 +5542,29 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(child_region, principal_task_id));
+        // A child-region principal borrows the caller's task identity, so it
+        // must share that task's clock rather than restart its component.
+        let principal_clock = self
+            .task(principal_task_id)
+            .and_then(|task| task.cx.as_ref())
+            .filter(|cx| {
+                self.task_causality && cx.task_causality_runtime() == Some(self.instance_id)
+            });
+        let principal_causality = principal_clock.and_then(|cx| cx.task_causality_runtime());
+        let logical_clock = principal_clock.map_or_else(
+            || {
+                if self.task_causality {
+                    // A principal without a live task is unattributed. A
+                    // shared fallback vector component would manufacture
+                    // order between unrelated principals.
+                    crate::trace::distributed::LogicalClockHandle::default()
+                } else {
+                    self.logical_clock_mode
+                        .build_handle(self.timer_driver_handle())
+                }
+            },
+            |cx| cx.logical_clock_handle(),
+        );
         let principal_cx = crate::cx::Cx::new_with_drivers_and_clock(
             child_region,
             principal_task_id,
@@ -5414,9 +5577,9 @@ impl RuntimeState {
                 &self.entropy_source,
                 principal_task_id,
             )),
-            self.logical_clock_mode
-                .build_handle(self.timer_driver_handle()),
+            logical_clock,
         )
+        .with_task_causality_runtime(principal_causality)
         .with_blocking_pool_handle(self.blocking_pool_handle())
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
@@ -9171,9 +9334,14 @@ impl RuntimeState {
                     .wrapping_add(finalizer_id.rotate_left(29)),
             );
             let entropy: Arc<dyn EntropySource> = Arc::new(DetEntropy::new(entropy_seed));
-            let logical_clock = self
-                .logical_clock_mode
-                .build_handle(self.timer_driver_handle());
+            // This inline rollback never admits a lab task. Its bootstrap
+            // identity is process-global, not a replay-stable task component.
+            let logical_clock = if self.task_causality {
+                crate::trace::distributed::LogicalClockHandle::default()
+            } else {
+                self.logical_clock_mode
+                    .build_handle(self.timer_driver_handle())
+            };
             let cx = crate::cx::Cx::new_with_drivers_and_clock(
                 region_id,
                 cleanup_task,
@@ -10795,6 +10963,20 @@ impl RuntimeState {
 
                     // Check if we can complete close
                     if self.can_region_complete_close_in(&*regions, region_id) {
+                        if let Some(monitor) = self.obligation_conservation.as_mut() {
+                            if let Some(violation) =
+                                crate::runtime::obligation_conservation::pending_at_close(
+                                    region_id,
+                                    obligations.resolve_ref(&self.obligations),
+                                )
+                            {
+                                // Cached counters cannot prove their own zero.
+                                // Keep the region and its heap alive when the
+                                // actual arena marking disagrees with readiness.
+                                monitor.refuse_close(violation);
+                                break;
+                            }
+                        }
                         // Every registered finalizer emits its own completion
                         // transition when it actually retires. Closing a region
                         // before that accounting reaches Finalized is a protocol

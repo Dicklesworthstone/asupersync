@@ -1143,7 +1143,7 @@ fn policy_limits_golden_matrix_and_gaps_are_explicit() {
         ("default_max_message_bytes", 4_194_304),
         ("default_max_wire_fields", 65_536),
         ("default_max_wire_depth", 100),
-        ("default_max_wire_work_bytes", 16_777_216),
+        ("default_max_wire_work_bytes", 436_207_616),
         ("hard_protobuf_message_ceiling_bytes", 2_147_483_647),
         ("max_total_repeated_items", 65_536),
         ("max_total_any_value_nodes", 4_096),

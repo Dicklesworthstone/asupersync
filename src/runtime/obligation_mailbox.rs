@@ -161,6 +161,15 @@ enum AdmissionDecision {
     HandedOff(Arc<AdmittedObligation>),
 }
 
+/// Read under the owning region's admission gate by the projection checker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObligationCreditProjection {
+    Pending,
+    Terminal,
+    HandedOff,
+    Inactive,
+}
+
 /// Owned, preaccepted admission; the arena is its delayed lifecycle projection.
 #[derive(Debug)]
 pub(crate) struct AdmittedObligation {
@@ -226,6 +235,22 @@ impl AdmittedObligation {
 
     pub(crate) fn binding(&self) -> (u64, TaskId, RegionId) {
         (self.ticket, self.handle.holder(), self.handle.region())
+    }
+
+    pub(crate) fn projection_state(&self) -> ObligationCreditProjection {
+        if !self.active.load(Ordering::Acquire) || self.application_finished.load(Ordering::Acquire)
+        {
+            return ObligationCreditProjection::Inactive;
+        }
+        match &*self
+            .resolution
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            AdmissionDecision::Pending => ObligationCreditProjection::Pending,
+            AdmissionDecision::Terminal(_) => ObligationCreditProjection::Terminal,
+            AdmissionDecision::HandedOff(_) => ObligationCreditProjection::HandedOff,
+        }
     }
 
     pub(crate) fn bind_ticket(&self, id: ObligationId) {
@@ -474,6 +499,14 @@ impl ObligationMailbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+
+    pub(crate) fn ticket_binding(&self, ticket: u64) -> Option<ObligationId> {
+        self.tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&ticket)
+            .copied()
     }
 }
 
@@ -948,6 +981,7 @@ pub(crate) fn apply_obligation_posts_with_task_table(
     dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
 ) -> usize {
     if mailbox.is_empty() {
+        state.check_obligation_conservation_after_drain(mailbox);
         return 0;
     }
     // One post at a time: a post whose application unwinds (a leak under the
@@ -1079,6 +1113,9 @@ pub(crate) fn apply_obligation_posts_with_task_table(
                 .remove(&post.ticket);
         }
     }
+    // Ticket insertion/removal and receipt barriers are complete here. Checking
+    // inside an individual apply would observe those legitimate partial writes.
+    state.check_obligation_conservation_after_drain(mailbox);
     drained
 }
 

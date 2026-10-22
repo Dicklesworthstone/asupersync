@@ -1518,10 +1518,8 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         // Get driver handles once - minimize state.handle() calls
         let io_driver = state.io_driver_handle();
         let timer_driver = state.timer_driver_handle();
-        // Note: logical_clock requires owned timer_driver, but we still save one clone
-        let logical_clock = state
-            .logical_clock_mode()
-            .build_handle(timer_driver.clone());
+        let parent_causality = parent_cx.task_causality_snapshot();
+        let logical_clock = state.build_task_logical_clock(task_id, parent_causality.as_ref());
 
         // Batch parent handle retrieval to reduce method call overhead
         let io_cap = parent_cx.io_cap_handle();
@@ -1548,6 +1546,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             Some(child_entropy),
         )
         .with_logical_clock(logical_clock)
+        .with_task_causality_runtime(state.task_causality_runtime())
         .with_registry_handle(registry)
         .with_remote_cap_handle(remote_cap)
         .with_blocking_pool_handle(blocking_pool)
