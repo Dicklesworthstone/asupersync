@@ -446,6 +446,15 @@ fn tls13_traffic_key_updates_preserve_the_channel_binding() {
 /// Exercise the public retry and write paths, not an assignment to TlsState.
 /// Terminal handshake polls must neither reopen the stream nor touch its IO.
 fn assert_terminal_handshake(stream: &mut TlsStream<MemoryIo>) {
+    assert_terminal_handshake_rejects_writes_with(stream, io::ErrorKind::BrokenPipe);
+}
+
+/// Like [`assert_terminal_handshake`], for a stream whose writes report a
+/// retained transport failure of `write_error` instead of a closed stream.
+fn assert_terminal_handshake_rejects_writes_with(
+    stream: &mut TlsStream<MemoryIo>,
+    write_error: io::ErrorKind,
+) {
     let mut cx = Context::from_waker(Waker::noop());
     let state = stream.state;
     let io_calls = stream.io.io_calls;
@@ -459,7 +468,7 @@ fn assert_terminal_handshake(stream: &mut TlsStream<MemoryIo>) {
         assert_disconnected(stream);
         assert!(matches!(
             Pin::new(&mut *stream).poll_write(&mut cx, b"must not send"),
-            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::BrokenPipe
+            Poll::Ready(Err(err)) if err.kind() == write_error
         ));
         assert_eq!(stream.io.io_calls, io_calls, "terminal polls performed IO");
     }
@@ -781,6 +790,14 @@ fn shutdown_reports_write_zero_and_preserves_transport_flush_errors() {
                         stream.io.flush_error = Some(io::ErrorKind::ConnectionReset);
                         io::ErrorKind::ConnectionReset
                     };
+                    // WriteZero is retryable and leaves writes closed by the
+                    // pending shutdown. Any other flush error is retained, and
+                    // every later write reports it (#81).
+                    let write_error = if zero_write {
+                        io::ErrorKind::BrokenPipe
+                    } else {
+                        expected
+                    };
                     let mut cx = Context::from_waker(Waker::noop());
                     for _ in 0..2 {
                         assert!(matches!(
@@ -790,20 +807,35 @@ fn shutdown_reports_write_zero_and_preserves_transport_flush_errors() {
                         assert!(!stream.shutdown_flushed);
                         assert_eq!(stream.io.shutdown_calls, 0);
                         assert!(stream.conn.wants_write() || !stream.io.buffered.is_empty());
-                        assert_terminal_handshake(stream);
+                        assert_terminal_handshake_rejects_writes_with(stream, write_error);
                     }
                     // Retrying the shutdown may drain retained records, but
                     // must never reopen application writes or channel binding.
                     stream.io.write_limit = Some(3);
                     stream.io.flush_error = None;
-                    assert!(matches!(
-                        poll_shutdown_api(stream, &mut cx, async_shutdown),
-                        Poll::Ready(Ok(()))
-                    ));
-                    assert!(stream.shutdown_flushed);
-                    assert_eq!(stream.io.shutdown_calls, usize::from(async_shutdown));
-                    assert_plaintext_read(peer, b"");
-                    assert_terminal_handshake(stream);
+                    if zero_write {
+                        assert!(matches!(
+                            poll_shutdown_api(stream, &mut cx, async_shutdown),
+                            Poll::Ready(Ok(()))
+                        ));
+                        assert!(stream.shutdown_flushed);
+                        assert_eq!(stream.io.shutdown_calls, usize::from(async_shutdown));
+                        assert_plaintext_read(peer, b"");
+                        assert_terminal_handshake(stream);
+                    } else {
+                        // A recovered transport cannot turn the failed
+                        // close_notify flush into a clean close: the retry
+                        // reports the retained error without further I/O.
+                        let io_calls = stream.io.io_calls;
+                        assert!(matches!(
+                            poll_shutdown_api(stream, &mut cx, async_shutdown),
+                            Poll::Ready(Err(error)) if error.kind() == expected
+                        ));
+                        assert_eq!(stream.io.io_calls, io_calls);
+                        assert!(!stream.shutdown_flushed);
+                        assert_eq!(stream.io.shutdown_calls, 0);
+                        assert_terminal_handshake_rejects_writes_with(stream, write_error);
+                    }
                 }
             }
         }
