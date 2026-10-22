@@ -180,6 +180,9 @@ struct CxHandles {
     blocking_pool: Option<BlockingPoolHandle>,
     entropy: Arc<dyn EntropySource>,
     logical_clock: LogicalClockHandle,
+    /// Runtime identity for the opt-in lab task-causality producer. Kept out
+    /// of clock component names so identical lab workloads remain replayable.
+    task_causality_runtime: Option<u64>,
     remote_cap: Option<Arc<RemoteCap>>,
     registry: Option<RegistryHandle>,
     pressure: Option<Arc<SystemPressure>>,
@@ -230,9 +233,15 @@ pub(crate) struct InheritedHandles {
     macaroon: Option<Arc<MacaroonToken>>,
     default_http_client: DefaultHttpClientSlot,
     pressure: Option<Arc<SystemPressure>>,
+    /// Captured when the spawn is requested, not when its mailbox is drained.
+    task_causality: Option<(u64, LogicalTime)>,
 }
 
 impl InheritedHandles {
+    pub(crate) fn task_causality(&self) -> Option<&(u64, LogicalTime)> {
+        self.task_causality.as_ref()
+    }
+
     /// The child's entropy source: the spawner's, forked for `task` now, in
     /// admission (spawn) order, under the runtime lock; only a user fork that
     /// panics is deferred to the task's first poll (`fork_contained`).
@@ -1147,6 +1156,7 @@ impl<Caps> Cx<Caps> {
                 blocking_pool: None,
                 entropy: Arc::new(OsEntropy),
                 logical_clock: LogicalClockHandle::default(),
+                task_causality_runtime: None,
                 remote_cap: None,
                 registry: None,
                 pressure: None,
@@ -1284,6 +1294,7 @@ impl<Caps> Cx<Caps> {
                 blocking_pool: None,
                 entropy,
                 logical_clock,
+                task_causality_runtime: None,
                 remote_cap: None,
                 registry: None,
                 pressure: None,
@@ -1388,6 +1399,24 @@ impl<Caps> Cx<Caps> {
     pub(crate) fn with_logical_clock(mut self, clock: LogicalClockHandle) -> Self {
         Arc::make_mut(&mut self.handles).logical_clock = clock;
         self
+    }
+
+    /// Marks clocks whose components identify tasks in one lab runtime.
+    #[must_use]
+    pub(crate) fn with_task_causality_runtime(mut self, runtime: Option<u64>) -> Self {
+        Arc::make_mut(&mut self.handles).task_causality_runtime = runtime;
+        self
+    }
+
+    pub(crate) fn task_causality_runtime(&self) -> Option<u64> {
+        self.handles.task_causality_runtime
+    }
+
+    /// A spawn/wake source must be sampled at the operation, before later
+    /// events in the sending task can advance its clock.
+    pub(crate) fn task_causality_snapshot(&self) -> Option<(u64, LogicalTime)> {
+        self.task_causality_runtime()
+            .map(|runtime| (runtime, self.logical_tick()))
     }
 
     /// Re-type this context to a narrower capability set.
@@ -5866,6 +5895,7 @@ where
             macaroon: self.macaroon_handle(),
             default_http_client: self.handles.default_http_client.clone(),
             pressure: self.pressure_handle(),
+            task_causality: self.task_causality_snapshot(),
         }
     }
 
@@ -5886,6 +5916,7 @@ where
             macaroon,
             default_http_client,
             pressure,
+            task_causality: _,
         } = inherited;
         let handles = Arc::make_mut(&mut self.handles);
         handles.io_cap = io_cap;

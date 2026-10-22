@@ -2525,6 +2525,31 @@ impl LabRuntime {
         }
     }
 
+    /// Creates a lab runtime that records task-level vector-clock causality.
+    ///
+    /// Each full generational task identity receives its own component. Direct
+    /// spawns with a caller context, scoped spawns, and queued spawns inherit
+    /// the parent's clock at the spawn request. Completed poll boundaries carry
+    /// those clocks, and an actual task-to-task wake merges the waking task's
+    /// clock into the task being awakened. This includes
+    /// channel and join wakes when their receiver has registered a lab waker.
+    ///
+    /// A wake without an active task from this runtime has an unknown source
+    /// and contributes no cross-task edge. Channel or join results consumed
+    /// without a wake, arbitrary shared-memory access, and external I/O remain
+    /// uninstrumented; use [`crate::Cx::logical_receive`] when the application
+    /// can supply an explicit synchronization timestamp. Missing evidence may
+    /// produce conservative extra races. This does not make the explorer an
+    /// exhaustive DPOR implementation.
+    ///
+    /// [`Self::new`] retains its legacy Lamport clocks and trace event stream.
+    #[must_use]
+    pub fn new_with_task_causality(config: LabConfig) -> Self {
+        let mut runtime = Self::new(config);
+        runtime.state.enable_lab_task_causality();
+        runtime
+    }
+
     /// Creates a lab runtime with the default configuration.
     #[must_use]
     pub fn with_seed(seed: u64) -> Self {
@@ -4689,12 +4714,32 @@ impl LabRuntime {
             })
             .unwrap_or((0, None, None, None, None));
 
+        let task_causality = current_cx.as_ref().and_then(|cx| {
+            cx.task_causality_runtime()
+                .map(|runtime| TaskWakeCausality {
+                    runtime,
+                    clock: cx.logical_clock_handle(),
+                })
+        });
+        let causal_poll =
+            task_causality
+                .as_ref()
+                .zip(current_cx.as_ref())
+                .map(|(causality, cx)| {
+                    (
+                        causality.clock.clone(),
+                        cx.region_id(),
+                        self.state.trace_handle(),
+                    )
+                });
+
         let waker = match cached_waker {
             Some((waker, cached_priority)) if cached_priority == priority => waker,
             _ => Waker::from(Arc::new(TaskWaker {
                 task_id,
                 priority,
                 scheduler: self.scheduler.clone(),
+                causality: task_causality.clone(),
             })),
         };
         let mut cx = Context::from_waker(&waker);
@@ -4707,6 +4752,7 @@ impl LabRuntime {
                     task_id,
                     priority,
                     scheduler: self.scheduler.clone(),
+                    causality: task_causality,
                 })),
                 priority,
             ),
@@ -4784,7 +4830,17 @@ impl LabRuntime {
             }
             let _scheduler_driven =
                 crate::runtime::scheduler::three_lane::ScopedSchedulerDriven::enter();
-            stored.poll(&mut cx)
+            let result = stored.poll(&mut cx);
+            // The legacy direct-spawn wrapper publishes its deferred Spawn
+            // during the first poll. Stamp this completed poll boundary after
+            // that publication so trace order does not invert its older clock.
+            if let Some((clock, region, trace)) = causal_poll {
+                let time = clock.tick();
+                trace.record_event(|seq| {
+                    TraceEvent::poll(seq, now, task_id, region).with_logical_time(time)
+                });
+            }
+            result
         } else {
             if let Some(replay) = self.production_replay.as_mut()
                 && let Some(ordinal) = replay.selected.take()
@@ -6556,15 +6612,40 @@ impl LabScheduler {
     }
 }
 
+/// A synchronization edge comes from an actual wake, never from the order in
+/// which the lab happened to dispatch two independent tasks. Runtime identity
+/// prevents an ambient context from another lab manufacturing an edge between
+/// equal task component names in two independent executions.
+#[derive(Clone)]
+struct TaskWakeCausality {
+    runtime: u64,
+    clock: crate::trace::distributed::LogicalClockHandle,
+}
+
+impl TaskWakeCausality {
+    fn observe_wake(&self) {
+        if let Some(source) = crate::Cx::current()
+            && source.task_causality_runtime() == Some(self.runtime)
+        {
+            let sent = source.logical_tick();
+            let _ = self.clock.receive(&sent);
+        }
+    }
+}
+
 struct TaskWaker {
     task_id: crate::types::TaskId,
     priority: u8,
     scheduler: Arc<Mutex<LabScheduler>>,
+    causality: Option<TaskWakeCausality>,
 }
 
 use std::task::Wake;
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
+        if let Some(causality) = &self.causality {
+            causality.observe_wake();
+        }
         self.scheduler.lock().schedule(self.task_id, self.priority);
     }
 }
@@ -6577,10 +6658,14 @@ struct CancelTaskWaker {
     task_id: crate::types::TaskId,
     priority: u8,
     scheduler: Arc<Mutex<LabScheduler>>,
+    causality: Option<TaskWakeCausality>,
 }
 
 impl Wake for CancelTaskWaker {
     fn wake(self: Arc<Self>) {
+        if let Some(causality) = &self.causality {
+            causality.observe_wake();
+        }
         self.scheduler
             .lock()
             .schedule_cancel(self.task_id, self.priority);
@@ -6739,3 +6824,7 @@ fn owned_region_close_reason(now: Time) -> crate::types::CancelReason {
 #[cfg(test)]
 #[path = "runtime_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "task_causality_inline_tests.rs"]
+mod task_causality_tests;

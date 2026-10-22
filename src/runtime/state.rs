@@ -2292,6 +2292,8 @@ pub struct RuntimeState {
     timer_driver: Option<TimerDriverHandle>,
     /// Logical clock mode used for task contexts.
     logical_clock_mode: LogicalClockMode,
+    /// Additive lab-only producer; ordinary runtime clock policy is unchanged.
+    task_causality: bool,
     /// Cancel attribution configuration (cause-chain limits, memory caps).
     cancel_attribution: CancelAttributionConfig,
     /// Entropy source for capability-based randomness.
@@ -2607,6 +2609,7 @@ impl RuntimeState {
             io_reactor_capability_snapshot: IoReactorCapabilitySnapshot::no_reactor(),
             timer_driver: None,
             logical_clock_mode: LogicalClockMode::Lamport,
+            task_causality: false,
             cancel_attribution: CancelAttributionConfig::default(),
             entropy_source: Arc::new(OsEntropy),
             spawn_authorization_key: None,
@@ -3280,8 +3283,47 @@ impl RuntimeState {
     }
 
     /// Sets the logical clock mode for new task contexts.
+    ///
+    /// This replaces the opt-in lab task-causality policy for subsequently
+    /// constructed contexts. Existing contexts keep their clocks.
     pub fn set_logical_clock_mode(&mut self, mode: LogicalClockMode) {
         self.logical_clock_mode = mode;
+        self.task_causality = false;
+    }
+
+    pub(crate) fn enable_lab_task_causality(&mut self) {
+        self.logical_clock_mode = LogicalClockMode::Vector {
+            node: crate::remote::NodeId::new("lab"),
+        };
+        self.task_causality = true;
+    }
+
+    pub(crate) fn task_causality_runtime(&self) -> Option<u64> {
+        self.task_causality.then_some(self.instance_id)
+    }
+
+    /// Builds one component per full generational task identity. A parent
+    /// snapshot is trusted only when it came from this opt-in runtime.
+    pub(crate) fn build_task_logical_clock(
+        &self,
+        task: TaskId,
+        parent: Option<&(u64, LogicalTime)>,
+    ) -> crate::trace::distributed::LogicalClockHandle {
+        if !self.task_causality {
+            return self
+                .logical_clock_mode
+                .build_handle(self.timer_driver_handle());
+        }
+        let clock = LogicalClockMode::Vector {
+            node: crate::remote::NodeId::new(format!("lab-task:{:016x}", task.as_u64())),
+        }
+        .build_handle(self.timer_driver_handle());
+        if let Some((runtime, time)) = parent
+            && *runtime == self.instance_id
+        {
+            let _ = clock.receive(time);
+        }
+        clock
     }
 
     /// Returns the cancel attribution configuration for this runtime.
@@ -4473,9 +4515,9 @@ impl RuntimeState {
     }
 
     /// Shared value for [`Self::create_task_infrastructure_in`]'s caller
-    /// argument, which admission never reads. Runtime spawn paths pass this
-    /// instead of minting a throwaway system `Cx` (several allocations and a
-    /// global id draw) on every spawn
+    /// argument when no task-origin causal evidence is available. Ordinary
+    /// runtime spawn paths pass this instead of minting a throwaway system
+    /// `Cx` (several allocations and a global id draw) on every spawn
     /// (br-asupersync-issue65-criticisms-kpmoy5.1.9).
     pub(crate) fn unread_caller_cx() -> &'static crate::cx::Cx {
         static CALLER: std::sync::OnceLock<crate::cx::Cx> = std::sync::OnceLock::new();
@@ -4560,8 +4602,6 @@ impl RuntimeState {
     where
         T: Send + 'static,
     {
-        let _ = caller_cx;
-
         // Create the TaskRecord
         let now = self.current_runtime_time();
         let idx = tasks
@@ -4665,9 +4705,8 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(region, task_id));
-        let logical_clock = self
-            .logical_clock_mode
-            .build_handle(self.timer_driver_handle());
+        let parent_causality = caller_cx.task_causality_snapshot();
+        let logical_clock = self.build_task_logical_clock(task_id, parent_causality.as_ref());
         let cx = crate::cx::Cx::new_with_drivers_and_clock(
             region,
             task_id,
@@ -4679,6 +4718,7 @@ impl RuntimeState {
             Some(entropy),
             logical_clock,
         )
+        .with_task_causality_runtime(self.task_causality_runtime())
         .with_blocking_pool_handle(self.blocking_pool_handle())
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
@@ -5134,9 +5174,12 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(region, task_id));
-        let logical_clock = self
-            .logical_clock_mode
-            .build_handle(self.timer_driver_handle());
+        let logical_clock = self.build_task_logical_clock(
+            task_id,
+            inherited
+                .as_ref()
+                .and_then(|handles| handles.task_causality()),
+        );
         let cx = crate::cx::Cx::new_with_drivers_and_clock(
             region,
             task_id,
@@ -5148,6 +5191,7 @@ impl RuntimeState {
             Some(entropy),
             logical_clock,
         )
+        .with_task_causality_runtime(self.task_causality_runtime())
         .with_blocking_pool_handle(self.blocking_pool_handle())
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
@@ -5402,6 +5446,29 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(child_region, principal_task_id));
+        // A child-region principal borrows the caller's task identity, so it
+        // must share that task's clock rather than restart its component.
+        let principal_clock = self
+            .task(principal_task_id)
+            .and_then(|task| task.cx.as_ref())
+            .filter(|cx| {
+                self.task_causality && cx.task_causality_runtime() == Some(self.instance_id)
+            });
+        let principal_causality = principal_clock.and_then(|cx| cx.task_causality_runtime());
+        let logical_clock = principal_clock.map_or_else(
+            || {
+                if self.task_causality {
+                    // A principal without a live task is unattributed. A
+                    // shared fallback vector component would manufacture
+                    // order between unrelated principals.
+                    crate::trace::distributed::LogicalClockHandle::default()
+                } else {
+                    self.logical_clock_mode
+                        .build_handle(self.timer_driver_handle())
+                }
+            },
+            |cx| cx.logical_clock_handle(),
+        );
         let principal_cx = crate::cx::Cx::new_with_drivers_and_clock(
             child_region,
             principal_task_id,
@@ -5414,9 +5481,9 @@ impl RuntimeState {
                 &self.entropy_source,
                 principal_task_id,
             )),
-            self.logical_clock_mode
-                .build_handle(self.timer_driver_handle()),
+            logical_clock,
         )
+        .with_task_causality_runtime(principal_causality)
         .with_blocking_pool_handle(self.blocking_pool_handle())
         .with_spawn_gateway(self.spawn_gateway.clone())
         .with_pending_spawn_counter(
@@ -9171,9 +9238,14 @@ impl RuntimeState {
                     .wrapping_add(finalizer_id.rotate_left(29)),
             );
             let entropy: Arc<dyn EntropySource> = Arc::new(DetEntropy::new(entropy_seed));
-            let logical_clock = self
-                .logical_clock_mode
-                .build_handle(self.timer_driver_handle());
+            // This inline rollback never admits a lab task. Its bootstrap
+            // identity is process-global, not a replay-stable task component.
+            let logical_clock = if self.task_causality {
+                crate::trace::distributed::LogicalClockHandle::default()
+            } else {
+                self.logical_clock_mode
+                    .build_handle(self.timer_driver_handle())
+            };
             let cx = crate::cx::Cx::new_with_drivers_and_clock(
                 region_id,
                 cleanup_task,
