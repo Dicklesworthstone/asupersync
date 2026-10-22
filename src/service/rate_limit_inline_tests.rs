@@ -7,6 +7,9 @@
         clippy::future_not_send
     )]
     use super::*;
+    use crate::cx::Cx;
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId};
     use std::future::ready;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Weak};
@@ -1403,48 +1406,209 @@
         }
     }
 
-    /// Regression test: Sleep must register a waker when tokens are exhausted.
-    ///
-    /// Previously, `Sleep::with_time_getter()` was used, which returns Pending
-    /// without registering any waker — causing tasks to hang forever. The fix
-    /// uses `Sleep::new()` which properly registers with the timer driver or
-    /// spawns a fallback thread.
+    fn rate_limit_timer_context(timer: &TimerDriverHandle) -> Cx {
+        Cx::new_with_drivers(
+            RegionId::new_for_test(0, 123),
+            TaskId::new_for_test(0, 123),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        )
+    }
+
+    /// Exhausted buckets must register a real wake, then refill in the same
+    /// clock domain as their configured source, including through layers/clones.
     #[test]
     fn exhausted_tokens_register_waker_not_hang() {
         init_test("exhausted_tokens_register_waker_not_hang");
-        let woken = Arc::new(AtomicBool::new(false));
+        for (driver_start, custom_start) in [(100, 0), (0, 100), (100, 100)] {
+            for construction in 0..4 {
+                let clock = Arc::new(VirtualClock::new());
+                clock.set(Time::from_secs(driver_start));
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let _current = Cx::set_current(Some(rate_limit_timer_context(&timer)));
+                set_test_time(Time::from_secs(custom_start).as_nanos());
+                let layer = RateLimitLayer::with_time_getter(1, Duration::from_secs(5), test_time);
+                let mut svc = match construction {
+                    0 => RateLimit::with_time_getter(
+                        EchoService,
+                        1,
+                        Duration::from_secs(5),
+                        test_time,
+                    ),
+                    1 => layer.layer(EchoService),
+                    2 => RateLimit::with_time_getter(
+                        EchoService,
+                        1,
+                        Duration::from_secs(5),
+                        test_time,
+                    )
+                    .clone(),
+                    _ => layer.clone().layer(EchoService).clone(),
+                };
+                let woken = Arc::new(AtomicBool::new(false));
+                let waker = Waker::from(Arc::new(TrackWaker(Arc::clone(&woken))));
+                let mut cx = Context::from_waker(&waker);
+                assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+                assert!(matches!(
+                    Pin::new(&mut svc.call(42)).poll(&mut cx),
+                    Poll::Ready(Ok(42))
+                ));
 
-        let waker: Waker = Arc::new(TrackWaker(woken)).into();
-        let mut cx = Context::from_waker(&waker);
+                assert!(svc.poll_ready(&mut cx).is_pending());
+                assert_eq!(svc.available_tokens(), 0);
+                assert_eq!(svc.state.lock().waiters.len(), 1);
+                assert_eq!(timer.pending_count(), 1);
+                assert_eq!(
+                    timer.next_deadline(),
+                    Some(Time::from_secs(driver_start + 5))
+                );
+                assert!(!woken.load(Ordering::SeqCst));
 
-        // Use a far-future deadline so this test observes registration rather
-        // than the separate immediately-ready Sleep path.
-        let mut svc = RateLimit::with_time_getter(EchoService, 1, Duration::MAX, test_time);
-
-        // Set time to 0, consume the single token via poll_ready + call.
-        set_test_time(0);
-        let first = svc.poll_ready(&mut cx);
-        let ok = matches!(first, Poll::Ready(Ok(())));
-        crate::assert_with_log!(ok, "first ready", true, ok);
-        let mut future = svc.call(42);
-        let _ = Pin::new(&mut future).poll(&mut cx);
-
-        // Now tokens are exhausted. poll_ready should return Pending.
-        let second = svc.poll_ready(&mut cx);
-        crate::assert_with_log!(second.is_pending(), "pending", true, second.is_pending());
-
-        // The Sleep should NOT use time_getter (which would skip waker registration).
-        // Verify the sleep field exists and was created with Sleep::new (no time_getter).
-        let sleep = svc.sleep.as_ref().expect("sleep must be created");
-        let has_time_getter = sleep.time_getter.is_some();
-        crate::assert_with_log!(
-            !has_time_getter,
-            "sleep must NOT have time_getter",
-            false,
-            has_time_getter
-        );
-
+                set_test_time(Time::from_secs(custom_start + 5).as_nanos());
+                clock.set(Time::from_secs(driver_start + 5));
+                assert_eq!(timer.process_timers(), 1);
+                assert!(
+                    woken.load(Ordering::SeqCst),
+                    "refill timer wakes the waiter"
+                );
+                assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+                assert!(svc.sleep.is_none());
+                assert!(svc.state.lock().waiters.is_empty());
+                assert_eq!(timer.pending_count(), 0);
+                assert!(matches!(
+                    Pin::new(&mut svc.call(7)).poll(&mut cx),
+                    Poll::Ready(Ok(7))
+                ));
+            }
+        }
         crate::test_complete!("exhausted_tokens_register_waker_not_hang");
+    }
+
+    #[test]
+    fn custom_clock_refill_wait_rearms_without_spinning_while_clock_is_frozen() {
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let _current = Cx::set_current(Some(rate_limit_timer_context(&timer)));
+        set_test_time(Time::from_secs(100).as_nanos());
+        let mut svc =
+            RateLimit::with_time_getter(EchoService, 1, Duration::from_secs(5), test_time);
+        let (waker, wakes, unlocked_wakes) = reentrant_rate_limit_waker(&svc.state);
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            Pin::new(&mut svc.call(42)).poll(&mut cx),
+            Poll::Ready(Ok(42))
+        ));
+        assert!(svc.poll_ready(&mut cx).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_secs(5)));
+
+        clock.set(Time::from_secs(5));
+        assert_eq!(timer.process_timers(), 1);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_wakes.load(Ordering::SeqCst), 1);
+        for _ in 0..3 {
+            assert!(svc.poll_ready(&mut cx).is_pending());
+            assert_eq!(wakes.load(Ordering::SeqCst), 1, "no immediate re-wake loop");
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(timer.next_deadline(), Some(Time::from_secs(10)));
+            assert_eq!(svc.state.lock().waiters.len(), 1);
+        }
+
+        set_test_time(Time::from_secs(105).as_nanos());
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(timer.pending_count(), 0);
+        assert!(svc.state.lock().waiters.is_empty());
+        assert!(svc.sleep.is_none());
+        drop(svc.release_readiness());
+        assert_eq!(svc.available_tokens(), 1);
+    }
+
+    #[test]
+    fn default_clock_layers_and_clones_preserve_ordinary_refill_timers() {
+        for construction in 0..3 {
+            let clock = Arc::new(VirtualClock::new());
+            clock.set(Time::from_secs(100));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let _current = Cx::set_current(Some(rate_limit_timer_context(&timer)));
+            let layer = RateLimitLayer::new(1, Duration::from_secs(5));
+            let mut svc = match construction {
+                0 => RateLimit::new(EchoService, 1, Duration::from_secs(5)),
+                1 => layer.layer(EchoService),
+                _ => layer.clone().layer(EchoService).clone(),
+            };
+            let woken = Arc::new(AtomicBool::new(false));
+            let waker = Waker::from(Arc::new(TrackWaker(Arc::clone(&woken))));
+            let mut cx = Context::from_waker(&waker);
+            assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            assert!(matches!(
+                Pin::new(&mut svc.call(42)).poll(&mut cx),
+                Poll::Ready(Ok(42))
+            ));
+            assert!(svc.poll_ready(&mut cx).is_pending());
+            assert!(
+                !svc.sleep
+                    .as_ref()
+                    .expect("refill wait")
+                    .has_custom_time_getter()
+            );
+            assert_eq!(timer.next_deadline(), Some(Time::from_secs(105)));
+
+            clock.set(Time::from_secs(105));
+            assert_eq!(timer.process_timers(), 1);
+            assert!(woken.load(Ordering::SeqCst));
+            assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            assert_eq!(timer.pending_count(), 0);
+            assert!(svc.state.lock().waiters.is_empty());
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_custom_clock_rate_limit_wakes_its_parked_refill_waiter() {
+        fn offset_now() -> Time {
+            Cx::current()
+                .expect("native task context")
+                .now()
+                .saturating_add_nanos(Time::from_secs(100).as_nanos())
+        }
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native runtime");
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().expect("native task context");
+            let timer = owner.timer_driver().expect("native timer driver");
+            let mut svc =
+                RateLimit::with_time_getter(EchoService, 1, Duration::from_millis(20), offset_now);
+            std::future::poll_fn(|cx| svc.poll_ready(cx))
+                .await
+                .expect("initial capacity");
+            assert!(matches!(svc.call(42).await, Ok(42)));
+            let mut parked = false;
+            let wait = std::future::poll_fn(|cx| {
+                let result = svc.poll_ready(cx);
+                if result.is_pending() && !parked {
+                    parked = true;
+                    assert_eq!(timer.pending_count(), 1, "refill wait is registered");
+                }
+                result
+            });
+            let result =
+                crate::time::TimeoutFuture::after(owner.now(), Duration::from_secs(2), wait).await;
+            assert!(matches!(result, Ok(Ok(()))));
+            assert!(
+                parked,
+                "the exhausted service must actually park before refill"
+            );
+            assert!(svc.state.lock().waiters.is_empty());
+            assert!(svc.sleep.is_none());
+            assert_eq!(timer.pending_count(), 0);
+            assert!(matches!(svc.call(7).await, Ok(7)));
+        }));
     }
 
     #[test]

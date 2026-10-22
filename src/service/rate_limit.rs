@@ -42,6 +42,7 @@ pub struct RateLimitLayer {
     /// Duration of each period.
     period: Duration,
     time_getter: fn() -> Time,
+    custom_clock: bool,
 }
 
 impl RateLimitLayer {
@@ -57,16 +58,20 @@ impl RateLimitLayer {
             rate,
             period,
             time_getter: wall_clock_now,
+            custom_clock: false,
         }
     }
 
     /// Creates a new rate limit layer with a custom time source.
+    ///
+    /// This source controls both bucket refills and the waits between refills.
     #[must_use]
     pub const fn with_time_getter(rate: u64, period: Duration, time_getter: fn() -> Time) -> Self {
         Self {
             rate,
             period,
             time_getter,
+            custom_clock: true,
         }
     }
 
@@ -93,7 +98,11 @@ impl<S> Layer<S> for RateLimitLayer {
     type Service = RateLimit<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        RateLimit::with_time_getter(inner, self.rate, self.period, self.time_getter)
+        if self.custom_clock {
+            RateLimit::with_time_getter(inner, self.rate, self.period, self.time_getter)
+        } else {
+            RateLimit::new(inner, self.rate, self.period)
+        }
     }
 }
 
@@ -121,6 +130,8 @@ pub struct RateLimit<S> {
     /// Period for refilling tokens.
     period: Duration,
     time_getter: fn() -> Time,
+    /// Distinguish explicitly injected clocks from the default shared timer path.
+    custom_clock: bool,
     /// Timer for sleeping when tokens are exhausted.
     sleep: Option<crate::time::Sleep>,
 }
@@ -274,6 +285,7 @@ impl<S: Clone> Clone for RateLimit<S> {
             rate: self.rate,
             period: self.period,
             time_getter: self.time_getter,
+            custom_clock: self.custom_clock,
             sleep: None, // Sleep state is not cloned
         }
     }
@@ -305,11 +317,16 @@ impl<S> RateLimit<S> {
             rate,
             period,
             time_getter: wall_clock_now,
+            custom_clock: false,
             sleep: None,
         }
     }
 
     /// Creates a new rate-limited service with a custom time source.
+    ///
+    /// This source controls both bucket refills and the waits between refills.
+    /// A runtime timer schedules the remaining custom duration in its own clock
+    /// domain and rechecks this source when it wakes.
     #[must_use]
     pub fn with_time_getter(
         inner: S,
@@ -333,6 +350,7 @@ impl<S> RateLimit<S> {
             rate,
             period,
             time_getter,
+            custom_clock: true,
             sleep: None,
         }
     }
@@ -592,7 +610,11 @@ impl<S> RateLimit<S> {
                     .is_none_or(|sleep| sleep.deadline() != next_deadline);
                 if need_new_sleep {
                     drop(self.sleep.take());
-                    self.sleep = Some(crate::time::Sleep::new(next_deadline));
+                    self.sleep = Some(if self.custom_clock {
+                        crate::time::Sleep::with_time_getter(next_deadline, self.time_getter)
+                    } else {
+                        crate::time::Sleep::new(next_deadline)
+                    });
                 }
 
                 // `poll_deadline`, not the cancel-aware `poll`: in a cancelled
