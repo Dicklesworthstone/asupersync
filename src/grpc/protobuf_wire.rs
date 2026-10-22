@@ -78,14 +78,33 @@ pub struct ProtobufWireLimits {
 
 impl ProtobufWireLimits {
     /// Construct balanced limits around a top-level message-size ceiling.
+    ///
+    /// The default depth is 100. Work includes four message-sized passes plus
+    /// one per admitted nesting level, because a nested payload is charged at
+    /// each level on descent or when inserting its encoded wrapper. This lets
+    /// an ordinary traversal use the advertised byte and depth limits without
+    /// exhausting an unrelated, fixed four-pass allowance.
+    ///
+    /// Repeated traversals and schema-specific work still consume the shared
+    /// finite budget. Use [`Self::with_max_work`] to impose a tighter work cap.
     #[must_use]
     pub const fn for_message_size(max_message_len: usize) -> Self {
+        Self::for_message_size_and_depth(max_message_len, 100)
+    }
+
+    /// Construct byte, depth, and cumulative-work limits together.
+    ///
+    /// Work is `max_message_len * (max_depth + 4)`, with saturating arithmetic.
+    /// A shallow schema can use this constructor to reserve less work than the
+    /// default depth of 100. Field count remains capped at 65,536.
+    #[must_use]
+    pub const fn for_message_size_and_depth(max_message_len: usize, max_depth: usize) -> Self {
         Self {
             max_message_len,
             max_field_len: max_message_len,
             max_fields: 65_536,
-            max_depth: 100,
-            max_work: max_message_len.saturating_mul(4),
+            max_depth,
+            max_work: max_message_len.saturating_mul(max_depth.saturating_add(4)),
         }
     }
 
@@ -104,6 +123,9 @@ impl ProtobufWireLimits {
     }
 
     /// Override the combined nested-message and group depth.
+    ///
+    /// This changes only depth, preserving any work policy already selected.
+    /// Use [`Self::for_message_size_and_depth`] to size both limits together.
     #[must_use]
     pub const fn with_max_depth(mut self, max_depth: usize) -> Self {
         self.max_depth = max_depth;

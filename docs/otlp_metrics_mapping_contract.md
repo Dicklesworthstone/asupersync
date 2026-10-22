@@ -281,9 +281,13 @@ The private owned model has semantic limits and default wire-envelope values:
 | Attribute key / value | 1,024 / 4,096 bytes |
 
 `ProtoMessage` encode/decode accepts caller-supplied `ProtobufWireLimits`, so the
-4 MiB message and 16 MiB work values are defaults rather than immutable schema
-caps. The semantic owned-payload and collection caps remain hard. The codec
-rejects limit violations without returning a partial fresh model.
+4 MiB message and 416 MiB cumulative work values are defaults rather than
+immutable schema caps. Automatic work allows one pass per nesting level plus
+four base passes (`4 MiB * (100 + 4)`), accounting for nested payloads at each
+level. `for_message_size_and_depth` sizes both bounds for shallower schemas;
+explicit work overrides remain independent. The semantic owned-payload and
+collection caps remain hard. The codec rejects limit violations without
+returning a partial fresh model.
 
 `OwnedOtlpMetricsConfig` defaults to 1,000 points per metric, 256 metrics per
 request, and 4,194,304 encoded bytes per request. The accepted ranges are
