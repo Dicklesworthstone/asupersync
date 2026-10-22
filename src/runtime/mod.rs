@@ -164,6 +164,7 @@ pub mod kernel;
 pub mod memory_residency;
 /// Feature-gated runtime instrumentation counters (timer/sched_yield/park).
 pub mod metrics;
+pub mod obligation_conservation;
 /// Lock-free obligation-post intake (see the module docs).
 ///
 pub mod obligation_mailbox;

@@ -1109,6 +1109,18 @@ impl RegionRecord {
         self.inner.read().pending_obligations
     }
 
+    /// Inspect admission accounting while excluding checked admit, settle and
+    /// transfer. The callback must not acquire this region gate again or invoke
+    /// runtime operations. Credit decisions and ticket bindings may be read:
+    /// producers acquire this gate for writing before changing either decision.
+    pub(crate) fn with_obligation_accounting<R>(
+        &self,
+        inspect: impl FnOnce(usize, usize) -> R,
+    ) -> R {
+        let inner = self.inner.read();
+        inspect(inner.pending_obligations, inner.unapplied_obligations)
+    }
+
     pub(crate) fn obligation_admission_handle(
         &self,
         holder: TaskId,

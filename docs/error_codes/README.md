@@ -35,6 +35,7 @@ lands.
 | ASUP-E103 | live | obligations | [Root-region obligation](./ASUP-E103.md) |
 | ASUP-E104 | live | obligations | [Obligation abort missing](./ASUP-E104.md) |
 | ASUP-E105 | live | obligations | [Obligation drain timeout](./ASUP-E105.md) |
+| ASUP-E106 | live | obligations | [Obligation projection inconsistent](./ASUP-E106.md) |
 | ASUP-E201 | live | channels-sync | [Channel closed](./ASUP-E201.md) |
 | ASUP-E202 | live | channels-sync | [Send permit leaked](./ASUP-E202.md) |
 | ASUP-E203 | live | channels-sync | [Receive cancelled](./ASUP-E203.md) |

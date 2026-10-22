@@ -7451,4 +7451,37 @@ impl Runtime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .obligation_leak_monitor_snapshot()
     }
+
+    /// Enables online consistency checks between obligation admission credits,
+    /// arena records, ticket bindings, and region accounting.
+    ///
+    /// Checks run after mailbox drains and before region reclamation. A fault
+    /// latches in [`Self::obligation_conservation_report`]; a pending arena
+    /// record prevents close even if the region's cached counters claim zero.
+    /// Queued checked Reserve/Handoff projections explicitly defer equality.
+    /// This checks current projection consistency, not a lifetime conservation
+    /// ledger or unprojected legacy posts. Inspection scans live regions and
+    /// retained records. It is disabled by default and adds no producer-side
+    /// credit registry.
+    /// Calling this again preserves the first detected fault.
+    pub fn enable_obligation_conservation_checks(&self) {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enable_obligation_conservation_checks();
+    }
+
+    /// The latest inspection's coverage and first latched fault, or `None`
+    /// when online obligation projection checks have not been enabled.
+    #[must_use]
+    pub fn obligation_conservation_report(
+        &self,
+    ) -> Option<crate::runtime::obligation_conservation::ObligationConservationReport> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .obligation_conservation_report()
+    }
 }

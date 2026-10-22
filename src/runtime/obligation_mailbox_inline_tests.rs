@@ -24,6 +24,50 @@
         )
     }
 
+    #[test]
+    fn conservation_detects_absent_and_recycled_ticket_bindings() {
+        use crate::runtime::obligation_conservation::ObligationConservationIssue;
+        use crate::util::ArenaIndex;
+
+        for recycled in [false, true] {
+            let (mut runtime, _, holder, cx) = checked_holder(4);
+            let mailbox = mailbox_of(&runtime);
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::SendPermit, holder)
+                .unwrap()
+                .unwrap();
+            let ticket = token.ticket;
+            runtime.state.drain_obligation_posts(1);
+            let id = mailbox.ticket_binding(ticket).unwrap();
+            let observed = recycled.then(|| {
+                let index = id.arena_index();
+                ObligationId::from_arena(ArenaIndex::new(index.index(), index.generation() + 1))
+            });
+            {
+                let mut tickets = mailbox.tickets.lock().unwrap();
+                if let Some(recycled_id) = observed {
+                    tickets.insert(ticket, recycled_id);
+                } else {
+                    tickets.remove(&ticket);
+                }
+            }
+            let fault = runtime
+                .state
+                .check_obligation_conservation()
+                .violation
+                .unwrap();
+            assert_eq!(fault.obligation, Some(id));
+            assert_eq!(fault.ticket, Some(ticket));
+            assert_eq!(
+                fault.issue,
+                ObligationConservationIssue::TicketBindingMismatch { observed }
+            );
+            mailbox.tickets.lock().unwrap().insert(ticket, id);
+            assert!(token.abort(ObligationAbortReason::Explicit));
+            runtime.state.drain_obligation_posts(64);
+        }
+    }
+
     /// A post whose application unwinds (a leak under the Panic policy)
     /// leaves the posts behind it queued for the next drain. A batch drain
     /// dropped them: the next token's Reserve was lost, its Commit refused,

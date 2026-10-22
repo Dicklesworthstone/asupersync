@@ -2475,6 +2475,7 @@ impl LabRuntime {
                 Arc::downgrade(&spawn_liveness),
             ),
         ));
+        state.enable_obligation_conservation_checks();
         state.set_entropy_source(Arc::new(DetEntropy::new(config.entropy_seed)));
 
         // Initialize replay recorder if configured
@@ -3871,6 +3872,13 @@ impl LabRuntime {
             .into_iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>();
+        if let Some(violation) = self
+            .state
+            .obligation_conservation_report()
+            .and_then(|report| report.violation)
+        {
+            invariant_violations.push(violation.to_string());
+        }
         for invariant in &oracle_invariant_failures {
             invariant_violations.push(format!("oracle:{invariant}"));
         }
@@ -5605,9 +5613,15 @@ impl LabRuntime {
     }
 
     /// Checks invariants and returns any violations.
+    ///
+    /// Also refreshes the separate typed obligation projection report on
+    /// [`RuntimeState::obligation_conservation_report`]. Projection faults are
+    /// included in [`Self::report`] and the [`test`] success assertion without
+    /// changing this method's existing exhaustive violation enum.
     #[must_use]
     pub fn check_invariants(&mut self) -> Vec<InvariantViolation> {
         let mut violations = Vec::new();
+        let _ = self.state.check_obligation_conservation();
 
         // Check cancellation protocol oracle
         if let Err(violation) = self.check_cancellation_protocol() {
@@ -6804,6 +6818,13 @@ where
         violations.is_empty(),
         "Lab runtime invariant violations: {violations:?}"
     );
+    if let Some(violation) = runtime
+        .state
+        .obligation_conservation_report()
+        .and_then(|report| report.violation)
+    {
+        panic!("{violation}");
+    }
 
     result
 }

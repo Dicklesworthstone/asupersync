@@ -2261,6 +2261,9 @@ pub struct RuntimeState {
     /// Private association with preaccepted credits; quota lives in RegionRecord.
     admitted_obligations:
         DetHashMap<ObligationId, Arc<crate::runtime::obligation_mailbox::AdmittedObligation>>,
+    /// Optional cross-table projection checks; the lab always enables these.
+    obligation_conservation:
+        Option<crate::runtime::obligation_conservation::ObligationConservationMonitor>,
     /// Current logical time.
     pub now: Time,
     /// The root region.
@@ -2599,6 +2602,7 @@ impl RuntimeState {
             tasks: TaskTable::with_capacity(capacity_hints.task_capacity),
             obligations: ObligationTable::with_capacity(capacity_hints.obligation_capacity),
             admitted_obligations: DetHashMap::default(),
+            obligation_conservation: None,
             now: Time::from_nanos(1_000_000_000),
             root_region: None,
             trace: TraceBufferHandle::new(trace_capacity),
@@ -3385,6 +3389,98 @@ impl RuntimeState {
     #[must_use]
     pub fn leak_count(&self) -> u64 {
         self.leak_count
+    }
+
+    /// Enables cross-table obligation projection checks after mailbox drains
+    /// and before region reclamation. The first disagreement remains latched.
+    ///
+    /// Checks reconcile actual arena records, checked-credit decisions, ticket
+    /// bindings, and region accounting. Queued checked Reserve/Handoff receipts
+    /// explicitly defer equality; terminal receipts can be checked before they
+    /// apply. This is not a lifetime ledger or a proof of unprojected legacy
+    /// posts. The native runtime defaults to disabled; the lab enables it.
+    pub fn enable_obligation_conservation_checks(&mut self) {
+        self.obligation_conservation.get_or_insert_with(
+            crate::runtime::obligation_conservation::ObligationConservationMonitor::new,
+        );
+        let _ = self.check_obligation_conservation();
+    }
+
+    /// Latest enabled checkpoint's coverage and first latched fault.
+    #[must_use]
+    pub fn obligation_conservation_report(
+        &self,
+    ) -> Option<crate::runtime::obligation_conservation::ObligationConservationReport> {
+        self.obligation_conservation
+            .as_ref()
+            .map(crate::runtime::obligation_conservation::ObligationConservationMonitor::snapshot)
+    }
+
+    /// Inspects actual obligation projections now, even when automatic checking
+    /// is disabled. An enabled monitor retains its first observed violation.
+    /// A report with deferred regions does not establish projection equality.
+    #[must_use]
+    pub fn check_obligation_conservation(
+        &mut self,
+    ) -> crate::runtime::obligation_conservation::ObligationConservationReport {
+        let gateway = self.obligation_gateway.clone();
+        let report = self.inspect_obligation_projection(
+            gateway.as_ref().map(|gateway| gateway.mailbox().as_ref()),
+            crate::runtime::obligation_conservation::ObligationConservationCheckpoint::Inspection,
+        );
+        if let Some(monitor) = self.obligation_conservation.as_mut() {
+            monitor.record(report);
+            monitor.snapshot()
+        } else {
+            report
+        }
+    }
+
+    pub(crate) fn check_obligation_conservation_after_drain(
+        &mut self,
+        mailbox: &crate::runtime::obligation_mailbox::ObligationMailbox,
+    ) {
+        if self.obligation_conservation.is_none() {
+            return;
+        }
+        let report = self.inspect_obligation_projection(
+            Some(mailbox),
+            crate::runtime::obligation_conservation::ObligationConservationCheckpoint::MailboxDrain,
+        );
+        if let Some(monitor) = self.obligation_conservation.as_mut() {
+            monitor.record(report);
+        }
+    }
+
+    fn inspect_obligation_projection(
+        &self,
+        mailbox: Option<&crate::runtime::obligation_mailbox::ObligationMailbox>,
+        checkpoint: crate::runtime::obligation_conservation::ObligationConservationCheckpoint,
+    ) -> crate::runtime::obligation_conservation::ObligationConservationReport {
+        // Regions remain embedded in sharded runtimes; obligations are in C.
+        // The scanner never takes another runtime/shard lock beneath a region
+        // admission gate, and no user callbacks run during inspection.
+        if let Some(shards) = self.shard_tables.as_ref() {
+            let obligations = shards
+                .obligations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::runtime::obligation_conservation::inspect_projection(
+                &self.regions,
+                &obligations,
+                &self.admitted_obligations,
+                mailbox,
+                checkpoint,
+            )
+        } else {
+            crate::runtime::obligation_conservation::inspect_projection(
+                &self.regions,
+                &self.obligations,
+                &self.admitted_obligations,
+                mailbox,
+                checkpoint,
+            )
+        }
     }
 
     /// Enables an obligation leak monitor, a
@@ -10867,6 +10963,20 @@ impl RuntimeState {
 
                     // Check if we can complete close
                     if self.can_region_complete_close_in(&*regions, region_id) {
+                        if let Some(monitor) = self.obligation_conservation.as_mut() {
+                            if let Some(violation) =
+                                crate::runtime::obligation_conservation::pending_at_close(
+                                    region_id,
+                                    obligations.resolve_ref(&self.obligations),
+                                )
+                            {
+                                // Cached counters cannot prove their own zero.
+                                // Keep the region and its heap alive when the
+                                // actual arena marking disagrees with readiness.
+                                monitor.refuse_close(violation);
+                                break;
+                            }
+                        }
                         // Every registered finalizer emits its own completion
                         // transition when it actually retires. Closing a region
                         // before that accounting reaches Finalized is a protocol
