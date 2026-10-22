@@ -222,6 +222,191 @@
         crate::test_complete!("custom_time_getter_wakes_promptly_after_logical_time_advance");
     }
 
+    thread_local! {
+        static DRIVER_CUSTOM_TIME: std::cell::Cell<Time> = const { std::cell::Cell::new(Time::ZERO) };
+    }
+
+    fn driver_custom_now() -> Time {
+        DRIVER_CUSTOM_TIME.with(std::cell::Cell::get)
+    }
+
+    fn custom_clock_context(timer: &TimerDriverHandle) -> Cx {
+        Cx::new_with_drivers(
+            RegionId::new_for_test(0, 120),
+            TaskId::new_for_test(0, 120),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        )
+    }
+
+    #[test]
+    fn custom_clock_sleep_translates_remaining_duration_across_epochs() {
+        for (driver_start, custom_start) in [(100, 0), (0, 100), (100, 100)] {
+            let clock = Arc::new(VirtualClock::new());
+            clock.set(Time::from_secs(driver_start));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let _current = Cx::set_current(Some(custom_clock_context(&timer)));
+            DRIVER_CUSTOM_TIME.with(|now| now.set(Time::from_secs(custom_start)));
+            let mut sleep =
+                Sleep::with_time_getter(Time::from_secs(custom_start + 5), driver_custom_now);
+            let woke = Arc::new(AtomicBool::new(false));
+            let waker = waker_that_sets(Arc::clone(&woke));
+            let mut cx = Context::from_waker(&waker);
+
+            assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(
+                timer.next_deadline(),
+                Some(Time::from_secs(driver_start + 5))
+            );
+            assert!(sleep.state.lock().fallback.is_none());
+
+            clock.set(Time::from_secs(driver_start + 5));
+            DRIVER_CUSTOM_TIME.with(|now| now.set(Time::from_secs(custom_start + 5)));
+            assert_eq!(timer.process_timers(), 1);
+            assert!(woke.load(Ordering::SeqCst));
+            assert!(Pin::new(&mut sleep).poll(&mut cx).is_ready());
+            assert_eq!(timer.pending_count(), 0);
+        }
+    }
+
+    #[test]
+    fn custom_clock_driver_wake_rearms_until_its_own_deadline() {
+        let clock = Arc::new(VirtualClock::new());
+        clock.set(Time::from_secs(100));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let _current = Cx::set_current(Some(custom_clock_context(&timer)));
+        DRIVER_CUSTOM_TIME.with(|now| now.set(Time::ZERO));
+        let mut sleep = Sleep::with_time_getter(Time::from_secs(5), driver_custom_now);
+        let old_woke = Arc::new(AtomicBool::new(false));
+        let old_waker = waker_that_sets(Arc::clone(&old_woke));
+        let mut old_cx = Context::from_waker(&old_waker);
+        assert!(Pin::new(&mut sleep).poll(&mut old_cx).is_pending());
+
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = waker_that_sets(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        clock.set(Time::from_secs(105));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(!old_woke.load(Ordering::SeqCst));
+        assert!(woke.load(Ordering::SeqCst));
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_secs(110)));
+        assert_eq!(timer.pending_count(), 1);
+
+        clock.set(Time::from_secs(110));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(sleep.poll_with_time(Time::ZERO).is_pending());
+        assert_eq!(timer.pending_count(), 0);
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_secs(115)));
+
+        DRIVER_CUSTOM_TIME.with(|now| now.set(Time::from_secs(5)));
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_ready());
+        assert_eq!(timer.pending_count(), 0);
+    }
+
+    #[test]
+    fn custom_clock_migration_reset_and_drop_retire_the_registered_driver() {
+        DRIVER_CUSTOM_TIME.with(|now| now.set(Time::from_secs(100)));
+        let first_clock = Arc::new(VirtualClock::new());
+        let first = TimerDriverHandle::with_virtual_clock(first_clock);
+        let _first_current = Cx::set_current(Some(custom_clock_context(&first)));
+        let mut sleep = Sleep::with_time_getter(Time::from_secs(110), driver_custom_now);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert_eq!(first.next_deadline(), Some(Time::from_secs(10)));
+
+        let second_clock = Arc::new(VirtualClock::new());
+        second_clock.set(Time::from_secs(200));
+        let second = TimerDriverHandle::with_virtual_clock(second_clock);
+        let _second_current = Cx::set_current(Some(custom_clock_context(&second)));
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert_eq!(first.pending_count(), 0);
+        assert_eq!(second.next_deadline(), Some(Time::from_secs(210)));
+
+        sleep.reset(Time::from_secs(103));
+        assert_eq!(second.pending_count(), 0);
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert_eq!(second.next_deadline(), Some(Time::from_secs(203)));
+        drop(sleep);
+        assert_eq!(first.pending_count(), 0);
+        assert_eq!(second.pending_count(), 0);
+    }
+
+    #[test]
+    fn custom_clock_horizon_wake_does_not_complete_the_wait() {
+        let clock = Arc::new(VirtualClock::new());
+        clock.set(Time::from_secs(100));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let _current = Cx::set_current(Some(custom_clock_context(&timer)));
+        DRIVER_CUSTOM_TIME.with(|now| now.set(Time::ZERO));
+        let deadline = Time::from_secs(8 * 24 * 60 * 60);
+        let mut sleep = Sleep::with_time_getter(deadline, driver_custom_now);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert!(sleep.state.lock().registered_partial);
+
+        let horizon = duration_to_nanos(timer.max_timer_duration());
+        clock.set(Time::from_secs(100).saturating_add_nanos(horizon));
+        DRIVER_CUSTOM_TIME.with(|now| now.set(Time::from_nanos(horizon)));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert_eq!(timer.pending_count(), 1);
+        assert_eq!(
+            timer.next_deadline(),
+            Some(deadline.saturating_add_nanos(Time::from_secs(100).as_nanos()))
+        );
+
+        clock.set(deadline.saturating_add_nanos(Time::from_secs(100).as_nanos()));
+        DRIVER_CUSTOM_TIME.with(|now| now.set(deadline));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_ready());
+        assert_eq!(timer.pending_count(), 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_custom_clock_sleep_wakes_without_waiting_for_its_epoch_offset() {
+        fn offset_now() -> Time {
+            Cx::current()
+                .expect("native task context")
+                .now()
+                .saturating_add_nanos(Time::from_secs(100).as_nanos())
+        }
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native runtime");
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().expect("native task context");
+            let timer = owner.timer_driver().expect("native timer driver");
+            let mut sleep =
+                Sleep::with_time_getter(offset_now().saturating_add_nanos(20_000_000), offset_now);
+            let mut parked = false;
+            let wait = std::future::poll_fn(|cx| {
+                let result = Pin::new(&mut sleep).poll(cx);
+                if result.is_pending() && !parked {
+                    parked = true;
+                    assert_eq!(timer.pending_count(), 1, "custom sleep is registered");
+                }
+                result
+            });
+            let result =
+                crate::time::TimeoutFuture::after(owner.now(), Duration::from_secs(2), wait).await;
+            assert_eq!(result, Ok(()));
+            assert!(parked, "the custom sleep must actually park before waking");
+            assert_eq!(timer.pending_count(), 0);
+        }));
+    }
+
     // =========================================================================
     // is_elapsed and remaining Tests
     // =========================================================================
