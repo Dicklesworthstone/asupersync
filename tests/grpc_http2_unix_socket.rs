@@ -4,6 +4,10 @@
 //! `send_on`, and the native gRPC streaming client, which takes any
 //! transport).
 #![cfg(unix)]
+// An integration test is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. With every feature enabled, proving `Send` for the
+// server task overflows rustc's default depth.
+#![recursion_limit = "256"]
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder as _, Encoder as _};

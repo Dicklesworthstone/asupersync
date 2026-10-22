@@ -19,7 +19,7 @@ fn body_events<'a>(trace: &'a [TraceEvent], request: &Cx) -> Vec<(usize, &'a Tra
         .collect()
 }
 
-pub(super) async fn pending_credit(runtime: &RuntimeHandle, request: &Cx) -> ObligationId {
+pub async fn pending_credit(runtime: &RuntimeHandle, request: &Cx) -> ObligationId {
     loop {
         let trace = runtime.trace_snapshot().expect("live HTTP/2 runtime trace");
         let events = body_events(&trace, request);
@@ -78,7 +78,7 @@ async fn terminal_credit(
     }
 }
 
-pub(super) async fn assert_retired(
+pub async fn assert_retired(
     runtime: &RuntimeHandle,
     request: &Cx,
     expected_abort: Option<ObligationAbortReason>,

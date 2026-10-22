@@ -5,6 +5,10 @@
 //! Each journey runs on current-thread/two-worker, unified/sharded runtimes.
 
 #![cfg(not(target_arch = "wasm32"))]
+// An integration test is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. Proving `Send` for the produced-response serve future
+// overflows rustc's default depth.
+#![recursion_limit = "256"]
 
 use asupersync::bytes::Bytes;
 use asupersync::channel::oneshot;

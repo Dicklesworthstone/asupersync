@@ -4,6 +4,10 @@
 //! on current-thread and two-worker runtimes with unified and sharded state.
 
 #![cfg(not(target_arch = "wasm32"))]
+// An integration test is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. With every feature enabled, proving `Send` for the serve
+// future overflows rustc's default depth.
+#![recursion_limit = "256"]
 
 use asupersync::channel::oneshot;
 use asupersync::cx::{ChildRegionSpec, Cx};

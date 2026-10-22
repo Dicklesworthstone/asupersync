@@ -2308,14 +2308,20 @@ mod reactor_handoff {
             let (mut stream, go, peer) = unix_peer();
             let first = build(true, sharded);
             first.block_on(async {
+                // UnixStream also implements std::io::{Read, Write}, which this
+                // module imports for its blocking peers: name the async traits.
                 let mut byte = [0_u8; 1];
-                park_once(stream.read(&mut byte)).await;
+                park_once(AsyncReadExt::read(&mut stream, &mut byte)).await;
                 let second = build(current_thread, sharded);
                 second.block_on(async move {
                     let mut bytes = [0_u8; 4];
-                    after_pending(stream.read_exact(&mut bytes), go).await.unwrap();
+                    after_pending(AsyncReadExt::read_exact(&mut stream, &mut bytes), go)
+                        .await
+                        .unwrap();
                     assert_eq!(&bytes, b"pong");
-                    stream.write_all(b"ack!").await.unwrap();
+                    AsyncWriteExt::write_all(&mut stream, b"ack!")
+                        .await
+                        .unwrap();
                 });
                 retire(second);
             });
@@ -2340,9 +2346,13 @@ mod reactor_handoff {
                         let mut bytes = [0_u8; 4];
                         if reunite {
                             let mut stream = read.reunite(write).unwrap();
-                            after_pending(stream.read_exact(&mut bytes), go).await.unwrap();
+                            after_pending(AsyncReadExt::read_exact(&mut stream, &mut bytes), go)
+                                .await
+                                .unwrap();
                             assert_eq!(&bytes, b"pong");
-                            stream.write_all(b"ack!").await.unwrap();
+                            AsyncWriteExt::write_all(&mut stream, b"ack!")
+                                .await
+                                .unwrap();
                         } else {
                             after_pending(read.read_exact(&mut bytes), go).await.unwrap();
                             assert_eq!(&bytes, b"pong");

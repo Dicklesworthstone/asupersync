@@ -723,8 +723,13 @@ mod completion_recovery {
                     let bytes = std::fs::read(&original_path).unwrap();
                     let sequence = request.journal.get_stats().sequence;
                     let report = ScopedSparseWriter::reconcile_committed_destination(&cx, request).await.unwrap();
-                    assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::VerificationFailed(_))
-                        | Outcome::Err(SparseWriterError::FileOpen(_))));
+                    assert!(matches!(
+                        report.outcome,
+                        Outcome::Err(
+                            SparseWriterError::VerificationFailed(_)
+                                | SparseWriterError::FileOpen(_)
+                        )
+                    ));
                     assert!(!report.content_verified && !report.destination_synced && !report.completion_persisted);
                     assert_eq!(report.journal.get_stats().sequence, sequence);
                     assert_eq!(report.journal.get_resume_summary("recover-completion").unwrap().status,

@@ -233,7 +233,7 @@ impl ReceiveStartGate {
 
     fn release(&self) {
         // Never undo body admission after an earlier wait has started it.
-        let _ = self.0.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+        let _ = self.0.try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
             matches!(state, Self::HELD | Self::PREPARED).then_some(Self::OPEN)
         });
     }
@@ -243,7 +243,7 @@ impl ReceiveStartGate {
     }
 
     pub(super) fn poll_admit(&self) -> Poll<()> {
-        let previous = self.0.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+        let previous = self.0.try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
             match state {
                 Self::OPEN => Some(Self::ADMITTED),
                 Self::HELD => Some(Self::PREPARED),

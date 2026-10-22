@@ -3,6 +3,11 @@
 //! `HttpAutoListener`. A real gRPC `Channel`, an HTTP/1.1 client and an
 //! HTTP/2 client all reach their side of the same listener.
 
+// An integration test is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. With every feature enabled, proving `Send` for the
+// spawned test task overflows rustc's default depth.
+#![recursion_limit = "256"]
+
 use asupersync::bytes::Bytes;
 use asupersync::cx::Cx;
 use asupersync::grpc::{

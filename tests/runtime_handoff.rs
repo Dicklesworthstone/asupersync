@@ -319,7 +319,9 @@ mod lifecycle {
             .write_all(ACK)
             .await
             .expect("transferred socket remains writable");
-        stream.shutdown(Shutdown::Write).expect("client half-close");
+        // With AsyncWriteExt in scope, `stream.shutdown(..)` resolves to its
+        // zero-argument async shutdown; name the inherent half-close.
+        TcpStream::shutdown(stream, Shutdown::Write).expect("client half-close");
         let mut byte = [0_u8];
         let count = after_pending(stream.read(&mut byte), || {
             commands
