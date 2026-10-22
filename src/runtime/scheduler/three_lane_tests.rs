@@ -13467,8 +13467,10 @@ fn an_early_none_from_next_task_spills_the_lifo_slot() {
         );
     }
     let woken = TaskId::new_for_test(8_000, 1);
-    let key = Arc::as_ptr(&worker.coordinator).addr();
-    LIFO_SLOT.with(|slot| slot.set(Some((key, woken, 7))));
+    let slot = &worker.coordinator.lifo_slots[worker.id];
+    slot.priority.store(7, Ordering::Relaxed);
+    slot.task
+        .store(lifo_word(woken).expect("a slot word"), Ordering::Relaxed);
 
     assert_eq!(
         worker.next_task(),
@@ -13476,7 +13478,7 @@ fn an_early_none_from_next_task_spills_the_lifo_slot() {
         "queued cancellation commands yield the turn"
     );
     assert!(
-        take_lifo_task(&worker.coordinator).is_none(),
+        take_lifo_task(&worker.coordinator, worker.id).is_none(),
         "the woken task was left in the LIFO slot"
     );
     let spilled = worker
