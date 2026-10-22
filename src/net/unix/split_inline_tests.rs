@@ -379,7 +379,10 @@
             };
             assert_eq!(first.waker_count(), 0);
             assert_eq!(second.waker_count(), 1);
-            reactor.set_ready(token, Interest::READABLE | Interest::WRITABLE);
+            reactor.set_ready(
+                token,
+                crate::runtime::reactor::Event::new(token, Interest::READABLE | Interest::WRITABLE),
+            );
             second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
             assert_eq!(read_signal.hits.load(Ordering::SeqCst), 1);
             assert_eq!(write_signal.hits.load(Ordering::SeqCst), 1);

@@ -3697,7 +3697,7 @@ mod tests {
         assert!(registration.belongs_to(&first));
         assert!(registration.belongs_to(&shared));
         assert!(!registration.belongs_to(&other));
-        reactor.set_ready(registration.token(), Interest::READABLE);
+        reactor.set_ready(registration.token(), Event::readable(registration.token()));
         shared.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
         assert_eq!(wakes.count.load(Ordering::SeqCst), 1);
         drop(first);

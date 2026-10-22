@@ -3207,6 +3207,7 @@ fn assert_registered_task_waker_releases_driver(local: bool) {
                     result
                 })
                 .await
+                .expect("the local capture task completes")
         })
     } else {
         runtime.block_on(runtime.handle().spawn(capture))
