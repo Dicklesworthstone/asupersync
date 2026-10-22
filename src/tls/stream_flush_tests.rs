@@ -1125,15 +1125,25 @@ fn failed_final_tls13_flush_never_publishes_peer_certificate_metadata() {
         assert!(client.poll_handshake(&mut cx).is_pending());
         assert!(server.poll_handshake(&mut cx).is_pending());
 
+        // Every handshake poll flushes the transport before it reads, so a
+        // flush error injected now would fire before the client even reads
+        // the server's flight. Block the flush first: the client reads that
+        // flight, authenticates the server and writes its Finished, and only
+        // the final flush is left.
+        client.io.block_flush = true;
+        assert!(client.poll_handshake(&mut cx).is_pending());
+        assert!(
+            !client.conn.is_handshaking(),
+            "rustls had already authenticated the server before wrapper failure"
+        );
+        assert!(client.state.requires_handshake());
+
+        client.io.block_flush = false;
         client.io.flush_error = Some(io::ErrorKind::BrokenPipe);
         let Poll::Ready(Err(TlsError::Io(error))) = client.poll_handshake(&mut cx) else {
             panic!("the final wrapper flush must fail");
         };
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-        assert!(
-            !client.conn.is_handshaking(),
-            "rustls had already authenticated the server before wrapper failure"
-        );
         assert!(client.conn.peer_leaf_certificate_der().is_some());
         assert!(!client.handshake_completed);
         assert!(client.is_closed());
