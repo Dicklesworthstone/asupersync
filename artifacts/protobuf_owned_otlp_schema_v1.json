@@ -147,7 +147,7 @@
       },
       {
         "path": "src/grpc/protobuf_wire.rs",
-        "sha256": "468c5fdc699009eb2339107f63cb5abf196131a174ba47ee23a23e025f01dfa0",
+        "sha256": "588f70abdbdeb75adf3db6eefab17dfe755483b46d917c049b220eb670c97c19",
         "role": "schema-neutral wire and generic budget authority"
       },
       {

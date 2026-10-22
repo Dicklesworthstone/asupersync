@@ -343,3 +343,308 @@ fn a_hand_written_oneof_in_a_derived_message_decodes_through_its_own_decode_oneo
         Some(ManualPayload::Point(Point { x: 0, y: 2 }))
     );
 }
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, ProtoMessage)]
+struct Blob {
+    #[proto(bytes, tag = 1)]
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, ProtoMessage)]
+struct SingularBlob {
+    #[proto(message, tag = 1)]
+    child: Blob,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, ProtoOneof)]
+enum BlobChoice {
+    #[proto(message, tag = 4)]
+    Child(Blob),
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, ProtoMessage)]
+struct BlobContainers {
+    #[proto(message, optional, tag = 1)]
+    child: Option<Blob>,
+    #[proto(message, repeated, tag = 2)]
+    children: Vec<Blob>,
+    #[proto(map, key = "string", value = "message", tag = 3)]
+    entries: HashMap<String, Blob>,
+    #[proto(oneof, tags = "4")]
+    choice: Option<BlobChoice>,
+}
+
+fn assert_owned_round_trip<T>(value: &T, limits: ProtobufWireLimits)
+where
+    T: OwnedProtoMessage + std::fmt::Debug + PartialEq,
+{
+    let wire = value
+        .encode_to_bytes(limits)
+        .expect("encode within parent limits");
+    assert_eq!(
+        &T::decode_from_bytes(&wire, limits).expect("decode within parent limits"),
+        value,
+    );
+}
+
+/// br-asupersync-fe1plr: child messages previously restarted the default 4 MiB
+/// encoder even when their parent explicitly admitted a larger message.
+#[test]
+fn parent_message_limits_reach_every_derived_nested_container() {
+    let limits = ProtobufWireLimits::for_message_size(16 * 1024 * 1024);
+    let blob = Blob {
+        bytes: vec![0xa5; 5 * 1024 * 1024],
+    };
+    assert_owned_round_trip(
+        &SingularBlob {
+            child: blob.clone(),
+        },
+        limits,
+    );
+    for value in [
+        BlobContainers {
+            child: Some(blob.clone()),
+            ..BlobContainers::default()
+        },
+        BlobContainers {
+            children: vec![blob.clone()],
+            ..BlobContainers::default()
+        },
+        BlobContainers {
+            entries: HashMap::from([("key".to_owned(), blob.clone())]),
+            ..BlobContainers::default()
+        },
+        BlobContainers {
+            choice: Some(BlobChoice::Child(blob.clone())),
+            ..BlobContainers::default()
+        },
+    ] {
+        assert_owned_round_trip(&value, limits);
+        assert!(
+            value
+                .encode_to_bytes(ProtobufWireLimits::default())
+                .is_err(),
+            "the default ceiling must still reject the oversized child",
+        );
+    }
+}
+
+#[test]
+fn derived_children_share_the_parents_aggregate_field_budget() {
+    let blob = Blob { bytes: vec![1] };
+    let value = BlobContainers {
+        child: Some(blob.clone()),
+        children: vec![blob],
+        ..BlobContainers::default()
+    };
+    let limits = ProtobufWireLimits::for_message_size(128).with_max_fields(4);
+    assert_owned_round_trip(&value, limits);
+    assert!(matches!(
+        value.encode_to_bytes(limits.with_max_fields(3)),
+        Err(ProtobufWireError::FieldCountExceeded {
+            count: 4,
+            limit: 3,
+            ..
+        }),
+    ));
+}
+
+#[test]
+fn derived_messages_and_map_wrappers_share_the_depth_budget() {
+    let blob = Blob { bytes: vec![1] };
+    let singular = SingularBlob {
+        child: blob.clone(),
+    };
+    let limits = ProtobufWireLimits::for_message_size(128);
+    assert!(matches!(
+        singular.encode_to_bytes(limits.with_max_depth(0)),
+        Err(ProtobufWireError::RecursionLimitExceeded {
+            depth: 1,
+            limit: 0,
+            ..
+        }),
+    ));
+    assert_owned_round_trip(&singular, limits.with_max_depth(1));
+
+    let map = BlobContainers {
+        entries: HashMap::from([("k".to_owned(), blob)]),
+        ..BlobContainers::default()
+    };
+    assert!(matches!(
+        map.encode_to_bytes(limits.with_max_depth(1)),
+        Err(ProtobufWireError::RecursionLimitExceeded {
+            depth: 2,
+            limit: 1,
+            ..
+        }),
+    ));
+    assert_owned_round_trip(&map, limits.with_max_depth(2));
+}
+
+#[test]
+fn derived_children_and_map_wrappers_honor_stricter_field_byte_limits() {
+    let limits = ProtobufWireLimits::for_message_size(128);
+    let singular = SingularBlob {
+        child: Blob {
+            bytes: vec![1, 2, 3],
+        },
+    };
+    assert!(matches!(
+        singular.encode_to_bytes(limits.with_max_field_len(4)),
+        Err(ProtobufWireError::FieldLimitExceeded { limit: 4, .. }),
+    ));
+    assert_owned_round_trip(&singular, limits.with_max_field_len(5));
+
+    let map = BlobContainers {
+        entries: HashMap::from([("k".to_owned(), Blob { bytes: vec![7] })]),
+        ..BlobContainers::default()
+    };
+    assert!(matches!(
+        map.encode_to_bytes(limits.with_max_field_len(7)),
+        Err(ProtobufWireError::FieldLimitExceeded { limit: 7, .. }),
+    ));
+    assert_owned_round_trip(&map, limits.with_max_field_len(8));
+}
+
+#[test]
+fn nested_work_refusal_restores_the_prefix_and_allows_encoder_reuse() {
+    let limits = ProtobufWireLimits::for_message_size(128);
+    let message = SingularBlob {
+        child: Blob { bytes: vec![7; 20] },
+    };
+    let mut encoder = ProtobufWireEncoder::new(limits.with_max_work(47));
+    encoder.write_varint(9, 1).expect("existing prefix");
+    let before = encoder.as_bytes().to_vec();
+    assert!(matches!(
+        message.encode_fields(&mut encoder),
+        Err(ProtobufWireError::WorkLimitExceeded { limit: 47, .. }),
+    ));
+    assert_eq!(encoder.as_bytes(), before);
+    assert_eq!(encoder.fields_written(), 1);
+    assert_eq!(encoder.work_used(), 2);
+    encoder
+        .write_varint(10, 3)
+        .expect("reuse after failed child");
+    assert_eq!(
+        encoder.finish().expect("finish prefix").as_ref(),
+        &[0x48, 1, 0x50, 3]
+    );
+
+    let mut exact = ProtobufWireEncoder::new(limits.with_max_work(48));
+    exact.write_varint(9, 1).expect("existing prefix");
+    message
+        .encode_fields(&mut exact)
+        .expect("exact work budget");
+    assert_eq!(exact.work_used(), 48);
+    assert_eq!(exact.fields_written(), 3);
+    let mut expected = vec![0x48, 1, 0x0a, 22, 0x0a, 20];
+    expected.extend_from_slice(&[7; 20]);
+    assert_eq!(exact.finish().expect("finish child").as_ref(), expected);
+}
+
+#[test]
+fn derived_map_has_independent_wire_bytes_and_exact_shared_budgets() {
+    let map = BlobContainers {
+        entries: HashMap::from([("k".to_owned(), Blob { bytes: vec![7] })]),
+        ..BlobContainers::default()
+    };
+    let limits = ProtobufWireLimits::for_message_size(10)
+        .with_max_fields(4)
+        .with_max_depth(2)
+        .with_max_work(21);
+    let mut encoder = ProtobufWireEncoder::new(limits);
+    map.encode_fields(&mut encoder)
+        .expect("exact aggregate budget");
+    assert_eq!(encoder.fields_written(), 4);
+    assert_eq!(encoder.work_used(), 21);
+    let wire = encoder.finish().expect("finish map");
+    assert_eq!(
+        wire.as_ref(),
+        &[0x1a, 8, 0x0a, 1, b'k', 0x12, 3, 0x0a, 1, 7]
+    );
+    assert_eq!(
+        BlobContainers::decode_from_bytes(&wire, limits).unwrap(),
+        map
+    );
+    assert!(matches!(
+        map.encode_to_bytes(limits.with_max_work(20)),
+        Err(ProtobufWireError::WorkLimitExceeded { limit: 20, .. }),
+    ));
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ManualBlob(Blob);
+
+impl OwnedProtoMessage for ManualBlob {
+    fn encode_fields(&self, encoder: &mut ProtobufWireEncoder) -> Result<(), ProtobufWireError> {
+        self.0.encode_fields(encoder)
+    }
+
+    fn merge_field<'wire>(
+        &mut self,
+        field: &ProtobufWireField<'wire>,
+        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+    ) -> Result<bool, ProtobufWireError> {
+        self.0.merge_field(field, decoder)
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, ProtoMessage)]
+struct ManualBlobEnvelope {
+    #[proto(message, tag = 1)]
+    child: ManualBlob,
+}
+
+#[test]
+fn derived_parent_supports_hand_written_child_under_shared_limits() {
+    let value = ManualBlobEnvelope {
+        child: ManualBlob(Blob {
+            bytes: vec![1, 2, 3],
+        }),
+    };
+    let limits = ProtobufWireLimits::for_message_size(32)
+        .with_max_fields(2)
+        .with_max_depth(1);
+    assert_owned_round_trip(&value, limits);
+    assert!(matches!(
+        value.encode_to_bytes(limits.with_max_fields(1)),
+        Err(ProtobufWireError::FieldCountExceeded { limit: 1, .. }),
+    ));
+}
+
+#[test]
+fn nested_callback_unwind_restores_groups_counters_and_original_panic() {
+    let limits = ProtobufWireLimits::for_message_size(128);
+    let mut encoder = ProtobufWireEncoder::new(limits);
+    encoder.start_group(1).expect("parent group");
+    encoder.write_varint(9, 1).expect("parent prefix");
+    let before = encoder.as_bytes().to_vec();
+    let fields = encoder.fields_written();
+    let work = encoder.work_used();
+    let marker = std::sync::Arc::new(17_u8);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        encoder.write_nested_message(3, |nested| {
+            nested.start_group(4)?;
+            nested.write_varint(5, 9)?;
+            std::panic::panic_any(marker.clone());
+        })
+    }))
+    .expect_err("the callback panic must propagate");
+    assert!(std::sync::Arc::ptr_eq(
+        panic
+            .downcast_ref::<std::sync::Arc<u8>>()
+            .expect("original panic type"),
+        &marker,
+    ));
+    assert_eq!(encoder.as_bytes(), before);
+    assert_eq!(encoder.fields_written(), fields);
+    assert_eq!(encoder.work_used(), work);
+    encoder
+        .write_nested_message(3, |nested| nested.write_varint(7, 11))
+        .expect("reuse");
+    encoder.end_group(1).expect("parent group floor restored");
+    assert_eq!(
+        encoder.finish().expect("finish restored encoder").as_ref(),
+        &[0x0b, 0x48, 1, 0x1a, 2, 0x38, 11, 0x0c]
+    );
+}
