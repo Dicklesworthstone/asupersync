@@ -628,7 +628,7 @@ impl StreamingSseSource for Source {
         // The source can park after queuing an event but before the transport
         // writes it. Require the actual wire event as well as source Pending
         // before the test cancels the connection.
-        if self.wire.text().contains("data: owned event\n\n")
+        if self.wire.text().contains("data:owned event\n\n")
             && let Some(ready) = self.ready.take()
         {
             ready.send_blocking(cx.clone()).unwrap();
@@ -697,7 +697,9 @@ async fn sse_source_and_terminal_follow_request_retirement(cx: Cx) {
             assert!(shutdown.begin_force_close());
         }
         cleanup_parked.recv(&cx).await.unwrap();
-        assert!(wire.text().contains("event: update\ndata: owned event\n\n"), "{:?}", wire.text());
+        // SseEvent writes `field:value`; see the wire-format pins in
+        // src/web/sse_inline_tests.rs.
+        assert!(wire.text().contains("event:update\ndata:owned event\n\n"), "{:?}", wire.text());
         assert!(!wire.text().contains("\r\n0\r\n"));
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
         assert_eq!(cancelled.load(Ordering::SeqCst), usize::from(idle));
