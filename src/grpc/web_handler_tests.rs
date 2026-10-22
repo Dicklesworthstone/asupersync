@@ -929,7 +929,12 @@ fn native_web_stream_error_preserves_complete_message_and_terminal_status() {
                 parks.recv_timeout(Duration::from_secs(2)).expect("source parked");
                 probe.release();
                 let trailers = peer.terminal("3");
-                assert!(trailers.contains("grpc-message: bad%20%25%0A\r\n"));
+                // grpc-message keeps an internal space literal, as the gRPC
+                // grammar allows, and escapes `%` and the line feed.
+                assert!(
+                    trailers.contains("grpc-message: bad %25%0A\r\n"),
+                    "{trailers:?}"
+                );
                 assert!(!trailers.contains("x-end:"));
                 retirements.recv_timeout(Duration::from_secs(2)).expect("error source dropped");
             },
