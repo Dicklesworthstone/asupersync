@@ -808,8 +808,8 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b",
-      "line_count": 1194,
+      "sha256": "4d2172faec620ad277d014525c59e20cd8dbea19283dd296ebaf5b76f026f938",
+      "line_count": 966,
       "anchors": ["private, native-only owned OTLP message staging", "Signal adapters may construct these finite models", "pub(crate) mod otlp_proto", "OwnedOtlpMetrics"]
     },
     {
@@ -892,7 +892,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "6cc6d7bb46cb233f536ac9c175444147b1c5861e46ede35c02dd67a8d395ebe9",
+      "sha256": "e134a7f69b6341e5c6ea5f9f5358df4998bba9af2aa72c9ecd224c21e82aab6d",
       "line_count": 2237,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -910,7 +910,7 @@
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "9bbf2b38c5db5a5f65450cceb052460a0033042134360c76b18e783cd2abbbb5",
+      "sha256": "a87f6a5a6323d1ffefa0ff1b1d7ca2fc3cbab3e17b158fab394d2a51937a77de",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

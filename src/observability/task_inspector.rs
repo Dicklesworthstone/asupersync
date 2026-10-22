@@ -24,14 +24,16 @@
 use crate::console::Console;
 use crate::cx::Cx;
 use crate::record::task::{TaskPhase, TaskRecord, TaskState};
-use crate::record::{ObligationRecord, RegionRecord};
+use crate::record::{
+    ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState, RegionRecord,
+};
 use crate::runtime::obligation_table::ObligationTable;
 use crate::runtime::state::{LoserDrainHistoryEvent, RuntimeState};
 use crate::runtime::task_table::TaskTable;
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
-use crate::types::{ObligationId, Outcome, RegionId, TaskId, Time};
+use crate::types::{Budget, ObligationId, Outcome, RegionId, TaskId, Time};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -110,9 +112,7 @@ impl<'a> RuntimeStateView<'a> {
     }
 
     /// Every region record (regions stay embedded in the unified state on
-    /// every shape). Only the in-source diagnostics tests need the full
-    /// iterator today; production queries look regions up by id.
-    #[cfg(test)]
+    /// every shape).
     pub(crate) fn regions(&self) -> impl Iterator<Item = &'a RegionRecord> + 'a {
         let state: &'a RuntimeState = self.state;
         state.regions.iter().map(|(_, record)| record)
@@ -361,6 +361,403 @@ pub enum TaskStateInfo {
 
 /// Stable schema identifier for task-inspector wire snapshots.
 pub const TASK_CONSOLE_WIRE_SCHEMA_V1: &str = "asupersync.task_console_wire.v1";
+
+/// Stable schema identifier for the combined runtime-inspector snapshot.
+pub const INSPECTOR_SNAPSHOT_SCHEMA_V1: &str = "asupersync.inspector_snapshot.v1";
+
+/// Controls whether a runtime snapshot includes free-form diagnostic text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InspectorProfile {
+    /// Include obligation descriptions, acquisition locations, and checkpoint messages.
+    Full,
+    /// Remove those fields while preserving identities, topology, and counters.
+    Shareable,
+}
+
+/// The sources and limits of a snapshot, rather than inferred runtime telemetry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorCoverage {
+    /// The runtime's record-table locks were held together during collection.
+    /// False for a caller-borrowed or detached `RuntimeState`.
+    pub record_tables_locked: bool,
+    /// Phase/wake atomics, context data, and region metadata are sampled separately.
+    /// Even when the record tables are locked, these are not one atomic observation.
+    pub dynamic_metadata_sampled_separately: bool,
+    /// An external dispatch/shard-A task table was included.
+    pub external_task_table: bool,
+    /// An external shard-C obligation table was included.
+    pub external_obligation_table: bool,
+    /// Obligations cover retained records, not reaped history or undrained mailbox posts.
+    pub retained_obligations_only: bool,
+    /// Wait edges cover task join waiters, not all resource/spectral wait edges.
+    pub join_wait_edges_only: bool,
+    /// Whether scheduler lane depths and fairness telemetry are included.
+    pub scheduler_statistics: bool,
+    /// Whether adaptive controller cards are included.
+    pub controller_cards: bool,
+}
+
+/// Counts derived from the records actually present in a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorCounters {
+    /// Retained task records, including completed tasks not yet reaped.
+    pub tasks: usize,
+    /// Tasks whose recorded state is not completed.
+    pub active_tasks: usize,
+    /// Retained region records.
+    pub regions: usize,
+    /// All retained obligation records.
+    pub retained_obligations: usize,
+    /// Unresolved obligation records.
+    pub reserved_obligations: usize,
+    /// Successfully committed obligation records.
+    pub committed_obligations: usize,
+    /// Cleanly aborted obligation records.
+    pub aborted_obligations: usize,
+    /// Confirmed leaked obligation records.
+    pub leaked_obligations: usize,
+    /// Distinct task join wait edges.
+    pub join_wait_edges: usize,
+}
+
+/// Serializable copy of every dimension of a runtime budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorBudget {
+    /// Absolute deadline in the budget's clock domain.
+    pub deadline: Option<Time>,
+    /// Stored poll quota; task-record remaining polls are reported separately.
+    pub poll_quota: u32,
+    /// Optional cost quota.
+    pub cost_quota: Option<u64>,
+    /// Scheduling priority.
+    pub priority: u8,
+}
+
+impl From<Budget> for InspectorBudget {
+    fn from(budget: Budget) -> Self {
+        Self {
+            deadline: budget.deadline,
+            poll_quota: budget.poll_quota,
+            cost_quota: budget.cost_quota,
+            priority: budget.priority,
+        }
+    }
+}
+
+/// A retained progress checkpoint, in its task's runtime-clock domain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorCheckpoint {
+    /// Runtime timestamp recorded by the task.
+    pub at: Time,
+    /// Omitted under the shareable profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// A task record with its context budget and bounded progress trail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorTask {
+    /// Existing task wire fields, including join waiters and pending obligation ids.
+    #[serde(flatten)]
+    pub details: TaskDetailsWire,
+    /// Context budget when the task still has context state; never synthesized.
+    pub budget: Option<InspectorBudget>,
+    /// Total progress checkpoints, including pending fast-path accounting.
+    pub checkpoint_count: Option<u64>,
+    /// Last checkpoint in the task's runtime-clock domain. Absent when the task
+    /// has no runtime timer driver, so wall-clock timestamps are not exported.
+    pub last_checkpoint: Option<Time>,
+    /// Retained message checkpoints, oldest first. Empty without a runtime clock.
+    pub checkpoint_trail: Vec<InspectorCheckpoint>,
+}
+
+/// A region's topology, lifecycle state, budget, and close-blocking counters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorRegion {
+    /// Region identity.
+    pub id: RegionId,
+    /// Parent region, absent for roots.
+    pub parent: Option<RegionId>,
+    /// Direct children sorted by region id.
+    pub children: Vec<RegionId>,
+    /// Registered tasks sorted by task id.
+    pub tasks: Vec<TaskId>,
+    /// Region lifecycle state.
+    pub state: String,
+    /// Logical creation time.
+    pub created_at: Time,
+    /// Current region budget.
+    pub budget: InspectorBudget,
+    /// Spawn reservations not yet applied to the region.
+    pub pending_spawns: u32,
+    /// Outstanding obligation mailbox credits, sampled independently.
+    pub pending_obligation_posts: u32,
+    /// Applied pending obligation count.
+    pub pending_obligations: usize,
+    /// Checked admission credits awaiting their arena projection.
+    pub unapplied_obligations: usize,
+    /// Registered finalizers remaining.
+    pub finalizers: usize,
+}
+
+/// An obligation still retained by the runtime, including terminal records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorObligation {
+    /// Obligation identity.
+    pub id: ObligationId,
+    /// Resource kind.
+    pub kind: ObligationKind,
+    /// Holder task identity.
+    pub holder: TaskId,
+    /// Owning region identity.
+    pub region: RegionId,
+    /// Recorded lifecycle state.
+    pub state: ObligationState,
+    /// Reservation timestamp.
+    pub reserved_at: Time,
+    /// Resolution timestamp when terminal.
+    pub resolved_at: Option<Time>,
+    /// Time since reservation, including time retained after resolution.
+    pub age_nanos: u64,
+    /// Resolution reason for an aborted obligation.
+    pub abort_reason: Option<ObligationAbortReason>,
+    /// Diagnostic description; omitted under the shareable profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Acquisition path, line, and column; omitted under the shareable profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acquired_at: Option<String>,
+    /// Whether a backtrace was captured. Backtrace text is never exported.
+    pub has_acquire_backtrace: bool,
+}
+
+/// A registered task join dependency. Either endpoint may since have been reaped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorWaitEdge {
+    /// Task waiting for completion.
+    pub waiter: TaskId,
+    /// Task whose completion is awaited.
+    pub awaited_task: TaskId,
+}
+
+/// Versioned, deterministic runtime record snapshot for tools and tests.
+///
+/// Task, region, obligation, and edge ordering uses numeric runtime identities.
+/// Collection does not poll tasks, drain mailboxes, or run callbacks. Payloads,
+/// panic text, and backtrace text are never included. The shareable profile also
+/// removes free-form descriptions, source locations, and checkpoint messages.
+/// See [`InspectorCoverage`] for fields unavailable from these record tables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorSnapshot {
+    /// Schema version identifier.
+    pub schema_version: String,
+    /// Applied diagnostic-text policy.
+    pub profile: InspectorProfile,
+    /// Runtime timestamp captured once before collecting the records.
+    pub generated_at: Time,
+    /// Source coverage and consistency limits.
+    pub coverage: InspectorCoverage,
+    /// Counts of the records below, rather than lifetime or scheduler counters.
+    pub counters: InspectorCounters,
+    /// Task records sorted by id.
+    pub tasks: Vec<InspectorTask>,
+    /// Region records sorted by id.
+    pub regions: Vec<InspectorRegion>,
+    /// Retained obligation records sorted by id.
+    pub obligations: Vec<InspectorObligation>,
+    /// Join wait edges sorted by waiter then awaited task.
+    pub wait_edges: Vec<InspectorWaitEdge>,
+}
+
+impl InspectorSnapshot {
+    /// Capture caller-borrowed state, including `LabRuntime::state`.
+    ///
+    /// Use [`TaskInspector::runtime_snapshot`] for a live native runtime: its
+    /// binding also acquires the external task and obligation tables when present.
+    #[must_use]
+    pub fn from_state(state: &RuntimeState, profile: InspectorProfile) -> Self {
+        Self::from_view(
+            &RuntimeStateView {
+                state,
+                shard_tasks: None,
+                shard_obligations: None,
+            },
+            profile,
+            false,
+        )
+    }
+
+    fn from_view(
+        view: &RuntimeStateView<'_>,
+        profile: InspectorProfile,
+        record_tables_locked: bool,
+    ) -> Self {
+        let generated_at = view.now();
+        let full = profile == InspectorProfile::Full;
+        // Stable sorting preserves external-table precedence if a record is
+        // temporarily represented in both tables, matching `view.task`.
+        let mut obligation_records: Vec<_> = view.obligations().collect();
+        obligation_records.sort_by_key(|record| record.id.as_u64());
+        obligation_records.dedup_by_key(|record| record.id);
+        let mut by_holder: BTreeMap<TaskId, Vec<ObligationId>> = BTreeMap::new();
+        let obligations: Vec<_> = obligation_records
+            .into_iter()
+            .map(|record| {
+                if record.state == ObligationState::Reserved {
+                    by_holder.entry(record.holder).or_default().push(record.id);
+                }
+                InspectorObligation {
+                    id: record.id,
+                    kind: record.kind,
+                    holder: record.holder,
+                    region: record.region,
+                    state: record.state,
+                    reserved_at: record.reserved_at,
+                    resolved_at: record.resolved_at,
+                    age_nanos: generated_at.duration_since(record.reserved_at),
+                    abort_reason: record.abort_reason,
+                    description: full.then(|| record.description.clone()).flatten(),
+                    acquired_at: full.then(|| record.acquired_at.to_string()),
+                    has_acquire_backtrace: record.acquire_backtrace.is_some(),
+                }
+            })
+            .collect();
+
+        let mut task_records: Vec<_> = view.tasks().collect();
+        task_records.sort_by_key(|record| record.id.as_u64());
+        task_records.dedup_by_key(|record| record.id);
+        let tasks: Vec<_> = task_records
+            .into_iter()
+            .map(|task| {
+                let checkpoint_now = TaskInspector::current_checkpoint_time_for_task(task);
+                let (budget, checkpoint_count, last_checkpoint, checkpoint_trail) = task
+                    .cx_inner
+                    .as_ref()
+                    .map_or((None, None, None, Vec::new()), |inner| {
+                        let inner = inner.read();
+                        let checkpoints = inner.materialised_checkpoint_state();
+                        let trail = if checkpoint_now.is_some() {
+                            checkpoints
+                                .history()
+                                .into_iter()
+                                .map(|entry| InspectorCheckpoint {
+                                    at: entry.at,
+                                    message: full.then_some(entry.message),
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        (
+                            Some(InspectorBudget::from(inner.budget)),
+                            Some(checkpoints.checkpoint_count),
+                            checkpoint_now.and(checkpoints.last_checkpoint),
+                            trail,
+                        )
+                    });
+                let mut waiters = task.waiters.to_vec();
+                waiters.sort_unstable_by_key(TaskId::as_u64);
+                waiters.dedup();
+                InspectorTask {
+                    details: TaskDetailsWire {
+                        id: task.id,
+                        region_id: task.owner,
+                        state: TaskStateInfo::from(&task.state),
+                        phase: phase_name(task.phase()).to_string(),
+                        poll_count: task.total_polls,
+                        polls_remaining: task.polls_remaining,
+                        created_at: task.created_at,
+                        age_nanos: generated_at.duration_since(task.created_at),
+                        time_since_last_poll_nanos: checkpoint_now
+                            .zip(last_checkpoint)
+                            .map(|(now, last)| now.duration_since(last)),
+                        wake_pending: task.wake_state.is_notified(),
+                        obligations: by_holder.remove(&task.id).unwrap_or_default(),
+                        waiters,
+                    },
+                    budget,
+                    checkpoint_count,
+                    last_checkpoint,
+                    checkpoint_trail,
+                }
+            })
+            .collect();
+
+        let mut regions: Vec<_> = view
+            .regions()
+            .map(|region| {
+                let mut children = region.child_ids();
+                children.sort_unstable_by_key(RegionId::as_u64);
+                let mut tasks = region.task_ids();
+                tasks.sort_unstable_by_key(TaskId::as_u64);
+                InspectorRegion {
+                    id: region.id,
+                    parent: region.parent,
+                    children,
+                    tasks,
+                    state: format!("{:?}", region.state()),
+                    created_at: region.created_at,
+                    budget: InspectorBudget::from(region.budget()),
+                    pending_spawns: region.pending_spawn_count(),
+                    pending_obligation_posts: region.pending_obligation_post_count(),
+                    pending_obligations: region.pending_obligations(),
+                    unapplied_obligations: region.unapplied_obligation_count(),
+                    finalizers: region.finalizer_count(),
+                }
+            })
+            .collect();
+        regions.sort_unstable_by_key(|region| region.id.as_u64());
+
+        let mut wait_edges: Vec<_> = tasks
+            .iter()
+            .flat_map(|task| {
+                task.details
+                    .waiters
+                    .iter()
+                    .map(move |&waiter| InspectorWaitEdge {
+                        waiter,
+                        awaited_task: task.details.id,
+                    })
+            })
+            .collect();
+        wait_edges.sort_unstable_by_key(|edge| (edge.waiter.as_u64(), edge.awaited_task.as_u64()));
+        let count_obligations = |state| obligations.iter().filter(|ob| ob.state == state).count();
+        let counters = InspectorCounters {
+            tasks: tasks.len(),
+            active_tasks: tasks
+                .iter()
+                .filter(|task| !matches!(task.details.state, TaskStateInfo::Completed { .. }))
+                .count(),
+            regions: regions.len(),
+            retained_obligations: obligations.len(),
+            reserved_obligations: count_obligations(ObligationState::Reserved),
+            committed_obligations: count_obligations(ObligationState::Committed),
+            aborted_obligations: count_obligations(ObligationState::Aborted),
+            leaked_obligations: count_obligations(ObligationState::Leaked),
+            join_wait_edges: wait_edges.len(),
+        };
+        Self {
+            schema_version: INSPECTOR_SNAPSHOT_SCHEMA_V1.to_string(),
+            profile,
+            generated_at,
+            coverage: InspectorCoverage {
+                record_tables_locked,
+                dynamic_metadata_sampled_separately: true,
+                external_task_table: view.shard_tasks.is_some(),
+                external_obligation_table: view.shard_obligations.is_some(),
+                retained_obligations_only: true,
+                join_wait_edges_only: true,
+                scheduler_statistics: false,
+                controller_cards: false,
+            },
+            counters,
+            tasks,
+            regions,
+            obligations,
+            wait_edges,
+        }
+    }
+}
 
 /// Deterministic wire payload for task-inspector snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -871,6 +1268,20 @@ impl TaskInspector {
         let summary = Self::summarize_tasks(&tasks, self.config.stuck_task_threshold);
         let wire_tasks = tasks.into_iter().map(TaskDetailsWire::from).collect();
         TaskConsoleWireSnapshot::new(captured_at, TaskSummaryWire::from(summary), wire_tasks)
+    }
+
+    /// Capture tasks, regions, retained obligations, and task join dependencies.
+    ///
+    /// One state view holds the record-table locks in B -> A -> C order on a
+    /// live runtime, including external dispatch and obligation tables. Atomic
+    /// phase/wake fields and interior context/region metadata may still change;
+    /// the snapshot explicitly reports that consistency boundary. Inspector
+    /// display settings do not suppress obligation records in this API.
+    #[must_use]
+    pub fn runtime_snapshot(&self, profile: InspectorProfile) -> InspectorSnapshot {
+        let record_tables_locked = matches!(&self.state, RuntimeStateSource::Shared { .. });
+        self.state
+            .with_view(|view| InspectorSnapshot::from_view(view, profile, record_tables_locked))
     }
 
     /// Serialize a wire snapshot as compact JSON.

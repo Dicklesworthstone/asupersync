@@ -152,7 +152,7 @@
       },
       {
         "path": "src/observability/mod.rs",
-        "sha256": "2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b",
+        "sha256": "4d2172faec620ad277d014525c59e20cd8dbea19283dd296ebaf5b76f026f938",
         "role": "private native metrics module gate"
       },
       {

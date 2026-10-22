@@ -2,6 +2,207 @@
     use crate::Budget;
     use crate::time::{TimerDriverHandle, VirtualClock};
 
+    fn inspector_lab_fixture() -> (InspectorSnapshot, InspectorSnapshot) {
+        let mut lab = crate::LabRuntime::with_seed(41);
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let child = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .unwrap();
+        let grandchild = lab
+            .state
+            .create_child_region(child, Budget::INFINITE)
+            .unwrap();
+        let budget = Budget {
+            deadline: Some(Time::from_secs(30)),
+            poll_quota: 64,
+            cost_quota: Some(512),
+            priority: 17,
+        };
+        let mut task_ids = Vec::new();
+        let mut handles = Vec::new();
+        for region in [root, root, child, grandchild, grandchild] {
+            let (task, handle) = lab
+                .state
+                .create_task(region, budget, std::future::pending::<()>())
+                .unwrap();
+            task_ids.push(task);
+            handles.push(handle);
+        }
+        let task = lab.state.task_mut(task_ids[0]).unwrap();
+        task.waiters.push(task_ids[1]);
+        let cx = task.cx.as_ref().unwrap().clone();
+        lab.advance_time_to(Time::from_secs(2));
+        cx.checkpoint_with("private-checkpoint-canary").unwrap();
+
+        let pending = lab
+            .state
+            .create_obligation(
+                ObligationKind::IoOp,
+                task_ids[0],
+                root,
+                Some("private-obligation-canary".to_string()),
+            )
+            .unwrap();
+        let committed = lab
+            .state
+            .create_obligation(ObligationKind::Lease, task_ids[3], grandchild, None)
+            .unwrap();
+        lab.state.commit_obligation(committed).unwrap();
+        let completed = lab.state.task_mut(task_ids[4]).unwrap();
+        completed.state = TaskState::Running;
+        completed.phase.store(TaskPhase::Running);
+        assert!(
+            completed.complete(Outcome::Panicked(crate::types::PanicPayload::new(
+                "private-panic-canary",
+            )))
+        );
+        lab.advance_time_to(Time::from_secs(5));
+
+        let full = InspectorSnapshot::from_state(&lab.state, InspectorProfile::Full);
+        let shareable = InspectorSnapshot::from_state(&lab.state, InspectorProfile::Shareable);
+        // Reading a snapshot neither resolves a held obligation nor consumes its record.
+        assert_eq!(lab.state.commit_obligation(pending).unwrap(), 3_000_000_000);
+        (full, shareable)
+    }
+
+    #[test]
+    fn runtime_snapshot_lab_topology_budgets_obligations_and_join_edge() {
+        let (snapshot, _) = inspector_lab_fixture();
+        assert_eq!(snapshot.schema_version, INSPECTOR_SNAPSHOT_SCHEMA_V1);
+        assert_eq!(snapshot.generated_at, Time::from_secs(5));
+        assert_eq!(snapshot.counters.tasks, 5);
+        assert_eq!(snapshot.counters.active_tasks, 4);
+        assert_eq!(snapshot.counters.regions, 3);
+        assert_eq!(snapshot.counters.retained_obligations, 2);
+        assert_eq!(snapshot.counters.reserved_obligations, 1);
+        assert_eq!(snapshot.counters.committed_obligations, 1);
+        assert_eq!(snapshot.counters.aborted_obligations, 0);
+        assert_eq!(snapshot.counters.leaked_obligations, 0);
+        assert_eq!(snapshot.counters.join_wait_edges, 1);
+
+        let root = &snapshot.regions[0];
+        let child = &snapshot.regions[1];
+        let grandchild = &snapshot.regions[2];
+        assert_eq!(root.parent, None);
+        assert_eq!(root.children, vec![child.id]);
+        assert_eq!(child.parent, Some(root.id));
+        assert_eq!(child.children, vec![grandchild.id]);
+        assert_eq!(grandchild.parent, Some(child.id));
+        assert_eq!(root.pending_obligations, 1);
+        assert_eq!(root.pending_spawns, 0);
+        assert_eq!(root.budget, InspectorBudget::from(Budget::INFINITE));
+
+        let holder = &snapshot.tasks[0];
+        let waiter = &snapshot.tasks[1];
+        assert_eq!(root.tasks, vec![holder.details.id, waiter.details.id]);
+        assert_eq!(holder.details.region_id, root.id);
+        assert_eq!(holder.details.obligations, vec![snapshot.obligations[0].id]);
+        assert_eq!(holder.details.waiters, vec![waiter.details.id]);
+        assert_eq!(snapshot.obligations[0].holder, holder.details.id);
+        assert_eq!(snapshot.obligations[0].region, root.id);
+        assert_eq!(snapshot.obligations[0].age_nanos, 3_000_000_000);
+        assert_eq!(snapshot.obligations[1].state, ObligationState::Committed);
+        assert_eq!(
+            snapshot.obligations[1].resolved_at,
+            Some(Time::from_secs(2))
+        );
+        assert_eq!(snapshot.wait_edges[0].waiter, waiter.details.id);
+        assert_eq!(snapshot.wait_edges[0].awaited_task, holder.details.id);
+        assert_eq!(holder.last_checkpoint, Some(Time::from_secs(2)));
+        assert_eq!(holder.checkpoint_count, Some(1));
+        assert_eq!(
+            holder.details.time_since_last_poll_nanos,
+            Some(3_000_000_000)
+        );
+        assert_eq!(holder.checkpoint_trail.len(), 1);
+        assert_eq!(
+            waiter.budget,
+            Some(InspectorBudget {
+                deadline: Some(Time::from_secs(30)),
+                poll_quota: 64,
+                cost_quota: Some(512),
+                priority: 17,
+            })
+        );
+        assert!(!snapshot.coverage.record_tables_locked);
+        assert!(snapshot.coverage.dynamic_metadata_sampled_separately);
+        assert!(snapshot.coverage.retained_obligations_only);
+        assert!(snapshot.coverage.join_wait_edges_only);
+        assert!(!snapshot.coverage.scheduler_statistics);
+        assert!(!snapshot.coverage.controller_cards);
+    }
+
+    #[test]
+    fn runtime_snapshot_same_seed_json_is_deterministic_and_shareable() {
+        let (full, shareable) = inspector_lab_fixture();
+        let (_, replay) = inspector_lab_fixture();
+        let full_json = serde_json::to_string(&full).unwrap();
+        let shareable_json = serde_json::to_string(&shareable).unwrap();
+        assert_eq!(shareable_json, serde_json::to_string(&replay).unwrap());
+        assert_eq!(
+            serde_json::from_str::<InspectorSnapshot>(&shareable_json).unwrap(),
+            shareable
+        );
+        assert_eq!(full.counters, shareable.counters);
+        assert_eq!(full.regions, shareable.regions);
+        assert_eq!(full.wait_edges, shareable.wait_edges);
+        for canary in ["private-checkpoint-canary", "private-obligation-canary"] {
+            assert!(full_json.contains(canary));
+            assert!(!shareable_json.contains(canary));
+        }
+        assert!(!full_json.contains("private-panic-canary"));
+        assert!(!shareable_json.contains("private-panic-canary"));
+        assert!(full.obligations.iter().all(|ob| ob.acquired_at.is_some()));
+        assert!(
+            shareable
+                .obligations
+                .iter()
+                .all(|ob| { ob.description.is_none() && ob.acquired_at.is_none() })
+        );
+        assert!(!shareable_json.contains("task_inspector_inline_tests.rs"));
+        assert_eq!(
+            shareable.tasks[0].checkpoint_trail[0].at,
+            Time::from_secs(2)
+        );
+        assert_eq!(shareable.tasks[0].checkpoint_trail[0].message, None);
+        let wire: serde_json::Value = serde_json::from_str(&shareable_json).unwrap();
+        assert_eq!(wire["schema_version"], INSPECTOR_SNAPSHOT_SCHEMA_V1);
+        assert!(wire["tasks"][0]["budget"]["poll_quota"].is_number());
+        assert!(wire["obligations"][0]["acquired_at"].is_null());
+        assert!(wire["coverage"]["scheduler_statistics"].is_boolean());
+    }
+
+    #[test]
+    fn runtime_snapshot_ignores_display_filter_and_omits_unclocked_checkpoint_times() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state.create_task(root, Budget::INFINITE, async {}).unwrap();
+        let cx = state.task(task_id).unwrap().cx.as_ref().unwrap();
+        cx.checkpoint_with("wall-clock-checkpoint").unwrap();
+        let obligation_id = state
+            .create_obligation(ObligationKind::Ack, task_id, root, None)
+            .unwrap();
+        let inspector = TaskInspector::with_config(
+            Arc::new(state),
+            None,
+            TaskInspectorConfig::default().with_show_obligations(false),
+        );
+        assert!(
+            inspector
+                .inspect_task(task_id)
+                .unwrap()
+                .obligations
+                .is_empty()
+        );
+        let snapshot = inspector.runtime_snapshot(InspectorProfile::Full);
+        assert_eq!(snapshot.tasks[0].details.obligations, vec![obligation_id]);
+        assert_eq!(snapshot.counters.reserved_obligations, 1);
+        assert_eq!(snapshot.tasks[0].checkpoint_count, Some(1));
+        assert_eq!(snapshot.tasks[0].last_checkpoint, None);
+        assert!(snapshot.tasks[0].checkpoint_trail.is_empty());
+    }
+
     #[test]
     fn test_task_state_info_name() {
         assert_eq!(TaskStateInfo::Created.name(), "Created");
