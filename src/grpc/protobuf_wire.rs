@@ -1276,9 +1276,9 @@ impl ProtobufWireEncoder {
     ///
     /// The wrapper field and payload bytes are bounded, but the encoder cannot
     /// infer which length-delimited records inside `value` are messages rather
-    /// than byte strings. Schema implementations that require aggregate nested
-    /// field and depth accounting need a reviewed shared-writer path; the safe
-    /// downstream authoring surface for that remains pending.
+    /// than byte strings. Schema implementations should use
+    /// [`Self::write_nested_message`] to encode children with aggregate field,
+    /// depth, work, and allocation accounting.
     pub fn write_message(
         &mut self,
         field_number: u32,
@@ -1294,14 +1294,15 @@ impl ProtobufWireEncoder {
     /// are inserted ahead of it. A failed nested write rolls the encoder back
     /// to its exact entry state, so callers never observe a partial field and
     /// no unconstrained temporary message buffer is required.
+    /// If the callback unwinds, the same rollback happens before the original
+    /// panic resumes; a caller that catches it can reuse the encoder.
     ///
     /// # Errors
     ///
     /// Returns a typed wire, schema, allocation, depth, field-count, message,
     /// or work error from the nested callback or shared encoder budget. Every
     /// error restores the encoder's exact entry state.
-    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
-    pub(crate) fn write_nested_message<F>(
+    pub fn write_nested_message<F>(
         &mut self,
         field_number: u32,
         write_payload: F,
@@ -1346,8 +1347,23 @@ impl ProtobufWireEncoder {
             })?;
         self.nested_messages.push(open_message);
         self.group_floor = start_groups;
-        let payload_result = write_payload(self);
+        let payload_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write_payload(self)));
         self.group_floor = start_group_floor;
+        let payload_result = match payload_result {
+            Ok(result) => result,
+            Err(payload) => {
+                self.rollback_nested(
+                    start_len,
+                    start_fields,
+                    start_work,
+                    start_nested_messages,
+                    start_groups,
+                    start_group_floor,
+                );
+                std::panic::resume_unwind(payload);
+            }
+        };
         if let Err(error) = payload_result {
             self.rollback_nested(
                 start_len,
@@ -1471,7 +1487,6 @@ impl ProtobufWireEncoder {
         Ok(())
     }
 
-    #[cfg(any(test, all(feature = "metrics", not(target_arch = "wasm32"))))]
     fn rollback_nested(
         &mut self,
         output_len: usize,

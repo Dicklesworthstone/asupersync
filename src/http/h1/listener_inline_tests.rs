@@ -699,7 +699,7 @@
                                                     stream,
                                                     guard,
                                                     handler,
-                                                    config,
+                                                    config.connection,
                                                     shutdown,
                                                     in_flight,
                                                 )
@@ -710,7 +710,7 @@
                                             stream,
                                             guard,
                                             handler,
-                                            config,
+                                            config.connection,
                                             shutdown,
                                             in_flight,
                                             &runtime_handle,

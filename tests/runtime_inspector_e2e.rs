@@ -18,16 +18,20 @@
 //! not by the record's `poll_count`, which stayed at 0 here for a task that
 //! had provably run (the production dispatch path does not advance it).
 //!
-//! No-claim: this does not prove lock-metrics, spectral-health accuracy,
-//! multi-worker race freedom, or the sharded state shape (the runtime here is
-//! the default unified shape).
+//! The combined snapshot case also checks current-thread and two-worker runtimes
+//! in unified and sharded shapes, with a witnessed held obligation followed by
+//! explicit resolution. This does not prove lock-metrics, spectral-health
+//! accuracy, or general multi-worker race freedom.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use asupersync::Cx;
 use asupersync::channel::mpsc;
-use asupersync::observability::{BlockReason, TaskInspector, TaskInspectorConfig, TaskStateInfo};
+use asupersync::observability::{
+    BlockReason, INSPECTOR_SNAPSHOT_SCHEMA_V1, InspectorProfile, InspectorSnapshot, TaskInspector,
+    TaskInspectorConfig, TaskStateInfo,
+};
 use asupersync::runtime::{RuntimeBuilder, yield_now};
 use asupersync::types::{CancelKind, CancelReason, TaskId};
 
@@ -311,7 +315,10 @@ fn production_runtime_diagnostics_distinguishes_live_and_confirmed_obligation_le
                     .any(|obligation| obligation.holder_task == Some(holder))
             })
             .await;
-            assert!(reserved, "{flavor}: reservation must reach the runtime table");
+            assert!(
+                reserved,
+                "{flavor}: reservation must reach the runtime table"
+            );
             let legacy = diagnostics.find_leaked_obligations();
             assert_eq!(legacy.len(), 1, "{flavor}: exactly one held obligation");
             let obligation_id = legacy[0].obligation_id;
@@ -340,5 +347,109 @@ fn production_runtime_diagnostics_distinguishes_live_and_confirmed_obligation_le
                  obligation={obligation_id:?} live_confirmed=0 leaked_confirmed=1"
             );
         });
+    }
+}
+
+#[test]
+fn production_runtime_snapshot_tracks_obligation_resolution_across_state_shapes() {
+    use asupersync::record::{ObligationKind, ObligationState};
+
+    for workers in [1, 2] {
+        for sharded in [false, true] {
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::multi_thread().worker_threads(workers)
+            };
+            let runtime = builder
+                .with_sharded_state(sharded)
+                .build()
+                .expect("build snapshot runtime");
+            let inspector =
+                runtime.task_inspector(TaskInspectorConfig::default().with_show_obligations(false));
+            runtime.block_on(async {
+                let cx = Cx::current().expect("registered root context");
+                let holder = cx.task_id();
+                let token = cx
+                    .try_register_obligation_checked(ObligationKind::Ack, holder)
+                    .expect("admit checked obligation")
+                    .expect("native context tracks the obligation");
+                assert!(
+                    yield_until(|| {
+                        inspector
+                            .runtime_snapshot(InspectorProfile::Shareable)
+                            .obligations
+                            .iter()
+                            .any(|ob| ob.holder == holder && ob.state == ObligationState::Reserved)
+                    })
+                    .await,
+                    "workers={workers} sharded={sharded}: reservation must reach its owning table"
+                );
+                let held = inspector.runtime_snapshot(InspectorProfile::Shareable);
+                let obligation = held
+                    .obligations
+                    .iter()
+                    .find(|ob| ob.holder == holder && ob.state == ObligationState::Reserved)
+                    .expect("previously witnessed held obligation");
+                let obligation_id = obligation.id;
+                let task = held
+                    .tasks
+                    .iter()
+                    .find(|task| task.details.id == holder)
+                    .unwrap();
+                let region = held
+                    .regions
+                    .iter()
+                    .find(|region| region.id == cx.region_id())
+                    .unwrap();
+                assert_eq!(held.schema_version, INSPECTOR_SNAPSHOT_SCHEMA_V1);
+                assert!(held.coverage.record_tables_locked);
+                assert_eq!(held.coverage.external_obligation_table, sharded);
+                assert!(held.coverage.dynamic_metadata_sampled_separately);
+                assert_eq!(task.details.region_id, region.id);
+                assert_eq!(obligation.region, region.id);
+                assert!(region.tasks.contains(&holder));
+                assert!(region.pending_obligations >= 1);
+                assert!(task.details.obligations.contains(&obligation_id));
+                assert!(task.budget.is_some());
+                assert_eq!(held.counters.reserved_obligations, 1);
+                assert!(obligation.description.is_none());
+                assert!(obligation.acquired_at.is_none());
+                let json = serde_json::to_string(&held).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<InspectorSnapshot>(&json).unwrap(),
+                    held
+                );
+
+                assert!(
+                    token.commit(),
+                    "live runtime must accept explicit resolution"
+                );
+                assert!(
+                    yield_until(|| {
+                        inspector
+                            .runtime_snapshot(InspectorProfile::Shareable)
+                            .obligations
+                            .iter()
+                            .find(|ob| ob.id == obligation_id)
+                            .is_none_or(|ob| ob.state == ObligationState::Committed)
+                    })
+                    .await,
+                    "workers={workers} sharded={sharded}: resolution must reach the snapshot"
+                );
+                let resolved = inspector.runtime_snapshot(InspectorProfile::Shareable);
+                assert_eq!(resolved.counters.reserved_obligations, 0);
+                assert!(
+                    resolved
+                        .tasks
+                        .iter()
+                        .all(|task| { !task.details.obligations.contains(&obligation_id) })
+                );
+                eprintln!(
+                    "scenario=runtime-snapshot workers={workers} sharded={sharded} \
+                     holder={holder:?} obligation={obligation_id:?} held=1 resolved=1"
+                );
+            });
+        }
     }
 }

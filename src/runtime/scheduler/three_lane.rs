@@ -156,7 +156,7 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -426,19 +426,104 @@ impl Drop for IdleReactorTurn {
 /// other cannot starve other ready work (tokio uses the same bound).
 const MAX_LIFO_DISPATCHES: u8 = 3;
 
+/// The first interval between the looks of the idle worker that watches the
+/// LIFO slots, in nanoseconds (GH #84). A task found in the same slot at two
+/// consecutive looks, with the slot's owner still in the same poll, goes to
+/// the watcher: a task woken by a long poll waits one to two intervals for an
+/// idle worker, not for the rest of that poll.
+const LIFO_WATCH_MIN_INTERVAL_NANOS: u64 = 1_000_000;
+/// The interval doubles at each look that takes nothing while the owners
+/// keep filling and emptying their slots, up to this bound, so steady
+/// message passing costs the watcher about a hundred wakeups a second.
+const LIFO_WATCH_MAX_INTERVAL_NANOS: u64 = 8_000_000;
+
+/// [`WorkerCoordinator::lifo_watch`]: no worker watches the LIFO slots.
+const LIFO_WATCH_NONE: u8 = 0;
+/// An idle worker was woken to watch the slots and has not taken the role.
+const LIFO_WATCH_REQUESTED: u8 = 1;
+/// An idle worker watches the slots.
+const LIFO_WATCH_ACTIVE: u8 = 2;
+
 thread_local! {
-    /// While this worker executes a task: its runtime's coordinator (by
-    /// address) and the task (br-asupersync-issue65-criticisms-kpmoy5.1.11).
-    static EXECUTING: Cell<Option<(usize, TaskId)>> = const { Cell::new(None) };
-    /// A ready task woken by the task this worker is executing. The worker
-    /// runs it next instead of sending it through the global injector and
-    /// unparking another worker: (runtime key, task, priority).
-    static LIFO_SLOT: Cell<Option<(usize, TaskId, u8)>> = const { Cell::new(None) };
+    /// While this worker executes a task in its dispatch loop: its runtime's
+    /// coordinator (by address), the worker's index and the task
+    /// (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+    static EXECUTING: Cell<Option<(usize, usize, TaskId)>> = const { Cell::new(None) };
 }
 
 /// Ready wakes placed in a LIFO slot, for the test that proves the path runs.
 #[cfg(test)]
 static LIFO_SLOT_WAKES: AtomicUsize = AtomicUsize::new(0);
+
+/// Tasks the LIFO watcher took from a slot, for the tests (GH #84).
+#[cfg(test)]
+static LIFO_WATCH_TAKES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+thread_local! {
+    /// The task this thread last put in its worker's LIFO slot, so a test can
+    /// prove that a wake it raised took the slot (GH #84).
+    static LIFO_PLACED_HERE: Cell<Option<TaskId>> = const { Cell::new(None) };
+}
+
+/// Takes the task this thread last put in its worker's LIFO slot.
+#[cfg(test)]
+fn take_lifo_placed_here() -> Option<TaskId> {
+    LIFO_PLACED_HERE.with(Cell::take)
+}
+
+/// One worker's LIFO slot (br-asupersync-issue65-criticisms-kpmoy5.1.11): a
+/// ready task woken by the task the worker is executing, which the worker
+/// runs next instead of sending it through the global injector and unparking
+/// another worker. The slot is shared so the idle worker watching the slots
+/// can run a task whose owner stays in the poll that woke it (GH #84).
+#[derive(Debug, Default)]
+struct LifoSlot {
+    /// The task as a [`lifo_word`], 0 when empty. Only the owner fills the
+    /// slot. Whoever empties it runs the task, the owner (`swap`) or the
+    /// watcher (`compare_exchange`), so the task runs exactly once.
+    task: AtomicU64,
+    /// The task's priority. Only the owner writes or reads it.
+    priority: AtomicU8,
+    /// Polls the owner started in its dispatch loop. The watcher takes a task
+    /// only while the owner is in the poll it saw at the previous look.
+    polls: AtomicU64,
+    /// Times the owner filled the slot. While these move, the watcher stays
+    /// on duty (at a growing interval) instead of handing the next fill a
+    /// fresh wake.
+    fills: AtomicU64,
+}
+
+/// `task` as a nonzero slot word. `None` only for the one id with no such
+/// word; its wakes take the global lane.
+#[inline]
+fn lifo_word(task: TaskId) -> Option<u64> {
+    task.as_u64().checked_add(1)
+}
+
+/// The task a slot word holds, `None` for an empty slot.
+#[inline]
+fn lifo_word_task(word: u64) -> Option<TaskId> {
+    let raw = word.checked_sub(1)?;
+    // The inverse of `TaskId::as_u64`: generation high, index low.
+    let (index, generation) = (raw as u32, (raw >> 32) as u32);
+    Some(TaskId::from_arena(crate::util::ArenaIndex::new(
+        index, generation,
+    )))
+}
+
+/// Monotonic nanoseconds for the LIFO watch: real time, whatever clock the
+/// runtime's timers read.
+fn lifo_watch_nanos() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        u64::try_from(crate::time::process_epoch().elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::time::wasm_monotonic_nanos()
+    }
+}
 
 /// Where a ready wake goes when the waking thread is executing a task.
 enum LifoWake {
@@ -450,37 +535,56 @@ enum LifoWake {
     Displaced(TaskId, u8),
 }
 
-/// Puts `task` in this thread's LIFO slot when the thread is executing a
-/// different task of the same runtime.
+/// Puts `task` in the LIFO slot of the worker this thread runs when it is
+/// executing a different task of the same runtime.
 fn claim_lifo_wake(coordinator: &Arc<WorkerCoordinator>, task: TaskId, priority: u8) -> LifoWake {
     let key = Arc::as_ptr(coordinator).addr();
-    let executing_other = EXECUTING.with(|executing| {
-        matches!(executing.get(), Some((owner, current)) if owner == key && current != task)
+    // A self-wake (yield_now) keeps the global lane, so a task looping on it
+    // cannot starve other work through the slot.
+    let worker = EXECUTING.with(|executing| match executing.get() {
+        Some((owner, worker, current)) if owner == key && current != task => Some(worker),
+        _ => None,
     });
-    if !executing_other {
-        // A self-wake (yield_now) keeps the global lane, so a task looping
-        // on it cannot starve other work through the slot.
+    let (Some(slot), Some(word)) = (
+        worker.and_then(|worker| coordinator.lifo_slots.get(worker)),
+        lifo_word(task),
+    ) else {
         return LifoWake::NotLocal;
-    }
+    };
     #[cfg(test)]
-    LIFO_SLOT_WAKES.fetch_add(1, Ordering::Relaxed);
-    match LIFO_SLOT.with(|slot| slot.replace(Some((key, task, priority)))) {
-        Some((owner, older, older_priority)) if owner == key => {
-            LifoWake::Displaced(older, older_priority)
-        }
-        _ => LifoWake::Placed,
+    {
+        LIFO_SLOT_WAKES.fetch_add(1, Ordering::Relaxed);
+        LIFO_PLACED_HERE.with(|placed| placed.set(Some(task)));
     }
+    // Only this thread writes the priority and the fill count: no
+    // read-modify-write needed.
+    let older_priority = slot.priority.load(Ordering::Relaxed);
+    slot.priority.store(priority, Ordering::Relaxed);
+    let fills = slot.fills.load(Ordering::Relaxed);
+    slot.fills.store(fills.wrapping_add(1), Ordering::Relaxed);
+    // SeqCst: see `WorkerCoordinator::request_lifo_watch`.
+    let older = slot.task.swap(word, Ordering::SeqCst);
+    coordinator.request_lifo_watch();
+    lifo_word_task(older).map_or(LifoWake::Placed, |older| {
+        LifoWake::Displaced(older, older_priority)
+    })
 }
 
 /// Marks the task this worker executes for the guard's lifetime.
 struct ExecutingTask {
-    previous: Option<(usize, TaskId)>,
+    previous: Option<(usize, usize, TaskId)>,
 }
 
 impl ExecutingTask {
-    fn enter(coordinator: &Arc<WorkerCoordinator>, task: TaskId) -> Self {
+    fn enter(coordinator: &Arc<WorkerCoordinator>, worker: usize, task: TaskId) -> Self {
         let key = Arc::as_ptr(coordinator).addr();
-        let previous = EXECUTING.with(|executing| executing.replace(Some((key, task))));
+        if let Some(slot) = coordinator.lifo_slots.get(worker) {
+            // A new poll starts: the watcher takes a task the slot still
+            // holds only once it has seen this poll last a whole interval.
+            let polls = slot.polls.load(Ordering::Relaxed);
+            slot.polls.store(polls.wrapping_add(1), Ordering::Release);
+        }
+        let previous = EXECUTING.with(|executing| executing.replace(Some((key, worker, task))));
         Self { previous }
     }
 }
@@ -491,17 +595,229 @@ impl Drop for ExecutingTask {
     }
 }
 
-/// Takes this thread's LIFO slot if it holds a task of the runtime behind
-/// `coordinator`.
-fn take_lifo_task(coordinator: &Arc<WorkerCoordinator>) -> Option<(TaskId, u8)> {
-    let key = Arc::as_ptr(coordinator).addr();
-    LIFO_SLOT.with(|slot| match slot.get() {
-        Some((owner, task, priority)) if owner == key => {
-            slot.set(None);
-            Some((task, priority))
+/// Takes the task in `worker`'s LIFO slot, unless the watcher took it. Only
+/// the thread running `worker` calls this.
+fn take_lifo_task(coordinator: &WorkerCoordinator, worker: usize) -> Option<(TaskId, u8)> {
+    let slot = coordinator.lifo_slots.get(worker)?;
+    // Only this thread fills the slot, so reading it empty needs no
+    // read-modify-write on every dispatch.
+    if slot.task.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let task = lifo_word_task(slot.task.swap(0, Ordering::AcqRel))?;
+    Some((task, slot.priority.load(Ordering::Relaxed)))
+}
+
+/// A dispatch loop's part in watching the LIFO slots (GH #84).
+///
+/// A loop is idle from the moment it finds nothing to run until it runs a
+/// task or returns. At most one idle loop is the watcher: it looks at every
+/// other worker's slot and runs a task that stayed in a slot from one look to
+/// the next while the slot's owner stayed in the same poll. The interval
+/// between looks starts at [`LIFO_WATCH_MIN_INTERVAL_NANOS`] and doubles, up
+/// to [`LIFO_WATCH_MAX_INTERVAL_NANOS`], at each look that takes nothing; the
+/// watcher gives the role up at a look that finds every slot empty and no
+/// fill since the previous look. A wake that fills a slot while no loop
+/// watches wakes an idle loop to take the role; while every worker is busy,
+/// the first loop to go idle looks before it blocks.
+struct LifoIdle {
+    coordinator: Arc<WorkerCoordinator>,
+    worker: usize,
+    /// Counted in [`WorkerCoordinator::idle_workers`].
+    idle: bool,
+    /// Set while this loop is the watcher.
+    watch: Option<LifoWatch>,
+}
+
+struct LifoWatch {
+    /// Every slot's word and poll count at the previous look.
+    seen: SmallVec<[(u64, u64); 16]>,
+    /// The other workers' fill counts, summed, at the previous look.
+    fills: u64,
+    /// The current interval between looks.
+    interval: u64,
+    /// When the next look is due, in [`lifo_watch_nanos`].
+    next_look: u64,
+}
+
+impl LifoIdle {
+    fn new(coordinator: Arc<WorkerCoordinator>, worker: usize) -> Self {
+        Self {
+            coordinator,
+            worker,
+            idle: false,
+            watch: None,
         }
-        _ => None,
-    })
+    }
+
+    /// The loop found nothing to run.
+    #[inline]
+    fn enter(&mut self) {
+        if !self.idle {
+            self.idle = true;
+            // SeqCst: see `WorkerCoordinator::request_lifo_watch`.
+            self.coordinator.idle_workers.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The loop runs a task or returns. A watcher hands the role on while a
+    /// slot still holds a task, and so does a loop that leaves while a watch
+    /// is requested, since the request may have woken this loop.
+    #[inline]
+    fn leave(&mut self) {
+        if !self.idle {
+            return;
+        }
+        self.idle = false;
+        self.coordinator.idle_workers.fetch_sub(1, Ordering::SeqCst);
+        let was_watching = self.watch.take().is_some();
+        if was_watching {
+            self.coordinator
+                .lifo_watch
+                .store(LIFO_WATCH_NONE, Ordering::SeqCst);
+        }
+        let hand_on = match self.coordinator.lifo_watch.load(Ordering::SeqCst) {
+            LIFO_WATCH_REQUESTED => true,
+            LIFO_WATCH_NONE => was_watching && self.coordinator.any_lifo_slot_filled(self.worker),
+            _ => false,
+        };
+        if hand_on {
+            self.coordinator.hand_on_lifo_watch();
+        }
+    }
+
+    /// Takes the watch if it is wanted. When a look is due, returns a task
+    /// that stayed in another worker's slot since the previous look while
+    /// that worker stayed in the same poll, having emptied the slot; the
+    /// caller runs it. Gives the role up once no slot holds a task and none
+    /// was filled since the previous look.
+    fn look(&mut self, now: u64) -> Option<TaskId> {
+        if self.watch.is_none() && !self.claim(now) {
+            return None;
+        }
+        let watch = self.watch.as_mut()?;
+        if now < watch.next_look {
+            return None;
+        }
+        let mut filled = false;
+        for (index, slot) in self.coordinator.lifo_slots.iter().enumerate() {
+            if index == self.worker {
+                continue;
+            }
+            let word = slot.task.load(Ordering::SeqCst);
+            let polls = slot.polls.load(Ordering::Acquire);
+            let previous = std::mem::replace(&mut watch.seen[index], (word, polls));
+            if word == 0 {
+                continue;
+            }
+            if previous == (word, polls)
+                && slot
+                    .task
+                    .compare_exchange(word, 0, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            {
+                #[cfg(test)]
+                LIFO_WATCH_TAKES.fetch_add(1, Ordering::Relaxed);
+                return lifo_word_task(word);
+            }
+            filled = true;
+        }
+        let fills = self.coordinator.lifo_fills(self.worker);
+        let filling = std::mem::replace(&mut watch.fills, fills) != fills;
+        if filled || filling {
+            // The owners keep their slots moving: look less often.
+            watch.interval = watch
+                .interval
+                .saturating_mul(2)
+                .min(LIFO_WATCH_MAX_INTERVAL_NANOS);
+            watch.next_look = now.saturating_add(watch.interval);
+            return None;
+        }
+        // Give the role up, then look once more: a slot filled after the
+        // look above saw a watcher and requested none.
+        self.watch = None;
+        self.coordinator
+            .lifo_watch
+            .store(LIFO_WATCH_NONE, Ordering::SeqCst);
+        self.claim(now);
+        None
+    }
+
+    /// Becomes the watcher if a watch was requested, or if a slot holds a
+    /// task and nobody watches.
+    fn claim(&mut self, now: u64) -> bool {
+        let coordinator = &self.coordinator;
+        let state = coordinator.lifo_watch.load(Ordering::SeqCst);
+        let wanted = match state {
+            LIFO_WATCH_REQUESTED => true,
+            LIFO_WATCH_NONE => coordinator.any_lifo_slot_filled(self.worker),
+            _ => false,
+        };
+        if !wanted
+            || coordinator
+                .lifo_watch
+                .compare_exchange(
+                    state,
+                    LIFO_WATCH_ACTIVE,
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return false;
+        }
+        let seen = coordinator
+            .lifo_slots
+            .iter()
+            .map(|slot| {
+                (
+                    slot.task.load(Ordering::SeqCst),
+                    slot.polls.load(Ordering::Acquire),
+                )
+            })
+            .collect();
+        self.watch = Some(LifoWatch {
+            seen,
+            fills: coordinator.lifo_fills(self.worker),
+            interval: LIFO_WATCH_MIN_INTERVAL_NANOS,
+            next_look: now.saturating_add(LIFO_WATCH_MIN_INTERVAL_NANOS),
+        });
+        true
+    }
+
+    /// While this loop watches: how long it may block before its next look.
+    fn wait_cap(&self, now: u64) -> Option<Duration> {
+        self.watch
+            .as_ref()
+            .map(|watch| Duration::from_nanos(watch.next_look.saturating_sub(now)))
+    }
+
+    /// Whether the loop must stop backing off and come back to [`Self::look`]:
+    /// its look is due, or, when it does not watch, a watch was requested.
+    fn must_look(&self) -> bool {
+        self.watch.as_ref().map_or_else(
+            || self.coordinator.lifo_watch_requested(),
+            |watch| lifo_watch_nanos() >= watch.next_look,
+        )
+    }
+}
+
+impl Drop for LifoIdle {
+    /// Only reached without [`LifoIdle::leave`] when the loop unwinds: undo
+    /// the count and the role, but wake nobody from a destructor. A filled
+    /// slot is then looked at by the next loop to go idle or requested by the
+    /// next wake that fills a slot.
+    fn drop(&mut self) {
+        if self.watch.take().is_some() {
+            self.coordinator
+                .lifo_watch
+                .store(LIFO_WATCH_NONE, Ordering::SeqCst);
+        }
+        if self.idle {
+            self.idle = false;
+            self.coordinator.idle_workers.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
 
 #[inline]
@@ -1083,6 +1399,14 @@ pub(crate) struct WorkerCoordinator {
     /// would keep the driver and its waker table alive through each other.
     io_reactor: Option<Weak<dyn Reactor>>,
     wake_notifier: WakeNotifier,
+    /// One LIFO slot per worker, indexed like `parkers`.
+    lifo_slots: Box<[CachePadded<LifoSlot>]>,
+    /// Dispatch loops that found nothing to run and have not run a task or
+    /// returned since ([`LifoIdle`]).
+    idle_workers: CachePadded<AtomicUsize>,
+    /// Who watches the LIFO slots: [`LIFO_WATCH_NONE`],
+    /// [`LIFO_WATCH_REQUESTED`] or [`LIFO_WATCH_ACTIVE`].
+    lifo_watch: CachePadded<AtomicU8>,
 }
 
 impl WorkerCoordinator {
@@ -1099,7 +1423,97 @@ impl WorkerCoordinator {
             mask,
             io_reactor: io_driver.map(|driver| driver.downgrade_reactor()),
             wake_notifier: WakeNotifier::new(),
+            lifo_slots: (0..count).map(|_| CachePadded::default()).collect(),
+            idle_workers: CachePadded::new(AtomicUsize::new(0)),
+            lifo_watch: CachePadded::new(AtomicU8::new(LIFO_WATCH_NONE)),
         }
+    }
+
+    /// After a wake filled a LIFO slot: wakes an idle loop to watch the slots
+    /// unless one watches or was woken to (GH #84). With every worker busy
+    /// nothing is woken; the first loop to go idle looks before it blocks.
+    ///
+    /// The slot fill, these loads, an idle loop's count and a watcher's
+    /// release are all SeqCst, so either this sees that loop (or the
+    /// watcher), or that loop's next look sees the filled slot.
+    #[inline]
+    fn request_lifo_watch(&self) {
+        if self.lifo_watch.load(Ordering::SeqCst) != LIFO_WATCH_NONE
+            || self.idle_workers.load(Ordering::SeqCst) == 0
+        {
+            return;
+        }
+        if self
+            .lifo_watch
+            .compare_exchange(
+                LIFO_WATCH_NONE,
+                LIFO_WATCH_REQUESTED,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            self.wake_lifo_watcher();
+        }
+    }
+
+    /// A loop left idle while a watch was requested, or as the watcher while
+    /// a slot still holds a task: wakes another idle loop to watch. With no
+    /// loop idle, the next one to go idle looks first.
+    fn hand_on_lifo_watch(&self) {
+        if self.idle_workers.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let requested = match self.lifo_watch.load(Ordering::SeqCst) {
+            LIFO_WATCH_REQUESTED => true,
+            LIFO_WATCH_NONE => self
+                .lifo_watch
+                .compare_exchange(
+                    LIFO_WATCH_NONE,
+                    LIFO_WATCH_REQUESTED,
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                )
+                .is_ok(),
+            _ => false,
+        };
+        if requested {
+            self.wake_lifo_watcher();
+        }
+    }
+
+    fn wake_lifo_watcher(&self) {
+        // Pairs with the fence in `Parker::park_inner` before an idle loop's
+        // readiness check reads `lifo_watch`: the loop either sees the
+        // request and does not sleep, or `wake_one` sees it waiting.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        self.wake_one();
+    }
+
+    /// Whether a watch was requested and no loop has taken it yet.
+    #[inline]
+    fn lifo_watch_requested(&self) -> bool {
+        self.lifo_watch.load(Ordering::SeqCst) == LIFO_WATCH_REQUESTED
+    }
+
+    /// Whether a LIFO slot other than `worker`'s holds a task.
+    fn any_lifo_slot_filled(&self, worker: usize) -> bool {
+        self.lifo_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| index != worker && slot.task.load(Ordering::SeqCst) != 0)
+    }
+
+    /// The fill counts of the LIFO slots other than `worker`'s, summed: a
+    /// change means some owner filled its slot.
+    fn lifo_fills(&self, worker: usize) -> u64 {
+        self.lifo_slots
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| index != worker)
+            .fold(0_u64, |sum, (_, slot)| {
+                sum.wrapping_add(slot.fills.load(Ordering::Relaxed))
+            })
     }
 
     /// Hand reactor responsibility to one idle peer before executing a task. A waiter whose
@@ -5478,8 +5892,10 @@ impl ThreeLaneWorker {
     }
 
     /// `quick_poll` (GH#58, idle-return mode) turns the reactor without
-    /// blocking so already-arrived readiness becomes runnable work.
-    fn drive_io_phase(&self, quick_poll: bool) -> IoPhaseOutcome {
+    /// blocking so already-arrived readiness becomes runnable work. A
+    /// `wait_cap` bounds how long the turn may block: the LIFO watcher's next
+    /// look (GH #84).
+    fn drive_io_phase(&self, quick_poll: bool, wait_cap: Option<Duration>) -> IoPhaseOutcome {
         let Some(io) = &self.io_driver else {
             return IoPhaseOutcome::NoProgress;
         };
@@ -5525,6 +5941,11 @@ impl ThreeLaneWorker {
                         .is_some_and(|mailbox| !mailbox.is_empty())
                     || self.obligation_posts_queued(),
             )
+        };
+        let io_timeout = match (io_timeout, wait_cap) {
+            (Some(timeout), Some(cap)) => Some(timeout.min(cap)),
+            (None, cap) => cap,
+            (timeout, None) => timeout,
         };
 
         if self.shutdown.load(Ordering::Acquire) {
@@ -5653,6 +6074,8 @@ impl ThreeLaneWorker {
         // Also carried by a promoted follower while the reactor is free:
         // its next dispatch can select owner-local work before re-election.
         let mut left_reactor = false;
+        // This loop's part in watching the LIFO slots (GH #84).
+        let mut lifo_idle = LifoIdle::new(Arc::clone(&self.coordinator), self.id);
 
         'dispatch: loop {
             if self.shutdown.load(Ordering::Relaxed) {
@@ -5669,6 +6092,7 @@ impl ThreeLaneWorker {
                 break;
             }
             if let Some(task) = self.next_task() {
+                lifo_idle.leave();
                 self.reset_empty_backoff();
                 if std::mem::take(&mut left_reactor) {
                     // The selected task can spend arbitrarily long in poll.
@@ -5682,6 +6106,14 @@ impl ThreeLaneWorker {
                 continue;
             }
 
+            lifo_idle.enter();
+            if let Some(task) = lifo_idle.look(lifo_watch_nanos()) {
+                // Its worker is still in the poll that woke it: run it here
+                // through the ordinary selection (GH #84).
+                self.fast_queue.push(task);
+                continue;
+            }
+
             self.publish_preemption_fairness_certificate_before_idle();
 
             if self.schedule_ready_finalizers() {
@@ -5690,7 +6122,8 @@ impl ThreeLaneWorker {
 
             // PHASE 5: Drive I/O (Leader/Follower pattern).
             self.busy_turns_since_io = 0;
-            let io_phase = self.drive_io_phase(return_when_idle);
+            let io_phase =
+                self.drive_io_phase(return_when_idle, lifo_idle.wait_cap(lifo_watch_nanos()));
             // Include a successful zero-timeout miss: runnable work can race
             // the idle probe. Only a follower knows another poller owns I/O.
             left_reactor = self.io_driver.is_some()
@@ -5712,6 +6145,10 @@ impl ThreeLaneWorker {
                 // Check shutdown (or a stop request) before parking to avoid
                 // hanging in the backoff loop.
                 if self.shutdown.load(Ordering::Relaxed) || should_stop() {
+                    break;
+                }
+                // The LIFO watch needs this loop at its look (GH #84).
+                if lifo_idle.must_look() {
                     break;
                 }
 
@@ -5790,6 +6227,12 @@ impl ThreeLaneWorker {
                             self.reset_empty_backoff();
                             break 'dispatch;
                         }
+                        // The LIFO watcher sleeps no longer than until its
+                        // next look, and no loop sleeps through a requested
+                        // watch (GH #84).
+                        let watch_cap = lifo_idle.wait_cap(lifo_watch_nanos());
+                        let capped = |wait: Duration| watch_cap.map_or(wait, |cap| wait.min(cap));
+                        let coordinator = &self.coordinator;
                         // Followers keep only their owner-local deadline;
                         // the current reactor leader drives shared deadlines.
                         let timer_deadline = self
@@ -5851,15 +6294,24 @@ impl ThreeLaneWorker {
                                     nanos,
                                 );
                                 self.parker.park_timeout_unless(
-                                    Duration::from_nanos(nanos),
-                                    || !io.is_polling(),
+                                    capped(Duration::from_nanos(nanos)),
+                                    || !io.is_polling() || coordinator.lifo_watch_requested(),
                                 );
+                            } else if let Some(cap) = watch_cap {
+                                record_backoff_timeout_park(
+                                    &mut self.preemption_metrics,
+                                    io_phase,
+                                    u64::try_from(cap.as_nanos()).unwrap_or(u64::MAX),
+                                );
+                                self.parker.park_timeout_unless(cap, || !io.is_polling());
                             } else {
                                 record_backoff_indefinite_park(
                                     &mut self.preemption_metrics,
                                     io_phase,
                                 );
-                                self.parker.park_unless(|| !io.is_polling());
+                                self.parker.park_unless(|| {
+                                    !io.is_polling() || coordinator.lifo_watch_requested()
+                                });
                             }
                             // The next selection may find owner-local work
                             // before this follower gets to reactor election.
@@ -5887,7 +6339,10 @@ impl ThreeLaneWorker {
                                 io_phase,
                                 nanos,
                             );
-                            self.parker.park_timeout(Duration::from_nanos(nanos));
+                            self.parker
+                                .park_timeout_unless(capped(Duration::from_nanos(nanos)), || {
+                                    coordinator.lifo_watch_requested()
+                                });
                             self.reset_empty_backoff();
                             break;
                         }
@@ -5902,7 +6357,10 @@ impl ThreeLaneWorker {
                                         io_phase,
                                         nanos,
                                     );
-                                    self.parker.park_timeout(Duration::from_nanos(nanos));
+                                    self.parker.park_timeout_unless(
+                                        capped(Duration::from_nanos(nanos)),
+                                        || coordinator.lifo_watch_requested(),
+                                    );
                                     // br-asupersync-rr849p: this park was sized
                                     // by the nearest timer/EDF deadline, so on
                                     // wake that deadline is (close to) due.
@@ -5955,10 +6413,18 @@ impl ThreeLaneWorker {
                                     }
                                 }
                             }
+                        } else if let Some(cap) = watch_cap {
+                            record_backoff_timeout_park(
+                                &mut self.preemption_metrics,
+                                io_phase,
+                                u64::try_from(cap.as_nanos()).unwrap_or(u64::MAX),
+                            );
+                            self.parker.park_timeout(cap);
                         } else {
                             // Followers park indefinitely.
                             record_backoff_indefinite_park(&mut self.preemption_metrics, io_phase);
-                            self.parker.park();
+                            self.parker
+                                .park_unless(|| coordinator.lifo_watch_requested());
                         }
                         // After waking, re-check queues by continuing the loop.
                         // This fixes a lost-wakeup race where work arrives right as we park.
@@ -5979,6 +6445,7 @@ impl ThreeLaneWorker {
             self.cancel_streak = 0;
             self.ready_dispatch_streak = 0;
         }
+        lifo_idle.leave();
         if left_reactor {
             self.coordinator.promote_follower();
         }
@@ -5987,7 +6454,7 @@ impl ThreeLaneWorker {
         // so it is neither stranded on this thread nor seen by a later
         // runtime (br-asupersync-issue65-criticisms-kpmoy5.1.11).
         self.lifo_enabled = lifo_was_enabled;
-        if let Some((task, priority)) = take_lifo_task(&self.coordinator) {
+        if let Some((task, priority)) = take_lifo_task(&self.coordinator, self.id) {
             self.global.inject_ready(task, priority);
             self.coordinator.wake_one();
         }
@@ -7331,7 +7798,7 @@ impl ThreeLaneWorker {
     /// phases choose, so other ready work is reached
     /// (br-asupersync-issue65-criticisms-kpmoy5.1.11).
     fn take_lifo_dispatch(&mut self) -> Option<TaskId> {
-        let Some((task, priority)) = take_lifo_task(&self.coordinator) else {
+        let Some((task, priority)) = take_lifo_task(&self.coordinator, self.id) else {
             self.lifo_streak = 0;
             return None;
         };
@@ -7348,10 +7815,11 @@ impl ThreeLaneWorker {
     /// Moves the task in this worker's LIFO slot to the global ready lane and
     /// wakes a worker for it, as the dispatch loop does when it stops.
     /// `next_task` calls it before an early `None`: neither the park checks
-    /// nor the idle I/O turn can see the thread-local slot, so the task would
-    /// wait for some unrelated wake (GH #77, br-asupersync-0khxcu).
+    /// nor the idle I/O turn look at this worker's own slot, so the task would
+    /// wait for some unrelated wake or for the LIFO watch (GH #77,
+    /// br-asupersync-0khxcu).
     fn spill_lifo_slot(&mut self) {
-        if let Some((task, priority)) = take_lifo_task(&self.coordinator) {
+        if let Some((task, priority)) = take_lifo_task(&self.coordinator, self.id) {
             self.lifo_streak = 0;
             self.global.inject_ready(task, priority);
             self.coordinator.wake_one();
@@ -8786,7 +9254,7 @@ impl ThreeLaneWorker {
         // ordinary path (br-asupersync-issue65-criticisms-kpmoy5.1.11).
         let _executing = self
             .lifo_enabled
-            .then(|| ExecutingTask::enter(&self.coordinator, task_id));
+            .then(|| ExecutingTask::enter(&self.coordinator, self.id, task_id));
 
         // Poll time for `MetricsProvider::scheduler_tick`, only when the
         // provider wants it (br-asupersync-x9mmxl).
@@ -9659,7 +10127,9 @@ impl ThreeLaneWaker {
                     LifoWake::NotLocal => self.global.inject_ready(self.task_id, priority),
                     // The task this worker is executing woke it: the worker
                     // runs it next, with no global push and no unpark
-                    // (br-asupersync-issue65-criticisms-kpmoy5.1.11).
+                    // (br-asupersync-issue65-criticisms-kpmoy5.1.11), unless
+                    // that poll keeps it waiting and an idle worker watching
+                    // the slots runs it first (GH #84).
                     LifoWake::Placed => {
                         self.record_enqueue();
                         return;

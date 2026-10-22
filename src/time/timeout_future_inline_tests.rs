@@ -679,6 +679,96 @@
         assert!(matches!(result, Poll::Ready(Err(_))));
     }
 
+    #[test]
+    fn custom_clock_timeout_ignores_runtime_wakes_until_its_deadline() {
+        for explicit_time in [false, true] {
+            let clock = Arc::new(VirtualClock::new());
+            clock.set(Time::from_secs(100));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 121),
+                TaskId::new_for_test(0, 121),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let _current = Cx::set_current(Some(owner));
+            set_current_time(0);
+            let mut timeout =
+                TimeoutFuture::with_time_getter(pending::<()>(), Time::from_secs(5), test_now);
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let first = if explicit_time {
+                timeout.poll_with_time(&mut cx, test_now())
+            } else {
+                Pin::new(&mut timeout).poll(&mut cx)
+            };
+            assert!(first.is_pending());
+            assert_eq!(timer.next_deadline(), Some(Time::from_secs(105)));
+
+            clock.set(Time::from_secs(105));
+            assert_eq!(timer.process_timers(), 1);
+            let still_pending = if explicit_time {
+                timeout.poll_with_time(&mut cx, test_now())
+            } else {
+                Pin::new(&mut timeout).poll(&mut cx)
+            };
+            assert!(still_pending.is_pending());
+            assert_eq!(timer.next_deadline(), Some(Time::from_secs(110)));
+
+            set_current_time(Time::from_secs(5).as_nanos());
+            let elapsed = if explicit_time {
+                timeout.poll_with_time(&mut cx, test_now())
+            } else {
+                Pin::new(&mut timeout).poll(&mut cx)
+            };
+            assert_eq!(elapsed, Poll::Ready(Err(Elapsed::new(Time::from_secs(5)))));
+            assert_eq!(timer.pending_count(), 0);
+        }
+    }
+
+    #[test]
+    fn custom_clock_timeout_preserves_ready_inner_at_deadline_after_runtime_wake() {
+        let clock = Arc::new(VirtualClock::new());
+        clock.set(Time::from_secs(100));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let owner = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 122),
+            TaskId::new_for_test(0, 122),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(owner));
+        set_current_time(0);
+        let mut timeout = TimeoutFuture::with_time_getter(
+            ReadyAtTime {
+                ready_at: Time::from_secs(5),
+            },
+            Time::from_secs(5),
+            test_now,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut timeout).poll(&mut cx).is_pending());
+        clock.set(Time::from_secs(105));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(Pin::new(&mut timeout).poll(&mut cx).is_pending());
+        set_current_time(Time::from_secs(5).as_nanos());
+        assert_eq!(
+            Pin::new(&mut timeout).poll(&mut cx),
+            Poll::Ready(Ok("done"))
+        );
+        drop(timeout);
+        assert_eq!(timer.pending_count(), 0);
+    }
+
     // =========================================================================
     // Clone Tests
     // =========================================================================

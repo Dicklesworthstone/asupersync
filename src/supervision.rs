@@ -5121,11 +5121,12 @@ mod managed {
                 .unwrap();
             // The hook below blocks the sibling's worker thread until the
             // controller drains that generation. The sibling's completion has
-            // just woken the controller into this worker's LIFO slot, which no
-            // other worker can take, so the block would strand the very task
-            // it waits for. Waking a parked helper from the executing sibling
-            // displaces the slot's task to the global lane (three_lane's
-            // claim_lifo_wake), where the other worker runs it.
+            // just woken the controller into this worker's LIFO slot, which
+            // another worker takes only after one or two LIFO watch intervals
+            // (GH #84), and only while one is idle. Waking a parked helper from the
+            // executing sibling displaces the slot's task to the global lane
+            // at once (three_lane's claim_lifo_wake), where the other worker
+            // runs it.
             let (helper_tx, helper_rx) = std::sync::mpsc::sync_channel::<Waker>(1);
             let helper = runtime.handle().spawn(async move {
                 let mut parked = false;

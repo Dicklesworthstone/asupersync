@@ -142,17 +142,17 @@
       },
       {
         "path": "src/grpc/protobuf.rs",
-        "sha256": "fdaf6684ca76bdfb9d560ad5c13213ff18f835cf86a33053e17c8fda2f6b1e99",
+        "sha256": "6fa0ff6207b15980724bebb301abb70840e27bc5be660418941d24b78adc522d",
         "role": "owned ProtoMessage and UnknownFields authority"
       },
       {
         "path": "src/grpc/protobuf_wire.rs",
-        "sha256": "468c5fdc699009eb2339107f63cb5abf196131a174ba47ee23a23e025f01dfa0",
+        "sha256": "588f70abdbdeb75adf3db6eefab17dfe755483b46d917c049b220eb670c97c19",
         "role": "schema-neutral wire and generic budget authority"
       },
       {
         "path": "src/observability/mod.rs",
-        "sha256": "2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b",
+        "sha256": "4d2172faec620ad277d014525c59e20cd8dbea19283dd296ebaf5b76f026f938",
         "role": "private native metrics module gate"
       },
       {

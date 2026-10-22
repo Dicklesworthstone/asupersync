@@ -463,6 +463,10 @@ impl Sleep {
     /// Creates a `Sleep` with a custom time getter function.
     ///
     /// This is useful for testing or when you need to control the time source.
+    /// The deadline belongs to this clock, even when a runtime timer driver is
+    /// available. The driver schedules the remaining duration in its own clock
+    /// domain; its wake only completes the sleep after this getter reaches the
+    /// deadline.
     ///
     /// # Arguments
     ///
@@ -682,12 +686,17 @@ impl Sleep {
         crate::runtime::spawn_blocking::reap_threads(fallback_handles);
 
         if let Some(handle) = handle {
+            let driver = driver.or(timer_driver);
             let trace = Cx::current().and_then(|current| current.trace_buffer());
             if let Some(trace) = trace.as_ref() {
-                let fired_at = now.max(self.deadline);
+                let fired_at = if self.time_getter.is_some() {
+                    driver.as_ref().map_or(now, TimerDriverHandle::now)
+                } else {
+                    now.max(self.deadline)
+                };
                 trace.record_event(|seq| TraceEvent::timer_fired(seq, fired_at, handle.id()));
             }
-            if let Some(driver) = driver.or(timer_driver) {
+            if let Some(driver) = driver {
                 let _ = driver.cancel(&handle);
             }
         }
@@ -713,14 +722,11 @@ impl Sleep {
         );
         self.polled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        // A latched timer fire is authoritative completion — even when this
-        // poll's clock reads `now < deadline` (driver migration to a different
-        // clock, fallback-thread wake, custom time getter). The one exception is
-        // a *clamped-wheel* early fire (deadline beyond the wheel horizon, fired
-        // early at the horizon as a re-arm signal); that case is intercepted and
-        // re-armed by `Future::poll` BEFORE this runs, which consumes the latch,
-        // so it never reaches here (br-asupersync-sleep-horizon-early-youlxs).
-        if self.ready.swap(false, Ordering::AcqRel) || now >= self.deadline {
+        // Ordinary sleeps preserve an authoritative timer fire across driver
+        // migration. A custom clock still owns its deadline: a runtime wake
+        // only asks us to check that clock again. Clamped-wheel early fires are
+        // intercepted by `poll_inner` before reaching this check.
+        if self.take_elapsed_wake(now) || now >= self.deadline {
             self.completed
                 .store(true, std::sync::atomic::Ordering::Release);
             self.complete_ready_registration(now, self.timer_driver_for_poll());
@@ -742,7 +748,7 @@ impl Sleep {
             !self.completed.load(std::sync::atomic::Ordering::Acquire),
             "Sleep polled after completion"
         );
-        if self.ready.swap(false, Ordering::AcqRel) || now >= self.deadline {
+        if self.take_elapsed_wake(now) || now >= self.deadline {
             self.polled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             self.completed
@@ -752,6 +758,21 @@ impl Sleep {
         } else {
             Poll::Pending
         }
+    }
+}
+
+impl Sleep {
+    /// Consume a driver wake without allowing its clock to complete a custom
+    /// deadline. Retire a spent registration so the next poll can re-arm it.
+    fn take_elapsed_wake(&self, now: Time) -> bool {
+        if !self.ready.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        if self.time_getter.is_some() && now < self.deadline {
+            self.cancel_active_registration();
+            return false;
+        }
+        true
     }
 }
 
@@ -854,10 +875,10 @@ impl Sleep {
         // `register`); `registered_partial` records that the current registration
         // was clamped. Only then do we consume the latch and drop the spent
         // handle so the Pending path below re-registers for the remaining
-        // duration. A NON-partial latched fire is authoritative completion — even
-        // across a driver migration or fallback→driver transition whose clock
-        // reads before the deadline — so we leave its latch intact for
-        // poll_with_time (br-asupersync-sleep-horizon-early-youlxs).
+        // duration. For ordinary sleeps, a NON-partial latched fire remains
+        // authoritative across driver migration or fallback→driver transitions.
+        // Custom clocks are rechecked by poll_with_time even after that wake
+        // (br-asupersync-sleep-horizon-early-youlxs).
         if now < self.deadline {
             let mut state = self.state.lock();
             if state.registered_partial && self.ready.swap(false, Ordering::AcqRel) {
@@ -866,7 +887,7 @@ impl Sleep {
                     if let Some(driver) = driver {
                         if let Some(trace) = trace.as_ref() {
                             trace.record_event(|seq| {
-                                TraceEvent::timer_cancelled(seq, now, handle.id())
+                                TraceEvent::timer_cancelled(seq, driver.now(), handle.id())
                             });
                         }
                         let _ = driver.cancel(&handle);
@@ -924,6 +945,22 @@ impl Sleep {
 
                     state.timer_driver = Some(timer.clone());
 
+                    // Custom deadlines and runtime timers can have different
+                    // epochs. Schedule only the remaining custom duration on
+                    // the driver's clock, then recheck the custom getter on wake.
+                    let timer_now = if self.time_getter.is_some() {
+                        timer.now()
+                    } else {
+                        now
+                    };
+                    let timer_deadline = if self.time_getter.is_some() {
+                        timer_now.saturating_add_nanos(
+                            self.deadline.as_nanos().saturating_sub(now.as_nanos()),
+                        )
+                    } else {
+                        self.deadline
+                    };
+
                     // Record whether THIS registration may be clamped: the wheel fires
                     // early at its current 1 ms tick plus `max_timer_duration`, and that
                     // tick can be up to 1 ms behind `now`, so the horizon here is one
@@ -932,18 +969,24 @@ impl Sleep {
                     // (br-asupersync-sleep-horizon-early-youlxs).
                     let horizon_ns = u64::try_from(timer.max_timer_duration().as_nanos())
                         .map_or(u64::MAX, |ns| ns.saturating_sub(1_000_000));
-                    let registered_partial = self.deadline > now.saturating_add_nanos(horizon_ns);
+                    let registered_partial =
+                        timer_deadline > timer_now.saturating_add_nanos(horizon_ns);
 
                     let mut armed = false;
                     if state.timer_handle.is_none() {
                         // Register new timer
                         let handle = timer.register(
-                            self.deadline,
+                            timer_deadline,
                             readiness_waker(Arc::clone(&self.ready), cx.waker().clone()),
                         );
                         if let Some(trace) = trace.as_ref() {
                             trace.record_event(|seq| {
-                                TraceEvent::timer_scheduled(seq, now, handle.id(), self.deadline)
+                                TraceEvent::timer_scheduled(
+                                    seq,
+                                    timer_now,
+                                    handle.id(),
+                                    timer_deadline,
+                                )
                             });
                         }
                         state.timer_handle = Some(handle);
@@ -955,7 +998,7 @@ impl Sleep {
                             let old_id = handle.id();
                             let mut new_handle = timer.update(
                                 &handle,
-                                self.deadline,
+                                timer_deadline,
                                 readiness_waker(Arc::clone(&self.ready), cx.waker().clone()),
                             );
                             // `update` returns a handle the wheel has already
@@ -972,7 +1015,7 @@ impl Sleep {
                                     cx.waker().wake_by_ref();
                                 } else {
                                     new_handle = timer.register(
-                                        self.deadline,
+                                        timer_deadline,
                                         readiness_waker(
                                             Arc::clone(&self.ready),
                                             cx.waker().clone(),
@@ -982,14 +1025,14 @@ impl Sleep {
                             }
                             if let Some(trace) = trace.as_ref() {
                                 trace.record_event(|seq| {
-                                    TraceEvent::timer_cancelled(seq, now, old_id)
+                                    TraceEvent::timer_cancelled(seq, timer_now, old_id)
                                 });
                                 trace.record_event(|seq| {
                                     TraceEvent::timer_scheduled(
                                         seq,
-                                        now,
+                                        timer_now,
                                         new_handle.id(),
-                                        self.deadline,
+                                        timer_deadline,
                                     )
                                 });
                             }

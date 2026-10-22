@@ -693,12 +693,11 @@ fn encode_call(
         Kind::String => quote!(#encoder.write_string(#tag, #value.as_ref())?;),
         Kind::Bytes => quote!(#encoder.write_bytes(#tag, #value.as_ref())?;),
         Kind::Message => quote! {
-            let __proto_nested =
-                ::asupersync::grpc::protobuf::ProtoMessage::encode_to_bytes(
-                    #value,
-                    ::asupersync::grpc::protobuf::ProtobufWireLimits::default(),
-                )?;
-            #encoder.write_message(#tag, __proto_nested.as_ref())?;
+            #encoder.write_nested_message(#tag, |__proto_nested| {
+                ::asupersync::grpc::protobuf::ProtoMessage::encode_fields(
+                    #value, __proto_nested,
+                )
+            })?;
         },
         Kind::Enumeration(path) => quote! {
             let _: ::core::marker::PhantomData<#path> = ::core::marker::PhantomData;
@@ -771,14 +770,11 @@ fn encode_map(ident: &Ident, key_kind: &Kind, value_kind: &Kind, tag: u32) -> To
             let mut __proto_entries: ::std::vec::Vec<_> = self.#ident.iter().collect();
             __proto_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
             for (__proto_key, __proto_value) in __proto_entries {
-                let mut __proto_entry =
-                    ::asupersync::grpc::protobuf::ProtobufWireEncoder::new(
-                        ::asupersync::grpc::protobuf::ProtobufWireLimits::default(),
-                    );
-                #key_encode
-                #value_encode
-                let __proto_entry = __proto_entry.finish()?;
-                encoder.write_message(#tag, __proto_entry.as_ref())?;
+                encoder.write_nested_message(#tag, |__proto_entry| {
+                    #key_encode
+                    #value_encode
+                    ::core::result::Result::Ok(())
+                })?;
             }
         }
     }

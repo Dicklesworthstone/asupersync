@@ -94,7 +94,10 @@ fn a_poll_error_is_not_a_follower_and_releases_the_election() {
     let mut scheduler = ThreeLaneScheduler::new(1, &state);
     let worker = scheduler.take_workers().remove(0);
     for _ in 0..3 {
-        assert_eq!(worker.drive_io_phase(false), IoPhaseOutcome::PollError);
+        assert_eq!(
+            worker.drive_io_phase(false, None),
+            IoPhaseOutcome::PollError
+        );
         assert!(!io.is_polling());
     }
     assert_eq!(reactor.polls.load(Ordering::Relaxed), 3);

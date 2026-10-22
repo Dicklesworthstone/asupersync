@@ -808,20 +808,20 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b",
-      "line_count": 1194,
+      "sha256": "4d2172faec620ad277d014525c59e20cd8dbea19283dd296ebaf5b76f026f938",
+      "line_count": 966,
       "anchors": ["private, native-only owned OTLP message staging", "Signal adapters may construct these finite models", "pub(crate) mod otlp_proto", "OwnedOtlpMetrics"]
     },
     {
       "path": "src/grpc/protobuf_wire.rs",
-      "sha256": "468c5fdc699009eb2339107f63cb5abf196131a174ba47ee23a23e025f01dfa0",
-      "line_count": 2724,
+      "sha256": "588f70abdbdeb75adf3db6eefab17dfe755483b46d917c049b220eb670c97c19",
+      "line_count": 1971,
       "anchors": ["The encoder is deterministic for the same ordered sequence", "pub struct ProtobufWireLimits"]
     },
     {
       "path": "src/grpc/protobuf.rs",
-      "sha256": "fdaf6684ca76bdfb9d560ad5c13213ff18f835cf86a33053e17c8fda2f6b1e99",
-      "line_count": 2611,
+      "sha256": "6fa0ff6207b15980724bebb301abb70840e27bc5be660418941d24b78adc522d",
+      "line_count": 928,
       "anchors": ["fn encode_to_bytes", "limits: ProtobufWireLimits"]
     },
     {
@@ -892,7 +892,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "6320979acfc73b769dc68c11076f85f419b4b970cfde0b35be1a5ad5ea8b6969",
+      "sha256": "e134a7f69b6341e5c6ea5f9f5358df4998bba9af2aa72c9ecd224c21e82aab6d",
       "line_count": 2237,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -910,7 +910,7 @@
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "637be7b94f4271664892a1385a937cb467903f230b6c768dc0e326f209252e47",
+      "sha256": "a87f6a5a6323d1ffefa0ff1b1d7ca2fc3cbab3e17b158fab394d2a51937a77de",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },
