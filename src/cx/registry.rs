@@ -83,6 +83,28 @@ impl fmt::Debug for RegistryHandle {
 // Name Lease (bd-25f52)
 // ============================================================================
 
+/// An unforgeable registration incarnation shared by an entry and its witness.
+///
+/// Holder, region, and virtual time can all repeat, including across registries.
+/// Keeping this allocation alive in stale witnesses prevents identity reuse
+/// without a process-global counter or exposing addresses in diagnostics.
+#[derive(Debug, Clone)]
+struct RegistrationIdentity(Arc<()>);
+
+impl RegistrationIdentity {
+    fn new() -> Self {
+        Self(Arc::new(()))
+    }
+}
+
+impl PartialEq for RegistrationIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for RegistrationIdentity {}
+
 /// A lease-backed name ownership record.
 ///
 /// A `NameLease` represents an active name registration backed by the graded
@@ -112,6 +134,8 @@ pub struct NameLease {
     region: RegionId,
     /// Virtual time at which the lease was acquired.
     acquired_at: Time,
+    /// Identity of this registration, retained even after obligation resolution.
+    identity: RegistrationIdentity,
     /// The underlying lease obligation token (drop bomb).
     token: Option<ObligationToken<LeaseKind>>,
 }
@@ -153,6 +177,7 @@ impl NameLease {
             holder,
             region,
             acquired_at,
+            identity: RegistrationIdentity::new(),
             token: Some(token),
         }
     }
@@ -267,6 +292,8 @@ pub struct NamePermit {
     reserved_at: Time,
     /// Monotonic identity for this specific permit instance.
     permit_id: u64,
+    /// Registration identity, transferred unchanged to the committed lease.
+    identity: RegistrationIdentity,
     /// Obligation token (drop bomb). Transferred to NameLease on commit.
     token: Option<ObligationToken<LeaseKind>>,
 }
@@ -298,6 +325,7 @@ impl NamePermit {
             region,
             reserved_at,
             permit_id,
+            identity: RegistrationIdentity::new(),
             token: Some(token),
         }
     }
@@ -356,6 +384,7 @@ impl NamePermit {
             holder: self.holder,
             region: self.region,
             acquired_at: self.reserved_at,
+            identity: self.identity,
             token: Some(token),
         }
     }
@@ -547,6 +576,8 @@ struct NameEntry {
     acquired_at: Time,
     /// Identity nonce for pending entries. Active leases store `0`.
     identity_nonce: u64,
+    /// Exact registration incarnation, independent of metadata and clock time.
+    identity: RegistrationIdentity,
 }
 
 /// Internal entry for a budgeted waiter.
@@ -835,6 +866,7 @@ impl NameRegistry {
                 region,
                 acquired_at: now,
                 identity_nonce: 0,
+                identity: lease.identity.clone(),
             },
         );
         self.emit_name_change(&name, holder, region, NameOwnershipKind::Acquired);
@@ -886,6 +918,7 @@ impl NameRegistry {
                 region,
                 acquired_at: now,
                 identity_nonce: permit_id,
+                identity: permit.identity.clone(),
             },
         );
         Ok(permit)
@@ -917,6 +950,7 @@ impl NameRegistry {
         if permit.holder() != entry.holder
             || permit.region() != entry.region
             || permit.permit_id() != entry.identity_nonce
+            || permit.identity != entry.identity
         // ubs:ignore - not a secret
         {
             // Re-insert the pending entry so the original holder can still commit.
@@ -972,6 +1006,7 @@ impl NameRegistry {
         if permit.holder() != removed_entry.holder
             || permit.region() != removed_entry.region
             || permit.permit_id() != removed_entry.identity_nonce
+            || permit.identity != removed_entry.identity
         // ubs:ignore - not a secret
         {
             // Re-insert the entry on validation failure to maintain consistency
@@ -1073,6 +1108,7 @@ impl NameRegistry {
                         region,
                         acquired_at: now,
                         identity_nonce: 0,
+                        identity: lease.identity.clone(),
                     },
                 );
                 self.emit_name_change(&name, holder, region, NameOwnershipKind::Acquired);
@@ -1112,6 +1148,7 @@ impl NameRegistry {
                                 region,
                                 acquired_at: now,
                                 identity_nonce: 0,
+                                identity: lease.identity.clone(),
                             },
                         );
                         self.emit_name_change(&name, holder, region, NameOwnershipKind::Acquired);
@@ -1313,7 +1350,9 @@ impl NameRegistry {
     ///
     /// This guards manual lease-resolution paths against stale handles: the
     /// active registry entry must still match the lease's full identity
-    /// (`name`, `holder`, `region`, and acquisition time).
+    /// (`name`, `holder`, `region`, acquisition time, and registration
+    /// incarnation). Re-registering the same name at the same virtual time
+    /// never makes a stale lease valid again, even for the same holder.
     ///
     /// # Errors
     ///
@@ -1334,6 +1373,7 @@ impl NameRegistry {
         if entry.holder != lease.holder()
             || entry.region != lease.region()
             || entry.acquired_at != lease.acquired_at()
+            || entry.identity != lease.identity
         {
             return Err(NameLeaseError::PermissionDenied {
                 name: name.to_string(),
@@ -1374,6 +1414,7 @@ impl NameRegistry {
         if entry.holder != lease.holder()
             || entry.region != lease.region()
             || entry.acquired_at != lease.acquired_at()
+            || entry.identity != lease.identity
         {
             return Err(NameLeaseError::PermissionDenied {
                 name: lease.name().to_string(),
@@ -1409,6 +1450,7 @@ impl NameRegistry {
         if queue.is_empty() {
             self.waiters.remove(name);
         }
+        let lease = NameLease::new(name, waiter.holder, waiter.region, now);
         self.leases.insert(
             name.to_string(),
             NameEntry {
@@ -1416,6 +1458,7 @@ impl NameRegistry {
                 region: waiter.region,
                 acquired_at: now,
                 identity_nonce: 0,
+                identity: lease.identity.clone(),
             },
         );
         self.emit_name_change(
@@ -1424,7 +1467,6 @@ impl NameRegistry {
             waiter.region,
             NameOwnershipKind::Acquired,
         );
-        let lease = NameLease::new(name, waiter.holder, waiter.region, now);
         self.granted.push(GrantedLease {
             name: name.to_string(),
             lease,
@@ -1466,6 +1508,7 @@ impl NameRegistry {
                 entry.holder == lease.holder()
                     && entry.region == lease.region()
                     && entry.acquired_at == lease.acquired_at()
+                    && entry.identity == lease.identity
             })
     }
 

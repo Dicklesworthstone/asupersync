@@ -513,3 +513,312 @@ fn mr_comprehensive_invariants() {
 fn test_complete_coverage() {
     eprintln!("All OnceCell metamorphic relation tests completed successfully!");
 }
+
+// br-asupersync-c11v6v: exercise fallible initialization through actual native
+// task publication and cancellation. Telemetry witnesses the parked state;
+// wall-clock bounds only terminate a broken test, never establish that state.
+mod cancel_aware_fallible {
+    use asupersync::Cx;
+    use asupersync::channel::oneshot;
+    use asupersync::runtime::{JoinError, RuntimeBuilder, yield_now};
+    use asupersync::sync::{OnceCell, OnceCellError};
+    use asupersync::types::CancelKind;
+    use std::future::{Future, poll_fn};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::task::Poll;
+    use std::time::{Duration, Instant};
+
+    fn run_native<F, Fut>(multi_thread: bool, scenario: F)
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let builder = if multi_thread {
+                RuntimeBuilder::multi_thread().worker_threads(2)
+            } else {
+                RuntimeBuilder::current_thread()
+            };
+            let runtime = builder.build().expect("build native OnceCell runtime");
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native task context");
+                scenario(cx).await;
+            }));
+
+            let started = Instant::now();
+            while !runtime.is_quiescent() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "OnceCell tasks must retire after all handles are joined"
+                );
+                std::thread::yield_now();
+            }
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            drop(runtime);
+            done_tx.send(()).expect("test observer remains alive");
+        });
+        match done_rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                runner.join().expect("native OnceCell scenario must pass");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("native OnceCell scenario failed to drain within its watchdog");
+            }
+        }
+    }
+
+    async fn wait_for_cell(cell: &OnceCell<u32>, state: &str, waiters: usize) {
+        let started = Instant::now();
+        loop {
+            let snapshot = cell.telemetry_snapshot(1);
+            if snapshot.state == state && snapshot.waiter_count == waiters {
+                return;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "expected cell state {state} with {waiters} waiters, got {snapshot:?}"
+            );
+            yield_now().await;
+        }
+    }
+
+    fn parked_waiter_cancellation(multi_thread: bool) {
+        run_native(multi_thread, move |cx| async move {
+            let cell = Arc::new(OnceCell::<u32>::new());
+            let (release_tx, mut release_rx) = oneshot::channel::<u32>();
+            let initializing_cell = Arc::clone(&cell);
+            let mut initializer = cx
+                .spawn(move |init_cx| async move {
+                    initializing_cell
+                        .get_or_try_init_cx(&init_cx, || async {
+                            release_rx.recv(&init_cx).await.map_err(|_| "gate closed")
+                        })
+                        .await
+                        .map(|result| result.copied())
+                })
+                .expect("spawn owning initializer");
+            wait_for_cell(&cell, "initializing", 0).await;
+
+            let fallback_calls = Arc::new(AtomicUsize::new(0));
+            let waiter_calls = Arc::clone(&fallback_calls);
+            let waiting_cell = Arc::clone(&cell);
+            let waiter = cx
+                .spawn(move |waiter_cx| async move {
+                    waiting_cell
+                        .get_or_try_init_cx(&waiter_cx, || {
+                            waiter_calls.fetch_add(1, Ordering::SeqCst);
+                            async { Ok::<u32, &'static str>(99) }
+                        })
+                        .await
+                        .map(|result| result.copied())
+                })
+                .expect("spawn contending initializer");
+            wait_for_cell(&cell, "initializing", 1).await;
+
+            let mut waiter = if multi_thread {
+                std::thread::spawn(move || {
+                    waiter.abort();
+                    waiter
+                })
+                .join()
+                .expect("cross-thread abort")
+            } else {
+                waiter.abort();
+                waiter
+            };
+            assert_eq!(
+                waiter
+                    .join(&cx)
+                    .await
+                    .expect("publish the typed cancellation"),
+                Err(OnceCellError::Cancelled)
+            );
+            assert_eq!(cell.telemetry_snapshot(1).waiter_count, 0);
+            assert_eq!(cell.telemetry_snapshot(1).state, "initializing");
+            assert_eq!(cell.get(), None);
+            assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+            assert!(!initializer.is_finished(), "the owner is still parked");
+
+            release_tx
+                .send_blocking(41)
+                .expect("release original initializer");
+            assert_eq!(initializer.join(&cx).await.expect("join owner"), Ok(Ok(41)));
+            assert_eq!(cell.get(), Some(&41));
+            assert_eq!(cell.telemetry_snapshot(1).waiter_count, 0);
+        });
+    }
+
+    #[test]
+    fn native_fallible_waiter_cancellation_current_thread() {
+        parked_waiter_cancellation(false);
+    }
+
+    #[test]
+    fn native_fallible_waiter_cancellation_cross_thread() {
+        parked_waiter_cancellation(true);
+    }
+
+    #[derive(Clone, Copy)]
+    enum OwnerExit {
+        Error,
+        Cancelled,
+        Panicked,
+    }
+
+    fn failed_owner_handoff(multi_thread: bool, exit: OwnerExit) {
+        run_native(multi_thread, move |cx| async move {
+            let cell = Arc::new(OnceCell::<u32>::new());
+            let (release_tx, mut release_rx) = oneshot::channel::<()>();
+            let initializing_cell = Arc::clone(&cell);
+            let mut initializer = cx
+                .spawn(move |init_cx| async move {
+                    initializing_cell
+                        .get_or_try_init_cx(&init_cx, || async {
+                            match release_rx.recv(&init_cx).await {
+                                Err(_) => Err("initializer cancelled"),
+                                Ok(()) => match exit {
+                                    OwnerExit::Panicked => panic!("fallible initializer panic"),
+                                    OwnerExit::Error | OwnerExit::Cancelled => Err("load failed"),
+                                },
+                            }
+                        })
+                        .await
+                        .map(|result| result.copied())
+                })
+                .expect("spawn first initializer");
+            wait_for_cell(&cell, "initializing", 0).await;
+
+            let calls = Arc::new(AtomicUsize::new(0));
+            let retry_calls = Arc::clone(&calls);
+            let retry_cell = Arc::clone(&cell);
+            let mut waiter = cx
+                .spawn(move |waiter_cx| async move {
+                    retry_cell
+                        .get_or_try_init_cx(&waiter_cx, || {
+                            retry_calls.fetch_add(1, Ordering::SeqCst);
+                            async { Ok::<u32, &'static str>(73) }
+                        })
+                        .await
+                        .map(|result| result.copied())
+                })
+                .expect("spawn retrying initializer");
+            wait_for_cell(&cell, "initializing", 1).await;
+
+            if matches!(exit, OwnerExit::Cancelled) {
+                initializer.abort();
+            } else {
+                release_tx
+                    .send_blocking(())
+                    .expect("release first initializer");
+            }
+            let result = initializer.join(&cx).await;
+            match exit {
+                OwnerExit::Error => {
+                    assert_eq!(result.expect("owner result"), Ok(Err("load failed")))
+                }
+                OwnerExit::Cancelled => assert_eq!(
+                    result.expect("acknowledged cancellation preserves the initializer error"),
+                    Ok(Err("initializer cancelled"))
+                ),
+                OwnerExit::Panicked => assert!(matches!(result, Err(JoinError::Panicked(_)))),
+            }
+            assert_eq!(waiter.join(&cx).await.expect("join retry"), Ok(Ok(73)));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(cell.get(), Some(&73));
+            assert_eq!(cell.telemetry_snapshot(1).waiter_count, 0);
+        });
+    }
+
+    #[test]
+    fn native_fallible_waiter_retries_after_initializer_error() {
+        for multi_thread in [false, true] {
+            failed_owner_handoff(multi_thread, OwnerExit::Error);
+        }
+    }
+
+    #[test]
+    fn native_fallible_waiter_retries_after_initializer_cancellation() {
+        for multi_thread in [false, true] {
+            failed_owner_handoff(multi_thread, OwnerExit::Cancelled);
+        }
+    }
+
+    #[test]
+    fn native_fallible_waiter_retries_after_initializer_panic() {
+        for multi_thread in [false, true] {
+            failed_owner_handoff(multi_thread, OwnerExit::Panicked);
+        }
+    }
+
+    #[test]
+    fn native_fallible_waiter_retries_after_initializer_future_drop() {
+        run_native(false, |cx| async move {
+            let cell = Arc::new(OnceCell::<u32>::new());
+            let mut initializer =
+                Box::pin(cell.get_or_try_init_cx(&cx, || {
+                    std::future::pending::<Result<u32, &'static str>>()
+                }));
+            poll_fn(|task_cx| {
+                assert!(initializer.as_mut().poll(task_cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            let retry_cell = Arc::clone(&cell);
+            let mut waiter = cx
+                .spawn(move |waiter_cx| async move {
+                    retry_cell
+                        .get_or_try_init_cx(&waiter_cx, || async { Ok::<_, &'static str>(37) })
+                        .await
+                        .map(|result| result.copied())
+                })
+                .expect("spawn replacement initializer");
+            wait_for_cell(&cell, "initializing", 1).await;
+            drop(initializer);
+            assert_eq!(waiter.join(&cx).await.expect("join retry"), Ok(Ok(37)));
+            assert_eq!(cell.get(), Some(&37));
+            assert_eq!(cell.telemetry_snapshot(1).waiter_count, 0);
+        });
+    }
+
+    #[test]
+    fn native_fallible_cached_value_and_pre_cancelled_empty_cell() {
+        run_native(false, |cx| async move {
+            let mut child = cx
+                .spawn(|child_cx| async move {
+                    child_cx.cancel_fast(CancelKind::User);
+                    let calls = AtomicUsize::new(0);
+                    let ready = OnceCell::with_value(5_u32);
+                    assert_eq!(
+                        ready
+                            .get_or_try_init_cx(&child_cx, || {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                async { Err::<u32, _>("must not run") }
+                            })
+                            .await,
+                        Ok(Ok(&5))
+                    );
+                    let empty = OnceCell::new();
+                    assert_eq!(
+                        empty
+                            .get_or_try_init_cx(&child_cx, || {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                async { Ok::<u32, &'static str>(8) }
+                            })
+                            .await,
+                        Err(OnceCellError::Cancelled)
+                    );
+                    assert_eq!(calls.load(Ordering::SeqCst), 0);
+                    assert_eq!(empty.telemetry_snapshot(1).state, "uninitialized");
+                    assert_eq!(empty.telemetry_snapshot(1).waiter_count, 0);
+                })
+                .expect("spawn pre-cancelled initialization checks");
+            child
+                .join(&cx)
+                .await
+                .expect("publish acknowledged cancellation result");
+        });
+    }
+}

@@ -1639,11 +1639,9 @@
             }
         );
 
-        let mut cleanup =
-            NamePermit::new("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000), 1);
-        reg.cancel_permit(&cleanup, Time::from_secs(1))
-            .expect("cleanup pending entry");
-        cleanup.abort().expect("resolve cleanup permit");
+        // The consumed, aborted permit no longer supplies a live witness.
+        // Region cleanup removes the orphaned reservation without fabricating one.
+        assert_eq!(reg.cleanup_region(rid(0)), vec!["svc".to_string()]);
         let replacement = reg
             .reserve("svc", tid(2), rid(0), Time::from_secs(2))
             .expect("reserve after cleanup");
@@ -3042,4 +3040,210 @@
         reg.unregister_owned_and_grant(&lease, now)
             .expect("unregister");
         let _ = lease.release().expect("release");
+    }
+
+    // br-asupersync-in4gh8: registration incarnations must not be inferred
+    // from reusable task/region/time metadata or per-registry permit counters.
+    #[test]
+    fn same_tick_reregistration_rejects_the_previous_lease() {
+        init_test("same_tick_reregistration_rejects_the_previous_lease");
+        for through_permit in [false, true] {
+            let now = Time::from_secs(10);
+            let mut reg = NameRegistry::new();
+            reg.watch_name("svc", tid(9), rid(9)).expect("watch name");
+            let mut stale = reg.register("svc", tid(1), rid(0), now).unwrap();
+            reg.unregister("svc", tid(1)).unwrap();
+            let mut current = if through_permit {
+                let permit = reg.reserve("svc", tid(1), rid(0), now).unwrap();
+                reg.commit_permit(permit).unwrap()
+            } else {
+                reg.register("svc", tid(1), rid(0), now).unwrap()
+            };
+            assert_eq!(stale.holder(), current.holder());
+            assert_eq!(stale.region(), current.region());
+            assert_eq!(stale.acquired_at(), current.acquired_at());
+            let entry = reg.leases.get("svc").unwrap().clone();
+            let notifications = reg.notifications.clone();
+
+            assert!(!reg.owns_lease(&stale), "the old incarnation is fenced");
+            assert_eq!(
+                reg.unregister_owned_and_grant(&stale, now),
+                Err(NameLeaseError::PermissionDenied { name: "svc".into() })
+            );
+            assert_eq!(
+                reg.rebind_lease(&mut stale, tid(2), rid(2)),
+                Err(NameLeaseError::PermissionDenied { name: "svc".into() })
+            );
+            assert_eq!(reg.leases.get("svc"), Some(&entry));
+            assert_eq!(reg.notifications, notifications);
+            assert_eq!(stale.holder(), tid(1));
+            assert!(reg.owns_lease(&current));
+
+            reg.rebind_lease(&mut current, tid(3), rid(3)).unwrap();
+            assert!(reg.owns_lease(&current), "rebinding preserves the witness");
+            assert_eq!(reg.whereis("svc"), Some(tid(3)));
+            // Resolving first remains supported by the legacy release API.
+            current.release().unwrap();
+            reg.unregister_owned_and_grant(&current, now).unwrap();
+            stale.abort().unwrap();
+            assert!(reg.is_empty());
+        }
+        crate::test_complete!("same_tick_reregistration_rejects_the_previous_lease");
+    }
+
+    #[test]
+    fn same_tick_replace_rejects_the_displaced_lease() {
+        init_test("same_tick_replace_rejects_the_displaced_lease");
+        let now = Time::from_secs(10);
+        let mut reg = NameRegistry::new();
+        let mut stale = reg.register("svc", tid(1), rid(0), now).unwrap();
+        let NameCollisionOutcome::Replaced { mut lease, .. } = reg
+            .register_with_policy("svc", tid(1), rid(0), now, NameCollisionPolicy::Replace)
+            .unwrap()
+        else {
+            panic!("the old registration must be displaced");
+        };
+        assert!(!reg.owns_lease(&stale));
+        assert_eq!(
+            reg.unregister_owned_and_grant(&stale, now),
+            Err(NameLeaseError::PermissionDenied { name: "svc".into() })
+        );
+        assert_eq!(
+            reg.rebind_lease(&mut stale, tid(2), rid(2)),
+            Err(NameLeaseError::PermissionDenied { name: "svc".into() })
+        );
+        assert!(reg.owns_lease(&lease));
+        assert_eq!(reg.whereis("svc"), Some(tid(1)));
+        reg.unregister_owned_and_grant(&lease, now).unwrap();
+        lease.release().unwrap();
+        stale.abort().unwrap();
+        crate::test_complete!("same_tick_replace_rejects_the_displaced_lease");
+    }
+
+    #[test]
+    fn lease_witnesses_cannot_cross_registry_boundaries() {
+        init_test("lease_witnesses_cannot_cross_registry_boundaries");
+        let now = Time::from_secs(10);
+        let mut first = NameRegistry::new();
+        let mut second = NameRegistry::new();
+        let mut first_lease = first.register("svc", tid(1), rid(0), now).unwrap();
+        let mut second_lease = second.register("svc", tid(1), rid(0), now).unwrap();
+        second.watch_name("svc", tid(9), rid(9)).unwrap();
+        let notifications = second.notifications.clone();
+        let entry = second.leases.get("svc").unwrap().clone();
+
+        assert!(!second.owns_lease(&first_lease));
+        assert_eq!(
+            second.unregister_owned_and_grant(&first_lease, now),
+            Err(NameLeaseError::PermissionDenied { name: "svc".into() })
+        );
+        assert_eq!(
+            second.rebind_lease(&mut first_lease, tid(2), rid(2)),
+            Err(NameLeaseError::PermissionDenied { name: "svc".into() })
+        );
+        assert_eq!(second.leases.get("svc"), Some(&entry));
+        assert_eq!(second.notifications, notifications);
+        assert!(first.owns_lease(&first_lease));
+        assert!(second.owns_lease(&second_lease));
+
+        first.unregister_owned_and_grant(&first_lease, now).unwrap();
+        first_lease.release().unwrap();
+        second
+            .unregister_owned_and_grant(&second_lease, now)
+            .unwrap();
+        second_lease.release().unwrap();
+        crate::test_complete!("lease_witnesses_cannot_cross_registry_boundaries");
+    }
+
+    #[test]
+    fn permit_witnesses_cannot_cross_registry_boundaries() {
+        init_test("permit_witnesses_cannot_cross_registry_boundaries");
+        for commit_foreign in [false, true] {
+            let now = Time::from_secs(10);
+            let mut first = NameRegistry::new();
+            let mut second = NameRegistry::new();
+            let foreign = first.reserve("svc", tid(1), rid(0), now).unwrap();
+            let authentic = second.reserve("svc", tid(1), rid(0), now).unwrap();
+            assert_eq!(foreign.permit_id(), authentic.permit_id());
+            let entry = second.pending.get("svc").unwrap().clone();
+            let notifications = second.notifications.clone();
+            assert_eq!(
+                second.cancel_permit(&foreign, now),
+                Err(NameLeaseError::PermissionDenied { name: "svc".into() })
+            );
+            let error = if commit_foreign {
+                second.commit_permit(foreign).expect_err("foreign commit")
+            } else {
+                second
+                    .abort_permit(foreign, now)
+                    .expect_err("foreign abort")
+            };
+            assert_eq!(
+                error,
+                NameLeaseError::PermissionDenied { name: "svc".into() }
+            );
+            assert_eq!(second.pending.get("svc"), Some(&entry));
+            assert_eq!(second.notifications, notifications);
+            assert_eq!(second.whereis("svc"), None);
+            // A rejected consuming operation has resolved the foreign token;
+            // its original registry still owns the uncommitted reservation.
+            assert_eq!(
+                first.cleanup_region_at(rid(0), now),
+                vec!["svc".to_string()]
+            );
+
+            let mut lease = second.commit_permit(authentic).unwrap();
+            assert!(second.owns_lease(&lease));
+            assert_eq!(second.leases.get("svc").unwrap().identity_nonce, 0);
+            second.unregister_owned_and_grant(&lease, now).unwrap();
+            lease.release().unwrap();
+        }
+        crate::test_complete!("permit_witnesses_cannot_cross_registry_boundaries");
+    }
+
+    #[test]
+    fn stale_waiter_grant_cannot_publish_or_release_a_same_tick_replacement() {
+        init_test("stale_waiter_grant_cannot_publish_or_release_a_same_tick_replacement");
+        let now = Time::from_secs(10);
+        let mut reg = NameRegistry::new();
+        let mut owner = reg.register("svc", tid(1), rid(0), now).unwrap();
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(2),
+            now,
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(20),
+            },
+        )
+        .unwrap();
+        reg.unregister_owned_and_grant(&owner, now).unwrap();
+        owner.release().unwrap();
+        assert_eq!(reg.granted.len(), 1);
+        assert!(
+            reg.owns_lease(&reg.granted[0].lease),
+            "a genuine grant authorizes"
+        );
+        let NameCollisionOutcome::Replaced { mut lease, .. } = reg
+            .register_with_policy("svc", tid(2), rid(2), now, NameCollisionPolicy::Replace)
+            .unwrap()
+        else {
+            panic!("replace the uncollected grant");
+        };
+        assert!(
+            !reg.owns_lease(&reg.granted[0].lease),
+            "never publish a stale grant"
+        );
+        let notifications = reg.notifications.clone();
+        reg.cancel_wait_for("svc", tid(2), rid(2), now);
+        assert!(reg.granted.is_empty());
+        assert_eq!(
+            reg.notifications, notifications,
+            "stale cleanup releases no successor"
+        );
+        assert!(reg.owns_lease(&lease));
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+        reg.unregister_owned_and_grant(&lease, now).unwrap();
+        lease.release().unwrap();
+        crate::test_complete!("stale_waiter_grant_cannot_publish_or_release_a_same_tick_replacement");
     }

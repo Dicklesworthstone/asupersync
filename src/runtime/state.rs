@@ -5325,6 +5325,11 @@ impl RuntimeState {
         // The scheduler must install the inherited authority for the entire
         // task lifetime, including factory construction and panic cleanup.
         cx.runtime_mask = runtime_mask;
+        if let Some(barrier) = &retirement_barrier {
+            // Admission can retire before the lazy factory ever runs. Attach
+            // its clock now so even that terminal join witnesses retirement.
+            barrier.attach_task_causality(&cx);
+        }
         {
             // This context is still private to admission. Install the join
             // barrier before publishing it in the task record: retirement may
