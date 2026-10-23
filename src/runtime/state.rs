@@ -1602,11 +1602,127 @@ pub(crate) enum LifecycleObserverEffect {
 pub(crate) struct LifecycleObserverBatch {
     payloads: Vec<LifecycleObserverPayload>,
     region_close_wakes: Vec<crate::record::region::RegionCloseWakes>,
+    completion: NativeCompletionProgress,
 }
 
 struct LifecycleObserverPayload {
     metrics: Arc<dyn MetricsProvider>,
     effects: Vec<LifecycleObserverEffect>,
+}
+
+/// Functional completion work that must survive a configured leak panic.
+///
+/// A native execution/retirement guard owns this inline carrier. Taking a
+/// task's waiters, cancellation targets, or monitor/link slots is irreversible;
+/// stage them here before a later audit or parent-region walk can unwind.
+/// Ordinary completion metrics remain on their existing one-shot observer.
+#[derive(Default)]
+struct NativeCompletionProgress {
+    task: Option<(TaskId, RegionId)>,
+    retirement_cx_inner: Option<Arc<parking_lot::RwLock<CxInner>>>,
+    waiters: SmallVec<[TaskId; 4]>,
+    cancel_targets: SmallVec<[Arc<CancelWaker>; 4]>,
+    watch_effects: SmallVec<[crate::monitor::WatchEffects; 1]>,
+    retired: bool,
+}
+
+impl NativeCompletionProgress {
+    fn stage_task(&mut self, task: &mut TaskRecord) {
+        let identity = (task.id, task.owner);
+        if let Some(previous) = self.task {
+            assert_eq!(previous, identity, "native completion carrier changed task");
+        } else {
+            self.task = Some(identity);
+        }
+        self.waiters.append(&mut task.waiters);
+        if self.retirement_cx_inner.is_none() {
+            // An Arc clone only: read the Cx/barrier after releasing runtime
+            // locks, including when the embedded record has been recycled.
+            self.retirement_cx_inner = task.cx_inner.clone();
+        }
+    }
+
+    fn stage_cancel_targets(&mut self, retirements: &mut TaskCompletionRetirements) {
+        if let Some(mut targets) = retirements.targets.take() {
+            self.cancel_targets.append(&mut targets);
+        }
+    }
+
+    fn stage_watch_effects(&mut self, effects: Option<crate::monitor::WatchEffects>) {
+        if let Some(effects) = effects {
+            self.watch_effects.push(effects);
+        }
+    }
+
+    fn mark_retired(&mut self, task_id: TaskId, owner: RegionId) {
+        assert_eq!(self.task, Some((task_id, owner)));
+        // Obligations, task storage, and owner membership have retired. A
+        // cascading parent close may still trigger the configured leak
+        // panic. Leak settlement and finish_obligation_leak_batch advance
+        // those regions before that policy panic escapes, so its retry must
+        // only publish retained progress, not repeat the completion core.
+        // Arbitrary heap/subscriber panics are outside this recovery boundary.
+        self.retired = true;
+    }
+
+    fn is_retired(&self, task_id: TaskId) -> bool {
+        self.retired && self.task.is_some_and(|(task, _)| task == task_id)
+    }
+
+    fn restore_waiters(&mut self, task_id: TaskId, effects: &mut TaskCompletionEffects) {
+        if !self.is_retired(task_id) {
+            return;
+        }
+        let mut waiters = std::mem::take(&mut self.waiters);
+        waiters.append(&mut effects.waiters);
+        effects.waiters = waiters;
+    }
+
+    fn open_retirement_barrier(&mut self) {
+        if !self.retired {
+            return;
+        }
+        let Some(inner) = self.retirement_cx_inner.take() else {
+            return;
+        };
+        let barrier = inner.read().retirement_barrier.clone();
+        if let Some(barrier) = barrier {
+            // The ordinary native artifact may already have opened it. The
+            // captured handle also covers a retry that finds no task record.
+            contain_metrics_hook(|| barrier.open_and_wake());
+            contain_metrics_hook(|| drop(barrier));
+        }
+        contain_metrics_hook(|| drop(inner));
+    }
+
+    fn dispatch(mut self) {
+        if !self.retired {
+            return;
+        }
+        for effects in std::mem::take(&mut self.watch_effects) {
+            // Include final slot/gateway destruction in the boundary, beyond
+            // WatchEffects' individual notification callbacks.
+            contain_metrics_hook(|| effects.dispatch());
+        }
+        TaskCompletionRetirements::new(std::mem::take(&mut self.cancel_targets)).retire();
+    }
+}
+
+impl Drop for NativeCompletionProgress {
+    fn drop(&mut self) {
+        // A failed cleanup can abandon the guard while runtime locks are
+        // still owned. Do not invoke foreign destructors or falsely open a
+        // retirement barrier for an uncommitted task.
+        if let Some(inner) = self.retirement_cx_inner.take() {
+            std::mem::forget(inner);
+        }
+        for target in self.cancel_targets.drain(..) {
+            std::mem::forget(target);
+        }
+        for effects in self.watch_effects.drain(..) {
+            std::mem::forget(effects);
+        }
+    }
 }
 
 impl LifecycleObserverBatch {
@@ -1630,11 +1746,16 @@ impl LifecycleObserverBatch {
     /// No runtime or task-table guard may be held here. One failed callback
     /// cannot suppress later observations or unwind through worker bookkeeping.
     pub(crate) fn dispatch(mut self) {
+        let mut completion = std::mem::take(&mut self.completion);
+        // A close callback may immediately join the task that closed its
+        // region. Open its committed barrier before delivering those wakes.
+        completion.open_retirement_barrier();
         // Functional wake delivery precedes advisory observers and survives
         // their panics. Each close token isolates every wake and retirement.
         for wakes in std::mem::take(&mut self.region_close_wakes) {
             wakes.dispatch();
         }
+        completion.dispatch();
         for LifecycleObserverPayload { metrics, effects } in std::mem::take(&mut self.payloads) {
             for effect in effects {
                 contain_metrics_hook(|| effect.dispatch(&*metrics));
@@ -8756,7 +8877,22 @@ impl RuntimeState {
         task_id: TaskId,
         observers: &mut LifecycleObserverBatch,
     ) -> TaskCompletionEffects {
-        self.task_completed_with_observers(task_id, Some(observers))
+        let mut effects = if observers.completion.is_retired(task_id) {
+            // A parent-region leak can unwind after the task record and owner
+            // membership are gone. Do not repeat its outcome/watch resolution.
+            TaskCompletionEffects::unknown(task_id, &self.task_completion_observer_panics)
+        } else {
+            // This precedes even the late ownership-post drain in the
+            // common core: a drain's configured leak panic must not lose
+            // waiters already detached from the record. Keep the task-table
+            // mutation inside its incremental update seam.
+            let _ = self.update_task(task_id, |task| {
+                observers.completion.stage_task(task);
+            });
+            self.task_completed_with_observers(task_id, Some(&mut *observers))
+        };
+        observers.completion.restore_waiters(task_id, &mut effects);
+        effects
     }
 
     fn task_completed_with_observers(
@@ -8789,7 +8925,11 @@ impl RuntimeState {
             }
         }
 
-        let waiter_count = waiters.len();
+        let waiter_count = waiters.len().saturating_add(
+            obligation_observers
+                .as_deref()
+                .map_or(0, |observers| observers.completion.waiters.len()),
+        );
         let (owner, completion, close_outcome, observer, retired_cancel_wakers) = {
             let Some(task) = self.task(task_id) else {
                 // Defensive: if the task vanished between the
@@ -8817,7 +8957,7 @@ impl RuntimeState {
                 _ => TaskEvent::Complete,
             };
             let protocol_violation = self.live_task_protocol_violation(task_id, task_event);
-            let retired_cancel_wakers = if let Some(inner) = task.cx_inner.as_ref() {
+            let mut retired_cancel_wakers = if let Some(inner) = task.cx_inner.as_ref() {
                 // br-asupersync-xgujaf — single write-lock; the previous
                 // read-then-write split had a TOCTOU window where a concurrent
                 // canceller could install a fresh waker between the read drop
@@ -8834,6 +8974,11 @@ impl RuntimeState {
             } else {
                 TaskCompletionRetirements::empty()
             };
+            if let Some(observers) = obligation_observers.as_deref_mut() {
+                observers
+                    .completion
+                    .stage_cancel_targets(&mut retired_cancel_wakers);
+            }
 
             let mut observer = self.prepare_task_completion_observer(task, waiter_count);
             if let Some(violation) = protocol_violation {
@@ -8861,6 +9006,13 @@ impl RuntimeState {
         // br-asupersync-ndhjfj: `waiters` was already taken atomically
         // at the top of the function under `update_task`. The previous
         // separate `task_mut` re-acquisition has been removed.
+        let (close_wakes, completion_progress) = match obligation_observers {
+            Some(observers) => (
+                Some(&mut observers.region_close_wakes),
+                Some(&mut observers.completion),
+            ),
+            None => (None, None),
+        };
         self.finish_task_completion(
             task_id,
             owner,
@@ -8870,7 +9022,8 @@ impl RuntimeState {
             observer,
             retired_cancel_wakers,
             true,
-            obligation_observers.map(|observers| &mut observers.region_close_wakes),
+            close_wakes,
+            completion_progress,
         )
     }
 
@@ -8896,7 +9049,7 @@ impl RuntimeState {
         task: &mut TaskRecord,
         protocol_retired: &mut bool,
     ) -> TaskCompletionEffects {
-        self.task_completed_from_external_record_with_close_wakes(task, protocol_retired, None)
+        self.task_completed_from_external_record_with_close_wakes(task, protocol_retired, None, None)
     }
 
     /// Native detached-record completion retains functional close Wakers on
@@ -8907,11 +9060,20 @@ impl RuntimeState {
         protocol_retired: &mut bool,
         observers: &mut LifecycleObserverBatch,
     ) -> TaskCompletionEffects {
-        self.task_completed_from_external_record_with_close_wakes(
-            task,
-            protocol_retired,
-            Some(&mut observers.region_close_wakes),
-        )
+        let task_id = task.id;
+        let mut effects = if observers.completion.is_retired(task_id) {
+            TaskCompletionEffects::unknown(task_id, &self.task_completion_observer_panics)
+        } else {
+            observers.completion.stage_task(task);
+            self.task_completed_from_external_record_with_close_wakes(
+                task,
+                protocol_retired,
+                Some(&mut observers.region_close_wakes),
+                Some(&mut observers.completion),
+            )
+        };
+        observers.completion.restore_waiters(task_id, &mut effects);
+        effects
     }
 
     fn task_completed_from_external_record_with_close_wakes(
@@ -8919,10 +9081,15 @@ impl RuntimeState {
         task: &mut TaskRecord,
         protocol_retired: &mut bool,
         close_wakes: Option<&mut Vec<crate::record::region::RegionCloseWakes>>,
+        mut completion_progress: Option<&mut NativeCompletionProgress>,
     ) -> TaskCompletionEffects {
         let task_id = task.id;
         let waiters = std::mem::take(&mut task.waiters);
-        let waiter_count = waiters.len();
+        let waiter_count = waiters.len().saturating_add(
+            completion_progress
+                .as_deref()
+                .map_or(0, |progress| progress.waiters.len()),
+        );
         let task_event = match &task.state {
             TaskState::Completed(Outcome::Cancelled(_)) => TaskEvent::DrainComplete,
             TaskState::Completed(Outcome::Panicked(payload)) => TaskEvent::Panic {
@@ -8955,7 +9122,7 @@ impl RuntimeState {
             );
         }
 
-        let retired_cancel_wakers =
+        let mut retired_cancel_wakers =
             task.cx_inner
                 .as_ref()
                 .map_or_else(TaskCompletionRetirements::empty, |inner| {
@@ -8964,6 +9131,9 @@ impl RuntimeState {
                         guard.take_cancel_wakers()
                     })
                 });
+        if let Some(progress) = completion_progress.as_deref_mut() {
+            progress.stage_cancel_targets(&mut retired_cancel_wakers);
+        }
         let mut observer = self.prepare_task_completion_observer(task, waiter_count);
         observer.lifecycle = lifecycle;
         let close_outcome = match &task.state {
@@ -8982,6 +9152,7 @@ impl RuntimeState {
             retired_cancel_wakers,
             false,
             close_wakes,
+            completion_progress,
         )
     }
 
@@ -8997,6 +9168,7 @@ impl RuntimeState {
         retired_cancel_wakers: TaskCompletionRetirements,
         remove_embedded_record: bool,
         close_wakes: Option<&mut Vec<crate::record::region::RegionCloseWakes>>,
+        mut completion_progress: Option<&mut NativeCompletionProgress>,
     ) -> TaskCompletionEffects {
         // E1.2 subsystem 3b (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
         // the cross-cutting completion tail, decomposed into shard-phase
@@ -9053,9 +9225,16 @@ impl RuntimeState {
                         owner,
                         completion,
                     );
-                    watch_effects = watch_now.and_then(|now| {
+                    let resolved_watch_effects = watch_now.and_then(|now| {
                         self.resolve_task_watches(task_id, close_outcome.as_ref(), now)
                     });
+                    watch_effects = match completion_progress.as_deref_mut() {
+                        Some(progress) => {
+                            progress.stage_watch_effects(resolved_watch_effects);
+                            None
+                        }
+                        None => resolved_watch_effects,
+                    };
                     self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
                     self.abort_orphaned_obligations_for_holder(
                         &mut regions,
@@ -9073,6 +9252,7 @@ impl RuntimeState {
                         task_id,
                         owner,
                         close_outcome,
+                        completion_progress.as_deref_mut(),
                     );
                 }
                 self.dispatch_lifecycle_effects_with_observers(deferred, Some(&mut lifecycle));
@@ -9097,9 +9277,16 @@ impl RuntimeState {
                     owner,
                     completion,
                 );
-                watch_effects = watch_now.and_then(|now| {
+                let resolved_watch_effects = watch_now.and_then(|now| {
                     self.resolve_task_watches(task_id, close_outcome.as_ref(), now)
                 });
+                watch_effects = match completion_progress.as_deref_mut() {
+                    Some(progress) => {
+                        progress.stage_watch_effects(resolved_watch_effects);
+                        None
+                    }
+                    None => resolved_watch_effects,
+                };
                 self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
                 self.abort_orphaned_obligations_for_holder(
                     &mut regions,
@@ -9117,6 +9304,7 @@ impl RuntimeState {
                     task_id,
                     owner,
                     close_outcome,
+                    completion_progress.as_deref_mut(),
                 );
             }
         }
@@ -9331,6 +9519,7 @@ impl RuntimeState {
     /// region, records the close outcome, and advances region state if
     /// possible (e.g. if this was the last task). Region advancement is
     /// itself a B→A→C composite.
+    #[allow(clippy::too_many_arguments)]
     fn unlink_completed_task_from_region_in(
         &mut self,
         regions: &mut AdmissionRegionTarget<'_>,
@@ -9340,12 +9529,19 @@ impl RuntimeState {
         task_id: TaskId,
         owner: RegionId,
         close_outcome: Option<Outcome<(), Error>>,
+        completion_progress: Option<&mut NativeCompletionProgress>,
     ) {
         if let Some(region) = regions.resolve_ref(&self.regions).get(owner.arena_index()) {
             if let Some(outcome) = close_outcome {
                 region.record_close_outcome(outcome);
             }
             region.remove_task(task_id);
+        }
+        if let Some(progress) = completion_progress {
+            // The task can no longer be recovered from its dispatch table.
+            // Retain that commit before a child/parent close can trigger the
+            // configured fail-fast policy for a different leaked holder.
+            progress.mark_retired(task_id, owner);
         }
 
         self.advance_region_state_in(regions, tasks, obligations, effects, owner);

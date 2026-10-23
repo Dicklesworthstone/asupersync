@@ -9607,6 +9607,10 @@ impl ThreeLaneWorker {
                 cancel_wakes: crate::types::task_context::CancelWakeEffects,
                 protocol_retired: bool,
                 committed: bool,
+                // The outer execution guard retains everything already
+                // detached by the first attempt, including a late parent
+                // leak after this record's owner membership has retired.
+                obligation_observers: &'a mut crate::runtime::state::LifecycleObserverBatch,
             }
 
             impl Drop for DetachedCompletion<'_> {
@@ -9616,13 +9620,13 @@ impl ThreeLaneWorker {
                     }
                     let record = self.record.take();
                     let protocol_retired = &mut self.protocol_retired;
+                    let obligation_observers = &mut *self.obligation_observers;
+                    let committed = &mut self.committed;
                     let worker = self.worker;
                     let resumed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let Some(mut record) = record else {
                             return;
                         };
-                        let mut obligation_observers =
-                            crate::runtime::state::LifecycleObserverBatch::default();
                         let mut state = worker
                             .state
                             .lock()
@@ -9632,15 +9636,16 @@ impl ThreeLaneWorker {
                             .task_completed_from_external_record_resuming_with_observers(
                                 &mut record,
                                 protocol_retired,
-                                &mut obligation_observers,
+                                obligation_observers,
                             )
                             .into_waiters_and_retirements_without_observers();
                         let finalizers = worker.drain_ready_finalizers_locked(&mut state);
                         worker.wake_dependents_locked(&state, waiters);
                         let finalizer_publication = worker.publish_ready_finalizers(finalizers);
                         drop(state);
+                        *committed = true;
                         UnwindCompletionArtifacts {
-                            obligation_observers,
+                            obligation_observers: std::mem::take(obligation_observers),
                             cancel_waker_retirements,
                             detached_record: Some(record),
                             retirement_cx_inner,
@@ -9690,6 +9695,7 @@ impl ThreeLaneWorker {
                 cancel_wakes,
                 protocol_retired: false,
                 committed: false,
+                obligation_observers,
             };
 
             if let (Some(receipt), Some(now)) = (cancel_ack.as_ref(), capture_time) {
@@ -9713,11 +9719,12 @@ impl ThreeLaneWorker {
                 Some(record) => state.task_completed_from_external_record_resuming_with_observers(
                     record,
                     &mut detached.protocol_retired,
-                    obligation_observers,
+                    detached.obligation_observers,
                 ),
-                None => {
-                    state.task_completed_with_obligation_observers(task_id, obligation_observers)
-                }
+                None => state.task_completed_with_obligation_observers(
+                    task_id,
+                    detached.obligation_observers,
+                ),
             };
             detached.committed = true;
             let (waiters, completion_observer) = completion_effects.into_parts();
@@ -9731,7 +9738,7 @@ impl ThreeLaneWorker {
                 .as_ref()
                 .and_then(|record| record.cx_inner.clone());
             PolledCompletionArtifacts {
-                obligation_observers: std::mem::take(obligation_observers),
+                obligation_observers: std::mem::take(detached.obligation_observers),
                 completion_observer,
                 cancel_wakes,
                 detached_record,
@@ -10475,3 +10482,7 @@ mod mailbox_observer_tests;
 #[cfg(test)]
 #[path = "three_lane_close_wake_tests.rs"]
 mod close_wake_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "three_lane_completion_retention_tests.rs"]
+mod completion_retention_tests;
