@@ -6533,7 +6533,7 @@ impl RemoteComputationClient {
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub const DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT: usize = 256;
 
-/// Static destination route for [`NativeRemoteRuntime`].
+/// Provisioned destination route for [`NativeRemoteRuntime`].
 ///
 /// This value deliberately binds one logical destination to one validated
 /// client/bootstrap policy and one V3 peer hello. A caller can manually convert
@@ -6547,6 +6547,10 @@ pub struct NativeRemoteRoute {
     destination: NodeId,
     hello: RemotePeerHello,
     client: RemoteComputationClient,
+    membership: Option<(
+        crate::distributed::membership::owned::OwnedMembershipController,
+        u64,
+    )>,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -6562,6 +6566,7 @@ impl NativeRemoteRoute {
             destination,
             hello,
             client,
+            membership: None,
         }
     }
 
@@ -6583,6 +6588,44 @@ impl NativeRemoteRoute {
         &self.client
     }
 
+    /// Bind new native admissions to one authenticated membership incarnation.
+    ///
+    /// This is an explicit local authorization: the route's logical destination
+    /// and `incarnation` are bound to the client's single enforcing server SPKI
+    /// pin. Missing, audit-only, certificate-only or multiple pins are refused.
+    /// Provision that identity independently; membership statements do not
+    /// attest a process incarnation, replace TLS pins, or issue capabilities.
+    ///
+    /// A native runtime selects this route only while the shared controller is
+    /// open and its latest authenticated statement is Alive at exactly this
+    /// incarnation. Unknown, Suspect, Dead, Left and superseded members refuse
+    /// new work. No polling loop, event cursor or discovery snapshot can leave
+    /// an older authorization cached. Endpoint refresh preserves this binding.
+    /// A same-incarnation recovery from Suspect can resume admission; rejoin at
+    /// a newer incarnation requires an explicitly rebound route publication.
+    ///
+    /// Eligibility linearizes when native submission selects its route; a later
+    /// decision does not retract that selection. Admitted operations retain
+    /// their client for cancellation and drain. This gate alone does not revoke
+    /// them. Use the controller's `run_remote` ownership API when membership loss
+    /// must also cancel and drain existing work and settle its checked runtime
+    /// lease. Fixed admitted native domains recheck this gate at commit.
+    ///
+    /// This method starts no work and accepts no raw gossip as authority.
+    pub fn with_membership(
+        mut self,
+        controller: crate::distributed::membership::owned::OwnedMembershipController,
+        incarnation: u64,
+    ) -> Result<Self, RemoteComputationClientError> {
+        if self.client.tls_connector.single_enforcing_spki().is_none() {
+            return Err(RemoteComputationClientError::InvalidConfig(
+                "membership routes require one enforcing server SPKI pin",
+            ));
+        }
+        self.membership = Some((controller, incarnation));
+        Ok(self)
+    }
+
     /// Clones this route with a replacement ordered bootstrap endpoint set.
     ///
     /// The logical destination and V3 hello are retained exactly, while the
@@ -6595,6 +6638,7 @@ impl NativeRemoteRoute {
             destination: self.destination.clone(),
             hello: self.hello.clone(),
             client: self.client.with_bootstrap_endpoints(endpoints)?,
+            membership: self.membership.clone(),
         })
     }
 
@@ -6613,6 +6657,7 @@ impl NativeRemoteRoute {
             destination: self.destination.clone(),
             hello: self.hello.clone(),
             client: self.client.with_discovered_endpoints(discovery)?,
+            membership: self.membership.clone(),
         })
     }
 }
@@ -8075,13 +8120,29 @@ impl NativeRemoteRuntime {
         self.routes.get(destination)
     }
 
-    /// Owned route currently used to admit new work for a destination.
+    /// Owned route currently eligible to admit new work for a destination.
+    ///
+    /// Opt-in membership bindings are checked against the controller's current
+    /// authenticated state. Withdrawal takes effect even when discovery retains
+    /// an older endpoint snapshot. This observation reserves no permission;
+    /// actual native submission checks the binding again through this method.
     #[must_use]
     pub fn effective_route(&self, destination: &NodeId) -> Option<NativeRemoteRoute> {
-        self.live_routes.read().routes.get(destination).cloned()
+        // Release the route lock before inspecting membership. Neither policy
+        // validation nor dropping a controller clone needs nested runtime locks.
+        let route = self.live_routes.read().routes.get(destination).cloned()?;
+        if let Some((controller, incarnation)) = &route.membership
+            && !controller.permits_native_route(destination, *incarnation)
+        {
+            return None;
+        }
+        Some(route)
     }
 
-    /// Generation of the effective route snapshot.
+    /// Generation of the validated route catalog.
+    ///
+    /// Authenticated membership may independently change route eligibility
+    /// without publishing another catalog or advancing this generation.
     #[must_use]
     pub fn route_generation(&self) -> u64 {
         self.live_routes.read().generation

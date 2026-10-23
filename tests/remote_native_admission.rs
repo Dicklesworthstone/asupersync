@@ -463,3 +463,6 @@ fn native_admission_close_can_reenter_synchronous_spawn_metrics() {
 
 #[path = "remote_native_admission/owned.rs"]
 mod owned;
+
+#[path = "remote_native_admission/membership.rs"]
+mod membership;

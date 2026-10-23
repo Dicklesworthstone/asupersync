@@ -17,6 +17,7 @@
 //! - `reserve` is cancel-safe: if cancelled, no slot is consumed.
 //! - `recv` is cancel-safe: if cancelled, no message is consumed (cursor not advanced).
 
+use super::MessageCausality;
 use super::cancel_registration::CancelRegistration;
 use crate::cx::Cx;
 use crate::util::{Arena, ArenaIndex};
@@ -194,6 +195,10 @@ pub struct BroadcastTelemetrySnapshot {
 struct Shared<T> {
     /// The ring buffer of messages.
     buffer: VecDeque<Slot<T>>,
+    /// Exact publication evidence aligned with retained ring entries. This
+    /// sidecar is allocated only after an opt-in task-causal publication, so
+    /// ordinary channels keep their existing slot size and ring allocation.
+    message_causality: Option<VecDeque<Option<MessageCausality>>>,
     /// Maximum capacity of the buffer.
     capacity: usize,
     /// Total number of messages ever sent (for lag detection).
@@ -265,6 +270,7 @@ pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         receiver_count: AtomicUsize::new(1),
         inner: Mutex::new(Shared {
             buffer: VecDeque::with_capacity(capacity.min(PREALLOCATED_SLOTS)),
+            message_causality: None,
             capacity,
             total_sent: 0,
             wakers: Arena::new(),
@@ -320,6 +326,30 @@ impl<T> Shared<T> {
     #[inline]
     fn record_cancellation(&mut self) {
         self.cancellation_count = self.cancellation_count.saturating_add(1);
+    }
+
+    /// The new slot is already installed and the final liveness check has
+    /// succeeded. A rolled-back publication never changes this sidecar.
+    #[inline]
+    fn record_message_causality(&mut self, evicted: bool) {
+        let causality = MessageCausality::capture_current();
+        if let Some(messages) = self.message_causality.as_mut() {
+            if evicted {
+                let _ = messages.pop_front();
+            }
+            messages.push_back(causality);
+        } else if causality.is_some() {
+            let mut messages = VecDeque::with_capacity(self.buffer.len());
+            // Earlier unattributed slots must not inherit this sender.
+            messages.resize_with(self.buffer.len() - 1, || None);
+            messages.push_back(causality);
+            self.message_causality = Some(messages);
+        }
+    }
+
+    #[inline]
+    fn message_causality_at(&self, offset: usize) -> Option<MessageCausality> {
+        self.message_causality.as_ref()?.get(offset)?.clone()
     }
 }
 
@@ -571,7 +601,10 @@ impl<T: Clone> Sender<T> {
             let total_sent = inner.total_sent;
             let receiver_token = inner.receiver_cursors.insert(total_sent);
             let to_drop = if self.channel.receiver_count.fetch_add(1, Ordering::Relaxed) == 0 {
-                Some(std::mem::take(&mut inner.buffer))
+                Some((
+                    std::mem::take(&mut inner.buffer),
+                    inner.message_causality.take(),
+                ))
             } else {
                 None
             };
@@ -783,6 +816,7 @@ impl<T: Clone> SendPermit<'_, T> {
             return 0;
         }
 
+        inner.record_message_causality(popped.is_some());
         inner.total_sent += 1;
 
         // Drain wakers under lock (by ownership, no clone), wake outside
@@ -870,7 +904,14 @@ impl<T: Clone> Receiver<T> {
             if let Some(slot) = inner.buffer.get(offset) {
                 let msg = Arc::clone(&slot.msg);
                 let index = slot.index;
+                let causality = inner.message_causality_at(offset);
                 drop(inner);
+
+                // User Clone code observes this publication too. Retaining its
+                // exact snapshot before unlocking survives reentrant eviction.
+                if let Some(causality) = causality {
+                    causality.observe_current();
+                }
 
                 // `T::clone` is arbitrary user code and may block, panic, or
                 // re-enter the channel. The retained Arc keeps this exact
@@ -961,7 +1002,14 @@ impl<T: Clone> Receiver<T> {
                 if let Some(slot) = inner.buffer.get(offset) {
                     let msg = Arc::clone(&slot.msg);
                     let index = slot.index;
+                    let causality = inner.message_causality_at(offset);
                     drop(inner);
+
+                    // Attribute the observation to the actual polling task,
+                    // before arbitrary Clone code can emit dependent effects.
+                    if let Some(causality) = causality {
+                        causality.observe(cx);
+                    }
 
                     // `T::clone` is arbitrary user code and may block, panic, or
                     // re-enter the channel. The retained Arc keeps this exact
@@ -1124,7 +1172,10 @@ impl<T> Drop for Receiver<T> {
             if was_last_receiver {
                 // Re-check under lock in case a sender concurrently called `subscribe`.
                 if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
-                    to_drop = Some(std::mem::take(&mut inner.buffer));
+                    to_drop = Some((
+                        std::mem::take(&mut inner.buffer),
+                        inner.message_causality.take(),
+                    ));
                 }
             }
         }

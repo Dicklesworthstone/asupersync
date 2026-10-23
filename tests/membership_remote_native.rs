@@ -17,7 +17,8 @@ use asupersync::remote::{
     ComputationName, NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeConfig, NodeId,
     RemoteCap, RemoteComputationClient, RemoteComputationClientConfig, RemoteComputationRegistry,
     RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceHandle,
-    RemoteInput, RemoteOutcome, RemotePeerAdmissionPolicy, RemoteProtocolVersion, RemoteRuntime,
+    RemoteError, RemoteInput, RemoteOutcome, RemotePeerAdmissionPolicy, RemoteProtocolVersion,
+    RemoteRuntime, spawn_remote,
 };
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::AuthKey;
@@ -166,8 +167,10 @@ fn exercise(workers: usize, case: Case) {
             RemoteComputationClientConfig::new().with_max_attempts(1)
                 .with_connect_timeout(Duration::from_secs(2)).with_attempt_timeout(Duration::from_secs(5))).unwrap();
         let remote = Arc::new(NativeRemoteRuntime::with_config(runtime_handle, NodeId::new("origin"), [
-            NativeRemoteRoute::new(NodeId::new("worker"), hello.clone(), client.clone()),
-            NativeRemoteRoute::new(NodeId::new("other"), hello, client),
+            NativeRemoteRoute::new(NodeId::new("worker"), hello.clone(), client.clone())
+                .with_membership(owner.clone(), 1).unwrap(),
+            NativeRemoteRoute::new(NodeId::new("other"), hello, client)
+                .with_membership(owner.clone(), 1).unwrap(),
         ], NativeRemoteRuntimeConfig::new().with_max_in_flight(4).with_drain_timeout(Duration::from_secs(10))).unwrap());
         let _stop = Stop { owner: owner.clone(), remote: Arc::clone(&remote), service: operator.clone(), witness: Arc::clone(&witness) };
         let cx = base.with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("origin"))
@@ -212,6 +215,12 @@ fn exercise(workers: usize, case: Case) {
             let incarnation = if matches!(case, Case::Superseded) { 2 } else { 1 };
             apply(&owner, incarnation, 2, kind);
             apply(&owner, incarnation, 2, kind); // Exact duplicate cannot repeat cleanup.
+            assert!(remote.effective_route(&NodeId::new("worker")).is_none());
+            assert!(matches!(spawn_remote(&cx, NodeId::new("worker"),
+                ComputationName::new("echo"), RemoteInput::empty()),
+                Err(RemoteError::NodeUnreachable(_))),
+                "native submission must enforce membership without an outer membership runner");
+            assert!(remote.effective_route(&NodeId::new("other")).is_some());
             if matches!(case, Case::Suspect) {
                 assert!(!witness.cancelled.load(Ordering::Acquire));
                 assert!(running.try_join().unwrap().is_none());
@@ -232,7 +241,10 @@ fn exercise(workers: usize, case: Case) {
             let sibling = owner.run_remote(&cx, NodeId::new("other"), 1, ComputationName::new("echo"),
                 RemoteInput::new(b"unrelated".to_vec()), config()).await.unwrap();
             assert!(sibling.is_success(), "{sibling:?}");
-            if matches!(case, Case::Suspect) { apply(&owner, 1, 3, MembershipKind::Alive); }
+            if matches!(case, Case::Suspect) {
+                apply(&owner, 1, 3, MembershipKind::Alive);
+                assert!(remote.effective_route(&NodeId::new("worker")).is_some());
+            }
             witness.release.store(true, Ordering::Release);
             witness.changed.notify_waiters();
             let report = asupersync::time::timeout(cx.now(), Duration::from_secs(5), running.join(&cx)).await
