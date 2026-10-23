@@ -1010,3 +1010,263 @@ fn broadcast_clone_effects_observe_the_retained_publication_before_eviction() {
         );
     }
 }
+
+#[test]
+fn watch_latest_value_does_not_inherit_overwritten_or_skipped_publications() {
+    use crate::stream::{Stream, WatchStream};
+    use std::pin::Pin;
+    use std::task::{Context, Waker};
+
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (tx, rx) = crate::channel::watch::channel(0_u32);
+    let tx = Arc::new(tx);
+    for (value, before, after) in [
+        (1, "watch-overwritten-before", "watch-overwritten-after"),
+        (2, "watch-latest-before", "watch-latest-after"),
+    ] {
+        let sender = Arc::clone(&tx);
+        run_channel_task(&mut lab, root, async move {
+            let cx = Cx::current().unwrap();
+            cx.trace(before);
+            sender.send(value).unwrap();
+            cx.trace(after);
+        });
+    }
+
+    let mut metadata = rx.clone();
+    let metadata_sender = Arc::clone(&tx);
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        assert!(metadata.has_changed());
+        metadata.changed(&cx).await.unwrap();
+        assert_eq!(metadata.seen_version(), 2);
+        metadata.mark_seen();
+        assert!(!metadata.has_changed());
+        let subscribed = metadata_sender.subscribe();
+        assert!(!subscribed.has_changed());
+        let _ = metadata.telemetry_snapshot(1);
+        let _ = metadata_sender.telemetry_snapshot(1);
+        cx.trace("watch-version-only");
+
+        let mut stream = WatchStream::from_changes(cx.clone(), metadata);
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut stream).poll_next(&mut task).is_pending());
+        drop(stream);
+        cx.trace("watch-skipped-snapshot");
+    });
+
+    // Each read is ready before its task runs; none can inherit a wake edge.
+    for api in 0..6 {
+        let mut receiver = rx.clone();
+        let sender = Arc::clone(&tx);
+        run_channel_task(&mut lab, root, async move {
+            let cx = Cx::current().unwrap();
+            let value = match api {
+                0 => *receiver.borrow(),
+                1 => *receiver.borrow_and_update(),
+                2 => receiver.borrow_and_clone(),
+                3 => receiver.borrow_and_update_clone(),
+                4 => *sender.borrow(),
+                _ => {
+                    let snapshot = receiver
+                        .wait_for(&cx, |value| {
+                            assert_eq!(*value, 2);
+                            cx.trace("watch-ready-predicate");
+                            true
+                        })
+                        .await
+                        .unwrap();
+                    *snapshot
+                }
+            };
+            assert_eq!(value, 2);
+            cx.trace(&format!("watch-value-reader-{api}"));
+        });
+    }
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+
+    let events = lab.trace().snapshot();
+    let overwritten = message_time(&events, "watch-overwritten-before");
+    let latest = message_time(&events, "watch-latest-before");
+    assert_eq!(overwritten.causal_order(&latest), CausalOrder::Concurrent);
+    for name in ["watch-version-only", "watch-skipped-snapshot"] {
+        let observed = message_time(&events, name);
+        assert_eq!(overwritten.causal_order(&observed), CausalOrder::Concurrent);
+        assert_eq!(latest.causal_order(&observed), CausalOrder::Concurrent);
+    }
+    for api in 0..6 {
+        let observed = message_time(&events, &format!("watch-value-reader-{api}"));
+        assert_eq!(latest.causal_order(&observed), CausalOrder::Before);
+        assert_eq!(overwritten.causal_order(&observed), CausalOrder::Concurrent);
+        assert_eq!(
+            message_time(&events, "watch-latest-after").causal_order(&observed),
+            CausalOrder::Concurrent
+        );
+        for other in api + 1..6 {
+            assert_eq!(
+                observed.causal_order(&message_time(&events, &format!("watch-value-reader-{other}"))),
+                CausalOrder::Concurrent
+            );
+        }
+    }
+    assert_eq!(
+        latest.causal_order(&message_time(&events, "watch-ready-predicate")),
+        CausalOrder::Before
+    );
+}
+
+#[test]
+fn watch_initial_publication_reaches_independent_borrow_and_stream_snapshots() {
+    use crate::stream::{StreamExt, WatchStream};
+
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let channel = Arc::new(Mutex::new(None));
+    let published = Arc::clone(&channel);
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        cx.trace("watch-initial-before");
+        *published.lock() = Some(crate::channel::watch::channel(7_u32));
+        cx.trace("watch-initial-after");
+    });
+    let (_tx, rx) = channel.lock().take().unwrap();
+    for api in 0..2 {
+        let receiver = rx.clone();
+        run_channel_task(&mut lab, root, async move {
+            let cx = Cx::current().unwrap();
+            let value = if api == 0 {
+                *receiver.borrow()
+            } else {
+                let mut stream = WatchStream::new(cx.clone(), receiver);
+                stream.next().await.unwrap()
+            };
+            assert_eq!(value, 7);
+            cx.trace(&format!("watch-initial-reader-{api}"));
+        });
+    }
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+
+    let events = lab.trace().snapshot();
+    for api in 0..2 {
+        let observed = message_time(&events, &format!("watch-initial-reader-{api}"));
+        assert_eq!(
+            message_time(&events, "watch-initial-before").causal_order(&observed),
+            CausalOrder::Before
+        );
+        assert_eq!(
+            message_time(&events, "watch-initial-after").causal_order(&observed),
+            CausalOrder::Concurrent
+        );
+    }
+    assert_eq!(
+        message_time(&events, "watch-initial-reader-0")
+            .causal_order(&message_time(&events, "watch-initial-reader-1")),
+        CausalOrder::Concurrent
+    );
+}
+
+#[test]
+fn watch_modify_observes_before_user_code_and_preserves_publication_on_panic() {
+    type CloneAction = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+    struct CloneEffect {
+        value: u32,
+        action: CloneAction,
+    }
+
+    impl Clone for CloneEffect {
+        fn clone(&self) -> Self {
+            let action = self.action.lock().take();
+            if let Some(action) = action {
+                action();
+            }
+            Self {
+                value: self.value,
+                action: Arc::clone(&self.action),
+            }
+        }
+    }
+
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (tx, mut rx) = crate::channel::watch::channel(CloneEffect {
+        value: 0,
+        action: Arc::new(Mutex::new(None)),
+    });
+    let tx = Arc::new(tx);
+    let sender = Arc::clone(&tx);
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        cx.trace("watch-modify-source-before");
+        assert!(sender.send(CloneEffect {
+            value: 1,
+            action: Arc::new(Mutex::new(Some(Box::new(|| {
+                Cx::current().unwrap().trace("watch-modify-clone");
+            })))),
+        }).is_ok());
+        cx.trace("watch-modify-source-after");
+    });
+    let modifier = Arc::clone(&tx);
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        cx.trace("watch-modifier-before");
+        modifier.send_modify(|value| {
+            cx.trace("watch-modify-closure");
+            assert_eq!(value.value, 1);
+            value.value = 2;
+        }).unwrap();
+        cx.trace("watch-modifier-after");
+    });
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        cx.trace("watch-panic-before");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tx.send_modify(|value| {
+                assert_eq!(value.value, 2);
+                value.value = 99;
+                cx.trace("watch-panic-closure");
+                panic!("watch modifier rollback sentinel");
+            })
+        }));
+        assert!(result.is_err());
+        cx.trace("watch-panic-after");
+    });
+    run_channel_task(&mut lab, root, async move {
+        assert_eq!(rx.borrow_and_update_clone().value, 2);
+        Cx::current().unwrap().trace("watch-modified-received");
+    });
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+
+    let events = lab.trace().snapshot();
+    let source = message_time(&events, "watch-modify-source-before");
+    let modifier = message_time(&events, "watch-modifier-before");
+    for effect in ["watch-modify-clone", "watch-modify-closure", "watch-panic-closure"] {
+        let observed = message_time(&events, effect);
+        assert_eq!(source.causal_order(&observed), CausalOrder::Before);
+        assert_eq!(
+            message_time(&events, "watch-modify-source-after").causal_order(&observed),
+            CausalOrder::Concurrent
+        );
+    }
+    assert_eq!(
+        modifier.causal_order(&message_time(&events, "watch-panic-closure")),
+        CausalOrder::Before
+    );
+    let received = message_time(&events, "watch-modified-received");
+    assert_eq!(source.causal_order(&received), CausalOrder::Before);
+    assert_eq!(modifier.causal_order(&received), CausalOrder::Before);
+    for after in [
+        "watch-modify-source-after",
+        "watch-modifier-after",
+        "watch-panic-before",
+        "watch-panic-closure",
+        "watch-panic-after",
+    ] {
+        assert_eq!(message_time(&events, after).causal_order(&received), CausalOrder::Concurrent);
+    }
+}
+
