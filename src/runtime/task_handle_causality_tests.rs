@@ -235,3 +235,38 @@ fn admitted_ready_joins_follow_complete_but_not_later_retained_context_events() 
         );
     }
 }
+
+#[test]
+fn moved_join_observes_retirement_in_the_polling_task() {
+    let source = causal_context(97, "source");
+    let constructor = causal_context(97, "constructor");
+    let consumer = causal_context(97, "consumer");
+    let barrier = RetirementBarrier::pending();
+    barrier.attach_task_causality(&source);
+    let (sender, receiver) = task_result_channel::<u8>();
+    let mut handle = TaskHandle::with_retirement_barrier_for_test(
+        source.task_id(),
+        receiver,
+        Arc::downgrade(&source.inner),
+        Arc::clone(&barrier),
+    );
+    publish_terminal_result(sender, Ok(42));
+    let completed = source.logical_tick();
+    barrier.open_and_wake();
+    let constructor_before = constructor.logical_now();
+    let mut joined = pin!(handle.join(&constructor));
+    {
+        let _current = Cx::set_current(Some(consumer.clone()));
+        let mut task = Context::from_waker(Waker::noop());
+        assert_eq!(joined.as_mut().poll(&mut task), Poll::Ready(Ok(42)));
+    }
+    assert_eq!(
+        constructor.logical_now(),
+        constructor_before,
+        "retaining the argument does not make its task the observer"
+    );
+    assert_eq!(
+        completed.causal_order(&consumer.logical_now()),
+        CausalOrder::Before
+    );
+}

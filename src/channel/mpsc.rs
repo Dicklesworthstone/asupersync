@@ -87,6 +87,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
+use super::MessageCausality;
 use crate::cx::Cx;
 use crate::runtime::reactor::token::{SlabToken, TokenSlab};
 use crate::types::outcome::Outcome;
@@ -274,6 +275,9 @@ struct PreparedReceiverWaker {
 struct ChannelInner<T> {
     /// Buffered messages waiting to be received.
     queue: VecDeque<T>,
+    /// Message-aligned evidence, allocated only after a task-causal send.
+    /// Keeping this separate leaves ordinary queue slots exactly `T` sized.
+    message_causality: Option<VecDeque<Option<MessageCausality>>>,
     /// Number of reserved slots (permits outstanding).
     reserved: usize,
     /// Arc-owned wakers for senders waiting for capacity (O(1) access by token).
@@ -337,6 +341,7 @@ impl<T> ChannelInner<T> {
 
         Self {
             queue,
+            message_causality: None,
             reserved: 0,
             send_wakers: TokenSlab::with_capacity(4),
             waiter_queue: VecDeque::with_capacity(4),
@@ -344,6 +349,37 @@ impl<T> ChannelInner<T> {
             recv_wake_epoch: 0,
             cancellation_count: 0,
         }
+    }
+
+    /// Publish one value and its exact committing task's clock together.
+    #[inline]
+    fn push_message(&mut self, value: T) {
+        let causality = MessageCausality::capture_current();
+        if causality.is_some() && self.message_causality.is_none() {
+            // Earlier unattributed values must retain their own empty entries:
+            // receiving one must not acquire a later sender's clock.
+            let mut messages = VecDeque::new();
+            messages.resize_with(self.queue.len(), || None);
+            self.message_causality = Some(messages);
+        }
+        if let Some(messages) = self.message_causality.as_mut() {
+            // Reserve both buffers before changing their alignment.
+            self.queue.reserve(1);
+            messages.reserve(1);
+            messages.push_back(causality);
+        }
+        self.queue.push_back(value);
+    }
+
+    #[inline]
+    fn pop_message(&mut self) -> Option<(T, Option<MessageCausality>)> {
+        self.queue.pop_front().map(|value| {
+            let causality = self
+                .message_causality
+                .as_mut()
+                .and_then(|messages| messages.pop_front().flatten());
+            (value, causality)
+        })
     }
 
     /// Returns the number of used slots (queued + reserved).
@@ -782,7 +818,7 @@ impl<T> Sender<T> {
                 return Err(SendError::Full(value));
             }
 
-            inner.queue.push_back(value);
+            inner.push_message(value);
             // Extract the recv waker before dropping the lock so we can
             // wake outside the critical section.
             inner.recv_waker.take()
@@ -903,29 +939,39 @@ impl<T> Sender<T> {
         let has_physical_capacity = inner.has_capacity(self.shared.capacity);
         let waiter_owns_available_slot = has_physical_capacity && inner.has_waiting_sender();
 
-        let evicted = if waiter_owns_available_slot {
+        let (evicted, evicted_causality) = if waiter_owns_available_slot {
             return Err(SendError::Full(value));
         } else if has_physical_capacity {
-            None
+            (None, None)
         } else if let Some(index) = inner.queue.iter().position(&mut predicate) {
             // Evict the oldest committed message (not a reserved slot) that the
             // caller explicitly allows us to drop.
-            Some(
-                inner
-                    .queue
-                    .remove(index)
-                    .expect("position() returned a valid queue index"),
-            )
+            let value = inner
+                .queue
+                .remove(index)
+                .expect("position() returned a valid queue index");
+            let causality = inner
+                .message_causality
+                .as_mut()
+                .and_then(|messages| messages.remove(index).flatten());
+            (Some(value), causality)
         } else {
             // Either all capacity is consumed by reserved slots (and waiters), or
             // every queued value is protected by the caller's predicate.
             return Err(SendError::Full(value));
         };
 
-        inner.queue.push_back(value);
+        inner.push_message(value);
 
         let waker = inner.recv_waker.take();
         drop(inner);
+
+        // The evicted value is returned to this caller, rather than delivered
+        // to the receiver. Observe it after publishing the replacement so its
+        // evidence cannot be mistaken for the replacement's publication.
+        if let Some(causality) = evicted_causality {
+            causality.observe_current();
+        }
 
         // Wake receiver if waiting. Drop the lock first to avoid contention/deadlocks.
         if let Some(waker) = waker {
@@ -1613,7 +1659,7 @@ impl<T> SendPermit<'_, T> {
             );
         }
 
-        inner.queue.push_back(value);
+        inner.push_message(value);
 
         // Extract waker before dropping the lock to avoid wake-under-lock.
         let recv_waker = inner.recv_waker.take();
@@ -1798,10 +1844,13 @@ impl<T> Receiver<T> {
 
             let mut inner = self.shared.inner.lock();
 
-            if let Some(value) = inner.queue.pop_front() {
+            if let Some((value, causality)) = inner.pop_message() {
                 let retired_waker = inner.recv_waker.take();
                 let next_waker = inner.take_next_sender_waker();
                 drop(inner);
+                if let Some(causality) = causality {
+                    causality.observe(cx);
+                }
                 drop(retired_waker);
                 drop(prepared_waker);
                 if let Some(waker) = next_waker {
@@ -1895,11 +1944,22 @@ impl<T> Receiver<T> {
             let target = limit.min(inner.queue.len());
 
             if target > 0 {
+                // Reserve before draining so a capacity panic cannot misalign evidence.
+                buffer.reserve(target);
                 buffer.extend(inner.queue.drain(..target));
+                let causality = inner
+                    .message_causality
+                    .as_mut()
+                    .map(|messages| messages.drain(..target).flatten().collect::<Vec<_>>());
                 let sender_wakers =
                     inner.sender_wakers_for_freed_slots(target, self.shared.capacity);
                 let retired_waker = inner.recv_waker.take();
                 drop(inner);
+                if let Some(causality) = causality {
+                    for message in causality {
+                        message.observe(cx);
+                    }
+                }
                 drop(retired_waker);
                 drop(prepared_waker);
                 wake_detached(sender_wakers);
@@ -1955,10 +2015,13 @@ impl<T> Receiver<T> {
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock();
-        if let Some(value) = inner.queue.pop_front() {
+        if let Some((value, causality)) = inner.pop_message() {
             let retired_waker = inner.recv_waker.take();
             let next_waker = inner.take_next_sender_waker();
             drop(inner);
+            if let Some(causality) = causality {
+                causality.observe_current();
+            }
             drop(retired_waker);
             if let Some(w) = next_waker {
                 w.wake_by_ref();
@@ -2136,6 +2199,8 @@ impl<T> Drop for Receiver<T> {
             // We extract them using std::mem::take to drop them outside the lock,
             // preventing deadlocks if T::drop requires the same channel lock.
             let items = std::mem::take(&mut inner.queue);
+            // Dropping buffered values is not consumption by the dropping task.
+            inner.message_causality = None;
             drop(inner);
             (wakers, items, recv_waker)
         };

@@ -125,11 +125,19 @@ fn real_channel_wake_carries_only_the_senders_past() {
 }
 
 #[test]
-fn buffered_receive_without_a_wake_does_not_invent_an_edge() {
+fn buffered_receive_observes_the_exact_publication_without_a_wake() {
     let events = channel_trace(false);
     assert_eq!(
         message_time(&events, "before-send").causal_order(&message_time(&events, "received")),
+        CausalOrder::Before
+    );
+    assert_eq!(
+        message_time(&events, "after-send").causal_order(&message_time(&events, "received")),
         CausalOrder::Concurrent
+    );
+    assert_eq!(
+        message_time(&events, "received"),
+        message_time(&channel_trace(false), "received")
     );
 }
 
@@ -318,7 +326,7 @@ fn external_and_foreign_runtime_wakes_leave_the_source_unknown() {
 
 #[test]
 fn dpor_conflict_model_consumes_real_channel_producer_evidence() {
-    fn conflicts(receiver_waits: bool) -> Vec<TraceEvent> {
+    fn conflicts(receiver_waits: bool, sender_event: &str) -> Vec<TraceEvent> {
         let events = channel_trace(receiver_waits);
         let region = RegionId::new_for_test(0, 0);
         // Use the existing region-write footprint as a two-event conflict
@@ -330,9 +338,9 @@ fn dpor_conflict_model_consumes_real_channel_producer_evidence() {
                 Time::ZERO,
                 TaskId::new_for_test(1, 0),
                 region,
-                CancelReason::user("model-before-send"),
+                CancelReason::user("model-sender-event"),
             )
-            .with_logical_time(message_time(&events, "before-send")),
+            .with_logical_time(message_time(&events, sender_event)),
             TraceEvent::cancel_request(
                 2,
                 Time::ZERO,
@@ -344,10 +352,407 @@ fn dpor_conflict_model_consumes_real_channel_producer_evidence() {
         ]
     }
 
-    let racing = conflicts(false);
+    // A sender's subsequent event is still concurrent with the consumer;
+    // buffered delivery must not accidentally acquire that later clock.
+    let racing = conflicts(false, "after-send");
     assert_eq!(racing.len(), 2);
     assert_eq!(crate::trace::detect_hb_races(&racing).race_count(), 1);
-    let ordered = conflicts(true);
-    assert_eq!(ordered.len(), 2);
-    assert_eq!(crate::trace::detect_hb_races(&ordered).race_count(), 0);
+    for receiver_waits in [false, true] {
+        let ordered = conflicts(receiver_waits, "before-send");
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(crate::trace::detect_hb_races(&ordered).race_count(), 0);
+    }
+}
+
+fn run_channel_task(
+    lab: &mut LabRuntime,
+    root: RegionId,
+    future: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    let (task, _join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, future)
+        .unwrap();
+    lab.scheduler.lock().schedule(task, 0);
+    lab.step();
+}
+
+#[test]
+fn buffered_mpsc_keeps_each_senders_evidence_with_its_own_message() {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (tx, mut rx) = crate::channel::mpsc::channel(3);
+    // Activating the lazy evidence queue must preserve earlier host entries.
+    tx.try_send(0).unwrap();
+    for (value, before, after) in [(1, "one-before", "one-after"), (2, "two-before", "two-after")] {
+        let sender = tx.clone();
+        run_channel_task(&mut lab, root, async move {
+            let cx = Cx::current().unwrap();
+            cx.trace(before);
+            if value == 1 {
+                sender.send(&cx, value).await.unwrap();
+            } else {
+                sender.try_send(value).unwrap();
+            }
+            cx.trace(after);
+        });
+    }
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        assert_eq!(rx.try_recv(), Ok(0));
+        cx.trace("host-received");
+        assert_eq!(rx.recv(&cx).await, Ok(1));
+        cx.trace("one-received");
+        assert_eq!(rx.try_recv(), Ok(2));
+        cx.trace("two-received");
+    });
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    let events = lab.trace().snapshot();
+    let host = message_time(&events, "host-received");
+    let first = message_time(&events, "one-received");
+    let second = message_time(&events, "two-received");
+    for name in ["one-before", "two-before"] {
+        assert_eq!(message_time(&events, name).causal_order(&host), CausalOrder::Concurrent);
+        assert_eq!(message_time(&events, name).causal_order(&second), CausalOrder::Before);
+    }
+    assert_eq!(message_time(&events, "one-before").causal_order(&first), CausalOrder::Before);
+    assert_eq!(message_time(&events, "two-before").causal_order(&first), CausalOrder::Concurrent);
+    for name in ["one-after", "two-after"] {
+        assert_eq!(message_time(&events, name).causal_order(&second), CausalOrder::Concurrent);
+    }
+}
+
+#[test]
+fn mpsc_batch_receives_merge_only_the_consumed_prefix() {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (tx, mut rx) = crate::channel::mpsc::unbounded_channel();
+    for (value, name) in [(1, "batch-one"), (2, "batch-two"), (3, "batch-three")] {
+        let sender = tx.clone();
+        run_channel_task(&mut lab, root, async move {
+            Cx::current().unwrap().trace(name);
+            sender.send(value).unwrap();
+        });
+    }
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        let mut values = Vec::new();
+        assert_eq!(rx.recv_many(&cx, &mut values, 0).await, Ok(0));
+        assert!(values.is_empty());
+        cx.trace("zero-batch");
+        assert_eq!(rx.recv_many(&cx, &mut values, 2).await, Ok(2));
+        assert_eq!(values, vec![1, 2]);
+        cx.trace("first-batch");
+        assert_eq!(rx.try_recv(), Ok(3));
+        cx.trace("batch-tail");
+    });
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    let events = lab.trace().snapshot();
+    for name in ["batch-one", "batch-two", "batch-three"] {
+        assert_eq!(
+            message_time(&events, name).causal_order(&message_time(&events, "zero-batch")),
+            CausalOrder::Concurrent
+        );
+        assert_eq!(
+            message_time(&events, name).causal_order(&message_time(&events, "batch-tail")),
+            CausalOrder::Before
+        );
+    }
+    for name in ["batch-one", "batch-two"] {
+        assert_eq!(
+            message_time(&events, name).causal_order(&message_time(&events, "first-batch")),
+            CausalOrder::Before
+        );
+    }
+    assert_eq!(
+        message_time(&events, "batch-three").causal_order(&message_time(&events, "first-batch")),
+        CausalOrder::Concurrent
+    );
+}
+
+#[test]
+fn mpsc_eviction_and_failed_send_do_not_relabel_surviving_messages() {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (tx, mut rx) = crate::channel::mpsc::channel(3);
+    for (value, name) in [(1, "kept-first"), (2, "evicted-middle"), (3, "kept-last"), (4, "refused-full")] {
+        let sender = tx.clone();
+        run_channel_task(&mut lab, root, async move {
+            Cx::current().unwrap().trace(name);
+            if value == 4 {
+                assert_eq!(sender.try_send(value), Err(crate::channel::mpsc::SendError::Full(value)));
+            } else {
+                sender.try_send(value).unwrap();
+            }
+        });
+    }
+    assert_eq!(tx.send_evict_oldest_where(5, |value| *value == 2), Ok(Some(2)));
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        assert_eq!(rx.try_recv(), Ok(1));
+        cx.trace("eviction-first-received");
+        assert_eq!(rx.recv(&cx).await, Ok(3));
+        cx.trace("eviction-last-received");
+        assert_eq!(rx.try_recv(), Ok(5));
+        cx.trace("replacement-received");
+    });
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    let events = lab.trace().snapshot();
+    let first = message_time(&events, "eviction-first-received");
+    let last = message_time(&events, "eviction-last-received");
+    assert_eq!(message_time(&events, "kept-first").causal_order(&first), CausalOrder::Before);
+    assert_eq!(message_time(&events, "kept-last").causal_order(&first), CausalOrder::Concurrent);
+    assert_eq!(message_time(&events, "kept-last").causal_order(&last), CausalOrder::Before);
+    for name in ["evicted-middle", "refused-full"] {
+        assert_eq!(
+            message_time(&events, name).causal_order(&message_time(&events, "replacement-received")),
+            CausalOrder::Concurrent
+        );
+    }
+}
+
+#[test]
+fn channel_permits_capture_the_committing_task_at_publication() {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let mut tasks = Vec::new();
+    let mut contexts = Vec::new();
+    let mut joins = Vec::new();
+    for _ in 0..4 {
+        let (task, join) = lab.state.create_task(root, Budget::INFINITE, async {}).unwrap();
+        tasks.push(task);
+        contexts.push(context(&lab, task));
+        joins.push(join);
+    }
+    let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel();
+    let (mpsc_tx, mut mpsc_rx) = crate::channel::mpsc::channel(1);
+    let (oneshot_permit, mpsc_permit) = {
+        let _guard = Cx::set_current(Some(contexts[0].clone()));
+        (
+            oneshot_tx.reserve_checked(&contexts[0]).unwrap(),
+            mpsc_tx.try_reserve_checked(&contexts[0]).unwrap(),
+        )
+    };
+    {
+        let _guard = Cx::set_current(Some(contexts[1].clone()));
+        contexts[1].trace("committer-before");
+        oneshot_permit.send(11).unwrap();
+        mpsc_permit.try_send(12).unwrap();
+        contexts[1].trace("committer-after");
+    }
+    {
+        let _guard = Cx::set_current(Some(contexts[2].clone()));
+        assert_eq!(oneshot_rx.try_recv(), Ok(11));
+        contexts[2].trace("oneshot-permit-received");
+    }
+    {
+        let _guard = Cx::set_current(Some(contexts[3].clone()));
+        assert_eq!(mpsc_rx.try_recv(), Ok(12));
+        contexts[3].trace("mpsc-permit-received");
+    }
+    let events = lab.trace().snapshot();
+    for received in ["oneshot-permit-received", "mpsc-permit-received"] {
+        let received = message_time(&events, received);
+        assert_eq!(message_time(&events, "committer-before").causal_order(&received), CausalOrder::Before);
+        assert_eq!(message_time(&events, "committer-after").causal_order(&received), CausalOrder::Concurrent);
+    }
+    for task in tasks {
+        lab.scheduler.lock().schedule(task, 0);
+    }
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    assert!(joins.iter_mut().all(|join| join.try_join() == Ok(Some(()))));
+}
+
+#[test]
+fn channel_messages_from_another_runtime_do_not_merge_colliding_task_ids() {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (task, _join) = lab.state.create_task(root, Budget::INFINITE, async {}).unwrap();
+    let receiver = context(&lab, task);
+    let mut foreign_lab = LabRuntime::new_with_task_causality(LabConfig::new(97));
+    let foreign_root = foreign_lab.state.create_root_region(Budget::INFINITE);
+    let (foreign_task, _foreign_join) = foreign_lab.state.create_task(foreign_root, Budget::INFINITE, async {}).unwrap();
+    let sender = context(&foreign_lab, foreign_task);
+    assert_eq!(task, foreign_task);
+    for _ in 0..10 {
+        let _ = sender.logical_tick();
+    }
+    let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel();
+    let (mpsc_tx, mut mpsc_rx) = crate::channel::mpsc::channel(1);
+    {
+        let _guard = Cx::set_current(Some(sender));
+        oneshot_tx.send_blocking(11).unwrap();
+        mpsc_tx.try_send(12).unwrap();
+    }
+    {
+        let _guard = Cx::set_current(Some(receiver.clone()));
+        let before = receiver.logical_now();
+        assert_eq!(oneshot_rx.try_recv(), Ok(11));
+        assert_eq!(mpsc_rx.try_recv(), Ok(12));
+        assert_eq!(receiver.logical_now(), before);
+    }
+    lab.scheduler.lock().schedule(task, 0);
+    foreign_lab.scheduler.lock().schedule(foreign_task, 0);
+    lab.run_until_idle();
+    foreign_lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    assert!(foreign_lab.is_quiescent());
+}
+
+#[test]
+fn host_publications_and_legacy_contexts_do_not_advance_message_clocks() {
+    for task_causal in [false, true] {
+        let mut lab = if task_causal {
+            LabRuntime::new_with_task_causality(LabConfig::new(97))
+        } else {
+            LabRuntime::with_seed(97)
+        };
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, _join) = lab.state.create_task(root, Budget::INFINITE, async {}).unwrap();
+        let cx = context(&lab, task);
+        let before = cx.logical_now();
+        let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel();
+        let (mpsc_tx, mut mpsc_rx) = crate::channel::mpsc::channel(1);
+        {
+            let _guard = Cx::set_current((!task_causal).then(|| cx.clone()));
+            oneshot_tx.send_blocking(11).unwrap();
+            mpsc_tx.try_send(12).unwrap();
+        }
+        {
+            let _guard = Cx::set_current(Some(cx.clone()));
+            assert_eq!(oneshot_rx.try_recv(), Ok(11));
+            assert_eq!(mpsc_rx.try_recv(), Ok(12));
+            assert_eq!(cx.logical_now(), before);
+        }
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        assert!(lab.is_quiescent());
+    }
+}
+
+#[test]
+fn dropping_buffered_receivers_does_not_observe_their_messages() {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (oneshot_tx, oneshot_rx) = crate::channel::oneshot::channel();
+    let (mpsc_tx, mpsc_rx) = crate::channel::mpsc::channel(1);
+    run_channel_task(&mut lab, root, async move {
+        Cx::current().unwrap().trace("before-dropped-values");
+        oneshot_tx.send_blocking(11).unwrap();
+        mpsc_tx.try_send(12).unwrap();
+    });
+    run_channel_task(&mut lab, root, async move {
+        drop(oneshot_rx);
+        drop(mpsc_rx);
+        Cx::current().unwrap().trace("after-receiver-drop");
+    });
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    let events = lab.trace().snapshot();
+    assert_eq!(
+        message_time(&events, "before-dropped-values").causal_order(&message_time(&events, "after-receiver-drop")),
+        CausalOrder::Concurrent
+    );
+}
+
+#[test]
+fn moved_receive_futures_observe_only_the_actual_polling_task() {
+    use crate::remote::NodeId;
+    use crate::trace::distributed::LogicalClockMode;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    fn causal_context(runtime: u64, node: &str) -> Cx {
+        Cx::for_testing()
+            .with_logical_clock(
+                LogicalClockMode::Vector {
+                    node: NodeId::new(node),
+                }
+                .build_handle(None),
+            )
+            .with_task_causality_runtime(Some(runtime))
+    }
+
+    fn poll_once<F: Future>(future: F, current: Option<Cx>) -> Poll<F::Output> {
+        let mut future = pin!(future);
+        let _current = Cx::set_current(current);
+        let mut task = Context::from_waker(Waker::noop());
+        future.as_mut().poll(&mut task)
+    }
+
+    let _host = Cx::set_current(None);
+    for api in 0..3 {
+        for observer_mode in 0..3 {
+            let source = causal_context(97, "source");
+            let constructor = causal_context(97, "constructor");
+            let poller = causal_context(
+                if observer_mode == 2 { 98 } else { 97 },
+                "poller",
+            );
+            let source_before = source.logical_tick();
+            let _ = constructor.logical_tick();
+            let _ = poller.logical_tick();
+            let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel();
+            let (mpsc_tx, mut mpsc_rx) = crate::channel::mpsc::channel(1);
+            {
+                let _current = Cx::set_current(Some(source.clone()));
+                oneshot_tx.send_blocking(11).unwrap();
+                mpsc_tx.try_send(12).unwrap();
+            }
+            let source_after = source.logical_tick();
+            let poller_before = poller.logical_now();
+            let current = (observer_mode != 1).then(|| poller.clone());
+            match api {
+                0 => assert_eq!(
+                    poll_once(oneshot_rx.recv(&constructor), current),
+                    Poll::Ready(Ok(11))
+                ),
+                1 => assert_eq!(
+                    poll_once(mpsc_rx.recv(&constructor), current),
+                    Poll::Ready(Ok(12))
+                ),
+                _ => {
+                    let mut values = Vec::new();
+                    assert_eq!(
+                        poll_once(mpsc_rx.recv_many(&constructor, &mut values, 1), current),
+                        Poll::Ready(Ok(1))
+                    );
+                    assert_eq!(values, vec![12]);
+                }
+            }
+            let constructor_after = constructor.logical_tick();
+            let poller_after = poller.logical_now();
+            if observer_mode == 0 {
+                assert_eq!(source_before.causal_order(&poller_after), CausalOrder::Before);
+                assert_eq!(source_after.causal_order(&poller_after), CausalOrder::Concurrent);
+                assert_eq!(
+                    source_before.causal_order(&constructor_after),
+                    CausalOrder::Concurrent
+                );
+            } else if observer_mode == 1 {
+                // An explicit context is the observer only outside a task.
+                assert_eq!(
+                    source_before.causal_order(&constructor_after),
+                    CausalOrder::Before
+                );
+                assert_eq!(
+                    source_after.causal_order(&constructor_after),
+                    CausalOrder::Concurrent
+                );
+                assert_eq!(poller_after, poller_before);
+            } else {
+                // An active foreign task must not fall back to the constructor.
+                assert_eq!(poller_after, poller_before);
+                assert_eq!(
+                    source_before.causal_order(&constructor_after),
+                    CausalOrder::Concurrent
+                );
+            }
+        }
+    }
 }
