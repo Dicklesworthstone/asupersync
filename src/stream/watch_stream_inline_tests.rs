@@ -362,3 +362,83 @@
 
         crate::test_complete!("watch_stream_accepts_non_send_non_sync_items");
     }
+
+    #[test]
+    fn watch_stream_cancellation_alone_wakes_latest_poller() {
+        init_test("watch_stream_cancellation_alone_wakes_latest_poller");
+        let cx: Cx = Cx::for_testing();
+        let (tx, rx) = watch::channel(0_u8);
+        let mut stream = WatchStream::from_changes(cx.clone(), rx);
+        let (old_count, old_waker) = counting_waker();
+        let (count, waker) = counting_waker();
+        let mut old_task = Context::from_waker(&old_waker);
+        let mut task = Context::from_waker(&waker);
+        assert!(Pin::new(&mut stream).poll_next(&mut old_task).is_pending());
+        assert!(Pin::new(&mut stream).poll_next(&mut task).is_pending());
+        assert_eq!(Arc::strong_count(&old_count), 2);
+        cx.cancel_fast(crate::types::CancelKind::User);
+        assert_eq!(old_count.wake_count.load(Ordering::SeqCst), 0);
+        assert!(count.wake_count.load(Ordering::SeqCst) > 0);
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+        assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
+        assert_eq!(Arc::strong_count(&count), 2);
+        tx.send(7).unwrap();
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+        let rx = stream.into_inner();
+        assert!(rx.has_changed());
+        assert_eq!(*rx.borrow(), 7);
+    }
+
+    #[test]
+    fn watch_stream_rearms_after_value_and_preserves_cancellation_mask() {
+        init_test("watch_stream_rearms_after_value_and_preserves_cancellation_mask");
+        let cx: Cx = Cx::for_testing();
+        let (tx, rx) = watch::channel(0_u8);
+        let mut stream = WatchStream::from_changes(cx.clone(), rx);
+        let (count, waker) = counting_waker();
+        let mut task = Context::from_waker(&waker);
+        assert!(Pin::new(&mut stream).poll_next(&mut task).is_pending());
+        tx.send(3).unwrap();
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(Some(3)));
+        assert_eq!(Arc::strong_count(&count), 2);
+        count.wake_count.store(0, Ordering::SeqCst);
+        assert!(Pin::new(&mut stream).poll_next(&mut task).is_pending());
+        cx.masked(|| {
+            cx.cancel_fast(crate::types::CancelKind::User);
+            assert!(count.wake_count.load(Ordering::SeqCst) > 0);
+            assert!(Pin::new(&mut stream).poll_next(&mut task).is_pending());
+            assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 1);
+        });
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+        assert_eq!(Arc::strong_count(&count), 2);
+    }
+
+    #[test]
+    fn watch_stream_transfer_and_drop_retire_only_owned_registrations() {
+        use std::future::Future as _;
+
+        init_test("watch_stream_transfer_and_drop_retire_only_owned_registrations");
+        for action in 0..3 {
+            let cx: Cx = Cx::for_testing();
+            let (tx, rx) = watch::channel(0_u8);
+            let mut stream = Some(WatchStream::from_changes(cx.clone(), rx));
+            let (count, waker) = counting_waker();
+            let mut task = Context::from_waker(&waker);
+            let mut observer = Box::pin(cx.cancelled());
+            assert!(observer.as_mut().poll(&mut task).is_pending());
+            assert!(Pin::new(stream.as_mut().unwrap()).poll_next(&mut task).is_pending());
+            let mut extracted = None;
+            match action {
+                0 => { let _ = stream.as_mut().unwrap().get_mut(); }
+                1 => { extracted = Some(stream.take().unwrap().into_inner()); }
+                _ => { drop(stream.take()); }
+            }
+            assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
+            cx.cancel_fast(crate::types::CancelKind::User);
+            assert!(count.wake_count.load(Ordering::SeqCst) > 0);
+            assert!(observer.as_mut().poll(&mut task).is_ready());
+            assert_eq!(Arc::strong_count(&count), 2);
+            drop(extracted);
+            drop(stream);
+        }
+    }

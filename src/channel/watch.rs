@@ -706,7 +706,7 @@ pub struct Receiver<T> {
 }
 
 impl<T> Receiver<T> {
-    fn clear_waiter_registration(&self, cancelled: bool) {
+    pub(crate) fn clear_waiter_registration(&self, cancelled: bool) {
         let mut removed_pending_waiter = false;
         let mut retired = SmallVec::<[WatchWaiter; 4]>::new();
         if let Some(waiter) = self.waiter.as_ref() {

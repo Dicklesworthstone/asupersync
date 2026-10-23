@@ -1588,6 +1588,65 @@ pub(crate) enum LifecycleObserverEffect {
     },
 }
 
+/// One-shot observations collected while a native caller owns runtime locks.
+///
+/// Kernel accounting and mailbox receipts are applied immediately. The owning
+/// execution/retirement guard retains this batch until it has published work,
+/// committed completion, and released every state/table guard. Each metrics
+/// provider is retained with the observations captured under that provider.
+#[derive(Default)]
+#[must_use = "dispatch lifecycle observations after releasing runtime locks"]
+pub(crate) struct LifecycleObserverBatch {
+    payloads: Vec<LifecycleObserverPayload>,
+}
+
+struct LifecycleObserverPayload {
+    metrics: Arc<dyn MetricsProvider>,
+    effects: Vec<LifecycleObserverEffect>,
+}
+
+impl LifecycleObserverBatch {
+    fn for_metrics(
+        &mut self,
+        metrics: &Arc<dyn MetricsProvider>,
+    ) -> &mut Vec<LifecycleObserverEffect> {
+        if self
+            .payloads
+            .last()
+            .is_none_or(|payload| !Arc::ptr_eq(&payload.metrics, metrics))
+        {
+            self.payloads.push(LifecycleObserverPayload {
+                metrics: Arc::clone(metrics),
+                effects: Vec::new(),
+            });
+        }
+        &mut self.payloads.last_mut().expect("observer payload").effects
+    }
+
+    /// No runtime or task-table guard may be held here. One failed callback
+    /// cannot suppress later observations or unwind through worker bookkeeping.
+    pub(crate) fn dispatch(mut self) {
+        for LifecycleObserverPayload { metrics, effects } in std::mem::take(&mut self.payloads) {
+            for effect in effects {
+                contain_metrics_hook(|| effect.dispatch(&*metrics));
+            }
+            // A provider destructor is a separate hostile callback boundary.
+            contain_metrics_hook(|| drop(metrics));
+        }
+    }
+}
+
+impl Drop for LifecycleObserverBatch {
+    fn drop(&mut self) {
+        // An abandoned batch may still be beneath an outer runtime lock or
+        // unwinding through incomplete kernel cleanup. Never run a provider
+        // destructor there. Normal delivery takes every payload before Drop.
+        for payload in self.payloads.drain(..) {
+            std::mem::forget(payload);
+        }
+    }
+}
+
 impl LifecycleObserverEffect {
     fn dispatch(self, metrics: &dyn MetricsProvider) {
         // Tracing's no-feature macros erase their fields.
@@ -2978,6 +3037,27 @@ impl RuntimeState {
         }
     }
 
+    /// Native mailbox drain: retain advisory callbacks in the caller's guard.
+    /// The caller must dispatch only after releasing every state/table lock.
+    pub(crate) fn drain_obligation_posts_deferred(
+        &mut self,
+        max: usize,
+        dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+        observers: &mut LifecycleObserverBatch,
+    ) -> usize {
+        let Some(gateway) = self.obligation_gateway.clone() else {
+            return 0;
+        };
+        let effects = observers.for_metrics(&self.metrics);
+        crate::runtime::obligation_mailbox::apply_obligation_posts_with_observers(
+            self,
+            gateway.mailbox(),
+            max,
+            dispatch_tasks,
+            Some(effects),
+        )
+    }
+
     /// Settles a finite backlog before a native worker retires a task holder.
     ///
     /// Capture once: concurrent producers must not extend this completion
@@ -2988,6 +3068,25 @@ impl RuntimeState {
         &mut self,
         dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
     ) -> usize {
+        self.drain_obligation_posts_before_completion_with_observers(dispatch_tasks, None)
+    }
+
+    /// Production completion drain; the execution guard owns observations
+    /// even if a later configured leak-policy panic interrupts the sweep.
+    pub(crate) fn drain_obligation_posts_before_completion_deferred(
+        &mut self,
+        dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+        observers: &mut LifecycleObserverBatch,
+    ) -> usize {
+        let effects = observers.for_metrics(&self.metrics);
+        self.drain_obligation_posts_before_completion_with_observers(dispatch_tasks, Some(effects))
+    }
+
+    fn drain_obligation_posts_before_completion_with_observers(
+        &mut self,
+        dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+        mut observers: Option<&mut Vec<LifecycleObserverEffect>>,
+    ) -> usize {
         let Some(gateway) = self.obligation_gateway.clone() else {
             return 0;
         };
@@ -2995,11 +3094,12 @@ impl RuntimeState {
         let mut remaining = mailbox.len();
         let mut applied = 0;
         while remaining > 0 {
-            let batch = crate::runtime::obligation_mailbox::apply_obligation_posts_with_task_table(
+            let batch = crate::runtime::obligation_mailbox::apply_obligation_posts_with_observers(
                 self,
                 mailbox,
                 remaining.min(64),
                 dispatch_tasks,
+                observers.as_deref_mut(),
             );
             if batch == 0 {
                 break;
@@ -6416,6 +6516,7 @@ impl RuntimeState {
         request: crate::runtime::obligation_mailbox::QueuedObligationPost,
         obligation: Option<ObligationId>,
         dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+        observers: Option<&mut Vec<LifecycleObserverEffect>>,
     ) -> Result<Option<ObligationId>, Error> {
         use crate::runtime::obligation_mailbox::{ObligationOp, QueuedObligationPost};
         let mut deferred = Vec::new();
@@ -6507,7 +6608,7 @@ impl RuntimeState {
                 },
             }
         };
-        self.dispatch_lifecycle_effects(deferred);
+        self.dispatch_lifecycle_effects_with_observers(deferred, observers);
         result
     }
 
@@ -8609,6 +8710,24 @@ impl RuntimeState {
     /// mutated by the waiter-take, so the ordering change is
     /// behaviour-preserving.
     pub fn task_completed(&mut self, task_id: TaskId) -> TaskCompletionEffects {
+        self.task_completed_with_observers(task_id, None)
+    }
+
+    /// Native completion also defers any late mailbox ownership projection.
+    /// Direct state-threaded callers retain the public method's inline policy.
+    pub(crate) fn task_completed_with_obligation_observers(
+        &mut self,
+        task_id: TaskId,
+        observers: &mut LifecycleObserverBatch,
+    ) -> TaskCompletionEffects {
+        self.task_completed_with_observers(task_id, Some(observers))
+    }
+
+    fn task_completed_with_observers(
+        &mut self,
+        task_id: TaskId,
+        obligation_observers: Option<&mut LifecycleObserverBatch>,
+    ) -> TaskCompletionEffects {
         // br-asupersync-ndhjfj: atomic existence-check + waiter-take.
         // If the task was already removed (or never existed), return
         // an empty waiter set with the same early-return semantics
@@ -8627,7 +8746,11 @@ impl RuntimeState {
             .as_ref()
             .is_some_and(|gateway| gateway.mailbox().has_pending_ownership_projection())
         {
-            self.drain_obligation_posts_before_completion(None);
+            if let Some(observers) = obligation_observers {
+                self.drain_obligation_posts_before_completion_deferred(None, observers);
+            } else {
+                self.drain_obligation_posts_before_completion(None);
+            }
         }
 
         let waiter_count = waiters.len();
@@ -12630,3 +12753,7 @@ fn captured_terminal_fast_cancellation_without_reason_is_refused() {
         }
     ));
 }
+
+#[cfg(test)]
+#[path = "state_mailbox_observer_test_support.rs"]
+pub(crate) mod mailbox_observer_test_support;

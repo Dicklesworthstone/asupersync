@@ -12,8 +12,8 @@
 //! the messages still queued stay in the receiver, which
 //! [`ReceiverStream::into_inner`] returns.
 
-use crate::channel::mpsc;
 use crate::channel::mpsc::RecvError;
+use crate::channel::{OwnedCancelRegistration, mpsc};
 use crate::cx::Cx;
 use crate::stream::Stream;
 use std::pin::Pin;
@@ -23,7 +23,7 @@ use std::task::{Context, Poll};
 #[derive(Debug)]
 pub struct ReceiverStream<T> {
     inner: mpsc::Receiver<T>,
-    cx: Cx,
+    cx: OwnedCancelRegistration,
     terminated: bool,
 }
 
@@ -35,7 +35,7 @@ impl<T> ReceiverStream<T> {
         cx.trace("stream::ReceiverStream created");
         Self {
             inner,
-            cx,
+            cx: OwnedCancelRegistration::new(cx),
             terminated: false,
         }
     }
@@ -50,6 +50,8 @@ impl<T> ReceiverStream<T> {
     /// Returns a mutable reference to the inner receiver.
     #[inline]
     pub fn get_mut(&mut self) -> &mut mpsc::Receiver<T> {
+        self.inner.clear_recv_waker();
+        self.cx.clear();
         &mut self.inner
     }
 
@@ -57,7 +59,7 @@ impl<T> ReceiverStream<T> {
     #[inline]
     #[must_use]
     pub fn cx(&self) -> &Cx {
-        &self.cx
+        self.cx.cx()
     }
 
     /// Unwraps the stream into the inner receiver.
@@ -65,6 +67,7 @@ impl<T> ReceiverStream<T> {
     #[must_use]
     pub fn into_inner(mut self) -> mpsc::Receiver<T> {
         self.inner.clear_recv_waker();
+        self.cx.clear();
         self.inner
     }
 }
@@ -78,13 +81,22 @@ impl<T> Stream for ReceiverStream<T> {
             return Poll::Ready(None);
         }
 
-        match this.inner.poll_recv(&this.cx, poll_cx) {
+        let mut result = this.inner.poll_recv(this.cx.cx(), poll_cx);
+        if matches!(&result, Poll::Pending | Poll::Ready(Err(RecvError::Empty))) {
+            this.cx.refresh(poll_cx.waker());
+            if this.cx.cx().is_cancel_requested() {
+                result = this.inner.poll_recv(this.cx.cx(), poll_cx);
+            }
+        }
+        match result {
             Poll::Ready(Ok(item)) => {
-                this.cx.trace("stream::ReceiverStream yielded item");
+                this.cx.clear();
+                this.cx.cx().trace("stream::ReceiverStream yielded item");
                 Poll::Ready(Some(item))
             }
             Poll::Ready(Err(RecvError::Disconnected | RecvError::Cancelled)) => {
                 this.terminated = true;
+                this.cx.clear();
                 Poll::Ready(None)
             }
             Poll::Ready(Err(RecvError::Empty)) | Poll::Pending => Poll::Pending,

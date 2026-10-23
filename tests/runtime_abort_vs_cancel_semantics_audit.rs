@@ -3064,3 +3064,6 @@ fn watch_and_broadcast_cancel_without_producer_on_native_sharded_workers() {
     watch_independent_cancellation_on_native(true);
     broadcast_independent_cancellation_on_native(true);
 }
+
+#[path = "runtime_abort_vs_cancel_semantics_audit/stream_cancellation.rs"]
+mod stream_cancellation;

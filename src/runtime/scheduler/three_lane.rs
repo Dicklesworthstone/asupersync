@@ -5268,6 +5268,7 @@ enum PolledCompletion {
 /// dispatch. Everything here is callback-free to move; dispatch order is
 /// fixed by [`Self::dispatch_post_lock`].
 struct PolledCompletionArtifacts {
+    obligation_observers: crate::runtime::state::LifecycleObserverBatch,
     completion_observer: crate::runtime::state::TaskCompletionObserver,
     cancel_wakes: crate::types::task_context::CancelWakeEffects,
     detached_record: Option<crate::record::task::TaskRecord>,
@@ -5292,6 +5293,7 @@ impl PolledCompletionArtifacts {
         ThreeLaneWorker::open_retirement_barrier(self.retirement_cx_inner.as_ref());
         ThreeLaneWorker::retire_detached_task_record(self.detached_record);
         worker.finish_ready_finalizer_publication(self.finalizer_publication);
+        self.obligation_observers.dispatch();
         self.completion_observer.dispatch();
         self.cancel_wakes.dispatch();
     }
@@ -5301,6 +5303,7 @@ impl PolledCompletionArtifacts {
 /// dispatch. The completion metric and trace are suppressed; the retirements
 /// deliver its lifecycle and monitor/link effects after the lock (909482).
 struct UnwindCompletionArtifacts {
+    obligation_observers: crate::runtime::state::LifecycleObserverBatch,
     cancel_waker_retirements: crate::runtime::state::TaskCompletionRetirements,
     detached_record: Option<crate::record::task::TaskRecord>,
     /// The panicked task's `CxInner`, captured under the runtime lock so its
@@ -5316,6 +5319,7 @@ impl UnwindCompletionArtifacts {
     /// record destruction.
     fn dispatch_post_lock(self, worker: &ThreeLaneWorker) {
         worker.finish_ready_finalizer_publication(self.finalizer_publication);
+        self.obligation_observers.dispatch();
         self.cancel_waker_retirements.retire();
         // Release any consumer parked on this panicked task's retirement
         // barrier before retiring the record (br-asupersync-yhueis).
@@ -7095,23 +7099,33 @@ impl ThreeLaneWorker {
             .as_ref()
             .is_none_or(|mailbox| !mailbox.is_empty());
         if obligation_posts_may_be_pending {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.has_pending_obligation_posts() {
-                let _ = state.drain_obligation_posts_with_task_table(
-                    OBLIGATION_POST_BATCH,
-                    self.task_table.as_ref(),
-                );
-            }
-            drop(state);
+            let mut observers = crate::runtime::state::LifecycleObserverBatch::default();
+            // A configured leak-policy panic still propagates. Retain earlier
+            // successfully applied posts' observations until the state guard
+            // has unwound, then deliver them before resuming that panic.
+            let drained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.has_pending_obligation_posts() {
+                    let _ = state.drain_obligation_posts_deferred(
+                        OBLIGATION_POST_BATCH,
+                        self.task_table.as_ref(),
+                        &mut observers,
+                    );
+                }
+            }));
             // Posts made on a worker wake nobody (see
             // `ThreeLaneScheduler::obligation_posted_notifier`). When one burst
             // outgrows this batch, wake a worker for the rest, so a pump step
             // that reports idle does not leave them behind.
             if self.obligation_posts_queued() {
                 self.coordinator.wake_one();
+            }
+            observers.dispatch();
+            if let Err(payload) = drained {
+                std::panic::resume_unwind(payload);
             }
         }
 
@@ -8989,6 +9003,7 @@ impl ThreeLaneWorker {
             task_id: TaskId,
             completed: bool,
             stored: Option<AnyStoredTask>,
+            obligation_observers: crate::runtime::state::LifecycleObserverBatch,
         }
 
         impl Drop for TaskExecutionGuard<'_> {
@@ -9003,8 +9018,11 @@ impl ThreeLaneWorker {
                         // completion backing (E1.1 row T16). Observer
                         // suppression and the ack-free panic transition live
                         // inside the seam.
-                        let artifacts =
-                            self.worker.complete_task_after_unwind_ordered(self.task_id);
+                        let artifacts = self.worker.complete_task_after_unwind_ordered(
+                            self.task_id,
+                            &mut self.obligation_observers,
+                        );
+                        self.completed = true;
                         artifacts.dispatch_post_lock(self.worker);
                     }));
                     if let Err(payload) = cleanup {
@@ -9247,6 +9265,7 @@ impl ThreeLaneWorker {
             task_id,
             completed: false,
             stored: Some(stored),
+            obligation_observers: crate::runtime::state::LifecycleObserverBatch::default(),
         };
         // Tasks this one wakes, while it is polled and while its completion
         // is published, go to this worker's LIFO slot. Declared after `guard`
@@ -9303,8 +9322,11 @@ impl ThreeLaneWorker {
                 }
                 // E1.2 subsystem 3b: route through the single ordered
                 // completion backing (E1.1 rows T17/T18).
-                let artifacts = self
-                    .complete_polled_task_ordered(task_id, PolledCompletion::Ready(task_outcome));
+                let artifacts = self.complete_polled_task_ordered(
+                    task_id,
+                    PolledCompletion::Ready(task_outcome),
+                    &mut guard.obligation_observers,
+                );
                 guard.completed = true;
                 wake_state.clear();
                 artifacts.dispatch_post_lock(self);
@@ -9468,6 +9490,7 @@ impl ThreeLaneWorker {
                 let artifacts = self.complete_polled_task_ordered(
                     task_id,
                     PolledCompletion::Panicked(panic_outcome),
+                    &mut guard.obligation_observers,
                 );
                 guard.completed = true;
                 wake_state.clear();
@@ -9565,6 +9588,7 @@ impl ThreeLaneWorker {
         &self,
         task_id: TaskId,
         completion: PolledCompletion,
+        obligation_observers: &mut crate::runtime::state::LifecycleObserverBatch,
     ) -> PolledCompletionArtifacts {
         // Sample an injected clock before any task/state lock is acquired.
         let capture_time = self.schedule_capture.get().map(|_| self.capture_now());
@@ -9613,6 +9637,8 @@ impl ThreeLaneWorker {
                         let finalizer_publication = worker.publish_ready_finalizers(finalizers);
                         drop(state);
                         UnwindCompletionArtifacts {
+                            obligation_observers:
+                                crate::runtime::state::LifecycleObserverBatch::default(),
                             cancel_waker_retirements,
                             detached_record: Some(record),
                             retirement_cx_inner,
@@ -9638,7 +9664,7 @@ impl ThreeLaneWorker {
             // posts are admitted. Release B before the existing detach phase
             // takes A; the drainer acquires A/C in the ordinary minting order
             // itself.
-            self.drain_completion_obligation_posts(task_id);
+            self.drain_completion_obligation_posts(task_id, obligation_observers);
             // The sharded table owns the authoritative record. Reconcile the
             // checkpoint receipt and terminal outcome there, then detach the
             // record before taking RuntimeState. This avoids both the
@@ -9686,7 +9712,9 @@ impl ThreeLaneWorker {
                     record,
                     &mut detached.protocol_retired,
                 ),
-                None => state.task_completed(task_id),
+                None => {
+                    state.task_completed_with_obligation_observers(task_id, obligation_observers)
+                }
             };
             detached.committed = true;
             let (waiters, completion_observer) = completion_effects.into_parts();
@@ -9700,6 +9728,7 @@ impl ThreeLaneWorker {
                 .as_ref()
                 .and_then(|record| record.cx_inner.clone());
             PolledCompletionArtifacts {
+                obligation_observers: std::mem::take(obligation_observers),
                 completion_observer,
                 cancel_wakes,
                 detached_record,
@@ -9718,7 +9747,8 @@ impl ThreeLaneWorker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.revoke_obligation_admission_before_completion(task_id, None);
-            let _ = state.drain_obligation_posts_before_completion(None);
+            let _ =
+                state.drain_obligation_posts_before_completion_deferred(None, obligation_observers);
             let (cancel_ack, cancel_wakes) =
                 Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
             if let (Some(receipt), Some(now)) = (cancel_ack.as_ref(), capture_time) {
@@ -9735,12 +9765,15 @@ impl ThreeLaneWorker {
             let retirement_cx_inner = state
                 .task(task_id)
                 .and_then(|record| record.cx_inner.clone());
-            let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
+            let (waiters, completion_observer) = state
+                .task_completed_with_obligation_observers(task_id, obligation_observers)
+                .into_parts();
             let finalizers = self.drain_ready_finalizers_locked(&mut state);
             self.wake_dependents_locked(&state, waiters);
             let finalizer_publication = self.publish_ready_finalizers(finalizers);
             drop(state);
             PolledCompletionArtifacts {
+                obligation_observers: std::mem::take(obligation_observers),
                 completion_observer,
                 cancel_wakes,
                 detached_record: None,
@@ -9758,8 +9791,12 @@ impl ThreeLaneWorker {
     /// cancellation reconciliation) and observers are structurally suppressed
     /// (`into_waiters_and_retirements_without_observers`) because this path
     /// runs during a worker unwind.
-    fn complete_task_after_unwind_ordered(&self, task_id: TaskId) -> UnwindCompletionArtifacts {
-        self.drain_completion_obligation_posts(task_id);
+    fn complete_task_after_unwind_ordered(
+        &self,
+        task_id: TaskId,
+        obligation_observers: &mut crate::runtime::state::LifecycleObserverBatch,
+    ) -> UnwindCompletionArtifacts {
+        self.drain_completion_obligation_posts(task_id, obligation_observers);
         let panic_outcome = crate::types::Outcome::Panicked(
             crate::types::outcome::PanicPayload::new("task panicked during scheduler bookkeeping"),
         );
@@ -9805,7 +9842,7 @@ impl ThreeLaneWorker {
             .or_else(|| state.task(task_id).and_then(|record| record.cx_inner.clone()));
         let completion = match detached_record.as_mut() {
             Some(record) => state.task_completed_from_external_record(record),
-            None => state.task_completed(task_id),
+            None => state.task_completed_with_obligation_observers(task_id, obligation_observers),
         };
         let (waiters, cancel_waker_retirements) =
             completion.into_waiters_and_retirements_without_observers();
@@ -9814,6 +9851,7 @@ impl ThreeLaneWorker {
         let finalizer_publication = self.publish_ready_finalizers(finalizers);
         drop(state);
         UnwindCompletionArtifacts {
+            obligation_observers: std::mem::take(obligation_observers),
             cancel_waker_retirements,
             detached_record,
             retirement_cx_inner,
@@ -9829,13 +9867,20 @@ impl ThreeLaneWorker {
             .is_some_and(|mailbox| !mailbox.is_empty())
     }
 
-    fn drain_completion_obligation_posts(&self, task_id: TaskId) {
+    fn drain_completion_obligation_posts(
+        &self,
+        task_id: TaskId,
+        obligation_observers: &mut crate::runtime::state::LifecycleObserverBatch,
+    ) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.revoke_obligation_admission_before_completion(task_id, self.task_table.as_ref());
-        let _ = state.drain_obligation_posts_before_completion(self.task_table.as_ref());
+        let _ = state.drain_obligation_posts_before_completion_deferred(
+            self.task_table.as_ref(),
+            obligation_observers,
+        );
     }
 
     fn publish_ready_finalizers(
@@ -10415,3 +10460,7 @@ mod obligation_post_wake_tests;
 #[cfg(test)]
 #[path = "three_lane_global_ready_batch_tests_inline_tests.rs"]
 mod global_ready_batch_tests;
+
+#[cfg(test)]
+#[path = "three_lane_mailbox_observer_tests.rs"]
+mod mailbox_observer_tests;

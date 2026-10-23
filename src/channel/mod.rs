@@ -104,6 +104,7 @@ pub mod watch;
 
 #[path = "mpsc_cancel_registration.rs"]
 mod cancel_registration;
+pub(crate) use cancel_registration::OwnedCancelRegistration;
 
 /// Evidence carried by one committed message in the opt-in task-causal lab.
 ///
