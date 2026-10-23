@@ -46,6 +46,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+use super::cancel_registration::CancelRegistration;
 use crate::cx::Cx;
 use crate::util::{Arena, ArenaIndex};
 
@@ -705,6 +706,34 @@ pub struct Receiver<T> {
 }
 
 impl<T> Receiver<T> {
+    fn clear_waiter_registration(&self, cancelled: bool) {
+        let mut removed_pending_waiter = false;
+        let mut retired = SmallVec::<[WatchWaiter; 4]>::new();
+        if let Some(waiter) = self.waiter.as_ref() {
+            // A ready post-register path can clear the flag while its entry
+            // remains linked. Remove that entry before returning or dropping.
+            if waiter.load(Ordering::Acquire) || Arc::strong_count(waiter) > 1 {
+                waiter.store(false, Ordering::Release);
+                let mut waiters = self.inner.waiters.lock();
+                let mut index = 0;
+                while index < waiters.len() {
+                    let remove = Arc::ptr_eq(&waiters[index].queued, waiter);
+                    removed_pending_waiter |= remove;
+                    if remove || Arc::strong_count(&waiters[index].queued) <= 1 {
+                        retired.push(waiters.remove(index));
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+        }
+        if cancelled && removed_pending_waiter {
+            // Account before arbitrary Waker destructors can unwind.
+            self.inner.record_cancellation();
+        }
+        drop(retired);
+    }
+
     /// Waits until a new value is available.
     ///
     /// Returns a future that resolves when the channel's version differs from
@@ -724,6 +753,7 @@ impl<T> Receiver<T> {
         ChangedFuture {
             receiver: self,
             cx,
+            cancel: CancelRegistration::new(cx),
             completed: false,
         }
     }
@@ -1005,6 +1035,7 @@ impl<T> Receiver<T> {
 pub struct ChangedFuture<'a, 'b, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
     cx: &'b Cx<Caps>,
+    cancel: CancelRegistration<'b, Caps>,
     completed: bool,
 }
 
@@ -1018,44 +1049,32 @@ impl<T, Caps> Future for ChangedFuture<'_, '_, T, Caps> {
             return Poll::Ready(Err(RecvError::PolledAfterCompletion));
         }
 
-        match this.receiver.poll_changed(this.cx, context) {
-            Poll::Ready(result) => {
-                this.completed = true;
-                Poll::Ready(result)
-            }
-            Poll::Pending => Poll::Pending,
+        let result = this.receiver.poll_changed(this.cx, context);
+        if result.is_ready() {
+            this.completed = true;
+            this.receiver.clear_waiter_registration(false);
+            this.cancel.clear();
+            return result;
+        }
+        this.cancel.refresh(context.waker());
+        // Cancellation may arrive while the data or cancellation Waker is
+        // registered or retired. It must not require a later producer event.
+        if this.cx.is_cancel_requested() && this.cx.checkpoint().is_err() {
+            this.completed = true;
+            this.receiver.inner.record_cancellation();
+            this.cx.trace("watch::changed cancelled");
+            this.receiver.clear_waiter_registration(false);
+            this.cancel.clear();
+            Poll::Ready(Err(RecvError::Cancelled))
+        } else {
+            Poll::Pending
         }
     }
 }
 
 impl<T, Caps> Drop for ChangedFuture<'_, '_, T, Caps> {
     fn drop(&mut self) {
-        let mut removed_pending_waiter = false;
-        let mut retired = SmallVec::<[WatchWaiter; 4]>::new();
-        if let Some(waiter) = self.receiver.waiter.as_ref() {
-            // The post-register fast paths can clear the queued flag before Drop runs
-            // while the waiter entry is still linked from the shared waiter list.
-            if waiter.load(Ordering::Acquire) || Arc::strong_count(waiter) > 1 {
-                waiter.store(false, Ordering::Release);
-                let mut waiters = self.receiver.inner.waiters.lock();
-                let mut index = 0;
-                while index < waiters.len() {
-                    let remove = Arc::ptr_eq(&waiters[index].queued, waiter);
-                    removed_pending_waiter |= remove;
-                    if remove || Arc::strong_count(&waiters[index].queued) <= 1 {
-                        retired.push(waiters.remove(index));
-                    } else {
-                        index += 1;
-                    }
-                }
-            }
-        }
-        if !self.completed && removed_pending_waiter {
-            // Commit cancellation accounting before running arbitrary Waker
-            // destructors so a hostile Drop cannot suppress the state change.
-            self.receiver.inner.record_cancellation();
-        }
-        drop(retired);
+        self.receiver.clear_waiter_registration(!self.completed);
     }
 }
 

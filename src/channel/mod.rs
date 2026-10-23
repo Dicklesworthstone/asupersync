@@ -102,6 +102,9 @@ pub mod partition;
 pub mod session;
 pub mod watch;
 
+#[path = "mpsc_cancel_registration.rs"]
+mod cancel_registration;
+
 /// Evidence carried by one committed message in the opt-in task-causal lab.
 ///
 /// The active task is sampled at commit, rather than when a permit is reserved:

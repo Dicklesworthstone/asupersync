@@ -2930,3 +2930,137 @@ fn checked_other_primitives_refuse_cancel_and_reuse_on_native_sharded_workers() 
         }
     }
 }
+
+// The operation context is deliberately independent of the runtime task's
+// primary Cx. Its cancellation must wake a parked operation by itself.
+fn watch_independent_cancellation_on_native(sharded: bool) {
+    use asupersync::channel::watch;
+    use std::future::Future;
+
+    let runtime = checked_native_runtime(sharded, 4);
+    let completed_without_producer = runtime.block_on(runtime.handle().spawn(async move {
+        let cx: Cx = Cx::current().expect("native parent context");
+        let operation_cx = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
+        let cancel_cx = operation_cx.clone();
+        let (sender, mut receiver) = watch::channel(0_u8);
+        let (release, mut released) = oneshot::channel::<()>();
+        let parked = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let child_parked = Arc::clone(&parked);
+        let child_completed = Arc::clone(&completed);
+        let mut child = cx
+            .spawn(move |child_cx| async move {
+                let mut changed = Box::pin(receiver.changed(&operation_cx));
+                let result = std::future::poll_fn(|task| {
+                    let result = changed.as_mut().poll(task);
+                    if result.is_pending() {
+                        child_parked.store(true, Ordering::Release);
+                    }
+                    result
+                })
+                .await;
+                assert_eq!(result, Err(watch::RecvError::Cancelled));
+                assert!(!child_cx.is_cancel_requested());
+                child_completed.store(true, Ordering::Release);
+                // Keep the completed future alive until the parent verifies
+                // that the receive registration retired.
+                assert_eq!(released.recv(&child_cx).await, Ok(()));
+                drop(changed);
+            })
+            .expect("spawn native watch waiter");
+
+        assert!(drive_until_flag(&parked, Duration::from_secs(2)).await);
+        assert_eq!(sender.telemetry_snapshot(1).recv_waiter_count, 1);
+        std::thread::spawn(move || cancel_cx.cancel_fast(CancelKind::User))
+            .join()
+            .expect("independent cancellation thread");
+        let completed_without_producer = drive_until_flag(&completed, Duration::from_secs(2)).await;
+        if !completed_without_producer {
+            sender.send(1).expect("failure-only wake for cleanup");
+            assert!(drive_until_flag(&completed, Duration::from_secs(2)).await);
+        }
+        assert_eq!(sender.telemetry_snapshot(1).recv_waiter_count, 0);
+        assert!(!cx.is_cancel_requested());
+        release.send_blocking(()).expect("release retained future");
+        assert_eq!(child.join(&cx).await, Ok(()));
+        completed_without_producer
+    }));
+    assert_checked_native_cleanup(&runtime);
+    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    assert!(
+        completed_without_producer,
+        "watch::changed stayed parked after its independent Cx was cancelled; sharded={sharded}"
+    );
+}
+
+fn broadcast_independent_cancellation_on_native(sharded: bool) {
+    use asupersync::channel::broadcast;
+    use std::future::Future;
+
+    let runtime = checked_native_runtime(sharded, 4);
+    let completed_without_producer = runtime.block_on(runtime.handle().spawn(async move {
+        let cx: Cx = Cx::current().expect("native parent context");
+        let operation_cx = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
+        let cancel_cx = operation_cx.clone();
+        let (sender, mut receiver) = broadcast::channel::<u8>(2);
+        let (release, mut released) = oneshot::channel::<()>();
+        let parked = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let child_parked = Arc::clone(&parked);
+        let child_completed = Arc::clone(&completed);
+        let mut child = cx
+            .spawn(move |child_cx| async move {
+                let mut recv = Box::pin(receiver.recv(&operation_cx));
+                let result = std::future::poll_fn(|task| {
+                    let result = recv.as_mut().poll(task);
+                    if result.is_pending() {
+                        child_parked.store(true, Ordering::Release);
+                    }
+                    result
+                })
+                .await;
+                assert_eq!(result, Err(broadcast::RecvError::Cancelled));
+                assert!(!child_cx.is_cancel_requested());
+                child_completed.store(true, Ordering::Release);
+                // Retain the completed receive until its data registration
+                // has been checked, instead of relying on future Drop.
+                assert_eq!(released.recv(&child_cx).await, Ok(()));
+                drop(recv);
+            })
+            .expect("spawn native broadcast waiter");
+
+        assert!(drive_until_flag(&parked, Duration::from_secs(2)).await);
+        assert_eq!(sender.telemetry_snapshot(1).recv_waiter_count, 1);
+        std::thread::spawn(move || cancel_cx.cancel_fast(CancelKind::User))
+            .join()
+            .expect("independent cancellation thread");
+        let completed_without_producer = drive_until_flag(&completed, Duration::from_secs(2)).await;
+        if !completed_without_producer {
+            sender.send(&cx, 1).expect("failure-only wake for cleanup");
+            assert!(drive_until_flag(&completed, Duration::from_secs(2)).await);
+        }
+        assert_eq!(sender.telemetry_snapshot(1).recv_waiter_count, 0);
+        assert!(!cx.is_cancel_requested());
+        release.send_blocking(()).expect("release retained future");
+        assert_eq!(child.join(&cx).await, Ok(()));
+        completed_without_producer
+    }));
+    assert_checked_native_cleanup(&runtime);
+    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    assert!(
+        completed_without_producer,
+        "broadcast::recv stayed parked after its independent Cx was cancelled; sharded={sharded}"
+    );
+}
+
+#[test]
+fn watch_and_broadcast_cancel_without_producer_on_native_current_thread() {
+    watch_independent_cancellation_on_native(false);
+    broadcast_independent_cancellation_on_native(false);
+}
+
+#[test]
+fn watch_and_broadcast_cancel_without_producer_on_native_sharded_workers() {
+    watch_independent_cancellation_on_native(true);
+    broadcast_independent_cancellation_on_native(true);
+}

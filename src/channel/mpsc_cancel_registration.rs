@@ -1,4 +1,4 @@
-//! Owned auxiliary cancellation wakeups for MPSC waiters.
+//! Owned auxiliary cancellation wakeups for channel waiters.
 //!
 //! Channel capacity/data registrations cannot wake a waiter when cancellation
 //! is the only event. Keep this registration separate from both those queues
