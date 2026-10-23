@@ -621,6 +621,111 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Gets the value with a fallible initializer, stopping the wait when
+    /// `cx` is cancelled.
+    ///
+    /// This combines the retry semantics of [`get_or_try_init`](Self::get_or_try_init)
+    /// with the cancellation-aware waiting of [`get_or_init_cx`](Self::get_or_init_cx).
+    /// The outer result reports cancellation; the inner result preserves the
+    /// initializer's error type without requiring a conversion from
+    /// [`OnceCellError`]:
+    ///
+    /// - `Ok(Ok(value))`: the cell is initialized.
+    /// - `Ok(Err(error))`: this caller's initializer failed; the cell remains
+    ///   uninitialized and another caller may retry.
+    /// - `Err(OnceCellError::Cancelled)`: cancellation was observed before this
+    ///   caller started initializing or while it waited for another initializer.
+    ///
+    /// A value already available on entry is returned even when `cx` is
+    /// cancelled. An error from another caller's initializer is not shared:
+    /// this caller retries and may run its own `f` instead.
+    ///
+    /// # Cancel Safety
+    ///
+    /// Cancelling a waiting caller removes only its own waiter; it does not
+    /// cancel the initializer owned by another caller. Once this caller starts
+    /// `f`, the initializer itself must observe `cx`, just as with
+    /// [`get_or_init_cx`](Self::get_or_init_cx). This method does not interrupt
+    /// an initializer or discard its returned value/error after cancellation.
+    /// Dropping or unwinding the initialization future resets the cell and
+    /// wakes other callers so they can retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an outer `Err(OnceCellError::Cancelled)` if cancellation is
+    /// observed before initialization starts or while waiting. Returns
+    /// `Ok(Err(error))` when this caller's initializer returns an error.
+    #[inline]
+    #[allow(clippy::future_not_send)]
+    pub async fn get_or_try_init_cx<Caps, F, Fut, E>(
+        &self,
+        cx: &crate::cx::Cx<Caps>,
+        f: F,
+    ) -> Result<Result<&T, E>, OnceCellError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        if self.is_initialized() {
+            return Ok(Ok(self.value.get().expect("value should be set")));
+        }
+
+        let mut init_fn = Some(f);
+        loop {
+            if cx.checkpoint().is_err() {
+                return Err(OnceCellError::Cancelled);
+            }
+            match self.state.compare_exchange_weak(
+                UNINIT,
+                INITIALIZING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let mut guard = InitGuard {
+                        cell: self,
+                        completed: false,
+                    };
+                    let f = init_fn.take().expect("init closure available");
+                    match f().await {
+                        Ok(value) => {
+                            let _ = self.value.set(value);
+                            guard.completed = true;
+                            drop(guard);
+                            self.transition_out_of_initializing(INITIALIZED);
+                            return Ok(Ok(self.value.get().expect("just initialized")));
+                        }
+                        Err(error) => {
+                            drop(guard);
+                            return Ok(Err(error));
+                        }
+                    }
+                }
+                Err(INITIALIZED) => {
+                    return Ok(Ok(self.value.get().expect("already initialized")));
+                }
+                Err(INITIALIZING) => {
+                    CancelAwareWaitInit {
+                        cell: self,
+                        cx,
+                        waiter_id: None,
+                        cancel_waker: None,
+                        settle_when_uninit: true,
+                    }
+                    .await?;
+                    if self.is_initialized() {
+                        return Ok(Ok(self
+                            .value
+                            .get()
+                            .expect("should be initialized after wait")));
+                    }
+                }
+                Err(UNINIT) => {} // Spurious failure, try again
+                Err(_) => unreachable!("invalid state"),
+            }
+        }
+    }
+
     /// Takes the value out of the cell, leaving it uninitialized.
     ///
     /// Returns `None` if the cell is not initialized.
