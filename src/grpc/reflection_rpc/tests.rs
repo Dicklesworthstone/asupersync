@@ -486,3 +486,306 @@ fn descriptor_lookups_need_describe_service_not_only_list_services() {
         "{seen:?}"
     );
 }
+
+
+// Exercise the registration adapter, including its ownership of the request
+// envelope, with the same deliberately pinned source used by stream tests.
+fn dispatch_request(
+    service: &ReflectionRpcService,
+    cx: &Cx,
+    path: &'static str,
+    request: Request<Source>,
+) -> Result<RegisteredServerStream, Status> {
+    let mut call = registered_call(service, cx, path, request, path);
+    match call.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("reflection admission unexpectedly parked"),
+    }
+}
+
+fn identified_request(input: Source, principal: Option<&str>) -> Request<Source> {
+    let mut request = Request::new(input);
+    assert!(request.metadata_mut().insert("x-request-id", "request-42"));
+    if let Some(principal) = principal {
+        request.extensions_mut().insert_typed(
+            crate::grpc::interceptor::AuthContext::with_principal(principal),
+        );
+    }
+    request
+}
+
+/// asupersync-m5xrg1 M2: callers sharing one server Cx need not share authority.
+#[test]
+fn request_authorization_preserves_metadata_and_identity_for_both_versions() {
+    use crate::grpc::interceptor::AuthContext;
+    use crate::grpc::streaming::MetadataValue;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let service = rpc(registry().allow_anonymous(), ReflectionRpcConfig::default())
+        .with_request_authorization(move |cx, action, metadata, extensions| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            assert!(cx.has_remote());
+            assert!(Cx::current().unwrap().has_remote());
+            assert!(matches!(action, ReflectionRpcAction::OpenStream | ReflectionRpcAction::ListServices));
+            assert_eq!(metadata.get("x-request-id"), Some(&MetadataValue::Ascii("request-42".to_string())));
+            let auth = extensions.get_typed::<AuthContext>()
+                .ok_or_else(|| Status::unauthenticated("authenticated principal required"))?;
+            if auth.principal == "schema-reader" {
+                Ok(())
+            } else {
+                Err(Status::permission_denied("principal cannot inspect schemas"))
+            }
+        });
+    let alpha = service.v1alpha();
+    let cx = remote();
+    let _parent = Cx::set_current(Some(Cx::for_testing()));
+    for (view, path) in [(&service, V1_PATH), (&alpha.rpc, ALPHA_PATH)] {
+        for principal in [None, Some("guest"), Some("schema-reader")] {
+            let (input, witness) = source(vec![Ok(Bytes::from_static(LIST))], true);
+            let result = dispatch_request(view, &cx, path, identified_request(input, principal));
+            if principal == Some("schema-reader") {
+                let (mut output, metadata) = result.unwrap().into_parts();
+                assert!(metadata.is_empty(), "identity metadata must not be reflected");
+                let mut task = Context::from_waker(Waker::noop());
+                let Poll::Ready(Some(Ok(bytes))) = output.as_mut().poll_next(&mut task) else {
+                    panic!("authorized caller should receive a service list");
+                };
+                assert!(matches!(decode(bytes).reply, Some(Reply::Services(_))));
+                assert!(matches!(output.as_mut().poll_next(&mut task), Poll::Ready(None)));
+            } else {
+                let expected = if principal.is_none() { Code::Unauthenticated } else { Code::PermissionDenied };
+                assert_eq!(result.unwrap_err().code(), expected);
+                assert_eq!(witness.polls.load(Ordering::SeqCst), 0);
+            }
+            assert_eq!(service.active_streams(), 0);
+            assert_eq!(witness.drops.load(Ordering::SeqCst), 1);
+            assert!(witness.restricted_drop.load(Ordering::SeqCst));
+            assert!(!Cx::current().unwrap().has_remote(), "caller context must be restored");
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 8, "admission and each query are checked");
+}
+
+#[test]
+fn request_policy_authorizes_each_lookup_key_before_schema_access() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = Arc::clone(&seen);
+    let service = rpc(registry().allow_anonymous(), ReflectionRpcConfig::default())
+        .with_request_authorization(move |_, action, _, _| {
+            let key = match action {
+                ReflectionRpcAction::OpenStream | ReflectionRpcAction::ListServices => return Ok(()),
+                ReflectionRpcAction::FileByName(name) => {
+                    observed.lock().unwrap().push(format!("file:{name}"));
+                    if name == "echo.proto" { return Ok(()); }
+                    return Err(Status::permission_denied("schema withheld"));
+                }
+                ReflectionRpcAction::FileContainingSymbol(symbol) => format!("symbol:{symbol}"),
+                ReflectionRpcAction::FileContainingExtension { containing_type, number } =>
+                    format!("extension:{containing_type}:{number}"),
+                ReflectionRpcAction::AllExtensionNumbers(name) => format!("numbers:{name}"),
+            };
+            observed.lock().unwrap().push(key);
+            Err(Status::permission_denied("schema withheld"))
+        });
+    let queries = [
+        Query::ListServices(String::new()),
+        Query::FileByName("echo.proto".to_string()),
+        Query::FileByName("private.proto".to_string()),
+        Query::FileContainingSymbol("demo.Echo.Ping".to_string()),
+        Query::FileContainingExtension(wire::ExtensionRequest { containing_type: "demo.Record".to_string(), number: 100 }),
+        Query::AllExtensionNumbers("demo.Record".to_string()),
+        Query::ListServices(String::new()),
+    ];
+    let requests = queries.iter().cloned().map(|query| {
+        Ok(Bytes::from(WireRequest { host: String::new(), query: Some(query) }.encode_to_vec()))
+    }).collect();
+    let (input, witness) = source(requests, true);
+    let cx = remote();
+    let (mut output, _) = dispatch_request(&service, &cx, V1_PATH, Request::new(input)).unwrap().into_parts();
+    let mut task = Context::from_waker(Waker::noop());
+    for (index, query) in queries.into_iter().enumerate() {
+        let Poll::Ready(Some(Ok(bytes))) = output.as_mut().poll_next(&mut task) else {
+            panic!("each query should receive an in-band answer");
+        };
+        let response = decode(bytes);
+        assert_eq!(response.original_request.unwrap().query, Some(query));
+        match (index, response.reply) {
+            (0 | 6, Some(Reply::Services(_))) => {}
+            (1, Some(Reply::Files(files))) => assert_eq!(files.files.len(), 2),
+            (2..=5, Some(Reply::Error(error))) => {
+                assert_eq!(error.code, Code::PermissionDenied as i32);
+                assert_eq!(error.message, "schema withheld");
+            }
+            other => panic!("unexpected reflection reply: {other:?}"),
+        }
+        assert_eq!(witness.polls.load(Ordering::SeqCst), index + 1, "no query prefetch");
+    }
+    assert!(matches!(output.as_mut().poll_next(&mut task), Poll::Ready(None)));
+    assert_eq!(*seen.lock().unwrap(), [
+        "file:echo.proto", "file:private.proto", "symbol:demo.Echo.Ping",
+        "extension:demo.Record:100", "numbers:demo.Record",
+    ]);
+    assert_eq!(service.active_streams(), 0);
+}
+
+#[test]
+fn request_policy_rechecks_revocation_and_denied_queries_consume_the_limit() {
+    let allowed = Arc::new(AtomicBool::new(true));
+    let current = Arc::clone(&allowed);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let service = rpc(registry().allow_anonymous(), ReflectionRpcConfig {
+        max_queries_per_stream: 3, ..ReflectionRpcConfig::default()
+    }).with_request_authorization(move |_, action, _, _| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        if action == ReflectionRpcAction::OpenStream || current.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(Status::permission_denied("revoked"))
+        }
+    });
+    let (input, witness) = source(vec![Ok(Bytes::from_static(LIST)); 4], true);
+    let cx = remote();
+    let (mut output, _) = dispatch_request(&service, &cx, V1_PATH, Request::new(input)).unwrap().into_parts();
+    let mut task = Context::from_waker(Waker::noop());
+    for permitted in [true, false, true] {
+        allowed.store(permitted, Ordering::SeqCst);
+        let Poll::Ready(Some(Ok(bytes))) = output.as_mut().poll_next(&mut task) else {
+            panic!("query decision should be an in-band response");
+        };
+        let reply = decode(bytes).reply;
+        if permitted {
+            assert!(matches!(reply, Some(Reply::Services(_))));
+        } else {
+            assert!(matches!(reply, Some(Reply::Error(error)) if error.code == Code::PermissionDenied as i32));
+        }
+        assert_eq!(service.active_streams(), 1);
+    }
+    assert!(matches!(output.as_mut().poll_next(&mut task), Poll::Ready(Some(Err(status))) if status.code() == Code::ResourceExhausted));
+    assert_eq!(calls.load(Ordering::SeqCst), 4, "over-limit input must not invoke the policy");
+    assert_eq!(witness.polls.load(Ordering::SeqCst), 4);
+    assert_eq!(service.active_streams(), 0);
+}
+
+#[test]
+fn request_policy_cannot_weaken_legacy_registry_authorization() {
+    for (registry, cx) in [
+        (registry(), remote()),
+        (registry().allow_anonymous(), Cx::for_testing()),
+        (registry().with_auth(|_, _| Err(Status::unauthenticated("legacy refusal"))), remote()),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let service = rpc(registry, ReflectionRpcConfig { max_streams: 0, ..ReflectionRpcConfig::default() })
+            .with_request_authorization(move |_, _, _, _| { observed.fetch_add(1, Ordering::SeqCst); Ok(()) });
+        let (input, witness) = source(vec![Ok(Bytes::from_static(LIST))], true);
+        let status = dispatch_request(&service, &cx, V1_PATH, Request::new(input)).unwrap_err();
+        assert!(matches!(status.code(), Code::Unauthenticated | Code::PermissionDenied));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(witness.polls.load(Ordering::SeqCst), 0);
+        assert_eq!(service.active_streams(), 0);
+    }
+    let service = rpc(registry().with_auth(|_, method| {
+        if method == "ListServices" { Ok(()) } else { Err(Status::permission_denied("legacy schema refusal")) }
+    }), ReflectionRpcConfig::default()).with_request_authorization(|_, action, _, _| {
+        assert!(matches!(action, ReflectionRpcAction::OpenStream | ReflectionRpcAction::ListServices));
+        Ok(())
+    });
+    let request = WireRequest { host: String::new(), query: Some(Query::FileByName("echo.proto".to_string())) };
+    let response = decode(service.answer(&remote(), &Bytes::from(request.encode_to_vec())).unwrap());
+    assert!(matches!(response.reply, Some(Reply::Error(error)) if error.code == Code::PermissionDenied as i32 && error.message == "legacy schema refusal"));
+}
+
+#[test]
+fn cancellation_before_or_inside_request_policy_prevents_response_publication() {
+    for trigger in [None, Some(ReflectionRpcAction::OpenStream), Some(ReflectionRpcAction::ListServices)] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let service = rpc(registry().allow_anonymous(), ReflectionRpcConfig::default())
+            .with_request_authorization(move |cx, action, _, _| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                if Some(action) == trigger {
+                    cx.cancel_fast(CancelKind::User);
+                    return Err(Status::permission_denied("cancellation takes precedence"));
+                }
+                Ok(())
+            });
+        let cx = remote();
+        if trigger.is_none() { cx.cancel_fast(CancelKind::User); }
+        let (input, witness) = source(vec![Ok(Bytes::from_static(LIST))], false);
+        let result = dispatch_request(&service, &cx, V1_PATH, Request::new(input));
+        if trigger == Some(ReflectionRpcAction::ListServices) {
+            let (mut output, _) = result.unwrap().into_parts();
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(matches!(output.as_mut().poll_next(&mut task), Poll::Ready(Some(Err(status))) if status.code() == Code::Cancelled));
+            assert!(matches!(output.as_mut().poll_next(&mut task), Poll::Ready(None)));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(witness.polls.load(Ordering::SeqCst), 1);
+        } else {
+            assert_eq!(result.unwrap_err().code(), Code::Cancelled);
+            assert_eq!(calls.load(Ordering::SeqCst), usize::from(trigger.is_some()));
+            assert_eq!(witness.polls.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(service.active_streams(), 0);
+        assert_eq!(witness.drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+struct AuthorizationLease(Arc<Witness>);
+
+impl Drop for AuthorizationLease {
+    fn drop(&mut self) {
+        self.0.restricted_drop.store(Cx::current().is_some_and(|cx| cx.has_remote()), Ordering::SeqCst);
+        self.0.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn request_extensions_retire_with_input_on_every_terminal_path() {
+    for outcome in ["eof", "input_error", "malformed", "cancelled", "drop", "refused"] {
+        let service = rpc(registry().allow_anonymous(), ReflectionRpcConfig::default())
+            .with_request_authorization(move |_, action, _, extensions| {
+                assert_eq!(action, ReflectionRpcAction::OpenStream);
+                assert!(extensions.get_typed::<AuthorizationLease>().is_some());
+                if outcome == "refused" { Err(Status::permission_denied("refused")) } else { Ok(()) }
+            });
+        let items = match outcome {
+            "input_error" => vec![Err(Status::data_loss("transport failure"))],
+            "malformed" => vec![Ok(Bytes::from_static(b"\xff"))],
+            _ => vec![],
+        };
+        let (input, source_witness) = source(items, outcome == "eof");
+        let mut request = Request::new(input);
+        let lease = Arc::new(Witness::default());
+        request.extensions_mut().insert_typed(AuthorizationLease(Arc::clone(&lease)));
+        let cx = remote();
+        let result = dispatch_request(&service, &cx, V1_PATH, request);
+        if outcome == "refused" {
+            assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
+        } else {
+            let (mut output, _) = result.unwrap().into_parts();
+            assert_eq!(lease.drops.load(Ordering::SeqCst), 0, "admitted identity remains owned");
+            if outcome == "drop" {
+                drop(output);
+            } else {
+                if outcome == "cancelled" { cx.cancel_fast(CancelKind::User); }
+                let terminal = output.as_mut().poll_next(&mut Context::from_waker(Waker::noop()));
+                match outcome {
+                    "eof" => assert!(matches!(terminal, Poll::Ready(None))),
+                    "input_error" => assert!(matches!(terminal, Poll::Ready(Some(Err(status))) if status.code() == Code::DataLoss)),
+                    "malformed" => assert!(matches!(terminal, Poll::Ready(Some(Err(status))) if status.code() == Code::InvalidArgument)),
+                    "cancelled" => assert!(matches!(terminal, Poll::Ready(Some(Err(status))) if status.code() == Code::Cancelled)),
+                    _ => unreachable!(),
+                }
+                assert_eq!(lease.drops.load(Ordering::SeqCst), 1, "terminal stream must release identity before output is dropped");
+                drop(output);
+            }
+        }
+        assert_eq!(service.active_streams(), 0);
+        assert_eq!(source_witness.drops.load(Ordering::SeqCst), 1);
+        assert_eq!(lease.drops.load(Ordering::SeqCst), 1);
+        assert!(source_witness.restricted_drop.load(Ordering::SeqCst));
+        assert!(lease.restricted_drop.load(Ordering::SeqCst));
+    }
+}

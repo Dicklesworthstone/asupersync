@@ -119,6 +119,19 @@ impl RetirementBarrier {
         }
     }
 
+    /// A join future may move after construction. Attribute observation to
+    /// the task polling it, using the explicit context only outside a task.
+    fn observe_join(&self, fallback: &Cx) {
+        if self.causality.get().is_none() {
+            return;
+        }
+        if let Some(current) = Cx::current() {
+            self.observe(&current);
+        } else {
+            self.observe(fallback);
+        }
+    }
+
     #[inline]
     pub(crate) fn is_open(&self) -> bool {
         self.open.load(Ordering::Acquire)
@@ -1174,8 +1187,9 @@ pub struct JoinFuture<'a, T> {
     /// closed this future does not poll the receiver, so an early terminal is
     /// never consumed or surfaced until the scheduler opens it post-retirement.
     barrier: Arc<RetirementBarrier>,
-    /// The explicit observer receives retirement causality even if the join
-    /// completes on its first poll. It remains uninterruptible by cancellation.
+    /// Fallback observer for polling outside a runtime task. A current task
+    /// takes precedence if this future moves after construction; cancellation
+    /// still cannot interrupt the join.
     observer: &'a Cx,
     /// Whether this future stored its waker on the barrier. Only then does
     /// dropping it clear the slot: a waker the handle's own `poll_join`
@@ -1244,7 +1258,7 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
                 return std::task::Poll::Pending;
             }
         }
-        this.barrier.observe(this.observer);
+        this.barrier.observe_join(this.observer);
         // JoinError needs to be mapped if recv fails with RecvError
         match std::pin::Pin::new(&mut this.inner).poll(cx) {
             std::task::Poll::Ready(Ok(res)) => {

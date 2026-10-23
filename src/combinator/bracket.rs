@@ -135,6 +135,13 @@ where
     }
 
     fn transition_to_releasing(&mut self) -> std::thread::Result<()> {
+        // A completed or panicked future may still hold locks until Drop.
+        // Retire it before invoking the release constructor, not merely before
+        // polling the release future.
+        let previous_phase = std::mem::replace(&mut self.state.phase, BracketPhase::Done);
+        let retirement =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(previous_phase)));
+
         let release_fn = self
             .state
             .release_fn
@@ -149,7 +156,9 @@ where
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| release_fn(resource))) {
             Ok(release_fut) => {
                 self.state.phase = BracketPhase::Releasing(Box::pin(release_fut));
-                Ok(())
+                // Install cleanup even if retiring the old future panicked:
+                // Bracket::drop can then drive release during the unwind.
+                retirement
             }
             Err(payload) => {
                 self.state.phase = BracketPhase::Done;
@@ -193,9 +202,13 @@ where
                             // Clone resource for release before use_fn consumes it
                             this.state.resource_for_release = Some(resource.clone());
 
-                            // Transition to Using phase
+                            // Retire acquire before the use constructor can touch
+                            // resources still held by the completed future.
                             let use_fn = this.use_fn.take().expect("use_fn consumed twice");
+                            let acquire_phase =
+                                std::mem::replace(&mut this.state.phase, BracketPhase::Done);
                             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                drop(acquire_phase);
                                 use_fn(resource)
                             })) {
                                 Ok(use_fut) => {

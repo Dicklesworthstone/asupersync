@@ -1175,6 +1175,91 @@ impl Scheduler {
         self.scheduled.clear();
     }
 
+    /// Enumerates the complete next eligible tie group without mutating queues.
+    ///
+    /// Exact exploration deliberately rejects lazy entries and oversized tie
+    /// groups: removing tombstones or widening the normal RNG selection window
+    /// would silently change the scheduler's policy.
+    pub(crate) fn exact_exploration_choices(
+        &self,
+        now: Time,
+        cancel_first: bool,
+        max_entries: usize,
+    ) -> Result<Vec<(TaskId, DispatchLane)>, &'static str> {
+        let entries = self
+            .cancel_lane
+            .len()
+            .saturating_add(self.timed_lane.len())
+            .saturating_add(self.ready_lane.len());
+        if entries > max_entries {
+            return Err("scheduler inventory exceeds its entry budget");
+        }
+        let mut tasks: Vec<_> = self
+            .cancel_lane
+            .iter()
+            .map(|entry| entry.task)
+            .chain(self.timed_lane.iter().map(|entry| entry.task))
+            .chain(self.ready_lane.iter().map(|entry| entry.task))
+            .collect();
+        tasks.sort_unstable();
+        if tasks.len() != self.scheduled.len()
+            || tasks.windows(2).any(|pair| pair[0] == pair[1])
+            || tasks.iter().any(|task| !self.scheduled.contains(*task))
+        {
+            return Err("lazy or inconsistent scheduler entries are unsupported");
+        }
+
+        let lane = if cancel_first && !self.cancel_lane.is_empty() {
+            DispatchLane::Cancel
+        } else if self
+            .timed_lane
+            .peek()
+            .is_some_and(|entry| entry.deadline <= now)
+        {
+            DispatchLane::Timed
+        } else if !self.ready_lane.is_empty() {
+            DispatchLane::Ready
+        } else if !self.cancel_lane.is_empty() {
+            DispatchLane::Cancel
+        } else {
+            return Ok(Vec::new());
+        };
+        let (mut choices, window): (Vec<_>, _) = match lane {
+            DispatchLane::Cancel | DispatchLane::Ready => {
+                let heap = if lane == DispatchLane::Cancel {
+                    &self.cancel_lane
+                } else {
+                    &self.ready_lane
+                };
+                let priority = heap.peek().map(|entry| entry.priority);
+                (
+                    heap.iter()
+                        .filter(|entry| Some(entry.priority) == priority)
+                        .map(|entry| (entry.task, lane))
+                        .collect(),
+                    self.scratch_entries.capacity().max(1),
+                )
+            }
+            DispatchLane::Timed => {
+                let deadline = self.timed_lane.peek().map(|entry| entry.deadline);
+                (
+                    self.timed_lane
+                        .iter()
+                        .filter(|entry| Some(entry.deadline) == deadline)
+                        .map(|entry| (entry.task, lane))
+                        .collect(),
+                    self.scratch_timed.capacity().max(1),
+                )
+            }
+            DispatchLane::Stolen => unreachable!("single-worker inventory has no stolen lane"),
+        };
+        if choices.len() > window {
+            return Err("scheduler tie group exceeds the legacy selection window");
+        }
+        choices.sort_unstable_by_key(|(task, _)| *task);
+        Ok(choices)
+    }
+
     /// Takes one exact task from its authoritative lane without consulting the
     /// normal scheduler selector.
     ///
@@ -1379,3 +1464,7 @@ impl ScheduleCertificate {
 #[cfg(test)]
 #[path = "priority_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "priority_exact_exploration_tests.rs"]
+mod exact_exploration_tests;

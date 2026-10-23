@@ -105,15 +105,81 @@
     }
 
     #[test]
-    fn estimated_classes_grows_with_races() {
-        // More races -> more potential classes.
-        let events = [
-            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
-            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
-            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+    fn estimated_classes_respects_a_complete_region_spawn_model() {
+        use crate::trace::canonicalize::TraceMonoid;
+
+        // Enumerate every order of Create(R), Spawn(A, R), Spawn(B, R).
+        // The model admits a spawn only after its region exists. Its two legal
+        // executions differ only by independent spawns, so there is one class.
+        let permutations = [
+            [0_u32, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
         ];
-        let est = estimated_classes(&events);
-        assert!(est >= 2);
+        let mut legal_orders = 0;
+        let mut classes: Vec<TraceMonoid> = Vec::new();
+        let mut bounds = Vec::new();
+        for order in permutations {
+            let mut region_exists = false;
+            let mut events = Vec::new();
+            for (index, operation) in order.into_iter().enumerate() {
+                if operation != 0 && !region_exists {
+                    events.clear();
+                    break;
+                }
+                let seq = u64::try_from(index).unwrap() + 1;
+                let event = if operation == 0 {
+                    region_exists = true;
+                    TraceEvent::region_created(seq, Time::ZERO, rid(1), None)
+                } else {
+                    TraceEvent::spawn(seq, Time::ZERO, tid(operation), rid(1))
+                };
+                events.push(event);
+            }
+            if events.is_empty() {
+                continue;
+            }
+            legal_orders += 1;
+            assert_eq!(events.len(), 3);
+            assert!(!detect_races(&events).is_race_free());
+            assert!(crate::trace::independence::independent(
+                &events[1], &events[2],
+            ));
+            let class = TraceMonoid::from_events(&events);
+            if !classes.iter().any(|known| known.equivalent_exact(&class)) {
+                classes.push(class);
+            }
+            bounds.push(estimated_classes(&events));
+        }
+        assert_eq!(legal_orders, 2);
+        assert_eq!(classes.len(), 1);
+        assert!(bounds.into_iter().all(|bound| bound <= classes.len()));
+    }
+
+    #[test]
+    fn race_candidates_do_not_certify_alternative_executions() {
+        let events = [
+            TraceEvent::cancel_request(
+                1,
+                Time::ZERO,
+                tid(1),
+                rid(1),
+                CancelReason::user("first"),
+            ),
+            TraceEvent::cancel_request(
+                2,
+                Time::ZERO,
+                tid(2),
+                rid(1),
+                CancelReason::user("second"),
+            ),
+        ];
+        assert_eq!(detect_races(&events).race_count(), 1);
+        assert_eq!(detect_hb_races(&events).race_count(), 1);
+        assert_eq!(estimated_classes(&events), 1);
     }
 
     #[test]
@@ -198,7 +264,7 @@
         let analysis = trace_coverage_analysis(&events);
         assert_eq!(analysis.event_count, 3);
         assert!(analysis.immediate_race_count >= 1);
-        assert!(analysis.estimated_classes >= 2);
+        assert_eq!(analysis.estimated_classes, 1);
         assert!(analysis.racing_event_count >= 1);
         assert!(analysis.race_density > 0.0);
     }

@@ -93,7 +93,7 @@ fn finish<F: Future>(future: Pin<&mut F>) -> F::Output {
     match poll(future) { Poll::Ready(value) => value, Poll::Pending => panic!("expected ready") }
 }
 fn operation(cx: Cx) -> impl Future<Output = Result<RemoteRunReply, RemoteRunTaskError>> {
-    execute(cx, NodeId::new("worker"), ComputationName::new("test"), RemoteInput::empty(), clock(), Time::from_secs(30))
+    execute(cx, CapabilityRequest { node: NodeId::new("worker"), computation: ComputationName::new("test"), input: RemoteInput::empty() }, clock(), Time::from_secs(30))
 }
 fn config() -> RemoteRunConfig { RemoteRunConfig { timeout: Duration::from_secs(5), child: ChildRegionSpec::inherit() } }
 fn native<F, Fut>(f: F)
@@ -570,4 +570,31 @@ fn owned_remote_close_keeps_its_report_with_an_already_cancelled_observer() {
         assert_eq!(transport.clears.load(Ordering::Acquire), 1);
         assert!(!cx.is_cancel_requested());
     });
+}
+
+#[test]
+fn admitted_proxy_retains_credit_in_an_unread_terminal_after_future_retirement() {
+    struct Payload(std::sync::Weak<()>);
+    impl Drop for Payload {
+        fn drop(&mut self) {
+            assert!(self.0.upgrade().is_some(), "payload retires before its credit");
+        }
+    }
+
+    let credit = Arc::new(());
+    let observed = Arc::downgrade(&credit);
+    let retained: RemoteRunRetention = credit;
+    let mut proxy = Box::pin(AdmittedProxy {
+        future: std::future::ready(Payload(observed.clone())),
+        _admission: None,
+        _retention: Some(retained),
+    });
+    let mut task = Context::from_waker(Waker::noop());
+    let Poll::Ready(terminal) = proxy.as_mut().poll(&mut task) else {
+        panic!("ready proxy must publish its retained payload");
+    };
+    drop(proxy);
+    assert!(observed.upgrade().is_some(), "unread result outlives the proxy future");
+    drop(terminal);
+    assert!(observed.upgrade().is_none(), "retired payload returns the final credit");
 }

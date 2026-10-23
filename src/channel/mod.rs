@@ -102,6 +102,54 @@ pub mod partition;
 pub mod session;
 pub mod watch;
 
+/// Evidence carried by one committed message in the opt-in task-causal lab.
+///
+/// The active task is sampled at commit, rather than when a permit is reserved:
+/// permits can move between tasks, and later sender events must not leak into
+/// an already-buffered message. Host sends without an installed task context
+/// remain unattributed. Runtime provenance prevents task IDs reused by another
+/// lab instance from creating a false edge.
+#[derive(Debug)]
+struct MessageCausality {
+    runtime: u64,
+    time: crate::trace::distributed::LogicalTime,
+}
+
+impl MessageCausality {
+    #[inline]
+    fn capture_current() -> Option<Self> {
+        let cx = crate::cx::Cx::current()?;
+        cx.task_causality_snapshot()
+            .map(|(runtime, time)| Self { runtime, time })
+    }
+
+    /// Cancellation remains tied to the supplied context, but a receive
+    /// future can move to another task. Attribute consumption to the task
+    /// actually polling it; use the explicit context only outside a task.
+    #[inline]
+    fn observe<Caps>(self, cx: &crate::cx::Cx<Caps>) {
+        if let Some(current) = crate::cx::Cx::current() {
+            self.observe_on(&current);
+        } else {
+            self.observe_on(cx);
+        }
+    }
+
+    #[inline]
+    fn observe_on<Caps>(self, cx: &crate::cx::Cx<Caps>) {
+        if cx.task_causality_runtime() == Some(self.runtime) {
+            let _ = cx.logical_receive(&self.time);
+        }
+    }
+
+    #[inline]
+    fn observe_current(self) {
+        if let Some(cx) = crate::cx::Cx::current() {
+            self.observe_on(&cx);
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "deadlock_test.rs"]
 mod deadlock_test;

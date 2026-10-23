@@ -460,3 +460,6 @@ fn native_admission_close_can_reenter_synchronous_spawn_metrics() {
         .expect("reentrant close must not deadlock commit");
     thread.join().unwrap();
 }
+
+#[path = "remote_native_admission/owned.rs"]
+mod owned;

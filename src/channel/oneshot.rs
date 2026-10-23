@@ -46,6 +46,7 @@
 //! let value = rx.recv(&cx).await?;
 //! ```
 
+use super::MessageCausality;
 use crate::cx::{CancelWakerToken, Cx};
 use parking_lot::Mutex;
 use std::future::Future;
@@ -185,6 +186,8 @@ pub struct OneshotTelemetrySnapshot {
 struct OneShotInner<T> {
     /// The value, if sent.
     value: Option<T>,
+    /// The exact publication observed when this value is consumed.
+    causality: Option<MessageCausality>,
     /// Whether the sender has been consumed (dropped or reserved).
     sender_consumed: bool,
     /// Whether the receiver has been dropped.
@@ -218,6 +221,7 @@ impl<T> OneShotInner<T> {
     fn new() -> Self {
         Self {
             value: None,
+            causality: None,
             sender_consumed: false,
             receiver_dropped: false,
             permit_outstanding: false,
@@ -241,6 +245,14 @@ impl<T> OneShotInner<T> {
     #[inline]
     fn is_ready(&self) -> bool {
         self.value.is_some()
+    }
+
+    /// Keep the value and its publication evidence under the same lock.
+    #[inline]
+    fn take_value(&mut self) -> Option<(T, Option<MessageCausality>)> {
+        self.value
+            .take()
+            .map(|value| (value, self.causality.take()))
     }
 
     /// Takes the registered waker and clears its waiter identity.
@@ -740,6 +752,7 @@ impl<T> SendPermit<T> {
                 let retired_waker = inner.take_waker();
                 (Err(value), None, retired_waker)
             } else {
+                inner.causality = MessageCausality::capture_current();
                 inner.value = Some(value);
                 inner.permit_outstanding = false;
                 inner.closed_reason = None;
@@ -843,12 +856,15 @@ fn poll_recv_uninterruptible_with_waiter<T>(
     {
         let mut inner = channel.lock();
 
-        if let Some(value) = inner.value.take() {
+        if let Some((value, causality)) = inner.take_value() {
             let retired_waker = inner.take_waker();
             let retired_closed_waker = inner.receiver_closed_waker.take();
             inner.closed_reason = Some("committed");
             *waiter_id = None;
             drop(inner);
+            if let Some(causality) = causality {
+                causality.observe_current();
+            }
             retire_waker_after_unlock(retired_waker);
             wake_waker_after_unlock(retired_closed_waker);
             return Poll::Ready(Ok(value));
@@ -874,12 +890,15 @@ fn poll_recv_uninterruptible_with_waiter<T>(
     let mut incoming_waker = Some(ctx.waker().clone());
     let mut inner = channel.lock();
 
-    if let Some(value) = inner.value.take() {
+    if let Some((value, causality)) = inner.take_value() {
         let retired_waker = inner.take_waker();
         let retired_closed_waker = inner.receiver_closed_waker.take();
         inner.closed_reason = Some("committed");
         *waiter_id = None;
         drop(inner);
+        if let Some(causality) = causality {
+            causality.observe_current();
+        }
         retire_waker_after_unlock(retired_waker);
         wake_waker_after_unlock(retired_closed_waker);
         retire_waker_after_unlock(incoming_waker);
@@ -1027,13 +1046,16 @@ impl<T, Caps> RecvFuture<'_, T, Caps> {
     fn finish_cancelled(&mut self, incoming_waker: Option<Waker>) -> Poll<Result<T, RecvError>> {
         let mut inner = self.receiver.inner.lock();
 
-        if let Some(value) = inner.value.take() {
+        if let Some((value, causality)) = inner.take_value() {
             let retired_waker = inner.take_waker();
             let retired_closed_waker = inner.receiver_closed_waker.take();
             inner.closed_reason = Some("committed");
             self.waiter_id = None;
             self.completed = true;
             drop(inner);
+            if let Some(causality) = causality {
+                causality.observe(self.cx);
+            }
             retire_waker_after_unlock(retired_waker);
             wake_waker_after_unlock(retired_closed_waker);
             retire_waker_after_unlock(incoming_waker);
@@ -1092,13 +1114,16 @@ impl<T, Caps> Future for RecvFuture<'_, T, Caps> {
             let mut inner = this.receiver.inner.lock();
 
             // Value and closure retain precedence over cancellation.
-            if let Some(value) = inner.value.take() {
+            if let Some((value, causality)) = inner.take_value() {
                 let retired_waker = inner.take_waker();
                 let retired_closed_waker = inner.receiver_closed_waker.take();
                 inner.closed_reason = Some("committed");
                 this.waiter_id = None;
                 this.completed = true;
                 drop(inner);
+                if let Some(causality) = causality {
+                    causality.observe(this.cx);
+                }
                 retire_waker_after_unlock(retired_waker);
                 wake_waker_after_unlock(retired_closed_waker);
                 this.clear_cancel_waker();
@@ -1140,13 +1165,16 @@ impl<T, Caps> Future for RecvFuture<'_, T, Caps> {
 
         let mut inner = this.receiver.inner.lock();
 
-        if let Some(value) = inner.value.take() {
+        if let Some((value, causality)) = inner.take_value() {
             let retired_waker = inner.take_waker();
             let retired_closed_waker = inner.receiver_closed_waker.take();
             inner.closed_reason = Some("committed");
             this.waiter_id = None;
             this.completed = true;
             drop(inner);
+            if let Some(causality) = causality {
+                causality.observe(this.cx);
+            }
             retire_waker_after_unlock(retired_waker);
             wake_waker_after_unlock(retired_closed_waker);
             retire_waker_after_unlock(incoming_waker);
@@ -1314,28 +1342,32 @@ impl<T> Receiver<T> {
     /// - `TryRecvError::Closed` if the sender was dropped without sending
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        let (result, retired_waker, retired_closed_waker) = {
+        let (result, causality, retired_waker, retired_closed_waker) = {
             let mut inner = self.inner.lock();
 
-            if let Some(value) = inner.value.take() {
+            if let Some((value, causality)) = inner.take_value() {
                 // Terminal success path: detach stale waiter registration.
                 let retired_waker = inner.take_waker();
                 let retired_closed_waker = inner.receiver_closed_waker.take();
                 inner.closed_reason = Some("committed");
-                (Ok(value), retired_waker, retired_closed_waker)
+                (Ok(value), causality, retired_waker, retired_closed_waker)
             } else if inner.is_closed() {
                 // Terminal closed path: detach stale waiter registration.
                 let retired_waker = inner.take_waker();
                 let retired_closed_waker = inner.receiver_closed_waker.take();
                 (
                     Err(TryRecvError::Closed),
+                    None,
                     retired_waker,
                     retired_closed_waker,
                 )
             } else {
-                (Err(TryRecvError::Empty), None, None)
+                (Err(TryRecvError::Empty), None, None, None)
             }
         };
+        if let Some(causality) = causality {
+            causality.observe_current();
+        }
         retire_waker_after_unlock(retired_waker);
         // A terminal value drain (or observing an already-closed channel) makes
         // `is_closed()` true, so any registered `poll_closed` waiter must be
@@ -1430,7 +1462,7 @@ impl<T> Drop for Receiver<T> {
             // woken when its awaited predicate actually holds
             // (br-asupersync-0i8acc).
             let retired_closed_waker = inner.receiver_closed_waker.take();
-            let value = inner.value.take();
+            let value = inner.take_value();
             let closed_after_drop = inner.is_closed();
             (
                 sender_waker,
