@@ -529,8 +529,9 @@ fn caller_cancellation(cx: &Cx) -> Option<CancelReason> {
 /// Encoding is separate from native reservation so admission waiters need not
 /// own an extra payload. Prepared bytes are caller-owned until publication;
 /// they are not charged to a native admission domain while the caller holds
-/// them. Reserve [`encoded_len`](Self::encoded_len), then consume this value
-/// with `commit` on native TLS builds.
+/// them. On native TLS builds, reserve [`encoded_len`](Self::encoded_len),
+/// then use `commit` for a caller-owned handle or `run_admitted_owned` /
+/// `spawn_admitted_owned` for checked child-region ownership and native drain.
 #[must_use = "a prepared call performs no remote work until it is published"]
 pub struct PreparedTypedRemoteCall<C: TypedRemoteComputation> {
     input: RemoteInput,

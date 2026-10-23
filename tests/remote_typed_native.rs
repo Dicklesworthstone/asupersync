@@ -627,3 +627,6 @@ fn typed_owned_cancelled_and_dropped_observations_preserve_the_later_cleanup_rep
         fixture.finish(&cx).await;
     });
 }
+
+#[path = "remote_typed_native/admitted_owned.rs"]
+mod admitted_owned;

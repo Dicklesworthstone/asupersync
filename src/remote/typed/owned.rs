@@ -11,11 +11,15 @@ use crate::distributed::remote_owned::{
     prepare_run, spawn_remote_owned,
 };
 use crate::remote::{ComputationName, NodeId, RemoteOutcome, RemoteTaskId};
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+use crate::remote::{NativeRemoteOwnedError, NativeRemoteReservation};
 use crate::types::{CancelReason, Outcome, TaskId, Time};
 use std::fmt;
 use std::future::poll_fn;
 use std::marker::PhantomData;
 use std::task::{Context, Poll};
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+use std::time::Duration;
 
 /// Refusal while encoding or submitting a typed owned invocation.
 ///
@@ -30,6 +34,10 @@ pub enum TypedRemoteRunError {
     /// The ordinary owned path refused capability, budget, or task admission.
     #[error(transparent)]
     Owned(#[from] RemoteRunHandleError),
+    /// The reserved native path refused input, authority, timing or task admission.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[error(transparent)]
+    NativeOwned(#[from] NativeRemoteOwnedError),
 }
 
 /// Typed remote result with the original cancellation and checked-lease facts.
@@ -217,6 +225,74 @@ impl<C: TypedRemoteComputation> TypedRemoteRunHandle<C> {
 }
 
 impl<C: TypedRemoteComputation> PreparedTypedRemoteCall<C> {
+    /// Execute a prepared typed call through a reserved native domain and child region.
+    ///
+    /// Reserve exactly [`Self::encoded_len`] before calling. The reservation
+    /// supplies route authority without an attached legacy `RemoteCap`; the
+    /// caller's capability mask, native frame bounds and child constraints
+    /// still apply. Checked lease admission precedes native publication.
+    ///
+    /// The native owner retains its charge while the proxy and driver drain,
+    /// including cancellation and timeout. The exact protocol outcome and
+    /// child-close receipt are collected before typed response decoding. A
+    /// codec refusal preserves those receipts and the checked lease settlement.
+    /// Decoded report values belong to the caller and are outside native buffer
+    /// accounting; user deserializer allocations have the same boundary.
+    ///
+    /// The first poll submits a region-owned task and releases the prepared
+    /// input after copying it under native admission. An unpolled future
+    /// performs no dispatch. Dropping a started future drops its owned handle
+    /// and requests cancellation; the runtime retains admitted cleanup. The
+    /// timeout begins at submission and initiates cancellation without
+    /// manufacturing remote quiescence.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub async fn run_admitted_owned(
+        self,
+        cx: &Cx,
+        reservation: NativeRemoteReservation,
+        lease: Duration,
+        config: RemoteRunConfig,
+    ) -> Result<TypedRemoteRunReport<C::Output>, TypedRemoteRunError> {
+        let mut call = self.spawn_admitted_owned(cx, reservation, lease, config)?;
+        Ok(call.join(cx).await?)
+    }
+
+    /// Start a typed, region-owned invocation inside a reserved native domain.
+    ///
+    /// The reservation must cover exactly [`Self::encoded_len`]. Work starts
+    /// independently of result polling and follows the existing native owned
+    /// timeout, checked-lease and cancellation/drain path. Parent close waits
+    /// for the invocation without a manual native-handle close.
+    ///
+    /// The complete prepared input is bounded and copied under the reservation
+    /// before this method returns. An unread raw terminal report stays charged;
+    /// typed decoding runs only when the returned handle consumes that report.
+    /// Consumption transfers report values to the caller, even if decoding
+    /// fails. Dropping the handle requests cancellation and retains native
+    /// driver/proxy charges until their actual retirement.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub fn spawn_admitted_owned(
+        self,
+        cx: &Cx,
+        reservation: NativeRemoteReservation,
+        lease: Duration,
+        config: RemoteRunConfig,
+    ) -> Result<TypedRemoteRunHandle<C>, TypedRemoteRunError> {
+        let inner = reservation.spawn_owned(
+            cx,
+            &ComputationName::new(C::NAME),
+            self.input.data(),
+            lease,
+            config,
+        )?;
+        Ok(TypedRemoteRunHandle {
+            inner,
+            signature: self.signature,
+            limits: self.limits,
+            marker: PhantomData,
+        })
+    }
+
     /// Publish through the existing checked, region-owned remote path.
     ///
     /// The encoded envelope stays bounded by this prepared call's limits.
