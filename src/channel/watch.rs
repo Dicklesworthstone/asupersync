@@ -46,6 +46,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+use super::MessageCausality;
 use super::cancel_registration::CancelRegistration;
 use crate::cx::Cx;
 use crate::util::{Arena, ArenaIndex};
@@ -160,8 +161,10 @@ pub struct WatchTelemetrySnapshot {
 /// Internal state shared between sender and receivers.
 #[derive(Debug)]
 struct WatchInner<T> {
-    /// The current value and its version number.
-    value: RwLock<(T, u64)>,
+    /// The current value, its version, and optional publication evidence.
+    /// Keep all three under the same lock: an overwritten version must never
+    /// donate its predecessor to the value a receiver actually acquires.
+    value: RwLock<(T, u64, Option<MessageCausality>)>,
     // NOTE: Previously had version: AtomicU64 shadow counter, but this
     // created race conditions. Now we read version from value RwLock directly.
     /// Serializes writers (`send` / `send_modify`) so a read-modify-write in
@@ -190,7 +193,7 @@ struct WatchInner<T> {
 impl<T> WatchInner<T> {
     fn new(initial: T) -> Self {
         Self {
-            value: RwLock::new((initial, 0)),
+            value: RwLock::new((initial, 0, MessageCausality::capture_current())),
             send_lock: Mutex::new(()),
             receiver_count: AtomicUsize::new(1), // Counts the Receiver returned by channel()
             sender_dropped: AtomicBool::new(false),
@@ -498,8 +501,12 @@ impl<T> Sender<T> {
         let _old_value = {
             let _write_serialize = self.inner.send_lock.lock();
             let mut guard = self.inner.value.write();
+            // A blind replacement publishes only this writer's past. Merely
+            // serializing writers does not observe the overwritten value.
+            let causality = MessageCausality::capture_current();
             let old = std::mem::replace(&mut guard.0, value);
             guard.1 = guard.1.wrapping_add(1);
+            guard.2 = causality;
             old
         };
 
@@ -555,6 +562,11 @@ impl<T> Sender<T> {
 
             candidate = Some({
                 let guard = self.inner.value.read();
+                // Clone and the modifier can have arbitrary effects. They
+                // already read this snapshot, even if either later panics.
+                if let Some(causality) = guard.2.clone() {
+                    causality.observe_current();
+                }
                 guard.0.clone()
             });
 
@@ -563,11 +575,15 @@ impl<T> Sender<T> {
             f(candidate.as_mut().expect("candidate initialized before mutation"));
 
             let mut guard = self.inner.value.write();
+            // Only a successful modifier publishes new evidence. A panic
+            // above leaves the original value, version, and source intact.
+            let causality = MessageCausality::capture_current();
             let old = std::mem::replace(
                 &mut guard.0,
                 candidate.take().expect("candidate initialized before publication"),
             );
             guard.1 = guard.1.wrapping_add(1);
+            guard.2 = causality;
             old
         };
 
@@ -586,9 +602,7 @@ impl<T> Sender<T> {
     #[inline]
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
-        Ref {
-            guard: self.inner.value.read(),
-        }
+        Ref::new(self.inner.value.read())
     }
 
     /// Creates a new receiver subscribed to this channel.
@@ -902,6 +916,12 @@ impl<T> Receiver<T> {
         loop {
             let checked = {
                 let guard = self.inner.value.read();
+                // Every predicate call observes this exact value, including
+                // false or panicking calls. A version notification alone does
+                // not provide evidence about the next snapshot we will read.
+                if let Some(causality) = guard.2.clone() {
+                    causality.observe(cx);
+                }
                 if predicate(&guard.0) {
                     self.seen_version = guard.1;
                     self.inner
@@ -937,9 +957,7 @@ impl<T> Receiver<T> {
     #[inline]
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
-        Ref {
-            guard: self.inner.value.read(),
-        }
+        Ref::new(self.inner.value.read())
     }
 
     /// Borrows the current value and marks it as seen in a single operation.
@@ -954,7 +972,7 @@ impl<T> Receiver<T> {
         self.seen_version = guard.1;
         self.inner
             .update_receiver_version(self.receiver_token, self.seen_version);
-        Ref { guard }
+        Ref::new(guard)
     }
 
     /// Returns a clone of the current value.
@@ -981,6 +999,23 @@ impl<T> Receiver<T> {
         T: Clone,
     {
         self.borrow_and_update().clone_inner()
+    }
+
+    /// The stream adapter may be polled outside an installed task. Observe
+    /// only its yielded snapshot, using its explicit context as a fallback;
+    /// `poll_changed` may have acknowledged a different, overwritten version.
+    pub(crate) fn borrow_and_update_clone_with_cx<Caps>(&mut self, cx: &Cx<Caps>) -> T
+    where
+        T: Clone,
+    {
+        let guard = self.inner.value.read();
+        if let Some(causality) = guard.2.clone() {
+            causality.observe(cx);
+        }
+        self.seen_version = guard.1;
+        self.inner
+            .update_receiver_version(self.receiver_token, self.seen_version);
+        guard.0.clone()
     }
 
     /// Marks the current value as seen.
@@ -1123,7 +1158,18 @@ impl<T> Drop for Receiver<T> {
 /// simultaneously for reading.
 #[derive(Debug)]
 pub struct Ref<'a, T> {
-    guard: RwLockReadGuard<'a, (T, u64)>,
+    guard: RwLockReadGuard<'a, (T, u64, Option<MessageCausality>)>,
+}
+
+impl<'a, T> Ref<'a, T> {
+    fn new(guard: RwLockReadGuard<'a, (T, u64, Option<MessageCausality>)>) -> Self {
+        // Acquiring access to this concrete value is the observation boundary.
+        // Merely inspecting or acknowledging a version does not use this path.
+        if let Some(causality) = guard.2.clone() {
+            causality.observe_current();
+        }
+        Self { guard }
+    }
 }
 
 impl<T> std::ops::Deref for Ref<'_, T> {

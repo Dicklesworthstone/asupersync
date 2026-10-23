@@ -292,7 +292,7 @@ fn worker_panic_path_wakes_dependents_so_parent_observes_panicked() {
 
     assert!(
         seam.contains("let (waiters, completion_observer)")
-            && seam.contains("task_completed_from_external_record_resuming(")
+            && seam.contains("task_completed_from_external_record_resuming_with_observers(")
             && seam.contains("task_completed_with_obligation_observers("),
         "REGRESSION: the ordered completion seam no longer gathers waiters \
          and the owned completion observer via task_completed (external-\

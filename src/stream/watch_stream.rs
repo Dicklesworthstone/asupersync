@@ -92,7 +92,9 @@ impl<T: Clone> Stream for WatchStream<T> {
             this.inner.clear_waiter_registration(false);
             this.cx.clear();
             // The initial snapshot counts as observed by this stream.
-            return Poll::Ready(Some(this.inner.borrow_and_update_clone()));
+            return Poll::Ready(Some(
+                this.inner.borrow_and_update_clone_with_cx(this.cx.cx()),
+            ));
         }
 
         let mut result = this.inner.poll_changed(this.cx.cx(), context);
@@ -109,7 +111,9 @@ impl<T: Clone> Stream for WatchStream<T> {
             this.cx.clear();
         }
         match result {
-            Poll::Ready(Ok(())) => Poll::Ready(Some(this.inner.borrow_and_update_clone())),
+            Poll::Ready(Ok(())) => Poll::Ready(Some(
+                this.inner.borrow_and_update_clone_with_cx(this.cx.cx()),
+            )),
             Poll::Ready(Err(_)) => {
                 this.terminated = true;
                 Poll::Ready(None)

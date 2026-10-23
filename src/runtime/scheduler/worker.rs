@@ -1350,3 +1350,7 @@ mod tests;
 #[cfg(test)]
 #[path = "worker_mailbox_observer_tests.rs"]
 mod mailbox_observer_tests;
+
+#[cfg(test)]
+#[path = "worker_close_wake_tests.rs"]
+mod close_wake_tests;

@@ -3321,3 +3321,292 @@
             assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
         }
     }
+
+    fn watch_causality_context(runtime: u64, node: &str) -> Cx {
+        Cx::for_testing()
+            .with_logical_clock(
+                crate::trace::distributed::LogicalClockMode::Vector {
+                    node: crate::remote::NodeId::new(node),
+                }
+                .build_handle(None),
+            )
+            .with_task_causality_runtime(Some(runtime))
+    }
+
+    #[test]
+    fn watch_host_replacement_discards_prior_publication_evidence() {
+        let _host = Cx::set_current(None);
+        for modify in [false, true] {
+            let source = watch_causality_context(97, "source");
+            let observer = watch_causality_context(97, "observer");
+            let (tx, mut rx) = channel(0_u32);
+            assert!(tx.inner.value.read().2.is_none());
+            {
+                let _current = Cx::set_current(Some(source));
+                tx.send(1).unwrap();
+            }
+            assert!(tx.inner.value.read().2.is_some());
+            if modify {
+                tx.send_modify(|value| *value = 2).unwrap();
+            } else {
+                tx.send(2).unwrap();
+            }
+            assert!(tx.inner.value.read().2.is_none());
+            let before = observer.logical_now();
+            {
+                let _current = Cx::set_current(Some(observer.clone()));
+                assert_eq!(rx.borrow_and_update_clone(), 2);
+            }
+            assert_eq!(observer.logical_now(), before);
+        }
+
+        let legacy = Cx::for_testing();
+        let before = legacy.logical_now();
+        {
+            let _current = Cx::set_current(Some(legacy.clone()));
+            let (tx, mut rx) = channel(0_u32);
+            tx.send(1).unwrap();
+            tx.send_modify(|value| *value += 1).unwrap();
+            assert_eq!(rx.borrow_and_update_clone(), 2);
+            assert!(tx.inner.value.read().2.is_none());
+        }
+        assert_eq!(legacy.logical_now(), before);
+    }
+
+    #[test]
+    fn watch_value_futures_observe_the_actual_poller_before_user_effects() {
+        use crate::stream::{Stream, WatchStream};
+        use crate::trace::distributed::CausalOrder;
+
+        struct SnapshotProbe {
+            value: u32,
+            on_read: Arc<dyn Fn() + Send + Sync>,
+        }
+
+        impl SnapshotProbe {
+            fn observe(&self) {
+                (self.on_read)();
+            }
+        }
+
+        impl Clone for SnapshotProbe {
+            fn clone(&self) -> Self {
+                self.observe();
+                Self {
+                    value: self.value,
+                    on_read: Arc::clone(&self.on_read),
+                }
+            }
+        }
+
+        let _host = Cx::set_current(None);
+        // Ready/false wait_for predicates, initial stream, changed stream.
+        for api in 0..4 {
+            // Active same runtime, explicit fallback, foreign task, untracked task.
+            for observer_mode in 0..4 {
+                let source = watch_causality_context(97, "source");
+                let constructor = watch_causality_context(97, "constructor");
+                let poller = if observer_mode == 3 {
+                    Cx::for_testing()
+                } else {
+                    watch_causality_context(
+                        if observer_mode == 2 { 98 } else { 97 },
+                        "poller",
+                    )
+                };
+                let source_before = source.logical_tick();
+                let _ = constructor.logical_tick();
+                let _ = poller.logical_tick();
+                let constructor_before = constructor.logical_now();
+                let poller_before = poller.logical_now();
+                let observed = if observer_mode == 1 {
+                    constructor.clone()
+                } else {
+                    poller.clone()
+                };
+                let expected = if observer_mode < 2 {
+                    CausalOrder::Before
+                } else {
+                    CausalOrder::Concurrent
+                };
+                let calls = Arc::new(AtomicUsize::new(0));
+                let checked_calls = Arc::clone(&calls);
+                let checked_source = source_before.clone();
+                let probe = SnapshotProbe {
+                    value: 11,
+                    on_read: Arc::new(move || {
+                        checked_calls.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(
+                            checked_source.causal_order(&observed.logical_now()),
+                            expected,
+                            "evidence must be observed before arbitrary Clone/predicate effects"
+                        );
+                    }),
+                };
+                let (tx, rx) = channel(SnapshotProbe {
+                    value: 0,
+                    on_read: Arc::new(|| {}),
+                });
+                let mut receiver = Some(rx);
+                let mut stream = if api >= 2 {
+                    let rx = receiver.take().unwrap();
+                    Some(if api == 2 {
+                        WatchStream::new(constructor.clone(), rx)
+                    } else {
+                        WatchStream::from_changes(constructor.clone(), rx)
+                    })
+                } else {
+                    None
+                };
+                {
+                    let _current = Cx::set_current(Some(source.clone()));
+                    assert!(tx.send(probe).is_ok());
+                }
+                let source_after = source.logical_tick();
+                {
+                    let current = (observer_mode != 1).then(|| poller.clone());
+                    let _current = Cx::set_current(current);
+                    let mut task = Context::from_waker(Waker::noop());
+                    if let Some(stream) = stream.as_mut() {
+                        let Poll::Ready(Some(value)) = Pin::new(stream).poll_next(&mut task) else {
+                            panic!("published watch stream snapshot must be ready");
+                        };
+                        assert_eq!(value.value, 11);
+                    } else {
+                        let mut future = Box::pin(
+                            receiver.as_mut().unwrap().wait_for(&constructor, |value| {
+                                assert_eq!(value.value, 11);
+                                value.observe();
+                                api == 0
+                            }),
+                        );
+                        if api == 0 {
+                            let Poll::Ready(Ok(value)) = future.as_mut().poll(&mut task) else {
+                                panic!("satisfied watch predicate must be ready");
+                            };
+                            assert_eq!(value.value, 11);
+                        } else {
+                            assert!(future.as_mut().poll(&mut task).is_pending());
+                        }
+                    }
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                if observer_mode == 0 {
+                    assert_eq!(
+                        source_before.causal_order(&poller.logical_now()),
+                        CausalOrder::Before
+                    );
+                    assert_eq!(
+                        source_after.causal_order(&poller.logical_now()),
+                        CausalOrder::Concurrent
+                    );
+                    assert_eq!(constructor.logical_now(), constructor_before);
+                } else if observer_mode == 1 {
+                    assert_eq!(
+                        source_before.causal_order(&constructor.logical_now()),
+                        CausalOrder::Before
+                    );
+                    assert_eq!(
+                        source_after.causal_order(&constructor.logical_now()),
+                        CausalOrder::Concurrent
+                    );
+                    assert_eq!(poller.logical_now(), poller_before);
+                } else {
+                    assert_eq!(constructor.logical_now(), constructor_before);
+                    assert_eq!(poller.logical_now(), poller_before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn watch_clone_panic_preserves_the_previous_publication() {
+        use crate::trace::distributed::{CausalOrder, LogicalTime};
+
+        struct PanicOnClone {
+            value: u32,
+            source: LogicalTime,
+            observer: Cx,
+        }
+
+        impl Clone for PanicOnClone {
+            fn clone(&self) -> Self {
+                assert_eq!(
+                    self.source.causal_order(&self.observer.logical_now()),
+                    CausalOrder::Before
+                );
+                panic!("watch clone rollback sentinel");
+            }
+        }
+
+        let _host = Cx::set_current(None);
+        let source = watch_causality_context(97, "source");
+        let modifier = watch_causality_context(97, "modifier");
+        let reader = watch_causality_context(97, "reader");
+        let source_before = source.logical_tick();
+        let modifier_before = modifier.logical_tick();
+        let (tx, rx) = {
+            let _current = Cx::set_current(Some(source.clone()));
+            channel(PanicOnClone {
+                value: 11,
+                source: source_before.clone(),
+                observer: modifier.clone(),
+            })
+        };
+        let source_after = source.logical_tick();
+        let original = tx.inner.value.read().2.as_ref().unwrap().time.clone();
+        {
+            let _current = Cx::set_current(Some(modifier.clone()));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tx.send_modify(|_| panic!("modifier must not run after Clone panics"))
+            }));
+            assert_eq!(
+                result.expect_err("Clone must panic").downcast_ref::<&str>(),
+                Some(&"watch clone rollback sentinel")
+            );
+        }
+        assert_eq!(tx.inner.current_version(), 0);
+        assert_eq!(tx.inner.value.read().2.as_ref().unwrap().time, original);
+        assert_eq!(
+            source_before.causal_order(&modifier.logical_now()),
+            CausalOrder::Before
+        );
+        {
+            let _current = Cx::set_current(Some(reader.clone()));
+            assert_eq!(rx.borrow().value, 11);
+        }
+        let received = reader.logical_now();
+        assert_eq!(source_before.causal_order(&received), CausalOrder::Before);
+        assert_eq!(source_after.causal_order(&received), CausalOrder::Concurrent);
+        assert_eq!(modifier_before.causal_order(&received), CausalOrder::Concurrent);
+    }
+
+    #[test]
+    fn watch_foreign_runtime_values_do_not_merge_reused_clock_nodes() {
+        let _host = Cx::set_current(None);
+        let source = watch_causality_context(97, "same-task-node");
+        let receiver = watch_causality_context(98, "same-task-node");
+        for _ in 0..10 {
+            let _ = source.logical_tick();
+        }
+        let (tx, mut rx) = {
+            let _current = Cx::set_current(Some(source.clone()));
+            channel(11_u32)
+        };
+        let before = receiver.logical_now();
+        {
+            let _current = Cx::set_current(Some(receiver.clone()));
+            assert_eq!(rx.borrow_and_update_clone(), 11);
+        }
+        assert_eq!(receiver.logical_now(), before);
+        {
+            let _current = Cx::set_current(Some(source));
+            tx.send(12).unwrap();
+        }
+        {
+            let _current = Cx::set_current(Some(receiver.clone()));
+            assert_eq!(rx.borrow_and_update_clone(), 12);
+        }
+        assert_eq!(receiver.logical_now(), before);
+    }
+
