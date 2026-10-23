@@ -133,17 +133,15 @@ fn regression_estimated_classes_concurrent_trace() {
     init_test_logging();
     test_phase!("regression_estimated_classes_concurrent_trace");
 
-    // Two tasks sharing a region: races exist, classes > 1.
+    // Creation is a prerequisite for both spawns; the two spawns commute.
+    // Dependency candidates therefore do not establish a second reachable class.
     let events = [
         TraceEvent::region_created(1, Time::ZERO, rid(1), None),
         TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
         TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
     ];
-    let est = estimated_classes(&events);
-    assert!(
-        est >= 2,
-        "concurrent trace should have ≥2 classes, got {est}"
-    );
+    assert!(!detect_races(&events).is_race_free());
+    assert_eq!(estimated_classes(&events), 1);
 
     test_complete!("regression_estimated_classes_concurrent_trace");
 }
@@ -153,7 +151,7 @@ fn regression_estimated_classes_monotone_with_concurrency() {
     init_test_logging();
     test_phase!("regression_estimated_classes_monotone_with_concurrency");
 
-    // More concurrent tasks → more estimated classes (non-strictly).
+    // Additional independent spawns still supply only one observed class.
     let events_2 = [
         TraceEvent::region_created(1, Time::ZERO, rid(1), None),
         TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
@@ -167,10 +165,8 @@ fn regression_estimated_classes_monotone_with_concurrency() {
     ];
     let est_2 = estimated_classes(&events_2);
     let est_3 = estimated_classes(&events_3);
-    assert!(
-        est_3 >= est_2,
-        "more tasks should give ≥ classes: {est_3} vs {est_2}"
-    );
+    assert_eq!(est_2, 1);
+    assert_eq!(est_3, 1);
 
     test_complete!("regression_estimated_classes_monotone_with_concurrency");
 }

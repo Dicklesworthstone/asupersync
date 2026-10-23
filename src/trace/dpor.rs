@@ -483,47 +483,20 @@ pub fn racing_events(events: &[TraceEvent]) -> Vec<usize> {
     indices
 }
 
-/// Estimate the number of distinct equivalence classes reachable by
-/// exploring all backtrack points.
+/// Conservative lower bound on equivalence classes witnessed by one trace.
 ///
-/// This is a lower bound: the actual number may be higher if backtrack
-/// points interact.
+/// A trace supplies one execution, but no enabled-set evidence or replayed
+/// alternatives. A dependency or candidate backtrack point does not prove that
+/// reversing two events is schedulable. For example, region creation must
+/// precede its child spawns, while independent spawns commute into one class.
+///
+/// The bound is therefore one, including the empty execution. Race counts
+/// remain available separately for exploration guidance. An explorer may report
+/// a stronger bound only from validated executions in distinct equivalence
+/// classes; this function does not turn unexecuted candidates into coverage.
 #[must_use]
-pub fn estimated_classes(events: &[TraceEvent]) -> usize {
-    let analysis = detect_races(events);
-    // detect_races intentionally reports immediate same-task dependencies, but
-    // those are already ordered by the minimal happens-before graph and do not
-    // represent schedulable alternatives. Filter them out so the estimate
-    // remains a fail-closed lower bound on reachable equivalence classes.
-    let hb = HappensBeforeGraph::from_trace(events);
-    let mut sorted: Vec<&Race> = analysis
-        .races
-        .iter()
-        .filter(|race| !hb.happens_before(race.earlier, race.later))
-        .collect();
-
-    // Each remaining race can double the number of classes (in the worst
-    // case). But many races are "overlapping" and don't multiply
-    // independently. Conservative estimate: 1 + number of non-overlapping
-    // schedulable races.
-    if sorted.is_empty() {
-        return 1;
-    }
-
-    // Count non-overlapping races (greedy: sort by later index, pick races
-    // whose earlier index > previous race's later index).
-    sorted.sort_by_key(|r| (r.later, r.earlier));
-
-    let mut non_overlapping = 1usize;
-    let mut last_later = 0;
-    for race in &sorted {
-        if race.earlier >= last_later {
-            non_overlapping += 1;
-            last_later = race.later;
-        }
-    }
-
-    non_overlapping
+pub fn estimated_classes(_events: &[TraceEvent]) -> usize {
+    1
 }
 
 /// Per-resource race counts for coverage analysis.
@@ -567,7 +540,7 @@ pub struct TraceCoverageAnalysis {
     pub immediate_race_count: usize,
     /// HB-races detected (vector-clock based).
     pub hb_race_count: usize,
-    /// Estimated equivalence classes reachable.
+    /// Conservative class lower bound supported by this single trace.
     pub estimated_classes: usize,
     /// Backtrack points generated.
     pub backtrack_point_count: usize,
