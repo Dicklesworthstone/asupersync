@@ -1090,3 +1090,414 @@
         // Acquire stream must NOT have been polled again.
         assert_eq!(acquire_polls.load(Ordering::SeqCst), 1);
     }
+
+
+    // asupersync-combinator-time-audit-fqdvqn: retirement must precede the
+    // release constructor on normal and panic transitions, as it does on drop.
+    mod retirement_order {
+        use super::*;
+
+        #[derive(Clone, Copy)]
+        enum UseExit {
+            Value,
+            Error,
+            Panicked,
+        }
+
+        struct GuardedTerminalUse<'a> {
+            _guard: parking_lot::MutexGuard<'a, ()>,
+            exit: UseExit,
+            panic_on_drop: bool,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Future for GuardedTerminalUse<'_> {
+            type Output = Result<u32, &'static str>;
+
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                match self.exit {
+                    UseExit::Value => Poll::Ready(Ok(73)),
+                    UseExit::Error => Poll::Ready(Err("use failed")),
+                    UseExit::Panicked => panic!("use poll panic"),
+                }
+            }
+        }
+
+        impl Drop for GuardedTerminalUse<'_> {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                if self.panic_on_drop {
+                    panic!("use destructor panic");
+                }
+            }
+        }
+
+        struct CountedRelease {
+            polls: Arc<AtomicUsize>,
+            completions: Arc<AtomicUsize>,
+        }
+
+        impl Future for CountedRelease {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                if self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    self.completions.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready(())
+                }
+            }
+        }
+
+        fn poll_through_release<F: Future>(future: F, completions: &AtomicUsize) -> F::Output {
+            // Own the bracket here so destructor panics exercise cleanup
+            // during unwinding as well as the ordinary asynchronous path.
+            let mut future = Box::pin(future);
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(
+                future.as_mut().poll(&mut cx).is_pending(),
+                "no use result or panic may escape while release is pending"
+            );
+            assert_eq!(completions.load(Ordering::SeqCst), 0);
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => result,
+                Poll::Pending => panic!("release must finish on its second poll"),
+            }
+        }
+
+        fn check_use_retirement(
+            exit: UseExit,
+            panic_on_drop: bool,
+            release_constructor_panics: bool,
+        ) {
+            let mutex = Mutex::new(());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let constructors = AtomicUsize::new(0);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let completions = Arc::new(AtomicUsize::new(0));
+            let release_found_unlocked = AtomicBool::new(false);
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                poll_through_release(
+                    bracket(
+                        std::future::ready(Ok::<_, &'static str>(&mutex)),
+                        |resource| GuardedTerminalUse {
+                            _guard: resource.lock(),
+                            exit,
+                            panic_on_drop,
+                            drops: Arc::clone(&drops),
+                        },
+                        |resource| {
+                            constructors.fetch_add(1, Ordering::SeqCst);
+                            // A blocking lock would hang the old implementation.
+                            // Observe the same ownership defect without hanging.
+                            release_found_unlocked
+                                .store(resource.try_lock().is_some(), Ordering::SeqCst);
+                            if release_constructor_panics {
+                                panic!("release constructor panic");
+                            }
+                            CountedRelease {
+                                polls: Arc::clone(&polls),
+                                completions: Arc::clone(&completions),
+                            }
+                        },
+                    ),
+                    &completions,
+                )
+            }));
+
+            let expected_panic = if release_constructor_panics {
+                Some("release constructor panic")
+            } else if panic_on_drop {
+                Some("use destructor panic")
+            } else if matches!(exit, UseExit::Panicked) {
+                Some("use poll panic")
+            } else {
+                None
+            };
+            if let Some(expected) = expected_panic {
+                let payload = result.expect_err("the original panic must escape");
+                assert_eq!(payload.downcast_ref::<&str>().copied(), Some(expected));
+            } else {
+                let expected = match exit {
+                    UseExit::Value => Ok(73),
+                    UseExit::Error => Err(BracketError::Inner("use failed")),
+                    UseExit::Panicked => unreachable!(),
+                };
+                assert_eq!(result.expect("ordinary outcomes must not panic"), expected);
+            }
+
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "retire use exactly once");
+            assert_eq!(constructors.load(Ordering::SeqCst), 1);
+            assert!(
+                release_found_unlocked.load(Ordering::SeqCst),
+                "release must be constructed after the use future releases its lock"
+            );
+            assert!(mutex.try_lock().is_some());
+            if release_constructor_panics {
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(completions.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(polls.load(Ordering::SeqCst), 2);
+                assert_eq!(completions.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[test]
+        fn release_constructor_runs_after_successful_use_future_is_dropped() {
+            check_use_retirement(UseExit::Value, false, false);
+        }
+
+        #[test]
+        fn release_constructor_runs_after_failed_use_future_is_dropped() {
+            check_use_retirement(UseExit::Error, false, false);
+        }
+
+        #[test]
+        fn release_constructor_runs_after_panicked_use_future_is_dropped() {
+            check_use_retirement(UseExit::Panicked, false, false);
+        }
+
+        #[test]
+        fn use_destructor_panic_still_installs_and_finishes_release_once() {
+            check_use_retirement(UseExit::Value, true, false);
+        }
+
+        #[test]
+        fn release_constructor_panic_still_takes_precedence_over_use_panic() {
+            check_use_retirement(UseExit::Panicked, false, true);
+            check_use_retirement(UseExit::Value, true, true);
+        }
+
+        #[test]
+        fn caught_use_destructor_panic_keeps_release_owned_until_bracket_drop() {
+            let mutex = Mutex::new(());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let constructors = AtomicUsize::new(0);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let completions = Arc::new(AtomicUsize::new(0));
+            let release_found_unlocked = AtomicBool::new(false);
+            let mut future = Box::pin(bracket(
+                std::future::ready(Ok::<_, &'static str>(&mutex)),
+                |resource| GuardedTerminalUse {
+                    _guard: resource.lock(),
+                    exit: UseExit::Value,
+                    panic_on_drop: true,
+                    drops: Arc::clone(&drops),
+                },
+                |resource| {
+                    constructors.fetch_add(1, Ordering::SeqCst);
+                    release_found_unlocked.store(resource.try_lock().is_some(), Ordering::SeqCst);
+                    CountedRelease {
+                        polls: Arc::clone(&polls),
+                        completions: Arc::clone(&completions),
+                    }
+                },
+            ));
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                future.as_mut().poll(&mut cx)
+            }));
+            let payload = first.expect_err("use destructor must unwind");
+            assert_eq!(
+                payload.downcast_ref::<&str>().copied(),
+                Some("use destructor panic")
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(constructors.load(Ordering::SeqCst), 1);
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(completions.load(Ordering::SeqCst), 0);
+            assert!(release_found_unlocked.load(Ordering::SeqCst));
+
+            drop(future);
+
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(constructors.load(Ordering::SeqCst), 1);
+            assert_eq!(polls.load(Ordering::SeqCst), 2);
+            assert_eq!(completions.load(Ordering::SeqCst), 1);
+            assert!(mutex.try_lock().is_some());
+        }
+
+        struct GuardedAcquire<'a> {
+            resource: &'a Mutex<()>,
+            _guard: parking_lot::MutexGuard<'a, ()>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl<'a> Future for GuardedAcquire<'a> {
+            type Output = Result<&'a Mutex<()>, &'static str>;
+
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                Poll::Ready(Ok(self.resource))
+            }
+        }
+
+        impl Drop for GuardedAcquire<'_> {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn use_constructor_panic_retires_acquire_future_before_release() {
+            let mutex = Mutex::new(());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let constructors = AtomicUsize::new(0);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let completions = Arc::new(AtomicUsize::new(0));
+            let release_found_unlocked = AtomicBool::new(false);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                poll_through_release(
+                    bracket(
+                        GuardedAcquire {
+                            resource: &mutex,
+                            _guard: mutex.lock(),
+                            drops: Arc::clone(&drops),
+                        },
+                        |_| -> std::future::Ready<Result<u32, &'static str>> {
+                            panic!("use constructor panic")
+                        },
+                        |resource| {
+                            constructors.fetch_add(1, Ordering::SeqCst);
+                            release_found_unlocked
+                                .store(resource.try_lock().is_some(), Ordering::SeqCst);
+                            CountedRelease {
+                                polls: Arc::clone(&polls),
+                                completions: Arc::clone(&completions),
+                            }
+                        },
+                    ),
+                    &completions,
+                )
+            }));
+
+            let payload = result.expect_err("use constructor panic must escape after release");
+            assert_eq!(
+                payload.downcast_ref::<&str>().copied(),
+                Some("use constructor panic")
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(constructors.load(Ordering::SeqCst), 1);
+            assert_eq!(polls.load(Ordering::SeqCst), 2);
+            assert_eq!(completions.load(Ordering::SeqCst), 1);
+            assert!(
+                release_found_unlocked.load(Ordering::SeqCst),
+                "a completed acquire future must not retain its lock into release"
+            );
+            assert!(mutex.try_lock().is_some());
+        }
+
+        #[test]
+        fn use_constructor_runs_after_completed_acquire_future_is_dropped() {
+            let mutex = Mutex::new(());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let constructors = AtomicUsize::new(0);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let completions = Arc::new(AtomicUsize::new(0));
+            let use_found_unlocked = AtomicBool::new(false);
+            let release_found_unlocked = AtomicBool::new(false);
+            let result = poll_through_release(
+                bracket(
+                    GuardedAcquire {
+                        resource: &mutex,
+                        _guard: mutex.lock(),
+                        drops: Arc::clone(&drops),
+                    },
+                    |resource| {
+                        use_found_unlocked.store(resource.try_lock().is_some(), Ordering::SeqCst);
+                        std::future::ready(Ok::<_, &'static str>(73_u32))
+                    },
+                    |resource| {
+                        constructors.fetch_add(1, Ordering::SeqCst);
+                        release_found_unlocked
+                            .store(resource.try_lock().is_some(), Ordering::SeqCst);
+                        CountedRelease {
+                            polls: Arc::clone(&polls),
+                            completions: Arc::clone(&completions),
+                        }
+                    },
+                ),
+                &completions,
+            );
+
+            assert_eq!(result, Ok(73));
+            assert!(
+                use_found_unlocked.load(Ordering::SeqCst),
+                "use must be constructed after the acquire future releases its lock"
+            );
+            assert!(release_found_unlocked.load(Ordering::SeqCst));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(constructors.load(Ordering::SeqCst), 1);
+            assert_eq!(polls.load(Ordering::SeqCst), 2);
+            assert_eq!(completions.load(Ordering::SeqCst), 1);
+        }
+
+        struct PanickingAcquireDrop<'a>(GuardedAcquire<'a>);
+
+        impl<'a> Future for PanickingAcquireDrop<'a> {
+            type Output = Result<&'a Mutex<()>, &'static str>;
+
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                Poll::Ready(Ok(self.0.resource))
+            }
+        }
+
+        impl Drop for PanickingAcquireDrop<'_> {
+            fn drop(&mut self) {
+                panic!("acquire destructor panic");
+            }
+        }
+
+        #[test]
+        fn acquire_destructor_panic_skips_use_and_waits_for_async_release() {
+            let mutex = Mutex::new(());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let use_called = AtomicBool::new(false);
+            let constructors = AtomicUsize::new(0);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let completions = Arc::new(AtomicUsize::new(0));
+            let release_found_unlocked = AtomicBool::new(false);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                poll_through_release(
+                    bracket(
+                        PanickingAcquireDrop(GuardedAcquire {
+                            resource: &mutex,
+                            _guard: mutex.lock(),
+                            drops: Arc::clone(&drops),
+                        }),
+                        |_| {
+                            use_called.store(true, Ordering::SeqCst);
+                            std::future::ready(Ok::<_, &'static str>(73_u32))
+                        },
+                        |resource| {
+                            constructors.fetch_add(1, Ordering::SeqCst);
+                            release_found_unlocked
+                                .store(resource.try_lock().is_some(), Ordering::SeqCst);
+                            CountedRelease {
+                                polls: Arc::clone(&polls),
+                                completions: Arc::clone(&completions),
+                            }
+                        },
+                    ),
+                    &completions,
+                )
+            }));
+
+            let payload = result.expect_err("acquire destructor panic must escape after release");
+            assert_eq!(
+                payload.downcast_ref::<&str>().copied(),
+                Some("acquire destructor panic")
+            );
+            assert!(!use_called.load(Ordering::SeqCst));
+            assert!(release_found_unlocked.load(Ordering::SeqCst));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(constructors.load(Ordering::SeqCst), 1);
+            assert_eq!(polls.load(Ordering::SeqCst), 2);
+            assert_eq!(completions.load(Ordering::SeqCst), 1);
+            assert!(mutex.try_lock().is_some());
+        }
+    }
