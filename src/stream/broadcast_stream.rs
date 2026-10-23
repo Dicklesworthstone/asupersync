@@ -1,6 +1,6 @@
 //! Stream adapter for broadcast receivers.
 
-use crate::channel::broadcast;
+use crate::channel::{OwnedCancelRegistration, broadcast};
 use crate::cx::Cx;
 use crate::stream::Stream;
 use crate::util::ArenaIndex;
@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 #[derive(Debug)]
 pub struct BroadcastStream<T> {
     inner: broadcast::Receiver<T>,
-    cx: Cx,
+    cx: OwnedCancelRegistration,
     terminated: bool,
     waiter: Option<ArenaIndex>,
 }
@@ -24,7 +24,7 @@ impl<T: Clone> BroadcastStream<T> {
     pub fn new(cx: Cx, recv: broadcast::Receiver<T>) -> Self {
         Self {
             inner: recv,
-            cx,
+            cx: OwnedCancelRegistration::new(cx),
             terminated: false,
             waiter: None,
         }
@@ -47,7 +47,7 @@ impl<T: Clone> BroadcastStream<T> {
     #[inline]
     #[must_use]
     pub fn cx(&self) -> &Cx {
-        &self.cx
+        self.cx.cx()
     }
 
     /// Consumes the stream, returning the underlying broadcast receiver.
@@ -57,6 +57,7 @@ impl<T: Clone> BroadcastStream<T> {
     pub fn into_inner(mut self) -> broadcast::Receiver<T> {
         // Manually clear waiter registration before moving out inner receiver
         self.inner.clear_waiter_registration(&mut self.waiter);
+        self.cx.clear();
 
         let mut md = std::mem::ManuallyDrop::new(self);
 
@@ -77,6 +78,7 @@ impl<T: Clone> BroadcastStream<T> {
     /// (br-asupersync-lh4z78).
     fn receiver_for_mutation(&mut self) -> &mut broadcast::Receiver<T> {
         self.inner.clear_waiter_registration(&mut self.waiter);
+        self.cx.clear();
         &mut self.inner
     }
 }
@@ -107,10 +109,21 @@ impl<T: Clone> Stream for BroadcastStream<T> {
         }
 
         let this = self.as_mut().get_mut();
-        match this
+        let mut result = this
             .inner
-            .poll_recv_with_waiter(&this.cx, poll_cx, &mut this.waiter)
-        {
+            .poll_recv_with_waiter(this.cx.cx(), poll_cx, &mut this.waiter);
+        if result.is_pending() {
+            this.cx.refresh(poll_cx.waker());
+            if this.cx.cx().is_cancel_requested() {
+                result = this
+                    .inner
+                    .poll_recv_with_waiter(this.cx.cx(), poll_cx, &mut this.waiter);
+            }
+        }
+        if result.is_ready() {
+            this.cx.clear();
+        }
+        match result {
             Poll::Ready(Ok(item)) => Poll::Ready(Some(Ok(item))),
             Poll::Ready(Err(broadcast::RecvError::Lagged(n))) => {
                 Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n))))
