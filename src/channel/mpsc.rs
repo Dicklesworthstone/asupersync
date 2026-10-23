@@ -88,13 +88,10 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use super::MessageCausality;
+use super::cancel_registration::CancelRegistration;
 use crate::cx::Cx;
 use crate::runtime::reactor::token::{SlabToken, TokenSlab};
 use crate::types::outcome::Outcome;
-
-#[path = "mpsc_cancel_registration.rs"]
-mod cancel_registration;
-use cancel_registration::CancelRegistration;
 
 #[path = "mpsc_closed.rs"]
 mod closed;

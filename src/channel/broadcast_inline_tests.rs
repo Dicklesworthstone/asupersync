@@ -3563,3 +3563,184 @@
 
         crate::test_complete!("metamorphic_composite_stress_test");
     }
+
+    #[test]
+    fn recv_cancellation_alone_wakes_and_clears_before_future_drop() {
+        init_test("recv_cancellation_alone_wakes_and_clears_before_future_drop");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u8>(2);
+        let count = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&count));
+        let mut task = Context::from_waker(&waker);
+        let mut recv = Box::pin(rx.recv(&cx));
+        assert!(recv.as_mut().poll(&mut task).is_pending());
+        assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 1);
+        assert_eq!(count.wake_count(), 0);
+        cx.cancel_fast(crate::types::CancelKind::User);
+        assert!(count.wake_count() > 0);
+        assert_eq!(
+            recv.as_mut().poll(&mut task),
+            Poll::Ready(Err(RecvError::Cancelled))
+        );
+        assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
+        assert_eq!(Arc::strong_count(&count), 2);
+        assert_eq!(
+            recv.as_mut().poll(&mut task),
+            Poll::Ready(Err(RecvError::PolledAfterCompletion))
+        );
+        let fresh = test_cx();
+        assert_eq!(tx.send(&fresh, 7), Ok(1));
+        drop(recv);
+        let mut retry = Box::pin(rx.recv(&fresh));
+        assert_eq!(retry.as_mut().poll(&mut task), Poll::Ready(Ok(7)));
+    }
+
+    #[test]
+    fn recv_success_close_and_lag_clear_cancellation_before_future_drop() {
+        init_test("recv_success_close_and_lag_clear_cancellation_before_future_drop");
+        for terminal in 0..3 {
+            let cx = test_cx();
+            let (tx, mut rx) = channel::<u8>(1);
+            let count = CountingWaker::new();
+            let waker = Waker::from(Arc::clone(&count));
+            let mut task = Context::from_waker(&waker);
+            let mut recv = Box::pin(rx.recv(&cx));
+            assert!(recv.as_mut().poll(&mut task).is_pending());
+            let expected = match terminal {
+                0 => {
+                    tx.send(&cx, 3).unwrap();
+                    Ok(3)
+                }
+                1 => {
+                    drop(tx);
+                    Err(RecvError::Closed)
+                }
+                _ => {
+                    tx.send(&cx, 3).unwrap();
+                    tx.send(&cx, 4).unwrap();
+                    Err(RecvError::Lagged(1))
+                }
+            };
+            assert_eq!(recv.as_mut().poll(&mut task), Poll::Ready(expected));
+            assert_eq!(Arc::strong_count(&count), 2);
+            count.wakes.store(0, AtomicOrdering::SeqCst);
+            cx.cancel_fast(crate::types::CancelKind::User);
+            assert_eq!(count.wake_count(), 0);
+            drop(recv);
+        }
+    }
+
+    #[test]
+    fn recv_drop_removes_only_its_owned_cancellation_registration() {
+        init_test("recv_drop_removes_only_its_owned_cancellation_registration");
+        for sibling in [false, true] {
+            let cx = test_cx();
+            let (tx, mut rx) = channel::<u8>(1);
+            let count = CountingWaker::new();
+            let waker = Waker::from(Arc::clone(&count));
+            let mut task = Context::from_waker(&waker);
+            let mut observer = sibling.then(|| Box::pin(cx.cancelled()));
+            if let Some(observer) = observer.as_mut() {
+                assert!(observer.as_mut().poll(&mut task).is_pending());
+            }
+            let mut recv = Box::pin(rx.recv(&cx));
+            assert!(recv.as_mut().poll(&mut task).is_pending());
+            drop(recv);
+            assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
+            cx.cancel_fast(crate::types::CancelKind::User);
+            assert_eq!(count.wake_count() > 0, sibling);
+            if let Some(observer) = observer.as_mut() {
+                assert!(observer.as_mut().poll(&mut task).is_ready());
+            }
+            assert_eq!(Arc::strong_count(&count), 2);
+            let wakes = count.wake_count();
+            let fresh = test_cx();
+            tx.send(&fresh, 9).unwrap();
+            assert_eq!(count.wake_count(), wakes);
+            assert_eq!(rx.try_recv(), Ok(9));
+        }
+    }
+
+    #[test]
+    fn recv_migration_retargets_the_cancellation_waker() {
+        init_test("recv_migration_retargets_the_cancellation_waker");
+        let cx = test_cx();
+        let (_tx, mut rx) = channel::<u8>(1);
+        let old_count = CountingWaker::new();
+        let new_count = CountingWaker::new();
+        let old_waker = Waker::from(Arc::clone(&old_count));
+        let new_waker = Waker::from(Arc::clone(&new_count));
+        let mut old_task = Context::from_waker(&old_waker);
+        let mut new_task = Context::from_waker(&new_waker);
+        let mut recv = Box::pin(rx.recv(&cx));
+        assert!(recv.as_mut().poll(&mut old_task).is_pending());
+        assert!(recv.as_mut().poll(&mut new_task).is_pending());
+        assert_eq!(Arc::strong_count(&old_count), 2);
+        cx.cancel_fast(crate::types::CancelKind::User);
+        assert_eq!(old_count.wake_count(), 0);
+        assert!(new_count.wake_count() > 0);
+        assert_eq!(
+            recv.as_mut().poll(&mut new_task),
+            Poll::Ready(Err(RecvError::Cancelled))
+        );
+        assert_eq!(Arc::strong_count(&new_count), 2);
+    }
+
+    struct RetiredCancellationWake {
+        cx: Cx,
+        channel: std::sync::Weak<Channel<u8>>,
+        retired: Arc<AtomicBool>,
+    }
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for RetiredCancellationWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for RetiredCancellationWake {
+        fn drop(&mut self) {
+            let channel = self.channel.upgrade().expect("sender remains alive");
+            assert!(channel.inner.try_lock().is_some());
+            assert!(self.cx.inner.try_write().is_some());
+            self.retired.store(true, AtomicOrdering::SeqCst);
+            self.cx.cancel_fast(crate::types::CancelKind::User);
+        }
+    }
+
+    #[test]
+    fn recv_retiring_wakers_cancel_outside_locks() {
+        init_test("recv_retiring_wakers_cancel_outside_locks");
+        for abandon in [false, true] {
+            let cx = test_cx();
+            let (tx, mut rx) = channel::<u8>(1);
+            let retired = Arc::new(AtomicBool::new(false));
+            let mut recv = Box::pin(rx.recv(&cx));
+            {
+                let waker = Waker::from(Arc::new(RetiredCancellationWake {
+                    cx: cx.clone(),
+                    channel: Arc::downgrade(&tx.channel),
+                    retired: Arc::clone(&retired),
+                }));
+                let mut task = Context::from_waker(&waker);
+                assert!(recv.as_mut().poll(&mut task).is_pending());
+            }
+            assert!(!cx.is_cancel_requested());
+            assert!(!retired.load(AtomicOrdering::SeqCst));
+            if abandon {
+                drop(recv);
+            } else {
+                let count = CountingWaker::new();
+                let waker = Waker::from(Arc::clone(&count));
+                let mut task = Context::from_waker(&waker);
+                assert_eq!(
+                    recv.as_mut().poll(&mut task),
+                    Poll::Ready(Err(RecvError::Cancelled)),
+                    "cancellation from the retired Waker must finish this poll"
+                );
+                assert_eq!(Arc::strong_count(&count), 2);
+            }
+            assert!(retired.load(AtomicOrdering::SeqCst));
+            assert!(cx.is_cancel_requested());
+            assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
+        }
+    }

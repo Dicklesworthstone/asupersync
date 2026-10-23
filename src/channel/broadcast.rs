@@ -17,6 +17,7 @@
 //! - `reserve` is cancel-safe: if cancelled, no slot is consumed.
 //! - `recv` is cancel-safe: if cancelled, no message is consumed (cursor not advanced).
 
+use super::cancel_registration::CancelRegistration;
 use crate::cx::Cx;
 use crate::util::{Arena, ArenaIndex};
 use parking_lot::Mutex;
@@ -906,6 +907,7 @@ impl<T: Clone> Receiver<T> {
         Recv {
             receiver: self,
             cx,
+            cancel: CancelRegistration::new(cx),
             waiter: None,
             completed: false,
         }
@@ -1037,6 +1039,7 @@ impl<T: Clone> Receiver<T> {
 pub struct Recv<'a, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
     cx: &'a Cx<Caps>,
+    cancel: CancelRegistration<'a, Caps>,
     /// Token for the registered waiter in the arena.
     waiter: Option<ArenaIndex>,
     completed: bool,
@@ -1058,13 +1061,27 @@ impl<T: Clone, Caps> Future for Recv<'_, T, Caps> {
             return Poll::Ready(Err(RecvError::PolledAfterCompletion));
         }
 
-        let poll = this
+        let result = this
             .receiver
             .poll_recv_with_waiter(this.cx, ctx, &mut this.waiter);
-        if poll.is_ready() {
+        if result.is_ready() {
             this.completed = true;
+            this.cancel.clear();
+            return result;
         }
-        poll
+        this.cancel.refresh(ctx.waker());
+        // The operation's Cx can be independently cancelled while its task
+        // remains live. Recheck after arbitrary registration callbacks.
+        if this.cx.is_cancel_requested() && this.cx.checkpoint().is_err() {
+            this.completed = true;
+            this.cx.trace("broadcast::recv cancelled");
+            this.receiver
+                .clear_waiter_registration_and_record_cancellation(&mut this.waiter);
+            this.cancel.clear();
+            Poll::Ready(Err(RecvError::Cancelled))
+        } else {
+            Poll::Pending
+        }
     }
 }
 
