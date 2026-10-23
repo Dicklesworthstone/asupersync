@@ -604,3 +604,6 @@ fn membership_withdrawal_rechecks_waiting_reservations_and_preserves_native_drai
         assert_eq!(service.operator.active_connections(), 0);
     });
 }
+
+#[path = "membership_owned.rs"]
+mod owned;

@@ -808,5 +808,8 @@ impl OwnedRemoteExchange for NativeRemoteAdmittedHandle {
     }
 }
 
+mod membership;
+pub use membership::NativeRemoteMembershipError;
+
 #[cfg(test)]
 mod tests;

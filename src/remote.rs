@@ -119,8 +119,8 @@ pub use typed::{
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use admission::{
     AdmittedNativeRemoteRuntime, NativeRemoteAdmissionError, NativeRemoteAdmissionLimits,
-    NativeRemoteAdmissionUsage, NativeRemoteAdmittedHandle, NativeRemoteOwnedError,
-    NativeRemotePeerAdmissionLimits, NativeRemoteReservation,
+    NativeRemoteAdmissionUsage, NativeRemoteAdmittedHandle, NativeRemoteMembershipError,
+    NativeRemoteOwnedError, NativeRemotePeerAdmissionLimits, NativeRemoteReservation,
 };
 
 // ---------------------------------------------------------------------------
