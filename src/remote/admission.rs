@@ -7,8 +7,11 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::distributed::remote_owned::{
-    RemoteAdmissionLimits, RemoteExecutor, RemotePeerLimits, RemoteQueueLimits,
-    RemoteReservation as QueueReservation, RemoteReserveError,
+    OwnedRemoteExchange, OwnedRemoteRequest, RemoteAdmissionLimits, RemoteExecutor,
+    RemotePeerLimits, RemoteQueueLimits, RemoteReservation as QueueReservation,
+    RemoteReserveError, RemoteRunConfig, RemoteRunError, RemoteRunHandle, RemoteRunReport,
+    RemoteRunRetention, RemoteRunTaskError, prepare_owned_timing, run_owned_request,
+    spawn_owned_request,
 };
 
 /// Aggregate limits for a separate native transport domain.
@@ -91,6 +94,23 @@ pub enum NativeRemoteAdmissionError {
     /// Local publication failed; no automatic retry is added.
     #[error(transparent)]
     Remote(#[from] RemoteError),
+}
+
+/// Refusal before an admitted invocation has acquired its owning child region.
+/// Later native dispatch failures and actual protocol outcomes remain in the
+/// returned [`RemoteRunReport`] or [`RemoteRunHandle`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum NativeRemoteOwnedError {
+    /// The reserved input, route or native admission policy refused the call.
+    #[error(transparent)]
+    Admission(#[from] NativeRemoteAdmissionError),
+    /// Required timer, caller liveness or child-region admission was unavailable.
+    #[error(transparent)]
+    Ownership(#[from] RemoteRunError),
+    /// The local owning task could not be submitted.
+    #[error(transparent)]
+    Spawn(#[from] SpawnError),
 }
 
 struct RoutePolicy {
@@ -413,6 +433,92 @@ impl fmt::Debug for NativeRemoteReservation {
 }
 
 impl NativeRemoteReservation {
+    /// Execute this reservation in an actual child region of `cx`.
+    ///
+    /// The proxy registers a checked Lease before publishing the native
+    /// request. Parent cancellation and the explicit timeout request remote
+    /// cancellation and retain the lease and admission charge until the native
+    /// driver has published its terminal and the child has closed. This
+    /// reservation supplies the route authority without an attached legacy
+    /// `RemoteCap`. The context's remote capability mask and child attenuation
+    /// remain effective; the route cannot escape its separate bounded domain.
+    ///
+    /// A bounded input copy is retained under the existing charge while local
+    /// admission is pending. The exact eventual wire request is checked again
+    /// by `commit` before native publication. Returned report bytes transfer to
+    /// the caller and are outside the domain after return. Inspect
+    /// [`RemoteRunReport::is_success`] before treating any report as success.
+    ///
+    /// Cancellation uses a bounded parent-cancelled wire reason; the exact
+    /// origin reason remains in `RemoteRunReply::cancellation`. Native lease
+    /// expiry and drain timeout retain their delivery-ambiguity semantics.
+    /// Dropping an unpolled future releases the reservation without dispatch;
+    /// dropping it after admission leaves its proxy owned by the parent region
+    /// until cancellation and terminal collection complete.
+    pub async fn run_owned(
+        self, cx: &Cx, computation: &ComputationName, input: &[u8],
+        lease: Duration, config: RemoteRunConfig,
+    ) -> Result<RemoteRunReport, NativeRemoteOwnedError> {
+        let timing = prepare_owned_timing(cx, &config)?;
+        let request = self.prepare_owned(cx, computation, input, lease)?;
+        Ok(run_owned_request(cx, request, config.child, timing).await?)
+    }
+
+    /// Submit a region-owned admitted invocation without waiting for its result.
+    ///
+    /// The timeout starts before owner-task admission. Once submitted, work and
+    /// cleanup progress even if the result handle is never polled. Dropping the
+    /// handle requests cancellation; the runtime retains the owner and its
+    /// charged buffers through terminal retirement. An unread terminal report
+    /// remains charged until consumed or dropped. Joining transfers report
+    /// bytes to the caller, which then owns their lifetime outside this domain.
+    ///
+    /// Uses the same checked lease, bounded cancellation and child-close path
+    /// as [`Self::run_owned`]. The returned handle needs no manual native close
+    /// to participate in parent-region cancellation or quiescence.
+    pub fn spawn_owned(
+        self, cx: &Cx, computation: &ComputationName, input: &[u8],
+        lease: Duration, config: RemoteRunConfig,
+    ) -> Result<RemoteRunHandle, NativeRemoteOwnedError> {
+        let timing = prepare_owned_timing(cx, &config)?;
+        let request = self.prepare_owned(cx, computation, input, lease)?;
+        Ok(spawn_owned_request(cx, request, config.child, timing)?)
+    }
+
+    fn prepare_owned(
+        self, cx: &Cx, computation: &ComputationName, input: &[u8], lease: Duration,
+    ) -> Result<NativeOwnedRequest, NativeRemoteAdmissionError> {
+        if input.len() != self.input_bytes {
+            return Err(NativeRemoteAdmissionError::InputLength);
+        }
+        if lease.is_zero() || computation.as_str().is_empty() || computation.as_str().len() > 255 {
+            return Err(NativeRemoteAdmissionError::InvalidConfig("lease or computation name"));
+        }
+        if cx.checkpoint().is_err() {
+            return Err(NativeRemoteAdmissionError::Cancelled);
+        }
+        if !cx.capabilities().remote {
+            return Err(NativeRemoteAdmissionError::Remote(RemoteError::NoCapability));
+        }
+        if *self.domain.closed.lock() {
+            return Err(NativeRemoteAdmissionError::Closed);
+        }
+        // Copy only bounded, live input bytes. A caller Vec's spare capacity
+        // must not become unaccounted runtime-owned memory while queued.
+        let policy = &self.domain.routes[&self.node];
+        if input.len() > policy.max_input_bytes || input.len() > policy.frame_bytes {
+            return Err(NativeRemoteAdmissionError::RequestTooLarge);
+        }
+        let retention = Arc::new(NativeOwnedRetention {
+            _domain: Arc::clone(&self.domain),
+            _credit: Arc::clone(&self.credit),
+        });
+        Ok(NativeOwnedRequest {
+            reservation: self, computation: computation.clone(), input: input.to_vec(),
+            lease, retention,
+        })
+    }
+
     /// Commit exactly one local native publication. Input and name stay borrowed
     /// until their checked frame size is known, then are copied under the charge.
     /// This is not remote exactly-once execution; transport ambiguity is preserved.
@@ -506,6 +612,31 @@ impl NativeRemoteReservation {
             credit: Some(self.credit),
             frame_bytes: policy.frame_bytes,
         })
+    }
+}
+
+struct NativeOwnedRetention {
+    _domain: Arc<Domain>,
+    _credit: Arc<NativeRemoteCredit>,
+}
+struct NativeOwnedRequest {
+    reservation: NativeRemoteReservation,
+    computation: ComputationName,
+    input: Vec<u8>,
+    lease: Duration,
+    retention: Arc<NativeOwnedRetention>,
+}
+impl OwnedRemoteRequest for NativeOwnedRequest {
+    type Exchange = NativeRemoteAdmittedHandle;
+    fn validate_context(&self, cx: &Cx) -> Result<(), RemoteRunTaskError> {
+        if cx.capabilities().remote { Ok(()) }
+        else { Err(RemoteError::NoCapability.into()) }
+    }
+    fn dispatch(self, cx: &Cx) -> Result<Self::Exchange, RemoteRunTaskError> {
+        Ok(self.reservation.commit(cx, &self.computation, &self.input, self.lease)?)
+    }
+    fn retention(&self) -> Option<RemoteRunRetention> {
+        Some(Arc::clone(&self.retention) as RemoteRunRetention)
     }
 }
 
@@ -638,6 +769,10 @@ impl NativeRemoteAdmittedHandle {
             return Ok(Outcome::Err(RemoteError::PolledAfterCompletion));
         }
         self.cancel(reason)?;
+        Ok(self.collect_terminal(cx).await)
+    }
+
+    async fn collect_terminal(&mut self, cx: &Cx) -> Outcome<RemoteOutcome, RemoteError> {
         let result = match self.handle.receiver.recv_uninterruptible().await {
             Ok(result) => match self.handle.finish_result(result) {
                 Ok(outcome) => Outcome::Ok(outcome),
@@ -647,7 +782,29 @@ impl NativeRemoteAdmittedHandle {
         };
         self.credit.take();
         cx.trace("remote::admission_terminal_collected");
-        Ok(result)
+        result
+    }
+}
+
+impl OwnedRemoteExchange for NativeRemoteAdmittedHandle {
+    fn remote_task_id(&self) -> RemoteTaskId {
+        NativeRemoteAdmittedHandle::remote_task_id(self)
+    }
+    async fn join(&mut self, cx: &Cx) -> Outcome<RemoteOutcome, RemoteError> {
+        NativeRemoteAdmittedHandle::join(self, cx).await
+    }
+    fn try_join(&mut self) -> Result<Option<RemoteOutcome>, RemoteError> {
+        NativeRemoteAdmittedHandle::try_join(self)
+    }
+    async fn close(&mut self, cx: &Cx) -> Outcome<RemoteOutcome, RemoteError> {
+        if self.handle.completed {
+            return Outcome::Err(RemoteError::PolledAfterCompletion);
+        }
+        // Region cancellation may contain unbounded local attribution. Keep
+        // protected native control bounded and preserve the full local reason
+        // in RemoteRunReply instead of copying it into this domain's buffers.
+        self.handle.request_cancel(CancelReason::parent_cancelled());
+        self.collect_terminal(cx).await
     }
 }
 

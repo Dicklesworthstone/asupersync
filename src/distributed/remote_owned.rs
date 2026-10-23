@@ -19,6 +19,7 @@ use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelReason, Outcome, RegionId, TaskId, Time};
 use std::fmt;
 use std::future::{Future, poll_fn};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -89,8 +90,11 @@ pub enum RemoteRunHandleError {
 /// must supply its own eventual terminal result or drain can remain pending.
 #[must_use = "dropping the owned remote handle requests cancellation"]
 pub struct RemoteRunHandle {
-    task: TaskHandle<Result<RemoteRunReport, RemoteRunError>>,
+    task: TaskHandle<RetainedRemoteResult<Result<RemoteRunReport, RemoteRunError>>>,
     deadline: Time,
+    // Native work keeps unread report bytes charged until consumption/drop.
+    // The legacy capability path has no additional allocation or owner.
+    retention: Option<RemoteRunRetention>,
 }
 
 impl fmt::Debug for RemoteRunHandle {
@@ -148,9 +152,15 @@ impl RemoteRunHandle {
     /// observation after consuming a terminal returns
     /// [`JoinError::PolledAfterCompletion`].
     pub fn try_join(&mut self) -> Result<Option<RemoteRunReport>, RemoteRunHandleError> {
-        match self.task.try_join()? {
-            Some(report) => report.map(Some).map_err(RemoteRunHandleError::Run),
-            None => Ok(None),
+        match self.task.try_join() {
+            Ok(None) => Ok(None),
+            terminal => {
+                self.retention.take();
+                terminal
+                    .map_err(RemoteRunHandleError::Join)?
+                    .map(|report| report.into_inner().map_err(RemoteRunHandleError::Run))
+                    .transpose()
+            }
         }
     }
 
@@ -165,9 +175,10 @@ impl RemoteRunHandle {
         task: &mut Context<'_>,
     ) -> Poll<Result<RemoteRunReport, RemoteRunHandleError>> {
         self.task.poll_join(task).map(|result| {
+            self.retention.take();
             result
                 .map_err(RemoteRunHandleError::Join)
-                .and_then(|report| report.map_err(RemoteRunHandleError::Run))
+                .and_then(|report| report.into_inner().map_err(RemoteRunHandleError::Run))
         })
     }
 
@@ -223,6 +234,10 @@ pub enum RemoteRunTaskError {
     /// Synchronous remote registration/dispatch failed.
     #[error(transparent)]
     Dispatch(#[from] RemoteError),
+    /// A reserved native request was refused before transport publication.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[error(transparent)]
+    NativeAdmission(#[from] crate::remote::NativeRemoteAdmissionError),
     /// The local child-task spawn gateway refused.
     #[error(transparent)]
     Spawn(#[from] SpawnError),
@@ -352,7 +367,67 @@ impl Drop for CheckedLease {
         if let Some(token) = self.0.take() { token.abort(ObligationAbortReason::Cancel); }
     }
 }
-struct Exchange { remote: RemoteHandle, lease: CheckedLease }
+struct Exchange<H> { remote: H, lease: CheckedLease }
+
+/// Private retention shared by the owner, proxy and optional result handle.
+/// Native admission uses it for domain identity and buffer credit; the legacy
+/// capability path needs no allocation or additional owner.
+pub(crate) type RemoteRunRetention = Arc<dyn Send + Sync>;
+
+// Retain credit with a terminal payload through task publication and unread
+// join-slot ownership, even when the public owner has already been dropped.
+// Field order destroys runtime-owned payload bytes before its credit share.
+struct RetainedRemoteResult<T> {
+    value: T,
+    _retention: Option<RemoteRunRetention>,
+}
+impl<T> RetainedRemoteResult<T> {
+    fn into_inner(self) -> T { self.value }
+}
+
+/// A private adapter over the existing terminal and cancellation protocols.
+pub(crate) trait OwnedRemoteExchange: Send + 'static {
+    fn remote_task_id(&self) -> RemoteTaskId;
+    fn join(&mut self, cx: &Cx) -> impl Future<Output = Outcome<RemoteOutcome, RemoteError>> + Send;
+    fn try_join(&mut self) -> Result<Option<RemoteOutcome>, RemoteError>;
+    fn close(&mut self, cx: &Cx) -> impl Future<Output = Outcome<RemoteOutcome, RemoteError>> + Send;
+}
+
+pub(crate) trait OwnedRemoteRequest: Send + 'static {
+    type Exchange: OwnedRemoteExchange;
+    fn validate_context(&self, cx: &Cx) -> Result<(), RemoteRunTaskError>;
+    fn dispatch(self, cx: &Cx) -> Result<Self::Exchange, RemoteRunTaskError>;
+    fn retention(&self) -> Option<RemoteRunRetention> { None }
+}
+
+struct CapabilityRequest {
+    node: NodeId,
+    computation: ComputationName,
+    input: RemoteInput,
+}
+impl OwnedRemoteRequest for CapabilityRequest {
+    type Exchange = RemoteHandle;
+    fn validate_context(&self, cx: &Cx) -> Result<(), RemoteRunTaskError> {
+        if cx.remote().is_none_or(|cap| cap.runtime().is_none()) {
+            Err(RemoteRunTaskError::NoRemoteRuntime)
+        } else { Ok(()) }
+    }
+    fn dispatch(self, cx: &Cx) -> Result<Self::Exchange, RemoteRunTaskError> {
+        Ok(spawn_remote(cx, self.node, self.computation, self.input)?)
+    }
+}
+impl OwnedRemoteExchange for RemoteHandle {
+    fn remote_task_id(&self) -> RemoteTaskId { RemoteHandle::remote_task_id(self) }
+    async fn join(&mut self, cx: &Cx) -> Outcome<RemoteOutcome, RemoteError> {
+        RemoteHandle::join(self, cx).await
+    }
+    fn try_join(&mut self) -> Result<Option<RemoteOutcome>, RemoteError> {
+        RemoteHandle::try_join(self)
+    }
+    async fn close(&mut self, cx: &Cx) -> Outcome<RemoteOutcome, RemoteError> {
+        RemoteHandle::close(self, cx).await
+    }
+}
 
 // Field drop order retires the complete proxy future (including remote handle
 // and checked token) before its share of outbound admission. The calling scope
@@ -362,27 +437,31 @@ struct AdmittedProxy<F> {
     #[pin]
     future: F,
     _admission: Option<admission::Permit>,
+    _retention: Option<RemoteRunRetention>,
 }
 
 impl<F: Future> Future for AdmittedProxy<F> {
-    type Output = F::Output;
+    type Output = RetainedRemoteResult<F::Output>;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        self.project().future.poll(cx)
+        let this = self.project();
+        this.future.poll(cx).map(|value| RetainedRemoteResult {
+            value,
+            _retention: this._retention.take(),
+        })
     }
 }
 
-async fn execute(
-    cx: Cx, node: NodeId, computation: ComputationName, input: RemoteInput,
-    clock: TimerDriverHandle, deadline: Time,
+async fn execute<R: OwnedRemoteRequest>(
+    cx: Cx, request: R, clock: TimerDriverHandle, deadline: Time,
 ) -> Result<RemoteRunReply, RemoteRunTaskError> {
     if cx.checkpoint().is_err() || clock.now() >= deadline { return Err(RemoteRunTaskError::NotStarted); }
-    if cx.remote().is_none_or(|cap| cap.runtime().is_none()) { return Err(RemoteRunTaskError::NoRemoteRuntime); }
+    request.validate_context(&cx)?;
     let lease = CheckedLease(Some(cx.try_register_obligation_checked(ObligationKind::Lease, cx.task_id())?
         .ok_or(RemoteRunTaskError::NoObligationRuntime)?));
     // Runtime admission can invoke a notifier. Recheck before its side effects.
     if cx.checkpoint().is_err() || clock.now() >= deadline { return Err(RemoteRunTaskError::NotStarted); }
-    let mut exchange = Exchange { remote: spawn_remote(&cx, node, computation, input)?, lease };
+    let mut exchange = Exchange { remote: request.dispatch(&cx)?, lease };
     let remote_task_id = exchange.remote.remote_task_id();
     let mut outcome = exchange.remote.join(&cx).await;
     if matches!(outcome, Outcome::Err(RemoteError::Cancelled(_))) {
@@ -478,28 +557,28 @@ pub fn spawn_remote_owned(
     input: RemoteInput,
     config: RemoteRunConfig,
 ) -> Result<RemoteRunHandle, RemoteRunHandleError> {
-    let (clock, deadline) = prepare_run(cx, &config)?;
+    let timing = prepare_run(cx, &config)?;
+    Ok(spawn_owned_request(cx, CapabilityRequest { node, computation, input }, config.child, timing)?)
+}
+
+pub(crate) fn spawn_owned_request<R: OwnedRemoteRequest>(
+    cx: &Cx, request: R, child: ChildRegionSpec,
+    timing: (TimerDriverHandle, Time),
+) -> Result<RemoteRunHandle, SpawnError> {
+    let (clock, deadline) = timing;
+    let retention = request.retention();
+    let owner_retention = retention.clone();
     let task = cx.spawn(move |owner| async move {
         let result = if clock.now() >= deadline {
             Err(RemoteRunError::Timeout)
         } else {
-            run_prepared(
-                &owner,
-                node,
-                computation,
-                input,
-                config.child,
-                (clock, deadline),
-                None,
-            )
-            .await
+            run_prepared(&owner, request, child, (clock, deadline), None).await
         };
-        // The report is terminal bookkeeping. Preserve it even when the
-        // operation's cancellation arrived during child-region close.
+        // Preserve terminal bookkeeping through acknowledged cancellation.
         let _ = owner.checkpoint();
-        result
+        RetainedRemoteResult { value: result, _retention: owner_retention }
     })?;
-    Ok(RemoteRunHandle { task, deadline })
+    Ok(RemoteRunHandle { task, deadline, retention })
 }
 
 pub(crate) fn prepare_run(
@@ -513,6 +592,16 @@ pub(crate) fn prepare_run(
     if cap.runtime().is_none() {
         return Err(RemoteRunError::NoRemoteRuntime);
     }
+    prepare_owned_timing(cx, config)
+}
+
+/// Timing authority for capability-backed and explicitly reserved calls.
+/// A native reservation is the route authority; attaching its private runtime
+/// to a legacy remote capability would bypass the native admission domain.
+pub(crate) fn prepare_owned_timing(
+    cx: &Cx, config: &RemoteRunConfig,
+) -> Result<(TimerDriverHandle, Time), RemoteRunError> {
+    if cx.is_cancel_requested() { return Err(RemoteRunError::Cancelled); }
     let clock = cx.timer_driver().ok_or(RemoteRunError::NoTimer)?;
     let now = clock.now();
     let deadline = now + config.timeout;
@@ -527,19 +616,26 @@ async fn run_admitted(
     config: RemoteRunConfig, admission: Option<admission::Permit>,
 ) -> Result<RemoteRunReport, RemoteRunError> {
     let timing = prepare_run(cx, &config)?;
-    run_prepared(cx, node, computation, input, config.child, timing, admission).await
+    run_prepared(cx, CapabilityRequest { node, computation, input }, config.child, timing, admission).await
 }
 
-async fn run_prepared(
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub(crate) async fn run_owned_request<R: OwnedRemoteRequest>(
+    cx: &Cx, request: R, child: ChildRegionSpec,
+    timing: (TimerDriverHandle, Time),
+) -> Result<RemoteRunReport, RemoteRunError> {
+    run_prepared(cx, request, child, timing, None).await
+}
+
+async fn run_prepared<R: OwnedRemoteRequest>(
     cx: &Cx,
-    node: NodeId,
-    computation: ComputationName,
-    input: RemoteInput,
+    request: R,
     child_spec: ChildRegionSpec,
     timing: (TimerDriverHandle, Time),
     admission: Option<admission::Permit>,
 ) -> Result<RemoteRunReport, RemoteRunError> {
     let (clock, deadline) = timing;
+    let retention = request.retention();
     let child = cx.open_child_region(child_spec).await?;
     let region_id = child.region_id();
     let mut handle = None;
@@ -548,9 +644,11 @@ async fn run_prepared(
     if trigger.is_none() {
         let timer = clock.clone();
         let proxy_admission = admission.clone();
+        let proxy_retention = request.retention();
         match child.cx().spawn(move |task| AdmittedProxy {
-            future: execute(task, node, computation, input, timer, deadline),
+            future: execute(task, request, timer, deadline),
             _admission: proxy_admission,
+            _retention: proxy_retention,
         }) {
             Ok(task) => handle = Some(task),
             Err(error) => {
@@ -573,7 +671,7 @@ async fn run_prepared(
                 return Poll::Ready(RemoteRunTrigger::Deadline);
             }
             if let Poll::Ready(value) = handle.as_mut().expect("admitted proxy").poll_join(task) {
-                result = Some(value.map_err(RemoteRunTaskError::Join).and_then(|value| value));
+                result = Some(value.map_err(RemoteRunTaskError::Join).and_then(|value| value.into_inner()));
                 return Poll::Ready(RemoteRunTrigger::Finished);
             }
             Poll::Pending
@@ -595,7 +693,7 @@ async fn run_prepared(
         // get here first, where try_join would still report Ok(None).
         let proxy = handle.as_mut().expect("retained proxy");
         result = Some(match poll_fn(|task| proxy.poll_join(task)).await {
-            Ok(value) => value,
+            Ok(value) => value.into_inner(),
             Err(error) => Err(RemoteRunTaskError::Join(error)),
         });
     }
@@ -605,6 +703,7 @@ async fn run_prepared(
         if let Some(stop) = stopped(cx, &clock, deadline) { trigger = stop; }
     }
     let report = RemoteRunReport { trigger, task: result.expect("terminal classification"), close, cancel_error };
+    drop(retention);
     drop(admission);
     Ok(report)
 }
