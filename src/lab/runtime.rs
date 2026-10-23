@@ -7,6 +7,10 @@
 //! - Chaos injection for stress testing
 
 use super::config::LabConfig;
+use super::exact_explorer::{
+    ExactScheduleDecision, ExactScheduleLimits, ExactSchedulePrefix, ExactScheduleRun,
+    ExactScheduleTermination,
+};
 use super::oracle::OracleSuite;
 use crate::lab::chaos::{ChaosRng, ChaosStats};
 use crate::record::ObligationKind;
@@ -1395,8 +1399,18 @@ impl ProductionReplayState {
     }
 }
 
+struct ExactScheduleControl {
+    requested: ExactSchedulePrefix,
+    decisions: Vec<ExactScheduleDecision>,
+    limits: ExactScheduleLimits,
+    stopped: Option<ExactScheduleTermination>,
+}
+
 enum LabDispatchMode<'a> {
     Normal,
+    Exploration {
+        control: &'a mut ExactScheduleControl,
+    },
     Forced {
         expected: Option<(usize, &'a ForcedDispatch)>,
     },
@@ -2532,16 +2546,18 @@ impl LabRuntime {
     /// spawns with a caller context, scoped spawns, and queued spawns inherit
     /// the parent's clock at the spawn request. Completed poll boundaries carry
     /// those clocks, and an actual task-to-task wake merges the waking task's
-    /// clock into the task being awakened. This includes
-    /// channel and join wakes when their receiver has registered a lab waker.
+    /// clock into the task being awakened. Oneshot and MPSC message
+    /// consumption also merges the sender's message clock, including buffered
+    /// receives that need no wake. Retirement-gated joins merge the child's
+    /// terminal clock only after its finalization and retirement barrier.
     ///
     /// A wake without an active task from this runtime has an unknown source
-    /// and contributes no cross-task edge. Channel or join results consumed
-    /// without a wake, arbitrary shared-memory access, and external I/O remain
-    /// uninstrumented; use [`crate::Cx::logical_receive`] when the application
-    /// can supply an explicit synchronization timestamp. Missing evidence may
-    /// produce conservative extra races. This does not make the explorer an
-    /// exhaustive DPOR implementation.
+    /// and contributes no cross-task edge. Watch/broadcast consumption,
+    /// arbitrary shared-memory access, and external I/O remain partially or
+    /// wholly uninstrumented; use [`crate::Cx::logical_receive`] when the
+    /// application can supply an explicit synchronization timestamp. Missing
+    /// evidence may produce conservative extra races. This does not make the
+    /// explorer an exhaustive DPOR implementation.
     ///
     /// [`Self::new`] retains its legacy Lamport clocks and trace event stream.
     #[must_use]
@@ -2631,6 +2647,188 @@ impl LabRuntime {
         // Take ownership by replacing with a disabled recorder
         let recorder = std::mem::replace(&mut self.replay_recorder, TraceRecorder::disabled());
         recorder.finish()
+    }
+
+    pub(crate) fn exact_schedule_empty_prefix(&self) -> ExactSchedulePrefix {
+        ExactSchedulePrefix {
+            seed: self.config.seed,
+            config_hash: forced_schedule_config_hash(&self.config),
+            decisions: Vec::new(),
+        }
+    }
+
+    fn exact_schedule_admission(
+        &self,
+        prefix: &ExactSchedulePrefix,
+        limits: ExactScheduleLimits,
+    ) -> Result<(), ExactScheduleTermination> {
+        let reject = ExactScheduleTermination::ReplayRejected;
+        if prefix.seed != self.config.seed {
+            return Err(reject(ForcedScheduleError::SeedMismatch {
+                expected: self.config.seed,
+                found: prefix.seed,
+            }));
+        }
+        let config_hash = forced_schedule_config_hash(&self.config);
+        if prefix.config_hash != config_hash {
+            return Err(reject(ForcedScheduleError::ConfigMismatch {
+                expected: config_hash,
+                found: prefix.config_hash,
+            }));
+        }
+        if self.steps != 0 || self.certificate.decisions() != 0 {
+            return Err(reject(ForcedScheduleError::RuntimeAlreadyStarted {
+                steps: self.steps,
+                decisions: self.certificate.decisions(),
+            }));
+        }
+        if prefix.decisions.len() > limits.max_dispatches_per_run {
+            return Err(reject(ForcedScheduleError::DispatchLimitExceeded {
+                found: prefix.decisions.len(),
+                limit: limits.max_dispatches_per_run,
+            }));
+        }
+        if self.config.worker_count.max(1) != 1
+            || self.has_chaos()
+            || self.production_replay.is_some()
+            || self.is_clock_paused()
+        {
+            return Err(ExactScheduleTermination::Unsupported {
+                reason: "multiple workers, chaos, production replay, or a paused clock",
+            });
+        }
+        Ok(())
+    }
+
+    // Only ExactScheduleExplorer invokes this after validating nonzero bounds.
+    // Keep the selected dispatch in step_inner so command/timer/I/O preparation
+    // is identical to ordinary execution and the forced-schedule recorder.
+    pub(crate) fn run_exact_schedule_prefix(
+        &mut self,
+        prefix: &ExactSchedulePrefix,
+        limits: ExactScheduleLimits,
+    ) -> ExactScheduleRun {
+        let start_steps = self.steps;
+        let mut control = ExactScheduleControl {
+            requested: prefix.clone(),
+            decisions: Vec::new(),
+            limits,
+            stopped: None,
+        };
+        let mut work_units = 0u64;
+        let admission = self
+            .exact_schedule_admission(prefix, limits)
+            .and_then(|()| {
+                self.start_forced_schedule_recording(limits.max_dispatches_per_run)
+                    .map_err(ExactScheduleTermination::ReplayRejected)
+            });
+        let recording = admission.is_ok();
+        let mut termination = match admission {
+            Err(reason) => reason,
+            Ok(()) => loop {
+                if self.is_quiescent() && !self.has_pending_dispatch_commands() {
+                    if !self.scheduler.lock().is_empty() {
+                        break ExactScheduleTermination::Unsupported {
+                            reason: "scheduler entries remain after structured quiescence",
+                        };
+                    }
+                    break if control.decisions.len() < control.requested.decisions.len() {
+                        ExactScheduleTermination::PrefixDiverged {
+                            decision: control.decisions.len(),
+                        }
+                    } else {
+                        ExactScheduleTermination::Quiescent
+                    };
+                }
+                if work_units >= limits.max_work_per_run
+                    || self.config.max_steps.is_some_and(|max| self.steps >= max)
+                {
+                    break ExactScheduleTermination::WorkLimit;
+                }
+
+                let mut pumped = false;
+                // Match forced-schedule replay's pump ordering. Obligation
+                // posts are applied by step_inner before any task is polled.
+                if self.scheduler.lock().is_empty()
+                    && !self.has_pending_dispatch_commands()
+                    && let Some(deadline) = self.next_auto_advance_deadline()
+                    && deadline > self.now()
+                {
+                    work_units = work_units.saturating_add(1);
+                    self.advance_time_to(deadline);
+                    let _ = self.pump_due_system_events();
+                    pumped = true;
+                    if self.is_quiescent() && !self.has_pending_dispatch_commands() {
+                        continue;
+                    }
+                }
+                if work_units >= limits.max_work_per_run {
+                    break ExactScheduleTermination::WorkLimit;
+                }
+                work_units = work_units.saturating_add(1);
+                let dispatched = match self.step_inner(LabDispatchMode::Exploration {
+                    control: &mut control,
+                }) {
+                    Ok(dispatched) => dispatched,
+                    Err(error) => break ExactScheduleTermination::ReplayRejected(error),
+                };
+                if let Some(reason) = control.stopped.take() {
+                    break reason;
+                }
+                if !dispatched {
+                    if pumped {
+                        // ForcedSchedule records dispatch timestamps, not an
+                        // arbitrary sequence of silent intermediate time hops.
+                        // Require each nonterminal pump to lead to a dispatch.
+                        break ExactScheduleTermination::Unsupported {
+                            reason: "a time pump without a dispatch cannot be exactly replayed",
+                        };
+                    }
+                    if !self.is_quiescent()
+                        && !self.has_pending_dispatch_commands()
+                        && !self.state.has_pending_obligation_posts()
+                    {
+                        if !self.scheduler.lock().is_empty() {
+                            break ExactScheduleTermination::Unsupported {
+                                reason: "future-only scheduler entries require unrecorded time hops",
+                            };
+                        }
+                        if self.next_auto_advance_deadline().is_none() {
+                            break ExactScheduleTermination::Stalled;
+                        }
+                    }
+                }
+            },
+        };
+        let schedule = if recording {
+            match self.finish_forced_schedule_recording() {
+                Ok(schedule) if termination == ExactScheduleTermination::Quiescent => {
+                    Some(schedule)
+                }
+                Ok(_) => None,
+                Err(error) => {
+                    if termination == ExactScheduleTermination::Quiescent {
+                        termination = ExactScheduleTermination::ReplayRejected(error);
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let execution = ExactSchedulePrefix {
+            seed: self.config.seed,
+            config_hash: forced_schedule_config_hash(&self.config),
+            decisions: control.decisions,
+        };
+        ExactScheduleRun {
+            requested_prefix: control.requested,
+            execution,
+            termination,
+            work_units,
+            schedule,
+            lab: self.report_with_steps_delta(self.steps.saturating_sub(start_steps)),
+        }
     }
 
     /// Starts bounded capture of exact task/worker/lane/step/time dispatches.
@@ -4559,6 +4757,58 @@ impl LabRuntime {
         let (task_id, dispatch_lane, dispatch_worker) = {
             let mut sched = self.scheduler.lock();
             match dispatch_mode {
+                LabDispatchMode::Exploration { control } => {
+                    let enabled = match sched.exact_exploration_choices(
+                        now,
+                        self.steps,
+                        control.limits.max_inventory_entries,
+                    ) {
+                        Ok(enabled) => enabled,
+                        Err(reason) => {
+                            control.stopped =
+                                Some(ExactScheduleTermination::Unsupported { reason });
+                            return Ok(false);
+                        }
+                    };
+                    if enabled.is_empty() {
+                        sched.cancel_streak[0] = 0;
+                        drop(sched);
+                        self.check_deadline_monitor();
+                        return Ok(false);
+                    }
+                    if enabled.iter().any(|dispatch| {
+                        self.state
+                            .task(compact_task_id(dispatch.task))
+                            .is_none_or(|task| task.state.is_terminal())
+                    }) {
+                        control.stopped = Some(ExactScheduleTermination::Unsupported {
+                            reason: "eligible task generation is absent or already terminal",
+                        });
+                        return Ok(false);
+                    }
+                    let index = control.decisions.len();
+                    if index >= control.limits.max_dispatches_per_run {
+                        control.stopped = Some(ExactScheduleTermination::DispatchLimit);
+                        return Ok(false);
+                    }
+                    let selected = if let Some(expected) = control.requested.decisions.get(index) {
+                        if expected.enabled != enabled || expected.selected >= enabled.len() {
+                            control.stopped =
+                                Some(ExactScheduleTermination::PrefixDiverged { decision: index });
+                            return Ok(false);
+                        }
+                        expected.selected
+                    } else {
+                        0
+                    };
+                    let dispatch = enabled[selected];
+                    let task_id = compact_task_id(dispatch.task);
+                    sched.take_forced(task_id, 0, dispatch.lane, now, index)?;
+                    control
+                        .decisions
+                        .push(ExactScheduleDecision { enabled, selected });
+                    (task_id, dispatch.lane, 0)
+                }
                 LabDispatchMode::Normal => {
                     // Production-schedule oracle (br-asupersync-bi2462.7):
                     // while a recorded schedule is being followed it names
@@ -6502,6 +6752,43 @@ impl LabScheduler {
         }
 
         None
+    }
+
+    fn exact_exploration_choices(
+        &self,
+        now: Time,
+        step: u64,
+        max_entries: usize,
+    ) -> Result<Vec<ForcedDispatch>, &'static str> {
+        if self.workers.len() != 1 {
+            return Err("exact exploration requires one virtual worker");
+        }
+        if !self.pending_spurious_wakes.is_empty() {
+            return Err("injected spurious wake choices are unsupported");
+        }
+        if self.scheduled.len() != self.workers[0].len() {
+            return Err("lab and worker scheduler membership disagree");
+        }
+        let choices = self.workers[0].exact_exploration_choices(
+            now,
+            self.cancel_streak[0] < self.cancel_streak_limit,
+            max_entries,
+        )?;
+        if choices.iter().any(|(task, _)| {
+            !self.scheduled.contains(task) || self.assignment_for(*task) != Some(0)
+        }) {
+            return Err("eligible task generation or worker assignment disagrees");
+        }
+        Ok(choices
+            .into_iter()
+            .map(|(task, lane)| ForcedDispatch {
+                task: task.into(),
+                worker: 0,
+                lane,
+                at_step: step,
+                at_nanos: now.as_nanos(),
+            })
+            .collect())
     }
 
     fn take_forced(
