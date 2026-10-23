@@ -521,7 +521,7 @@ fn channel_permits_capture_the_committing_task_at_publication() {
     let mut tasks = Vec::new();
     let mut contexts = Vec::new();
     let mut joins = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..5 {
         let (task, join) = lab.state.create_task(root, Budget::INFINITE, async {}).unwrap();
         tasks.push(task);
         contexts.push(context(&lab, task));
@@ -529,11 +529,14 @@ fn channel_permits_capture_the_committing_task_at_publication() {
     }
     let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel();
     let (mpsc_tx, mut mpsc_rx) = crate::channel::mpsc::channel(1);
-    let (oneshot_permit, mpsc_permit) = {
+    let (broadcast_tx, mut broadcast_rx) = crate::channel::broadcast::channel(1);
+    let reserver_before = contexts[0].logical_tick();
+    let (oneshot_permit, mpsc_permit, broadcast_permit) = {
         let _guard = Cx::set_current(Some(contexts[0].clone()));
         (
             oneshot_tx.reserve_checked(&contexts[0]).unwrap(),
             mpsc_tx.try_reserve_checked(&contexts[0]).unwrap(),
+            broadcast_tx.reserve_checked(&contexts[0]).unwrap(),
         )
     };
     {
@@ -541,6 +544,7 @@ fn channel_permits_capture_the_committing_task_at_publication() {
         contexts[1].trace("committer-before");
         oneshot_permit.send(11).unwrap();
         mpsc_permit.try_send(12).unwrap();
+        assert_eq!(broadcast_permit.send(13), 1);
         contexts[1].trace("committer-after");
     }
     {
@@ -553,9 +557,19 @@ fn channel_permits_capture_the_committing_task_at_publication() {
         assert_eq!(mpsc_rx.try_recv(), Ok(12));
         contexts[3].trace("mpsc-permit-received");
     }
+    {
+        let _guard = Cx::set_current(Some(contexts[4].clone()));
+        assert_eq!(broadcast_rx.try_recv(), Ok(13));
+        contexts[4].trace("broadcast-permit-received");
+    }
     let events = lab.trace().snapshot();
-    for received in ["oneshot-permit-received", "mpsc-permit-received"] {
+    for received in [
+        "oneshot-permit-received",
+        "mpsc-permit-received",
+        "broadcast-permit-received",
+    ] {
         let received = message_time(&events, received);
+        assert_eq!(reserver_before.causal_order(&received), CausalOrder::Concurrent);
         assert_eq!(message_time(&events, "committer-before").causal_order(&received), CausalOrder::Before);
         assert_eq!(message_time(&events, "committer-after").causal_order(&received), CausalOrder::Concurrent);
     }
@@ -583,16 +597,19 @@ fn channel_messages_from_another_runtime_do_not_merge_colliding_task_ids() {
     }
     let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel();
     let (mpsc_tx, mut mpsc_rx) = crate::channel::mpsc::channel(1);
+    let (broadcast_tx, mut broadcast_rx) = crate::channel::broadcast::channel(1);
     {
-        let _guard = Cx::set_current(Some(sender));
+        let _guard = Cx::set_current(Some(sender.clone()));
         oneshot_tx.send_blocking(11).unwrap();
         mpsc_tx.try_send(12).unwrap();
+        assert_eq!(broadcast_tx.send(&sender, 13), Ok(1));
     }
     {
         let _guard = Cx::set_current(Some(receiver.clone()));
         let before = receiver.logical_now();
         assert_eq!(oneshot_rx.try_recv(), Ok(11));
         assert_eq!(mpsc_rx.try_recv(), Ok(12));
+        assert_eq!(broadcast_rx.try_recv(), Ok(13));
         assert_eq!(receiver.logical_now(), before);
     }
     lab.scheduler.lock().schedule(task, 0);
@@ -617,15 +634,18 @@ fn host_publications_and_legacy_contexts_do_not_advance_message_clocks() {
         let before = cx.logical_now();
         let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel();
         let (mpsc_tx, mut mpsc_rx) = crate::channel::mpsc::channel(1);
+        let (broadcast_tx, mut broadcast_rx) = crate::channel::broadcast::channel(1);
         {
             let _guard = Cx::set_current((!task_causal).then(|| cx.clone()));
             oneshot_tx.send_blocking(11).unwrap();
             mpsc_tx.try_send(12).unwrap();
+            assert_eq!(broadcast_tx.send(&cx, 13), Ok(1));
         }
         {
             let _guard = Cx::set_current(Some(cx.clone()));
             assert_eq!(oneshot_rx.try_recv(), Ok(11));
             assert_eq!(mpsc_rx.try_recv(), Ok(12));
+            assert_eq!(broadcast_rx.try_recv(), Ok(13));
             assert_eq!(cx.logical_now(), before);
         }
         lab.scheduler.lock().schedule(task, 0);
@@ -640,14 +660,18 @@ fn dropping_buffered_receivers_does_not_observe_their_messages() {
     let root = lab.state.create_root_region(Budget::INFINITE);
     let (oneshot_tx, oneshot_rx) = crate::channel::oneshot::channel();
     let (mpsc_tx, mpsc_rx) = crate::channel::mpsc::channel(1);
+    let (broadcast_tx, broadcast_rx) = crate::channel::broadcast::channel(1);
     run_channel_task(&mut lab, root, async move {
-        Cx::current().unwrap().trace("before-dropped-values");
+        let cx = Cx::current().unwrap();
+        cx.trace("before-dropped-values");
         oneshot_tx.send_blocking(11).unwrap();
         mpsc_tx.try_send(12).unwrap();
+        assert_eq!(broadcast_tx.send(&cx, 13), Ok(1));
     });
     run_channel_task(&mut lab, root, async move {
         drop(oneshot_rx);
         drop(mpsc_rx);
+        drop(broadcast_rx);
         Cx::current().unwrap().trace("after-receiver-drop");
     });
     lab.run_until_idle();
@@ -686,7 +710,7 @@ fn moved_receive_futures_observe_only_the_actual_polling_task() {
     }
 
     let _host = Cx::set_current(None);
-    for api in 0..3 {
+    for api in 0..4 {
         for observer_mode in 0..3 {
             let source = causal_context(97, "source");
             let constructor = causal_context(97, "constructor");
@@ -699,10 +723,12 @@ fn moved_receive_futures_observe_only_the_actual_polling_task() {
             let _ = poller.logical_tick();
             let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel();
             let (mpsc_tx, mut mpsc_rx) = crate::channel::mpsc::channel(1);
+            let (broadcast_tx, mut broadcast_rx) = crate::channel::broadcast::channel(1);
             {
                 let _current = Cx::set_current(Some(source.clone()));
                 oneshot_tx.send_blocking(11).unwrap();
                 mpsc_tx.try_send(12).unwrap();
+                assert_eq!(broadcast_tx.send(&source, 13), Ok(1));
             }
             let source_after = source.logical_tick();
             let poller_before = poller.logical_now();
@@ -716,7 +742,7 @@ fn moved_receive_futures_observe_only_the_actual_polling_task() {
                     poll_once(mpsc_rx.recv(&constructor), current),
                     Poll::Ready(Ok(12))
                 ),
-                _ => {
+                2 => {
                     let mut values = Vec::new();
                     assert_eq!(
                         poll_once(mpsc_rx.recv_many(&constructor, &mut values, 1), current),
@@ -724,6 +750,10 @@ fn moved_receive_futures_observe_only_the_actual_polling_task() {
                     );
                     assert_eq!(values, vec![12]);
                 }
+                _ => assert_eq!(
+                    poll_once(broadcast_rx.recv(&constructor), current),
+                    Poll::Ready(Ok(13))
+                ),
             }
             let constructor_after = constructor.logical_tick();
             let poller_after = poller.logical_now();
@@ -754,5 +784,229 @@ fn moved_receive_futures_observe_only_the_actual_polling_task() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn buffered_broadcast_fanout_keeps_each_publication_and_reader_independent() {
+    use crate::stream::{BroadcastStream, StreamExt};
+
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (tx, first) = crate::channel::broadcast::channel(3);
+    let second = first.clone();
+    let third = first.clone();
+    assert_eq!(tx.send(&Cx::for_testing(), 0), Ok(3));
+
+    for (value, before, after) in [
+        (1, "broadcast-one-before", "broadcast-one-after"),
+        (2, "broadcast-two-before", "broadcast-two-after"),
+    ] {
+        let sender = tx.clone();
+        run_channel_task(&mut lab, root, async move {
+            let cx = Cx::current().unwrap();
+            cx.trace(before);
+            assert_eq!(sender.send_checked(&cx, value), Ok(3));
+            cx.trace(after);
+        });
+    }
+
+    // All messages are ready before any receiver runs, so no sender wake can
+    // supply the missing edge. Each API must observe its own consumed prefix.
+    for (api, receiver) in [(0, first), (1, second), (2, third)] {
+        run_channel_task(&mut lab, root, async move {
+            let cx = Cx::current().unwrap();
+            let mut stream = BroadcastStream::new(cx.clone(), receiver);
+            for expected in 0..3 {
+                let received = match api {
+                    0 => stream.get_mut().try_recv().unwrap(),
+                    1 => stream.get_mut().recv(&cx).await.unwrap(),
+                    _ => stream.next().await.unwrap().unwrap(),
+                };
+                assert_eq!(received, expected);
+                cx.trace(&format!("broadcast-reader-{api}-value-{expected}"));
+            }
+        });
+    }
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+
+    let events = lab.trace().snapshot();
+    for api in 0..3 {
+        let host = message_time(&events, &format!("broadcast-reader-{api}-value-0"));
+        let first = message_time(&events, &format!("broadcast-reader-{api}-value-1"));
+        let second = message_time(&events, &format!("broadcast-reader-{api}-value-2"));
+        for before in ["broadcast-one-before", "broadcast-two-before"] {
+            assert_eq!(message_time(&events, before).causal_order(&host), CausalOrder::Concurrent);
+            assert_eq!(message_time(&events, before).causal_order(&second), CausalOrder::Before);
+        }
+        assert_eq!(
+            message_time(&events, "broadcast-one-before").causal_order(&first),
+            CausalOrder::Before
+        );
+        assert_eq!(
+            message_time(&events, "broadcast-two-before").causal_order(&first),
+            CausalOrder::Concurrent
+        );
+        for after in ["broadcast-one-after", "broadcast-two-after"] {
+            assert_eq!(message_time(&events, after).causal_order(&second), CausalOrder::Concurrent);
+        }
+        for other in api + 1..3 {
+            assert_eq!(
+                second.causal_order(&message_time(
+                    &events,
+                    &format!("broadcast-reader-{other}-value-2"),
+                )),
+                CausalOrder::Concurrent
+            );
+        }
+    }
+}
+
+#[test]
+fn broadcast_lag_empty_and_close_do_not_observe_unread_publications() {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (tx, mut lagged) = crate::channel::broadcast::channel(1);
+    for (value, name) in [(1, "broadcast-evicted"), (2, "broadcast-retained")] {
+        let sender = tx.clone();
+        run_channel_task(&mut lab, root, async move {
+            let cx = Cx::current().unwrap();
+            cx.trace(name);
+            assert_eq!(sender.send(&cx, value), Ok(1));
+        });
+    }
+    let mut fresh = tx.subscribe();
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        assert_eq!(
+            lagged.recv(&cx).await,
+            Err(crate::channel::broadcast::RecvError::Lagged(1))
+        );
+        cx.trace("broadcast-lag-only");
+        assert_eq!(lagged.try_recv(), Ok(2));
+        cx.trace("broadcast-retained-received");
+    });
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        assert_eq!(
+            fresh.try_recv(),
+            Err(crate::channel::broadcast::TryRecvError::Empty)
+        );
+        cx.trace("broadcast-empty-only");
+        drop(tx);
+        assert_eq!(
+            fresh.recv(&cx).await,
+            Err(crate::channel::broadcast::RecvError::Closed)
+        );
+        cx.trace("broadcast-closed-only");
+    });
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+
+    let events = lab.trace().snapshot();
+    for name in [
+        "broadcast-lag-only",
+        "broadcast-empty-only",
+        "broadcast-closed-only",
+    ] {
+        let observed = message_time(&events, name);
+        for publication in ["broadcast-evicted", "broadcast-retained"] {
+            assert_eq!(
+                message_time(&events, publication).causal_order(&observed),
+                CausalOrder::Concurrent
+            );
+        }
+    }
+    let received = message_time(&events, "broadcast-retained-received");
+    assert_eq!(
+        message_time(&events, "broadcast-retained").causal_order(&received),
+        CausalOrder::Before
+    );
+    assert_eq!(
+        message_time(&events, "broadcast-evicted").causal_order(&received),
+        CausalOrder::Concurrent
+    );
+}
+
+#[test]
+fn broadcast_clone_effects_observe_the_retained_publication_before_eviction() {
+    type CloneAction = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+    struct CloneEffect {
+        value: u32,
+        action: CloneAction,
+    }
+
+    impl Clone for CloneEffect {
+        fn clone(&self) -> Self {
+            let action = self.action.lock().take();
+            if let Some(action) = action {
+                action();
+            }
+            Self {
+                value: self.value,
+                action: Arc::clone(&self.action),
+            }
+        }
+    }
+
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (tx, mut rx) = crate::channel::broadcast::channel(1);
+    let action: CloneAction = Arc::new(Mutex::new(None));
+    let evictor = tx.clone();
+    *action.lock() = Some(Box::new(move || {
+        let cx = Cx::current().unwrap();
+        cx.trace("broadcast-clone-before-eviction");
+        {
+            // Reenter while the original payload is retained, replacing its
+            // ring slot with a deliberately unattributed host publication.
+            let _host = Cx::set_current(None);
+            assert_eq!(
+                evictor.send(
+                    &cx,
+                    CloneEffect {
+                        value: 2,
+                        action: Arc::new(Mutex::new(None)),
+                    },
+                ).ok(),
+                Some(1)
+            );
+        }
+        cx.trace("broadcast-clone-after-eviction");
+    }));
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        cx.trace("broadcast-clone-source-before");
+        assert_eq!(tx.send(&cx, CloneEffect { value: 1, action }).ok(), Some(1));
+        cx.trace("broadcast-clone-source-after");
+    });
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        assert_eq!(rx.recv(&cx).await.unwrap().value, 1);
+        cx.trace("broadcast-original-cloned");
+        let before = cx.logical_now();
+        assert_eq!(rx.try_recv().unwrap().value, 2);
+        assert_eq!(cx.logical_now(), before);
+    });
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+
+    let events = lab.trace().snapshot();
+    for effect in [
+        "broadcast-clone-before-eviction",
+        "broadcast-clone-after-eviction",
+        "broadcast-original-cloned",
+    ] {
+        let observed = message_time(&events, effect);
+        assert_eq!(
+            message_time(&events, "broadcast-clone-source-before").causal_order(&observed),
+            CausalOrder::Before
+        );
+        assert_eq!(
+            message_time(&events, "broadcast-clone-source-after").causal_order(&observed),
+            CausalOrder::Concurrent
+        );
     }
 }

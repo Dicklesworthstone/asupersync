@@ -113,7 +113,7 @@ pub(crate) use cancel_registration::OwnedCancelRegistration;
 /// an already-buffered message. Host sends without an installed task context
 /// remain unattributed. Runtime provenance prevents task IDs reused by another
 /// lab instance from creating a false edge.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MessageCausality {
     runtime: u64,
     time: crate::trace::distributed::LogicalTime,

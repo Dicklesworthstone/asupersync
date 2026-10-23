@@ -3744,3 +3744,124 @@
             assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
         }
     }
+
+
+    fn broadcast_causal_test_cx(node: &str) -> Cx {
+        Cx::for_testing()
+            .with_logical_clock(
+                crate::trace::distributed::LogicalClockMode::Vector {
+                    node: crate::remote::NodeId::new(node),
+                }
+                .build_handle(None),
+            )
+            .with_task_causality_runtime(Some(97))
+    }
+
+    #[test]
+    fn broadcast_causality_sidecar_is_lazy_and_released_with_receivers() {
+        init_test("broadcast_causality_sidecar_is_lazy_and_released_with_receivers");
+        let _host = Cx::set_current(None);
+        let sender = broadcast_causal_test_cx("sender");
+        let (tx, rx) = channel(2);
+        assert_eq!(tx.send(&sender, 1), Ok(1));
+        assert!(tx.channel.inner.lock().message_causality.is_none());
+        {
+            let _current = Cx::set_current(Some(sender.clone()));
+            assert_eq!(tx.send(&sender, 2), Ok(1));
+        }
+        {
+            let inner = tx.channel.inner.lock();
+            let messages = inner.message_causality.as_ref().unwrap();
+            assert_eq!(messages.len(), inner.buffer.len());
+            assert!(messages[0].is_none());
+            assert!(messages[1].is_some());
+        }
+        drop(rx);
+        {
+            let inner = tx.channel.inner.lock();
+            assert!(inner.buffer.is_empty());
+            assert!(inner.message_causality.is_none());
+        }
+        let mut rx = tx.subscribe();
+        assert_eq!(tx.send(&sender, 3), Ok(1));
+        assert!(tx.channel.inner.lock().message_causality.is_none());
+        assert_eq!(rx.try_recv(), Ok(3));
+    }
+
+    #[test]
+    fn broadcast_final_liveness_rollback_preserves_publication_evidence() {
+        use crate::trace::distributed::CausalOrder;
+
+        init_test("broadcast_final_liveness_rollback_preserves_publication_evidence");
+        let _host = Cx::set_current(None);
+        for attributed in [false, true] {
+            let published = broadcast_causal_test_cx("published");
+            let refused = broadcast_causal_test_cx("refused");
+            let receiver = broadcast_causal_test_cx("receiver");
+            let published_before = published.logical_tick();
+            let (tx, mut rx) = channel(1);
+            {
+                let _current = Cx::set_current(attributed.then(|| published.clone()));
+                assert_eq!(tx.send(&published, 1), Ok(1));
+            }
+            let original = tx
+                .channel
+                .inner
+                .lock()
+                .message_causality_at(0)
+                .map(|evidence| (evidence.runtime, evidence.time));
+            let refused_before = refused.logical_tick();
+            {
+                let _current = Cx::set_current(Some(refused.clone()));
+                let permit = tx.reserve(&refused).unwrap();
+                assert_eq!(permit.send_forcing_zero_at_final_liveness(2), 0);
+            }
+            assert_eq!(refused.logical_now(), refused_before);
+            {
+                let inner = tx.channel.inner.lock();
+                assert_eq!(inner.total_sent, 1);
+                assert_eq!(inner.message_causality.is_some(), attributed);
+                assert_eq!(
+                    inner.message_causality_at(0).map(|evidence| (evidence.runtime, evidence.time)),
+                    original
+                );
+            }
+            let observed = {
+                let _current = Cx::set_current(Some(receiver.clone()));
+                assert_eq!(rx.try_recv(), Ok(1));
+                receiver.logical_tick()
+            };
+            assert_eq!(
+                published_before.causal_order(&observed),
+                if attributed { CausalOrder::Before } else { CausalOrder::Concurrent }
+            );
+            assert_eq!(refused_before.causal_order(&observed), CausalOrder::Concurrent);
+        }
+    }
+
+    #[test]
+    fn broadcast_cancelled_ready_receive_does_not_observe_the_value() {
+        use crate::trace::distributed::CausalOrder;
+
+        init_test("broadcast_cancelled_ready_receive_does_not_observe_the_value");
+        let _host = Cx::set_current(None);
+        let published = broadcast_causal_test_cx("published");
+        let receiver = broadcast_causal_test_cx("receiver");
+        let before = published.logical_tick();
+        let (tx, mut rx) = channel(1);
+        {
+            let _current = Cx::set_current(Some(published.clone()));
+            assert_eq!(tx.send(&published, 1), Ok(1));
+        }
+        receiver.set_cancel_requested(true);
+        let _current = Cx::set_current(Some(receiver.clone()));
+        assert_eq!(block_on(rx.recv(&receiver)), Err(RecvError::Cancelled));
+        assert_eq!(
+            before.causal_order(&receiver.logical_tick()),
+            CausalOrder::Concurrent
+        );
+        assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
+        receiver.set_cancel_requested(false);
+        assert_eq!(block_on(rx.recv(&receiver)), Ok(1));
+        assert_eq!(before.causal_order(&receiver.logical_now()), CausalOrder::Before);
+    }
