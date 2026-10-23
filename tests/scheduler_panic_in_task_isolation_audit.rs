@@ -259,7 +259,7 @@ fn catch_unwind_err_arm_wakes_dependents_so_parent_observes_panic() {
     // The waiters set is gathered via task_completed.
     assert!(
         seam.contains("let (waiters, completion_observer)")
-            && seam.contains("state.task_completed(task_id).into_parts();"),
+            && seam.contains("task_completed_with_obligation_observers("),
         "REGRESSION: the ordered completion seam no longer gathers \
          waiters and the owned completion observer via task_completed. The wake_dependents call \
          has nothing to wake — equivalent silent-swallow.",
@@ -351,7 +351,8 @@ fn task_execution_guard_fires_on_panic_unwind_as_safety_net() {
     // unwind-ordered completion seam, which synthesizes the Panicked
     // outcome and applies it via the shared apply arm.
     assert!(
-        source.contains(".complete_task_after_unwind_ordered(self.task_id);")
+        source.contains(".complete_task_after_unwind_ordered(")
+            && source.contains("&mut self.obligation_observers")
             && source.contains("\"task panicked during scheduler bookkeeping\""),
         "REGRESSION: TaskExecutionGuard safety-net no longer \
          marks the task as Outcome::Panicked (via the unwind-ordered \

@@ -292,8 +292,8 @@ fn worker_panic_path_wakes_dependents_so_parent_observes_panicked() {
 
     assert!(
         seam.contains("let (waiters, completion_observer)")
-            && seam.contains("state.task_completed_from_external_record(record)")
-            && seam.contains("state.task_completed(task_id).into_parts();"),
+            && seam.contains("task_completed_from_external_record_resuming(")
+            && seam.contains("task_completed_with_obligation_observers("),
         "REGRESSION: the ordered completion seam no longer gathers waiters \
          and the owned completion observer via task_completed (external-\
          record arm or unified fallback). The parent's JoinHandle never \
@@ -462,7 +462,8 @@ fn task_execution_guard_safety_net_marks_panicked_under_unwind() {
     let net_end = (net_pos + 1500).min(source.len());
     let net_body = &source[net_pos..net_end];
     assert!(
-        net_body.contains(".complete_task_after_unwind_ordered(self.task_id);")
+        net_body.contains(".complete_task_after_unwind_ordered(")
+            && net_body.contains("&mut self.obligation_observers")
             && net_body.contains("artifacts.dispatch_post_lock(self.worker);"),
         "REGRESSION: TaskExecutionGuard safety net no longer routes through \
          the unwind-ordered completion seam. The escape path leaves the \

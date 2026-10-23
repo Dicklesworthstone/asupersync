@@ -5716,6 +5716,7 @@ impl CallerTaskRegistration {
             waiters: smallvec::SmallVec::new(),
             protocol_retired: false,
             completed: false,
+            obligation_observers: crate::runtime::state::LifecycleObserverBatch::default(),
         };
         retirement.finish(outcome, std::thread::panicking());
     }
@@ -5730,6 +5731,7 @@ struct CallerTaskRetirement<'a> {
     waiters: smallvec::SmallVec<[crate::types::TaskId; 4]>,
     protocol_retired: bool,
     completed: bool,
+    obligation_observers: crate::runtime::state::LifecycleObserverBatch,
 }
 
 impl CallerTaskRetirement<'_> {
@@ -5746,25 +5748,13 @@ impl CallerTaskRetirement<'_> {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(gateway) = state.obligation_gateway() {
-                // Do not dequeue a whole batch across the deliberate Panic
-                // leak-policy boundary: unwinding would discard the unvisited
-                // posts and their application barriers. One post at a time
-                // leaves the rest available to this guard's unwind cleanup.
-                // Capture once so concurrent producers cannot extend cleanup.
-                let remaining = gateway.mailbox().len();
-                for _ in 0..remaining {
-                    if crate::runtime::obligation_mailbox::apply_obligation_posts_with_task_table(
-                        &mut state,
-                        gateway.mailbox(),
-                        1,
-                        dispatch_table.as_ref(),
-                    ) == 0
-                    {
-                        break;
-                    }
-                }
-            }
+            // The finite sweep still dequeues one post at a time. Preserve
+            // earlier successful observations on this retirement guard if a
+            // later configured leak-policy panic interrupts the drain.
+            let _ = state.drain_obligation_posts_before_completion_deferred(
+                dispatch_table.as_ref(),
+                &mut self.obligation_observers,
+            );
             let (ack, mut cancel_wakes) = if self.record.is_none() {
                 let complete = |tasks: &mut crate::runtime::TaskTable| {
                     let effects = tasks
@@ -5798,6 +5788,8 @@ impl CallerTaskRetirement<'_> {
             };
             let Some(record) = self.record.as_mut() else {
                 self.completed = true;
+                drop(state);
+                std::mem::take(&mut self.obligation_observers).dispatch();
                 return;
             };
             if let Some(receipt) = ack.as_ref()
@@ -5855,6 +5847,7 @@ impl CallerTaskRetirement<'_> {
             registration.inner.scheduler.inject_ready(task, priority);
             spawn_effects.dispatch();
         }
+        std::mem::take(&mut self.obligation_observers).dispatch();
         if let Some(observer) = observer {
             observer.dispatch();
         }
@@ -7485,3 +7478,7 @@ impl Runtime {
             .obligation_conservation_report()
     }
 }
+
+#[cfg(test)]
+#[path = "builder_mailbox_observer_tests.rs"]
+mod mailbox_observer_tests;

@@ -395,6 +395,7 @@ impl Worker {
             task_id: TaskId,
             completed: bool,
             stored: Option<AnyStoredTask>,
+            obligation_observers: crate::runtime::state::LifecycleObserverBatch,
         }
 
         impl Drop for TaskExecutionGuard<'_> {
@@ -410,7 +411,10 @@ impl Worker {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         state.revoke_obligation_admission_before_completion(self.task_id, None);
-                        let _ = state.drain_obligation_posts_before_completion(None);
+                        let _ = state.drain_obligation_posts_before_completion_deferred(
+                            None,
+                            &mut self.obligation_observers,
+                        );
                         let _ = state.update_task(self.task_id, |record| {
                             if !record.state.is_terminal() {
                                 record.complete(crate::types::Outcome::Panicked(
@@ -422,7 +426,10 @@ impl Worker {
                         });
 
                         let (waiters, cancel_waker_retirements) = state
-                            .task_completed(self.task_id)
+                            .task_completed_with_obligation_observers(
+                                self.task_id,
+                                &mut self.obligation_observers,
+                            )
                             .into_waiters_and_retirements_without_observers();
                         let finalizers = state.drain_ready_async_finalizers();
                         let mut local_waiters = self.worker.scratch_local.take();
@@ -459,20 +466,22 @@ impl Worker {
                             }
                         }
                         drop(state);
+                        for waiter in &global_waiters {
+                            self.worker.global.push(*waiter);
+                        }
+                        self.worker.local.push_many(&local_waiters);
+                        self.completed = true;
+                        self.worker.publish_ready_finalizers(finalizers);
+                        std::mem::take(&mut self.obligation_observers).dispatch();
                         cancel_waker_retirements.retire();
 
                         while let Some(waker) = foreign_wakers.pop() {
                             waker.wake();
                         }
 
-                        for waiter in &global_waiters {
-                            self.worker.global.push(*waiter);
-                        }
-                        self.worker.local.push_many(&local_waiters);
                         self.worker.scratch_local.set(local_waiters);
                         self.worker.scratch_global.set(global_waiters);
                         self.worker.scratch_foreign_wakers.set(foreign_wakers);
-                        self.worker.publish_ready_finalizers(finalizers);
                     }));
                     if let Err(payload) = cleanup {
                         // A lifecycle observer or foreign destructor may panic
@@ -584,6 +593,7 @@ impl Worker {
             task_id,
             completed: false,
             stored: Some(stored),
+            obligation_observers: crate::runtime::state::LifecycleObserverBatch::default(),
         };
 
         // br-asupersync-qdkyqs: replay-determinism. Sample the
@@ -658,7 +668,10 @@ impl Worker {
                 // within one poll is tracked, and an open reservation is
                 // caught by the completion-time leak check below.
                 state.revoke_obligation_admission_before_completion(task_id, None);
-                let _ = state.drain_obligation_posts_before_completion(None);
+                let _ = state.drain_obligation_posts_before_completion_deferred(
+                    None,
+                    &mut guard.obligation_observers,
+                );
                 let (cancel_ack, cancel_wakes) =
                     Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
                 let cancel_ack = cancel_ack.is_some();
@@ -708,7 +721,12 @@ impl Worker {
                     }
                 });
 
-                let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
+                let (waiters, completion_observer) = state
+                    .task_completed_with_obligation_observers(
+                        task_id,
+                        &mut guard.obligation_observers,
+                    )
+                    .into_parts();
                 let finalizers = state.drain_ready_async_finalizers();
                 let mut local_waiters = self.scratch_local.take();
                 let mut global_waiters = self.scratch_global.take();
@@ -749,9 +767,10 @@ impl Worker {
                     self.global.push(*waiter);
                 }
                 self.local.push_many(&local_waiters);
-                self.publish_ready_finalizers(finalizers);
                 guard.completed = true;
                 wake_state.clear();
+                self.publish_ready_finalizers(finalizers);
+                std::mem::take(&mut guard.obligation_observers).dispatch();
                 completion_observer.dispatch();
 
                 while let Some(waker) = foreign_wakers.pop() {
@@ -774,7 +793,11 @@ impl Worker {
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         state.store_spawned_task(task_id, t);
                         if state.has_pending_obligation_posts() {
-                            let _ = state.drain_obligation_posts(64);
+                            let _ = state.drain_obligation_posts_deferred(
+                                64,
+                                None,
+                                &mut guard.obligation_observers,
+                            );
                         }
                         // Cache waker back in the task record for reuse on next poll
                         let _ = state.update_task(task_id, |record| {
@@ -792,7 +815,11 @@ impl Worker {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if state.has_pending_obligation_posts() {
-                            let _ = state.drain_obligation_posts(64);
+                            let _ = state.drain_obligation_posts_deferred(
+                                64,
+                                None,
+                                &mut guard.obligation_observers,
+                            );
                         }
                         let _ = state.update_task(task_id, |record| {
                             record.increment_polls();
@@ -817,6 +844,7 @@ impl Worker {
                     self.parker.unpark();
                 }
                 guard.completed = true;
+                std::mem::take(&mut guard.obligation_observers).dispatch();
                 cancel_wakes.dispatch();
             }
             PanicIsolationResult::Panicked(panic_context)
@@ -836,7 +864,10 @@ impl Worker {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.revoke_obligation_admission_before_completion(task_id, None);
-                let _ = state.drain_obligation_posts_before_completion(None);
+                let _ = state.drain_obligation_posts_before_completion_deferred(
+                    None,
+                    &mut guard.obligation_observers,
+                );
                 let (_cancel_ack, cancel_wakes) =
                     Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
                 let _ = state.update_task(task_id, |record| {
@@ -845,7 +876,12 @@ impl Worker {
                     }
                 });
 
-                let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
+                let (waiters, completion_observer) = state
+                    .task_completed_with_obligation_observers(
+                        task_id,
+                        &mut guard.obligation_observers,
+                    )
+                    .into_parts();
                 let finalizers = state.drain_ready_async_finalizers();
                 let mut local_waiters = self.scratch_local.take();
                 let mut global_waiters = self.scratch_global.take();
@@ -882,9 +918,10 @@ impl Worker {
                     self.global.push(*waiter);
                 }
                 self.local.push_many(&local_waiters);
-                self.publish_ready_finalizers(finalizers);
                 guard.completed = true;
                 wake_state.clear();
+                self.publish_ready_finalizers(finalizers);
+                std::mem::take(&mut guard.obligation_observers).dispatch();
                 completion_observer.dispatch();
 
                 while let Some(waker) = foreign_wakers.pop() {
@@ -1309,3 +1346,7 @@ mod parker_handoff_tests;
 #[cfg(test)]
 #[path = "worker_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "worker_mailbox_observer_tests.rs"]
+mod mailbox_observer_tests;

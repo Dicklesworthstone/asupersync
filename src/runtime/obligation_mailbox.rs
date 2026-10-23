@@ -980,6 +980,18 @@ pub(crate) fn apply_obligation_posts_with_task_table(
     max: usize,
     dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
 ) -> usize {
+    apply_obligation_posts_with_observers(state, mailbox, max, dispatch_tasks, None)
+}
+
+/// Apply authoritative mutations and receipts before handing observations back
+/// to a native execution guard. None preserves direct state-threaded delivery.
+pub(crate) fn apply_obligation_posts_with_observers(
+    state: &mut RuntimeState,
+    mailbox: &ObligationMailbox,
+    max: usize,
+    dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
+    mut observers: Option<&mut Vec<crate::runtime::state::LifecycleObserverEffect>>,
+) -> usize {
     if mailbox.is_empty() {
         state.check_obligation_conservation_after_drain(mailbox);
         return 0;
@@ -1011,6 +1023,7 @@ pub(crate) fn apply_obligation_posts_with_task_table(
                             QueuedObligationPost::Handoff { source },
                             id,
                             dispatch_tasks,
+                            observers.as_deref_mut(),
                         )
                         .is_err()
                     {
@@ -1036,8 +1049,12 @@ pub(crate) fn apply_obligation_posts_with_task_table(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&post.ticket)
             .copied();
-        let apply = |state: &mut RuntimeState, id: Option<ObligationId>| {
-            if dispatch_tasks.is_some() || admission.is_some() || post.op == ObligationOp::Reserve {
+        let mut apply = |state: &mut RuntimeState, id: Option<ObligationId>| {
+            if observers.is_some()
+                || dispatch_tasks.is_some()
+                || admission.is_some()
+                || post.op == ObligationOp::Reserve
+            {
                 return state.apply_obligation_post_from_dispatch_table(
                     QueuedObligationPost::Operation {
                         post,
@@ -1045,6 +1062,7 @@ pub(crate) fn apply_obligation_posts_with_task_table(
                     },
                     id,
                     dispatch_tasks,
+                    observers.as_deref_mut(),
                 );
             }
             match post.op {
