@@ -17,7 +17,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, mpsc as sync_mpsc};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 struct Echo {
@@ -929,7 +929,12 @@ fn native_web_stream_error_preserves_complete_message_and_terminal_status() {
                 parks.recv_timeout(Duration::from_secs(2)).expect("source parked");
                 probe.release();
                 let trailers = peer.terminal("3");
-                assert!(trailers.contains("grpc-message: bad%20%25%0A\r\n"));
+                // grpc-message keeps an internal space literal, as the gRPC
+                // grammar allows, and escapes `%` and the line feed.
+                assert!(
+                    trailers.contains("grpc-message: bad %25%0A\r\n"),
+                    "{trailers:?}"
+                );
                 assert!(!trailers.contains("x-end:"));
                 retirements.recv_timeout(Duration::from_secs(2)).expect("error source dropped");
             },
@@ -1039,12 +1044,6 @@ fn produced_request(cx: &Cx, mut request: HttpRequest, path: &str) -> StreamingS
     }
 }
 
-struct WebNoopWake;
-
-impl Wake for WebNoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 #[test]
 fn produced_web_stream_bounds_prefetch_when_consumer_stalls_and_drops_source_on_close() {
     for content_type in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
@@ -1058,8 +1057,7 @@ fn produced_web_stream_bounds_prefetch_when_consumer_stalls_and_drops_source_on_
         assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "admission precedes user code");
         assert_eq!(produced.max_retained_data_bytes(), 28); // (2 + 2) * 7.
         let (response, mut producer) = produced.into_parts(&cx);
-        let waker = Waker::from(Arc::new(WebNoopWake));
-        let mut task = Context::from_waker(&waker);
+        let mut task = Context::from_waker(Waker::noop());
         assert!(producer.as_mut().poll(&mut task).is_pending());
         assert_eq!(probe.polls.load(Ordering::SeqCst), 1);
         for _ in 0..4 {

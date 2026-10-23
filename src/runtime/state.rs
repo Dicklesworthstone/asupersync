@@ -9034,6 +9034,11 @@ impl RuntimeState {
     /// ownership until this method returns. That keeps the shard lock out of
     /// validator, metrics, region, obligation, and finalizer paths while still
     /// preserving the same completion semantics as [`Self::task_completed`].
+    ///
+    /// Runtime callers use
+    /// [`Self::task_completed_from_external_record_resuming_with_observers`];
+    /// this observer-free form remains for the state tests.
+    #[cfg(test)]
     pub(crate) fn task_completed_from_external_record(
         &mut self,
         task: &mut TaskRecord,
@@ -9044,6 +9049,7 @@ impl RuntimeState {
     /// Detached-record completion whose caller retains progress across a
     /// configured leak panic. Protocol retirement precedes the obligation
     /// audit and must not run again when the same owned record resumes cleanup.
+    #[cfg(test)]
     pub(crate) fn task_completed_from_external_record_resuming(
         &mut self,
         task: &mut TaskRecord,
@@ -9304,7 +9310,7 @@ impl RuntimeState {
                     task_id,
                     owner,
                     close_outcome,
-                    completion_progress.as_deref_mut(),
+                    completion_progress,
                 );
             }
         }

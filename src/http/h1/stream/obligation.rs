@@ -13,7 +13,7 @@ use crate::types::CancelKind;
 
 /// Refusal before a checked request body becomes visible to application code.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum IncomingBodyAdmissionError {
+pub enum IncomingBodyAdmissionError {
     Policy(IncomingBodyError),
     Cancelled { kind: CancelKind },
     Runtime(ObligationAdmissionError),
@@ -123,7 +123,7 @@ impl Drop for IncomingBodyObligation {
 /// next poll, or synchronously when the holder drops its work.
 #[cfg(any(feature = "http2-streaming", all(feature = "http3", feature = "tls")))]
 #[derive(Debug)]
-pub(crate) struct FramedIncomingBodyGuard {
+pub struct FramedIncomingBodyGuard {
     obligation: Option<IncomingBodyObligation>,
     shared: std::sync::Arc<super::IncomingBodyShared>,
     sender: crate::channel::mpsc::WeakSender<super::QueuedIncomingFrame>,

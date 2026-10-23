@@ -153,7 +153,7 @@ fn endpoints(
         .with_single_cert(chain, key)
         .expect("server certificate");
     client.alpn_protocols = vec![ALPN.to_vec()];
-    server.alpn_protocols = client.alpn_protocols.clone();
+    server.alpn_protocols.clone_from(&client.alpn_protocols);
     (TlsConnector::new(client), TlsAcceptor::new(server))
 }
 

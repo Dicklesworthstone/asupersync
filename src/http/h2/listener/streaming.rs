@@ -1036,15 +1036,13 @@ fn admission_refusal_response(error: IncomingBodyAdmissionError) -> Option<Http2
         IncomingBodyAdmissionError::Policy(_) => {
             Response::new(413, "Payload Too Large", Vec::new())
         }
-        IncomingBodyAdmissionError::Cancelled { kind }
-            if matches!(kind, CancelKind::Deadline | CancelKind::Timeout) =>
-        {
-            Response::new(
-                503,
-                "Service Unavailable",
-                HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
-            )
-        }
+        IncomingBodyAdmissionError::Cancelled {
+            kind: CancelKind::Deadline | CancelKind::Timeout,
+        } => Response::new(
+            503,
+            "Service Unavailable",
+            HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
+        ),
         IncomingBodyAdmissionError::Cancelled { .. } => return None,
         IncomingBodyAdmissionError::Runtime(_) | IncomingBodyAdmissionError::RuntimeRequired => {
             Response::new(

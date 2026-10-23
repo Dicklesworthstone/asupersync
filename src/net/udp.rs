@@ -2216,10 +2216,7 @@ pub fn ambient_io_driver_present() -> bool {
 /// This check belongs in the socket poll path, not `IoRegistration::rearm`:
 /// cancellation also rearms surviving waiters and must keep their owner.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn registration_needs_migration(
-    registration: &IoRegistration,
-    on_fallback: bool,
-) -> bool {
+pub fn registration_needs_migration(registration: &IoRegistration, on_fallback: bool) -> bool {
     Cx::with_current(|current| match current.io_driver_ref() {
         Some(driver) => on_fallback || !registration.belongs_to(driver),
         None => !on_fallback,

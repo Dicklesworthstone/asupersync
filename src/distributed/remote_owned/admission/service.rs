@@ -232,6 +232,9 @@ impl RemoteServiceAdmission {
                 let task = cx.spawn(move |owner| crate::distributed::remote_owned::AdmittedProxy {
                     future: execute(owner, invocation, spec, handler),
                     _admission: Some(permit),
+                    // Inbound service admission is charged by its permit alone;
+                    // no outbound native credit travels with the result.
+                    _retention: None,
                 }).map_err(|_| setup_error("remote service coordinator admission refused"))?;
                 let mut coordinator = Coordinator { task, cx: &cx };
                 let mut cancel = std::pin::pin!(cx.cancelled());
@@ -250,7 +253,7 @@ impl RemoteServiceAdmission {
                     }
                 };
                 match result {
-                    Ok(result) => result,
+                    Ok(result) => result.into_inner(),
                     Err(error) => Ok(join_outcome(error)),
                 }
             }

@@ -88,7 +88,7 @@ impl<Caps> Drop for CancelRegistration<'_, Caps> {
 
 /// A stream owns its Cx, so its cancellation slot must own that same context
 /// rather than borrow another field of the stream.
-pub(crate) struct OwnedCancelRegistration {
+pub struct OwnedCancelRegistration {
     cx: Cx,
     state: RegistrationState,
 }

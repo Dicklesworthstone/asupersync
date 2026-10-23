@@ -158,7 +158,7 @@ impl Drop for ObservedDrop {
 fn completed_proxy_destructor_runs_before_its_admission_is_released() {
     let executor = executor(1, 8, peer()); let dropped = Arc::new(AtomicBool::new(false));
     let mut proxy = Box::pin(AdmittedProxy { future: ObservedDrop { executor: executor.clone(), dropped: Arc::clone(&dropped) },
-        _admission: Some(executor.acquire(&NodeId::new("a"), 4).unwrap()) });
+        _admission: Some(executor.acquire(&NodeId::new("a"), 4).unwrap()), _retention: None });
     assert!(proxy.as_mut().poll(&mut Context::from_waker(std::task::Waker::noop())).is_ready());
     assert_eq!(executor.usage().in_flight, 1); drop(proxy);
     assert!(dropped.load(Ordering::Acquire)); empty(&executor);

@@ -7592,8 +7592,9 @@ fn unified_ready_completion_still_drains_ready_finalizers() {
 /// E1.2 subsystem 3b: the unwind-cleanup guard (E1.1 row T16) routes through
 /// `complete_task_after_unwind_ordered`. It must synthesize a panic terminal
 /// state on the external record, detach it, retire validator state, mint
-/// ready finalizers externally, and structurally suppress observers (the
-/// artifacts type has no observer to dispatch).
+/// ready finalizers externally, and structurally suppress completion observers
+/// (only the caller's obligation-observer batch rides the artifacts, for
+/// post-lock dispatch).
 #[test]
 fn unwind_guard_completion_detaches_external_record_and_mints_finalizer() {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
@@ -7634,7 +7635,8 @@ fn unwind_guard_completion_detaches_external_record_and_mints_finalizer() {
     );
     let worker = scheduler.take_workers().remove(0);
 
-    let artifacts = worker.complete_task_after_unwind_ordered(task_id);
+    let mut obligation_observers = crate::runtime::state::LifecycleObserverBatch::default();
+    let artifacts = worker.complete_task_after_unwind_ordered(task_id, &mut obligation_observers);
     assert!(
         artifacts.detached_record.as_ref().is_some_and(|record| {
             matches!(

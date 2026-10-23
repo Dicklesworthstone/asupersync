@@ -1092,7 +1092,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
 
         // Never shut down the transport before its buffered close_notify has
         // been flushed, even if the peer already sent its own close_notify.
-        std::task::ready!(self.poll_flush_close_notify(cx))?;
+        // A failed flush is classified as in poll_shutdown_tls: a fatal error
+        // is retained, so a retry cannot report a clean close (#81).
+        match self.poll_flush_close_notify(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(error)) => return self.poll_shutdown_io_error(cx, error),
+            Poll::Pending => return Poll::Pending,
+        }
 
         // Shutdown underlying IO. Reads may continue until the peer closes.
         match Pin::new(&mut self.io).poll_shutdown(cx) {

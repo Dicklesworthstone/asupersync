@@ -5,7 +5,8 @@
 use super::*;
 use crate::cx::{Cx, Scope};
 use crate::trace::distributed::{CausalOrder, LogicalClockKind, LogicalTime};
-use crate::types::{Budget, CancelReason, FailFast};
+use crate::types::policy::FailFast;
+use crate::types::{Budget, CancelReason};
 
 fn message_time(events: &[TraceEvent], message: &str) -> LogicalTime {
     events

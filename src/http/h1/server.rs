@@ -3004,9 +3004,9 @@ where
                             hop_error_response(request_version, 413, "request body exceeds the configured limit")
                         })
                     }
-                    IncomingBodyAdmissionError::Cancelled { kind }
-                        if matches!(kind, CancelKind::Deadline | CancelKind::Timeout) =>
-                    {
+                    IncomingBodyAdmissionError::Cancelled {
+                        kind: CancelKind::Deadline | CancelKind::Timeout,
+                    } => {
                         hop_error_response(request_version, 503, HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC)
                     }
                     IncomingBodyAdmissionError::Cancelled { .. } => {
@@ -3475,12 +3475,10 @@ where
     let body_kind = response.body.kind();
     let mut remaining = body_kind.exact_size();
     let defer_head = defer_completion && body_kind.is_empty();
-    let mut terminal_bytes = None;
-
-    if defer_head {
+    let mut terminal_bytes = if defer_head {
         // An empty fixed body completes with its head, so that head belongs
         // behind the same retirement barrier as a final chunk or DATA tail.
-        terminal_bytes = Some(encoded_head);
+        Some(encoded_head)
     } else {
         // Once attempted, a partial head may be visible. Later failures must
         // close without a fallback status or successful message boundary.
@@ -3503,7 +3501,8 @@ where
                 .await;
             return Err(HttpError::Io(error));
         }
-    }
+        None
+    };
 
     let mut encoder = ChunkedEncoder::new();
     loop {

@@ -8,7 +8,7 @@ use std::sync::{Arc, Weak};
 use std::task::{Wake, Waker};
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum ClosePanic {
+pub enum ClosePanic {
     None,
     Wake,
     Drop,
@@ -16,7 +16,7 @@ pub(crate) enum ClosePanic {
 
 /// A nonblocking reentry probe makes the old lock-held delivery fail instead
 /// of hanging the entire test process. The second waiter is always healthy.
-pub(crate) struct CloseProbe {
+pub struct CloseProbe {
     state: Weak<ContendedMutex<RuntimeState>>,
     tasks: Option<Weak<ContendedMutex<TaskTable>>>,
     region: RegionId,
@@ -192,7 +192,7 @@ impl Drop for CloseWaiter {
     }
 }
 
-pub(crate) async fn close_work(
+pub async fn close_work(
     mut receive: Option<crate::channel::oneshot::Receiver<()>>,
     panic_task: bool,
 ) -> u8 {
@@ -203,7 +203,7 @@ pub(crate) async fn close_work(
     73
 }
 
-pub(crate) struct RetirementProbe {
+pub struct RetirementProbe {
     wakes: AtomicUsize,
     drops: AtomicUsize,
 }
