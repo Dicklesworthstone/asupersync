@@ -126,7 +126,8 @@ fn exercise_owned(workers: usize, case: Case) {
                 assert_eq!(admitted.usage().buffer_bytes, CHARGE);
                 // Local attribution exceeds the entire wire-frame envelope.
                 // Owned cancellation must still fit protected native control.
-                let reason = CancelReason::user("owned parent attribution ".repeat(1024));
+                let mut reason = CancelReason::user("owned parent attribution");
+                reason.message = Some("owned parent attribution ".repeat(1024));
                 if matches!(case, Case::HandleDrop) {
                     drop(invocation.take());
                 } else {

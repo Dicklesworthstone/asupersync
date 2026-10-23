@@ -300,7 +300,7 @@ fn exact_explorer_rechecks_factory_state_and_inventory_bounds() {
     let started = explorer
         .explore(|runtime| {
             one_poll_tasks(runtime, 2, Arc::new(Mutex::new(Vec::new())));
-            runtime.step();
+            runtime.step_for_test();
         })
         .unwrap();
     assert!(matches!(

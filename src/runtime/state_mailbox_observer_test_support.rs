@@ -5,7 +5,7 @@ use crate::sync::ContendedMutex;
 use std::sync::{Mutex, Weak};
 
 /// Records a failed reentry instead of blocking forever on the old locked path.
-pub(crate) struct MailboxLifecycleMetrics {
+pub struct MailboxLifecycleMetrics {
     target: Mutex<Option<(Weak<ContendedMutex<RuntimeState>>, Arc<ObligationMailbox>)>>,
     events: Mutex<Vec<&'static str>>,
     unlocked: AtomicUsize,
@@ -91,7 +91,7 @@ impl MetricsProvider for MailboxLifecycleMetrics {
 }
 
 /// Retain the returned liveness token until the fixture has finished.
-pub(crate) fn mailbox_runtime(
+pub fn mailbox_runtime(
     panic_callbacks: bool,
 ) -> (
     RuntimeState,
@@ -114,7 +114,7 @@ pub(crate) fn mailbox_runtime(
 /// All reservations originate from an admitted task's actual installed Cx.
 /// An optional real oneshot wait separates bounded Pending delivery from the
 /// completion sweep. The task panic happens only after both tokens settle.
-pub(crate) async fn post_work(
+pub async fn post_work(
     mut release: Option<crate::channel::oneshot::Receiver<()>>,
     panic_task: bool,
 ) -> u8 {
@@ -136,7 +136,7 @@ pub(crate) async fn post_work(
     73
 }
 
-pub(crate) fn assert_settled(mailbox: &ObligationMailbox) {
+pub fn assert_settled(mailbox: &ObligationMailbox) {
     let stats = mailbox.stats();
     assert_eq!(stats.posted, 4);
     assert_eq!(stats.applied, 4);

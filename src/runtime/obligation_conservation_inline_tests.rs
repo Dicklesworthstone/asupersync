@@ -1,7 +1,8 @@
 use super::*;
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
-use crate::record::{ObligationAbortReason, RegionState, SourceLocation};
+use crate::record::region::RegionState;
+use crate::record::{ObligationAbortReason, SourceLocation};
 use crate::runtime::config::ObligationLeakResponse;
 use crate::runtime::obligation_table::ObligationCreateArgs;
 use crate::runtime::state::RuntimeState;
