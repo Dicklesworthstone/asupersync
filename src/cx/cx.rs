@@ -5974,6 +5974,7 @@ where
         &self,
         barrier: std::sync::Arc<crate::runtime::task_handle::RetirementBarrier>,
     ) {
+        barrier.attach_task_causality(self);
         self.inner.write().retirement_barrier = Some(barrier);
     }
 }

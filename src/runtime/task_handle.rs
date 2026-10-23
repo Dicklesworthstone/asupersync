@@ -5,10 +5,11 @@
 
 use crate::channel::oneshot;
 use crate::cx::Cx;
+use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::{CancelReason, CxInner, PanicPayload, TaskId};
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 /// Retirement barrier gating terminal-result visibility to a task's consumers.
 ///
@@ -38,6 +39,16 @@ pub(crate) struct RetirementBarrier {
     open: AtomicBool,
     shutdown: AtomicBool,
     waker: Mutex<Option<std::task::Waker>>,
+    // Present only in the opt-in task-causal lab. Publication of the result
+    // precedes retirement, so the result channel's stamp cannot witness the
+    // later Complete event. Freeze this separate clock at barrier opening.
+    causality: OnceLock<Box<RetirementCausality>>,
+}
+
+struct RetirementCausality {
+    runtime: u64,
+    clock: LogicalClockHandle,
+    retired: OnceLock<LogicalTime>,
 }
 
 impl std::fmt::Debug for RetirementBarrier {
@@ -56,6 +67,7 @@ impl RetirementBarrier {
             open: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             waker: Mutex::new(None),
+            causality: OnceLock::new(),
         })
     }
 
@@ -66,7 +78,45 @@ impl RetirementBarrier {
             open: AtomicBool::new(true),
             shutdown: AtomicBool::new(false),
             waker: Mutex::new(None),
+            causality: OnceLock::new(),
         })
+    }
+
+    /// Installs the admitted task's clock before its context is published.
+    /// The factory may repeat installation; it must not replace the source.
+    /// Native/default contexts keep the empty, allocation-free sidecar.
+    pub(crate) fn attach_task_causality<Caps>(&self, cx: &Cx<Caps>) {
+        if !self.is_open()
+            && let Some(runtime) = cx.task_causality_runtime()
+        {
+            self.causality.get_or_init(|| {
+                Box::new(RetirementCausality {
+                    runtime,
+                    clock: cx.logical_clock_handle(),
+                    retired: OnceLock::new(),
+                })
+            });
+        }
+    }
+
+    /// Observing an open record-backed barrier synchronizes with retirement,
+    /// even when the consumer never parked and no wake carried that evidence.
+    fn observe<Caps>(&self, cx: &Cx<Caps>) {
+        if self.is_open()
+            && let Some(causality) = self.causality.get()
+            && cx.task_causality_runtime() == Some(causality.runtime)
+            && let Some(retired) = causality.retired.get()
+        {
+            let _ = cx.logical_receive(retired);
+        }
+    }
+
+    fn observe_current(&self) {
+        if self.causality.get().is_some()
+            && let Some(cx) = Cx::current()
+        {
+            self.observe(&cx);
+        }
     }
 
     #[inline]
@@ -93,6 +143,12 @@ impl RetirementBarrier {
     /// in the post-lock completion dispatch, after the record terminal is
     /// committed. Idempotent and cheap on the already-open path.
     pub(crate) fn open_and_wake(&self) {
+        // Freeze before publishing open and before any foreign wake. Retained
+        // copies of the child's Cx may advance later; those later events must
+        // not become ancestors of a consumer of this retirement signal.
+        if let Some(causality) = self.causality.get() {
+            causality.retired.get_or_init(|| causality.clock.tick());
+        }
         // Publish `open` before taking the waker so a consumer that registered
         // its waker before this store is either observed as open by its own
         // recheck or has its registered waker taken and woken here.
@@ -858,7 +914,7 @@ impl<T> TaskHandle<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> JoinFuture<'a, T> {
+    pub fn join<'a>(&'a mut self, cx: &'a Cx) -> JoinFuture<'a, T> {
         // Resolve the live linkage at join time: mailbox spawns start with a
         // dangling weak that admission supersedes via the admitted slot.
         let cx_inner = self
@@ -875,6 +931,7 @@ impl<T> TaskHandle<T> {
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             barrier,
+            observer: cx,
             registered: false,
             drop_abort_defused: false,
             drop_reason: None,
@@ -891,7 +948,7 @@ impl<T> TaskHandle<T> {
     #[must_use]
     pub fn join_with_drop_reason<'a>(
         &'a mut self,
-        _cx: &'a Cx,
+        cx: &'a Cx,
         reason: CancelReason,
     ) -> JoinFuture<'a, T> {
         // Resolve the live linkage at join time, exactly like `join`: mailbox
@@ -915,6 +972,7 @@ impl<T> TaskHandle<T> {
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             barrier,
+            observer: cx,
             registered: false,
             drop_abort_defused: false,
             drop_reason: Some(reason),
@@ -942,6 +1000,7 @@ impl<T> TaskHandle<T> {
         if !self.barrier.is_open() {
             return Ok(None);
         }
+        self.barrier.observe_current();
         match self.receiver.try_recv() {
             Ok(result) => {
                 self.terminal_consumed = true;
@@ -1009,6 +1068,7 @@ impl<T> TaskHandle<T> {
         if !self.barrier.is_open() && !self.barrier.register_and_is_open(ctx.waker()) {
             return std::task::Poll::Pending;
         }
+        self.barrier.observe_current();
         match self.receiver.poll_recv_uninterruptible(ctx) {
             std::task::Poll::Ready(Ok(result)) => {
                 self.terminal_consumed = true;
@@ -1114,6 +1174,9 @@ pub struct JoinFuture<'a, T> {
     /// closed this future does not poll the receiver, so an early terminal is
     /// never consumed or surfaced until the scheduler opens it post-retirement.
     barrier: Arc<RetirementBarrier>,
+    /// The explicit observer receives retirement causality even if the join
+    /// completes on its first poll. It remains uninterruptible by cancellation.
+    observer: &'a Cx,
     /// Whether this future stored its waker on the barrier. Only then does
     /// dropping it clear the slot: a waker the handle's own `poll_join`
     /// registered is not this future's to drop.
@@ -1181,6 +1244,7 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
                 return std::task::Poll::Pending;
             }
         }
+        this.barrier.observe(this.observer);
         // JoinError needs to be mapped if recv fails with RecvError
         match std::pin::Pin::new(&mut this.inner).poll(cx) {
             std::task::Poll::Ready(Ok(res)) => {
@@ -1236,6 +1300,10 @@ impl<T> Drop for JoinFuture<'_, T> {
 #[cfg(test)]
 #[path = "task_handle_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "task_handle_causality_tests.rs"]
+mod causality_tests;
 
 // Monitor and link targets (br-asupersync-issue65-criticisms-kpmoy5.6.1).
 impl<T> TaskHandle<T> {
