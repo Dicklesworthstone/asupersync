@@ -168,12 +168,22 @@ impl RetirementBarrier {
         if self.open.swap(true, Ordering::Release) {
             return;
         }
-        // Take the waker out under the lock, then drop the guard BEFORE waking:
-        // `Waker::wake` is a foreign callback and must not run while the barrier
-        // mutex is held (br-asupersync-yhueis).
+        // Take the waker out under the lock, then release it before invoking
+        // either foreign callback. Completion may still owe region-close
+        // notifications after this barrier: neither a wake panic nor final
+        // handle retirement may suppress that functional delivery (909482).
         let waker = self.waker.lock().take();
         if let Some(waker) = waker {
-            waker.wake();
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref()))
+            {
+                std::mem::forget(payload);
+            }
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker)))
+            {
+                std::mem::forget(payload);
+            }
         }
     }
 

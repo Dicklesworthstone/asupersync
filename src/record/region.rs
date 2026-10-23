@@ -64,6 +64,48 @@ pub struct RegionCloseState {
     pub waiters: Vec<std::task::Waker>,
 }
 
+/// Detached notifications for a close whose heap cleanup and receipt are complete.
+///
+/// Native completion retains this functional work on its execution guard until
+/// every runtime/table lock is released. Abandonment never invokes a foreign
+/// RawWaker callback or destructor beneath an unknown caller-owned lock.
+#[derive(Debug)]
+#[must_use = "region close waiters must be dispatched after releasing runtime locks"]
+pub(crate) struct RegionCloseWakes {
+    waiters: Vec<std::task::Waker>,
+}
+
+impl RegionCloseWakes {
+    pub(crate) fn dispatch(mut self) {
+        for waker in std::mem::take(&mut self.waiters) {
+            // Waking and retiring the same handle are independent hostile
+            // boundaries. A consuming wake could drop the final handle during
+            // unwind and abort before the remaining close waiters are reached.
+            contain_region_close_callback(|| waker.wake_by_ref());
+            contain_region_close_callback(|| drop(waker));
+        }
+    }
+}
+
+impl Drop for RegionCloseWakes {
+    fn drop(&mut self) {
+        // Native execution guards deliver these notifications on both normal
+        // completion and unwind. An explicitly abandoned token fails closed:
+        // keep its opaque handles alive instead of invoking user code here.
+        for waker in self.waiters.drain(..) {
+            std::mem::forget(waker);
+        }
+    }
+}
+
+fn contain_region_close_callback(callback: impl FnOnce()) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+        // Panic payload destruction is user code too; it must not suppress a
+        // later notification or double-panic during task unwind.
+        std::mem::forget(payload);
+    }
+}
+
 /// The state of a region in its lifecycle.
 ///
 /// State machine:
@@ -1806,13 +1848,24 @@ impl RegionRecord {
     ///
     /// Returns true if the transition succeeded.
     pub fn complete_close(&self) -> bool {
+        let Some(wakes) = self.complete_close_deferred_wakes() else {
+            return false;
+        };
+        wakes.dispatch();
+        true
+    }
+
+    /// Completes heap cleanup and publishes the receipt synchronously, retaining
+    /// only the foreign waiter callbacks for the native post-lock boundary.
+    /// This does not defer region heap destructors or tracing subscribers.
+    pub(crate) fn complete_close_deferred_wakes(&self) -> Option<RegionCloseWakes> {
         // Enforce structural quiescence: a region cannot close if it still has live
         // tasks, children, or pending obligations, as doing so would prematurely clear
         // its heap memory and violate structured concurrency invariants.
         let mut inner = self.inner.write();
 
         if self.state.load() != RegionState::Finalizing {
-            return false;
+            return None;
         }
 
         if !(inner.children.is_empty()
@@ -1826,7 +1879,7 @@ impl RegionRecord {
             // destined for this region (br-asupersync-dx-core-api-v2-u1z5hn.1.2).
             && self.pending_spawns.count() == 0)
         {
-            return false;
+            return None;
         }
 
         // br-asupersync-n0lthy: when no task or finalizer has folded a
@@ -1876,11 +1929,10 @@ impl RegionRecord {
                 notify.closed = true;
                 std::mem::take(&mut notify.waiters)
             };
-            for waker in waiters {
-                waker.wake();
-            }
+            Some(RegionCloseWakes { waiters })
+        } else {
+            None
         }
-        transitioned
     }
 
     /// Updates the region state to the provided value without enforcing transitions.
@@ -2235,3 +2287,7 @@ fn drop_region_payloads(region: RegionId, payloads: Vec<Box<dyn std::any::Any + 
 #[cfg(test)]
 #[path = "region_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "region_close_wake_tests.rs"]
+mod close_wake_tests;

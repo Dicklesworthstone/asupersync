@@ -5805,9 +5805,10 @@ impl CallerTaskRetirement<'_> {
             // can now audit obligations and advance the region without holding
             // the dispatch-table lock or retiring user wakers beneath it.
             self.waiters.extend(std::mem::take(&mut record.waiters));
-            let effects = state.task_completed_from_external_record_resuming(
+            let effects = state.task_completed_from_external_record_resuming_with_observers(
                 record,
                 &mut self.protocol_retired,
+                &mut self.obligation_observers,
             );
             let (observer, retirements) = if unwinding {
                 let (waiters, retirements) =
@@ -7482,3 +7483,7 @@ impl Runtime {
 #[cfg(test)]
 #[path = "builder_mailbox_observer_tests.rs"]
 mod mailbox_observer_tests;
+
+#[cfg(test)]
+#[path = "builder_close_wake_tests.rs"]
+mod close_wake_tests;

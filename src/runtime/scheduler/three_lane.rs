@@ -5318,12 +5318,12 @@ impl UnwindCompletionArtifacts {
     /// finalizer publication, cancellation-Waker retirement, then detached
     /// record destruction.
     fn dispatch_post_lock(self, worker: &ThreeLaneWorker) {
+        // Functional region-close Wakers may immediately join this task.
+        // Publish its committed retirement before dispatching those callbacks.
+        ThreeLaneWorker::open_retirement_barrier(self.retirement_cx_inner.as_ref());
         worker.finish_ready_finalizer_publication(self.finalizer_publication);
         self.obligation_observers.dispatch();
         self.cancel_waker_retirements.retire();
-        // Release any consumer parked on this panicked task's retirement
-        // barrier before retiring the record (br-asupersync-yhueis).
-        ThreeLaneWorker::open_retirement_barrier(self.retirement_cx_inner.as_ref());
         ThreeLaneWorker::retire_detached_task_record(self.detached_record);
     }
 }
@@ -9621,15 +9621,18 @@ impl ThreeLaneWorker {
                         let Some(mut record) = record else {
                             return;
                         };
+                        let mut obligation_observers =
+                            crate::runtime::state::LifecycleObserverBatch::default();
                         let mut state = worker
                             .state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         let retirement_cx_inner = record.cx_inner.clone();
                         let (waiters, cancel_waker_retirements) = state
-                            .task_completed_from_external_record_resuming(
+                            .task_completed_from_external_record_resuming_with_observers(
                                 &mut record,
                                 protocol_retired,
+                                &mut obligation_observers,
                             )
                             .into_waiters_and_retirements_without_observers();
                         let finalizers = worker.drain_ready_finalizers_locked(&mut state);
@@ -9637,8 +9640,7 @@ impl ThreeLaneWorker {
                         let finalizer_publication = worker.publish_ready_finalizers(finalizers);
                         drop(state);
                         UnwindCompletionArtifacts {
-                            obligation_observers:
-                                crate::runtime::state::LifecycleObserverBatch::default(),
+                            obligation_observers,
                             cancel_waker_retirements,
                             detached_record: Some(record),
                             retirement_cx_inner,
@@ -9708,9 +9710,10 @@ impl ThreeLaneWorker {
                 );
             }
             let completion_effects = match detached.record.as_mut() {
-                Some(record) => state.task_completed_from_external_record_resuming(
+                Some(record) => state.task_completed_from_external_record_resuming_with_observers(
                     record,
                     &mut detached.protocol_retired,
+                    obligation_observers,
                 ),
                 None => {
                     state.task_completed_with_obligation_observers(task_id, obligation_observers)
@@ -9841,7 +9844,11 @@ impl ThreeLaneWorker {
             .and_then(|record| record.cx_inner.clone())
             .or_else(|| state.task(task_id).and_then(|record| record.cx_inner.clone()));
         let completion = match detached_record.as_mut() {
-            Some(record) => state.task_completed_from_external_record(record),
+            Some(record) => state.task_completed_from_external_record_resuming_with_observers(
+                record,
+                &mut false,
+                obligation_observers,
+            ),
             None => state.task_completed_with_obligation_observers(task_id, obligation_observers),
         };
         let (waiters, cancel_waker_retirements) =
@@ -10464,3 +10471,7 @@ mod global_ready_batch_tests;
 #[cfg(test)]
 #[path = "three_lane_mailbox_observer_tests.rs"]
 mod mailbox_observer_tests;
+
+#[cfg(test)]
+#[path = "three_lane_close_wake_tests.rs"]
+mod close_wake_tests;

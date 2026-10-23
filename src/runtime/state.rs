@@ -1588,16 +1588,20 @@ pub(crate) enum LifecycleObserverEffect {
     },
 }
 
-/// One-shot observations collected while a native caller owns runtime locks.
+/// One-shot effects collected while a native caller owns runtime locks.
 ///
 /// Kernel accounting and mailbox receipts are applied immediately. The owning
 /// execution/retirement guard retains this batch until it has published work,
 /// committed completion, and released every state/table guard. Each metrics
 /// provider is retained with the observations captured under that provider.
+/// Functional region-close notifications have separate storage: a configured
+/// leak-policy panic may flush advisory observations inline, but must leave
+/// these foreign Wakers on the execution guard until the lock is released.
 #[derive(Default)]
-#[must_use = "dispatch lifecycle observations after releasing runtime locks"]
+#[must_use = "dispatch lifecycle effects after releasing runtime locks"]
 pub(crate) struct LifecycleObserverBatch {
     payloads: Vec<LifecycleObserverPayload>,
+    region_close_wakes: Vec<crate::record::region::RegionCloseWakes>,
 }
 
 struct LifecycleObserverPayload {
@@ -1626,6 +1630,11 @@ impl LifecycleObserverBatch {
     /// No runtime or task-table guard may be held here. One failed callback
     /// cannot suppress later observations or unwind through worker bookkeeping.
     pub(crate) fn dispatch(mut self) {
+        // Functional wake delivery precedes advisory observers and survives
+        // their panics. Each close token isolates every wake and retirement.
+        for wakes in std::mem::take(&mut self.region_close_wakes) {
+            wakes.dispatch();
+        }
         for LifecycleObserverPayload { metrics, effects } in std::mem::take(&mut self.payloads) {
             for effect in effects {
                 contain_metrics_hook(|| effect.dispatch(&*metrics));
@@ -1641,6 +1650,8 @@ impl Drop for LifecycleObserverBatch {
         // An abandoned batch may still be beneath an outer runtime lock or
         // unwinding through incomplete kernel cleanup. Never run a provider
         // destructor there. Normal delivery takes every payload before Drop.
+        // RegionCloseWakes similarly leaks only its opaque undispatched
+        // handles on abandonment; execution guards normally deliver them.
         for payload in self.payloads.drain(..) {
             std::mem::forget(payload);
         }
@@ -1820,6 +1831,18 @@ pub(crate) enum LifecycleEffectsSink<'b> {
     /// Apply kernel accounting immediately but retain observations for the
     /// task-completion token's post-unlock dispatch.
     Completion(&'b mut Vec<LifecycleObserverEffect>),
+    /// Native completion buffers shard effects while close Wakers move
+    /// directly to a caller-owned guard that survives completion unwind.
+    NativeBuffered {
+        buffer: &'b mut Vec<LifecycleEffect>,
+        close_wakes: &'b mut Vec<crate::record::region::RegionCloseWakes>,
+    },
+    /// Embedded native completion applies kernel effects immediately and
+    /// keeps functional close Wakers apart from advisory observations.
+    NativeCompletion {
+        observers: &'b mut Vec<LifecycleObserverEffect>,
+        close_wakes: &'b mut Vec<crate::record::region::RegionCloseWakes>,
+    },
 }
 
 /// Obligation-table target for the completion C-phases
@@ -7046,10 +7069,12 @@ impl RuntimeState {
     ) {
         match sink {
             LifecycleEffectsSink::Inline => self.dispatch_obligation_lifecycle_effect(effect, &mut None),
-            LifecycleEffectsSink::Buffered(buffer) => {
+            LifecycleEffectsSink::Buffered(buffer)
+            | LifecycleEffectsSink::NativeBuffered { buffer, .. } => {
                 buffer.push(LifecycleEffect::Obligation(effect));
             }
-            LifecycleEffectsSink::Completion(observers) => {
+            LifecycleEffectsSink::Completion(observers)
+            | LifecycleEffectsSink::NativeCompletion { observers, .. } => {
                 self.dispatch_obligation_lifecycle_effect(effect, &mut Some(observers));
             }
         }
@@ -7067,14 +7092,17 @@ impl RuntimeState {
         obligation: ObligationId,
     ) {
         match sink {
-            LifecycleEffectsSink::Inline | LifecycleEffectsSink::Completion(_) => {
+            LifecycleEffectsSink::Inline
+            | LifecycleEffectsSink::Completion(_)
+            | LifecycleEffectsSink::NativeCompletion { .. } => {
                 if self.cancel_protocol_tracking {
                     self.cancel_protocol_validator
                         .lock()
                         .remove_obligation(obligation);
                 }
             }
-            LifecycleEffectsSink::Buffered(buffer) => {
+            LifecycleEffectsSink::Buffered(buffer)
+            | LifecycleEffectsSink::NativeBuffered { buffer, .. } => {
                 buffer.push(LifecycleEffect::ValidatorRemoveObligation(obligation));
             }
         }
@@ -7129,7 +7157,11 @@ impl RuntimeState {
     /// Delivers the observations a completion walk has buffered so far, inline
     /// and each panic-contained, for a walk about to unwind.
     fn flush_completion_observations_inline(&self, sink: &mut LifecycleEffectsSink<'_>) {
-        if let LifecycleEffectsSink::Completion(buffer) = sink {
+        if let LifecycleEffectsSink::Completion(buffer)
+        | LifecycleEffectsSink::NativeCompletion {
+            observers: buffer, ..
+        } = sink
+        {
             for effect in buffer.drain(..) {
                 contain_metrics_hook(|| effect.dispatch(&*self.metrics));
             }
@@ -7143,10 +7175,14 @@ impl RuntimeState {
     ) {
         match sink {
             LifecycleEffectsSink::Inline => self.emit_lifecycle_observation(&mut None, effect),
-            LifecycleEffectsSink::Buffered(buffer) => {
+            LifecycleEffectsSink::Buffered(buffer)
+            | LifecycleEffectsSink::NativeBuffered { buffer, .. } => {
                 buffer.push(LifecycleEffect::Observer(effect))
             }
-            LifecycleEffectsSink::Completion(buffer) => buffer.push(effect),
+            LifecycleEffectsSink::Completion(buffer)
+            | LifecycleEffectsSink::NativeCompletion {
+                observers: buffer, ..
+            } => buffer.push(effect),
         }
     }
 
@@ -8726,7 +8762,7 @@ impl RuntimeState {
     fn task_completed_with_observers(
         &mut self,
         task_id: TaskId,
-        obligation_observers: Option<&mut LifecycleObserverBatch>,
+        mut obligation_observers: Option<&mut LifecycleObserverBatch>,
     ) -> TaskCompletionEffects {
         // br-asupersync-ndhjfj: atomic existence-check + waiter-take.
         // If the task was already removed (or never existed), return
@@ -8746,7 +8782,7 @@ impl RuntimeState {
             .as_ref()
             .is_some_and(|gateway| gateway.mailbox().has_pending_ownership_projection())
         {
-            if let Some(observers) = obligation_observers {
+            if let Some(observers) = obligation_observers.as_deref_mut() {
                 self.drain_obligation_posts_before_completion_deferred(None, observers);
             } else {
                 self.drain_obligation_posts_before_completion(None);
@@ -8834,6 +8870,7 @@ impl RuntimeState {
             observer,
             retired_cancel_wakers,
             true,
+            obligation_observers.map(|observers| &mut observers.region_close_wakes),
         )
     }
 
@@ -8858,6 +8895,30 @@ impl RuntimeState {
         &mut self,
         task: &mut TaskRecord,
         protocol_retired: &mut bool,
+    ) -> TaskCompletionEffects {
+        self.task_completed_from_external_record_with_close_wakes(task, protocol_retired, None)
+    }
+
+    /// Native detached-record completion retains functional close Wakers on
+    /// the same execution guard as mailbox observations, including unwind.
+    pub(crate) fn task_completed_from_external_record_resuming_with_observers(
+        &mut self,
+        task: &mut TaskRecord,
+        protocol_retired: &mut bool,
+        observers: &mut LifecycleObserverBatch,
+    ) -> TaskCompletionEffects {
+        self.task_completed_from_external_record_with_close_wakes(
+            task,
+            protocol_retired,
+            Some(&mut observers.region_close_wakes),
+        )
+    }
+
+    fn task_completed_from_external_record_with_close_wakes(
+        &mut self,
+        task: &mut TaskRecord,
+        protocol_retired: &mut bool,
+        close_wakes: Option<&mut Vec<crate::record::region::RegionCloseWakes>>,
     ) -> TaskCompletionEffects {
         let task_id = task.id;
         let waiters = std::mem::take(&mut task.waiters);
@@ -8920,6 +8981,7 @@ impl RuntimeState {
             observer,
             retired_cancel_wakers,
             false,
+            close_wakes,
         )
     }
 
@@ -8934,6 +8996,7 @@ impl RuntimeState {
         mut observer: TaskCompletionObserver,
         retired_cancel_wakers: TaskCompletionRetirements,
         remove_embedded_record: bool,
+        close_wakes: Option<&mut Vec<crate::record::region::RegionCloseWakes>>,
     ) -> TaskCompletionEffects {
         // E1.2 subsystem 3b (br-asupersync-sched-hot-path-perf-bt4y5f.2.2):
         // the cross-cutting completion tail, decomposed into shard-phase
@@ -8974,7 +9037,13 @@ impl RuntimeState {
                     let mut regions = AdmissionRegionTarget::Embedded;
                     let tasks = AdmissionTaskTarget::Embedded;
                     let mut obligations = CompletionObligationTarget::External(obligations_guard);
-                    let mut effects = LifecycleEffectsSink::Buffered(&mut deferred);
+                    let mut effects = match close_wakes {
+                        Some(close_wakes) => LifecycleEffectsSink::NativeBuffered {
+                            buffer: &mut deferred,
+                            close_wakes,
+                        },
+                        None => LifecycleEffectsSink::Buffered(&mut deferred),
+                    };
                     self.audit_completion_obligation_leaks(
                         &mut regions,
                         &tasks,
@@ -9012,7 +9081,13 @@ impl RuntimeState {
                 let mut regions = AdmissionRegionTarget::Embedded;
                 let tasks = AdmissionTaskTarget::Embedded;
                 let mut obligations = CompletionObligationTarget::Embedded;
-                let mut effects = LifecycleEffectsSink::Completion(&mut lifecycle);
+                let mut effects = match close_wakes {
+                    Some(close_wakes) => LifecycleEffectsSink::NativeCompletion {
+                        observers: &mut lifecycle,
+                        close_wakes,
+                    },
+                    None => LifecycleEffectsSink::Completion(&mut lifecycle),
+                };
                 self.audit_completion_obligation_leaks(
                     &mut regions,
                     &tasks,
@@ -10840,10 +10915,12 @@ impl RuntimeState {
     ) {
         match sink {
             LifecycleEffectsSink::Inline => self.dispatch_region_lifecycle_effect(effect, &mut None),
-            LifecycleEffectsSink::Buffered(buffer) => {
+            LifecycleEffectsSink::Buffered(buffer)
+            | LifecycleEffectsSink::NativeBuffered { buffer, .. } => {
                 buffer.push(LifecycleEffect::Region(effect));
             }
-            LifecycleEffectsSink::Completion(observers) => {
+            LifecycleEffectsSink::Completion(observers)
+            | LifecycleEffectsSink::NativeCompletion { observers, .. } => {
                 self.dispatch_region_lifecycle_effect(effect, &mut Some(observers));
             }
         }
@@ -11123,7 +11200,18 @@ impl RuntimeState {
                                 break;
                             };
                             let old_state = region.state();
-                            let closed = region.complete_close();
+                            let closed = match effects {
+                                LifecycleEffectsSink::NativeBuffered { close_wakes, .. }
+                                | LifecycleEffectsSink::NativeCompletion { close_wakes, .. } => {
+                                    if let Some(wakes) = region.complete_close_deferred_wakes() {
+                                        close_wakes.push(wakes);
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                _ => region.complete_close(),
+                            };
                             let new_state = region.state();
                             (
                                 closed,
@@ -12757,3 +12845,7 @@ fn captured_terminal_fast_cancellation_without_reason_is_refused() {
 #[cfg(test)]
 #[path = "state_mailbox_observer_test_support.rs"]
 pub(crate) mod mailbox_observer_test_support;
+
+#[cfg(test)]
+#[path = "state_close_wake_test_support.rs"]
+pub(crate) mod close_wake_test_support;
