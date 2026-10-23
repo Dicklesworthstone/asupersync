@@ -2027,7 +2027,7 @@ mod reactor_handoff {
     // block_on deliberately accepts caller-polled futures without Send bounds.
     #![allow(clippy::future_not_send)]
 
-    use super::{Cx, RootDrainOutcome, Runtime, RuntimeBuilder};
+    use super::{Cx, RootDrainOutcome, Runtime, RuntimeBuilder, TaskInspectorConfig};
     use asupersync::io::{AsyncReadExt, AsyncWriteExt};
     use asupersync::net::{TcpStream, UdpSocket};
     use std::future::{Future, poll_fn};
@@ -2150,7 +2150,22 @@ mod reactor_handoff {
                     park_once(stream.read(&mut byte)).await;
                     stream
                 });
-                assert!(first.is_quiescent());
+                // The root retired before block_on returned, but the runtime
+                // is not quiescent: is_quiescent() also counts registered I/O
+                // sources, and the parked read registered the stream with
+                // this runtime's reactor. Dropping the runtime with that
+                // registration live is the handoff under test.
+                assert!(
+                    first
+                        .task_inspector(TaskInspectorConfig::default())
+                        .list_tasks()
+                        .is_empty(),
+                    "the root retired before block_on returned"
+                );
+                assert!(
+                    !first.is_quiescent(),
+                    "the stream is still registered with the first reactor"
+                );
                 drop(first);
                 stream
             })
