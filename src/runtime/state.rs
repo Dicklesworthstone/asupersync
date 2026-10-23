@@ -2327,6 +2327,10 @@ impl MaskedFinalizer {
         guard.mask_depth += 1;
         drop(guard);
         self.entered = true;
+        crate::cx::cancel_observation::record(
+            &self.cx_inner,
+            crate::cx::cancel_observation::CancelObservation::MaskEnter,
+        );
     }
 
     fn exit_mask(&mut self) {
@@ -2337,6 +2341,10 @@ impl MaskedFinalizer {
         guard.mask_depth = guard.mask_depth.saturating_sub(1);
         drop(guard);
         self.entered = false;
+        crate::cx::cancel_observation::record(
+            &self.cx_inner,
+            crate::cx::cancel_observation::CancelObservation::MaskExit,
+        );
     }
 }
 
