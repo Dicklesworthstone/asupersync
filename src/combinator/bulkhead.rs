@@ -33,11 +33,15 @@
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
+use std::task::Poll;
 
-use crate::types::Time;
+use crate::cx::Cx;
+use crate::sync::Notify;
+use crate::types::{CancelReason, Time};
 
 // =========================================================================
 // Policy Configuration
@@ -184,6 +188,9 @@ pub struct Bulkhead {
     /// so `metrics()` can read queue depth without locking the queue.
     pending_queue_count: AtomicU32,
 
+    /// Queue/capacity mutations wake async admission after releasing state locks.
+    changed: Notify,
+
     /// Next queue entry ID.
     next_id: AtomicU64,
 
@@ -220,6 +227,7 @@ impl Bulkhead {
             available_permits: AtomicU32::new(available),
             queue: RwLock::new(VecDeque::with_capacity(max_queue)),
             pending_queue_count: AtomicU32::new(0),
+            changed: Notify::new(),
             next_id: AtomicU64::new(0),
             total_wait_time_ms: AtomicU64::new(0),
             total_executed_atomic: AtomicU64::new(0),
@@ -313,6 +321,11 @@ impl Bulkhead {
             }
         }
 
+        self.try_acquire_ready(weight)
+    }
+
+    /// Claim currently available capacity without advancing queue deadlines.
+    fn try_acquire_ready(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
         // Serialize against queue mutation so a waiter cannot slip into the
         // queue after our counter check but before we consume permits. This
         // closes the barging window where enqueue has pushed the waiter but has
@@ -353,7 +366,14 @@ impl Bulkhead {
     #[allow(clippy::cast_precision_loss)]
     pub fn process_queue(&self, now: Time) -> Option<u64> {
         let mut queue = self.queue.write();
-        self.process_queue_inner(&mut queue, now)
+        let pending_before = self.pending_queue_count.load(Ordering::Acquire);
+        let result = self.process_queue_inner(&mut queue, now);
+        let changed = self.pending_queue_count.load(Ordering::Acquire) != pending_before;
+        drop(queue);
+        if changed {
+            self.notify_admission_change();
+        }
+        result
     }
 
     /// Time out (but never grant) any queue entries whose deadline has passed.
@@ -391,6 +411,10 @@ impl Bulkhead {
                 .fetch_add(timeout_wait_ms, Ordering::Relaxed);
             self.max_queue_wait_ms_atomic
                 .fetch_max(max_individual_wait_ms, Ordering::Relaxed);
+        }
+        drop(queue);
+        if timeout_count > 0 {
+            self.notify_admission_change();
         }
     }
 
@@ -519,6 +543,8 @@ impl Bulkhead {
         // thread that observes this counter increment via Acquire load.
         self.pending_queue_count.fetch_add(1, Ordering::Release);
         self.total_queued_atomic.fetch_add(1, Ordering::Relaxed);
+        drop(queue);
+        self.notify_admission_change();
 
         Ok(entry_id)
     }
@@ -538,11 +564,13 @@ impl Bulkhead {
     ) -> Result<Option<BulkheadPermit<'_>>, BulkheadError<()>> {
         // Single write lock: process queue + check entry in one acquisition.
         let mut queue = self.queue.write();
+        let pending_before = self.pending_queue_count.load(Ordering::Acquire);
         let _ = self.process_queue_inner(&mut queue, now);
+        let changed = self.pending_queue_count.load(Ordering::Acquire) != pending_before;
 
         let entry_idx = queue.iter().position(|e| e.id == entry_id);
 
-        if let Some(idx) = entry_idx {
+        let result = if let Some(idx) = entry_idx {
             match queue[idx].result {
                 Some(Ok(())) => {
                     let entry = queue.remove(idx).expect("entry must exist");
@@ -563,7 +591,12 @@ impl Bulkhead {
         } else {
             // Entry not found - likely already processed
             Err(BulkheadError::Cancelled)
+        };
+        drop(queue);
+        if changed {
+            self.notify_admission_change();
         }
+        result
     }
 
     /// Cancel a queued entry.
@@ -598,6 +631,7 @@ impl Bulkhead {
             }
             // If entry.result was Some(Err(_)), it was already counted (e.g. as Timeout)
             // and pending_queue_count was decremented. Removing it keeps queue capacity honest.
+            self.notify_admission_change();
         }
     }
 
@@ -608,10 +642,10 @@ impl Bulkhead {
     fn release_permit(&self, weight: u32) {
         let max = self.policy.max_concurrent;
         let mut current = self.available_permits.load(Ordering::Acquire);
-        loop {
+        let changed = loop {
             let new = current.saturating_add(weight).min(max);
             if new == current {
-                break;
+                break false;
             }
             match self.available_permits.compare_exchange_weak(
                 current,
@@ -619,9 +653,12 @@ impl Bulkhead {
                 Ordering::Release,
                 Ordering::Acquire,
             ) {
-                Ok(_) => break,
+                Ok(_) => break true,
                 Err(actual) => current = actual,
             }
+        };
+        if changed {
+            self.notify_admission_change();
         }
     }
 
@@ -668,6 +705,7 @@ impl Bulkhead {
         self.available_permits
             .store(self.policy.max_concurrent, Ordering::Release);
         drop(queue);
+        self.notify_admission_change();
     }
 }
 
@@ -730,13 +768,15 @@ impl Drop for BulkheadPermit<'_> {
 /// obtain the [`BulkheadPermit`] once granted, and if it is dropped before the
 /// permit is claimed — e.g. the acquiring future is cancelled — it cancels the
 /// queue entry, releasing any granted-but-unclaimed permit so the slot is not
-/// leaked (5vzqse). The wait-stat timestamp used by a drop-time cancel is the
-/// enqueue time; the slot release itself is exact.
+/// leaked (5vzqse). Caller-driven guards preserve their enqueue timestamp on
+/// drop. Async admission captures its authorized timer driver so cancellation
+/// processes follower deadlines using the current time.
 #[derive(Debug)]
 pub struct QueuedAcquire<'a> {
     bulkhead: &'a Bulkhead,
     entry_id: u64,
     enqueued_now: Time,
+    timer_driver: Option<crate::time::TimerDriverHandle>,
     claimed: bool,
 }
 
@@ -774,7 +814,11 @@ impl Drop for QueuedAcquire<'_> {
             // The acquisition was abandoned before the permit was claimed.
             // cancel_entry releases a granted-but-unclaimed permit (or dequeues a
             // still-waiting entry), so no permit slot is leaked (5vzqse).
-            self.bulkhead.cancel_entry(self.entry_id, self.enqueued_now);
+            let now = self
+                .timer_driver
+                .as_ref()
+                .map_or(self.enqueued_now, |driver| driver.now());
+            self.bulkhead.cancel_entry(self.entry_id, now);
         }
     }
 }
@@ -796,6 +840,7 @@ impl Bulkhead {
             bulkhead: self,
             entry_id,
             enqueued_now: now,
+            timer_driver: None,
             claimed: false,
         })
     }
@@ -804,6 +849,169 @@ impl Bulkhead {
 // =========================================================================
 // Error Types
 // =========================================================================
+
+/// Failures from cancellation-aware async bulkhead admission.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum BulkheadAcquireError {
+    /// The bulkhead refused or expired the queued acquisition.
+    Admission(BulkheadError<()>),
+    /// The supplied context cancelled before ownership was handed to the caller.
+    Cancelled(CancelReason),
+    /// A contended acquisition needs the supplied context's time capability
+    /// and timer driver to enforce queue deadlines without polling.
+    TimerUnavailable,
+}
+
+impl fmt::Display for BulkheadAcquireError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admission(error) => write!(f, "bulkhead admission failed: {error:?}"),
+            Self::Cancelled(reason) => write!(f, "bulkhead admission cancelled: {reason:?}"),
+            Self::TimerUnavailable => f.write_str(
+                "waiting for bulkhead admission requires time capability and a timer driver",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BulkheadAcquireError {}
+
+impl From<BulkheadError<()>> for BulkheadAcquireError {
+    fn from(error: BulkheadError<()>) -> Self {
+        Self::Admission(error)
+    }
+}
+
+impl BulkheadAcquireError {
+    fn cancelled<Caps>(cx: &Cx<Caps>) -> Self {
+        Self::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("bulkhead admission cancelled")),
+        )
+    }
+}
+
+impl Bulkhead {
+    /// Acquire a weighted permit, parking until capacity or a terminal event.
+    ///
+    /// Immediate admission needs no timer. A queued acquisition requires the
+    /// supplied context's time capability and timer driver. Without a driver,
+    /// only currently free capacity with no pending FIFO predecessor is used.
+    /// Authorized waiting uses the same
+    /// FIFO order, queue bound and queue timeout as the existing queue APIs.
+    /// Release, queue progress and reset wake parked callers; no background
+    /// task, self-wake loop or periodic polling is used.
+    ///
+    /// The pending queue entry remains owned across every wait. Cancellation
+    /// or dropping this future removes it and refunds an unclaimed grant.
+    /// A permit returned successfully has the normal RAII release behavior.
+    /// Cancellation takes precedence when observed before the handoff.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed cancellation, timer-authority failure, or the original
+    /// bulkhead queue refusal/timeout. Reset invalidates a pending entry and
+    /// returns `Admission(BulkheadError::Cancelled)`.
+    pub async fn acquire_async<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        weight: u32,
+    ) -> Result<BulkheadPermit<'_>, BulkheadAcquireError>
+    where
+        Caps: crate::cx::cap::HasTime,
+    {
+        cx.checkpoint()
+            .map_err(|_| BulkheadAcquireError::cancelled(cx))?;
+        let driver = cx.timer_driver();
+        let now = driver.as_ref().map_or(Time::ZERO, |driver| driver.now());
+        let immediate = if driver.is_some() {
+            self.try_acquire(weight, now)
+        } else {
+            self.try_acquire_ready(weight)
+        };
+        if let Some(permit) = immediate {
+            cx.checkpoint()
+                .map_err(|_| BulkheadAcquireError::cancelled(cx))?;
+            return Ok(permit);
+        }
+        if weight > self.policy.max_concurrent {
+            self.total_rejected_atomic.fetch_add(1, Ordering::Relaxed);
+            return Err(BulkheadError::Full.into());
+        }
+        let driver = driver.ok_or(BulkheadAcquireError::TimerUnavailable)?;
+        let mut queued = self.acquire_queued(weight, now)?;
+        queued.timer_driver = Some(driver.clone());
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+
+        loop {
+            let mut changed = std::pin::pin!(self.changed.notified());
+            // Arm the creation-time generation before checking state. Merely
+            // constructing Notified would capture it on first poll and could
+            // lose a release between poll_claim and waiter registration.
+            changed.as_mut().enable();
+            let now = driver.now();
+            // Enforce deadlines after the time snapshot used below: an elapsed
+            // owner deadline may be omitted from the timer only if masked.
+            cx.checkpoint()
+                .map_err(|_| BulkheadAcquireError::cancelled(cx))?;
+            if let Some(permit) = queued.poll_claim(now)? {
+                cx.checkpoint()
+                    .map_err(|_| BulkheadAcquireError::cancelled(cx))?;
+                return Ok(permit);
+            }
+
+            // A raw FIFO predecessor might never be polled again. Its expiry
+            // must wake this owner so it can retire the predecessor and proceed.
+            let queue_deadline = self
+                .queue
+                .read()
+                .iter()
+                .filter(|entry| entry.result.is_none())
+                .map(|entry| Time::from_millis(entry.deadline_millis))
+                .min()
+                .unwrap_or(Time::MAX);
+            let wake_at = cx
+                .budget()
+                .deadline
+                // An expired but masked cancellation must not create a
+                // permanently-ready timer loop. Cancellation stays deferred.
+                .filter(|deadline| *deadline > now)
+                .map_or(queue_deadline, |deadline| queue_deadline.min(deadline));
+            let mut timer =
+                std::pin::pin!(crate::time::Sleep::with_timer_driver(wake_at, driver.clone()));
+            poll_fn(|task| {
+                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                    return Poll::Ready(());
+                }
+                if changed.as_mut().poll(task).is_ready()
+                    || (wake_at > now && timer.as_mut().poll_deadline(task).is_ready())
+                {
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            })
+            .await;
+        }
+    }
+
+    /// Queue/capacity publication cannot unwind through the owner because an
+    /// external wake callback panics. Notify still completes its entire fanout.
+    fn notify_admission_change(&self) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.changed.notify_waiters();
+        })) {
+            // A panic payload can itself have a panicking destructor. Contain
+            // that too; leaking only the secondary payload keeps an already
+            // published transition from unwinding before its RAII owner exists.
+            if let Err(secondary) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+            {
+                std::mem::forget(secondary);
+            }
+        }
+    }
+}
 
 /// Errors from bulkhead.
 #[derive(Debug, Clone)]

@@ -1598,3 +1598,563 @@
             "bulkhead lab-runtime saturation test should leave runtime invariants clean: {violations:?}"
         );
     }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod async_admission_tests {
+    use super::*;
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+    use crate::types::CancelKind;
+    use std::future::{Future, poll_fn};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex, mpsc};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    fn native<F, Fut>(workers: usize, scenario: F)
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::multi_thread().worker_threads(workers)
+            };
+            let runtime = builder.build().unwrap();
+            let completed = Arc::new(AtomicBool::new(false));
+            let completion = Arc::clone(&completed);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("admitted bulkhead scenario");
+                crate::time::timeout(cx.now(), Duration::from_secs(10), scenario(cx))
+                    .await
+                    .expect("bulkhead admission scenario watchdog");
+                completion.store(true, Ordering::Release);
+            }));
+            assert!(completed.load(Ordering::Acquire));
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            done_tx.send(()).unwrap();
+        });
+        match done_rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                runner.join().expect("native bulkhead admission scenario");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("native bulkhead admission exceeded watchdog");
+            }
+        }
+    }
+
+    fn limiter(timeout: Duration) -> Bulkhead {
+        Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 4,
+            queue_timeout: timeout,
+            ..Default::default()
+        })
+    }
+
+    async fn wait_parked(bulkhead: &Bulkhead, waiters: usize) {
+        while bulkhead.changed.waiter_count() < waiters {
+            yield_now().await;
+        }
+    }
+
+    fn assert_empty(bulkhead: &Bulkhead, available: u32) {
+        assert!(bulkhead.queue.read().is_empty());
+        assert_eq!(bulkhead.pending_queue_count.load(Ordering::Acquire), 0);
+        assert_eq!(bulkhead.changed.waiter_count(), 0);
+        assert_eq!(bulkhead.available(), available);
+    }
+
+    #[test]
+    fn immediate_admission_needs_no_timer_but_contended_wait_fails_closed() {
+        type TimeOnly = crate::cx::cap::CapSet<false, true, false, false, false>;
+        let cx = Cx::for_testing().restrict::<TimeOnly>();
+        let bulkhead = limiter(Duration::from_secs(1));
+        let mut context = Context::from_waker(Waker::noop());
+        let mut immediate = Box::pin(bulkhead.acquire_async(&cx, 1));
+        let permit = match immediate.as_mut().poll(&mut context) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("immediate admission must succeed: {other:?}"),
+        };
+        drop(immediate);
+        let mut waiting = Box::pin(bulkhead.acquire_async(&cx, 1));
+        assert!(matches!(
+            waiting.as_mut().poll(&mut context),
+            Poll::Ready(Err(BulkheadAcquireError::TimerUnavailable))
+        ));
+        drop(waiting);
+        assert_empty(&bulkhead, 0);
+        drop(permit);
+
+        cx.set_cancel_requested(true);
+        let mut cancelled = Box::pin(bulkhead.acquire_async(&cx, 1));
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            Poll::Ready(Err(BulkheadAcquireError::Cancelled(_)))
+        ));
+        drop(cancelled);
+        assert_empty(&bulkhead, 1);
+    }
+
+    async fn fifo_release_scenario(cx: Cx) {
+        let bulkhead = Arc::new(limiter(Duration::from_secs(30)));
+        let held = bulkhead.try_acquire(1, cx.now()).unwrap();
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let release = Arc::new(AtomicBool::new(false));
+        let changed = Arc::new(Notify::new());
+
+        let first_bulkhead = Arc::clone(&bulkhead);
+        let first_order = Arc::clone(&order);
+        let first_release = Arc::clone(&release);
+        let first_changed = Arc::clone(&changed);
+        let mut first = cx
+            .spawn(move |owner| async move {
+                let _permit = first_bulkhead.acquire_async(&owner, 1).await.unwrap();
+                first_order.lock().unwrap().push(1);
+                first_changed.notify_waiters();
+                first_changed
+                    .wait_until(|| first_release.load(Ordering::Acquire))
+                    .await;
+            })
+            .unwrap();
+        wait_parked(&bulkhead, 1).await;
+
+        let second_bulkhead = Arc::clone(&bulkhead);
+        let second_order = Arc::clone(&order);
+        let mut second = cx
+            .spawn(move |owner| async move {
+                let _permit = second_bulkhead.acquire_async(&owner, 1).await.unwrap();
+                second_order.lock().unwrap().push(2);
+            })
+            .unwrap();
+        wait_parked(&bulkhead, 2).await;
+        assert_eq!(bulkhead.metrics().queue_depth, 2);
+        assert!(order.lock().unwrap().is_empty());
+
+        // A release from another OS thread must wake the actually parked task.
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(held)).join().unwrap();
+        });
+        changed
+            .wait_until(|| !order.lock().unwrap().is_empty())
+            .await;
+        assert_eq!(*order.lock().unwrap(), vec![1]);
+        assert_eq!(bulkhead.available(), 0);
+        release.store(true, Ordering::Release);
+        changed.notify_waiters();
+        first.join(&cx).await.unwrap();
+        second.join(&cx).await.unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+        assert_empty(&bulkhead, 1);
+    }
+
+    #[test]
+    fn native_async_admission_wakes_on_release_and_preserves_fifo() {
+        for workers in [1, 2] {
+            native(workers, fifo_release_scenario);
+        }
+    }
+
+    #[test]
+    fn native_async_admission_cancels_an_actually_parked_owner() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                let bulkhead = Arc::new(limiter(Duration::from_secs(30)));
+                let held = bulkhead.try_acquire(1, cx.now()).unwrap();
+                let child_bulkhead = Arc::clone(&bulkhead);
+                let child = cx
+                    .spawn(move |owner| async move {
+                        let result = child_bulkhead.acquire_async(&owner, 1).await;
+                        assert!(matches!(
+                            result,
+                            Err(BulkheadAcquireError::Cancelled(reason))
+                                if reason.kind == CancelKind::User
+                        ));
+                    })
+                    .unwrap();
+                wait_parked(&bulkhead, 1).await;
+                assert_eq!(bulkhead.metrics().queue_depth, 1);
+                let mut child = std::thread::spawn(move || {
+                    child.abort();
+                    child
+                })
+                .join()
+                .unwrap();
+                child.join(&cx).await.unwrap();
+                assert_empty(&bulkhead, 0);
+                drop(held);
+                assert_empty(&bulkhead, 1);
+            });
+        }
+    }
+
+    #[test]
+    fn native_async_drop_releases_pending_and_unclaimed_grants() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                for grant in [false, true] {
+                    let bulkhead = limiter(Duration::from_secs(30));
+                    let mut held = Some(bulkhead.try_acquire(1, cx.now()).unwrap());
+                    let mut waiting = Box::pin(bulkhead.acquire_async(&cx, 1));
+                    poll_fn(|task| {
+                        assert!(waiting.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    assert_eq!(bulkhead.changed.waiter_count(), 1);
+                    if grant {
+                        drop(held.take());
+                        assert!(bulkhead.process_queue(cx.now()).is_some());
+                        assert_eq!(bulkhead.pending_queue_count.load(Ordering::Acquire), 0);
+                        assert_eq!(bulkhead.available(), 0);
+                    }
+                    drop(waiting);
+                    assert_empty(&bulkhead, u32::from(grant));
+                    drop(held);
+                    assert_empty(&bulkhead, 1);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn native_async_admission_wakes_on_reset() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                let bulkhead = Arc::new(limiter(Duration::from_secs(30)));
+                let held = bulkhead.try_acquire(1, cx.now()).unwrap();
+                let child_bulkhead = Arc::clone(&bulkhead);
+                let mut child = cx
+                    .spawn(move |owner| async move {
+                        assert!(matches!(
+                            child_bulkhead.acquire_async(&owner, 1).await,
+                            Err(BulkheadAcquireError::Admission(BulkheadError::Cancelled))
+                        ));
+                    })
+                    .unwrap();
+                wait_parked(&bulkhead, 1).await;
+                bulkhead.reset();
+                child.join(&cx).await.unwrap();
+                assert_empty(&bulkhead, 1);
+                drop(held);
+                assert_empty(&bulkhead, 1);
+            });
+        }
+    }
+
+    #[test]
+    fn native_async_queue_timeout_and_inherited_deadline_are_driven() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                for inherited in [false, true] {
+                    let mut spec = ChildRegionSpec::inherit();
+                    if inherited {
+                        spec = spec.with_budget(
+                            Budget::new().with_deadline(cx.now() + Duration::from_millis(250)),
+                        );
+                    }
+                    let parent = cx.open_child_region(spec).await.unwrap();
+                    let timeout = if inherited {
+                        Duration::from_secs(30)
+                    } else {
+                        Duration::from_millis(250)
+                    };
+                    let bulkhead = Arc::new(limiter(timeout));
+                    let held = bulkhead.try_acquire(1, cx.now()).unwrap();
+                    let child_bulkhead = Arc::clone(&bulkhead);
+                    let mut child = parent
+                        .cx()
+                        .spawn(move |owner| async move {
+                            let result = child_bulkhead.acquire_async(&owner, 1).await;
+                            if inherited {
+                                assert!(matches!(
+                                    result,
+                                    Err(BulkheadAcquireError::Cancelled(reason))
+                                        if reason.kind == CancelKind::Deadline
+                                ));
+                            } else {
+                                assert!(matches!(
+                                    result,
+                                    Err(BulkheadAcquireError::Admission(
+                                        BulkheadError::QueueTimeout { waited }
+                                    )) if waited >= timeout
+                                ));
+                            }
+                        })
+                        .unwrap();
+                    wait_parked(&bulkhead, 1).await;
+                    child.join(&cx).await.unwrap();
+                    assert_empty(&bulkhead, 0);
+                    drop(held);
+                    parent.close().await.unwrap();
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn lab_async_follower_drives_abandoned_raw_fifo_deadline() {
+        use crate::{LabConfig, LabRuntime};
+        for seed in [17, 41, 93] {
+            let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let (task, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async {
+                    let cx = Cx::current().unwrap();
+                    let bulkhead = Bulkhead::new(BulkheadPolicy {
+                        max_concurrent: 2,
+                        max_queue: 2,
+                        queue_timeout: Duration::from_millis(100),
+                        ..Default::default()
+                    });
+                    let started = cx.now();
+                    let held = bulkhead.try_acquire(1, started).unwrap();
+                    let abandoned = bulkhead.enqueue(2, started).unwrap();
+                    crate::time::sleep(cx.now(), Duration::from_millis(50)).await;
+                    let permit = bulkhead.acquire_async(&cx, 1).await.unwrap();
+                    assert_eq!(cx.now(), started + Duration::from_millis(100));
+                    assert_eq!(permit.weight(), 1);
+                    bulkhead.cancel_entry(abandoned, cx.now());
+                    drop(permit);
+                    drop(held);
+                    assert_empty(&bulkhead, 2);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(task, 0);
+            let virtual_time = lab.run_with_auto_advance();
+            let report = lab.run_until_quiescent_with_report();
+            assert!(matches!(join.try_join(), Ok(Some(()))), "{virtual_time:?} {report:?}");
+            assert!(lab.state.tasks_is_empty());
+            assert!(lab.state.obligations_iter().all(|(_, obligation)| !obligation.is_pending()));
+            assert!(report.lab_test_passed(), "{report:?}");
+        }
+    }
+
+    struct PanicWake;
+    impl Wake for PanicWake {
+        fn wake(self: Arc<Self>) {
+            panic!("bulkhead notification wake panic");
+        }
+    }
+
+    struct CountWake(AtomicUsize);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn notification_panic_cannot_interrupt_queue_owner_publication() {
+        let bulkhead = limiter(Duration::from_secs(1));
+        let mut hostile = Box::pin(bulkhead.changed.notified());
+        let hostile_waker = Waker::from(Arc::new(PanicWake));
+        assert!(
+            hostile
+                .as_mut()
+                .poll(&mut Context::from_waker(&hostile_waker))
+                .is_pending()
+        );
+        let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+        let other_waker = Waker::from(Arc::clone(&counter));
+        let mut other = Box::pin(bulkhead.changed.notified());
+        assert!(
+            other
+                .as_mut()
+                .poll(&mut Context::from_waker(&other_waker))
+                .is_pending()
+        );
+        let queued = bulkhead.acquire_queued(1, Time::ZERO).unwrap();
+        assert_eq!(counter.0.load(Ordering::Acquire), 1);
+        assert_eq!(bulkhead.pending_queue_count.load(Ordering::Acquire), 1);
+        drop(queued);
+        drop(hostile);
+        drop(other);
+        assert_empty(&bulkhead, 1);
+    }
+
+    #[test]
+    fn deadline_crossing_between_checkpoint_and_queue_clock_does_not_park() {
+        use crate::time::{TimeSource, TimerDriver, TimerDriverHandle};
+        use crate::types::{RegionId, TaskId};
+
+        #[derive(Debug, Default)]
+        struct CrossingClock {
+            reads: AtomicUsize,
+        }
+
+        impl TimeSource for CrossingClock {
+            fn now(&self) -> Time {
+                // Initial checkpoint and enqueue use time zero. Advance on the
+                // fourth sample, between the old loop checkpoint and its queue
+                // clock read, then remain monotonic at the owner deadline.
+                if self.reads.fetch_add(1, Ordering::SeqCst) < 3 {
+                    Time::ZERO
+                } else {
+                    Time::from_millis(1)
+                }
+            }
+        }
+
+        let clock = Arc::new(CrossingClock::default());
+        let driver = TimerDriverHandle::new(Arc::new(TimerDriver::with_clock(Arc::clone(&clock))));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::new().with_deadline(Time::from_millis(1)),
+            None,
+            None,
+            None,
+            Some(driver),
+            None,
+        );
+        let bulkhead = limiter(Duration::from_secs(30));
+        let held = bulkhead.try_acquire(1, Time::ZERO).unwrap();
+        clock.reads.store(0, Ordering::SeqCst);
+
+        let mut waiting = Box::pin(bulkhead.acquire_async(&cx, 1));
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task),
+            Poll::Ready(Err(BulkheadAcquireError::Cancelled(reason)))
+                if reason.kind == CancelKind::Deadline
+        ));
+        assert!(clock.reads.load(Ordering::SeqCst) >= 4);
+        drop(waiting);
+        assert_empty(&bulkhead, 0);
+        drop(held);
+        assert_empty(&bulkhead, 1);
+    }
+
+    #[test]
+    fn runtime_masked_time_cannot_expire_a_fifo_predecessor() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{RegionId, TaskId};
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(10)));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(TimerDriverHandle::with_virtual_clock(clock)),
+            None,
+        );
+        let bulkhead = limiter(Duration::from_millis(1));
+        let predecessor = bulkhead.enqueue(1, Time::ZERO).unwrap();
+        let restriction = cx
+            .restrict::<crate::cx::cap::None>()
+            .set_current_restricted();
+        let masked = Cx::current().unwrap();
+        assert!(!masked.capabilities().time);
+        assert!(masked.timer_driver().is_none());
+
+        let mut task = Context::from_waker(Waker::noop());
+        let mut denied = Box::pin(bulkhead.acquire_async(&masked, 1));
+        assert!(matches!(
+            denied.as_mut().poll(&mut task),
+            Poll::Ready(Err(BulkheadAcquireError::TimerUnavailable))
+        ));
+        drop(denied);
+        assert_eq!(bulkhead.available(), 1);
+        assert_eq!(bulkhead.pending_queue_count.load(Ordering::Acquire), 1);
+        {
+            let queue = bulkhead.queue.read();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].id, predecessor);
+            assert!(queue[0].result.is_none());
+        }
+        drop(restriction);
+
+        // The original context still owns TIME and may retire the stale head.
+        let mut admitted = Box::pin(bulkhead.acquire_async(&cx, 1));
+        let permit = match admitted.as_mut().poll(&mut task) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("authorized time must expire the stale head: {other:?}"),
+        };
+        drop(admitted);
+        bulkhead.cancel_entry(predecessor, cx.now());
+        drop(permit);
+        assert_empty(&bulkhead, 1);
+    }
+
+    #[test]
+    fn dropping_async_owner_expires_followers_with_current_time() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{RegionId, TaskId};
+
+        for granted in [false, true] {
+            let clock = Arc::new(VirtualClock::new());
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock))),
+                None,
+            );
+            let bulkhead = Bulkhead::new(BulkheadPolicy {
+                max_concurrent: 2,
+                max_queue: 4,
+                queue_timeout: Duration::from_millis(100),
+                ..Default::default()
+            });
+            let mut held = Some(bulkhead.try_acquire(1, Time::ZERO).unwrap());
+            let mut owner = Box::pin(bulkhead.acquire_async(&cx, 2));
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(owner.as_mut().poll(&mut task).is_pending());
+            let owner_id = bulkhead.queue.read()[0].id;
+            let follower = bulkhead.enqueue(1, Time::ZERO).unwrap();
+
+            if granted {
+                drop(held.take());
+                assert_eq!(bulkhead.process_queue(Time::ZERO), Some(owner_id));
+            }
+            {
+                let queue = bulkhead.queue.read();
+                let first = queue.iter().find(|entry| entry.id == owner_id).unwrap();
+                assert_eq!(matches!(first.result, Some(Ok(()))), granted);
+                assert!(
+                    queue
+                        .iter()
+                        .find(|entry| entry.id == follower)
+                        .unwrap()
+                        .result
+                        .is_none()
+                );
+            }
+
+            // Drop the owner without another poll: its stored enqueue time is
+            // still zero, but the follower has expired and must not be granted.
+            clock.advance_to(Time::from_millis(200));
+            drop(owner);
+            assert_eq!(bulkhead.available(), if granted { 2 } else { 1 });
+            assert_eq!(bulkhead.pending_queue_count.load(Ordering::Acquire), 0);
+            {
+                let queue = bulkhead.queue.read();
+                assert_eq!(queue.len(), 1);
+                assert_eq!(queue[0].id, follower);
+                assert!(matches!(queue[0].result, Some(Err(RejectionReason::Timeout))));
+            }
+            assert!(matches!(
+                bulkhead.check_entry(follower, cx.now()),
+                Err(BulkheadError::QueueTimeout { waited })
+                    if waited == Duration::from_millis(200)
+            ));
+            drop(held);
+            assert_empty(&bulkhead, 2);
+        }
+    }
+}
