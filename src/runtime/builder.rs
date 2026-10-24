@@ -7131,14 +7131,17 @@ fn current_timer_driver_for_block_on() -> Option<TimerDriverHandle> {
     crate::cx::Cx::current().and_then(|cx| cx.timer_driver())
 }
 
+/// Fires the timers that are due on the ambient timer driver.
+///
+/// Returns whether any timer fired. Each fired timer runs its own `Waker`,
+/// and that waker makes its owner runnable: a task waker enqueues the task
+/// and wakes a worker (the owning worker plus the reactor for a local task),
+/// and a `block_on` root's waker unparks the caller. The caller therefore
+/// broadcasts nothing itself. A `wake_all()` here used to unpark every worker
+/// and the I/O driver each time this thread fired a batch of timers
+/// (frankenterm#135).
 fn process_current_block_on_timers() -> bool {
-    let fired = current_timer_driver_for_block_on().is_some_and(|timer| timer.process_timers() > 0);
-    if fired
-        && let Some(inner) = Runtime::current_handle().and_then(|handle| handle.try_inner().ok())
-    {
-        inner.scheduler.wake_all();
-    }
-    fired
+    current_timer_driver_for_block_on().is_some_and(|timer| timer.process_timers() > 0)
 }
 
 fn next_block_on_timer_park_duration(timer: &TimerDriverHandle) -> Option<Duration> {

@@ -6452,3 +6452,64 @@ worker_threads = 16
             "queued local spawns did not resolve cancelled: {unresolved:?}"
         );
     }
+
+    /// frankenterm#135: a `block_on` caller that fires a due timer runs that
+    /// timer's own waker and nothing else. It used to broadcast `wake_all()`
+    /// on top, unparking every worker and the reactor for each fired batch.
+    #[test]
+    fn block_on_timer_processing_runs_only_the_fired_wakers() {
+        struct CountingWaker(AtomicUsize);
+        impl std::task::Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime build");
+        // A driver only this thread knows about, so no worker can fire the
+        // timer first and the assertions below are deterministic.
+        let clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_secs(1)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(0, 135),
+            crate::types::TaskId::new_for_test(0, 135),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let fired = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let _registration = timer.register(Time::from_secs(2), Waker::from(Arc::clone(&fired)));
+        clock.advance_to(Time::from_secs(2));
+
+        let _runtime_guard = ScopedRuntimeHandle::new(runtime.handle());
+        let _cx_guard = Cx::set_current(Some(cx));
+        let broadcasts_before =
+            crate::runtime::scheduler::three_lane::wake_all_calls_on_this_thread();
+
+        assert!(process_current_block_on_timers(), "the due timer fires");
+        assert_eq!(
+            fired.0.load(Ordering::SeqCst),
+            1,
+            "the fired timer's waker runs exactly once"
+        );
+        assert_eq!(
+            crate::runtime::scheduler::three_lane::wake_all_calls_on_this_thread()
+                - broadcasts_before,
+            0,
+            "firing a timer must not broadcast an unpark to every worker"
+        );
+        assert!(
+            !process_current_block_on_timers(),
+            "no further timer is due"
+        );
+    }

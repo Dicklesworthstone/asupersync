@@ -472,6 +472,20 @@ fn take_lifo_placed_here() -> Option<TaskId> {
     LIFO_PLACED_HERE.with(Cell::take)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `WorkerCoordinator::wake_all` broadcasts raised on this thread, so a
+    /// test can prove that a path it drives does not broadcast (counted per
+    /// thread: parallel tests cannot disturb it).
+    static WAKE_ALL_CALLS_HERE: Cell<usize> = const { Cell::new(0) };
+}
+
+/// `WorkerCoordinator::wake_all` broadcasts raised on this thread so far.
+#[cfg(test)]
+pub(crate) fn wake_all_calls_on_this_thread() -> usize {
+    WAKE_ALL_CALLS_HERE.with(Cell::get)
+}
+
 /// One worker's LIFO slot (br-asupersync-issue65-criticisms-kpmoy5.1.11): a
 /// ready task woken by the task the worker is executing, which the worker
 /// runs next instead of sending it through the global injector and unparking
@@ -1636,6 +1650,8 @@ impl WorkerCoordinator {
 
     #[inline]
     pub(crate) fn wake_all(&self) {
+        #[cfg(test)]
+        WAKE_ALL_CALLS_HERE.with(|calls| calls.set(calls.get().saturating_add(1)));
         for parker in &self.parkers {
             parker.unpark();
         }
