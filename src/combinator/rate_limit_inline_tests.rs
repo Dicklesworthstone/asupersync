@@ -1351,3 +1351,391 @@
             "Failed to acquire token due to precision loss starvation"
         );
     }
+
+mod queued_acquisition_ownership {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::{Barrier, mpsc};
+    use std::time::Instant;
+
+    fn limiter(rate: u32, burst: u32) -> RateLimiter {
+        RateLimiter::new(RateLimitPolicy {
+            rate,
+            period: Duration::from_secs(1),
+            burst,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn immediate_guard_refunds_or_transfers_its_credit_exactly_once() {
+        let rl = limiter(0, 3);
+        let now = Time::ZERO;
+
+        let guard = rl.acquire_queued_bounded(2, now, 0).unwrap();
+        assert_eq!(rl.available_tokens(), 1);
+        assert!(rl.wait_queue.read().is_empty());
+        drop(guard);
+        assert_eq!(rl.available_tokens(), 3);
+
+        let mut guard = rl.acquire_queued_bounded(2, now, 0).unwrap();
+        let permit = guard.poll_claim(now).unwrap().expect("immediate permit");
+        assert!(matches!(
+            guard.poll_claim(now),
+            Err(RateLimitError::Cancelled)
+        ));
+        assert!(rl.try_acquire(1, now));
+        drop(guard);
+        assert_eq!(rl.available_tokens(), 0, "only the permit owns the credit");
+        drop(permit);
+        assert_eq!(rl.available_tokens(), 2);
+
+        let mut guard = rl.acquire_queued(2, now).unwrap();
+        guard.poll_claim(now).unwrap().unwrap().commit();
+        drop(guard);
+        assert_eq!(rl.available_tokens(), 0, "committed credit stays consumed");
+        assert!(matches!(
+            rl.acquire_queued_bounded(1, now, 0),
+            Err(RateLimitError::RateLimitExceeded)
+        ));
+        assert!(rl.wait_queue.read().is_empty());
+    }
+
+    #[test]
+    fn dropping_a_pending_guard_releases_capacity_and_wait_accounting() {
+        let rl = limiter(0, 2);
+        assert!(rl.try_acquire(2, Time::ZERO));
+
+        let mut guard = rl.acquire_queued_bounded(2, Time::ZERO, 1).unwrap();
+        assert!(guard.poll_claim(Time::from_millis(9)).unwrap().is_none());
+        assert!(matches!(
+            rl.acquire_queued_bounded(1, Time::from_millis(9), 1),
+            Err(RateLimitError::RateLimitExceeded)
+        ));
+        assert_eq!(rl.wait_queue.read().len(), 1);
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 1);
+        drop(guard);
+
+        assert!(rl.wait_queue.read().is_empty());
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+        assert_eq!(rl.metrics().total_wait_time, Duration::from_millis(9));
+        assert_eq!(rl.available_tokens(), 0, "an ungranted entry has no refund");
+        drop(
+            rl.acquire_queued_bounded(1, Time::from_millis(9), 1)
+                .unwrap(),
+        );
+        assert!(rl.wait_queue.read().is_empty());
+    }
+
+    #[test]
+    fn a_grant_keeps_queue_capacity_until_claim_and_refunds_only_via_its_owner() {
+        let rl = limiter(1, 1);
+        assert!(rl.try_acquire(1, Time::ZERO));
+        let mut first = rl.acquire_queued_bounded(1, Time::ZERO, 1).unwrap();
+        let granted_at = Time::from_millis(1000);
+        assert!(rl.process_queue(granted_at).is_some());
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+        assert_eq!(rl.wait_queue.read().len(), 1);
+        assert!(matches!(
+            rl.acquire_queued_bounded(1, granted_at, 1),
+            Err(RateLimitError::RateLimitExceeded)
+        ));
+
+        let permit = first.poll_claim(granted_at).unwrap().unwrap();
+        assert!(rl.wait_queue.read().is_empty());
+        let mut second = rl.acquire_queued_bounded(1, granted_at, 1).unwrap();
+        drop(first);
+        assert_eq!(rl.available_tokens(), 0);
+        assert!(second.poll_claim(granted_at).unwrap().is_none());
+        drop(permit);
+
+        second.poll_claim(granted_at).unwrap().unwrap().commit();
+        drop(second);
+        assert_eq!(rl.available_tokens(), 0);
+        assert!(rl.wait_queue.read().is_empty());
+    }
+
+    #[test]
+    fn dropping_an_unclaimed_grant_hands_its_credit_to_the_next_waiter() {
+        let rl = limiter(1, 2);
+        assert!(rl.try_acquire(2, Time::ZERO));
+        let first = rl.acquire_queued_bounded(2, Time::ZERO, 2).unwrap();
+        let mut second = rl.acquire_queued_bounded(1, Time::ZERO, 2).unwrap();
+        let granted_at = Time::from_millis(2000);
+        assert!(rl.process_queue(granted_at).is_some());
+        assert_eq!(rl.available_tokens(), 0);
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 1);
+
+        drop(first);
+        assert_eq!(rl.wait_queue.read().len(), 1);
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+        assert_eq!(rl.available_tokens(), 1);
+        let permit = second.poll_claim(granted_at).unwrap().unwrap();
+        drop(second);
+        assert_eq!(rl.available_tokens(), 1);
+        permit.commit();
+        assert_eq!(rl.available_tokens(), 1);
+        assert!(rl.wait_queue.read().is_empty());
+    }
+
+    #[test]
+    fn queued_ownership_preserves_weighted_fifo_until_the_head_is_cancelled() {
+        let rl = limiter(1, 3);
+        assert!(rl.try_acquire(3, Time::ZERO));
+        let head = rl.acquire_queued_bounded(3, Time::ZERO, 2).unwrap();
+        let mut tail = rl.acquire_queued_bounded(1, Time::ZERO, 2).unwrap();
+        let now = Time::from_millis(2000);
+
+        assert!(tail.poll_claim(now).unwrap().is_none());
+        assert_eq!(rl.available_tokens(), 2);
+        assert!(!rl.try_acquire(1, now), "new work cannot bypass the head");
+        drop(head);
+        tail.poll_claim(now).unwrap().unwrap().commit();
+        assert_eq!(rl.available_tokens(), 1);
+        assert!(rl.wait_queue.read().is_empty());
+    }
+
+    #[test]
+    fn timeout_records_count_toward_the_bound_until_observed_or_dropped() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 0,
+            burst: 1,
+            wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(10)),
+            ..Default::default()
+        });
+        assert!(rl.try_acquire(1, Time::ZERO));
+        let mut first = rl.acquire_queued_bounded(1, Time::ZERO, 1).unwrap();
+        let deadline = Time::from_millis(10);
+        assert!(rl.process_queue(deadline).is_none());
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+        assert_eq!(rl.wait_queue.read().len(), 1);
+        assert!(matches!(
+            rl.acquire_queued_bounded(1, deadline, 1),
+            Err(RateLimitError::RateLimitExceeded)
+        ));
+        assert!(matches!(
+            first.poll_claim(deadline),
+            Err(RateLimitError::Timeout { waited }) if waited == Duration::from_millis(10)
+        ));
+        assert!(matches!(
+            first.poll_claim(deadline),
+            Err(RateLimitError::Cancelled)
+        ));
+        drop(first);
+        assert!(rl.wait_queue.read().is_empty());
+
+        let second = rl.acquire_queued_bounded(1, deadline, 1).unwrap();
+        assert!(rl.process_queue(Time::from_millis(20)).is_none());
+        assert_eq!(rl.wait_queue.read().len(), 1);
+        drop(second);
+        assert!(rl.wait_queue.read().is_empty());
+        assert_eq!(rl.available_tokens(), 0, "timeouts never refund tokens");
+    }
+
+    #[test]
+    fn a_grant_at_the_deadline_wins_over_timeout() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 100,
+            period: Duration::from_secs(1),
+            burst: 1,
+            wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(10)),
+            ..Default::default()
+        });
+        assert!(rl.try_acquire(1, Time::ZERO));
+        let mut guard = rl.acquire_queued_bounded(1, Time::ZERO, 1).unwrap();
+        guard
+            .poll_claim(Time::from_millis(10))
+            .unwrap()
+            .expect("tokens become available at the deadline")
+            .commit();
+        assert!(rl.wait_queue.read().is_empty());
+        assert_eq!(rl.available_tokens(), 0);
+    }
+
+    #[test]
+    fn a_reset_invalidates_a_queued_guard_without_refunding_new_work() {
+        let rl = limiter(0, 1);
+        assert!(rl.try_acquire(1, Time::ZERO));
+        let mut guard = rl.acquire_queued_bounded(1, Time::ZERO, 1).unwrap();
+        rl.reset();
+        assert!(rl.try_acquire(1, Time::ZERO));
+        assert!(matches!(
+            guard.poll_claim(Time::ZERO),
+            Err(RateLimitError::Cancelled)
+        ));
+        drop(guard);
+        assert!(rl.wait_queue.read().is_empty());
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+        assert_eq!(rl.available_tokens(), 0);
+    }
+
+    #[test]
+    fn concurrent_bounded_admission_cannot_overfill_the_queue() {
+        const CALLERS: usize = 8;
+        const LIMIT: usize = 3;
+        let rl = limiter(0, 1);
+        assert!(rl.try_acquire(1, Time::ZERO));
+        let admitted = AtomicUsize::new(0);
+        let barrier = Barrier::new(CALLERS + 1);
+
+        let (retained, pending, outcomes) = std::thread::scope(|scope| {
+            let mut workers = Vec::new();
+            for _ in 0..CALLERS {
+                let rl = &rl;
+                let admitted = &admitted;
+                let barrier = &barrier;
+                workers.push(scope.spawn(move || {
+                    let guard = rl.acquire_queued_bounded(1, Time::ZERO, LIMIT);
+                    if guard.is_ok() {
+                        admitted.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let expected_error = matches!(&guard, Err(RateLimitError::RateLimitExceeded));
+                    // Every successful guard remains alive until the observer
+                    // measures the queue, so admissions cannot reuse slots.
+                    barrier.wait();
+                    barrier.wait();
+                    let granted = guard.is_ok();
+                    drop(guard);
+                    (granted, expected_error)
+                }));
+            }
+            barrier.wait();
+            let retained = rl.wait_queue.read().len();
+            let pending = rl.pending_queue_count.load(Ordering::Relaxed);
+            // Release workers before making assertions, including on failure.
+            barrier.wait();
+            let outcomes = workers
+                .into_iter()
+                .map(|worker| worker.join().expect("queue admission worker"))
+                .collect::<Vec<_>>();
+            (retained, pending, outcomes)
+        });
+
+        assert_eq!(admitted.load(Ordering::SeqCst), LIMIT);
+        assert_eq!(retained, LIMIT);
+        assert_eq!(pending as usize, LIMIT);
+        assert!(
+            outcomes
+                .iter()
+                .all(|(granted, rejected)| granted != rejected)
+        );
+        assert_eq!(rl.metrics().total_waited, LIMIT as u64);
+        assert_eq!(rl.metrics().total_rejected, (CALLERS - LIMIT) as u64);
+        assert_eq!(rl.next_id.load(Ordering::Relaxed), LIMIT as u64);
+        assert!(rl.wait_queue.read().is_empty());
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+    }
+
+    fn native_cancelled_owner(multi_thread: bool, grant_before_cancel: bool) {
+        use crate::Cx;
+        use crate::channel::oneshot;
+        use crate::runtime::{RuntimeBuilder, yield_now};
+        use std::future::{Future, poll_fn};
+
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let builder = if multi_thread {
+                RuntimeBuilder::multi_thread().worker_threads(2)
+            } else {
+                RuntimeBuilder::current_thread()
+            };
+            let runtime = builder.build().expect("build native rate-limit runtime");
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native task context");
+                let rl = Arc::new(limiter(1, 1));
+                assert!(rl.try_acquire(1, Time::ZERO));
+                let parked = Arc::new(AtomicBool::new(false));
+                let child_parked = Arc::clone(&parked);
+                let child_rl = Arc::clone(&rl);
+                let (_hold_tx, mut hold_rx) = oneshot::channel::<()>();
+                let child = cx
+                    .spawn(move |child_cx| async move {
+                        let guard = child_rl
+                            .acquire_queued_bounded(1, Time::ZERO, 1)
+                            .expect("queue the cancellable owner");
+                        let mut wait = std::pin::pin!(hold_rx.recv(&child_cx));
+                        let result = poll_fn(|task_cx| {
+                            let result = wait.as_mut().poll(task_cx);
+                            if result.is_pending() {
+                                child_parked.store(true, Ordering::SeqCst);
+                            }
+                            result
+                        })
+                        .await;
+                        assert!(result.is_err(), "the owner must observe cancellation");
+                        drop(guard);
+                    })
+                    .expect("spawn queued acquisition owner");
+
+                let started = Instant::now();
+                while !parked.load(Ordering::SeqCst) {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "owner must park while retaining its queue entry"
+                    );
+                    yield_now().await;
+                }
+                assert_eq!(rl.wait_queue.read().len(), 1);
+                if grant_before_cancel {
+                    assert!(rl.process_queue(Time::from_millis(1000)).is_some());
+                    assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+                } else {
+                    assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 1);
+                }
+
+                let mut child = if multi_thread {
+                    std::thread::spawn(move || {
+                        child.abort();
+                        child
+                    })
+                    .join()
+                    .expect("cross-thread cancellation request")
+                } else {
+                    child.abort();
+                    child
+                };
+                child.join(&cx).await.expect("join cancelled queue owner");
+                assert!(rl.wait_queue.read().is_empty());
+                assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+                assert_eq!(rl.available_tokens(), u32::from(grant_before_cancel));
+                drop(
+                    rl.acquire_queued_bounded(1, Time::ZERO, 1)
+                        .expect("cancelled owner released queue capacity"),
+                );
+                assert!(rl.wait_queue.read().is_empty());
+            }));
+
+            let started = Instant::now();
+            while !runtime.is_quiescent() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "cancelled rate-limit owner must retire"
+                );
+                std::thread::yield_now();
+            }
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            drop(runtime);
+            done_tx
+                .send(())
+                .expect("native test observer remains alive");
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                runner.join().expect("native rate-limit scenario must pass");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("native rate-limit cancellation exceeded its watchdog");
+            }
+        }
+    }
+
+    #[test]
+    fn native_cancelled_queue_owners_release_pending_and_granted_credit() {
+        for multi_thread in [false, true] {
+            for grant_before_cancel in [false, true] {
+                native_cancelled_owner(multi_thread, grant_before_cancel);
+            }
+        }
+    }
+}
