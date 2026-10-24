@@ -661,6 +661,10 @@ mod managed_execution {
     /// a response, following the normal task-join contract. New requests after
     /// route retirement receive 503. Interval jobs wait their declared delay
     /// before the first invocation and between fully drained invocations.
+    /// A `Stop` group drains all workers and routes after the first child domain
+    /// failure or panic, retains that failure in its terminal report, and does
+    /// not admit a replacement. Normal success/cancellation follows the bound
+    /// worker's restart mode.
     /// Poll/deadline limits and memory/I/O capability envelopes derive from the
     /// declared budget and can only tighten parent limits. Capability envelopes
     /// govern participating runtime primitives, not arbitrary Rust allocations.
@@ -802,8 +806,21 @@ mod managed_execution {
                     reason: "managed binding requires one group and explicit observability adapters are not yet supported",
                 });
             }
-            let restart = runtime_restart_policy(&plan.root_restart_policy)
-                .map_err(ManagedAppBindError::Compile)?;
+            let stop_on_child_failure =
+                matches!(&plan.root_restart_policy, super::AppRestartPolicyV1::Stop);
+            let restart = if stop_on_child_failure {
+                // The managed controller supplies group-stop semantics; its
+                // unused failure-restart topology must still match its config.
+                super::RestartPolicy::OneForOne
+            } else {
+                runtime_restart_policy(&plan.root_restart_policy)
+                    .map_err(ManagedAppBindError::Compile)?
+            };
+            let config = if stop_on_child_failure {
+                config.with_restart_policy(restart)
+            } else {
+                config
+            };
             let mut builder = SupervisorBuilder::new(plan.app_name).with_restart_policy(restart);
             let mut supplied = BTreeMap::new();
             for binding in bindings {
@@ -993,6 +1010,11 @@ mod managed_execution {
                 })?
                 .bind_managed(managed, config)
                 .map_err(ManagedAppBindError::Supervisor)?;
+            let supervisor = if stop_on_child_failure {
+                supervisor.with_stop_on_child_failure()
+            } else {
+                supervisor
+            };
             let mut router = Router::new().without_default_trace();
             for (path, method) in methods.into_values() {
                 router = router.route(&path, method);

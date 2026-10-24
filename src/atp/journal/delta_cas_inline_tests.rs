@@ -98,3 +98,197 @@
             manifest.to_canonical_bytes()
         );
     }
+
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
+
+    #[test]
+    fn concurrent_chunk_publishers_choose_one_complete_winner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DeltaCasStore::open(dir.path()).expect("open cas");
+        let bytes = Arc::new(vec![0x6d_u8; 256 * 1024 + 17]);
+        let gate = Arc::new(Barrier::new(8));
+        let writes = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let store = &store;
+                    let bytes = Arc::clone(&bytes);
+                    let gate = Arc::clone(&gate);
+                    scope.spawn(move || {
+                        gate.wait();
+                        store.put_chunk(&bytes).expect("concurrent publication")
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("publisher joined"))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(writes.iter().filter(|write| write.inserted).count(), 1);
+        let first = writes[0];
+        assert!(writes.iter().all(|write| {
+            write.id == first.id && write.size_bytes == first.size_bytes
+        }));
+        assert_eq!(
+            store.get_chunk(first.id, first.size_bytes).unwrap().unwrap(),
+            *bytes
+        );
+    }
+
+    #[test]
+    fn partial_staging_is_invisible_and_losing_writer_preserves_winner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DeltaCasStore::open(dir.path()).expect("open cas");
+        let bytes = b"one complete content-addressed object";
+        let id = DeltaChunkId::from_bytes(bytes);
+        let path = store.chunk_path(id, bytes.len() as u64);
+        let (staged_tx, staged_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let staged_path = path.clone();
+            let candidate = scope.spawn(move || {
+                publish_file_new(&staged_path, |file| {
+                    file.write_all(&bytes[..5])?;
+                    staged_tx.send(()).map_err(std::io::Error::other)?;
+                    resume_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(std::io::Error::other)?;
+                    file.write_all(&bytes[5..])
+                })
+            });
+            staged_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("writer reached a partial staging file");
+            assert!(
+                !store.has_chunk(id, bytes.len() as u64).unwrap(),
+                "a partial staging file must not be addressable as a chunk"
+            );
+            let winner = store.put_chunk(bytes).expect("other publisher wins");
+            assert!(winner.inserted);
+            resume_tx.send(()).unwrap();
+            assert!(
+                !candidate.join().expect("writer joined").unwrap(),
+                "the delayed publisher must observe an existing winner"
+            );
+        });
+        assert_eq!(
+            store.get_chunk(id, bytes.len() as u64).unwrap().unwrap(),
+            bytes
+        );
+        assert_eq!(
+            fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "both staging names should be retired, preserving the one final object"
+        );
+    }
+
+    #[test]
+    fn interrupted_write_leaves_no_poisoned_final_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DeltaCasStore::open(dir.path()).expect("open cas");
+        let bytes = b"retry after a partial disk write";
+        let id = DeltaChunkId::from_bytes(bytes);
+        let path = store.chunk_path(id, bytes.len() as u64);
+        let error = publish_file_new(&path, |file| {
+            file.write_all(&bytes[..7])?;
+            Err(std::io::Error::other("injected write failure"))
+        })
+        .expect_err("interrupted write must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(!store.has_chunk(id, bytes.len() as u64).unwrap());
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 0);
+        assert!(store.put_chunk(bytes).unwrap().inserted);
+        assert_eq!(
+            store.get_chunk(id, bytes.len() as u64).unwrap().unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn different_manifest_is_refused_without_claiming_or_replacing_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DeltaCasStore::open(dir.path()).expect("open cas");
+        let first =
+            DeltaMerkleManifest::new("same-tree", vec![DeltaChunkRef::from_bytes(0, b"first")])
+                .unwrap();
+        let different =
+            DeltaMerkleManifest::new("same-tree", vec![DeltaChunkRef::from_bytes(0, b"second")])
+                .unwrap();
+        assert!(store.persist_manifest_new(&first).unwrap());
+        assert!(!store.persist_manifest_new(&first).unwrap());
+        assert!(matches!(
+            store.persist_manifest_new(&different),
+            Err(DeltaCasError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+        assert_eq!(
+            store.load_manifest_bytes("same-tree").unwrap().unwrap(),
+            first.to_canonical_bytes()
+        );
+    }
+
+    #[test]
+    fn concurrent_different_manifests_cannot_both_claim_publication() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DeltaCasStore::open(dir.path()).expect("open cas");
+        let candidates = [
+            DeltaMerkleManifest::new("same-tree", vec![DeltaChunkRef::from_bytes(0, b"left")])
+                .unwrap(),
+            DeltaMerkleManifest::new("same-tree", vec![DeltaChunkRef::from_bytes(0, b"right")])
+                .unwrap(),
+        ];
+        let gate = Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = candidates
+                .iter()
+                .map(|manifest| {
+                    let store = &store;
+                    let gate = &gate;
+                    scope.spawn(move || {
+                        gate.wait();
+                        store.persist_manifest_new(manifest)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("manifest publisher joined"))
+                .collect::<Vec<_>>()
+        });
+        let winners: Vec<_> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, result)| matches!(result, Ok(true)))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(winners.len(), 1);
+        let winner = winners[0];
+        assert!(matches!(
+            &results[1 - winner],
+            Err(DeltaCasError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+        assert_eq!(
+            store.load_manifest_bytes("same-tree").unwrap().unwrap(),
+            candidates[winner].to_canonical_bytes()
+        );
+    }
+
+    #[test]
+    fn corrupted_existing_chunk_is_reported_without_overwrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DeltaCasStore::open(dir.path()).expect("open cas");
+        let bytes = vec![0x39_u8; 24_701];
+        let stored = store.put_chunk(&bytes).unwrap();
+        let path = store.chunk_path(stored.id, stored.size_bytes);
+        for length in [bytes.len() - 1, bytes.len(), bytes.len() + 1] {
+            let damaged = vec![0x72_u8; length];
+            fs::write(&path, &damaged).unwrap();
+            let error = store.put_chunk(&bytes).expect_err("corruption must fail closed");
+            assert!(matches!(
+                error,
+                DeltaCasError::ChunkHashMismatch { expected, actual }
+                    if expected == stored.id && actual == DeltaChunkId::from_bytes(&damaged)
+            ));
+            assert_eq!(fs::read(&path).unwrap(), damaged);
+        }
+    }
