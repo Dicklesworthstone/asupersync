@@ -309,6 +309,82 @@ impl Drop for RateLimitPermit<'_> {
     }
 }
 
+/// Owns a rate-limit acquisition until its permit is claimed.
+///
+/// This guard removes its queue entry when dropped. If tokens have already
+/// been granted, including an immediate acquisition, it refunds them instead
+/// of leaving an abandoned reservation behind. Keep the guard alive across
+/// waits so cancellation of the enclosing future releases the acquisition.
+///
+/// This is a caller-driven queue handle, not a future: it does not register a
+/// waker or arrange another poll. Call [`Self::poll_claim`] after the caller's
+/// timer or other progress source fires.
+#[derive(Debug)]
+#[must_use = "dropping the guard cancels the acquisition and refunds any granted tokens"]
+pub struct QueuedRateLimitAcquire<'a> {
+    limiter: &'a RateLimiter,
+    entry_id: Option<u64>,
+    cost: u32,
+    last_observed_now: Time,
+}
+
+impl<'a> QueuedRateLimitAcquire<'a> {
+    /// Claim the refundable permit once the acquisition is granted.
+    ///
+    /// Returns `Ok(None)` while waiting, `Ok(Some(permit))` on a grant, or the
+    /// existing timeout/cancellation error after removing a terminal entry.
+    /// After a permit or error is returned, this guard is spent: further calls
+    /// return [`RateLimitError::Cancelled`] and dropping it has no effect.
+    ///
+    /// The returned [`RateLimitPermit`] owns the token reservation and refunds
+    /// it on drop until committed. Queue capacity is released when the permit
+    /// is claimed, even if the permit is kept alive.
+    pub fn poll_claim(
+        &mut self,
+        now: Time,
+    ) -> Result<Option<RateLimitPermit<'a>>, RateLimitError<()>> {
+        let Some(entry_id) = self.entry_id else {
+            return Err(RateLimitError::Cancelled);
+        };
+        self.last_observed_now = now;
+
+        match self.limiter.check_entry(entry_id, now) {
+            Ok(true) => {
+                self.entry_id = None;
+                Ok(Some(RateLimitPermit {
+                    limiter: self.limiter,
+                    cost: self.cost,
+                    refund: true,
+                }))
+            }
+            Ok(false) => Ok(None),
+            Err(error) => {
+                self.entry_id = None;
+                Err(error)
+            }
+        }
+    }
+}
+
+impl Drop for QueuedRateLimitAcquire<'_> {
+    fn drop(&mut self) {
+        let Some(entry_id) = self.entry_id.take() else {
+            return;
+        };
+
+        if entry_id == IMMEDIATE_ACQUIRE_SENTINEL {
+            // The raw sentinel does not retain its cost, so cancel_entry()
+            // cannot refund an immediate grant. This owner retains that cost.
+            self.limiter.refund_tokens(self.cost);
+        } else {
+            // Cancellation removes pending and terminal records alike and
+            // refunds a granted-but-unclaimed entry exactly once. The latest
+            // caller-provided time supplies drop-time wait accounting.
+            self.limiter.cancel_entry(entry_id, self.last_observed_now);
+        }
+    }
+}
+
 impl RateLimiter {
     /// Create a new rate limiter with the given policy.
     #[must_use]
@@ -656,13 +732,72 @@ impl RateLimiter {
     // Queue-based waiting (similar to bulkhead)
     // =========================================================================
 
+    /// Acquire a queue-owned token reservation.
+    ///
+    /// Prefer this to [`Self::enqueue`] when the caller can be cancelled or
+    /// dropped before claiming its grant. Dropping the returned guard removes
+    /// the entry and refunds any granted tokens. Claim the reservation with
+    /// [`QueuedRateLimitAcquire::poll_claim`], then commit its permit when the
+    /// protected operation should consume the tokens.
+    ///
+    /// Waiting is caller-driven; this method does not register a waker.
+    pub fn acquire_queued(
+        &self,
+        cost: u32,
+        now: Time,
+    ) -> Result<QueuedRateLimitAcquire<'_>, RateLimitError<()>> {
+        let entry_id = self.enqueue(cost, now)?;
+        Ok(QueuedRateLimitAcquire {
+            limiter: self,
+            entry_id: Some(entry_id),
+            cost,
+            last_observed_now: now,
+        })
+    }
+
+    /// Acquire a queue-owned reservation with a bound on retained queue entries.
+    ///
+    /// Immediate acquisitions do not need a queue slot. If the request must
+    /// wait, admission fails with [`RateLimitError::RateLimitExceeded`] when
+    /// `max_queued` entries are already retained. The check and insertion are
+    /// atomic with respect to other queue admissions.
+    ///
+    /// All retained entries count, including grants and timeouts not yet
+    /// claimed or dropped. A zero bound permits only immediate acquisitions.
+    /// Use the same bound for all admissions to enforce a limiter-wide cap;
+    /// [`Self::enqueue`] and [`Self::acquire_queued`] remain unbounded, and a
+    /// different bound on another call does not evict existing entries.
+    pub fn acquire_queued_bounded(
+        &self,
+        cost: u32,
+        now: Time,
+        max_queued: usize,
+    ) -> Result<QueuedRateLimitAcquire<'_>, RateLimitError<()>> {
+        let entry_id = self.enqueue_with_limit(cost, now, Some(max_queued))?;
+        Ok(QueuedRateLimitAcquire {
+            limiter: self,
+            entry_id: Some(entry_id),
+            cost,
+            last_observed_now: now,
+        })
+    }
+
     /// Enqueue a waiting operation.
     ///
     /// Returns `Ok(entry_id)` if enqueued, `Err(RateLimitExceeded)` if rate exceeded
     /// and policy is Reject, or `Err(QueueIdExhausted)` if the queue-handle
     /// ID space has been exhausted and the limiter must fail closed.
-    #[allow(clippy::cast_precision_loss, clippy::significant_drop_tightening)]
     pub fn enqueue(&self, cost: u32, now: Time) -> Result<u64, RateLimitError<()>> {
+        self.enqueue_with_limit(cost, now, None)
+    }
+
+    #[allow(clippy::cast_precision_loss, clippy::significant_drop_tightening)]
+    fn enqueue_with_limit(
+        &self,
+        cost: u32,
+        now: Time,
+        max_queued: Option<usize>,
+    ) -> Result<u64, RateLimitError<()>> {
         // Fast path: try immediate acquisition
         if self.try_acquire(cost, now) {
             return Ok(IMMEDIATE_ACQUIRE_SENTINEL); // Already acquired
@@ -695,6 +830,10 @@ impl RateLimiter {
         };
 
         let mut queue = self.wait_queue.write();
+        if max_queued.is_some_and(|limit| queue.len() >= limit) {
+            self.total_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(RateLimitError::RateLimitExceeded);
+        }
         let entry_id = self.allocate_entry_id(&queue)?;
 
         queue.push_back(QueueEntry {
