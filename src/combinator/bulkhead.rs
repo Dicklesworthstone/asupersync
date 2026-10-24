@@ -321,6 +321,11 @@ impl Bulkhead {
             }
         }
 
+        self.try_acquire_ready(weight)
+    }
+
+    /// Claim currently available capacity without advancing queue deadlines.
+    fn try_acquire_ready(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
         // Serialize against queue mutation so a waiter cannot slip into the
         // queue after our counter check but before we consume permits. This
         // closes the barging window where enqueue has pushed the waiter but has
@@ -763,13 +768,15 @@ impl Drop for BulkheadPermit<'_> {
 /// obtain the [`BulkheadPermit`] once granted, and if it is dropped before the
 /// permit is claimed — e.g. the acquiring future is cancelled — it cancels the
 /// queue entry, releasing any granted-but-unclaimed permit so the slot is not
-/// leaked (5vzqse). The wait-stat timestamp used by a drop-time cancel is the
-/// enqueue time; the slot release itself is exact.
+/// leaked (5vzqse). Caller-driven guards preserve their enqueue timestamp on
+/// drop. Async admission captures its authorized timer driver so cancellation
+/// processes follower deadlines using the current time.
 #[derive(Debug)]
 pub struct QueuedAcquire<'a> {
     bulkhead: &'a Bulkhead,
     entry_id: u64,
     enqueued_now: Time,
+    timer_driver: Option<crate::time::TimerDriverHandle>,
     claimed: bool,
 }
 
@@ -807,7 +814,11 @@ impl Drop for QueuedAcquire<'_> {
             // The acquisition was abandoned before the permit was claimed.
             // cancel_entry releases a granted-but-unclaimed permit (or dequeues a
             // still-waiting entry), so no permit slot is leaked (5vzqse).
-            self.bulkhead.cancel_entry(self.entry_id, self.enqueued_now);
+            let now = self
+                .timer_driver
+                .as_ref()
+                .map_or(self.enqueued_now, |driver| driver.now());
+            self.bulkhead.cancel_entry(self.entry_id, now);
         }
     }
 }
@@ -829,6 +840,7 @@ impl Bulkhead {
             bulkhead: self,
             entry_id,
             enqueued_now: now,
+            timer_driver: None,
             claimed: false,
         })
     }
@@ -872,7 +884,7 @@ impl From<BulkheadError<()>> for BulkheadAcquireError {
 }
 
 impl BulkheadAcquireError {
-    fn cancelled(cx: &Cx) -> Self {
+    fn cancelled<Caps>(cx: &Cx<Caps>) -> Self {
         Self::Cancelled(
             cx.cancel_reason()
                 .unwrap_or_else(|| CancelReason::user("bulkhead admission cancelled")),
@@ -884,7 +896,9 @@ impl Bulkhead {
     /// Acquire a weighted permit, parking until capacity or a terminal event.
     ///
     /// Immediate admission needs no timer. A queued acquisition requires the
-    /// supplied context's time capability and timer driver. It uses the same
+    /// supplied context's time capability and timer driver. Without a driver,
+    /// only currently free capacity with no pending FIFO predecessor is used.
+    /// Authorized waiting uses the same
     /// FIFO order, queue bound and queue timeout as the existing queue APIs.
     /// Release, queue progress and reset wake parked callers; no background
     /// task, self-wake loop or periodic polling is used.
@@ -899,15 +913,24 @@ impl Bulkhead {
     /// Returns a typed cancellation, timer-authority failure, or the original
     /// bulkhead queue refusal/timeout. Reset invalidates a pending entry and
     /// returns `Admission(BulkheadError::Cancelled)`.
-    pub async fn acquire_async(
+    pub async fn acquire_async<Caps>(
         &self,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         weight: u32,
-    ) -> Result<BulkheadPermit<'_>, BulkheadAcquireError> {
+    ) -> Result<BulkheadPermit<'_>, BulkheadAcquireError>
+    where
+        Caps: crate::cx::cap::HasTime,
+    {
         cx.checkpoint()
             .map_err(|_| BulkheadAcquireError::cancelled(cx))?;
-        let now = cx.now_for_observability();
-        if let Some(permit) = self.try_acquire(weight, now) {
+        let driver = cx.timer_driver();
+        let now = driver.as_ref().map_or(Time::ZERO, |driver| driver.now());
+        let immediate = if driver.is_some() {
+            self.try_acquire(weight, now)
+        } else {
+            self.try_acquire_ready(weight)
+        };
+        if let Some(permit) = immediate {
             cx.checkpoint()
                 .map_err(|_| BulkheadAcquireError::cancelled(cx))?;
             return Ok(permit);
@@ -916,11 +939,9 @@ impl Bulkhead {
             self.total_rejected_atomic.fetch_add(1, Ordering::Relaxed);
             return Err(BulkheadError::Full.into());
         }
-        let driver = cx
-            .timer_driver()
-            .filter(|_| cx.capabilities().time)
-            .ok_or(BulkheadAcquireError::TimerUnavailable)?;
+        let driver = driver.ok_or(BulkheadAcquireError::TimerUnavailable)?;
         let mut queued = self.acquire_queued(weight, now)?;
+        queued.timer_driver = Some(driver.clone());
         let mut cancelled = std::pin::pin!(cx.cancelled());
 
         loop {
@@ -954,7 +975,7 @@ impl Bulkhead {
                 .budget()
                 .deadline
                 // An expired but masked cancellation must not create a
-                // permanently-ready timer loop; unmasking has its own wake.
+                // permanently-ready timer loop. Cancellation stays deferred.
                 .filter(|deadline| *deadline > now)
                 .map_or(queue_deadline, |deadline| queue_deadline.min(deadline));
             let mut timer =

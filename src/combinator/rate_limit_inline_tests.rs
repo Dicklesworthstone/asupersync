@@ -1739,3 +1739,743 @@ mod queued_acquisition_ownership {
         }
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod async_admission_tests {
+    use super::*;
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::{RuntimeBuilder, yield_now};
+    use crate::time::{TimerDriver, TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, CancelKind, RegionId, TaskId};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::{Mutex as StdMutex, mpsc};
+    use std::task::{Context, Wake, Waker};
+
+    fn native<F, Fut>(workers: usize, scenario: F)
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::multi_thread().worker_threads(workers)
+            };
+            let runtime = builder.build().unwrap();
+            let completed = Arc::new(AtomicBool::new(false));
+            let completion = Arc::clone(&completed);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("admitted rate-limit scenario");
+                crate::time::timeout(cx.now(), Duration::from_secs(10), scenario(cx))
+                    .await
+                    .expect("rate-limit admission scenario watchdog");
+                completion.store(true, Ordering::Release);
+            }));
+            assert!(completed.load(Ordering::Acquire));
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            done_tx.send(()).unwrap();
+        });
+        match done_rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                runner.join().expect("native rate-limit admission scenario");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("native rate-limit admission exceeded watchdog");
+            }
+        }
+    }
+
+    fn stalled(burst: u32) -> RateLimiter {
+        RateLimiter::new(RateLimitPolicy {
+            rate: 0,
+            burst,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        })
+    }
+
+    async fn wait_parked(limiter: &RateLimiter, count: usize) {
+        while limiter.changed.waiter_count() < count {
+            yield_now().await;
+        }
+    }
+
+    fn assert_empty(limiter: &RateLimiter, tokens: u32) {
+        assert!(limiter.wait_queue.read().is_empty());
+        assert_eq!(limiter.pending_queue_count.load(Ordering::Acquire), 0);
+        assert_eq!(limiter.changed.waiter_count(), 0);
+        assert_eq!(limiter.available_tokens(), tokens);
+    }
+
+    fn virtual_context(budget: Budget) -> (Cx, Arc<VirtualClock>) {
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriverHandle::new(Arc::new(TimerDriver::with_clock(Arc::clone(&clock))));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            budget,
+            None,
+            None,
+            None,
+            Some(driver),
+            None,
+        );
+        (cx, clock)
+    }
+
+    #[test]
+    fn time_only_context_can_claim_existing_tokens_without_a_driver() {
+        type TimeOnly = crate::cx::cap::CapSet<false, true, false, false, false>;
+        let cx = Cx::for_testing().restrict::<TimeOnly>();
+        let limiter = stalled(1);
+        let mut task = Context::from_waker(Waker::noop());
+        let mut immediate = Box::pin(limiter.acquire_async_bounded(&cx, 1, 0));
+        let permit = match immediate.as_mut().poll(&mut task) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("existing credit must be available without a timer"),
+        };
+        drop(immediate);
+        let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::TimerUnavailable))
+        ));
+        drop(waiting);
+        assert_empty(&limiter, 0);
+        drop(permit);
+        assert_empty(&limiter, 1);
+
+        cx.cancel_fast(CancelKind::User);
+        let mut cancelled = Box::pin(limiter.acquire_async_bounded(&cx, 1, 0));
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Cancelled(reason)))
+                if reason.kind == CancelKind::User
+        ));
+        drop(cancelled);
+        assert_empty(&limiter, 1);
+    }
+
+    async fn fifo_refund_scenario(cx: Cx) {
+        let limiter = Arc::new(stalled(3));
+        let held = limiter.acquire_permit(3, cx.now()).unwrap();
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let release = Arc::new(AtomicBool::new(false));
+        let changed = Arc::new(Notify::new());
+
+        let first_limiter = Arc::clone(&limiter);
+        let first_order = Arc::clone(&order);
+        let first_release = Arc::clone(&release);
+        let first_changed = Arc::clone(&changed);
+        let mut first = cx
+            .spawn(move |owner| async move {
+                let _permit = first_limiter
+                    .acquire_async_bounded(&owner, 3, 2)
+                    .await
+                    .unwrap();
+                first_order.lock().unwrap().push(1);
+                first_changed.notify_waiters();
+                first_changed
+                    .wait_until(|| first_release.load(Ordering::Acquire))
+                    .await;
+            })
+            .unwrap();
+        wait_parked(&limiter, 1).await;
+
+        let second_limiter = Arc::clone(&limiter);
+        let second_order = Arc::clone(&order);
+        let mut second = cx
+            .spawn(move |owner| async move {
+                let permit = second_limiter
+                    .acquire_async_bounded(&owner, 1, 2)
+                    .await
+                    .unwrap();
+                second_order.lock().unwrap().push(2);
+                permit.commit();
+            })
+            .unwrap();
+        wait_parked(&limiter, 2).await;
+        assert_eq!(limiter.wait_queue.read().len(), 2);
+        assert!(order.lock().unwrap().is_empty());
+
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(held)).join().unwrap();
+        });
+        changed
+            .wait_until(|| !order.lock().unwrap().is_empty())
+            .await;
+        assert_eq!(*order.lock().unwrap(), vec![1]);
+        assert_eq!(limiter.available_tokens(), 0);
+        release.store(true, Ordering::Release);
+        changed.notify_waiters();
+        first.join(&cx).await.unwrap();
+        second.join(&cx).await.unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+        assert_empty(&limiter, 2);
+    }
+
+    #[test]
+    fn native_refunds_wake_weighted_fifo_and_commit_consumes_credit() {
+        for workers in [1, 2] {
+            native(workers, fifo_refund_scenario);
+        }
+    }
+
+    #[test]
+    fn native_cancellation_and_reset_wake_actually_parked_owners() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                for reset in [false, true] {
+                    let limiter = Arc::new(stalled(1));
+                    let held = limiter.acquire_permit(1, cx.now()).unwrap();
+                    let child_limiter = Arc::clone(&limiter);
+                    let mut child = cx
+                        .spawn(move |owner| async move {
+                            let result = child_limiter.acquire_async_bounded(&owner, 1, 1).await;
+                            if reset {
+                                assert!(matches!(
+                                    result,
+                                    Err(RateLimitAcquireError::Admission(RateLimitError::Cancelled))
+                                ));
+                            } else {
+                                assert!(matches!(
+                                    result,
+                                    Err(RateLimitAcquireError::Cancelled(reason))
+                                        if reason.kind == CancelKind::User
+                                ));
+                            }
+                        })
+                        .unwrap();
+                    wait_parked(&limiter, 1).await;
+                    if reset {
+                        limiter.reset();
+                    } else {
+                        child = std::thread::spawn(move || {
+                            child.abort();
+                            child
+                        })
+                        .join()
+                        .unwrap();
+                    }
+                    child.join(&cx).await.unwrap();
+                    assert_empty(&limiter, u32::from(reset));
+                    drop(held);
+                    assert_empty(&limiter, 1);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn native_removing_a_raw_head_wakes_a_zero_rate_follower() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                let limiter = Arc::new(stalled(3));
+                let held = limiter.acquire_permit(1, cx.now()).unwrap();
+                let head = limiter.acquire_queued_bounded(3, cx.now(), 2).unwrap();
+                let child_limiter = Arc::clone(&limiter);
+                let mut child = cx
+                    .spawn(move |owner| async move {
+                        child_limiter
+                            .acquire_async_bounded(&owner, 1, 2)
+                            .await
+                            .unwrap()
+                            .commit();
+                    })
+                    .unwrap();
+                wait_parked(&limiter, 1).await;
+                assert_eq!(limiter.available_tokens(), 2);
+                std::thread::scope(|scope| {
+                    scope.spawn(move || drop(head)).join().unwrap();
+                });
+                child.join(&cx).await.unwrap();
+                assert_empty(&limiter, 1);
+                drop(held);
+                assert_empty(&limiter, 2);
+            });
+        }
+    }
+
+    #[test]
+    fn native_tokens_arrive_without_an_external_queue_driver() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                let limiter = RateLimiter::new(RateLimitPolicy {
+                    rate: 1,
+                    period: Duration::from_millis(250),
+                    burst: 1,
+                    ..Default::default()
+                });
+                let started = cx.now();
+                assert!(limiter.try_acquire(1, started));
+                let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+                poll_fn(|task| {
+                    assert!(waiting.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                assert_eq!(limiter.changed.waiter_count(), 1);
+                waiting.await.unwrap().commit();
+                assert!(cx.now().as_millis() >= started.as_millis() + 250);
+                assert_empty(&limiter, 0);
+            });
+        }
+    }
+
+    #[test]
+    fn native_queue_timeout_and_owner_deadline_wake_without_refill() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                for inherited in [false, true] {
+                    let timeout = Duration::from_millis(250);
+                    let mut spec = ChildRegionSpec::inherit();
+                    if inherited {
+                        spec = spec.with_budget(
+                            Budget::new().with_deadline(cx.now() + timeout),
+                        );
+                    }
+                    let parent = cx.open_child_region(spec).await.unwrap();
+                    let limiter = Arc::new(RateLimiter::new(RateLimitPolicy {
+                        rate: 0,
+                        burst: 1,
+                        wait_strategy: if inherited {
+                            WaitStrategy::Block
+                        } else {
+                            WaitStrategy::BlockWithTimeout(timeout)
+                        },
+                        ..Default::default()
+                    }));
+                    let held = limiter.acquire_permit(1, cx.now()).unwrap();
+                    let child_limiter = Arc::clone(&limiter);
+                    let mut child = parent
+                        .cx()
+                        .spawn(move |owner| async move {
+                            let result = child_limiter.acquire_async_bounded(&owner, 1, 1).await;
+                            if inherited {
+                                assert!(matches!(
+                                    result,
+                                    Err(RateLimitAcquireError::Cancelled(reason))
+                                        if reason.kind == CancelKind::Deadline
+                                ));
+                            } else {
+                                assert!(matches!(
+                                    result,
+                                    Err(RateLimitAcquireError::Admission(
+                                        RateLimitError::Timeout { waited }
+                                    )) if waited >= timeout
+                                ));
+                            }
+                        })
+                        .unwrap();
+                    wait_parked(&limiter, 1).await;
+                    child.join(&cx).await.unwrap();
+                    assert_empty(&limiter, 0);
+                    drop(held);
+                    parent.close().await.unwrap();
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn async_bound_and_drop_account_for_pending_and_unclaimed_credit() {
+        let (cx, _) = virtual_context(Budget::INFINITE);
+        let limiter = stalled(1);
+        let held = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        assert!(waiting.as_mut().poll(&mut task).is_pending());
+        assert_eq!(limiter.wait_queue.read().len(), 1);
+
+        let mut full = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        assert!(matches!(
+            full.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Admission(
+                RateLimitError::RateLimitExceeded
+            )))
+        ));
+        drop(full);
+        drop(waiting);
+        assert_empty(&limiter, 0);
+
+        let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        assert!(waiting.as_mut().poll(&mut task).is_pending());
+        drop(held);
+        assert!(limiter.process_queue(Time::ZERO).is_some());
+        assert_eq!(limiter.pending_queue_count.load(Ordering::Acquire), 0);
+        assert_eq!(limiter.wait_queue.read().len(), 1);
+        let mut full = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        assert!(matches!(
+            full.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Admission(
+                RateLimitError::RateLimitExceeded
+            )))
+        ));
+        drop(full);
+        drop(waiting);
+        assert_empty(&limiter, 1);
+
+        let mut committed = Box::pin(limiter.acquire_async_bounded(&cx, 1, 0));
+        match committed.as_mut().poll(&mut task) {
+            Poll::Ready(Ok(permit)) => permit.commit(),
+            _ => panic!("dropping the unclaimed grant must restore immediate quota"),
+        }
+        drop(committed);
+        assert_empty(&limiter, 0);
+    }
+
+    #[test]
+    fn dropping_an_async_grant_uses_current_time_before_handing_off() {
+        let (cx, clock) = virtual_context(Budget::INFINITE);
+        let limiter = RateLimiter::new(RateLimitPolicy {
+            rate: 0,
+            burst: 1,
+            wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(10)),
+            ..Default::default()
+        });
+        let held = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        let mut first = Box::pin(limiter.acquire_async_bounded(&cx, 1, 2));
+        assert!(first.as_mut().poll(&mut task).is_pending());
+        let mut follower = limiter.acquire_queued_bounded(1, Time::ZERO, 2).unwrap();
+        drop(held);
+        clock.advance_to(Time::from_millis(5));
+        assert!(limiter.process_queue(cx.now()).is_some());
+        assert_eq!(limiter.available_tokens(), 0);
+
+        // The future has not been polled since time zero. Its drop must use
+        // the captured clock, so it cannot grant the now-expired follower.
+        clock.advance_to(Time::from_millis(20));
+        drop(first);
+        assert!(matches!(
+            follower.poll_claim(cx.now()),
+            Err(RateLimitError::Timeout { waited }) if waited == Duration::from_millis(20)
+        ));
+        drop(follower);
+        assert_empty(&limiter, 1);
+    }
+
+    #[test]
+    fn an_expired_masked_context_parks_until_a_real_event() {
+        let (cx, clock) = virtual_context(
+            Budget::new().with_deadline(Time::from_millis(1)),
+        );
+        let limiter = stalled(1);
+        let held = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        let mut task = Context::from_waker(Waker::noop());
+        clock.advance_to(Time::from_millis(2));
+        cx.masked(|| {
+            assert!(waiting.as_mut().poll(&mut task).is_pending());
+        });
+        assert_eq!(limiter.changed.waiter_count(), 1);
+        // Explicitly repoll after the synchronous mask; masks do not promise
+        // a separate wakeup, and the expired timer must not drive a hot loop.
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Cancelled(reason)))
+                if reason.kind == CancelKind::Deadline
+        ));
+        drop(waiting);
+        assert_empty(&limiter, 0);
+        drop(held);
+        assert_empty(&limiter, 1);
+    }
+
+    #[test]
+    fn lab_drives_weighted_fifo_timeouts_and_fractional_periods() {
+        use crate::{LabConfig, LabRuntime};
+        for seed in [17, 41, 93] {
+            let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let (task, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async {
+                    let cx = Cx::current().unwrap();
+                    crate::time::sleep(cx.now(), Duration::from_millis(713)).await;
+
+                    let limiter = RateLimiter::new(RateLimitPolicy {
+                        rate: 1,
+                        period: Duration::from_millis(100),
+                        burst: 3,
+                        ..Default::default()
+                    });
+                    let started = cx.now();
+                    assert!(limiter.try_acquire(3, started));
+                    let mut raw_head = limiter.acquire_queued_bounded(3, started, 2).unwrap();
+                    limiter.acquire_async_bounded(&cx, 1, 2).await.unwrap().commit();
+                    assert_eq!(cx.now(), started + Duration::from_millis(400));
+                    raw_head.poll_claim(cx.now()).unwrap().unwrap().commit();
+                    drop(raw_head);
+                    assert_empty(&limiter, 0);
+
+                    // The async follower must drive an unpolled predecessor's
+                    // earlier timeout even though it already has enough tokens.
+                    let limiter = RateLimiter::new(RateLimitPolicy {
+                        rate: 1,
+                        period: Duration::from_millis(200),
+                        burst: 2,
+                        wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(100)),
+                        ..Default::default()
+                    });
+                    let started = cx.now();
+                    let held = limiter.acquire_permit(1, started).unwrap();
+                    let mut raw_head = limiter.acquire_queued_bounded(2, started, 2).unwrap();
+                    crate::time::sleep(cx.now(), Duration::from_millis(50)).await;
+                    let permit = limiter.acquire_async_bounded(&cx, 1, 2).await.unwrap();
+                    assert_eq!(cx.now(), started + Duration::from_millis(100));
+                    assert!(matches!(
+                        raw_head.poll_claim(cx.now()),
+                        Err(RateLimitError::Timeout { waited })
+                            if waited == Duration::from_millis(100)
+                    ));
+                    drop(raw_head);
+                    drop(permit);
+                    drop(held);
+                    assert_empty(&limiter, 2);
+
+                    let limiter = RateLimiter::new(RateLimitPolicy {
+                        rate: 1,
+                        period: Duration::from_millis(100),
+                        burst: 1,
+                        wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(100)),
+                        ..Default::default()
+                    });
+                    let started = cx.now();
+                    assert!(limiter.try_acquire(1, started));
+                    limiter.acquire_async_bounded(&cx, 1, 1).await.unwrap().commit();
+                    assert_eq!(cx.now(), started + Duration::from_millis(100));
+                    assert_empty(&limiter, 0);
+
+                    // Whole-ms accounting must wake at the absolute boundary,
+                    // not add a rounded duration to this half-ms starting time.
+                    crate::time::sleep(cx.now(), Duration::from_micros(500)).await;
+                    let limiter = RateLimiter::new(RateLimitPolicy {
+                        rate: 1,
+                        period: Duration::from_micros(1_900),
+                        burst: 1,
+                        ..Default::default()
+                    });
+                    let started = cx.now();
+                    assert!(limiter.try_acquire(1, started));
+                    limiter.acquire_async_bounded(&cx, 1, 1).await.unwrap().commit();
+                    assert_eq!(cx.now(), Time::from_millis(started.as_millis() + 2));
+                    assert_empty(&limiter, 0);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(task, 0);
+            let virtual_time = lab.run_with_auto_advance();
+            let report = lab.run_until_quiescent_with_report();
+            assert!(matches!(join.try_join(), Ok(Some(()))), "{virtual_time:?} {report:?}");
+            assert!(lab.state.tasks_is_empty());
+            assert!(lab.state.obligations_iter().all(|(_, obligation)| !obligation.is_pending()));
+            assert!(report.lab_test_passed(), "{report:?}");
+        }
+    }
+
+    struct PanicWake;
+    impl Wake for PanicWake {
+        fn wake(self: Arc<Self>) {
+            panic!("rate-limit notification wake panic");
+        }
+    }
+
+    struct CountWake(AtomicUsize);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn notification_panics_cannot_interrupt_queue_or_refund_publication() {
+        let limiter = stalled(1);
+        let held = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        let hostile_waker = Waker::from(Arc::new(PanicWake));
+        let mut hostile = Box::pin(limiter.changed.notified());
+        assert!(hostile.as_mut().poll(&mut Context::from_waker(&hostile_waker)).is_pending());
+        let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+        let other_waker = Waker::from(Arc::clone(&counter));
+        let mut other = Box::pin(limiter.changed.notified());
+        assert!(other.as_mut().poll(&mut Context::from_waker(&other_waker)).is_pending());
+
+        let queued = limiter.acquire_queued_bounded(1, Time::ZERO, 1).unwrap();
+        assert_eq!(counter.0.load(Ordering::Acquire), 1);
+        assert_eq!(limiter.wait_queue.read().len(), 1);
+        drop(queued);
+        drop(hostile);
+        drop(other);
+
+        let mut hostile = Box::pin(limiter.changed.notified());
+        assert!(hostile.as_mut().poll(&mut Context::from_waker(&hostile_waker)).is_pending());
+        drop(held);
+        drop(hostile);
+        assert_empty(&limiter, 1);
+    }
+
+    #[test]
+    fn crossing_an_owner_deadline_before_queue_inspection_cannot_park() {
+        use crate::time::TimeSource;
+
+        #[derive(Debug, Default)]
+        struct CrossingClock {
+            reads: AtomicUsize,
+        }
+        impl TimeSource for CrossingClock {
+            fn now(&self) -> Time {
+                if self.reads.fetch_add(1, Ordering::SeqCst) < 4 {
+                    Time::ZERO
+                } else {
+                    Time::from_millis(1)
+                }
+            }
+        }
+
+        let clock = Arc::new(CrossingClock::default());
+        let driver = TimerDriverHandle::new(Arc::new(TimerDriver::with_clock(Arc::clone(&clock))));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::new().with_deadline(Time::from_millis(1)),
+            None,
+            None,
+            None,
+            Some(driver),
+            None,
+        );
+        let limiter = stalled(1);
+        let held = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        clock.reads.store(0, Ordering::SeqCst);
+        let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Cancelled(reason)))
+                if reason.kind == CancelKind::Deadline
+        ));
+        assert_eq!(limiter.metrics().total_waited, 1);
+        assert!(clock.reads.load(Ordering::SeqCst) >= 5);
+        drop(waiting);
+        assert_empty(&limiter, 0);
+        drop(held);
+        assert_empty(&limiter, 1);
+    }
+
+    #[test]
+    fn refill_at_max_time_preserves_a_nonempty_burst() {
+        let limiter = RateLimiter::new(RateLimitPolicy {
+            rate: u32::MAX,
+            period: Duration::from_millis(1),
+            burst: 2,
+            ..Default::default()
+        });
+
+        limiter.refill(Time::MAX);
+        assert_eq!(limiter.available_tokens(), 2);
+        assert!(limiter.try_acquire(2, Time::MAX));
+        assert!(!limiter.try_acquire(1, Time::MAX));
+    }
+
+    #[test]
+    fn refund_to_full_discards_fractional_credit_independent_of_queries() {
+        let make_limiter = || {
+            RateLimiter::new(RateLimitPolicy {
+                rate: 1,
+                period: Duration::from_millis(10),
+                burst: 1,
+                ..Default::default()
+            })
+        };
+        let queried = make_limiter();
+        let unqueried = make_limiter();
+        let queried_permit = queried.acquire_permit(1, Time::ZERO).unwrap();
+        let unqueried_permit = unqueried.acquire_permit(1, Time::ZERO).unwrap();
+
+        assert_eq!(
+            queried.retry_after(1, Time::from_millis(5)),
+            Duration::from_millis(5)
+        );
+        drop(queried_permit);
+        drop(unqueried_permit);
+
+        for limiter in [&queried, &unqueried] {
+            assert!(limiter.try_acquire(1, Time::from_millis(5)));
+            assert!(!limiter.try_acquire(1, Time::from_millis(10)));
+            assert!(limiter.try_acquire(1, Time::from_millis(15)));
+        }
+    }
+
+    #[test]
+    fn async_wake_uses_head_fraction_and_only_representable_progress() {
+        let limiter = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_micros(1_900),
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+        assert!(limiter.try_acquire(1, Time::ZERO));
+        let mut head = limiter.acquire_queued_bounded(1, Time::ZERO, 2).unwrap();
+        let follower = limiter.acquire_queued_bounded(1, Time::ZERO, 2).unwrap();
+
+        // The rounded policy period is 2 ms. At 1.5 ms, half a token
+        // exists: the head needs the 2 ms boundary, irrespective of the
+        // follower's demand or the fractional part of the current time.
+        assert_eq!(
+            limiter.next_async_wake(Time::from_nanos(1_500_000)),
+            Some(Time::from_millis(2))
+        );
+        assert!(head.poll_claim(Time::from_nanos(1_999_999)).unwrap().is_none());
+        head.poll_claim(Time::from_millis(2))
+            .unwrap()
+            .expect("head should receive the token at the whole-ms boundary")
+            .commit();
+        assert_eq!(
+            limiter.next_async_wake(Time::from_millis(2)),
+            Some(Time::from_millis(4))
+        );
+        drop(follower);
+
+        let saturated = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_millis(1),
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+        assert!(saturated.try_acquire(1, Time::MAX));
+        let mut pending = saturated.acquire_queued_bounded(1, Time::MAX, 1).unwrap();
+        assert!(pending.poll_claim(Time::MAX).unwrap().is_none());
+        assert_eq!(saturated.next_async_wake(Time::MAX), None);
+        drop(pending);
+
+        for (rate, period) in [
+            (0, Duration::from_millis(1)),
+            (1, Duration::ZERO),
+        ] {
+            let stalled = RateLimiter::new(RateLimitPolicy {
+                rate,
+                period,
+                burst: 1,
+                wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(3)),
+                ..Default::default()
+            });
+            assert!(stalled.try_acquire(1, Time::ZERO));
+            let mut pending = stalled.acquire_queued_bounded(1, Time::ZERO, 1).unwrap();
+            assert_eq!(
+                stalled.next_async_wake(Time::ZERO),
+                Some(Time::from_millis(3))
+            );
+            assert!(matches!(
+                pending.poll_claim(Time::from_millis(3)),
+                Err(RateLimitError::Timeout { .. })
+            ));
+        }
+    }
+}

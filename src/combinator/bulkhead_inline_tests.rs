@@ -1671,7 +1671,8 @@ mod async_admission_tests {
 
     #[test]
     fn immediate_admission_needs_no_timer_but_contended_wait_fails_closed() {
-        let cx = Cx::for_testing();
+        type TimeOnly = crate::cx::cap::CapSet<false, true, false, false, false>;
+        let cx = Cx::for_testing().restrict::<TimeOnly>();
         let bulkhead = limiter(Duration::from_secs(1));
         let mut context = Context::from_waker(Waker::noop());
         let mut immediate = Box::pin(bulkhead.acquire_async(&cx, 1));
@@ -2031,5 +2032,129 @@ mod async_admission_tests {
         assert_empty(&bulkhead, 0);
         drop(held);
         assert_empty(&bulkhead, 1);
+    }
+
+    #[test]
+    fn runtime_masked_time_cannot_expire_a_fifo_predecessor() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{RegionId, TaskId};
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(10)));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(TimerDriverHandle::with_virtual_clock(clock)),
+            None,
+        );
+        let bulkhead = limiter(Duration::from_millis(1));
+        let predecessor = bulkhead.enqueue(1, Time::ZERO).unwrap();
+        let restriction = cx
+            .restrict::<crate::cx::cap::None>()
+            .set_current_restricted();
+        let masked = Cx::current().unwrap();
+        assert!(!masked.capabilities().time);
+        assert!(masked.timer_driver().is_none());
+
+        let mut task = Context::from_waker(Waker::noop());
+        let mut denied = Box::pin(bulkhead.acquire_async(&masked, 1));
+        assert!(matches!(
+            denied.as_mut().poll(&mut task),
+            Poll::Ready(Err(BulkheadAcquireError::TimerUnavailable))
+        ));
+        drop(denied);
+        assert_eq!(bulkhead.available(), 1);
+        assert_eq!(bulkhead.pending_queue_count.load(Ordering::Acquire), 1);
+        {
+            let queue = bulkhead.queue.read();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].id, predecessor);
+            assert!(queue[0].result.is_none());
+        }
+        drop(restriction);
+
+        // The original context still owns TIME and may retire the stale head.
+        let mut admitted = Box::pin(bulkhead.acquire_async(&cx, 1));
+        let permit = match admitted.as_mut().poll(&mut task) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("authorized time must expire the stale head: {other:?}"),
+        };
+        drop(admitted);
+        bulkhead.cancel_entry(predecessor, cx.now());
+        drop(permit);
+        assert_empty(&bulkhead, 1);
+    }
+
+    #[test]
+    fn dropping_async_owner_expires_followers_with_current_time() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{RegionId, TaskId};
+
+        for granted in [false, true] {
+            let clock = Arc::new(VirtualClock::new());
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock))),
+                None,
+            );
+            let bulkhead = Bulkhead::new(BulkheadPolicy {
+                max_concurrent: 2,
+                max_queue: 4,
+                queue_timeout: Duration::from_millis(100),
+                ..Default::default()
+            });
+            let mut held = Some(bulkhead.try_acquire(1, Time::ZERO).unwrap());
+            let mut owner = Box::pin(bulkhead.acquire_async(&cx, 2));
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(owner.as_mut().poll(&mut task).is_pending());
+            let owner_id = bulkhead.queue.read()[0].id;
+            let follower = bulkhead.enqueue(1, Time::ZERO).unwrap();
+
+            if granted {
+                drop(held.take());
+                assert_eq!(bulkhead.process_queue(Time::ZERO), Some(owner_id));
+            }
+            {
+                let queue = bulkhead.queue.read();
+                let first = queue.iter().find(|entry| entry.id == owner_id).unwrap();
+                assert_eq!(matches!(first.result, Some(Ok(()))), granted);
+                assert!(
+                    queue
+                        .iter()
+                        .find(|entry| entry.id == follower)
+                        .unwrap()
+                        .result
+                        .is_none()
+                );
+            }
+
+            // Drop the owner without another poll: its stored enqueue time is
+            // still zero, but the follower has expired and must not be granted.
+            clock.advance_to(Time::from_millis(200));
+            drop(owner);
+            assert_eq!(bulkhead.available(), if granted { 2 } else { 1 });
+            assert_eq!(bulkhead.pending_queue_count.load(Ordering::Acquire), 0);
+            {
+                let queue = bulkhead.queue.read();
+                assert_eq!(queue.len(), 1);
+                assert_eq!(queue[0].id, follower);
+                assert!(matches!(queue[0].result, Some(Err(RejectionReason::Timeout))));
+            }
+            assert!(matches!(
+                bulkhead.check_entry(follower, cx.now()),
+                Err(BulkheadError::QueueTimeout { waited })
+                    if waited == Duration::from_millis(200)
+            ));
+            drop(held);
+            assert_empty(&bulkhead, 2);
+        }
     }
 }

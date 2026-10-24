@@ -174,8 +174,8 @@ pub use race::{
     race_all_to_result, race2_outcomes, race2_to_result,
 };
 pub use rate_limit::{
-    RateLimitAlgorithm, RateLimitError, RateLimitMetrics, RateLimitPolicy, RateLimitPolicyBuilder,
-    RateLimiter, RateLimiterRegistry, SlidingWindowRateLimiter, WaitStrategy,
+    RateLimitAcquireError, RateLimitAlgorithm, RateLimitError, RateLimitMetrics, RateLimitPolicy,
+    RateLimitPolicyBuilder, RateLimiter, RateLimiterRegistry, SlidingWindowRateLimiter, WaitStrategy,
 };
 pub use retry::{
     AlwaysRetry, NeverRetry, RateLimitedRetryPolicy, Retry, RetryBudget, RetryError, RetryFailure,
