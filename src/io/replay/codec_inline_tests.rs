@@ -24,6 +24,7 @@
             read_bytes: 4,
             write_bytes: 3,
             vectored: true,
+            pending_polls: false,
         }
     }
     fn limits() -> IoTapeDecodeLimits {
@@ -128,6 +129,7 @@
             read_bytes: 0,
             write_bytes: 0,
             vectored: false,
+            pending_polls: false,
         };
         let encoded = tape.to_canonical_bytes(4096).unwrap();
         let decoded = IoTape::from_canonical_bytes(encoded.as_ref(), limits()).unwrap();
