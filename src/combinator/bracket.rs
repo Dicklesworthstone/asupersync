@@ -82,6 +82,10 @@ struct BracketState<Res, T, E, A, UF, R, RF> {
 /// drive the release future to completion. Immediately-progressable release
 /// futures are cleaned up even on cancellation; externally-woken release
 /// futures fail closed if they exhaust that bounded drop loop.
+/// Catchable panics from retiring a use future do not skip release. Cleanup
+/// futures are retired before any deferred panic is resumed; a release failure
+/// takes precedence over a use-phase failure. During an existing unwind,
+/// catchable cleanup failures do not replace the original panic.
 ///
 /// # Example
 /// ```ignore
@@ -290,22 +294,19 @@ where
     RF: Future<Output = ()>,
 {
     fn drop(&mut self) {
-        let mut release_panic: Option<Box<dyn std::any::Any + Send>> = None;
-        // Determine the release future to drive:
-        // - Using phase: resource acquired but use not complete; construct release future.
-        // - Releasing phase: release already started but not complete; drive existing future.
-        // We replace the phase with Done so that `use_fut` is dropped BEFORE the release
-        // future is created and polled. This ensures resources (like locks) held by
-        // the use phase are released before the cleanup phase attempts to run.
+        let already_panicking = std::thread::panicking();
+        let mut retirement_panic = None;
+        let mut release_panic = None;
+
+        // Retire the unfinished phase before constructing cleanup, even if
+        // that future's destructor panics. Its fields (including held locks)
+        // finish dropping inside the catch before release touches the resource.
         let release_fut: Option<Pin<Box<RF>>> =
             match std::mem::replace(&mut self.state.phase, BracketPhase::Done) {
                 unfinished @ (BracketPhase::Acquiring(_) | BracketPhase::Using(_)) => {
-                    // A `_` pattern left the future in the match temporary,
-                    // alive until this statement ended, so release_fn ran
-                    // while the use future still held what it had taken.
-                    drop(unfinished);
-                    // Cancel before release starts: construct the release future
-                    // from the saved resource clone if one exists.
+                    retirement_panic =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(unfinished)))
+                            .err();
                     if let (Some(release_fn), Some(resource)) = (
                         self.state.release_fn.take(),
                         self.state.resource_for_release.take(),
@@ -323,71 +324,61 @@ where
                         None
                     }
                 }
-                BracketPhase::Releasing(fut) => {
-                    // Cancel during release: extract the in-progress release future.
-                    Some(fut)
-                }
+                BracketPhase::Releasing(fut) => Some(fut),
                 BracketPhase::Done => None,
             };
 
-        if let Some(payload) = release_panic {
-            if !std::thread::panicking() {
-                std::panic::resume_unwind(payload);
-            }
-            return;
-        }
-
+        let mut cleanup_budget_exhausted = false;
         if let Some(mut release_fut) = release_fut {
-            // Drive it to completion synchronously using a noop waker.
-            // This is Phase 0 behavior; full implementation would use the
-            // runtime's cancel mask to run release asynchronously.
-            let waker = Waker::noop();
-            let mut cx = Context::from_waker(waker);
-
-            // Poll until complete (bounded iteration to prevent infinite loops)
-            // Most release futures complete quickly or immediately.
+            // Drop cannot suspend for external wakeups. Preserve the existing
+            // bounded best-effort cleanup policy and its fail-closed result.
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut settled = false;
             for _ in 0..DROP_RELEASE_POLL_BUDGET {
-                let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     release_fut.as_mut().poll(&mut cx)
-                }));
-                match poll_result {
+                })) {
                     Ok(Poll::Ready(())) => {
-                        if !std::thread::panicking() {
-                            if let Some(Err(payload)) = self.state.use_result.take() {
-                                std::panic::resume_unwind(payload);
-                            }
-                        }
-                        return;
+                        settled = true;
+                        break;
                     }
                     Err(payload) => {
-                        if !std::thread::panicking() {
-                            std::panic::resume_unwind(payload);
-                        }
-                        return;
+                        release_panic = Some(payload);
+                        settled = true;
+                        break;
                     }
-                    Ok(Poll::Pending) => {
-                        // Yield to allow progress
-                        std::hint::spin_loop();
-                    }
+                    Ok(Poll::Pending) => std::hint::spin_loop(),
                 }
             }
+            cleanup_budget_exhausted = !settled;
 
-            if !std::thread::panicking() {
-                if let Some(Err(payload)) = self.state.use_result.take() {
-                    std::panic::resume_unwind(payload);
+            // Retire cleanup before resuming any saved panic. Otherwise a
+            // release destructor that panics would run during that unwind and
+            // abort the process instead of leaving a catchable primary panic.
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(release_fut)))
+            {
+                // A release poll failure remains primary if its destructor
+                // also fails; either release failure takes precedence over use.
+                if release_panic.is_none() {
+                    release_panic = Some(payload);
                 }
-                panic!(
-                    "bracket release future did not complete within drop-time cleanup poll budget"
-                );
             }
-            return;
         }
 
-        // Ensure we don't swallow a use-phase panic if release times out or is absent.
-        if !std::thread::panicking() {
-            if let Some(Err(payload)) = self.state.use_result.take() {
-                std::panic::resume_unwind(payload);
-            }
+        // During an existing unwind, cleanup still runs, but a secondary
+        // catchable phase panic must not replace the caller's original panic.
+        if already_panicking {
+            return;
+        }
+        if let Some(payload) = release_panic.or(retirement_panic) {
+            std::panic::resume_unwind(payload);
+        }
+        if let Some(Err(payload)) = self.state.use_result.take() {
+            std::panic::resume_unwind(payload);
+        }
+        if cleanup_budget_exhausted {
+            panic!("bracket release future did not complete within drop-time cleanup poll budget");
         }
     }
 }
