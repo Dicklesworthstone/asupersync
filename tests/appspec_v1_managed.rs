@@ -683,3 +683,507 @@ fn managed_app_refuses_routes_the_router_would_merge_or_shadow() {
     // so neither handler is shadowed.
     assert!(bind_two_routes(("GET", "/users/:id"), ("DELETE", "/users/:uid")).is_ok());
 }
+
+fn signal_job_manifest() -> Value {
+    let mut manifest = manifest_json();
+    manifest["services"][0]["routes"] = json!([]);
+    manifest["services"][0]["actors"] = json!([]);
+    manifest["services"][0]["background_jobs"] = json!([{
+        "name": "reload", "entrypoint": "example::reload",
+        "trigger": {"signal": {"source": "reload"}},
+        "required_capabilities": {
+            "cx_capabilities": ["pure"], "feature_flags": [], "resources": []
+        },
+        "budget": "work"
+    }]);
+    manifest
+}
+
+fn signal_parent_spec() -> ChildRegionSpec {
+    let mut envelope = CapabilityBudget::UNSPECIFIED;
+    envelope.io_bytes = Some(128);
+    envelope.memory_bytes = Some(256);
+    let mut spec = ChildRegionSpec::inherit();
+    spec.capability_budget = Some(envelope);
+    spec
+}
+
+#[derive(Default)]
+struct SignalSerialState {
+    starts: AtomicUsize,
+    active: AtomicUsize,
+    retired: AtomicUsize,
+    release_first: AtomicBool,
+    generations: std::sync::Mutex<Vec<ManagedGeneration>>,
+    changed: Notify,
+}
+
+struct SignalInvocationGuard(Arc<SignalSerialState>);
+
+impl Drop for SignalInvocationGuard {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
+        self.0.retired.fetch_add(1, Ordering::AcqRel);
+        self.0.changed.notify_waiters();
+    }
+}
+
+fn enter_signal_invocation(
+    state: &Arc<SignalSerialState>,
+    cx: &Cx,
+    generation: ManagedGeneration,
+) -> (usize, SignalInvocationGuard) {
+    assert_pure_work_context(cx);
+    assert_eq!(generation.task, cx.task_id());
+    assert_eq!(generation.region, cx.region_id());
+    let index = state.starts.fetch_add(1, Ordering::AcqRel);
+    assert_eq!(
+        state.retired.load(Ordering::Acquire),
+        index,
+        "the preceding invocation must retire before the next factory"
+    );
+    assert_eq!(
+        state.active.fetch_add(1, Ordering::AcqRel),
+        0,
+        "signal invocations must never overlap"
+    );
+    state.generations.lock().unwrap().push(generation);
+    state.changed.notify_waiters();
+    (index, SignalInvocationGuard(Arc::clone(state)))
+}
+
+fn assert_signal_invocations(state: &SignalSerialState, numbers: &[u64]) {
+    assert_eq!(state.starts.load(Ordering::Acquire), numbers.len());
+    assert_eq!(state.retired.load(Ordering::Acquire), numbers.len());
+    assert_eq!(state.active.load(Ordering::Acquire), 0);
+    let generations = state.generations.lock().unwrap();
+    let observed: Vec<_> = generations.iter().map(|generation| generation.number).collect();
+    assert_eq!(observed, numbers);
+    for (index, invocation) in generations.iter().enumerate() {
+        for previous in &generations[..index] {
+            assert_ne!(invocation.region, previous.region, "fresh invocation region");
+            assert_ne!(invocation.task, previous.task, "fresh invocation task");
+        }
+    }
+}
+
+async fn signal_queue_with_mode(cx: Cx, mode: ManagedRestartMode) {
+    let parent = cx.open_child_region(signal_parent_spec()).await.unwrap();
+    let state = Arc::new(SignalSerialState::default());
+    let seen = Arc::clone(&state);
+    let (tx, rx) = asupersync::channel::mpsc::channel(2);
+    let app = parse(signal_job_manifest())
+        .bind_managed(
+            vec![ManagedAppBinding::signal_worker(
+                "api.job.reload",
+                "reload",
+                rx,
+                mode,
+                move |cx: Cx, generation: ManagedGeneration| {
+                    let seen = Arc::clone(&seen);
+                    let (index, retired) = enter_signal_invocation(&seen, &cx, generation);
+                    async move {
+                        let _retired = retired;
+                        if index == 0 {
+                            seen.changed
+                                .wait_until(|| seen.release_first.load(Ordering::Acquire))
+                                .await;
+                        }
+                        yield_now().await;
+                        assert_pure_work_context(&cx);
+                        Outcome::<(), ()>::Ok(())
+                    }
+                },
+            )],
+            config(),
+        )
+        .unwrap();
+    assert_eq!(state.starts.load(Ordering::Acquire), 0);
+    let mut app = app.start(parent.cx()).unwrap();
+    while tx.telemetry_snapshot(0).recv_waiter_count == 0 {
+        yield_now().await;
+    }
+    assert_eq!(
+        state.starts.load(Ordering::Acquire),
+        0,
+        "starting a signal listener must not invoke its workload"
+    );
+    tx.try_send(()).unwrap();
+    state
+        .changed
+        .wait_until(|| state.starts.load(Ordering::Acquire) == 1)
+        .await;
+    tx.try_send(()).unwrap();
+    tx.try_send(()).unwrap();
+    assert!(matches!(
+        tx.try_send(()),
+        Err(asupersync::channel::mpsc::SendError::Full(()))
+    ));
+    {
+        let mut blocked = Box::pin(tx.send(&cx, ()));
+        poll_fn(|task| {
+            assert!(
+                blocked.as_mut().poll(task).is_pending(),
+                "a full signal queue must backpressure its sender"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(state.starts.load(Ordering::Acquire), 1);
+        assert_eq!(state.active.load(Ordering::Acquire), 1);
+        state.release_first.store(true, Ordering::Release);
+        state.changed.notify_waiters();
+        blocked.await.unwrap();
+    }
+    // EOF is only observed after all four accepted notifications are drained.
+    drop(tx);
+    let report = app.join().await.unwrap();
+    assert_signal_invocations(&state, &[1, 1, 1, 1]);
+    assert_eq!(report.started, 1, "events share a managed generation");
+    assert_eq!(report.joined, 1);
+    assert_eq!(report.restart_batches, 0);
+    assert!(matches!(report.outcome, Outcome::Ok(())));
+    parent.close().await.unwrap();
+}
+
+async fn signal_queue_scenario(cx: Cx) {
+    signal_queue_with_mode(cx.clone(), ManagedRestartMode::Temporary).await;
+    signal_queue_with_mode(cx, ManagedRestartMode::Transient).await;
+}
+
+async fn signal_restart_scenario(cx: Cx) {
+    let parent = cx.open_child_region(signal_parent_spec()).await.unwrap();
+    let state = Arc::new(SignalSerialState::default());
+    let seen = Arc::clone(&state);
+    let (tx, rx) = asupersync::channel::mpsc::channel(3);
+    for _ in 0..3 {
+        tx.try_send(()).unwrap();
+    }
+    drop(tx);
+    let app = parse(signal_job_manifest())
+        .bind_managed(
+            vec![ManagedAppBinding::signal_worker(
+                "api.job.reload",
+                "reload",
+                rx,
+                ManagedRestartMode::Transient,
+                move |cx: Cx, generation: ManagedGeneration| {
+                    let (index, retired) = enter_signal_invocation(&seen, &cx, generation);
+                    async move {
+                        let _retired = retired;
+                        yield_now().await;
+                        assert_pure_work_context(&cx);
+                        if index == 0 {
+                            Outcome::Err("first event failed")
+                        } else {
+                            Outcome::Ok(())
+                        }
+                    }
+                },
+            )],
+            config(),
+        )
+        .unwrap();
+    let report = app.run(parent.cx()).await.unwrap();
+    assert_signal_invocations(&state, &[1, 2, 2]);
+    assert_eq!(report.started, 2);
+    assert_eq!(report.joined, 2);
+    assert_eq!(report.restart_batches, 1);
+    assert!(matches!(report.outcome, Outcome::Ok(())));
+    parent.close().await.unwrap();
+}
+
+async fn signal_cancel_drain_scenario(cx: Cx) {
+    let parent = cx.open_child_region(signal_parent_spec()).await.unwrap();
+    let witness = Arc::new(DrainWitness::default());
+    let seen = Arc::clone(&witness);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let starts = Arc::clone(&calls);
+    let (tx, rx) = asupersync::channel::mpsc::channel(1);
+    let app = parse(signal_job_manifest())
+        .bind_managed(
+            vec![ManagedAppBinding::signal_worker(
+                "api.job.reload",
+                "reload",
+                rx,
+                ManagedRestartMode::Transient,
+                move |cx: Cx, generation: ManagedGeneration| {
+                    assert_pure_work_context(&cx);
+                    assert_eq!(generation.task, cx.task_id());
+                    assert_eq!(generation.region, cx.region_id());
+                    starts.fetch_add(1, Ordering::AcqRel);
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        let _retired = Retired(Arc::clone(&seen));
+                        let mut cancelled = std::pin::pin!(cx.cancelled());
+                        poll_fn(|task| {
+                            let progress = cancelled.as_mut().poll(task);
+                            if progress.is_pending() {
+                                seen.parked.store(true, Ordering::Release);
+                                seen.changed.notify_waiters();
+                            }
+                            progress
+                        })
+                        .await;
+                        assert!(cx.checkpoint().is_err());
+                        let reason = cx.cancel_reason().expect("active signal cancellation");
+                        seen.cancelled.store(true, Ordering::Release);
+                        seen.changed.notify_waiters();
+                        seen.changed
+                            .wait_until(|| seen.release.load(Ordering::Acquire))
+                            .await;
+                        Outcome::<(), ()>::Cancelled(reason)
+                    }
+                },
+            )],
+            config(),
+        )
+        .unwrap();
+    let mut app = app.start(parent.cx()).unwrap();
+    tx.try_send(()).unwrap();
+    witness
+        .changed
+        .wait_until(|| witness.parked.load(Ordering::Acquire))
+        .await;
+    tx.try_send(()).unwrap();
+    assert!(matches!(
+        tx.try_send(()),
+        Err(asupersync::channel::mpsc::SendError::Full(()))
+    ));
+    app.abort();
+    witness
+        .changed
+        .wait_until(|| witness.cancelled.load(Ordering::Acquire))
+        .await;
+    let mut joined = Box::pin(app.join());
+    poll_fn(|task| {
+        assert!(
+            joined.as_mut().poll(task).is_pending(),
+            "application joined before active signal cleanup retired"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    assert!(!witness.retired.load(Ordering::Acquire));
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    witness.release.store(true, Ordering::Release);
+    witness.changed.notify_waiters();
+    let report = joined.await.unwrap();
+    assert!(witness.retired.load(Ordering::Acquire));
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        1,
+        "stop must not admit the queued signal"
+    );
+    assert_eq!(report.started, 1);
+    assert_eq!(report.joined, 1);
+    assert_eq!(report.restart_batches, 0);
+    assert!(matches!(report.outcome, Outcome::Cancelled(_)));
+    assert!(tx.is_closed(), "joined app must release its signal receiver");
+    assert!(matches!(
+        tx.try_send(()),
+        Err(asupersync::channel::mpsc::SendError::Disconnected(()))
+    ));
+    parent.close().await.unwrap();
+}
+
+#[test]
+fn managed_app_signal_queue_is_bounded_serial_and_context_limited() {
+    for workers in [1, 4] {
+        native(workers, signal_queue_scenario);
+    }
+}
+
+#[test]
+fn managed_app_signal_restart_consumes_failed_event_and_retains_the_queue() {
+    for workers in [1, 4] {
+        native(workers, signal_restart_scenario);
+    }
+}
+
+#[test]
+fn managed_app_signal_stop_drains_active_work_and_closes_the_receiver() {
+    for workers in [1, 4] {
+        native(workers, signal_cancel_drain_scenario);
+    }
+}
+
+#[test]
+fn managed_app_signals_reach_seeded_lab_quiescence() {
+    use asupersync::{LabConfig, LabRuntime};
+    for seed in [17, 41, 93] {
+        let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(8192));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                let cx = Cx::current().unwrap();
+                signal_queue_scenario(cx.clone()).await;
+                signal_restart_scenario(cx.clone()).await;
+                signal_cancel_drain_scenario(cx.clone()).await;
+                signal_idle_stop_scenario(cx.clone()).await;
+                signal_parent_deadline_scenario(cx).await;
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        let virtual_time = lab.run_with_auto_advance();
+        let report = lab.run_until_quiescent_with_report();
+        assert!(
+            matches!(join.try_join(), Ok(Some(()))),
+            "{virtual_time:?} {report:?}"
+        );
+        assert!(lab.state.tasks_is_empty(), "signal jobs left live tasks");
+        assert!(lab.state.obligations_iter().all(|(_, o)| !o.is_pending()));
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
+#[test]
+fn managed_app_signal_bindings_reject_mismatched_sources_and_kinds_before_work() {
+    for case in 0..6 {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let starts = Arc::clone(&calls);
+        let mut manifest = signal_job_manifest();
+        let mut name = "api.job.reload";
+        let mut source = "reload";
+        match case {
+            1 => source = "another-source",
+            2 => manifest["services"][0]["background_jobs"][0]["trigger"] = json!("startup"),
+            3 => {
+                manifest["services"][0]["background_jobs"] = json!([]);
+                manifest["services"][0]["actors"] =
+                    manifest_json()["services"][0]["actors"].clone();
+                name = "api.actor.cache";
+            }
+            4 => source = "",
+            5 => {
+                manifest["services"][0]["background_jobs"][0]["trigger"] =
+                    json!({"signal": {"source": ""}});
+                source = "";
+            }
+            _ => {}
+        }
+        let (_sender, receiver) = asupersync::channel::mpsc::channel(1);
+        let factory = move |_: Cx, _: ManagedGeneration| {
+            starts.fetch_add(1, Ordering::AcqRel);
+            async { Outcome::<(), ()>::Ok(()) }
+        };
+        let binding = if case == 0 {
+            ManagedAppBinding::worker(name, ManagedRestartMode::Temporary, factory)
+        } else {
+            ManagedAppBinding::signal_worker(
+                name,
+                source,
+                receiver,
+                ManagedRestartMode::Temporary,
+                factory,
+            )
+        };
+        let result = parse(manifest).bind_managed(vec![binding], config());
+        assert!(result.is_err(), "invalid signal binding case {case} was accepted");
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+    }
+}
+
+async fn signal_idle_stop_scenario(cx: Cx) {
+    let (sender, receiver) = asupersync::channel::mpsc::channel(1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let starts = Arc::clone(&calls);
+    let app = parse(signal_job_manifest())
+        .bind_managed(
+            vec![ManagedAppBinding::signal_worker(
+                "api.job.reload",
+                "reload",
+                receiver,
+                ManagedRestartMode::Temporary,
+                move |_: Cx, _: ManagedGeneration| {
+                    starts.fetch_add(1, Ordering::AcqRel);
+                    async { Outcome::<(), ()>::Ok(()) }
+                },
+            )],
+            config(),
+        )
+        .unwrap();
+    let mut app = app.start(&cx).unwrap();
+    while sender.telemetry_snapshot(0).recv_waiter_count == 0 {
+        assert!(!sender.is_closed(), "signal worker exited before parking");
+        yield_now().await;
+    }
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    app.abort();
+    let report = app.join().await.unwrap();
+    assert_eq!(report.started, 1);
+    assert_eq!(report.joined, 1);
+    assert_eq!(report.restart_batches, 0);
+    assert!(matches!(report.outcome, Outcome::Cancelled(_)));
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    assert!(sender.is_closed(), "stopped controller retained the signal receiver");
+    assert!(matches!(
+        sender.try_send(()),
+        Err(asupersync::channel::mpsc::SendError::Disconnected(()))
+    ));
+}
+
+async fn signal_parent_deadline_scenario(cx: Cx) {
+    let owner_deadline = cx.now() + Duration::from_millis(250);
+    let parent = cx
+        .open_child_region(
+            ChildRegionSpec::inherit().with_budget(Budget::new().with_deadline(owner_deadline)),
+        )
+        .await
+        .unwrap();
+    let (sender, receiver) = asupersync::channel::mpsc::channel(1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let starts = Arc::clone(&calls);
+    let app = parse(signal_job_manifest())
+        .bind_managed(
+            vec![ManagedAppBinding::signal_worker(
+                "api.job.reload",
+                "reload",
+                receiver,
+                ManagedRestartMode::Temporary,
+                move |_: Cx, _: ManagedGeneration| {
+                    starts.fetch_add(1, Ordering::AcqRel);
+                    async { Outcome::<(), ()>::Ok(()) }
+                },
+            )],
+            config(),
+        )
+        .unwrap();
+    let mut app = app.start(parent.cx()).unwrap();
+    // No notification, workload timer, or self-wake can finish this wait.
+    // The actual generation's inherited deadline must wake its MPSC receive.
+    while sender.telemetry_snapshot(0).recv_waiter_count == 0 {
+        assert!(!sender.is_closed(), "deadline worker never parked on its source");
+        yield_now().await;
+    }
+    let report = app.join().await.unwrap();
+    assert!(
+        cx.now() < owner_deadline + Duration::from_secs(1),
+        "idle signal receive ignored its inherited deadline"
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    assert_eq!(report.started, 1);
+    assert_eq!(report.joined, 1);
+    assert_eq!(report.restart_batches, 0);
+    assert!(
+        matches!(&report.children[0].outcome, Outcome::Cancelled(reason)
+            if reason.kind == CancelKind::Deadline)
+    );
+    assert!(sender.is_closed());
+    parent.close().await.unwrap();
+}
+
+#[test]
+fn managed_app_signal_idle_stop_closes_source_on_native_workers() {
+    for workers in [1, 4] {
+        native(workers, signal_idle_stop_scenario);
+    }
+}
+
+#[test]
+fn managed_app_signal_wait_obeys_inherited_deadline_on_native_workers() {
+    for workers in [1, 4] {
+        native(workers, signal_parent_deadline_scenario);
+    }
+}
