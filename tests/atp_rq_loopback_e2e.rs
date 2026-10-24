@@ -9,6 +9,9 @@
 //! closed. This is the regression wall for the fast/robust transport.
 #![allow(missing_docs)]
 
+#[path = "atp_rq_loopback_e2e/authenticated_control.rs"]
+mod authenticated_control;
+
 use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
