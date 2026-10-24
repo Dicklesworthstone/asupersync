@@ -1986,6 +1986,14 @@ mod managed {
             child: ChildName,
             dependency: ChildName,
         },
+        /// Stop-on-child-failure policy stopped the whole group. The original
+        /// domain error remains in the matching child completion.
+        ChildFailed {
+            /// Child whose failure stopped the controller.
+            child: ChildName,
+            /// Exact failed generation, retained after sibling drain.
+            generation: ManagedGeneration,
+        },
         /// Shared restart intensity refused another replacement batch.
         RestartLimit {
             child: ChildName,
@@ -2113,6 +2121,7 @@ mod managed {
         bindings: Vec<ManagedChildBinding<E>>,
         config: SupervisionConfig,
         registry: Option<Arc<Mutex<NameRegistry>>>,
+        stop_on_child_failure: bool,
         shared_restarts: Option<Arc<crate::cx::dynamic_supervisor::SharedRestartDomain>>,
         #[cfg(test)]
         terminal_publication_hook: Option<Arc<TerminalPublicationHook>>,
@@ -2124,6 +2133,7 @@ mod managed {
                 .field("name", &self.name)
                 .field("children", &self.children.len())
                 .field("config", &self.config)
+                .field("stop_on_child_failure", &self.stop_on_child_failure)
                 .finish_non_exhaustive()
         }
     }
@@ -2236,6 +2246,7 @@ mod managed {
                 bindings: factories,
                 config,
                 registry,
+                stop_on_child_failure: false,
                 shared_restarts: None,
                 #[cfg(test)]
                 terminal_publication_hook: None,
@@ -3198,6 +3209,26 @@ mod managed {
                 }
             }
             while let Some(failed) = self.wait_exit().await {
+                let completed = self.latest[failed].as_ref().expect("joined terminal");
+                if self.supervisor.stop_on_child_failure
+                    && ManagedRestartMode::Transient.eligible(completed)
+                {
+                    // Group failure containment applies even to Temporary
+                    // children, before restart budgets or escalation policy.
+                    let generation = completed.generation;
+                    self.report.outcome = match (&completed.task_outcome, &completed.outcome) {
+                        (Err(JoinError::Panicked(payload)), _)
+                        | (_, Outcome::Panicked(payload)) => Outcome::Panicked(payload.clone()),
+                        _ => Outcome::Err(ManagedSupervisorError::ChildFailed {
+                            child: completed.name.clone(),
+                            generation,
+                        }),
+                    };
+                    self.trace("stop-on-child-failure", failed, generation);
+                    // finish() requests sibling cancellation, joins every task
+                    // and drains all generation/supervisor region finalizers.
+                    return;
+                }
                 let eligible = self.supervisor.bindings[failed]
                     .mode
                     .eligible(self.latest[failed].as_ref().expect("joined terminal"));
@@ -3552,6 +3583,24 @@ mod managed {
     }
 
     impl<E> ManagedSupervisor<E> {
+        /// Stop and drain the whole group on its first observed child failure.
+        ///
+        /// Domain errors and panics stop the controller even for Temporary
+        /// children, without admitting a replacement or consuming restart
+        /// intensity. Successful and cancelled children retain their declared
+        /// restart-mode behavior. Ordinary failure does not cancel the parent.
+        ///
+        /// The report is published only after all sibling tasks and regions
+        /// drain. Domain failure produces `ManagedSupervisorError::ChildFailed`
+        /// with the exact child/generation; its original error remains in the
+        /// child completion. A panic remains `Outcome::Panicked`. Cleanup
+        /// failures still use the existing mandatory escalation path.
+        #[must_use]
+        pub fn with_stop_on_child_failure(mut self) -> Self {
+            self.stop_on_child_failure = true;
+            self
+        }
+
         pub(crate) fn set_shared_restarts(
             &mut self,
             domain: Arc<crate::cx::dynamic_supervisor::SharedRestartDomain>,
