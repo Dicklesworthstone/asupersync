@@ -983,14 +983,15 @@ pub(crate) fn apply_obligation_posts_with_task_table(
     apply_obligation_posts_with_observers(state, mailbox, max, dispatch_tasks, None)
 }
 
-/// Apply authoritative mutations and receipts before handing observations back
-/// to a native execution guard. None preserves direct state-threaded delivery.
+/// Apply authoritative mutations and receipts before handing close notifications
+/// and observations back to a native execution guard. None preserves direct
+/// state-threaded delivery.
 pub(crate) fn apply_obligation_posts_with_observers(
     state: &mut RuntimeState,
     mailbox: &ObligationMailbox,
     max: usize,
     dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
-    mut observers: Option<&mut Vec<crate::runtime::state::LifecycleObserverEffect>>,
+    mut observers: Option<&mut crate::runtime::state::LifecycleObserverBatch>,
 ) -> usize {
     if mailbox.is_empty() {
         state.check_obligation_conservation_after_drain(mailbox);

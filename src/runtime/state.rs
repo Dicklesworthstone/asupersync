@@ -3189,7 +3189,8 @@ impl RuntimeState {
         }
     }
 
-    /// Native mailbox drain: retain advisory callbacks in the caller's guard.
+    /// Native mailbox drain: retain close notifications and advisory callbacks
+    /// in the caller's guard, including through a later leak-policy panic.
     /// The caller must dispatch only after releasing every state/table lock.
     pub(crate) fn drain_obligation_posts_deferred(
         &mut self,
@@ -3200,13 +3201,12 @@ impl RuntimeState {
         let Some(gateway) = self.obligation_gateway.clone() else {
             return 0;
         };
-        let effects = observers.for_metrics(&self.metrics);
         crate::runtime::obligation_mailbox::apply_obligation_posts_with_observers(
             self,
             gateway.mailbox(),
             max,
             dispatch_tasks,
-            Some(effects),
+            Some(observers),
         )
     }
 
@@ -3230,14 +3230,13 @@ impl RuntimeState {
         dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
         observers: &mut LifecycleObserverBatch,
     ) -> usize {
-        let effects = observers.for_metrics(&self.metrics);
-        self.drain_obligation_posts_before_completion_with_observers(dispatch_tasks, Some(effects))
+        self.drain_obligation_posts_before_completion_with_observers(dispatch_tasks, Some(observers))
     }
 
     fn drain_obligation_posts_before_completion_with_observers(
         &mut self,
         dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
-        mut observers: Option<&mut Vec<LifecycleObserverEffect>>,
+        mut observers: Option<&mut LifecycleObserverBatch>,
     ) -> usize {
         let Some(gateway) = self.obligation_gateway.clone() else {
             return 0;
@@ -6761,9 +6760,22 @@ impl RuntimeState {
         request: crate::runtime::obligation_mailbox::QueuedObligationPost,
         obligation: Option<ObligationId>,
         dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
-        observers: Option<&mut Vec<LifecycleObserverEffect>>,
+        observers: Option<&mut LifecycleObserverBatch>,
     ) -> Result<Option<ObligationId>, Error> {
         use crate::runtime::obligation_mailbox::{ObligationOp, QueuedObligationPost};
+        // A terminal post or ownership handoff can close its region and walk
+        // into a parent whose leak policy panics. Retain the functional close
+        // work on the native caller's guard before that walk can unwind; an
+        // advisory-only buffer would dispatch foreign Wakers under these locks.
+        let (observers, close_wakes) = if let Some(batch) = observers {
+            let _ = batch.for_metrics(&self.metrics);
+            (
+                Some(&mut batch.payloads.last_mut().expect("observer payload").effects),
+                Some(&mut batch.region_close_wakes),
+            )
+        } else {
+            (None, None)
+        };
         let mut deferred = Vec::new();
         let result = {
             let shards = self.shard_tables.clone();
@@ -6786,7 +6798,13 @@ impl RuntimeState {
                 None => CompletionObligationTarget::Embedded,
             };
             let mut regions = AdmissionRegionTarget::Embedded;
-            let mut effects = LifecycleEffectsSink::Buffered(&mut deferred);
+            let mut effects = match close_wakes {
+                Some(close_wakes) => LifecycleEffectsSink::NativeBuffered {
+                    buffer: &mut deferred,
+                    close_wakes,
+                },
+                None => LifecycleEffectsSink::Buffered(&mut deferred),
+            };
             match request {
                 QueuedObligationPost::Handoff { .. } => {
                     let id = obligation
