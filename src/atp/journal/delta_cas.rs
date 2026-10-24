@@ -233,6 +233,13 @@ pub struct DeltaSubtreeRange {
 }
 
 /// File-backed CAS rooted inside the ATP journal directory.
+///
+/// New files sync their data before atomic publication. Unix also syncs
+/// validated dedup files, publication directories, and newly created store
+/// ancestors; an unsupported or failed sync barrier is an error. On other
+/// targets dedup only validates bytes, and directory-entry durability across
+/// power loss is not promised. The store root must be privately controlled;
+/// this path-based API is not a hostile-filesystem containment boundary.
 #[derive(Debug, Clone)]
 pub struct DeltaCasStore {
     root: PathBuf,
@@ -242,45 +249,33 @@ impl DeltaCasStore {
     /// Open or create a delta CAS at `root`.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, DeltaCasError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(root.join("chunks"))?;
-        fs::create_dir_all(root.join("manifests"))?;
+        create_store_directories(&root)?;
         Ok(Self { root })
     }
 
     /// Store bytes under their content id. Existing identical bytes are a dedup hit.
+    ///
+    /// New content is written and synced in a private staging file, then
+    /// published without replacing a winner. Readers never observe a partial
+    /// write through its content-addressed name.
     pub fn put_chunk(&self, bytes: &[u8]) -> Result<DeltaCasWrite, DeltaCasError> {
         let id = DeltaChunkId::from_bytes(bytes);
         let size_bytes = bytes.len() as u64;
         let path = self.chunk_path(id, size_bytes);
-        if path.exists() {
+        let inserted = if path.exists() {
             self.verify_existing_chunk(&path, id, bytes)?;
-            return Ok(DeltaCasWrite {
-                id,
-                size_bytes,
-                inserted: false,
-            });
-        }
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => file.write_all(bytes)?,
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.verify_existing_chunk(&path, id, bytes)?;
-                return Ok(DeltaCasWrite {
-                    id,
-                    size_bytes,
-                    inserted: false,
-                });
-            }
-            Err(err) => return Err(err.into()),
-        }
+            false
+        } else if publish_file_new(&path, |file| file.write_all(bytes))? {
+            true
+        } else {
+            self.verify_existing_chunk(&path, id, bytes)?;
+            false
+        };
 
         Ok(DeltaCasWrite {
             id,
             size_bytes,
-            inserted: true,
+            inserted,
         })
     }
 
@@ -336,28 +331,31 @@ impl DeltaCasStore {
         self.get_chunk(id, size_bytes).map(|chunk| chunk.is_some())
     }
 
-    /// Persist a manifest as a journal artifact. Existing identical bytes are a dedup hit.
+    /// Persist a manifest as a new journal artifact.
+    ///
+    /// Identical existing bytes are a dedup hit and return false. A different
+    /// manifest under the same tree id is refused with an AlreadyExists I/O
+    /// error; this operation never replaces an existing baseline or reports
+    /// that an unwritten candidate was persisted.
     pub fn persist_manifest_new(
         &self,
         manifest: &DeltaMerkleManifest,
     ) -> Result<bool, DeltaCasError> {
         let bytes = manifest.to_canonical_bytes();
         let path = self.manifest_path(manifest.tree_id());
-        if path.exists() {
-            return Ok(fs::read(&path)? != bytes);
+        if !path.exists() && publish_file_new(&path, |file| file.write_all(&bytes))? {
+            return Ok(true);
         }
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let (identical, _) = inspect_file_bytes(&path, &bytes)?;
+        if !identical {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "delta CAS tree id already has a different manifest",
+            )
+            .into());
         }
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => file.write_all(&bytes)?,
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Ok(fs::read(&path)? != bytes);
-            }
-            Err(err) => return Err(err.into()),
-        }
-        Ok(true)
+        sync_parent_directory(&path)?;
+        Ok(false)
     }
 
     /// Load the persisted canonical manifest bytes for `tree_id`, if present.
@@ -389,18 +387,14 @@ impl DeltaCasStore {
         id: DeltaChunkId,
         expected_bytes: &[u8],
     ) -> Result<(), DeltaCasError> {
-        let mut existing = Vec::new();
-        OpenOptions::new()
-            .read(true)
-            .open(path)?
-            .read_to_end(&mut existing)?;
-        if existing != expected_bytes {
-            let actual = DeltaChunkId::from_bytes(&existing);
+        let (identical, actual) = inspect_file_bytes(path, expected_bytes)?;
+        if !identical {
             return Err(DeltaCasError::ChunkHashMismatch {
                 expected: id,
-                actual,
+                actual: DeltaChunkId::from_hash(actual),
             });
         }
+        sync_parent_directory(path)?;
         Ok(())
     }
 }
@@ -449,6 +443,149 @@ pub enum DeltaCasError {
     /// Chunk input was too large to represent.
     #[error("delta CAS chunk is too large to represent")]
     ChunkTooLarge,
+}
+
+// Private staging names are never accepted as chunk or manifest identities.
+static NEXT_STAGING_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct StagingFile {
+    path: PathBuf,
+}
+
+impl StagingFile {
+    fn create(parent: &Path) -> std::io::Result<(Self, fs::File)> {
+        for _ in 0..128 {
+            let serial = NEXT_STAGING_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = parent.join(format!(
+                ".delta-cas-staging-{}-{serial:016x}.tmp",
+                std::process::id()
+            ));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((Self { path }, file)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "delta CAS could not reserve a unique staging file",
+        ))
+    }
+}
+
+impl Drop for StagingFile {
+    fn drop(&mut self) {
+        // Only this operation's create_new-owned staging name is removed.
+        // An interrupted process may leave staging garbage, never a partial
+        // object reachable through a content or manifest identity.
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Publish one complete file without clobbering an already-published winner.
+/// The callback keeps write-failure boundaries directly testable.
+fn publish_file_new(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "CAS path has no parent")
+    })?;
+    // The store roots already exist. Only the one-level hash shard may be new.
+    match fs::create_dir(parent) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    sync_parent_directory(parent)?;
+    let (staging, mut file) = StagingFile::create(parent)?;
+    let written = write(&mut file).and_then(|()| file.sync_all());
+    // Close before publication or cleanup, including a short/failed write.
+    drop(file);
+    written?;
+    let inserted = match fs::hard_link(&staging.path, path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => return Err(error),
+    };
+    drop(staging);
+    sync_directory(parent)?;
+    Ok(inserted)
+}
+
+/// Compare every byte and hash the existing object with fixed working memory.
+fn inspect_file_bytes(path: &Path, expected: &[u8]) -> std::io::Result<(bool, [u8; 32])> {
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0_u8; 8192];
+    let mut offset = 0_usize;
+    let mut identical = true;
+    let mut hasher = Sha256::new();
+    loop {
+        let count = match file.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        let end = offset.saturating_add(count);
+        identical &= expected.get(offset..end) == Some(&buffer[..count]);
+        offset = end;
+    }
+    let identical = identical && offset == expected.len();
+    #[cfg(unix)]
+    if identical {
+        // Upgrade a valid legacy/imported object before acknowledging dedup.
+        // Keep the same read-only handle used for byte validation.
+        file.sync_all()?;
+    }
+    Ok((identical, hasher.finalize().into()))
+}
+
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    // File data is synced on every target; portable std has no equivalent
+    // directory-entry durability barrier outside Unix.
+    Ok(())
+}
+
+fn create_store_directories(root: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(root.join("chunks"))?;
+    fs::create_dir_all(root.join("manifests"))?;
+    #[cfg(unix)]
+    {
+        sync_directory(&root.join("chunks"))?;
+        sync_directory(&root.join("manifests"))?;
+        // Persist newly-created ancestors too, not just the leaf directory.
+        let root = fs::canonicalize(if root.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            root
+        })?;
+        for ancestor in root.ancestors() {
+            sync_directory(ancestor)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
