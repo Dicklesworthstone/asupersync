@@ -1904,7 +1904,6 @@ impl RegionRecord {
             .transition(RegionState::Finalizing, RegionState::Closed);
 
         if transitioned {
-            self.trace_state_change(RegionState::Closed);
             // The payloads are dropped with the region lock released, and
             // before the receipt is stored and the close waiters are woken,
             // so whoever sees the close happens-after every destructor
@@ -1929,7 +1928,13 @@ impl RegionRecord {
                 notify.closed = true;
                 std::mem::take(&mut notify.waiters)
             };
-            Some(RegionCloseWakes { waiters })
+            let wakes = RegionCloseWakes { waiters };
+            // The terminal transition is already committed. A subscriber is
+            // advisory user code: publish the receipt and retain every waiter
+            // before invoking it, outside the region's own lock. Runtime/table
+            // locks held by the caller are not released by this boundary.
+            contain_region_close_callback(|| self.trace_state_change(RegionState::Closed));
+            Some(wakes)
         } else {
             None
         }
@@ -2270,16 +2275,22 @@ impl RRefAccess for RegionRecord {
 /// lock released. Each payload is dropped on its own under `catch_unwind`: a
 /// panicking destructor is logged and the rest are still dropped, and the
 /// caller still stores the close receipt and wakes the close waiters
-/// (br-asupersync-fu6cr0 M2).
+/// (br-asupersync-fu6cr0 M2). The caught payload's destructor and the diagnostic
+/// subscriber are also arbitrary user code; neither may interrupt reclamation.
 fn drop_region_payloads(region: RegionId, payloads: Vec<Box<dyn std::any::Any + Send + Sync>>) {
     for payload in payloads {
-        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)));
-        if dropped.is_err() {
-            let _ = &region;
-            warn!(
-                region_id = ?region,
-                "a region heap payload's destructor panicked after the region closed"
-            );
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+        {
+            // Do not run a second arbitrary destructor while completing a
+            // region, especially when this close itself runs during unwind.
+            std::mem::forget(panic);
+            contain_region_close_callback(|| {
+                let _ = &region;
+                warn!(
+                    region_id = ?region,
+                    "a region heap payload's destructor panicked after the region closed"
+                );
+            });
         }
     }
 }
@@ -2291,3 +2302,7 @@ mod tests;
 #[cfg(test)]
 #[path = "region_close_wake_tests.rs"]
 mod close_wake_tests;
+
+#[cfg(test)]
+#[path = "region_close_cleanup_tests.rs"]
+mod close_cleanup_tests;

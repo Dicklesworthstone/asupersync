@@ -7448,12 +7448,17 @@ impl ThreeLaneWorker {
         let mut live_task_publications = Vec::new();
         let mut watch_wakers = Vec::new();
         let mut watch_retries = Vec::new();
-        {
+        let mut observers = crate::runtime::state::LifecycleObserverBatch::default();
+        // Keep the iterator outside the caught lock scope too: unprocessed
+        // commands may own foreign finalizer payloads. Their retirement must
+        // not precede delivery of close tokens captured before a leak panic.
+        let mut commands = commands.into_iter();
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for command in commands {
+            for command in commands.by_ref() {
                 match command {
                     crate::runtime::spawn_mailbox::RegionCommand::Create(request) => {
                         let (slot, outcome) = state.open_child_region_command(request);
@@ -7474,12 +7479,13 @@ impl ThreeLaneWorker {
                         live_task_publications.push(query.apply(&state));
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
-                        state.close_region_command_in_task_table(
+                        state.close_region_command_deferred(
                             region_id,
                             &reason,
                             None,
                             self.task_table.as_ref(),
                             drain_now,
+                            &mut observers,
                         );
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::CancelWithBudget {
@@ -7487,27 +7493,36 @@ impl ThreeLaneWorker {
                         reason,
                         shutdown_budget,
                     } => {
-                        state.close_region_command_in_task_table(
+                        state.close_region_command_deferred(
                             region_id,
                             &reason,
                             Some(shutdown_budget),
                             self.task_table.as_ref(),
                             drain_now,
+                            &mut observers,
                         );
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::Close { region_id } => {
                         // Never earlier than the reasons it races with (pz66t0).
                         let completion = owned_region_close_reason(drain_now);
-                        state.close_region_command_in_task_table(
+                        state.close_region_command_deferred(
                             region_id,
                             &completion,
                             None,
                             self.task_table.as_ref(),
                             drain_now,
+                            &mut observers,
                         );
                     }
                 }
             }
+        }));
+        // Functional close callbacks run first, after RuntimeState/A/C have
+        // all been released. Ordinary command publications can themselves
+        // wake user code, so they must not strand these one-shot close tokens.
+        observers.dispatch();
+        if let Err(payload) = applied {
+            std::panic::resume_unwind(payload);
         }
         // Publication wakes producer futures; it runs only after the runtime
         // lock is released so a woken opener never contends mid-transition.
@@ -10486,3 +10501,7 @@ mod close_wake_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "three_lane_completion_retention_tests.rs"]
 mod completion_retention_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "three_lane_queued_close_tests.rs"]
+mod queued_close_tests;

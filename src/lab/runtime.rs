@@ -5043,6 +5043,19 @@ impl LabRuntime {
         }
 
         let _cx_guard = crate::cx::Cx::set_current(current_cx);
+        let cancel_observer = if self.config.has_cancellation_oracle() {
+            cx_inner.as_ref().map(|inner| {
+                let depth = inner.read().mask_depth;
+                self.oracles.cancellation_protocol.observe_mask_snapshot(
+                    task_id,
+                    depth,
+                    self.virtual_time,
+                );
+                crate::cx::cancel_observation::CancelObservationGuard::enter(inner)
+            })
+        } else {
+            None
+        };
 
         let started_running = self
             .state
@@ -5134,6 +5147,9 @@ impl LabRuntime {
             record.mark_polled(self.steps);
         });
 
+        // Replay the actual checkpoint/mask order before the coalesced task
+        // receipt. A mask may have entered and exited within this single poll.
+        self.replay_cancel_observations(task_id, cancel_observer.as_ref());
         let (cancel_ack, cancel_wakes) = self.consume_cancel_ack(task_id).into_parts();
 
         // Sample only the admitted task's primary Cx. A derived fiber context
@@ -5176,7 +5192,15 @@ impl LabRuntime {
                 self.notify_cancellation_oracle_task_transition(task_id, from_state, to_state);
             }
             if let Some((from_state, to_state)) = receipt.acknowledge_transition.as_ref() {
-                self.notify_cancellation_oracle_task_transition(task_id, from_state, to_state);
+                // The ordered checkpoint event checked its actual mask instant.
+                // Receipt consumption can follow a newly entered cleanup mask,
+                // or a host checkpoint made before this observed poll.
+                self.oracles.cancellation_protocol.on_checkpoint_transition(
+                    task_id,
+                    from_state,
+                    to_state,
+                    self.virtual_time,
+                );
             }
             self.notify_cancellation_oracle_cancel_ack(task_id);
         }
@@ -5390,7 +5414,36 @@ impl LabRuntime {
         }
 
         self.check_deadline_monitor();
+        // Future retirement and wake callbacks can run more context operations.
+        // Keep the observer installed through them, then restore the outer poll.
+        self.replay_cancel_observations(task_id, cancel_observer.as_ref());
         Ok(true)
+    }
+
+    fn replay_cancel_observations(
+        &mut self,
+        task_id: TaskId,
+        observer: Option<&crate::cx::cancel_observation::CancelObservationGuard>,
+    ) {
+        use crate::cx::cancel_observation::CancelObservation;
+        let Some(observer) = observer else {
+            return;
+        };
+        for event in observer.drain() {
+            match event {
+                CancelObservation::MaskEnter => {
+                    self.notify_cancellation_oracle_mask_enter(task_id);
+                }
+                CancelObservation::MaskExit => {
+                    self.notify_cancellation_oracle_mask_exit(task_id);
+                }
+                CancelObservation::CheckpointAck => {
+                    self.oracles
+                        .cancellation_protocol
+                        .observe_checkpoint_ack(task_id, self.virtual_time);
+                }
+            }
+        }
     }
 
     fn check_deadline_monitor(&mut self) {
@@ -7136,3 +7189,7 @@ mod tests;
 #[cfg(test)]
 #[path = "task_causality_inline_tests.rs"]
 mod task_causality_tests;
+
+#[cfg(test)]
+#[path = "cancel_mask_observation_tests.rs"]
+mod cancel_mask_observation_tests;

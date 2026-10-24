@@ -683,6 +683,11 @@ impl Drop for MaskGuard<'_> {
     fn drop(&mut self) {
         let mut inner = self.inner.write();
         inner.mask_depth = inner.mask_depth.saturating_sub(1);
+        drop(inner);
+        super::cancel_observation::record(
+            self.inner,
+            super::cancel_observation::CancelObservation::MaskExit,
+        );
     }
 }
 
@@ -2839,6 +2844,10 @@ impl<Caps> Cx<Caps> {
             }
             if inner.cancel_requested && inner.mask_depth == 0 {
                 inner.cancel_acknowledged = true;
+                super::cancel_observation::record(
+                    &self.inner,
+                    super::cancel_observation::CancelObservation::CheckpointAck,
+                );
             }
             (
                 inner.cancel_requested,
@@ -2969,6 +2978,10 @@ impl<Caps> Cx<Caps> {
             }
             if inner.cancel_requested && inner.mask_depth == 0 {
                 inner.cancel_acknowledged = true;
+                super::cancel_observation::record(
+                    &self.inner,
+                    super::cancel_observation::CancelObservation::CheckpointAck,
+                );
             }
             (
                 inner.cancel_requested,
@@ -3329,6 +3342,10 @@ impl<Caps> Cx<Caps> {
         }
 
         let _guard = MaskGuard { inner: &self.inner };
+        super::cancel_observation::record(
+            &self.inner,
+            super::cancel_observation::CancelObservation::MaskEnter,
+        );
         f()
     }
 

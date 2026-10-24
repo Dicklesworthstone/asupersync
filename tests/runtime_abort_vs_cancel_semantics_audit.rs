@@ -3067,3 +3067,38 @@ fn watch_and_broadcast_cancel_without_producer_on_native_sharded_workers() {
 
 #[path = "runtime_abort_vs_cancel_semantics_audit/stream_cancellation.rs"]
 mod stream_cancellation;
+
+#[test]
+fn native_nested_masks_preserve_checkpoint_deferral_and_unwind_restoration() {
+    for sharded in [false, true] {
+        let runtime = checked_native_runtime(sharded, 16);
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native owner context");
+            let mut child = cx
+                .spawn(|task_cx| async move {
+                    task_cx.masked(|| {
+                        task_cx.cancel_with(CancelKind::User, Some("native nested mask"));
+                        assert!(task_cx.checkpoint().is_ok());
+                        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            task_cx.masked(|| {
+                                assert!(task_cx.checkpoint_with("inner native mask").is_ok());
+                                panic!("unwind inner native mask");
+                            });
+                        }));
+                        assert!(unwind.is_err());
+                        assert!(task_cx.checkpoint_with("outer native mask").is_ok());
+                    });
+                    assert!(task_cx.checkpoint().is_err());
+                    assert!(task_cx.checkpoint_with("unmasked native checkpoint").is_err());
+                    42_u32
+                })
+                .expect("native masked child admitted");
+            assert_eq!(
+                child.join(&cx).await.expect("acknowledged result retained"),
+                42,
+            );
+        }));
+        assert_checked_native_cleanup(&runtime);
+        assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    }
+}

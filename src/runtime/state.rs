@@ -2327,6 +2327,10 @@ impl MaskedFinalizer {
         guard.mask_depth += 1;
         drop(guard);
         self.entered = true;
+        crate::cx::cancel_observation::record(
+            &self.cx_inner,
+            crate::cx::cancel_observation::CancelObservation::MaskEnter,
+        );
     }
 
     fn exit_mask(&mut self) {
@@ -2337,6 +2341,10 @@ impl MaskedFinalizer {
         guard.mask_depth = guard.mask_depth.saturating_sub(1);
         drop(guard);
         self.entered = false;
+        crate::cx::cancel_observation::record(
+            &self.cx_inner,
+            crate::cx::cancel_observation::CancelObservation::MaskExit,
+        );
     }
 }
 
@@ -5761,6 +5769,99 @@ impl RuntimeState {
         };
         self.dispatch_lifecycle_effects(deferred);
         // After the close effects, for the same reason as above.
+        if let Some(now) = drain_now {
+            effects.stamp_drains_at(now);
+        }
+        self.defer_cancel_dispatch(effects);
+    }
+
+    /// Native queued close/cancel boundary. Keep close notifications on the
+    /// caller's post-lock batch even when a later region leak escalates.
+    ///
+    /// The manual wrappers above remain synchronous. Heap destruction also
+    /// remains synchronous here; only waiter callbacks and lifecycle
+    /// observations move to the caller-owned delivery boundary.
+    pub(crate) fn close_region_command_deferred(
+        &mut self,
+        region_id: RegionId,
+        reason: &CancelReason,
+        shutdown_budget: Option<Budget>,
+        task_table: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+        drain_now: Option<Time>,
+        observers: &mut LifecycleObserverBatch,
+    ) {
+        // Capture the provider before mutation, then split the batch fields:
+        // functional close work must never enter a buffer that the configured
+        // leak-policy panic flushes inline.
+        let _ = observers.for_metrics(&self.metrics);
+        let observer_effects = &mut observers
+            .payloads
+            .last_mut()
+            .expect("observer payload")
+            .effects;
+        let close_wakes = &mut observers.region_close_wakes;
+        let mut deferred = Vec::new();
+        let effects = {
+            let shards = self.shard_tables.clone();
+            // Canonical order: the caller owns RuntimeState/B, then this
+            // scope takes the authoritative task table/A and obligations/C.
+            let mut tasks = match (shards.as_ref(), task_table) {
+                (Some(shards), _) => AdmissionTaskTarget::External(
+                    shards
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ),
+                (None, Some(table)) => AdmissionTaskTarget::External(
+                    table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ),
+                (None, None) => AdmissionTaskTarget::Embedded,
+            };
+            let mut obligations = match shards.as_ref() {
+                Some(shards) => CompletionObligationTarget::External(
+                    shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ),
+                None => CompletionObligationTarget::Embedded,
+            };
+            let mut regions = AdmissionRegionTarget::Embedded;
+            let mut sink = if matches!(&tasks, AdmissionTaskTarget::External(_)) {
+                LifecycleEffectsSink::NativeBuffered {
+                    buffer: &mut deferred,
+                    close_wakes,
+                }
+            } else {
+                LifecycleEffectsSink::NativeCompletion {
+                    observers: &mut *observer_effects,
+                    close_wakes,
+                }
+            };
+            let effects = self.cancel_request_in(
+                &mut regions,
+                &mut tasks,
+                &mut obligations,
+                &mut sink,
+                region_id,
+                reason,
+                None,
+                shutdown_budget,
+            );
+            self.advance_region_state_in(
+                &mut regions,
+                &tasks,
+                &mut obligations,
+                &mut sink,
+                region_id,
+            );
+            effects
+        };
+        self.dispatch_lifecycle_effects_with_observers(deferred, Some(observer_effects));
+        // Preserve the original drain-stamp/cancel-publication order. Empty
+        // regions have already closed, so they never acquire a drain stamp.
         if let Some(now) = drain_now {
             effects.stamp_drains_at(now);
         }

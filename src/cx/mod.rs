@@ -56,6 +56,7 @@
 //! - [`Scope`]: API for spawning tasks and creating child regions
 //! - [`Cancelled`]: An owned wake registration for observing cancellation
 
+pub(crate) mod cancel_observation;
 pub mod cancelled;
 pub mod cap;
 pub mod capacity_ticket;

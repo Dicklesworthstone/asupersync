@@ -789,6 +789,39 @@ impl CancellationProtocolOracle {
         }
     }
 
+    /// Observe the exact primary context at a Lab poll boundary. This updates
+    /// only mask depth: request timing, transitions and recorded violations stay
+    /// intact. A host-held mask can begin or end between observed polls.
+    pub(crate) fn observe_mask_snapshot(&mut self, task: TaskId, depth: u32, time: Time) {
+        self.tasks
+            .entry(task)
+            .or_insert_with(TaskProtocolRecord::new)
+            .mask_depth = depth;
+        if depth > crate::types::MAX_MASK_DEPTH {
+            self.record_violation(CancellationProtocolViolation::MaskDepthExceeded {
+                task,
+                depth,
+                max: crate::types::MAX_MASK_DEPTH,
+                time,
+            });
+        }
+    }
+
+    /// Validate mask state at the actual checkpoint, before later same-poll
+    /// exits erase it. The authoritative runtime receipt still owns request and
+    /// acknowledgement bookkeeping, so replaying this event does not invent a
+    /// second acknowledgement or an earlier cancellation request.
+    pub(crate) fn observe_checkpoint_ack(&mut self, task: TaskId, time: Time) {
+        let depth = self.tasks.get(&task).map_or(0, |record| record.mask_depth);
+        if depth > 0 {
+            self.record_violation(CancellationProtocolViolation::CancelAckWhileMasked {
+                task,
+                mask_depth: depth,
+                time,
+            });
+        }
+    }
+
     /// Records a poll event for a task (for tracking acknowledgement timing).
     pub fn on_task_poll(&mut self, task: TaskId) {
         if let Some(record) = self.tasks.get_mut(&task) {
@@ -849,6 +882,30 @@ impl CancellationProtocolOracle {
     ///
     /// This validates that the transition follows the cancellation protocol.
     pub fn on_transition(&mut self, task: TaskId, from: &TaskState, to: &TaskState, time: Time) {
+        self.on_transition_inner(task, from, to, time, true);
+    }
+
+    /// Reconcile a checkpoint receipt without treating the current mask as
+    /// its earlier acknowledgement-time mask. Ordered live observations check
+    /// that instant; a receipt can also come from before this observed poll.
+    pub(crate) fn on_checkpoint_transition(
+        &mut self,
+        task: TaskId,
+        from: &TaskState,
+        to: &TaskState,
+        time: Time,
+    ) {
+        self.on_transition_inner(task, from, to, time, false);
+    }
+
+    fn on_transition_inner(
+        &mut self,
+        task: TaskId,
+        from: &TaskState,
+        to: &TaskState,
+        time: Time,
+        check_mask: bool,
+    ) {
         let from_kind = TaskStateKind::from_task_state(from);
         let to_kind = TaskStateKind::from_task_state(to);
 
@@ -868,7 +925,7 @@ impl CancellationProtocolOracle {
         // If transitioning to Cancelling, mark as acknowledged and check mask state
         if to_kind == TaskStateKind::Cancelling {
             let current_mask_depth = record.mask_depth;
-            if current_mask_depth > 0 {
+            if check_mask && current_mask_depth > 0 {
                 // Need to record violation after releasing the borrow
                 self.record_violation(CancellationProtocolViolation::CancelAckWhileMasked {
                     task,
