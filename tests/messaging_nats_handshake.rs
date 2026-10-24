@@ -43,7 +43,9 @@
 //! hold across reconnections), and a PING cancelled before its PONG (the
 //! connection is replaced instead of left failing every command). A dropped
 //! subscription is unsubscribed on the wire, and a command whose caller gave
-//! up before the supervisor reached it is not sent. Client keepalive: a
+//! up before the supervisor reached it is not sent. Abandoning an in-flight
+//! request retires its inbox without cancelling its Cx; abandoning a PING
+//! replaces its unfinished connection before further commands. Client keepalive: a
 //! connection that stops answering PINGs is replaced without any client call,
 //! as is one that never answers a `ping()` (which fails within the stale
 //! window); one that answers them is kept, and a disabled keepalive sends none.
@@ -594,6 +596,301 @@ fn nats_cancelled_request_releases_supervisor_for_next_command() {
         );
         assert_eq!(peer_result.expect("caller-cancel peer joined"), 0);
         assert!(drained, "caller-cancel runtime did not drain");
+    }
+}
+
+/// A dropped request does not cancel its Cx. It must nevertheless retire its
+/// inbox and release the supervisor while the peer remains completely silent.
+#[test]
+fn nats_abandoned_inflight_requests_release_the_supervisor_and_inbox() {
+    use asupersync::channel::oneshot;
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    for workers in [1, 2] {
+        for with_headers in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind abandoned-request peer");
+            let addr = listener.local_addr().expect("abandoned-request address");
+            let (published_tx, published_rx) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept abandoned request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("bound abandoned-request peer");
+                stream
+                    .write_all(
+                        b"INFO {\"server_id\":\"abandoned-request\",\"headers\":true,\"max_payload\":1048576}\r\n",
+                    )
+                    .expect("send INFO");
+                let mut reader = BufReader::new(stream);
+                assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+                assert_eq!(read_nats_line(&mut reader), "SUB events.abandoned 1");
+                let inbox = read_nats_line(&mut reader);
+                assert!(inbox.starts_with("SUB _INBOX."), "{inbox}");
+                assert!(inbox.ends_with(" 2"), "{inbox}");
+                let command = read_nats_line(&mut reader);
+                let fields = command.split_whitespace().collect::<Vec<_>>();
+                assert_eq!(fields[0], if with_headers { "HPUB" } else { "PUB" });
+                assert_eq!(fields[1], "service.silent");
+                assert!(fields[2].starts_with("_INBOX."));
+                let total: usize = fields.last().unwrap().parse().expect("payload length");
+                let mut payload = vec![0_u8; total + 2];
+                reader
+                    .read_exact(&mut payload)
+                    .expect("read complete request");
+                assert!(payload.ends_with(b"parked\r\n"));
+                if with_headers {
+                    assert!(payload.starts_with(b"NATS/1.0\r\nX-Request: abandoned\r\n\r\n"));
+                } else {
+                    assert_eq!(payload, b"parked\r\n");
+                }
+                published_tx
+                    .send(reader.get_ref().try_clone().expect("clone cleanup socket"))
+                    .expect("publish real wire witness");
+
+                // No inbound frame or request timeout releases the supervisor.
+                // The caller's dropped response must wake it on its own.
+                assert_eq!(read_nats_line(&mut reader), "UNSUB 2");
+                assert_eq!(read_nats_line(&mut reader), "PING");
+                reader
+                    .get_mut()
+                    .write_all(b"PONG\r\nMSG events.abandoned 1 5\r\nalive\r\n")
+                    .expect("answer next command on the same connection");
+                let mut byte = [0_u8; 1];
+                reader
+                    .get_mut()
+                    .read(&mut byte)
+                    .expect("observe client close")
+            });
+
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .expect("build abandoned-request runtime");
+            let (abandon_tx, mut abandon_rx) = oneshot::channel::<()>();
+            let (done_tx, done_rx) = mpsc::channel();
+            let task = runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native request owner");
+                let mut config =
+                    NatsConfig::from_url(&format!("nats://{addr}")).expect("request URL");
+                config.auto_reconnect = false;
+                config.request_timeout = Duration::from_secs(60);
+                let mut client =
+                    NatsClient::connect_with_keepalive(&cx, config, NatsKeepalive::disabled())
+                        .await
+                        .expect("connect abandoned-request client");
+                let mut subscription = client
+                    .subscribe(&cx, "events.abandoned")
+                    .await
+                    .expect("persistent subscription");
+                {
+                    let request = async {
+                        if with_headers {
+                            client
+                                .request_with_headers(
+                                    &cx,
+                                    "service.silent",
+                                    &[("X-Request", b"abandoned".as_slice())],
+                                    b"parked",
+                                )
+                                .await
+                        } else {
+                            client.request(&cx, "service.silent", b"parked").await
+                        }
+                    };
+                    let mut request = std::pin::pin!(request);
+                    let mut abandon = std::pin::pin!(abandon_rx.recv(&cx));
+                    poll_fn(|task_cx| {
+                        if let Poll::Ready(result) = request.as_mut().poll(task_cx) {
+                            panic!("silent request completed before abandonment: {result:?}");
+                        }
+                        abandon.as_mut().poll(task_cx)
+                    })
+                    .await
+                    .expect("abandon only after the request reached the wire");
+                }
+                assert!(
+                    !cx.is_cancel_requested(),
+                    "dropping a call cancelled its owner"
+                );
+                client.ping(&cx).await.expect("next command makes progress");
+                let message = subscription
+                    .next(&cx)
+                    .await
+                    .expect("persistent subscription remains usable")
+                    .expect("healthy message");
+                assert_eq!(message.payload, b"alive");
+                client.close(&cx).await.expect("close supervised client");
+                assert!(
+                    subscription
+                        .next(&cx)
+                        .await
+                        .expect("closed subscription")
+                        .is_none()
+                );
+                done_tx.send(()).expect("publish completion witness");
+            });
+
+            let published = published_rx.recv_timeout(Duration::from_secs(3));
+            if published.is_ok() {
+                abandon_tx.send_blocking(()).expect("drop parked request");
+            }
+            let completed = done_rx.recv_timeout(Duration::from_secs(2));
+            // EOF is failure cleanup only, after recording whether abandonment
+            // alone allowed the next command and persistent subscription to run.
+            if let Ok(stream) = &published {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            let peer_result = server.join();
+            drop(task);
+            let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+            assert!(
+                published.is_ok(),
+                "request did not reach the peer: {published:?}"
+            );
+            assert!(
+                completed.is_ok(),
+                "NATS_ABANDON_REQUEST workers={workers} headers={with_headers}: {completed:?}"
+            );
+            assert_eq!(peer_result.expect("request peer joined"), 0);
+            assert!(drained, "abandoned-request runtime did not drain");
+        }
+    }
+}
+
+#[test]
+fn nats_abandoned_inflight_ping_reconnects_before_the_next_command() {
+    use asupersync::channel::oneshot;
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    for workers in [1, 2] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind abandoned-ping peer");
+        let addr = listener.local_addr().expect("abandoned-ping address");
+        let (published_tx, published_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept first connection");
+            first
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bound first connection");
+            first
+                .write_all(b"INFO {\"server_id\":\"abandoned-ping\",\"max_payload\":1048576}\r\n")
+                .expect("send first INFO");
+            let mut reader = BufReader::new(first);
+            assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+            assert_eq!(read_nats_line(&mut reader), "SUB events.ping_drop 1");
+            assert_eq!(read_nats_line(&mut reader), "PING");
+            published_tx
+                .send(reader.get_ref().try_clone().expect("clone cleanup socket"))
+                .expect("publish parked PING witness");
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                reader
+                    .get_mut()
+                    .read(&mut byte)
+                    .expect("observe old connection fence"),
+                0,
+                "a command must not reuse the abandoned PING connection"
+            );
+
+            let mut second = accept_within(&listener, Duration::from_secs(3))
+                .expect("supervisor reconnects after abandonment");
+            second
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bound replacement connection");
+            second
+                .write_all(b"INFO {\"server_id\":\"replacement\",\"max_payload\":1048576}\r\n")
+                .expect("send replacement INFO");
+            let mut reader = BufReader::new(second);
+            assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+            assert_eq!(read_nats_line(&mut reader), "SUB events.ping_drop 1");
+            assert_eq!(read_nats_line(&mut reader), "PUB service.next 4");
+            let mut payload = [0_u8; 6];
+            reader.read_exact(&mut payload).expect("replacement publication");
+            assert_eq!(&payload, b"next\r\n");
+            assert_eq!(read_nats_line(&mut reader), "PING");
+            reader
+                .get_mut()
+                .write_all(b"PONG\r\nMSG events.ping_drop 1 5\r\nalive\r\n")
+                .expect("answer replacement PING");
+            reader
+                .get_mut()
+                .read(&mut byte)
+                .expect("observe replacement close")
+        });
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .expect("build abandoned-ping runtime");
+        let (abandon_tx, mut abandon_rx) = oneshot::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel();
+        let task = runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("native ping owner");
+            let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("ping URL");
+            config.reconnect_delay = Duration::from_millis(10);
+            config.max_reconnect_delay = Duration::from_millis(50);
+            config.max_reconnect_attempts = 2;
+            let mut client =
+                NatsClient::connect_with_keepalive(&cx, config, NatsKeepalive::disabled())
+                    .await
+                    .expect("connect abandoned-ping client");
+            let mut subscription = client
+                .subscribe(&cx, "events.ping_drop")
+                .await
+                .expect("subscription survives reconnect");
+            {
+                let mut ping = std::pin::pin!(client.ping(&cx));
+                let mut abandon = std::pin::pin!(abandon_rx.recv(&cx));
+                poll_fn(|task_cx| {
+                    if let Poll::Ready(result) = ping.as_mut().poll(task_cx) {
+                        panic!("silent PING completed before abandonment: {result:?}");
+                    }
+                    abandon.as_mut().poll(task_cx)
+                })
+                .await
+                .expect("abandon only after PING reached the wire");
+            }
+            assert!(
+                !cx.is_cancel_requested(),
+                "dropping PING cancelled its owner"
+            );
+            client
+                .publish(&cx, "service.next", b"next")
+                .await
+                .expect("next publish uses replacement connection");
+            client.ping(&cx).await.expect("replacement PING completes");
+            assert_eq!(
+                subscription
+                    .next(&cx)
+                    .await
+                    .expect("subscription")
+                    .expect("message")
+                    .payload,
+                b"alive"
+            );
+            client.close(&cx).await.expect("close replacement connection");
+            done_tx.send(()).expect("publish completion witness");
+        });
+
+        let published = published_rx.recv_timeout(Duration::from_secs(3));
+        if published.is_ok() {
+            abandon_tx.send_blocking(()).expect("drop parked PING");
+        }
+        let completed = done_rx.recv_timeout(Duration::from_secs(2));
+        if let Ok(stream) = &published {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        let peer_result = server.join();
+        drop(task);
+        let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+        assert!(published.is_ok(), "PING did not reach the peer: {published:?}");
+        assert!(
+            completed.is_ok(),
+            "NATS_ABANDON_PING workers={workers}: {completed:?}"
+        );
+        assert_eq!(peer_result.expect("ping peer joined"), 0);
+        assert!(drained, "abandoned-ping runtime did not drain");
     }
 }
 

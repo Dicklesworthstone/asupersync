@@ -1501,3 +1501,354 @@
             assert!(mutex.try_lock().is_some());
         }
     }
+
+
+    // asupersync-combinator-time-audit-fqdvqn: cancellation must retain cleanup
+    // even when retiring the interrupted future itself panics.
+    mod drop_retirement {
+        use super::*;
+
+        struct InterruptedUse<'a> {
+            _guard: parking_lot::MutexGuard<'a, ()>,
+            drops: Arc<AtomicUsize>,
+            panic_on_poll: bool,
+            panic_on_drop: bool,
+        }
+
+        impl Future for InterruptedUse<'_> {
+            type Output = Result<u32, &'static str>;
+
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                if self.panic_on_poll {
+                    panic!("interrupted use poll");
+                }
+                Poll::Pending
+            }
+        }
+
+        impl Drop for InterruptedUse<'_> {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                if self.panic_on_drop {
+                    panic!("interrupted use drop");
+                }
+            }
+        }
+
+        #[derive(Default)]
+        struct ReleaseObservations {
+            constructors: AtomicUsize,
+            polls: AtomicUsize,
+            completed: AtomicUsize,
+            drops: AtomicUsize,
+            dropped_while_panicking: AtomicBool,
+        }
+
+        struct ObservedRelease<'a> {
+            _guard: parking_lot::MutexGuard<'a, ()>,
+            observations: Arc<ReleaseObservations>,
+            panic_on_poll: bool,
+            panic_on_drop: bool,
+            never_ready: bool,
+        }
+
+        impl Future for ObservedRelease<'_> {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                let previous = self.observations.polls.fetch_add(1, Ordering::SeqCst);
+                if self.panic_on_poll {
+                    panic!("release poll");
+                }
+                if self.never_ready || previous == 0 {
+                    Poll::Pending
+                } else {
+                    self.observations.completed.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready(())
+                }
+            }
+        }
+
+        impl Drop for ObservedRelease<'_> {
+            fn drop(&mut self) {
+                self.observations.drops.fetch_add(1, Ordering::SeqCst);
+                self.observations
+                    .dropped_while_panicking
+                    .store(std::thread::panicking(), Ordering::SeqCst);
+                if self.panic_on_drop {
+                    panic!("release drop");
+                }
+            }
+        }
+
+        fn assert_panic(payload: Box<dyn std::any::Any + Send>, expected: &str) {
+            assert_eq!(payload.downcast_ref::<&str>().copied(), Some(expected));
+        }
+
+        #[test]
+        fn cancelled_use_destructor_panic_still_finishes_release_exactly_once() {
+            let lock = Mutex::new(());
+            let use_drops = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::new(ReleaseObservations::default());
+            let mut future = Box::pin(bracket(
+                std::future::ready(Ok::<_, &'static str>(&lock)),
+                |resource| InterruptedUse {
+                    _guard: resource.lock(),
+                    drops: Arc::clone(&use_drops),
+                    panic_on_poll: false,
+                    panic_on_drop: true,
+                },
+                |resource| {
+                    observed.constructors.fetch_add(1, Ordering::SeqCst);
+                    ObservedRelease {
+                        _guard: resource
+                            .try_lock()
+                            .expect("use must release its lock first"),
+                        observations: Arc::clone(&observed),
+                        panic_on_poll: false,
+                        panic_on_drop: false,
+                        never_ready: false,
+                    }
+                },
+            ));
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            assert_eq!(observed.constructors.load(Ordering::SeqCst), 0);
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
+                .expect_err("the use destructor panic remains observable");
+            assert_panic(payload, "interrupted use drop");
+            assert_eq!(use_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.constructors.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 2);
+            assert_eq!(observed.completed.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+            assert!(!observed.dropped_while_panicking.load(Ordering::SeqCst));
+            assert!(lock.try_lock().is_some());
+        }
+
+        #[test]
+        fn cancellation_release_constructor_failure_takes_precedence_after_use_retirement() {
+            let lock = Mutex::new(());
+            let use_drops = Arc::new(AtomicUsize::new(0));
+            let constructors = AtomicUsize::new(0);
+            let mut future = Box::pin(bracket(
+                std::future::ready(Ok::<_, &'static str>(&lock)),
+                |resource| InterruptedUse {
+                    _guard: resource.lock(),
+                    drops: Arc::clone(&use_drops),
+                    panic_on_poll: false,
+                    panic_on_drop: true,
+                },
+                |resource| -> std::future::Ready<()> {
+                    assert!(resource.try_lock().is_some());
+                    constructors.fetch_add(1, Ordering::SeqCst);
+                    panic!("release constructor");
+                },
+            ));
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
+                .expect_err("release construction failed");
+            assert_panic(payload, "release constructor");
+            assert_eq!(use_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(constructors.load(Ordering::SeqCst), 1);
+            assert!(lock.try_lock().is_some());
+        }
+
+        #[test]
+        fn cancelled_release_retires_before_resuming_a_stored_use_panic() {
+            let lock = Mutex::new(());
+            let use_drops = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::new(ReleaseObservations::default());
+            let mut future = Box::pin(bracket(
+                std::future::ready(Ok::<_, &'static str>(&lock)),
+                |resource| InterruptedUse {
+                    _guard: resource.lock(),
+                    drops: Arc::clone(&use_drops),
+                    panic_on_poll: true,
+                    panic_on_drop: false,
+                },
+                |resource| ObservedRelease {
+                    _guard: resource.try_lock().expect("use lock retired"),
+                    observations: Arc::clone(&observed),
+                    panic_on_poll: false,
+                    panic_on_drop: false,
+                    never_ready: false,
+                },
+            ));
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 1);
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
+                .expect_err("stored use panic must escape after release");
+            assert_panic(payload, "interrupted use poll");
+            assert_eq!(use_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.completed.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+            assert!(!observed.dropped_while_panicking.load(Ordering::SeqCst));
+            assert!(lock.try_lock().is_some());
+        }
+
+        #[test]
+        fn cancelled_release_poll_panic_retires_cleanup_before_unwinding() {
+            run_secondary_panic_case(false, false);
+        }
+
+        fn run_secondary_panic_case(outer_unwind: bool, release_drop_panics: bool) {
+            let lock = Mutex::new(());
+            let use_drops = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::new(ReleaseObservations::default());
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut future = Box::pin(bracket(
+                    std::future::ready(Ok::<_, &'static str>(&lock)),
+                    |resource| InterruptedUse {
+                        _guard: resource.lock(),
+                        drops: Arc::clone(&use_drops),
+                        panic_on_poll: false,
+                        panic_on_drop: outer_unwind,
+                    },
+                    |resource| ObservedRelease {
+                        _guard: resource.try_lock().expect("interrupted use lock retired"),
+                        observations: Arc::clone(&observed),
+                        panic_on_poll: !outer_unwind,
+                        panic_on_drop: release_drop_panics,
+                        never_ready: false,
+                    },
+                ));
+                assert!(
+                    future
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                if outer_unwind {
+                    panic!("outer owner panic");
+                }
+                drop(future);
+            }));
+            assert_panic(
+                result.expect_err("the primary panic must remain catchable"),
+                if outer_unwind {
+                    "outer owner panic"
+                } else {
+                    "release poll"
+                },
+            );
+            assert_eq!(use_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                observed.completed.load(Ordering::SeqCst),
+                if outer_unwind { 1 } else { 0 }
+            );
+            assert_eq!(
+                observed.dropped_while_panicking.load(Ordering::SeqCst),
+                outer_unwind,
+            );
+            assert!(lock.try_lock().is_some());
+        }
+
+        #[test]
+        fn cancellation_cleanup_budget_stays_bounded_after_use_destructor_panic() {
+            let lock = Mutex::new(());
+            let observed = Arc::new(ReleaseObservations::default());
+            let mut future = Box::pin(bracket(
+                std::future::ready(Ok::<_, &'static str>(&lock)),
+                |resource| InterruptedUse {
+                    _guard: resource.lock(),
+                    drops: Arc::new(AtomicUsize::new(0)),
+                    panic_on_poll: false,
+                    panic_on_drop: true,
+                },
+                |resource| ObservedRelease {
+                    _guard: resource.try_lock().expect("use lock retired"),
+                    observations: Arc::clone(&observed),
+                    panic_on_poll: false,
+                    panic_on_drop: false,
+                    never_ready: true,
+                },
+            ));
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
+                .expect_err("use retirement failed and cleanup exhausted its budget");
+            assert_panic(payload, "interrupted use drop");
+            assert_eq!(
+                observed.polls.load(Ordering::SeqCst),
+                DROP_RELEASE_POLL_BUDGET
+            );
+            assert_eq!(observed.completed.load(Ordering::SeqCst), 0);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+            assert!(!observed.dropped_while_panicking.load(Ordering::SeqCst));
+            assert!(lock.try_lock().is_some());
+        }
+
+        // The broken implementation aborts on either double-panic case.
+        // Isolate that failure so a regression cannot kill the whole lib suite.
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn cancellation_cleanup_contains_secondary_panics() {
+            const CASE: &str = "ASUPERSYNC_BRACKET_DROP_RETIREMENT_CASE";
+            if let Ok(case) = std::env::var(CASE) {
+                match case.as_str() {
+                    "outer_unwind" => run_secondary_panic_case(true, true),
+                    "release_poll_and_drop" => run_secondary_panic_case(false, true),
+                    other => panic!("unknown bracket regression case: {other}"),
+                }
+                println!("[bracket-drop-retirement] completed {case}");
+                return;
+            }
+
+            let module = module_path!()
+                .split_once("::")
+                .expect("crate-qualified module")
+                .1;
+            let test = format!("{module}::cancellation_cleanup_contains_secondary_panics");
+            for case in ["outer_unwind", "release_poll_and_drop"] {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", &test, "--nocapture", "--test-threads=1"])
+                    .env(CASE, case)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::inherit())
+                    .spawn()
+                    .expect("launch isolated bracket regression");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    if let Some(status) = child.try_wait().expect("observe regression child") {
+                        let output = child
+                            .wait_with_output()
+                            .expect("collect regression witness");
+                        assert!(status.success(), "{case}: cleanup must not abort: {status}");
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        assert!(
+                            stdout.contains(&format!("[bracket-drop-retirement] completed {case}")),
+                            "{case}: the exact regression must execute, stdout={stdout}",
+                        );
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("{case}: bracket cleanup exceeded the subprocess watchdog");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }

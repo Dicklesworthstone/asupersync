@@ -4372,6 +4372,33 @@ fn fail_process_waiters(waiters: &mut Vec<ProcessWaiter>) {
     }
 }
 
+/// Keep an in-flight command owned by the future waiting for its reply.
+/// A timeout can drop that future without cancelling its Cx. Registering the
+/// receiver-close wake before polling the operation lets a silent transport
+/// release the supervisor immediately when its caller stops waiting.
+///
+/// Dropping the operation preserves the connection's existing cancellation
+/// fences: a partial write or unfinished PING leaves it unusable, while a
+/// request waiting for a reply drops its inbox and queues the required UNSUB.
+/// Unsubscribe and Close bypass this helper because their cleanup must finish
+/// even after the caller has stopped waiting.
+async fn complete_supervisor_command<T>(
+    mut reply: oneshot::Sender<Result<T, NatsError>>,
+    operation: impl Future<Output = Result<T, NatsError>>,
+) {
+    let mut operation = std::pin::pin!(operation);
+    let result = std::future::poll_fn(|task_cx| {
+        if reply.poll_closed(task_cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        operation.as_mut().poll(task_cx).map(Some)
+    })
+    .await;
+    if let Some(result) = result {
+        let _ = reply.send_blocking(result);
+    }
+}
+
 async fn handle_supervisor_command(
     connection: &mut NatsConnection,
     command: NatsSupervisorCommand,
@@ -4388,7 +4415,7 @@ async fn handle_supervisor_command(
             payload,
             reply,
         } => {
-            let _ = reply.send_blocking(connection.publish(&cx, &subject, &payload).await);
+            complete_supervisor_command(reply, connection.publish(&cx, &subject, &payload)).await;
         }
         NatsSupervisorCommand::PublishRequest {
             cx,
@@ -4397,11 +4424,11 @@ async fn handle_supervisor_command(
             payload,
             reply,
         } => {
-            let _ = reply.send_blocking(
-                connection
-                    .publish_request(&cx, &subject, &reply_to, &payload)
-                    .await,
-            );
+            complete_supervisor_command(
+                reply,
+                connection.publish_request(&cx, &subject, &reply_to, &payload),
+            )
+            .await;
         }
         NatsSupervisorCommand::PublishRequestWithHeaders {
             cx,
@@ -4415,11 +4442,13 @@ async fn handle_supervisor_command(
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_slice()))
                 .collect::<Vec<_>>();
-            let _ = reply.send_blocking(
-                connection
-                    .publish_request_with_headers(&cx, &subject, &reply_to, &headers, &payload)
-                    .await,
-            );
+            complete_supervisor_command(
+                reply,
+                connection.publish_request_with_headers(
+                    &cx, &subject, &reply_to, &headers, &payload,
+                ),
+            )
+            .await;
         }
         NatsSupervisorCommand::RequestWithHeaders {
             cx,
@@ -4432,11 +4461,11 @@ async fn handle_supervisor_command(
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_slice()))
                 .collect::<Vec<_>>();
-            let _ = reply.send_blocking(
-                connection
-                    .request_with_headers(&cx, &subject, &headers, &payload)
-                    .await,
-            );
+            complete_supervisor_command(
+                reply,
+                connection.request_with_headers(&cx, &subject, &headers, &payload),
+            )
+            .await;
         }
         NatsSupervisorCommand::Request {
             cx,
@@ -4444,7 +4473,7 @@ async fn handle_supervisor_command(
             payload,
             reply,
         } => {
-            let _ = reply.send_blocking(connection.request(&cx, &subject, &payload).await);
+            complete_supervisor_command(reply, connection.request(&cx, &subject, &payload)).await;
         }
         NatsSupervisorCommand::Subscribe {
             cx,
@@ -4453,16 +4482,18 @@ async fn handle_supervisor_command(
             capacity,
             reply,
         } => {
-            let result = if let Some(queue_group) = queue_group {
-                connection
-                    .queue_subscribe(&cx, &subject, &queue_group)
-                    .await
-            } else {
-                connection
-                    .subscribe_with_capacity(&cx, &subject, capacity)
-                    .await
-            };
-            let _ = reply.send_blocking(result);
+            complete_supervisor_command(reply, async {
+                if let Some(queue_group) = queue_group {
+                    connection
+                        .queue_subscribe(&cx, &subject, &queue_group)
+                        .await
+                } else {
+                    connection
+                        .subscribe_with_capacity(&cx, &subject, capacity)
+                        .await
+                }
+            })
+            .await;
         }
         NatsSupervisorCommand::Unsubscribe { cx, sid, reply } => {
             let _ = reply.send_blocking(connection.unsubscribe(&cx, sid).await);
@@ -4472,16 +4503,18 @@ async fn handle_supervisor_command(
             // window never will: the PING leaves the connection unusable and
             // the supervisor replaces it, rather than waiting (and keeping
             // the keepalive from ticking) until TCP gives up.
-            let result = match ping_bound {
-                Some(bound) => {
-                    let ping = connection.ping(&cx);
-                    crate::time::timeout(timeout_now(&cx), bound, ping)
-                        .await
-                        .unwrap_or_else(|_| Err(stale_connection_error()))
+            complete_supervisor_command(reply, async {
+                match ping_bound {
+                    Some(bound) => {
+                        let ping = connection.ping(&cx);
+                        crate::time::timeout(timeout_now(&cx), bound, ping)
+                            .await
+                            .unwrap_or_else(|_| Err(stale_connection_error()))
+                    }
+                    None => connection.ping(&cx).await,
                 }
-                None => connection.ping(&cx).await,
-            };
-            let _ = reply.send_blocking(result);
+            })
+            .await;
         }
         NatsSupervisorCommand::Process { after_epoch, reply } => {
             // The supervisor's own frame loop answers it. Reading the socket

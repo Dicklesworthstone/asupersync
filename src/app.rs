@@ -50,6 +50,7 @@ mod managed_execution {
         AppSpecV1WorkUnitKind, BTreeMap, BTreeSet, Budget, CancelKind, CancelReason, ChildSpec, Cx,
         RegistryHandle, RuntimeState, SupervisorBuilder, runtime_restart_policy,
     };
+    use crate::channel::mpsc;
     use crate::cx::{ChildRegion, ChildRegionSpec, cap};
     use crate::runtime::{JoinError, SpawnError, TaskHandle};
     use crate::supervision::{
@@ -90,9 +91,50 @@ mod managed_execution {
         shape
     }
 
+    type SignalReceiver = Arc<Mutex<Option<mpsc::Receiver<()>>>>;
+
+    // Own the receiver while waiting, without a non-Send lock guard across await.
+    // Dropping a generation restores its source before a replacement starts.
+    struct SignalReceiverLease {
+        slot: SignalReceiver,
+        receiver: Option<mpsc::Receiver<()>>,
+    }
+
+    impl SignalReceiverLease {
+        fn take<E>(slot: &SignalReceiver) -> Result<Self, ManagedAppWorkError<E>> {
+            let receiver = slot
+                .lock()
+                .take()
+                .ok_or(ManagedAppWorkError::SignalReceiverUnavailable)?;
+            Ok(Self {
+                slot: Arc::clone(slot),
+                receiver: Some(receiver),
+            })
+        }
+    }
+
+    impl Drop for SignalReceiverLease {
+        fn drop(&mut self) {
+            if let Some(receiver) = self.receiver.take() {
+                // Release the slot lock before retiring a displaced receiver.
+                let retired = self.slot.lock().replace(receiver);
+                drop(retired);
+            }
+        }
+    }
+
+    struct SignalBinding {
+        source: String,
+        receiver: SignalReceiver,
+    }
+
     enum BindingKind<E> {
         Route(Arc<dyn Handler>),
-        Worker(ManagedRestartMode, Arc<dyn ManagedChildFactory<E>>),
+        Worker(
+            ManagedRestartMode,
+            Arc<dyn ManagedChildFactory<E>>,
+            Option<SignalBinding>,
+        ),
     }
 
     /// Explicit Rust implementation of one manifest work-unit name.
@@ -124,7 +166,49 @@ mod managed_execution {
         ) -> Self {
             Self {
                 name: name.into(),
-                kind: BindingKind::Worker(mode, Arc::new(factory)),
+                kind: BindingKind::Worker(mode, Arc::new(factory), None),
+            }
+        }
+
+        /// Bind an externally signalled background job to a bounded channel.
+        ///
+        /// The qualified job name and source must match the manifest's
+        /// `Signal { source }` declaration. Each received unit notification
+        /// admits one invocation with the declared budget and capabilities.
+        /// Invocations do not overlap: the next notification is received only
+        /// after the previous invocation and its region have fully drained.
+        ///
+        /// Keep the sender to publish notifications through MPSC's existing
+        /// cancel-safe reserve/send API. The channel's capacity bounds pending
+        /// signals; successful send means queued, while job outcomes appear in
+        /// the supervisor report. An invocation consumes its notification even
+        /// when it fails. Queued notifications remain available across a
+        /// supervised restart, and stop discards notifications not yet run.
+        ///
+        /// Dropping every sender drains queued notifications, then completes
+        /// the worker normally. Temporary and Transient modes stop on that EOF.
+        /// Permanent mode applies its usual restart policy to the closed source,
+        /// so it can exhaust the configured restart intensity without new work.
+        /// Source ownership and cancellation remain with the managed application;
+        /// this method installs no process-global signal handlers.
+        #[must_use]
+        pub fn signal_worker(
+            name: impl Into<String>,
+            source: impl Into<String>,
+            receiver: mpsc::Receiver<()>,
+            mode: ManagedRestartMode,
+            factory: impl ManagedChildFactory<E>,
+        ) -> Self {
+            Self {
+                name: name.into(),
+                kind: BindingKind::Worker(
+                    mode,
+                    Arc::new(factory),
+                    Some(SignalBinding {
+                        source: source.into(),
+                        receiver: Arc::new(Mutex::new(Some(receiver))),
+                    }),
+                ),
             }
         }
     }
@@ -184,6 +268,10 @@ mod managed_execution {
         Join(JoinError),
         /// The workload's region finalizers reported unsuccessful cleanup.
         Cleanup(crate::record::task::TaskOutcome),
+        /// A managed generation could not take exclusive signal-source ownership.
+        SignalReceiverUnavailable,
+        /// Waiting for a signal failed before an invocation was admitted.
+        SignalReceive(mpsc::RecvError),
     }
 
     struct WorkPolicy {
@@ -191,6 +279,7 @@ mod managed_execution {
         required: AppRequiredCapabilitiesV1,
         budget: Option<AppBudgetSpecV1>,
         interval: Option<Duration>,
+        signal: Option<SignalReceiver>,
     }
 
     impl WorkPolicy {
@@ -422,6 +511,31 @@ mod managed_execution {
         }
     }
 
+    async fn wait_signal<E>(
+        owner: &Cx,
+        signal: &SignalReceiver,
+    ) -> Result<bool, ManagedAppWorkError<E>> {
+        // Do not consume another queued notification after generation cancel.
+        if owner.checkpoint().is_err() {
+            return Err(ManagedAppWorkError::SignalReceive(mpsc::RecvError::Cancelled));
+        }
+        let mut lease = SignalReceiverLease::take::<E>(signal)?;
+        if owner.checkpoint().is_err() {
+            return Err(ManagedAppWorkError::SignalReceive(mpsc::RecvError::Cancelled));
+        }
+        // The receiver remains owned by the lease across this cancellation-
+        // aware wait, with no lock guard, timer, or busy polling across await.
+        let receiver = lease
+            .receiver
+            .as_mut()
+            .expect("signal lease owns its receiver");
+        match receiver.recv(owner).await {
+            Ok(()) => Ok(true),
+            Err(mpsc::RecvError::Disconnected) => Ok(false),
+            Err(error) => Err(ManagedAppWorkError::SignalReceive(error)),
+        }
+    }
+
     async fn run_worker<E: Send + 'static>(
         owner: Cx,
         generation: ManagedGeneration,
@@ -429,7 +543,21 @@ mod managed_execution {
         factory: Arc<dyn ManagedChildFactory<E>>,
     ) -> Outcome<(), ManagedAppWorkError<E>> {
         loop {
-            if let Some(interval) = policy.interval {
+            if let Some(signal) = &policy.signal {
+                let received = wait_signal::<E>(&owner, signal).await;
+                if owner.checkpoint().is_err() {
+                    return Outcome::Cancelled(
+                        owner
+                            .cancel_reason()
+                            .unwrap_or_else(|| CancelReason::user("AppSpec worker cancelled")),
+                    );
+                }
+                match received {
+                    Ok(true) => {}
+                    Ok(false) => return Outcome::Ok(()),
+                    Err(error) => return Outcome::Err(error),
+                }
+            } else if let Some(interval) = policy.interval {
                 wait_interval(&owner, interval).await;
             }
             if owner.checkpoint().is_err() {
@@ -491,7 +619,9 @@ mod managed_execution {
                 }
                 Err(_) => {}
             }
-            if policy.interval.is_none() || !matches!(outcome, Outcome::Ok(())) {
+            if (policy.interval.is_none() && policy.signal.is_none())
+                || !matches!(outcome, Outcome::Ok(()))
+            {
                 return outcome;
             }
         }
@@ -523,7 +653,8 @@ mod managed_execution {
     /// Prepared, executing AppSpec with real routes and managed workers.
     ///
     /// The current mapping supports one supervisor group, actors, startup jobs,
-    /// and non-overlapping interval jobs. Routes run only while their managed
+    /// and non-overlapping interval and explicitly bound signal jobs.
+    /// Routes run only while their managed
     /// generation is active. Their method/path comes from the manifest; each
     /// invocation owns a child region and drains before returning its response.
     /// A handler that acknowledges cancellation can finish cleanup and return
@@ -536,8 +667,9 @@ mod managed_execution {
     /// The existing five Cx effect bits are attenuated; tracing remains an
     /// ungated diagnostic capability, as on other restricted Cx values.
     ///
-    /// External named resources, signal triggers, SLO adapters, and observability
-    /// sink adapters require further explicit bindings and are refused here.
+    /// Signal jobs require `ManagedAppBinding::signal_worker` with the exact
+    /// declared source name. External named resources, SLO adapters, and
+    /// observability sink adapters still require further bindings.
     /// The legacy `compile_with_child_specs` and `CompiledApp::start` are unchanged.
     pub struct ManagedApp<E> {
         supervisor: ManagedSupervisor<ManagedAppWorkError<E>>,
@@ -711,18 +843,43 @@ mod managed_execution {
                         });
                     }
                 }
+                let supplied_signal = match &kind {
+                    BindingKind::Worker(_, _, signal) => signal.as_ref(),
+                    BindingKind::Route(_) => None,
+                };
                 let interval = match &child.trigger {
                     None | Some(AppJobTriggerV1::Startup) => None,
                     Some(AppJobTriggerV1::Interval { every_ms }) if *every_ms > 0 => {
                         Some(Duration::from_millis(*every_ms))
                     }
+                    Some(AppJobTriggerV1::Signal { source }) => {
+                        let Some(signal) = supplied_signal else {
+                            return Err(ManagedAppBindError::Unsupported {
+                                unit: child.name,
+                                reason: "signal trigger requires an explicit signal_worker binding",
+                            });
+                        };
+                        if child.kind != AppSpecV1WorkUnitKind::BackgroundJob
+                            || source.trim().is_empty()
+                            || signal.source != *source
+                        {
+                            return Err(ManagedAppBindError::KindMismatch(child.name));
+                        }
+                        None
+                    }
                     Some(_) => {
                         return Err(ManagedAppBindError::Unsupported {
                             unit: child.name,
-                            reason: "zero intervals and external signal triggers are not supported",
+                            reason: "zero intervals are not supported",
                         });
                     }
                 };
+                if supplied_signal.is_some()
+                    && !matches!(&child.trigger, Some(AppJobTriggerV1::Signal { .. }))
+                {
+                    return Err(ManagedAppBindError::KindMismatch(child.name));
+                }
+                let signal = supplied_signal.map(|binding| Arc::clone(&binding.receiver));
                 let budget = child
                     .budget
                     .as_ref()
@@ -747,6 +904,7 @@ mod managed_execution {
                     required: child.required_capabilities,
                     budget,
                     interval,
+                    signal,
                 });
                 // Managed binding consumes only ChildSpec's topology. Keep its
                 // legacy callback fail-closed; user factories run exclusively
@@ -805,7 +963,7 @@ mod managed_execution {
                     }
                     (
                         AppSpecV1WorkUnitKind::Actor | AppSpecV1WorkUnitKind::BackgroundJob,
-                        BindingKind::Worker(mode, factory),
+                        BindingKind::Worker(mode, factory, _),
                     ) => {
                         let work_policy = Arc::clone(&policy);
                         managed.push(ManagedChildBinding::new(

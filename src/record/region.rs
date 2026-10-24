@@ -186,8 +186,9 @@ impl RegionState {
     /// Returns true if the region can admit cleanup-only work.
     ///
     /// Async finalizer barrier tasks are allowed in `Finalizing` so required
-    /// cleanup can still complete. Child-region creation and obligation
-    /// reservation remain `Open`-only.
+    /// cleanup can still complete. Child-region creation and ordinary
+    /// obligation reservation remain `Open`-only; runtime-owned cleanup
+    /// holders may also admit checked obligations while finalizing.
     #[must_use]
     pub const fn can_accept_cleanup_work(self) -> bool {
         matches!(self, Self::Open | Self::Finalizing)
@@ -568,9 +569,20 @@ pub(crate) struct ObligationAdmissionHandle {
     holder: TaskId,
     region: RegionId,
     live: AtomicBool,
+    /// Minted only for an actual runtime-owned async-finalizer generation.
+    /// A retained ordinary Cx cannot acquire cleanup admission by cloning.
+    cleanup_task: bool,
 }
 
 impl ObligationAdmissionHandle {
+    fn accepts_checked_admission(&self, state: RegionState) -> bool {
+        if self.cleanup_task {
+            state.can_accept_cleanup_work()
+        } else {
+            state.can_accept_work()
+        }
+    }
+
     pub(crate) fn revoke(&self) {
         if let Some(inner) = self.inner.upgrade() {
             let _guard = inner.write();
@@ -616,7 +628,9 @@ impl ObligationAdmissionHandle {
             if !source.obligation_handles_live || !self.live.load(Ordering::Acquire) {
                 return Err(Error::SourceHolderNotLive);
             }
-            if !target.obligation_handles_live || !target_state.load().can_accept_work() {
+            if !target.obligation_handles_live
+                || !destination.accepts_checked_admission(target_state.load())
+            {
                 return Err(Error::Destination(Admission::RegionClosed));
             }
             if !destination.live.load(Ordering::Acquire) {
@@ -713,7 +727,15 @@ impl ObligationAdmissionHandle {
         let inner = self.inner.upgrade().ok_or(Error::RegionClosed)?;
         let state = self.state.upgrade().ok_or(Error::RegionClosed)?;
         let mut inner = inner.write();
-        if !inner.obligation_handles_live || !state.load().can_accept_work() {
+        // Only the checked credit protocol carries terminal application
+        // ownership through cleanup. Preserve direct/legacy Open-only
+        // admission instead of widening those older registration contracts.
+        let accepts_work = if pending_application {
+            self.accepts_checked_admission(state.load())
+        } else {
+            state.load().can_accept_work()
+        };
+        if !inner.obligation_handles_live || !accepts_work {
             return Err(Error::RegionClosed);
         }
         if !self.live.load(Ordering::Acquire) {
@@ -1167,12 +1189,21 @@ impl RegionRecord {
         &self,
         holder: TaskId,
     ) -> Arc<ObligationAdmissionHandle> {
+        self.obligation_admission_handle_for_task(holder, false)
+    }
+
+    pub(crate) fn obligation_admission_handle_for_task(
+        &self,
+        holder: TaskId,
+        cleanup_task: bool,
+    ) -> Arc<ObligationAdmissionHandle> {
         Arc::new(ObligationAdmissionHandle {
             state: Arc::downgrade(&self.state),
             inner: Arc::downgrade(&self.inner),
             holder,
             region: self.id,
             live: AtomicBool::new(true),
+            cleanup_task,
         })
     }
 

@@ -4699,6 +4699,20 @@ impl LabRuntime {
             .expect("normal lab scheduling cannot produce a forced-schedule error");
     }
 
+    /// Drive one bounded action for a scheduler-owned injection run. Keep
+    /// deadline selection here so injection uses the same timer/reactor and
+    /// pending-command ordering as an ordinary auto-advancing Lab run.
+    pub(super) fn step_for_owned_injection(&mut self) -> bool {
+        if self.config.max_steps.is_some_and(|max| self.steps >= max) || self.replay_stopped() {
+            return false;
+        }
+        if self.config.auto_advance_time {
+            self.advance_idle_time();
+        }
+        self.step();
+        true
+    }
+
     fn step_with_forced_dispatch(
         &mut self,
         expected: Option<(usize, &ForcedDispatch)>,

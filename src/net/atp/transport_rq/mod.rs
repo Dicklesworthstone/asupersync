@@ -60,6 +60,10 @@ use std::time::{Duration, Instant};
 /// `docs/atp_rq_adaptive_design.md`.
 pub mod adaptive;
 
+mod authenticated_control;
+use authenticated_control::{AuthenticatedControl, ControlRole, FULL_OBJECT_CONTROL_V1};
+mod delta_chunks;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
@@ -615,6 +619,8 @@ pub struct RqConfig {
 pub struct RqReceiveOptions {
     allow_special_files: bool,
     sparse_files: bool,
+    authenticated_control: bool,
+    delta_chunks: bool,
 }
 
 impl RqReceiveOptions {
@@ -624,7 +630,52 @@ impl RqReceiveOptions {
         Self {
             allow_special_files: false,
             sparse_files: false,
+            authenticated_control: false,
+            delta_chunks: false,
         }
+    }
+
+    /// Require the authenticated delta handshake and manifest for every
+    /// connection, and sequenced control frames plus fresh-session symbol keys
+    /// when a full transfer is needed.
+    ///
+    /// Requires `RqConfig::enable_delta` and a strict symbol-authentication key.
+    /// The sender must offer the bounded single-file delta shape. Existing
+    /// entry points retain their legacy wire behavior unless this is enabled.
+    /// A matching file uses the existing signed zero-byte delta completion.
+    /// Authentication does not encrypt control payloads or receiver paths.
+    #[must_use]
+    pub const fn with_authenticated_control(mut self, enabled: bool) -> Self {
+        self.authenticated_control = enabled;
+        self
+    }
+
+    /// Whether legacy unauthenticated control connections are refused.
+    #[must_use]
+    pub const fn authenticated_control(&self) -> bool {
+        self.authenticated_control || self.delta_chunks
+    }
+
+    /// Reuse verified local chunks of a single regular file when the sender
+    /// advertises authenticated changed-chunk delivery.
+    ///
+    /// Missing fixed-size chunks travel over the reliable TCP control stream.
+    /// The receiver verifies reused chunks and the whole reconstructed file
+    /// before the existing atomic installation path. This is not CDC chunking
+    /// or RaptorQ coding of the delta. Enabling it also requires authenticated
+    /// control, including on full-object fallback; a stripped or absent offer
+    /// cannot select legacy unauthenticated control. Use
+    /// [`send_path_with_delta_chunks`] on the sender.
+    #[must_use]
+    pub const fn with_delta_chunks(mut self, enabled: bool) -> Self {
+        self.delta_chunks = enabled;
+        self
+    }
+
+    /// Whether authenticated, advertised changed-chunk reuse is enabled.
+    #[must_use]
+    pub const fn delta_chunks(&self) -> bool {
+        self.delta_chunks
     }
 
     /// Recreate portable special files when the platform and kind support it.
@@ -3160,11 +3211,12 @@ struct RqDeltaDestinationBinding {
     commitment: [u8; 32],
 }
 
-// Security boundary: these envelopes authenticate the delta negotiation and
-// its zero-byte completion with a symmetric key. They do not encrypt the raw
-// TCP stream, authorize a self-asserted `peer_id`, or authenticate the legacy
-// NeedMore/Proof exchange after a signed FullObject request. In that fallback
-// branch the existing wire receipt can still expose committed receiver paths.
+// Security boundary: these envelopes authenticate delta negotiation and its
+// zero-byte completion with a symmetric key. The explicit authenticated-control
+// API also protects FullObject feedback/completion and derives session symbol
+// keys. Legacy entry points keep their existing unauthenticated fallback.
+// Neither mode encrypts TCP or authorizes a self-asserted `peer_id`; full-object
+// receipts can still expose committed receiver paths.
 
 /// Sender-role shared-key possession proof over the exact typed manifest.
 /// It authenticates the protocol role, not a unique peer identity or signer.
@@ -3551,6 +3603,7 @@ struct FrameTransport<S> {
     // the post-spray feedback loop's `recv()` returns it normally (fixes zz35zq: the fast-transfer
     // "unexpected frame: got Proof, expected KeepAlive while spraying" abort).
     stashed: Option<Frame>,
+    authenticated_control: Option<AuthenticatedControl>,
 }
 
 impl<S> FrameTransport<S>
@@ -3563,6 +3616,57 @@ where
             codec: AtpFrameCodec::new(),
             rbuf: BytesMut::new(),
             stashed: None,
+            authenticated_control: None,
+        }
+    }
+
+    fn enable_authenticated_control(
+        &mut self,
+        context: &SecurityContext,
+        session: RqDeltaSessionContext,
+        transfer_id: &str,
+        role: ControlRole,
+    ) -> Result<(), RqError> {
+        if self.authenticated_control.is_some() || self.stashed.is_some() {
+            return Err(RqError::Authentication(
+                "authenticated control must begin once, at the full-object negotiation boundary"
+                    .to_string(),
+            ));
+        }
+        self.authenticated_control = Some(AuthenticatedControl::new(
+            context,
+            session,
+            transfer_id,
+            role,
+        )?);
+        Ok(())
+    }
+
+    fn ensure_healthy(&self) -> Result<(), RqError> {
+        if let Some(auth) = &self.authenticated_control {
+            auth.ensure_healthy()?;
+        }
+        Ok(())
+    }
+
+    fn fail_control(&mut self) {
+        if let Some(auth) = &mut self.authenticated_control {
+            auth.fail();
+        }
+    }
+
+    fn decode_frame(&mut self) -> Result<Option<Frame>, RqError> {
+        self.ensure_healthy()?;
+        let frame = match self.codec.decode(&mut self.rbuf) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.fail_control();
+                return Err(RqError::Frame(error.to_string()));
+            }
+        };
+        match (frame, &mut self.authenticated_control) {
+            (Some(frame), Some(auth)) => auth.verify_received(frame).map(Some),
+            (frame, _) => Ok(frame),
         }
     }
 
@@ -3572,11 +3676,17 @@ where
     }
 
     async fn send_unflushed(&mut self, frame: &Frame) -> Result<usize, RqError> {
-        let bytes = frame
-            .to_wire_bytes()
-            .map_err(|e| RqError::Frame(e.to_string()))?;
+        let bytes = match &mut self.authenticated_control {
+            Some(auth) => auth.prepare_send(frame)?,
+            None => frame
+                .to_wire_bytes()
+                .map_err(|error| RqError::Frame(error.to_string()))?,
+        };
         let len = bytes.len();
         self.stream.write_all(&bytes).await?;
+        if let Some(auth) = &mut self.authenticated_control {
+            auth.finish_write();
+        }
         Ok(len)
     }
 
@@ -3588,6 +3698,13 @@ where
         data: &[u8],
         symbol_auth: Option<&SecurityContext>,
     ) -> Result<usize, RqError> {
+        if self.authenticated_control.is_some() {
+            self.fail_control();
+            return Err(RqError::Authentication(
+                "authenticated full-object transfers cannot bypass framed control writes"
+                    .to_string(),
+            ));
+        }
         let bytes = control_source_data_wire_frame(transfer_id, entry, offset, data, symbol_auth)?;
         let len = bytes.len();
         self.stream.write_all(&bytes).await?;
@@ -3595,26 +3712,36 @@ where
     }
 
     async fn flush(&mut self) -> Result<(), RqError> {
+        if let Some(auth) = &mut self.authenticated_control {
+            auth.begin_flush()?;
+        }
         self.stream.flush().await?;
+        if let Some(auth) = &mut self.authenticated_control {
+            auth.finish_write();
+        }
         Ok(())
     }
 
     async fn recv(&mut self) -> Result<Frame, RqError> {
+        self.ensure_healthy()?;
         // A frame deferred by the spray-time drain takes precedence (see `stashed`).
         if let Some(frame) = self.stashed.take() {
             return Ok(frame);
         }
         loop {
-            if let Some(frame) = self
-                .codec
-                .decode(&mut self.rbuf)
-                .map_err(|e| RqError::Frame(e.to_string()))?
-            {
+            if let Some(frame) = self.decode_frame()? {
                 return Ok(frame);
             }
             let mut tmp = vec![0u8; 65536];
-            let n = self.stream.read(&mut tmp).await?;
+            let n = match self.stream.read(&mut tmp).await {
+                Ok(n) => n,
+                Err(error) => {
+                    self.fail_control();
+                    return Err(error.into());
+                }
+            };
             if n == 0 {
+                self.fail_control();
                 return Err(RqError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "peer closed control connection mid-transfer",
@@ -3629,15 +3756,12 @@ where
         use std::pin::Pin;
         use std::task::Poll;
 
+        self.ensure_healthy()?;
         if self.stashed.is_some() {
             return Ok(None);
         }
 
-        if let Some(frame) = self
-            .codec
-            .decode(&mut self.rbuf)
-            .map_err(|e| RqError::Frame(e.to_string()))?
-        {
+        if let Some(frame) = self.decode_frame()? {
             return Ok(Some(frame));
         }
 
@@ -3650,21 +3774,27 @@ where
                 Poll::Pending => Poll::Ready(Ok(None)),
             }
         })
-        .await?;
+        .await;
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(error) => {
+                self.fail_control();
+                return Err(error.into());
+            }
+        };
 
         let Some(n) = ready else {
             return Ok(None);
         };
         if n == 0 {
+            self.fail_control();
             return Err(RqError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "peer closed control connection mid-transfer",
             )));
         }
         self.rbuf.extend_from_slice(&tmp[..n]);
-        self.codec
-            .decode(&mut self.rbuf)
-            .map_err(|e| RqError::Frame(e.to_string()))
+        self.decode_frame()
     }
 }
 
@@ -3733,6 +3863,16 @@ fn rq_delta_control_auth_context(config: &RqConfig) -> Option<&SecurityContext> 
         .symbol_auth_context
         .as_ref()
         .filter(|context| context.mode() == AuthMode::Strict)
+}
+
+fn validate_authenticated_control_config(config: &RqConfig) -> Result<(), RqError> {
+    if !config.enable_delta || rq_delta_control_auth_context(config).is_none() {
+        return Err(RqError::Authentication(
+            "authenticated RQ control requires enable_delta and a strict symbol-authentication key"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn fresh_rq_delta_nonce(
@@ -4297,8 +4437,10 @@ fn validate_rq_delta_request_envelope(
                     .collect::<BTreeSet<_>>()
                     .len()
                     == envelope.udp_ports.len();
-            if request.fallback_reason.as_deref() != Some("full_object_required")
-                || request.receiver_merkle_root_hex.is_some()
+            if !matches!(
+                request.fallback_reason.as_deref(),
+                Some("full_object_required" | FULL_OBJECT_CONTROL_V1)
+            ) || request.receiver_merkle_root_hex.is_some()
                 || request.missing_bytes != 0
                 || request.shared_chunks != 0
                 || request.stale_chunks != 0
@@ -4330,9 +4472,13 @@ fn validate_rq_delta_request_envelope(
             }
         }
         DeltaWireMode::DeltaChunks => {
-            return Err(RqError::Control(
-                "RQ missing-chunk delta requests are not enabled in this rollout".to_string(),
-            ));
+            delta_chunks::validate_request(
+                manifest,
+                request,
+                envelope.udp_port,
+                &envelope.udp_ports,
+                control_source_stream,
+            )?;
         }
     }
     Ok(request.mode)
@@ -5188,7 +5334,6 @@ async fn build_rq_receiver_delta_request(
 /// is reused from local content). A content id present once on the receiver can
 /// satisfy any number of sender references to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // wired into build_rq_receiver_delta_request in a later sizeku slice
 struct RqDeltaChunkPlan {
     /// Sender chunks whose content id the receiver does not already hold.
     missing_chunks: Vec<DeltaChunkWire>,
@@ -5200,7 +5345,6 @@ struct RqDeltaChunkPlan {
     missing_bytes: u64,
 }
 
-#[allow(dead_code)] // wired into build_rq_receiver_delta_request in a later sizeku slice
 fn rq_plan_delta_chunks(
     sender_chunks: &[DeltaChunkWire],
     receiver_chunks: &[DeltaChunkWire],
@@ -8128,16 +8272,73 @@ pub async fn send_path(
     cx: &Cx,
     addr: SocketAddr,
     source: &Path,
-    mut config: RqConfig,
+    config: RqConfig,
     peer_id: &str,
 ) -> Result<SendReport, RqError> {
+    send_path_inner(cx, addr, source, config, peer_id, false, false).await
+}
+
+/// Transfer a bounded single file with authenticated delta negotiation and a
+/// sequenced control channel for the FullObject fallback.
+///
+/// Requires `RqConfig::enable_delta`, a strict symbol-authentication key, and
+/// receiver `RqReceiveOptions::with_authenticated_control(true)`. Unsupported
+/// transfer shapes or a peer selecting legacy control are refused before data
+/// is sent. Source and repair symbols are bound to the fresh negotiated session.
+/// A matching destination uses the existing signed zero-byte completion.
+///
+/// This authenticates shared-key possession, not a unique peer identity. It
+/// does not encrypt the TCP control stream or hide full-transfer receipt paths.
+/// Existing `send_path` behavior remains available for compatible legacy peers.
+pub async fn send_path_with_authenticated_control(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: RqConfig,
+    peer_id: &str,
+) -> Result<SendReport, RqError> {
+    send_path_inner(cx, addr, source, config, peer_id, true, false).await
+}
+
+/// Transfer one bounded regular file with authenticated changed-chunk reuse.
+///
+/// This additive entry point offers fixed-size chunk reuse to receivers using
+/// [`RqReceiveOptions::with_delta_chunks`]. Missing chunks travel over the
+/// reliable TCP control stream; all selected data and control frames are
+/// authenticated and bound to this session. A peer without this optimization
+/// can select the existing authenticated full-object path. A peer selecting
+/// legacy unauthenticated control is refused, as with
+/// [`send_path_with_authenticated_control`]. Existing entry points do not offer
+/// changed chunks. Payload counters exclude locally reused bytes.
+pub async fn send_path_with_delta_chunks(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: RqConfig,
+    peer_id: &str,
+) -> Result<SendReport, RqError> {
+    send_path_inner(cx, addr, source, config, peer_id, true, true).await
+}
+
+async fn send_path_inner(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    mut config: RqConfig,
+    peer_id: &str,
+    require_authenticated_control: bool,
+    offer_delta_chunks: bool,
+) -> Result<SendReport, RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    if require_authenticated_control {
+        validate_authenticated_control_config(&config)?;
+    }
     if config.delta_control_timeout.is_zero() {
         return Err(RqError::Control(
             "RQ delta_control_timeout must be greater than zero".to_string(),
         ));
     }
-    let symbol_auth = config.symbol_auth_context()?;
+    let mut symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
 
     let (root_name, is_directory, mut raw_entries, empty_directories) =
@@ -8169,7 +8370,8 @@ pub async fn send_path(
             <= RQ_DELTA_MAX_MANIFEST_CHUNKS;
     let prefer_control_source_stream =
         control_source_stream_eligible(preflight_total_bytes, &config)
-            && !delta_hash_first_candidate;
+            && !delta_hash_first_candidate
+            && !require_authenticated_control;
     if prefer_control_source_stream {
         let stream = match crate::time::timeout(
             cx.now(),
@@ -8401,13 +8603,20 @@ pub async fn send_path(
         entries: manifest_entries,
     };
     maybe_attach_rq_delta_manifest(cx, &mut manifest, &entries, &config).await?;
+    if require_authenticated_control && manifest.delta_manifest.is_none() {
+        return Err(RqError::Authentication(
+            "authenticated RQ control requires a supported bounded single-file delta manifest"
+                .to_string(),
+        ));
+    }
     let delta_auth = rq_delta_control_auth_context(&config).cloned();
     let delta_transfer_nonce = if manifest.delta_manifest.is_some() && delta_auth.is_some() {
         Some(fresh_rq_delta_nonce(cx, b"sender", None)?)
     } else {
         None
     };
-    let prefer_control_source_stream = control_source_stream_eligible(total_bytes, &config);
+    let prefer_control_source_stream =
+        control_source_stream_eligible(total_bytes, &config) && !require_authenticated_control;
 
     // Control plane: TCP connect + handshake.
     let stream = match crate::time::timeout(
@@ -8518,6 +8727,11 @@ pub async fn send_path(
         )?),
         None => None,
     };
+    if require_authenticated_control && delta_session.is_none() {
+        return Err(RqError::Authentication(
+            "receiver did not negotiate the required authenticated RQ delta session".to_string(),
+        ));
+    }
     let mut udp_ports = if control_source_stream {
         SmallVec::<[u16; DEFAULT_UDP_FANOUT]>::new()
     } else {
@@ -8561,7 +8775,10 @@ pub async fn send_path(
             )
         })?;
         let envelope = make_rq_delta_manifest_envelope(context, session, &manifest)?;
-        let manifest_frame = json_frame(FrameType::ObjectManifest, &envelope)?;
+        let mut manifest_frame = json_frame(FrameType::ObjectManifest, &envelope)?;
+        if offer_delta_chunks {
+            delta_chunks::advertise(&mut manifest_frame, context, session, &manifest)?;
+        }
         send_delta_control_frame(
             cx,
             &mut control,
@@ -8592,6 +8809,32 @@ pub async fn send_path(
             control_source_stream,
         )? {
             DeltaWireMode::FullObject => {
+                let authenticated =
+                    request.request.fallback_reason.as_deref() == Some(FULL_OBJECT_CONTROL_V1);
+                if require_authenticated_control && !authenticated {
+                    return Err(RqError::Authentication(
+                        "receiver selected legacy unauthenticated full-object control".to_string(),
+                    ));
+                }
+                if authenticated {
+                    if control_source_stream {
+                        return Err(RqError::Authentication(
+                            "authenticated full-object control requires the UDP symbol path"
+                                .to_string(),
+                        ));
+                    }
+                    control.enable_authenticated_control(
+                        context,
+                        session,
+                        &manifest.transfer_id,
+                        ControlRole::Sender,
+                    )?;
+                    symbol_auth = Some(authenticated_control::symbol_context(
+                        context,
+                        session,
+                        &manifest.transfer_id,
+                    )?);
+                }
                 udp_ports = advertised_udp_ports(request.udp_port, &request.udp_ports);
             }
             DeltaWireMode::AlreadyInSync => {
@@ -8644,9 +8887,28 @@ pub async fn send_path(
                 });
             }
             DeltaWireMode::DeltaChunks => {
-                return Err(RqError::Control(
-                    "RQ missing-chunk mode passed strict request validation".to_string(),
-                ));
+                if !offer_delta_chunks {
+                    return Err(RqError::Authentication(
+                        "receiver selected changed chunks without an authenticated offer"
+                            .to_string(),
+                    ));
+                }
+                control.enable_authenticated_control(
+                    context,
+                    session,
+                    &manifest.transfer_id,
+                    ControlRole::Sender,
+                )?;
+                return erase_send(delta_chunks::send(
+                    cx,
+                    &mut control,
+                    &manifest,
+                    &entries,
+                    &config,
+                    &request.request,
+                    peer,
+                ))
+                .await;
             }
         }
     } else {
@@ -10953,6 +11215,9 @@ pub async fn receive_once_with_options(
     options: RqReceiveOptions,
 ) -> Result<ReceiveReport, RqError> {
     options.validate()?;
+    if options.authenticated_control() {
+        validate_authenticated_control_config(&config)?;
+    }
     let (stream, peer) = match crate::time::timeout(
         cx.now(),
         config.accept_timeout,
@@ -11049,12 +11314,15 @@ pub async fn receive_connection_with_options(
     options: RqReceiveOptions,
 ) -> Result<ReceiveReport, RqError> {
     options.validate()?;
+    if options.authenticated_control() {
+        validate_authenticated_control_config(&config)?;
+    }
     if config.delta_control_timeout.is_zero() {
         return Err(RqError::Control(
             "RQ delta_control_timeout must be greater than zero".to_string(),
         ));
     }
-    let symbol_auth = config.symbol_auth_context()?;
+    let mut symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
     let should_tune_for_bulk_source = near_clean_control_source_stream_round0(&config);
     if should_tune_for_bulk_source {
@@ -11083,6 +11351,13 @@ pub async fn receive_connection_with_options(
     let strict_delta_context = rq_delta_control_auth_context(&config);
     let authenticated_delta_nonce = validate_rq_delta_hello(strict_delta_context, &hello)?;
     let delta_offered = authenticated_delta_nonce.is_some();
+    if options.authenticated_control()
+        && (!delta_offered || hello.prefer_control_source_stream)
+    {
+        return Err(RqError::Authentication(
+            "receiver requires an authenticated delta offer on the UDP symbol path".to_string(),
+        ));
+    }
     let geometry_error = rq_peer_geometry_error(hello.symbol_size, hello.max_block_size);
     let accepted = hello.protocol == ATP_RQ_PROTOCOL
         && hello.role == "sender"
@@ -11257,8 +11532,22 @@ pub async fn receive_connection_with_options(
             dest_dir,
         )?;
 
-        let request =
+        let mut request =
             build_rq_receiver_delta_request(cx, dest_dir, &config, &envelope.manifest).await?;
+        let chunk_plan = if options.delta_chunks()
+            && delta_chunks::offered(&manifest_frame, context, session, &envelope.manifest)?
+            && request.mode == DeltaWireMode::FullObject
+        {
+            delta_chunks::plan(cx, dest_dir, &config, &envelope.manifest).await?
+        } else {
+            None
+        };
+        if let Some(plan) = &chunk_plan {
+            request = plan.request.clone();
+        }
+        if options.authenticated_control() && request.mode == DeltaWireMode::FullObject {
+            request.fallback_reason = Some(FULL_OBJECT_CONTROL_V1.to_string());
+        }
         let (request_udp_port, request_udp_ports) =
             if request.mode == DeltaWireMode::FullObject && !control_source_stream {
                 let (bound_udp, ports, primary) =
@@ -11287,7 +11576,22 @@ pub async fn receive_connection_with_options(
         .await?;
 
         match request.mode {
-            DeltaWireMode::FullObject => envelope.manifest,
+            DeltaWireMode::FullObject => {
+                if options.authenticated_control() {
+                    control.enable_authenticated_control(
+                        context,
+                        session,
+                        &envelope.manifest.transfer_id,
+                        ControlRole::Receiver,
+                    )?;
+                    symbol_auth = Some(authenticated_control::symbol_context(
+                        context,
+                        session,
+                        &envelope.manifest.transfer_id,
+                    )?);
+                }
+                envelope.manifest
+            }
             DeltaWireMode::AlreadyInSync => {
                 let complete_frame = recv_delta_control_frame(
                     cx,
@@ -11368,9 +11672,26 @@ pub async fn receive_connection_with_options(
                 });
             }
             DeltaWireMode::DeltaChunks => {
-                return Err(RqError::Control(
-                    "RQ receiver emitted unsupported missing-chunk mode".to_string(),
-                ));
+                let plan = chunk_plan.ok_or_else(|| {
+                    RqError::Control("changed-chunk request lost its reconstruction plan".to_string())
+                })?;
+                control.enable_authenticated_control(
+                    context,
+                    session,
+                    &envelope.manifest.transfer_id,
+                    ControlRole::Receiver,
+                )?;
+                return erase_send(delta_chunks::receive(
+                    cx,
+                    &mut control,
+                    &envelope.manifest,
+                    &config,
+                    dest_dir,
+                    peer,
+                    options,
+                    plan,
+                ))
+                .await;
             }
         }
     } else {
@@ -16531,11 +16852,7 @@ where
 
         // 1) First, non-blockingly drain whatever the control codec already has
         //    buffered (a prior read may have pulled the frame in with symbols).
-        if let Some(frame) = control
-            .codec
-            .decode(&mut control.rbuf)
-            .map_err(|e| RqError::Frame(e.to_string()))?
-        {
+        if let Some(frame) = control.decode_frame()? {
             rqtrace!(
                 "pump: returning {:?} after {pumped} udp datagrams",
                 frame.frame_type()
@@ -16568,7 +16885,14 @@ where
                     Poll::Pending => Poll::Pending,
                 }
             })
-            .await?
+            .await
+        };
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(error) => {
+                control.fail_control();
+                return Err(error.into());
+            }
         };
         let recv_elapsed = recv_started.map(|started| started.elapsed());
 
@@ -16656,17 +16980,14 @@ where
             }
             Ready::Control(n) => {
                 if n == 0 {
+                    control.fail_control();
                     return Err(RqError::Io(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "control stream closed mid-transfer",
                     )));
                 }
                 control.rbuf.extend_from_slice(&cbuf[..n]);
-                if let Some(frame) = control
-                    .codec
-                    .decode(&mut control.rbuf)
-                    .map_err(|e| RqError::Frame(e.to_string()))?
-                {
+                if let Some(frame) = control.decode_frame()? {
                     return Ok(frame);
                 }
             }
@@ -16828,6 +17149,9 @@ where
     F: FnMut(Result<ReceiveReport, RqError>),
 {
     options.validate()?;
+    if options.authenticated_control() {
+        validate_authenticated_control_config(&config)?;
+    }
     loop {
         if cx.is_cancel_requested() {
             return Ok(());

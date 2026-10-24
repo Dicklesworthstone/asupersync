@@ -1,15 +1,17 @@
-//! Explicit persistence for sensitive completed-I/O transcripts.
+//! Explicit persistence for sensitive completed- and pending-I/O transcripts.
 
-use super::{Event, IoCaptureLimits, IoFailure, IoTape};
+use super::{Event, IoCaptureLimits, IoFailure, IoTape, PendingRequest};
 use sha2::{Digest, Sha256};
 use std::{fmt, io};
 use zeroize::Zeroize;
 
 const MAGIC: &[u8; 8] = b"ASUPIO\0\0";
 const VERSION: u32 = 1;
+const PENDING_VERSION: u32 = 2;
 const FIXED_HEADER: usize = 46;
 const CHECKSUM: usize = 32;
 const DOMAIN: &[u8] = b"asupersync.io-tape.v1";
+const PENDING_DOMAIN: &[u8] = b"asupersync.io-tape.v2";
 
 // Stable explicit wire IDs, independent of Rust enum discriminants. Unknown
 // future/nightly-only kinds fail export instead of silently becoming Other.
@@ -155,6 +157,15 @@ fn checksum(bytes: &[u8]) -> [u8; 32] {
     hash.update(bytes);
     hash.finalize().into()
 }
+fn version_checksum(version: u32, bytes: &[u8]) -> [u8; 32] {
+    if version == VERSION {
+        return checksum(bytes);
+    }
+    let mut hash = Sha256::new();
+    hash.update(PENDING_DOMAIN);
+    hash.update(bytes);
+    hash.finalize().into()
+}
 fn error_len(error: Option<IoFailure>) -> usize {
     match error {
         None => 1,
@@ -185,6 +196,8 @@ impl IoTape {
     /// V1 uses little-endian fixed integers, a source OS tag, exact operation and
     /// vector shapes, normalized error kinds/native codes, and a domain-separated
     /// checksum. Unsupported error kinds refuse export rather than lose meaning.
+    /// Pending-aware captures select V2, which adds exact pending request tags
+    /// and a separate checksum domain. Completed-only captures retain V1 bytes.
     /// Nothing is written to disk automatically; these bytes can contain secrets.
     pub fn to_canonical_bytes(&self, max_encoded_bytes: usize) -> Result<IoTapeBytes, IoTapeError> {
         let os = std::env::consts::OS.as_bytes();
@@ -217,6 +230,15 @@ impl IoTape {
                         )?
                     }
                     Event::Flush(error) | Event::Shutdown(error) => error_len(*error),
+                    Event::Pending(request) => match request {
+                        PendingRequest::Read { .. } => 8,
+                        PendingRequest::Write { slices, .. } => {
+                            let n = slices.as_ref().map_or(0, Vec::len);
+                            slices_total = add(slices_total, n)?;
+                            add(40, if slices.is_some() { add(8, mul(n, 8)?)? } else { 0 })?
+                        }
+                        PendingRequest::Flush | PendingRequest::Shutdown => 0,
+                    },
                 },
             )?;
         }
@@ -228,7 +250,8 @@ impl IoTape {
             .try_reserve_exact(size)
             .map_err(|_| IoTapeError::Allocation)?;
         out.0.extend_from_slice(MAGIC);
-        out.0.extend_from_slice(&VERSION.to_le_bytes());
+        let version = if self.pending_polls { PENDING_VERSION } else { VERSION };
+        out.0.extend_from_slice(&version.to_le_bytes());
         out.0.push(u8::from(self.vectored));
         put(&mut out.0, self.events.len())?;
         put(&mut out.0, self.read_bytes)?;
@@ -277,9 +300,26 @@ impl IoTape {
                     out.0.push(4);
                     put_error(&mut out.0, *error)?;
                 }
+                Event::Pending(PendingRequest::Read { capacity }) => {
+                    out.0.push(5);
+                    put(&mut out.0, *capacity)?;
+                }
+                Event::Pending(PendingRequest::Write { length, slices, digest }) => {
+                    out.0.push(if slices.is_some() { 7 } else { 6 });
+                    put(&mut out.0, *length)?;
+                    out.0.extend_from_slice(&digest[..]);
+                    if let Some(slices) = slices {
+                        put(&mut out.0, slices.len())?;
+                        for length in slices {
+                            put(&mut out.0, *length)?;
+                        }
+                    }
+                }
+                Event::Pending(PendingRequest::Flush) => out.0.push(8),
+                Event::Pending(PendingRequest::Shutdown) => out.0.push(9),
             }
         }
-        let digest = checksum(&out.0);
+        let digest = version_checksum(version, &out.0);
         out.0.extend_from_slice(&digest);
         debug_assert_eq!(out.0.len(), size);
         Ok(out)
@@ -289,7 +329,7 @@ impl IoTape {
     ///
     /// Resource limits and checksum precede allocations. Read progress, accepted
     /// write lengths, exact vector sums, aggregate counts, errors, flags and EOF
-    /// are checked. V1 is deliberately OS-bound; native codes additionally
+    /// are checked. V1 and V2 are deliberately OS-bound; native codes additionally
     /// require the same error-kind mapping. No platform translation or
     /// unknown-kind substitution is performed.
     pub fn from_canonical_bytes(
@@ -307,9 +347,15 @@ impl IoTape {
             bytes: &bytes[..body_len],
             offset: 0,
         };
-        if input.take(8)? != MAGIC || input.u32()? != VERSION {
+        if input.take(8)? != MAGIC {
             return Err(IoTapeError::Format);
         }
+        let version = input.u32()?;
+        let pending_polls = match version {
+            VERSION => false,
+            PENDING_VERSION => true,
+            _ => return Err(IoTapeError::Format),
+        };
         let vectored = match input.byte()? {
             0 => false,
             1 => true,
@@ -345,7 +391,10 @@ impl IoTape {
         }
         let minimum = add(
             input.offset,
-            add(mul(operations, 2)?, add(read_bytes, mul(slices_total, 8)?)?)?,
+            add(
+                mul(operations, if pending_polls { 1 } else { 2 })?,
+                add(read_bytes, mul(slices_total, 8)?)?,
+            )?,
         )?;
         if minimum > body_len {
             return Err(IoTapeError::Truncated);
@@ -357,7 +406,7 @@ impl IoTape {
         if decoded > limits.max_decoded_bytes {
             return Err(IoTapeError::Limit("decoded bytes"));
         }
-        if checksum(&bytes[..body_len])[..] != bytes[body_len..] {
+        if version_checksum(version, &bytes[..body_len])[..] != bytes[body_len..] {
             return Err(IoTapeError::Checksum);
         }
         let mut events = Vec::new();
@@ -387,9 +436,10 @@ impl IoTape {
                         error,
                     }
                 }
-                tag @ (1 | 2) => {
+                tag @ (1 | 2 | 6 | 7) if tag <= 2 || pending_polls => {
+                    let pending = tag >= 6;
                     let length = input.size()?;
-                    let accepted = input.size()?;
+                    let accepted = if pending { 0 } else { input.size()? };
                     if accepted > length || length > write_bytes - seen_write {
                         return Err(IoTapeError::Invalid("write count"));
                     }
@@ -398,7 +448,7 @@ impl IoTape {
                         .try_into()
                         .map_err(|_| IoTapeError::Truncated)?;
                     let digest = zeroize::Zeroizing::new(raw_digest);
-                    let slices = if tag == 2 {
+                    let slices = if tag == 2 || tag == 7 {
                         let count = input.size()?;
                         if count > limits.capture.max_vectored_slices {
                             return Err(IoTapeError::Limit("vectored slices"));
@@ -424,21 +474,30 @@ impl IoTape {
                     } else {
                         None
                     };
-                    let error = input.error(same_os)?;
+                    let error = if pending { None } else { input.error(same_os)? };
                     if error.is_some() && accepted != 0 {
                         return Err(IoTapeError::Invalid("error with accepted write"));
                     }
                     seen_write += length;
-                    Event::Write {
-                        length,
-                        slices,
-                        digest,
-                        accepted,
-                        error,
+                    if pending {
+                        Event::Pending(PendingRequest::Write { length, slices, digest })
+                    } else {
+                        Event::Write {
+                            length,
+                            slices,
+                            digest,
+                            accepted,
+                            error,
+                        }
                     }
                 }
                 3 => Event::Flush(input.error(same_os)?),
                 4 => Event::Shutdown(input.error(same_os)?),
+                5 if pending_polls => Event::Pending(PendingRequest::Read {
+                    capacity: input.size()?,
+                }),
+                8 if pending_polls => Event::Pending(PendingRequest::Flush),
+                9 if pending_polls => Event::Pending(PendingRequest::Shutdown),
                 _ => return Err(IoTapeError::Invalid("event tag")),
             };
             events.push(event);
@@ -454,6 +513,7 @@ impl IoTape {
             read_bytes,
             write_bytes,
             vectored,
+            pending_polls,
         })
     }
 }

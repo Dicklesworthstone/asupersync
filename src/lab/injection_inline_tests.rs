@@ -599,3 +599,330 @@
         let points = strategy.select_points(&[1, 2, 3], 0);
         assert!(points.is_empty());
     }
+
+    /// br-asupersync-vcu2oz: the operation, child, timer, and finalizer must
+    /// really run through Lab scheduling. Fixed seeds also pin replay order.
+    fn owned_injection_workflow(seed: u64) -> (LabInjectionReport, Vec<(usize, u8, u64)>) {
+        use crate::channel::mpsc;
+        use crate::cx::Cx;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let cancelled_children = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let report = lab(seed)
+            .with_cancellation_injection(InjectionStrategy::AllPoints)
+            .with_all_oracles()
+            .max_steps(200)
+            .run_owned_with_lab({
+                let runs = Arc::clone(&runs);
+                let finalized = Arc::clone(&finalized);
+                let cancelled_children = Arc::clone(&cancelled_children);
+                let events = Arc::clone(&events);
+                move |injector, runtime, _oracles, region| {
+                    let run = runs.fetch_add(1, Ordering::SeqCst);
+                    let final_events = Arc::clone(&events);
+                    let finalized = Arc::clone(&finalized);
+                    assert!(runtime.state.register_async_finalizer(region, async move {
+                        let cx = Cx::current().expect("admitted async finalizer");
+                        let start = cx.now();
+                        final_events.lock().push((run, 5, start.as_nanos()));
+                        crate::time::sleep(start, Duration::from_millis(2)).await;
+                        assert!(cx.now() >= start.saturating_add_nanos(2_000_000));
+                        final_events.lock().push((run, 6, cx.now().as_nanos()));
+                        finalized.fetch_add(1, Ordering::SeqCst);
+                    }));
+
+                    let events = Arc::clone(&events);
+                    let cancelled_children = Arc::clone(&cancelled_children);
+                    InstrumentedFuture::new(
+                        async move {
+                            let cx = Cx::current().expect("admitted injection operation");
+                            assert_eq!(cx.region_id(), region);
+                            events.lock().push((run, 0, cx.now().as_nanos()));
+                            let (started, mut observed_start) = mpsc::channel(1);
+                            let child_events = Arc::clone(&events);
+                            let mut child = cx
+                                .spawn(move |child_cx| async move {
+                                    child_events.lock().push((run, 1, child_cx.now().as_nanos()));
+                                    started
+                                        .send(&child_cx, ())
+                                        .await
+                                        .expect("announce child start");
+                                    crate::time::sleep(child_cx.now(), Duration::from_millis(5))
+                                        .await;
+                                    if child_cx.checkpoint().is_err() {
+                                        // Completion after acknowledgement must survive
+                                        // one more Pending while the region is draining.
+                                        crate::runtime::yield_now().await;
+                                        cancelled_children.fetch_add(1, Ordering::SeqCst);
+                                        child_events.lock().push((run, 3, child_cx.now().as_nanos()));
+                                    } else {
+                                        child_events.lock().push((run, 2, child_cx.now().as_nanos()));
+                                    }
+                                    42_u32
+                                })
+                                .expect("admit owned child");
+                            observed_start
+                                .recv(&cx)
+                                .await
+                                .expect("child really parked on its timer");
+                            assert_eq!(child.join(&cx).await.expect("join timer child"), 42);
+                            events.lock().push((run, 4, cx.now().as_nanos()));
+                        },
+                        injector,
+                    )
+                }
+            });
+
+        assert!(report.all_passed(), "seed={seed} report={report:?}");
+        assert_eq!(report.tests_run, report.total_await_points);
+        assert!(
+            report.total_await_points >= 3,
+            "spawn/park/join polls must be observed"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), report.tests_run + 1);
+        assert_eq!(finalized.load(Ordering::SeqCst), report.tests_run + 1);
+        assert!(
+            cancelled_children.load(Ordering::SeqCst) > 0,
+            "a parked child must drain after injection"
+        );
+        let events = events.lock().clone();
+        (report, events)
+    }
+
+    #[test]
+    fn owned_injection_drives_children_timers_finalizers_and_replays_deterministically() {
+        for seed in [7, 19, 53] {
+            let (first, first_events) = owned_injection_workflow(seed);
+            let (second, second_events) = owned_injection_workflow(seed);
+            assert_eq!(first.to_json(), second.to_json(), "seed={seed}");
+            assert_eq!(
+                first_events, second_events,
+                "real dispatch order, seed={seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn owned_injection_retires_held_channel_permits_before_region_finalizers() {
+        use crate::channel::mpsc;
+        use crate::cx::Cx;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let held = Arc::new(AtomicUsize::new(0));
+        let report = lab(0xCACE)
+            .with_cancellation_injection(InjectionStrategy::AllPoints)
+            .with_all_oracles()
+            .max_steps(100)
+            .run_owned_with_lab({
+                let finalized = Arc::clone(&finalized);
+                let held = Arc::clone(&held);
+                move |injector, runtime, _oracles, region| {
+                    let (sender, receiver) = mpsc::channel::<u32>(1);
+                    let inspect = sender.clone();
+                    let finalized = Arc::clone(&finalized);
+                    assert!(runtime.state.register_sync_finalizer(region, move || {
+                        assert_eq!(
+                            inspect.debug_counts(), (0, 0),
+                            "permit resolved before close"
+                        );
+                        finalized.fetch_add(1, Ordering::SeqCst);
+                    }));
+                    let held = Arc::clone(&held);
+                    InstrumentedFuture::new(
+                        async move {
+                            let cx = Cx::current().expect("real operation context");
+                            let permit = sender.reserve(&cx).await.expect("reserve tracked slot");
+                            assert_eq!(sender.debug_counts(), (0, 1));
+                            held.fetch_add(1, Ordering::SeqCst);
+                            crate::runtime::yield_now().await;
+                            drop(permit);
+                            drop(receiver);
+                        },
+                        injector,
+                    )
+                }
+            });
+        assert!(report.all_passed(), "{report:?}");
+        assert_eq!(report.total_await_points, 2);
+        assert_eq!(
+            held.load(Ordering::SeqCst), 2,
+            "recording and second-point injection held a permit"
+        );
+        assert_eq!(finalized.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn owned_injection_does_not_repoll_a_task_without_a_wake() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut runner = LabInjectionRunner::new(
+            LabInjectionConfig::new(0xCACE)
+                .with_strategy(InjectionStrategy::AllPoints)
+                .max_steps_per_run(8),
+        );
+        let report = runner.run_owned({
+            let polls = Arc::clone(&polls);
+            move |injector| {
+                let polls = Arc::clone(&polls);
+                InstrumentedFuture::new(
+                    std::future::poll_fn(move |_| {
+                        polls.fetch_add(1, Ordering::SeqCst);
+                        std::task::Poll::<()>::Pending
+                    }),
+                    injector,
+                )
+            }
+        });
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert_eq!(report.total_await_points, 1);
+        assert_eq!(report.failures, 1);
+        assert_eq!(report.results[0].injection.injection_point, 0);
+        assert!(matches!(
+            report.results[0].injection.outcome,
+            InjectionOutcome::Timeout
+        ));
+        assert_eq!(runner.current_mode(), InjectionMode::Recording);
+    }
+
+    #[test]
+    fn owned_injection_cannot_pass_with_an_escaped_task_in_an_open_region() {
+        let mut runner = LabInjectionRunner::new(
+            LabInjectionConfig::new(0xCACE)
+                .with_strategy(InjectionStrategy::Never)
+                .max_steps_per_run(12),
+        );
+        // No with_all_oracles: the owned execution contract itself requires
+        // a terminal run, even though the snapshot task-leak oracle permits
+        // live work in a region that has not closed.
+        let report = runner.run_owned_with_lab(|injector, runtime, _oracles, owned| {
+            let escaped = runtime.state.create_root_region(Budget::INFINITE);
+            assert_ne!(escaped, owned);
+            let (task, _join) = runtime
+                .state
+                .create_task(escaped, Budget::INFINITE, std::future::pending::<()>())
+                .unwrap();
+            runtime.scheduler.lock().schedule(task, 0);
+            InstrumentedFuture::new(async { 42_u32 }, injector)
+        });
+        assert_eq!(report.tests_run, 1, "a failed recording must be reported");
+        assert_eq!(report.results[0].injection.injection_point, 0);
+        assert!(matches!(
+            report.results[0].injection.outcome,
+            InjectionOutcome::Timeout
+        ));
+        assert!(!report.all_passed());
+    }
+
+    #[test]
+    fn owned_injection_step_budget_includes_async_finalizer_drain() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let finalizer_polls = Arc::new(AtomicUsize::new(0));
+        let report = lab(0xCACE)
+            .with_cancellation_injection(InjectionStrategy::Never)
+            .max_steps(8)
+            .run_owned_with_lab({
+                let finalizer_polls = Arc::clone(&finalizer_polls);
+                move |injector, runtime, _oracles, region| {
+                    let finalizer_polls = Arc::clone(&finalizer_polls);
+                    assert!(runtime.state.register_async_finalizer(
+                        region,
+                        std::future::poll_fn(move |_| {
+                            finalizer_polls.fetch_add(1, Ordering::SeqCst);
+                            std::task::Poll::<()>::Pending
+                        }),
+                    ));
+                    InstrumentedFuture::new(async { 42_u32 }, injector)
+                }
+            });
+        assert_eq!(
+            finalizer_polls.load(Ordering::SeqCst), 1,
+            "the admitted finalizer really parked"
+        );
+        assert_eq!(report.tests_run, 1);
+        assert!(matches!(
+            report.results[0].injection.outcome,
+            InjectionOutcome::Timeout
+        ));
+        assert!(
+            !report.all_passed(),
+            "a ready operation cannot conceal unfinished cleanup"
+        );
+    }
+
+    #[test]
+    fn owned_injection_recording_panics_and_oracle_failures_are_not_silent() {
+        let mut runner = LabInjectionRunner::new(
+            LabInjectionConfig::new(0xCACE)
+                .with_strategy(InjectionStrategy::Never)
+                .with_all_oracles()
+                .max_steps_per_run(20),
+        );
+        let panic_report = runner.run_owned(|injector| {
+            InstrumentedFuture::new(
+                async {
+                    panic!("owned recording panic");
+                },
+                injector,
+            )
+        });
+        assert_eq!(panic_report.tests_run, 1);
+        assert!(matches!(
+            &panic_report.results[0].injection.outcome,
+            InjectionOutcome::Panic(message) if message.contains("owned recording panic")
+        ));
+        assert_eq!(runner.current_mode(), InjectionMode::Recording);
+
+        let oracle_report = runner.run_owned_with_lab(|injector, _runtime, oracles, region| {
+            let task = crate::types::TaskId::from_arena(ArenaIndex::new(999, 1));
+            oracles.task_leak.on_spawn(task, region, Time::ZERO);
+            oracles.task_leak.on_region_close(region, Time::ZERO);
+            InstrumentedFuture::new(async { 42_u32 }, injector)
+        });
+        assert_eq!(
+            oracle_report.tests_run, 1,
+            "Never still checks its recording run"
+        );
+        assert!(oracle_report.results[0].injection.is_success());
+        assert!(oracle_report.results[0]
+            .oracle_violations
+            .iter()
+            .any(|violation| matches!(violation, OracleViolation::TaskLeak(_))));
+        assert!(!oracle_report.all_passed());
+    }
+
+    #[test]
+    fn owned_injection_rejects_an_unreached_target_and_restores_runner_mode() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let mut runner = LabInjectionRunner::new(
+            LabInjectionConfig::new(0xCACE)
+                .with_strategy(InjectionStrategy::AllPoints)
+                .stop_on_failure(true)
+                .max_steps_per_run(50),
+        );
+        let report = runner.run_owned({
+            let invocations = Arc::clone(&invocations);
+            move |injector| {
+                let yields = if invocations.fetch_add(1, Ordering::SeqCst) == 0 {
+                    2
+                } else {
+                    0
+                };
+                InstrumentedFuture::new(YieldingFuture::new(yields, 42), injector)
+            }
+        });
+        assert_eq!(report.total_await_points, 3);
+        assert_eq!(report.tests_run, 2);
+        assert_eq!(report.successes, 1);
+        assert_eq!(report.failures, 1);
+        assert!(matches!(
+            &report.results[1].injection.outcome,
+            InjectionOutcome::AssertionFailed(message) if message.contains("target 2 was not reached")
+        ));
+        assert_eq!(runner.current_mode(), InjectionMode::Recording);
+    }
