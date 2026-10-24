@@ -6002,3 +6002,12 @@ impl ChildStdin {
         self.inner.as_ref().map(AsRawHandle::as_raw_handle)
     }
 }
+
+// Bounded capture is Unix-only because these pipes are nonblocking there.
+// Append-only wiring preserves the unsafe-ledger source locations above.
+#[cfg(unix)]
+mod bounded_output;
+#[cfg(unix)]
+pub use bounded_output::{
+    BoundedOutputError, CapturedOutputStream, OutputCaptureLimits, OutputLimitExceeded,
+};
