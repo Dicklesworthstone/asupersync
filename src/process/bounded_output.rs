@@ -219,6 +219,20 @@ enum CaptureStop {
     Failed(ProcessError),
 }
 
+/// Forget a numeric signal target as soon as wait ownership is known to be lost.
+fn try_wait_owned(child: &mut Child) -> Result<Option<ExitStatus>, ProcessError> {
+    let result = child.try_wait();
+    if matches!(
+        &result,
+        Err(ProcessError::Io(error)) if error.raw_os_error() == Some(libc::ECHILD)
+    ) {
+        // An external waiter or SIGCHLD policy already consumed this child.
+        // The cached PID may be reused, so Drop must not signal it again.
+        child.inner = None;
+    }
+    result
+}
+
 /// Signal before try_wait can release the PID/managed process-group identity.
 async fn terminate_and_reap(child: &mut Child) -> Result<ExitStatus, ProcessError> {
     match child.kill() {
@@ -230,7 +244,7 @@ async fn terminate_and_reap(child: &mut Child) -> Result<ExitStatus, ProcessErro
     }
 
     for _ in 0..super::REAP_AFTER_KILL_POLLS {
-        match child.try_wait() {
+        match try_wait_owned(child) {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {}
             Err(ProcessError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -335,7 +349,7 @@ async fn capture(
                     terminate_and_reap(child).await?;
                     return Err(super::process_cancelled().into());
                 }
-                match child.try_wait() {
+                match try_wait_owned(child) {
                     Ok(Some(status)) => {
                         return Ok(Output {
                             status,
