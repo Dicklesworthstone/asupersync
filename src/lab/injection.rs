@@ -36,6 +36,7 @@ use crate::lab::instrumented_future::{
 };
 use crate::lab::oracle::{OracleSuite, OracleViolation};
 use crate::lab::runtime::LabRuntime;
+use crate::types::{Budget, CancelReason, RegionId};
 
 /// Configuration for Lab injection testing.
 #[derive(Debug, Clone)]
@@ -614,6 +615,98 @@ impl LabInjectionRunner {
         )
     }
 
+    /// Runs injection tests as admitted Lab tasks in an owned root region.
+    ///
+    /// The factory receives the injector, runtime, caller-owned oracle suite,
+    /// and the region owned by this run. The instrumented future runs with a
+    /// real task context, scheduler waker, spawn gateway, and virtual clock.
+    /// Timers and lab-reactor deadlines advance when runnable work is idle.
+    ///
+    /// After the task's terminal result is collected, the runner closes its
+    /// region and drives child cancellation, obligations, and async finalizers
+    /// to quiescence. A run cannot succeed while its region is still closing
+    /// or the fresh runtime contains live work, even without `with_all_oracles`.
+    /// The recording run is subject to the same ownership checks.
+    ///
+    /// `max_steps_per_run` bounds the entire run, including cleanup; when it
+    /// is unset, the ordinary Lab limit of 100,000 steps applies. Exhausting
+    /// that budget reports `Timeout`, including when cleanup is unfinished.
+    /// A timeout is not a claim that asynchronous cleanup completed.
+    ///
+    /// Injection retains [`InstrumentedFuture`]'s drop-at-poll semantics: the
+    /// target poll does not execute the inner future. It does not simulate a
+    /// cooperative cancellation checkpoint inside that future. The runtime
+    /// still owns and drains any child work created before injection.
+    ///
+    /// Use [`Self::run_with_lab`] for borrowed or non-`Send` futures that do
+    /// not need scheduler-owned execution.
+    pub fn run_owned_with_lab<F, Fut, T>(&mut self, test_fn: F) -> LabInjectionReport
+    where
+        F: Fn(
+            Arc<CancellationInjector>,
+            &mut LabRuntime,
+            &mut OracleSuite,
+            RegionId,
+        ) -> InstrumentedFuture<Fut>,
+        Fut: Future<Output = T> + Send + 'static,
+        T: std::fmt::Debug + Send + 'static,
+    {
+        self.current_mode = InjectionMode::Recording;
+        let recording_injector = CancellationInjector::recording();
+        let recording = self.run_owned_once(&test_fn, Arc::clone(&recording_injector), None);
+        let recorded_points = recording_injector.recorded_points();
+        let strategy_name = format!("{:?}", self.config.strategy);
+
+        if !recording.is_success() {
+            return LabInjectionReport::from_results(
+                vec![recording],
+                recorded_points.len(),
+                &strategy_name,
+                self.config.seed,
+            );
+        }
+
+        let points = self
+            .config
+            .strategy
+            .select_points(&recorded_points, self.config.seed);
+        let mut results = Vec::with_capacity(points.len());
+        for point in points {
+            self.current_mode = InjectionMode::Injecting { target: point };
+            let result = self.run_owned_once(
+                &test_fn,
+                CancellationInjector::inject_at(point),
+                Some(point),
+            );
+            let stop = self.config.stop_on_failure && !result.is_success();
+            results.push(result);
+            if stop {
+                break;
+            }
+        }
+        self.current_mode = InjectionMode::Recording;
+        LabInjectionReport::from_results(
+            results,
+            recorded_points.len(),
+            &strategy_name,
+            self.config.seed,
+        )
+    }
+
+    /// Runs owned, `Send` futures with real Lab scheduling and bounded drain.
+    ///
+    /// The operation can obtain its admitted context through
+    /// [`crate::cx::Cx::current`] during polling. See
+    /// [`Self::run_owned_with_lab`] for the ownership and injection contract.
+    pub fn run_owned<F, Fut, T>(&mut self, test_fn: F) -> LabInjectionReport
+    where
+        F: Fn(Arc<CancellationInjector>) -> InstrumentedFuture<Fut>,
+        Fut: Future<Output = T> + Send + 'static,
+        T: std::fmt::Debug + Send + 'static,
+    {
+        self.run_owned_with_lab(|injector, _runtime, _oracles, _region| test_fn(injector))
+    }
+
     /// Simplified runner for basic test cases.
     ///
     /// This method creates a simple test harness that:
@@ -628,6 +721,166 @@ impl LabInjectionRunner {
     {
         // Wrap with Lab runtime and oracles
         self.run_with_lab(|injector, _runtime, _oracles| test_fn(injector))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_owned_once<F, Fut, T>(
+        &self,
+        test_fn: &F,
+        injector: Arc<CancellationInjector>,
+        target: Option<u64>,
+    ) -> LabInjectionResult
+    where
+        F: Fn(
+            Arc<CancellationInjector>,
+            &mut LabRuntime,
+            &mut OracleSuite,
+            RegionId,
+        ) -> InstrumentedFuture<Fut>,
+        Fut: Future<Output = T> + Send + 'static,
+        T: std::fmt::Debug + Send + 'static,
+    {
+        let mut lab_config = LabConfig::new(self.config.seed).with_auto_advance();
+        if let Some(max) = self.config.max_steps_per_run {
+            lab_config = lab_config.max_steps(max);
+        }
+        let mut runtime = LabRuntime::new(lab_config);
+        let mut oracles = OracleSuite::new();
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+
+        let terminal = Self::catch_owned_panic(|| {
+            let future = test_fn(Arc::clone(&injector), &mut runtime, &mut oracles, region);
+            let (task, mut handle, effects) = runtime
+                .state
+                .create_task_with_deferred_spawn_effects(region, Budget::INFINITE, future)
+                .map_err(|error| InjectionOutcome::AssertionFailed(error.to_string()))?;
+            runtime
+                .scheduler
+                .lock()
+                .schedule(task, Budget::INFINITE.priority);
+            effects.dispatch();
+
+            loop {
+                // The TaskHandle retirement barrier makes this the same
+                // terminal observation boundary used by ordinary task joins.
+                match handle.try_join() {
+                    Ok(Some(output)) => {
+                        return Ok(matches!(
+                            output,
+                            InstrumentedPollResult::CancellationInjected(_)
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(crate::runtime::JoinError::Panicked(payload)) => {
+                        return Err(InjectionOutcome::Panic(payload.to_string()));
+                    }
+                    Err(error) => {
+                        return Err(InjectionOutcome::AssertionFailed(error.to_string()));
+                    }
+                }
+                if !runtime.step_for_owned_injection() {
+                    return Err(InjectionOutcome::Timeout);
+                }
+            }
+        })
+        .and_then(std::convert::identity);
+
+        let mut outcome = match terminal {
+            Ok(false) if target.is_some() => InjectionOutcome::AssertionFailed(format!(
+                "Injection target {} was not reached; future completed without cancellation injection",
+                target.unwrap_or(0)
+            )),
+            Ok(_) => InjectionOutcome::Success,
+            Err(outcome) => outcome,
+        };
+
+        // Close even on a factory/poll panic or timeout. A failure while
+        // requesting close must not suppress the bounded drain attempt.
+        let reason = CancelReason::user("owned injection run finished");
+        let reason = if runtime.now() > reason.timestamp {
+            reason.with_timestamp(runtime.now())
+        } else {
+            reason
+        };
+        let close = Self::catch_owned_panic(|| runtime.state.close_region_command(region, &reason));
+        let drain = Self::catch_owned_panic(|| {
+            while !Self::owned_run_drained(&runtime, region) {
+                if !runtime.step_for_owned_injection() {
+                    return Err(InjectionOutcome::Timeout);
+                }
+            }
+            Ok(())
+        })
+        .and_then(std::convert::identity);
+        for failure in [close.err(), drain.err()].into_iter().flatten() {
+            if matches!(outcome, InjectionOutcome::Success) {
+                outcome = failure;
+            }
+        }
+
+        // No second unbounded polling phase: cleanup and oracle hydration
+        // share the run's budget. Also check the recording run, so Never and
+        // zero-selected-point strategies cannot hide a broken baseline.
+        let oracle_violations = if self.config.use_all_oracles {
+            match Self::catch_owned_panic(|| {
+                let now = runtime.now();
+                let mut violations = oracles.check_all(now);
+                runtime
+                    .oracles
+                    .hydrate_temporal_from_state(&runtime.state, now);
+                violations.extend(runtime.oracles.check_all(now));
+                violations
+            }) {
+                Ok(violations) => violations,
+                Err(failure) => {
+                    if matches!(outcome, InjectionOutcome::Success) {
+                        outcome = failure;
+                    }
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let observed = injector.recorded_points().len();
+        LabInjectionResult {
+            injection: InjectionResult {
+                injection_point: target.unwrap_or(0),
+                outcome,
+                await_points_before: if target.is_some() {
+                    observed.saturating_sub(1)
+                } else {
+                    observed
+                },
+            },
+            oracle_violations,
+        }
+    }
+
+    fn owned_run_drained(runtime: &LabRuntime, region: RegionId) -> bool {
+        runtime.is_quiescent()
+            && runtime
+                .state
+                .region(region)
+                .is_none_or(|record| record.state().is_terminal())
+    }
+
+    fn catch_owned_panic<T>(f: impl FnOnce() -> T) -> Result<T, InjectionOutcome> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
+            let message = match payload.downcast::<String>() {
+                Ok(message) => *message,
+                Err(payload) => match payload.downcast::<&'static str>() {
+                    Ok(message) => (*message).to_owned(),
+                    Err(payload) => {
+                        // Reporting a panic must not execute an opaque panic
+                        // payload's potentially panicking destructor.
+                        std::mem::forget(payload);
+                        "Unknown panic".to_owned()
+                    }
+                },
+            };
+            InjectionOutcome::Panic(message)
+        })
     }
 
     /// Checks the oracles after one injection run.
@@ -792,6 +1045,36 @@ impl LabBuilder {
     {
         let mut runner = LabInjectionRunner::new(self.config);
         runner.run_with_lab(test_fn)
+    }
+
+    /// Builds the runner and executes owned futures through the Lab scheduler.
+    pub fn run_owned<F, Fut, T>(self, test_fn: F) -> LabInjectionReport
+    where
+        F: Fn(Arc<CancellationInjector>) -> InstrumentedFuture<Fut>,
+        Fut: Future<Output = T> + Send + 'static,
+        T: std::fmt::Debug + Send + 'static,
+    {
+        let mut runner = LabInjectionRunner::new(self.config);
+        runner.run_owned(test_fn)
+    }
+
+    /// Builds the runner and executes in an owned Lab region with setup access.
+    ///
+    /// See [`LabInjectionRunner::run_owned_with_lab`] for the factory arguments
+    /// and the bounded cleanup contract.
+    pub fn run_owned_with_lab<F, Fut, T>(self, test_fn: F) -> LabInjectionReport
+    where
+        F: Fn(
+            Arc<CancellationInjector>,
+            &mut LabRuntime,
+            &mut OracleSuite,
+            RegionId,
+        ) -> InstrumentedFuture<Fut>,
+        Fut: Future<Output = T> + Send + 'static,
+        T: std::fmt::Debug + Send + 'static,
+    {
+        let mut runner = LabInjectionRunner::new(self.config);
+        runner.run_owned_with_lab(test_fn)
     }
 }
 
