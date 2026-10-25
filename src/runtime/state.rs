@@ -5086,7 +5086,9 @@ impl RuntimeState {
             regions
                 .resolve_ref(&self.regions)
                 .get(region.arena_index())
-                .map(|record| record.obligation_admission_handle(task_id)),
+                .map(|record| {
+                    record.obligation_admission_handle_for_task(task_id, cleanup_task)
+                }),
         );
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());

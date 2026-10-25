@@ -62,6 +62,7 @@ pub mod adaptive;
 
 mod authenticated_control;
 use authenticated_control::{AuthenticatedControl, ControlRole, FULL_OBJECT_CONTROL_V1};
+mod delta_chunks;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -619,6 +620,7 @@ pub struct RqReceiveOptions {
     allow_special_files: bool,
     sparse_files: bool,
     authenticated_control: bool,
+    delta_chunks: bool,
 }
 
 impl RqReceiveOptions {
@@ -629,6 +631,7 @@ impl RqReceiveOptions {
             allow_special_files: false,
             sparse_files: false,
             authenticated_control: false,
+            delta_chunks: false,
         }
     }
 
@@ -650,7 +653,29 @@ impl RqReceiveOptions {
     /// Whether legacy unauthenticated control connections are refused.
     #[must_use]
     pub const fn authenticated_control(&self) -> bool {
-        self.authenticated_control
+        self.authenticated_control || self.delta_chunks
+    }
+
+    /// Reuse verified local chunks of a single regular file when the sender
+    /// advertises authenticated changed-chunk delivery.
+    ///
+    /// Missing fixed-size chunks travel over the reliable TCP control stream.
+    /// The receiver verifies reused chunks and the whole reconstructed file
+    /// before the existing atomic installation path. This is not CDC chunking
+    /// or RaptorQ coding of the delta. Enabling it also requires authenticated
+    /// control, including on full-object fallback; a stripped or absent offer
+    /// cannot select legacy unauthenticated control. Use
+    /// [`send_path_with_delta_chunks`] on the sender.
+    #[must_use]
+    pub const fn with_delta_chunks(mut self, enabled: bool) -> Self {
+        self.delta_chunks = enabled;
+        self
+    }
+
+    /// Whether authenticated, advertised changed-chunk reuse is enabled.
+    #[must_use]
+    pub const fn delta_chunks(&self) -> bool {
+        self.delta_chunks
     }
 
     /// Recreate portable special files when the platform and kind support it.
@@ -4447,9 +4472,13 @@ fn validate_rq_delta_request_envelope(
             }
         }
         DeltaWireMode::DeltaChunks => {
-            return Err(RqError::Control(
-                "RQ missing-chunk delta requests are not enabled in this rollout".to_string(),
-            ));
+            delta_chunks::validate_request(
+                manifest,
+                request,
+                envelope.udp_port,
+                &envelope.udp_ports,
+                control_source_stream,
+            )?;
         }
     }
     Ok(request.mode)
@@ -5305,7 +5334,6 @@ async fn build_rq_receiver_delta_request(
 /// is reused from local content). A content id present once on the receiver can
 /// satisfy any number of sender references to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // wired into build_rq_receiver_delta_request in a later sizeku slice
 struct RqDeltaChunkPlan {
     /// Sender chunks whose content id the receiver does not already hold.
     missing_chunks: Vec<DeltaChunkWire>,
@@ -5317,7 +5345,6 @@ struct RqDeltaChunkPlan {
     missing_bytes: u64,
 }
 
-#[allow(dead_code)] // wired into build_rq_receiver_delta_request in a later sizeku slice
 fn rq_plan_delta_chunks(
     sender_chunks: &[DeltaChunkWire],
     receiver_chunks: &[DeltaChunkWire],
@@ -8248,7 +8275,7 @@ pub async fn send_path(
     config: RqConfig,
     peer_id: &str,
 ) -> Result<SendReport, RqError> {
-    send_path_inner(cx, addr, source, config, peer_id, false).await
+    send_path_inner(cx, addr, source, config, peer_id, false, false).await
 }
 
 /// Transfer a bounded single file with authenticated delta negotiation and a
@@ -8270,7 +8297,27 @@ pub async fn send_path_with_authenticated_control(
     config: RqConfig,
     peer_id: &str,
 ) -> Result<SendReport, RqError> {
-    send_path_inner(cx, addr, source, config, peer_id, true).await
+    send_path_inner(cx, addr, source, config, peer_id, true, false).await
+}
+
+/// Transfer one bounded regular file with authenticated changed-chunk reuse.
+///
+/// This additive entry point offers fixed-size chunk reuse to receivers using
+/// [`RqReceiveOptions::with_delta_chunks`]. Missing chunks travel over the
+/// reliable TCP control stream; all selected data and control frames are
+/// authenticated and bound to this session. A peer without this optimization
+/// can select the existing authenticated full-object path. A peer selecting
+/// legacy unauthenticated control is refused, as with
+/// [`send_path_with_authenticated_control`]. Existing entry points do not offer
+/// changed chunks. Payload counters exclude locally reused bytes.
+pub async fn send_path_with_delta_chunks(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: RqConfig,
+    peer_id: &str,
+) -> Result<SendReport, RqError> {
+    send_path_inner(cx, addr, source, config, peer_id, true, true).await
 }
 
 async fn send_path_inner(
@@ -8280,6 +8327,7 @@ async fn send_path_inner(
     mut config: RqConfig,
     peer_id: &str,
     require_authenticated_control: bool,
+    offer_delta_chunks: bool,
 ) -> Result<SendReport, RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
     if require_authenticated_control {
@@ -8727,7 +8775,10 @@ async fn send_path_inner(
             )
         })?;
         let envelope = make_rq_delta_manifest_envelope(context, session, &manifest)?;
-        let manifest_frame = json_frame(FrameType::ObjectManifest, &envelope)?;
+        let mut manifest_frame = json_frame(FrameType::ObjectManifest, &envelope)?;
+        if offer_delta_chunks {
+            delta_chunks::advertise(&mut manifest_frame, context, session, &manifest)?;
+        }
         send_delta_control_frame(
             cx,
             &mut control,
@@ -8836,9 +8887,28 @@ async fn send_path_inner(
                 });
             }
             DeltaWireMode::DeltaChunks => {
-                return Err(RqError::Control(
-                    "RQ missing-chunk mode passed strict request validation".to_string(),
-                ));
+                if !offer_delta_chunks {
+                    return Err(RqError::Authentication(
+                        "receiver selected changed chunks without an authenticated offer"
+                            .to_string(),
+                    ));
+                }
+                control.enable_authenticated_control(
+                    context,
+                    session,
+                    &manifest.transfer_id,
+                    ControlRole::Sender,
+                )?;
+                return erase_send(delta_chunks::send(
+                    cx,
+                    &mut control,
+                    &manifest,
+                    &entries,
+                    &config,
+                    &request.request,
+                    peer,
+                ))
+                .await;
             }
         }
     } else {
@@ -11464,6 +11534,17 @@ pub async fn receive_connection_with_options(
 
         let mut request =
             build_rq_receiver_delta_request(cx, dest_dir, &config, &envelope.manifest).await?;
+        let chunk_plan = if options.delta_chunks()
+            && delta_chunks::offered(&manifest_frame, context, session, &envelope.manifest)?
+            && request.mode == DeltaWireMode::FullObject
+        {
+            delta_chunks::plan(cx, dest_dir, &config, &envelope.manifest).await?
+        } else {
+            None
+        };
+        if let Some(plan) = &chunk_plan {
+            request = plan.request.clone();
+        }
         if options.authenticated_control() && request.mode == DeltaWireMode::FullObject {
             request.fallback_reason = Some(FULL_OBJECT_CONTROL_V1.to_string());
         }
@@ -11591,9 +11672,26 @@ pub async fn receive_connection_with_options(
                 });
             }
             DeltaWireMode::DeltaChunks => {
-                return Err(RqError::Control(
-                    "RQ receiver emitted unsupported missing-chunk mode".to_string(),
-                ));
+                let plan = chunk_plan.ok_or_else(|| {
+                    RqError::Control("changed-chunk request lost its reconstruction plan".to_string())
+                })?;
+                control.enable_authenticated_control(
+                    context,
+                    session,
+                    &envelope.manifest.transfer_id,
+                    ControlRole::Receiver,
+                )?;
+                return erase_send(delta_chunks::receive(
+                    cx,
+                    &mut control,
+                    &envelope.manifest,
+                    &config,
+                    dest_dir,
+                    peer,
+                    options,
+                    plan,
+                ))
+                .await;
             }
         }
     } else {

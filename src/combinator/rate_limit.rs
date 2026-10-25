@@ -34,12 +34,16 @@
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
-use crate::types::Time;
+use crate::cx::{Cx, cap::HasTime};
+use crate::sync::Notify;
+use crate::types::{CancelReason, Time};
 
 // =========================================================================
 // Policy Configuration
@@ -267,6 +271,9 @@ pub struct RateLimiter {
     /// Waiting queue for FIFO ordering.
     wait_queue: RwLock<VecDeque<QueueEntry>>,
 
+    /// Broadcasts published token and queue transitions to async owners.
+    changed: Notify,
+
     /// Number of pending (result == None) entries. Maintained atomically
     /// so `try_acquire` can check if anyone is actually waiting without
     /// being blocked by zombie entries (granted/timed-out but not claimed).
@@ -326,6 +333,8 @@ pub struct QueuedRateLimitAcquire<'a> {
     entry_id: Option<u64>,
     cost: u32,
     last_observed_now: Time,
+    /// Async owners use their captured clock for cancellation-time queue progress.
+    drop_timer: Option<crate::time::TimerDriverHandle>,
 }
 
 impl<'a> QueuedRateLimitAcquire<'a> {
@@ -377,10 +386,14 @@ impl Drop for QueuedRateLimitAcquire<'_> {
             // cannot refund an immediate grant. This owner retains that cost.
             self.limiter.refund_tokens(self.cost);
         } else {
-            // Cancellation removes pending and terminal records alike and
-            // refunds a granted-but-unclaimed entry exactly once. The latest
-            // caller-provided time supplies drop-time wait accounting.
-            self.limiter.cancel_entry(entry_id, self.last_observed_now);
+            // Async drop uses the captured clock: a stale last poll must not
+            // grant a follower whose queue deadline has since expired. Manual
+            // owners retain their explicit caller-driven time semantics.
+            let now = self
+                .drop_timer
+                .as_ref()
+                .map_or(self.last_observed_now, |driver| driver.now());
+            self.limiter.cancel_entry(entry_id, now);
         }
     }
 }
@@ -399,6 +412,7 @@ impl RateLimiter {
                 last_refill: 0,
             }),
             wait_queue: RwLock::new(VecDeque::with_capacity(16)),
+            changed: Notify::new(),
             pending_queue_count: AtomicU32::new(0),
             next_id: AtomicU64::new(0),
             total_allowed: AtomicU64::new(0),
@@ -473,7 +487,9 @@ impl RateLimiter {
             let new_fractional = (total_fractional % u128::from(period_ms)) as u64;
 
             state.tokens =
-                (u64::from(state.tokens) + new_tokens).min(u64::from(self.policy.burst)) as u32;
+                u64::from(state.tokens)
+                    .saturating_add(new_tokens)
+                    .min(u64::from(self.policy.burst)) as u32;
             state.fractional = new_fractional;
 
             if state.tokens == self.policy.burst {
@@ -487,7 +503,13 @@ impl RateLimiter {
     /// Refill tokens based on elapsed time from the provided deterministic clock.
     pub fn refill(&self, now: Time) {
         let mut state = self.state.lock();
+        let previous_tokens = state.tokens;
         self.refill_inner(&mut state, now.as_millis());
+        let changed = state.tokens != previous_tokens;
+        drop(state);
+        if changed {
+            self.notify_admission_change();
+        }
     }
 
     /// Try to acquire tokens without waiting.
@@ -579,7 +601,16 @@ impl RateLimiter {
         }
 
         let mut state = self.state.lock();
+        let previous_tokens = state.tokens;
         state.tokens = state.tokens.saturating_add(cost).min(self.policy.burst);
+        if state.tokens == self.policy.burst {
+            state.fractional = 0;
+        }
+        let changed = state.tokens != previous_tokens;
+        drop(state);
+        if changed {
+            self.notify_admission_change();
+        }
     }
 
     /// Acquire a refundable permit for `cost` tokens.
@@ -752,6 +783,7 @@ impl RateLimiter {
             entry_id: Some(entry_id),
             cost,
             last_observed_now: now,
+            drop_timer: None,
         })
     }
 
@@ -779,6 +811,7 @@ impl RateLimiter {
             entry_id: Some(entry_id),
             cost,
             last_observed_now: now,
+            drop_timer: None,
         })
     }
 
@@ -846,6 +879,8 @@ impl RateLimiter {
 
         self.pending_queue_count.fetch_add(1, Ordering::Relaxed);
         self.total_waited.fetch_add(1, Ordering::Relaxed);
+        drop(queue);
+        self.notify_admission_change();
 
         Ok(entry_id)
     }
@@ -968,6 +1003,11 @@ impl RateLimiter {
                 .fetch_max(new_max_ms, Ordering::Relaxed);
         }
 
+        drop(state);
+        drop(queue);
+        if granted_count > 0 || timeout_count > 0 {
+            self.notify_admission_change();
+        }
         first_granted
     }
 
@@ -1034,11 +1074,8 @@ impl RateLimiter {
 
             if previous_result == Some(Ok(())) {
                 // Refund tokens if already granted but not consumed by the caller
-                let mut state = self.state.lock();
-                state.tokens = state.tokens.saturating_add(cost).min(self.policy.burst);
-                // We could decrement total_allowed here, but the operation was technically
-                // allowed from the rate limiter's perspective, just not consumed.
-                drop(state);
+                self.refund_tokens(cost);
+                // total_allowed records the grant, even when its owner cancels.
                 let _ = self.process_queue(now);
             } else if previous_result.is_none() {
                 let wait_ms = now.as_millis().saturating_sub(enqueued_at_millis);
@@ -1046,6 +1083,7 @@ impl RateLimiter {
                     .fetch_add(wait_ms, Ordering::Relaxed);
                 self.max_wait_time_ms.fetch_max(wait_ms, Ordering::Relaxed);
             }
+            self.notify_admission_change();
         }
     }
 
@@ -1067,6 +1105,7 @@ impl RateLimiter {
         queue.clear();
         self.pending_queue_count.store(0, Ordering::Relaxed);
         drop(queue);
+        self.notify_admission_change();
     }
 }
 
@@ -1251,6 +1290,224 @@ impl fmt::Debug for SlidingWindowRateLimiter {
 // =========================================================================
 // Error Types
 // =========================================================================
+
+/// Failures from cancellation-aware async rate-limit admission.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum RateLimitAcquireError {
+    /// The limiter refused or expired the owned queue entry.
+    Admission(RateLimitError<()>),
+    /// Cancellation was acknowledged before the permit was handed to the caller.
+    Cancelled(CancelReason),
+    /// Waiting or refilling requires the supplied context's time capability
+    /// and timer driver.
+    TimerUnavailable,
+}
+
+impl fmt::Display for RateLimitAcquireError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admission(error) => write!(f, "rate-limit admission failed: {error:?}"),
+            Self::Cancelled(reason) => write!(f, "rate-limit admission cancelled: {reason:?}"),
+            Self::TimerUnavailable => f.write_str(
+                "waiting for rate-limit admission requires time capability and a timer driver",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RateLimitAcquireError {}
+
+impl From<RateLimitError<()>> for RateLimitAcquireError {
+    fn from(error: RateLimitError<()>) -> Self {
+        Self::Admission(error)
+    }
+}
+
+impl RateLimitAcquireError {
+    fn cancelled<Caps>(cx: &Cx<Caps>) -> Self {
+        Self::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("rate-limit admission cancelled")),
+        )
+    }
+}
+
+impl RateLimiter {
+    /// Acquire a refundable permit, parking until quota or a terminal event.
+    ///
+    /// Admission uses the existing weighted FIFO and counts every retained
+    /// queue record against `max_queued`, including unclaimed grants and
+    /// timeouts. An immediate grant needs no queue slot. Use the same bound
+    /// for all callers to enforce a limiter-wide cap; the older unbounded
+    /// queue APIs remain unbounded.
+    ///
+    /// The supplied context's timer drives token replenishment and queue
+    /// deadlines. All timed users of this limiter must share its clock domain.
+    /// With no authorized timer, only already-available tokens can be claimed;
+    /// this path neither reads an ambient clock nor refills the bucket.
+    /// Zero-rate or zero-period policies wait for refunds, reset, cancellation
+    /// or a configured timeout without periodic polling.
+    ///
+    /// The queue entry remains owned across every wait. Dropping this future
+    /// removes it and refunds any unclaimed grant. The returned permit also
+    /// refunds on drop until committed. Cancellation is checked before the
+    /// handoff and respects the context's cancellation mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original queue refusal/timeout, a typed cancellation, or
+    /// `TimerUnavailable` before queue admission when no timer is authorized.
+    /// Reset invalidates the entry with `Admission(RateLimitError::Cancelled)`.
+    pub async fn acquire_async_bounded<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        cost: u32,
+        max_queued: usize,
+    ) -> Result<RateLimitPermit<'_>, RateLimitAcquireError>
+    where
+        Caps: HasTime,
+    {
+        cx.checkpoint()
+            .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+        let Some(driver) = cx.timer_driver() else {
+            if let Some(permit) = self.try_acquire_available(cost) {
+                cx.checkpoint()
+                    .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+                return Ok(permit);
+            }
+            if cost > self.policy.burst {
+                self.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitError::RateLimitExceeded.into());
+            }
+            return Err(RateLimitAcquireError::TimerUnavailable);
+        };
+        let now = driver.now();
+        cx.checkpoint()
+            .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+        let mut queued = self.acquire_queued_bounded(cost, now, max_queued)?;
+        queued.drop_timer = Some(driver.clone());
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+
+        loop {
+            let mut changed = std::pin::pin!(self.changed.notified());
+            // Arm the broadcast generation before inspecting queue state.
+            changed.as_mut().enable();
+            let now = driver.now();
+            // A deadline omitted below as already elapsed must have been
+            // checked at an equal or later time, even across a clock tick.
+            cx.checkpoint()
+                .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+            if let Some(permit) = queued.poll_claim(now)? {
+                cx.checkpoint()
+                    .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+                return Ok(permit);
+            }
+
+            let queue_wake = self.next_async_wake(now);
+            if queue_wake.is_some_and(|deadline| deadline <= now) {
+                // A concurrent refund or queue insertion made real progress
+                // possible after poll_claim. The next pass grants or expires
+                // that entry; unrepresentable future times never take this path.
+                continue;
+            }
+            let owner_deadline = cx.budget().deadline.filter(|deadline| *deadline > now);
+            let wake_at = match (queue_wake, owner_deadline) {
+                (Some(queue), Some(owner)) => Some(queue.min(owner)),
+                (queue, owner) => queue.or(owner),
+            };
+            let mut timer = std::pin::pin!(
+                wake_at.map(|deadline| crate::time::Sleep::with_timer_driver(deadline, driver.clone()))
+            );
+            poll_fn(|task| {
+                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                    return Poll::Ready(());
+                }
+                if changed.as_mut().poll(task).is_ready() {
+                    return Poll::Ready(());
+                }
+                if let Some(timer) = timer.as_mut().as_pin_mut()
+                    && timer.poll_deadline(task).is_ready()
+                {
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            })
+            .await;
+        }
+    }
+
+    /// Claim only existing credit when no time authority is available.
+    fn try_acquire_available(&self, cost: u32) -> Option<RateLimitPermit<'_>> {
+        let queue = self.wait_queue.read();
+        if queue.iter().any(|entry| entry.result.is_none()) {
+            return None;
+        }
+        let mut state = self.state.lock();
+        if state.tokens < cost {
+            return None;
+        }
+        state.tokens -= cost;
+        drop(state);
+        drop(queue);
+        self.total_allowed.fetch_add(1, Ordering::Relaxed);
+        Some(RateLimitPermit {
+            limiter: self,
+            cost,
+            refund: true,
+        })
+    }
+
+    /// Next real queue transition, in the same whole-millisecond clock as
+    /// refill_inner. A new request's retry_after includes all pending demand
+    /// and must not be used to schedule an existing FIFO owner.
+    fn next_async_wake(&self, now: Time) -> Option<Time> {
+        let queue = self.wait_queue.read();
+        let head = queue.iter().find(|entry| entry.result.is_none())?;
+        let mut state = self.state.lock();
+        self.refill_inner(&mut state, now.as_millis());
+
+        let token_millis = if state.tokens >= head.cost {
+            Some(u128::from(now.as_millis()))
+        } else if self.policy.rate > 0 && !self.policy.period.is_zero() {
+            let needed = u128::from(head.cost - state.tokens)
+                * u128::from(period_to_millis_ceil(self.policy.period));
+            let remaining = needed.saturating_sub(u128::from(state.fractional));
+            Some(
+                u128::from(state.last_refill)
+                    + remaining.div_ceil(u128::from(self.policy.rate)),
+            )
+        } else {
+            None
+        };
+        let timeout_millis = queue
+            .iter()
+            .filter(|entry| entry.result.is_none())
+            .map(|entry| u128::from(entry.deadline_millis))
+            .min();
+        token_millis
+            .into_iter()
+            .chain(timeout_millis)
+            .min()
+            // Time stores u64 nanoseconds. Saturating an unreachable future
+            // millisecond to Time::MAX would create a hot loop at that clock.
+            .and_then(|millis| u64::try_from(millis * 1_000_000).ok())
+            .map(Time::from_nanos)
+    }
+
+    /// Complete publication even if an external wake callback panics.
+    fn notify_admission_change(&self) {
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+            self.changed.notify_waiters();
+        })) {
+            // A panic payload may itself panic on drop. Only the secondary
+            // payload is leaked; queue/token ownership remains committed.
+            if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+                std::mem::forget(secondary);
+            }
+        }
+    }
+}
 
 /// Errors from rate limiter.
 #[derive(Debug, Clone, PartialEq, Eq)]

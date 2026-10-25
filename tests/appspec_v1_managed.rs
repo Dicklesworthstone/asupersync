@@ -1187,3 +1187,365 @@ fn managed_app_signal_wait_obeys_inherited_deadline_on_native_workers() {
         native(workers, signal_parent_deadline_scenario);
     }
 }
+
+fn stop_group_manifest() -> Value {
+    let mut manifest = manifest_json();
+    manifest["supervision"]["groups"][0]["restart_policy"] = json!("stop");
+    manifest["services"][0]["background_jobs"] = json!([{
+        "name": "fail", "entrypoint": "example::fail", "trigger": "startup",
+        "required_capabilities": {
+            "cx_capabilities": ["pure"], "feature_flags": [], "resources": []
+        },
+        "budget": "work"
+    }]);
+    manifest
+}
+
+async fn parked_stop_sibling(cx: Cx, witness: Arc<DrainWitness>) -> Outcome<(), &'static str> {
+    let _retired = Retired(Arc::clone(&witness));
+    let mut cancelled = std::pin::pin!(cx.cancelled());
+    poll_fn(|task| {
+        let progress = cancelled.as_mut().poll(task);
+        if progress.is_pending() {
+            witness.parked.store(true, Ordering::Release);
+            witness.changed.notify_waiters();
+        }
+        progress
+    })
+    .await;
+    assert!(cx.checkpoint().is_err());
+    let reason = cx.cancel_reason().expect("sibling cancellation");
+    witness.cancelled.store(true, Ordering::Release);
+    witness.changed.notify_waiters();
+    witness
+        .changed
+        .wait_until(|| witness.release.load(Ordering::Acquire))
+        .await;
+    Outcome::Cancelled(reason)
+}
+
+async fn stop_group_failure_scenario(cx: Cx, mode: ManagedRestartMode, failure: u8) {
+    use asupersync::app::ManagedAppWorkError;
+    use asupersync::supervision::{EscalationPolicy, ManagedSupervisorError, RestartPolicy};
+
+    let parent = cx.open_child_region(signal_parent_spec()).await.unwrap();
+    let witness = Arc::new(DrainWitness::default());
+    let observer = Arc::clone(&witness);
+    let fail_ready = Arc::new(AtomicBool::new(false));
+    let fail_gate = Arc::new(Notify::new());
+    let ready = Arc::clone(&fail_ready);
+    let gate = Arc::clone(&fail_gate);
+    let starts = Arc::new(AtomicUsize::new(0));
+    let fail_starts = Arc::clone(&starts);
+    let sibling_starts = Arc::new(AtomicUsize::new(0));
+    let observed_starts = Arc::clone(&sibling_starts);
+    // Even zero intensity plus ResetCounter must not convert the manifest's
+    // Stop policy into an automatic replacement or a per-child silent stop.
+    let config = SupervisionConfig::new(0, Duration::from_secs(60))
+        .with_restart_policy(RestartPolicy::OneForAll)
+        .with_backoff(BackoffStrategy::None)
+        .with_escalation(EscalationPolicy::ResetCounter);
+    let app = parse(stop_group_manifest())
+        .bind_managed(
+            vec![
+                ManagedAppBinding::route(
+                    "api.route.health",
+                    AsyncCxFnHandler::new(|cx: Cx| async move {
+                        assert_pure_work_context(&cx);
+                        Response::new(StatusCode::OK, "healthy")
+                    }),
+                ),
+                ManagedAppBinding::worker(
+                    "api.actor.cache",
+                    ManagedRestartMode::Permanent,
+                    move |cx: Cx, _| {
+                        assert_pure_work_context(&cx);
+                        observed_starts.fetch_add(1, Ordering::AcqRel);
+                        parked_stop_sibling(cx, Arc::clone(&observer))
+                    },
+                ),
+                ManagedAppBinding::worker(
+                    "api.job.fail",
+                    mode,
+                    move |cx: Cx, _| {
+                        assert_pure_work_context(&cx);
+                        fail_starts.fetch_add(1, Ordering::AcqRel);
+                        gate.notify_waiters();
+                        let ready = Arc::clone(&ready);
+                        let gate = Arc::clone(&gate);
+                        async move {
+                            gate.wait_until(|| ready.load(Ordering::Acquire)).await;
+                            match failure {
+                                0 => Outcome::Err("stop policy domain failure"),
+                                1 => Outcome::Panicked(asupersync::types::PanicPayload::new(
+                                    "encoded stop policy panic",
+                                )),
+                                _ => panic!("actual stop policy poll panic"),
+                            }
+                        }
+                    },
+                ),
+            ],
+            config,
+        )
+        .unwrap();
+    let mut app = app.start(parent.cx()).unwrap();
+    witness
+        .changed
+        .wait_until(|| witness.parked.load(Ordering::Acquire))
+        .await;
+    fail_gate
+        .wait_until(|| starts.load(Ordering::Acquire) == 1)
+        .await;
+    while !app.routes_ready() {
+        yield_now().await;
+    }
+    let router = app.router();
+    assert_eq!(
+        router
+            .handle_with_cx(&cx, Request::new("GET", "/health"))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(starts.load(Ordering::Acquire), 1);
+    assert_eq!(sibling_starts.load(Ordering::Acquire), 1);
+    fail_ready.store(true, Ordering::Release);
+    fail_gate.notify_waiters();
+    witness
+        .changed
+        .wait_until(|| witness.cancelled.load(Ordering::Acquire))
+        .await;
+    let mut joined = Box::pin(app.join());
+    poll_fn(|task| {
+        assert!(
+            joined.as_mut().poll(task).is_pending(),
+            "Stop group published before its parked sibling drained"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    assert!(!witness.retired.load(Ordering::Acquire));
+    assert_eq!(starts.load(Ordering::Acquire), 1);
+    assert_eq!(sibling_starts.load(Ordering::Acquire), 1);
+    assert_eq!(
+        router
+            .handle_with_cx(&cx, Request::new("GET", "/health"))
+            .await
+            .status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    witness.release.store(true, Ordering::Release);
+    witness.changed.notify_waiters();
+    let report = joined.await.unwrap();
+    assert!(witness.retired.load(Ordering::Acquire));
+    assert_eq!(report.started, 3);
+    assert_eq!(report.joined, 3);
+    assert_eq!(report.restart_batches, 0);
+    assert_eq!(report.escalations, 0);
+    let failed = report
+        .children
+        .iter()
+        .find(|child| child.name.as_str() == "api.job.fail")
+        .expect("failed generation retained");
+    assert_eq!(failed.generation.number, 1);
+    assert!(failed.region_outcome.is_some());
+    assert!(failed.cleanup_outcome.as_ref().is_none_or(Outcome::is_ok));
+    if failure == 0 {
+        assert!(matches!(
+            &report.outcome,
+            Outcome::Err(ManagedSupervisorError::ChildFailed { child, generation })
+                if child.as_str() == "api.job.fail" && *generation == failed.generation
+        ));
+        assert!(matches!(
+            &failed.outcome,
+            Outcome::Err(ManagedAppWorkError::Domain("stop policy domain failure"))
+        ));
+    } else {
+        assert!(matches!(report.outcome, Outcome::Panicked(_)));
+        assert!(matches!(failed.outcome, Outcome::Panicked(_)));
+    }
+    assert!(!cx.is_cancel_requested(), "ordinary group stop cancelled its parent");
+    parent.close().await.unwrap();
+}
+
+struct StopPolicyCompletionProbe {
+    cancelled: bool,
+    retired: Arc<AtomicBool>,
+    changed: Arc<Notify>,
+}
+
+impl asupersync::supervision::ManagedChildFactory<&'static str> for StopPolicyCompletionProbe {
+    fn start(
+        &self,
+        _: Cx,
+        _: ManagedGeneration,
+    ) -> asupersync::supervision::ManagedChildFuture<&'static str> {
+        let cancelled = self.cancelled;
+        Box::pin(async move {
+            if cancelled {
+                Outcome::Cancelled(asupersync::types::CancelReason::user("normal child stop"))
+            } else {
+                Outcome::Ok(())
+            }
+        })
+    }
+
+    fn retired(&self) {
+        self.retired.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+}
+
+fn stop_policy_legacy_start(
+    _: &asupersync::cx::Scope<'static>,
+    _: &mut asupersync::runtime::RuntimeState,
+    _: &Cx,
+) -> Result<asupersync::types::TaskId, asupersync::runtime::SpawnError> {
+    panic!("managed stop policy must not call legacy factories")
+}
+
+async fn stop_policy_nonfailure_scenario(cx: Cx) {
+    use asupersync::supervision::{ChildSpec, ManagedChildBinding, SupervisorBuilder};
+
+    for cancelled in [false, true] {
+        let retired = Arc::new(AtomicBool::new(false));
+        let changed = Arc::new(Notify::new());
+        let witness = Arc::new(DrainWitness::default());
+        let observer = Arc::clone(&witness);
+        let supervisor = SupervisorBuilder::new("stop-nonfailure")
+            .child(ChildSpec::new("finished", stop_policy_legacy_start))
+            .child(ChildSpec::new("waiting", stop_policy_legacy_start))
+            .compile()
+            .unwrap()
+            .bind_managed(
+                vec![
+                    ManagedChildBinding::new(
+                        "finished",
+                        ManagedRestartMode::Transient,
+                        StopPolicyCompletionProbe {
+                            cancelled,
+                            retired: Arc::clone(&retired),
+                            changed: Arc::clone(&changed),
+                        },
+                    ),
+                    ManagedChildBinding::new(
+                        "waiting",
+                        ManagedRestartMode::Permanent,
+                        move |cx: Cx, _| parked_stop_sibling(cx, Arc::clone(&observer)),
+                    ),
+                ],
+                config(),
+            )
+            .unwrap()
+            .with_stop_on_child_failure();
+        let mut handle = supervisor.spawn(&cx).unwrap();
+        changed
+            .wait_until(|| retired.load(Ordering::Acquire))
+            .await;
+        witness
+            .changed
+            .wait_until(|| witness.parked.load(Ordering::Acquire))
+            .await;
+        // Retirement proves the controller processed the first completion.
+        // The remaining sibling must still be alive under the Stop option.
+        assert!(!witness.cancelled.load(Ordering::Acquire));
+        {
+            let mut joined = Box::pin(handle.join());
+            poll_fn(|task| {
+                assert!(joined.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+        }
+        handle.abort();
+        witness
+            .changed
+            .wait_until(|| witness.cancelled.load(Ordering::Acquire))
+            .await;
+        witness.release.store(true, Ordering::Release);
+        witness.changed.notify_waiters();
+        let report = handle.join().await.unwrap();
+        assert!(matches!(report.outcome, Outcome::Cancelled(_)));
+        assert_eq!(report.started, 2);
+        assert_eq!(report.joined, 2);
+        assert_eq!(report.restart_batches, 0);
+        assert!(witness.retired.load(Ordering::Acquire));
+        let finished = report
+            .children
+            .iter()
+            .find(|child| child.name.as_str() == "finished")
+            .unwrap();
+        assert_eq!(finished.outcome.is_cancelled(), cancelled);
+        assert_eq!(finished.outcome.is_ok(), !cancelled);
+    }
+}
+
+#[test]
+fn managed_app_stop_policy_drains_siblings_and_preserves_failure_on_native_workers() {
+    for workers in [1, 4] {
+        for mode in [
+            ManagedRestartMode::Temporary,
+            ManagedRestartMode::Transient,
+            ManagedRestartMode::Permanent,
+        ] {
+            for failure in 0..3 {
+                native(workers, move |cx| stop_group_failure_scenario(cx, mode, failure));
+            }
+        }
+    }
+}
+
+#[test]
+fn managed_stop_policy_keeps_siblings_alive_after_normal_child_completion() {
+    for workers in [1, 4] {
+        native(workers, stop_policy_nonfailure_scenario);
+    }
+}
+
+#[test]
+fn managed_app_stop_policy_preserves_legacy_lowering_refusal() {
+    use asupersync::app::AppSpecV1CompileError;
+    let manifest = stop_group_manifest();
+    let result = parse(manifest).compile_with_child_specs(Vec::new());
+    assert!(matches!(
+        result,
+        Err(AppSpecV1CompileError::UnsupportedRuntimeMapping { .. })
+    ));
+}
+
+#[test]
+fn managed_app_stop_policy_reaches_seeded_lab_quiescence() {
+    use asupersync::{LabConfig, LabRuntime};
+
+    for seed in [17, 41, 93] {
+        let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(8192));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                let cx = Cx::current().unwrap();
+                for mode in [
+                    ManagedRestartMode::Temporary,
+                    ManagedRestartMode::Transient,
+                    ManagedRestartMode::Permanent,
+                ] {
+                    for failure in 0..3 {
+                        stop_group_failure_scenario(cx.clone(), mode, failure).await;
+                    }
+                }
+                stop_policy_nonfailure_scenario(cx).await;
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        let virtual_time = lab.run_with_auto_advance();
+        let report = lab.run_until_quiescent_with_report();
+        assert!(
+            matches!(join.try_join(), Ok(Some(()))),
+            "{virtual_time:?} {report:?}"
+        );
+        assert!(lab.state.tasks_is_empty(), "Stop group left live tasks");
+        assert!(lab.state.obligations_iter().all(|(_, o)| !o.is_pending()));
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

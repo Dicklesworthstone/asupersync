@@ -12,6 +12,9 @@
 #[path = "atp_rq_loopback_e2e/authenticated_control.rs"]
 mod authenticated_control;
 
+#[path = "atp_rq_loopback_e2e/delta_chunks.rs"]
+mod delta_chunks;
+
 use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

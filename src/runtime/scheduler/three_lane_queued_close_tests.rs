@@ -638,3 +638,289 @@ fn native_obligation_close_keeps_notifications_when_its_parent_walk_panics() {
         fixture.finish_healthy();
     }
 }
+
+
+#[test]
+fn native_async_finalizer_checked_permits_obey_quota_and_retirement() {
+    use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+    use crate::sync::{CheckedAcquireError, OwnedSemaphorePermit, Semaphore};
+
+    for layout in [TableLayout::Embedded, TableLayout::Sharded, TableLayout::ExternalOnly] {
+        for limit in [0_usize, 1, 3] {
+            let mut fixture = Fixture::new(layout);
+            let child = fixture.open_child();
+            let child_id = child.region_id();
+            let semaphore = Arc::new(Semaphore::new(limit + 1));
+            let cleanup_semaphore = Arc::clone(&semaphore);
+            let retained = Arc::new(parking_lot::Mutex::new(None::<Cx>));
+            let cleanup_retained = Arc::clone(&retained);
+            let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cleanup_started = Arc::clone(&started);
+            let (release, mut released) = crate::channel::oneshot::channel::<()>();
+            {
+                let mut state = fixture.state.lock().unwrap();
+                let region = state.region(child_id).unwrap();
+                let mut limits = region.limits();
+                limits.max_obligations = Some(limit);
+                region.set_limits(limits);
+                assert!(state.register_async_finalizer(child_id, async move {
+                    let cx = Cx::current().expect("real native finalizer context");
+                    *cleanup_retained.lock() = Some(cx.clone());
+                    // Zero units never consume quota, including a zero quota.
+                    drop(OwnedSemaphorePermit::acquire_checked(
+                        Arc::clone(&cleanup_semaphore), &cx, 0,
+                    ).await.unwrap());
+                    let mut permits = Vec::new();
+                    for _ in 0..limit {
+                        permits.push(OwnedSemaphorePermit::acquire_checked(
+                            Arc::clone(&cleanup_semaphore), &cx, 1,
+                        ).await.expect("live cleanup admits tracked resources"));
+                    }
+                    assert!(matches!(
+                        cleanup_semaphore.try_acquire_checked(&cx, 1),
+                        Err(CheckedAcquireError::Admission(
+                            ObligationAdmissionError::LimitReached {
+                                limit: observed,
+                                live,
+                            }
+                        )) if observed == limit && live == limit
+                    ));
+                    assert_eq!(cleanup_semaphore.available_permits(), 1);
+                    cleanup_started.store(true, std::sync::atomic::Ordering::SeqCst);
+                    released.recv_uninterruptible().await.unwrap();
+                    drop(permits);
+                }));
+            }
+            let probe = CloseProbe::install(
+                &fixture.state, fixture.table.as_ref(), child_id, ClosePanic::None,
+            );
+            let mut close = std::pin::pin!(child.close_with_outcome());
+            let mut poll = Context::from_waker(Waker::noop());
+            assert!(close.as_mut().poll(&mut poll).is_pending());
+            assert_eq!(fixture.worker.drain_region_commands(), 1);
+            // Native completion discovers and publishes the real finalizer.
+            fixture.finish_healthy();
+            let finalizer = fixture.worker.next_task().expect("finalizer is runnable");
+            fixture.worker.execute(finalizer);
+            assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+            let cleanup_cx = retained.lock().as_ref().unwrap().clone();
+            assert_eq!(cleanup_cx.task_id(), finalizer);
+            assert_eq!(cleanup_cx.region_id(), child_id);
+            assert_eq!(fixture.worker.drain_spawn_admissions(), 0);
+            probe.assert_pending();
+            {
+                let mut state = fixture.state.lock().unwrap();
+                let region = state.region(child_id).unwrap();
+                assert_eq!(region.state(), crate::record::region::RegionState::Finalizing);
+                assert_eq!(region.pending_obligations(), limit);
+                assert_eq!(region.unapplied_obligation_count(), limit);
+                assert!(matches!(
+                    region.add_task(finalizer),
+                    Err(crate::record::AdmissionError::Closed)
+                ));
+                assert!(!state.can_region_complete_close(child_id));
+                assert!(state.create_child_region(child_id, Budget::INFINITE).is_err());
+            }
+            // Cleanup checked credits do not widen the direct-ID contract.
+            assert!(matches!(
+                cleanup_cx.reserve_direct_obligation(finalizer, child_id),
+                Some(Err(ObligationAdmissionError::RegionClosed))
+            ));
+            assert!(close.as_mut().poll(&mut poll).is_pending());
+            release.send_blocking(()).unwrap();
+            assert_eq!(fixture.worker.next_task(), Some(finalizer));
+            fixture.worker.execute(finalizer);
+            probe.assert_delivered();
+            let receipt = match close.as_mut().poll(&mut poll) {
+                Poll::Ready(Ok(receipt)) => receipt,
+                result => panic!("checked cleanup failed to retire: {result:?}"),
+            };
+            assert!(matches!(receipt.cleanup_outcome, Some(crate::types::Outcome::Ok(()))));
+            assert_eq!(semaphore.available_permits(), limit + 1);
+            assert!(matches!(
+                cleanup_cx.try_register_obligation_checked(
+                    ObligationKind::SemaphorePermit, finalizer,
+                ),
+                Err(ObligationAdmissionError::RegionClosed)
+            ));
+            let stats = fixture.obligations.stats();
+            assert_eq!(stats.reserved, limit as u64);
+            assert_eq!(stats.committed, limit as u64);
+            assert_eq!(stats.posted, 2 * limit as u64);
+            assert_eq!(stats.applied, stats.posted);
+            assert_eq!(stats.refused, 0);
+            assert_eq!(stats.leaked, 0);
+            assert_eq!(fixture.obligations.open_tickets(), 0);
+            let state = fixture.state.lock().unwrap();
+            assert!(state.region_was_closed(child_id));
+            assert_eq!(state.pending_obligation_count(), 0);
+            assert_eq!(state.leak_count(), 0);
+        }
+    }
+}
+
+
+fn spawn_native_cleanup_probe(
+    fixture: &mut Fixture,
+    future: impl Future<Output = u8> + Send + 'static,
+) -> (TaskId, TaskHandle<u8>) {
+    let (task, handle, effects) = {
+        let mut state = fixture.state.lock().unwrap();
+        let mut target = fixture.table.as_ref().map_or(AdmissionTaskTarget::Embedded, |table| {
+            AdmissionTaskTarget::External(table.lock().unwrap())
+        });
+        state.create_task_with_deferred_spawn_effects_in(
+            fixture.root, Budget::INFINITE, future, &mut target,
+            &AdmissionRegionTarget::Embedded,
+        ).unwrap()
+    };
+    effects.dispatch();
+    fixture._scheduler.inject_ready(task, 50);
+    (task, handle)
+}
+
+#[test]
+fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destination() {
+    use crate::runtime::obligation_mailbox::{
+        ObligationAdmissionError, ObligationTransferError,
+    };
+
+    for layout in [TableLayout::Embedded, TableLayout::Sharded, TableLayout::ExternalOnly] {
+        let mut fixture = Fixture::new(layout);
+        let child = fixture.open_child();
+        let child_id = child.region_id();
+        let retained = Arc::new(parking_lot::Mutex::new(None::<Cx>));
+        let cleanup_retained = Arc::clone(&retained);
+        let received = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup_received = Arc::clone(&received);
+        let (transfer, mut transferred) = crate::channel::oneshot::channel::<ObligationToken>();
+        let (finish, mut finished) = crate::channel::oneshot::channel::<()>();
+        {
+            let mut state = fixture.state.lock().unwrap();
+            let region = state.region(child_id).unwrap();
+            let mut limits = region.limits();
+            limits.max_obligations = Some(1);
+            region.set_limits(limits);
+            assert!(state.register_async_finalizer(child_id, async move {
+                let cx = Cx::current().expect("real native finalizer context");
+                *cleanup_retained.lock() = Some(cx.clone());
+                let token = transferred.recv_uninterruptible().await.unwrap();
+                assert_eq!(token.holder(), cx.task_id());
+                assert_eq!(token.region(), cx.region_id());
+                assert!(matches!(
+                    cx.try_register_obligation_checked(ObligationKind::Lease, cx.task_id()),
+                    Err(ObligationAdmissionError::LimitReached { limit: 1, live: 1 })
+                ));
+                cleanup_received.store(true, std::sync::atomic::Ordering::SeqCst);
+                finished.recv_uninterruptible().await.unwrap();
+                assert!(token.commit());
+            }));
+        }
+        let probe = CloseProbe::install(
+            &fixture.state, fixture.table.as_ref(), child_id, ClosePanic::None,
+        );
+        let mut close = std::pin::pin!(child.close_with_outcome());
+        let mut poll = Context::from_waker(Waker::noop());
+        assert!(close.as_mut().poll(&mut poll).is_pending());
+        assert_eq!(fixture.worker.drain_region_commands(), 1);
+        fixture.finish_healthy();
+        let finalizer = fixture.worker.next_task().expect("finalizer is runnable");
+        fixture.worker.execute(finalizer);
+        let cleanup_cx = retained.lock().as_ref().unwrap().clone();
+        assert_eq!(cleanup_cx.task_id(), finalizer);
+        assert_eq!(
+            fixture.state.lock().unwrap().region(child_id).unwrap().state(),
+            crate::record::region::RegionState::Finalizing,
+        );
+        probe.assert_pending();
+
+        let (published, mut publication) = crate::channel::oneshot::channel::<ObligationToken>();
+        let (release_source, mut source_released) = crate::channel::oneshot::channel::<()>();
+        let (source, mut source_handle) = spawn_native_cleanup_probe(&mut fixture, async move {
+            let cx = Cx::current().expect("real native source context");
+            let token = cx.try_register_obligation_checked(
+                ObligationKind::Lease, cx.task_id(),
+            ).unwrap().unwrap();
+            published.send_blocking(token).unwrap();
+            source_released.recv_uninterruptible().await.unwrap();
+            41_u8
+        });
+        assert_eq!(fixture.worker.next_task(), Some(source));
+        fixture.worker.execute(source);
+        let token = publication.try_recv().unwrap();
+        let original_ticket = token.ticket();
+        assert_eq!(fixture.worker.drain_spawn_admissions(), 0);
+        let original_id = fixture.obligations.ticket_binding(original_ticket).unwrap();
+        let moved = token.try_transfer(&cleanup_cx).expect("live cleanup receives ownership");
+        let destination_ticket = moved.ticket();
+        assert_eq!(fixture.worker.drain_spawn_admissions(), 0);
+        assert_eq!(fixture.obligations.ticket_binding(original_ticket), None);
+        assert_eq!(fixture.obligations.ticket_binding(destination_ticket), Some(original_id));
+        {
+            let state = fixture.state.lock().unwrap();
+            assert_eq!(state.region(fixture.root).unwrap().pending_obligations(), 0);
+            assert_eq!(state.region(child_id).unwrap().pending_obligations(), 1);
+            assert_eq!(state.region(child_id).unwrap().unapplied_obligation_count(), 1);
+        }
+
+        // The original native owner can retire without leaking the obligation
+        // now owned by the still-running finalizer.
+        release_source.send_blocking(()).unwrap();
+        assert_eq!(fixture.worker.next_task(), Some(source));
+        fixture.worker.execute(source);
+        assert_eq!(source_handle.try_join().unwrap(), Some(41));
+        transfer.send_blocking(moved).unwrap();
+        assert_eq!(fixture.worker.next_task(), Some(finalizer));
+        fixture.worker.execute(finalizer);
+        assert!(received.load(std::sync::atomic::Ordering::SeqCst));
+        probe.assert_pending();
+        finish.send_blocking(()).unwrap();
+        assert_eq!(fixture.worker.next_task(), Some(finalizer));
+        fixture.worker.execute(finalizer);
+        probe.assert_delivered();
+        let receipt = match close.as_mut().poll(&mut poll) {
+            Poll::Ready(Ok(receipt)) => receipt,
+            result => panic!("transferred cleanup failed to retire: {result:?}"),
+        };
+        assert!(matches!(receipt.cleanup_outcome, Some(crate::types::Outcome::Ok(()))));
+
+        // Reuse the actual scheduler/task arena after cleanup retirement. A
+        // retained cleanup context must not admit into the retired generation;
+        // a refused transfer returns the original live owner's token intact.
+        let (replacement, mut replacement_handle) =
+            spawn_native_cleanup_probe(&mut fixture, async move {
+                let cx = Cx::current().expect("replacement native source context");
+                assert_ne!(cx.task_id(), cleanup_cx.task_id());
+                let token = cx.try_register_obligation_checked(
+                    ObligationKind::Lease, cx.task_id(),
+                ).unwrap().unwrap();
+                let ticket = token.ticket();
+                let failure = token.try_transfer(&cleanup_cx).unwrap_err();
+                assert_eq!(
+                    failure.reason(),
+                    ObligationTransferError::Destination(ObligationAdmissionError::RegionClosed),
+                );
+                let (_, token) = failure.into_parts();
+                assert_eq!(token.ticket(), ticket);
+                assert_eq!(token.holder(), cx.task_id());
+                assert!(token.commit());
+                43_u8
+            });
+        assert_eq!(fixture.worker.next_task(), Some(replacement));
+        fixture.worker.execute(replacement);
+        assert_eq!(replacement_handle.try_join().unwrap(), Some(43));
+        let stats = fixture.obligations.stats();
+        assert_eq!(stats.reserved, 2);
+        assert_eq!(stats.committed, 2);
+        assert_eq!(stats.posted, 5);
+        assert_eq!(stats.applied, stats.posted);
+        assert_eq!(stats.refused, 0);
+        assert_eq!(fixture.obligations.open_tickets(), 0);
+        let state = fixture.state.lock().unwrap();
+        assert!(state.region_was_closed(child_id));
+        assert_eq!(state.pending_obligation_count(), 0);
+        assert_eq!(state.leak_count(), 0);
+        assert!(state.region(fixture.root).unwrap().task_ids().is_empty());
+    }
+}
+
