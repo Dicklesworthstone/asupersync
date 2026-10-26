@@ -8,7 +8,8 @@
     )]
     use super::*;
     use crate::codec::Encoder;
-    use crate::types::{Budget, RegionId, TaskId};
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId, Time};
     use crate::util::EntropySource;
     use futures_lite::future;
     use std::future::Future;
@@ -26,6 +27,7 @@
         pending_first_write: bool,
         partial_first_write_len: Option<usize>,
         pending_after_partial_write: bool,
+        stall_reads: bool,
         stall_writes: bool,
         stall_flush_after_write: bool,
         write_polls: usize,
@@ -43,6 +45,7 @@
                 pending_first_write: false,
                 partial_first_write_len: None,
                 pending_after_partial_write: false,
+                stall_reads: false,
                 stall_writes: false,
                 stall_flush_after_write: false,
                 write_polls: 0,
@@ -76,6 +79,11 @@
             self
         }
 
+        fn with_stalled_reads(mut self) -> Self {
+            self.stall_reads = true;
+            self
+        }
+
         fn with_stalled_flush(mut self) -> Self {
             self.stall_flush_after_write = true;
             self
@@ -102,6 +110,9 @@
             _cx: &mut std::task::Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<io::Result<()>> {
+            if self.stall_reads {
+                return Poll::Pending;
+            }
             if self.pending_first_read {
                 self.pending_first_read = false;
                 _cx.waker().wake_by_ref();
@@ -761,6 +772,350 @@
         fn wake_by_ref(self: &Arc<Self>) {
             self.wake_count.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    fn close_timer_context(start: u64) -> (Arc<VirtualClock>, TimerDriverHandle, Cx) {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(start)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(77, 1),
+            TaskId::new_for_test(77, 1),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        (clock, timer, cx)
+    }
+
+    fn websocket_with_close_timeout(io: TestIo) -> WebSocket<TestIo> {
+        let mut config = WebSocketConfig::default();
+        config.close_config.close_timeout = std::time::Duration::from_secs(10);
+        config.ping_interval = None;
+        WebSocket::from_upgraded_with_entropy(
+            io,
+            config,
+            Arc::new(FixedEntropy([0x11, 0x22, 0x33, 0x44])),
+        )
+    }
+
+    fn assert_close_expires_at(
+        close: impl Future<Output = Result<(), WsError>>,
+        clock: &VirtualClock,
+        timer: &TimerDriverHandle,
+        deadline_seconds: u64,
+    ) {
+        let counter = CountingWake::new();
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut task = Context::from_waker(&waker);
+        let mut close = std::pin::pin!(close);
+        assert!(close.as_mut().poll(&mut task).is_pending());
+        clock.set(Time::from_secs(deadline_seconds - 1));
+        assert_eq!(timer.process_timers(), 0, "close must not expire early");
+        assert!(close.as_mut().poll(&mut task).is_pending());
+        let before = counter.count();
+        clock.set(Time::from_secs(deadline_seconds));
+        assert!(timer.process_timers() > 0, "the original deadline must be armed");
+        assert!(counter.count() > before, "timeout must wake never-ready I/O");
+        assert!(
+            matches!(close.as_mut().poll(&mut task), Poll::Ready(Ok(()))),
+            "close completes abortively when its bounded handshake expires"
+        );
+    }
+
+    #[test]
+    fn split_parked_reader_wakes_when_writer_starts_a_close() {
+        let (clock, timer, cx) = close_timer_context(100);
+        let ws = websocket_with_close_timeout(TestIo::new(vec![]).with_stalled_reads());
+        let (mut read, mut write) = ws.split();
+        let reader_counter = CountingWake::new();
+        let reader_waker = Waker::from(Arc::clone(&reader_counter));
+        let mut reader_task = Context::from_waker(&reader_waker);
+        let mut recv = Box::pin(read.recv(&cx));
+        assert!(recv.as_mut().poll(&mut reader_task).is_pending());
+        assert_eq!(reader_counter.count(), 0, "the transport never wakes reads");
+
+        let mut close = std::pin::pin!(write.send(&cx, Message::Close(None)));
+        assert!(matches!(
+            close.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(
+            reader_counter.count() > 0,
+            "an already parked reader must learn that the other half started closing"
+        );
+        assert!(recv.as_mut().poll(&mut reader_task).is_pending());
+        clock.set(Time::from_secs(109));
+        assert_eq!(timer.process_timers(), 0);
+        let before = reader_counter.count();
+        clock.set(Time::from_secs(110));
+        assert!(timer.process_timers() > 0);
+        assert!(reader_counter.count() > before);
+        assert!(matches!(recv.as_mut().poll(&mut reader_task), Poll::Ready(Ok(None))));
+        drop(recv);
+        assert!(read.is_closed());
+    }
+
+    #[test]
+    fn split_close_timeout_bounds_never_ready_writes_and_flushes() {
+        for explicit_cx in [false, true] {
+            for stall_flush in [false, true] {
+                let (clock, timer, cx) = close_timer_context(100);
+                let _current = (!explicit_cx).then(|| Cx::set_current(Some(cx.clone())));
+                let io = if stall_flush {
+                    TestIo::new(vec![]).with_stalled_flush()
+                } else {
+                    TestIo::new(vec![]).with_stalled_writes()
+                };
+                let (read, mut write) = websocket_with_close_timeout(io).split();
+                assert_close_expires_at(
+                    async {
+                        if explicit_cx {
+                            write.send(&cx, Message::Close(None)).await
+                        } else {
+                            write.close(CloseReason::normal()).await
+                        }
+                    },
+                    &clock,
+                    &timer,
+                    110,
+                );
+                assert!(write.is_closed());
+                let ws = read.reunite(write).expect("timeout releases writer ownership");
+                if stall_flush {
+                    assert_eq!(
+                        ws.io.written,
+                        encode_client_frame_with_entropy(
+                            &CloseReason::normal().to_frame(),
+                            &FixedEntropy([0x11, 0x22, 0x33, 0x44]),
+                        ),
+                        "a stalled flush must not duplicate the already written Close"
+                    );
+                } else {
+                    assert!(ws.io.written.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn split_crossing_peer_close_keeps_timeout_until_the_final_flush_finishes() {
+        let (clock, timer, cx) = close_timer_context(100);
+        let peer_close = encode_server_frame(CloseReason::normal().to_frame());
+        let ws = websocket_with_close_timeout(TestIo::new(peer_close).with_stalled_flush());
+        let (mut read, mut write) = ws.split();
+        let writer_counter = CountingWake::new();
+        let writer_waker = Waker::from(Arc::clone(&writer_counter));
+        let mut writer_task = Context::from_waker(&writer_waker);
+        let mut close = Box::pin(write.send(&cx, Message::Close(None)));
+        assert!(close.as_mut().poll(&mut writer_task).is_pending());
+        let reader_counter = CountingWake::new();
+        let reader_waker = Waker::from(Arc::clone(&reader_counter));
+        let mut reader_task = Context::from_waker(&reader_waker);
+        let mut recv = Box::pin(read.recv(&cx));
+        assert!(
+            recv.as_mut().poll(&mut reader_task).is_pending(),
+            "receiving the peer Close still owes our final transport flush"
+        );
+        clock.set(Time::from_secs(109));
+        assert_eq!(timer.process_timers(), 0);
+        assert!(close.as_mut().poll(&mut writer_task).is_pending());
+        assert!(recv.as_mut().poll(&mut reader_task).is_pending());
+        let writer_before = writer_counter.count();
+        let reader_before = reader_counter.count();
+        clock.set(Time::from_secs(110));
+        assert!(timer.process_timers() > 0);
+        assert!(writer_counter.count() > writer_before);
+        assert!(reader_counter.count() > reader_before);
+        assert!(matches!(recv.as_mut().poll(&mut reader_task), Poll::Ready(Ok(None))));
+        assert!(matches!(close.as_mut().poll(&mut writer_task), Poll::Ready(Ok(()))));
+        drop(recv);
+        drop(close);
+        let ws = read.reunite(write).expect("timeout releases the stalled final flush");
+        assert!(ws.is_closed());
+        assert_eq!(
+            ws.io.written,
+            encode_client_frame_with_entropy(
+                &CloseReason::normal().to_frame(),
+                &FixedEntropy([0x11, 0x22, 0x33, 0x44]),
+            ),
+            "crossing closes must not resend the already written Close"
+        );
+    }
+
+    #[test]
+    fn split_close_timeout_bounds_a_writer_waiting_for_the_readers_permit() {
+        let (clock, timer, cx) = close_timer_context(100);
+        let peer_ping = encode_server_frame(Frame::ping(Bytes::from_static(b"peer ping")));
+        let ws = websocket_with_close_timeout(TestIo::new(peer_ping).with_stalled_writes());
+        let (mut read, mut write) = ws.split();
+        let reader_counter = CountingWake::new();
+        let reader_waker = Waker::from(Arc::clone(&reader_counter));
+        let mut reader_task = Context::from_waker(&reader_waker);
+        let mut recv = Box::pin(read.recv(&cx));
+        // Receiving Ping parks while its automatic Pong owns the write path.
+        assert!(recv.as_mut().poll(&mut reader_task).is_pending());
+        let before_close = reader_counter.count();
+        let writer_counter = CountingWake::new();
+        let writer_waker = Waker::from(Arc::clone(&writer_counter));
+        let mut writer_task = Context::from_waker(&writer_waker);
+        let mut close = Box::pin(write.send(&cx, Message::Close(None)));
+        assert!(close.as_mut().poll(&mut writer_task).is_pending());
+        assert!(reader_counter.count() > before_close);
+        assert!(recv.as_mut().poll(&mut reader_task).is_pending());
+        let reader_before = reader_counter.count();
+        let writer_before = writer_counter.count();
+        clock.set(Time::from_secs(110));
+        assert!(timer.process_timers() > 0);
+        assert!(reader_counter.count() > reader_before);
+        assert!(writer_counter.count() > writer_before);
+        assert!(matches!(close.as_mut().poll(&mut writer_task), Poll::Ready(Ok(()))));
+        assert!(matches!(recv.as_mut().poll(&mut reader_task), Poll::Ready(Ok(None))));
+        drop(close);
+        drop(recv);
+        let ws = read.reunite(write).expect("both stalled operations release ownership");
+        assert!(ws.is_closed());
+        assert!(ws.io.written.is_empty(), "timeout must not depend on releasing the transport");
+    }
+
+    #[test]
+    fn split_peer_close_times_out_an_already_parked_data_writer() {
+        let (clock, timer, cx) = close_timer_context(100);
+        let peer_close = encode_server_frame(CloseReason::normal().to_frame());
+        let ws = websocket_with_close_timeout(TestIo::new(peer_close).with_stalled_writes());
+        let (mut read, mut write) = ws.split();
+        let writer_counter = CountingWake::new();
+        let writer_waker = Waker::from(Arc::clone(&writer_counter));
+        let mut writer_task = Context::from_waker(&writer_waker);
+        let mut send = Box::pin(write.send(&cx, Message::text("parked data")));
+        assert!(send.as_mut().poll(&mut writer_task).is_pending());
+        let before_close = writer_counter.count();
+        let reader_counter = CountingWake::new();
+        let reader_waker = Waker::from(Arc::clone(&reader_counter));
+        let mut reader_task = Context::from_waker(&reader_waker);
+        let mut recv = Box::pin(read.recv(&cx));
+        assert!(recv.as_mut().poll(&mut reader_task).is_pending());
+        assert!(writer_counter.count() > before_close, "peer Close wakes the parked writer");
+        assert!(send.as_mut().poll(&mut writer_task).is_pending());
+        let before_timeout = writer_counter.count();
+        clock.set(Time::from_secs(110));
+        assert!(timer.process_timers() > 0);
+        assert!(writer_counter.count() > before_timeout);
+        assert!(matches!(
+            send.as_mut().poll(&mut writer_task),
+            Poll::Ready(Err(WsError::Io(ref error))) if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert!(matches!(recv.as_mut().poll(&mut reader_task), Poll::Ready(Ok(None))));
+        drop(send);
+        drop(recv);
+        let ws = read.reunite(write).expect("timed-out data writer releases its permit");
+        assert!(ws.is_closed());
+        assert!(ws.io.written.is_empty());
+    }
+
+    #[test]
+    fn split_close_retry_and_reunite_keep_the_original_clock_and_deadline() {
+        for migration in 0..3 {
+            let (clock, timer, cx) = close_timer_context(100);
+            let (read, mut write) =
+                websocket_with_close_timeout(TestIo::new(vec![]).with_stalled_writes()).split();
+            let mut first = Box::pin(write.send(&cx, Message::Close(Some(CloseReason::going_away()))));
+            assert!(first.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            clock.set(Time::from_secs(106));
+            drop(first);
+            // A later caller uses a different clock domain. The active close
+            // still belongs to its original clock and expires at t=110, not
+            // ten seconds after retry or at an unrelated clock's t=1010.
+            let (_later_clock, _later_timer, later_cx) = close_timer_context(1000);
+            if migration == 0 {
+                assert_close_expires_at(
+                    write.send(&later_cx, Message::Close(None)),
+                    &clock,
+                    &timer,
+                    110,
+                );
+                assert!(write.is_closed());
+                assert!(read.reunite(write).unwrap().is_closed());
+            } else {
+                let mut ws = read.reunite(write).expect("dropping a close releases its waiter");
+                if migration == 1 {
+                    assert_close_expires_at(
+                        ws.close(&later_cx, CloseReason::normal()),
+                        &clock,
+                        &timer,
+                        110,
+                    );
+                    assert!(ws.is_closed());
+                } else {
+                    let (read, mut write) = ws.split();
+                    assert_close_expires_at(
+                        write.send(&later_cx, Message::Close(None)),
+                        &clock,
+                        &timer,
+                        110,
+                    );
+                    assert!(read.reunite(write).unwrap().is_closed());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn split_inherits_the_deadline_of_an_unsplit_peer_close_echo() {
+        for stall_flush in [false, true] {
+            let (clock, timer, cx) = close_timer_context(100);
+            let peer_close = encode_server_frame(CloseReason::normal().to_frame());
+            let io = if stall_flush {
+                TestIo::new(peer_close).with_stalled_flush()
+            } else {
+                TestIo::new(peer_close).with_stalled_writes()
+            };
+            let mut ws = websocket_with_close_timeout(io);
+            let mut recv = Box::pin(ws.recv(&cx));
+            assert!(
+                recv.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending(),
+                "the unsplit peer-close echo must reach the stalled write or flush"
+            );
+            clock.set(Time::from_secs(106));
+            drop(recv);
+            let committed = ws.io.written.clone();
+            assert_eq!(committed.is_empty(), !stall_flush);
+
+            let (_later_clock, _later_timer, later_cx) = close_timer_context(1000);
+            let (read, mut write) = ws.split();
+            assert_close_expires_at(
+                write.send(&later_cx, Message::Close(None)),
+                &clock,
+                &timer,
+                110,
+            );
+            let ws = read.reunite(write).expect("timeout releases the inherited close echo");
+            assert!(ws.is_closed());
+            assert_eq!(
+                ws.io.written, committed,
+                "retry must not duplicate a peer-close echo already written before split"
+            );
+        }
+    }
+
+    #[test]
+    fn split_open_reader_has_no_close_timeout_until_closing_starts() {
+        let (clock, timer, cx) = close_timer_context(100);
+        let (mut read, write) =
+            websocket_with_close_timeout(TestIo::new(vec![]).with_stalled_reads()).split();
+        let counter = CountingWake::new();
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut task = Context::from_waker(&waker);
+        let mut recv = Box::pin(read.recv(&cx));
+        assert!(recv.as_mut().poll(&mut task).is_pending());
+        clock.set(Time::from_secs(1000));
+        assert_eq!(timer.process_timers(), 0);
+        assert_eq!(counter.count(), 0);
+        assert!(recv.as_mut().poll(&mut task).is_pending());
+        drop(recv);
+        assert!(read.reunite(write).unwrap().is_open());
     }
 
     #[test]

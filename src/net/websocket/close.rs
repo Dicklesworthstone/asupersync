@@ -30,6 +30,14 @@
 
 use super::{CloseCode, Frame, Opcode, WsError};
 use crate::bytes::Bytes;
+use crate::cx::Cx;
+use crate::time::{Sleep, TimerDriverHandle};
+use crate::types::Time;
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 const CLOSE_CODE_BYTES: usize = 2;
@@ -334,6 +342,108 @@ impl CloseConfig {
     }
 }
 
+/// One absolute close budget, retained across cancelled waits and split/reunite.
+/// The captured clock is never replaced by a later caller's ambient context.
+#[derive(Debug, Clone)]
+pub(super) struct CloseDeadline {
+    at: Time,
+    clock: Option<TimerDriverHandle>,
+    timed_out: Arc<AtomicBool>,
+}
+
+impl CloseDeadline {
+    pub(super) fn new(cx: Option<&Cx>, timeout: Duration) -> Self {
+        let ambient = cx.is_none().then(Cx::current).flatten();
+        let clock = cx.or(ambient.as_ref()).and_then(Cx::timer_driver);
+        let now = clock.as_ref().map_or_else(
+            || {
+                let _ambient = Cx::set_current(None);
+                crate::time::wall_now()
+            },
+            TimerDriverHandle::now,
+        );
+        Self {
+            at: now.saturating_add_nanos(u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX)),
+            clock,
+            timed_out: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(super) fn timed_out(&self) -> bool {
+        self.timed_out.load(Ordering::Acquire)
+    }
+
+    /// This may invoke an injected clock, so call it outside connection locks.
+    pub(super) fn elapsed(&self) -> bool {
+        self.timed_out()
+            || self.clock.as_ref().map_or_else(
+                || {
+                    let _ambient = Cx::set_current(None);
+                    crate::time::wall_now()
+                },
+                TimerDriverHandle::now,
+            ) >= self.at
+    }
+
+    pub(super) fn expire(&self) {
+        self.timed_out.store(true, Ordering::Release);
+    }
+
+    pub(super) fn sleep(&self) -> Sleep {
+        match &self.clock {
+            Some(clock) => Sleep::with_timer_driver(self.at, clock.clone()),
+            None => {
+                let _ambient = Cx::set_current(None);
+                Sleep::new(self.at)
+            }
+        }
+    }
+
+    pub(super) fn poll(&self, sleep: &mut Sleep, task: &mut Context<'_>) -> Poll<()> {
+        if self.timed_out() {
+            return Poll::Ready(());
+        }
+        let _ambient = self.clock.is_none().then(|| Cx::set_current(None));
+        Pin::new(sleep).poll_deadline(task)
+    }
+
+    /// Wait with a retained deadline. Explicit operation cancellation wins
+    /// over expiry; timer cancellation itself must not look like elapsed time.
+    pub(super) async fn wait<T>(
+        &self,
+        cx: Option<&Cx>,
+        future: impl Future<Output = Result<T, WsError>>,
+    ) -> Result<Option<T>, WsError> {
+        let mut future = std::pin::pin!(future);
+        let mut sleep = self.sleep();
+        let mut cancel = cx.map(super::client::WsCancelWakerGuard::new);
+        poll_fn(|task| {
+            if let Some(cancel) = &mut cancel {
+                cancel.refresh(task.waker());
+            }
+            if cx.is_some_and(|cx| cx.checkpoint().is_err()) {
+                return Poll::Ready(Err(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ))));
+            }
+            if self.poll(&mut sleep, task).is_ready() {
+                self.expire();
+                return Poll::Ready(Ok(None));
+            }
+            future.as_mut().poll(task).map(|result| result.map(Some))
+        })
+        .await
+    }
+}
+
+pub(super) fn close_timeout_error() -> WsError {
+    WsError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "WebSocket close handshake timed out",
+    ))
+}
+
 /// Close handshake state machine.
 ///
 /// Tracks the state of the WebSocket close handshake and provides
@@ -348,6 +458,8 @@ pub struct CloseHandshake {
     our_reason: Option<CloseReason>,
     /// Peer's close reason (if they initiated).
     peer_reason: Option<CloseReason>,
+    /// Captured by the first actual close operation, not by each waiter.
+    deadline: Option<CloseDeadline>,
 }
 
 impl CloseHandshake {
@@ -382,6 +494,7 @@ impl CloseHandshake {
             config,
             our_reason: None,
             peer_reason: None,
+            deadline: None,
         }
     }
 
@@ -419,6 +532,20 @@ impl CloseHandshake {
     #[must_use]
     pub const fn close_timeout(&self) -> Duration {
         self.config.close_timeout
+    }
+
+    pub(super) fn deadline(&self) -> Option<CloseDeadline> {
+        self.deadline.clone()
+    }
+
+    pub(super) fn start_deadline(&mut self, candidate: CloseDeadline) {
+        if self.deadline.is_none() {
+            self.deadline = Some(candidate);
+        }
+    }
+
+    pub(super) fn timed_out(&self) -> bool {
+        self.deadline.as_ref().is_some_and(CloseDeadline::timed_out)
     }
 
     /// Initiate a close handshake.
@@ -525,6 +652,7 @@ impl CloseHandshake {
         self.state = CloseState::Open;
         self.our_reason = None;
         self.peer_reason = None;
+        self.deadline = None;
     }
 }
 

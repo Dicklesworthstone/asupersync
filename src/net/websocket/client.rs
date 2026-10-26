@@ -22,7 +22,9 @@
 //! }
 //! ```
 
-use super::close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
+use super::close::{
+    CloseConfig, CloseDeadline, CloseHandshake, CloseReason, CloseState, close_timeout_error,
+};
 use super::frame::{CloseCode, Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{ClientHandshake, HandshakeError, HttpResponse, WsUrl};
 use crate::bytes::{Bytes, BytesMut};
@@ -646,6 +648,21 @@ where
     ///
     /// This method is cancel-safe. If cancelled, no data is lost.
     pub async fn recv(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
+        // Split/reunite carries the original clock and close budget. Leave
+        // the open-state cancellation/cleanup path unchanged.
+        let Some(deadline) = self.active_close_deadline() else {
+            return self.recv_inner(cx).await;
+        };
+        match deadline.wait(Some(cx), self.recv_inner(cx)).await? {
+            Some(message) => Ok(message),
+            None => {
+                self.force_close(CloseReason::going_away());
+                Ok(None)
+            }
+        }
+    }
+
+    async fn recv_inner(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
         let mut steps = 0;
         loop {
             steps += 1;
@@ -765,21 +782,49 @@ where
                         self.heartbeat.received_pong(&frame.payload);
                     }
                     Opcode::Close => {
-                        // Handle close handshake
-                        if let Some(response) = self.close_handshake.receive_close(&frame)? {
-                            let deadline = self.heartbeat.write_deadline();
-                            let send_result = super::heartbeat::wait_until(cx, deadline, async {
+                        // Capture the budget when the peer Close is processed,
+                        // not when this receive first began waiting. Retain it
+                        // even if the echo is interrupted and we later split.
+                        let candidate =
+                            CloseDeadline::new(Some(cx), self.close_handshake.close_timeout());
+                        let response = self.close_handshake.receive_close(&frame)?;
+                        if response.is_some() || self.close_flush_pending {
+                            self.close_handshake.start_deadline(candidate);
+                            if let Some(response) = response {
+                                // Publish the retained echo before a deadline
+                                // or cancellation wait can return. A retry of
+                                // CloseReceived must always have bytes to flush.
                                 self.encode_frame_with_entropy(&response, cx.entropy())?;
-                                self.flush_write_buf_with_cx(Some(cx)).await
-                            })
-                            .await;
-                            if send_result?.is_none() {
-                                self.heartbeat.fail();
-                                self.force_close(CloseReason::new(
-                                    super::CloseCode::Abnormal,
-                                    None,
-                                ));
-                                return Err(super::heartbeat::timeout_error());
+                            }
+                            let close_deadline = self
+                                .close_handshake
+                                .deadline()
+                                .expect("peer close deadline installed");
+                            let heartbeat_deadline = self.heartbeat.write_deadline();
+                            let send_result = close_deadline
+                                .wait(
+                                    Some(cx),
+                                    super::heartbeat::wait_until(
+                                        cx,
+                                        heartbeat_deadline,
+                                        self.flush_write_buf_with_cx(Some(cx)),
+                                    ),
+                                )
+                                .await?;
+                            match send_result {
+                                None => {
+                                    self.force_close(CloseReason::going_away());
+                                    return Ok(None);
+                                }
+                                Some(None) => {
+                                    self.heartbeat.fail();
+                                    self.force_close(CloseReason::new(
+                                        super::CloseCode::Abnormal,
+                                        None,
+                                    ));
+                                    return Err(super::heartbeat::timeout_error());
+                                }
+                                Some(Some(())) => {}
                             }
                             self.close_handshake.mark_response_sent();
                         }
@@ -830,74 +875,41 @@ where
     ///
     /// Sends a close frame and waits for the peer's response.
     pub async fn close(&mut self, cx: &Cx, reason: CloseReason) -> Result<(), WsError> {
-        // The close timeout bounds the whole handshake, including writing
-        // our Close to a peer that stopped reading, which otherwise held
-        // close() until cancellation (br-asupersync-fmw87f). On expiry the
-        // connection is closed as when the peer does not answer.
-        let now = cx
-            .timer_driver()
-            .map_or_else(crate::time::wall_now, |driver| driver.now());
-        let timeout_duration = self.close_handshake.close_timeout();
-        if let Ok(result) =
-            crate::time::timeout(now, timeout_duration, self.close_exchange(cx, reason)).await
-        {
-            return result;
+        self.initiate_close_with_cx(Some(cx), reason).await?;
+        if self.close_handshake.timed_out() {
+            return Ok(());
         }
-        self.force_close(CloseReason::going_away());
-        Ok(())
+        let deadline = self.close_handshake.deadline().unwrap_or_else(|| {
+            CloseDeadline::new(Some(cx), self.close_handshake.close_timeout())
+        });
+        match deadline.wait(Some(cx), self.close_exchange(cx, &deadline)).await? {
+            Some(()) => Ok(()),
+            None => {
+                self.force_close(CloseReason::going_away());
+                Ok(())
+            }
+        }
     }
 
-    async fn close_exchange(&mut self, cx: &Cx, reason: CloseReason) -> Result<(), WsError> {
-        self.initiate_close_with_cx(Some(cx), reason).await?;
-
-        // Wait for close response (with timeout)
-        let timeout_duration = self.close_handshake.close_timeout();
-        let current_time = || {
-            cx.timer_driver()
-                .map_or_else(crate::time::wall_now, |driver| driver.now())
-        };
-        let initial_time = current_time();
-        let deadline = initial_time + timeout_duration;
-
+    async fn close_exchange(&mut self, cx: &Cx, deadline: &CloseDeadline) -> Result<(), WsError> {
+        // Keep checking while draining buffered frames: an always-ready peer
+        // must not prevent the outer timer from getting another poll.
         while !self.close_handshake.is_closed() {
-            let time_now = current_time();
-
-            if time_now >= deadline {
+            if deadline.elapsed() {
+                deadline.expire();
                 self.force_close(CloseReason::going_away());
-                break;
+                return Ok(());
             }
 
-            // Try to receive close response
             match self.codec.decode(&mut self.read_buf)? {
                 Some(frame) if frame.opcode == Opcode::Close => {
                     self.close_handshake.receive_close(&frame)?;
                 }
-                Some(_) => {
-                    // Ignore non-close frames during close
-                }
+                Some(_) => {}
                 None => {
-                    let time_now = current_time();
-
-                    if time_now >= deadline {
+                    if self.read_more(cx).await? == 0 {
                         self.force_close(CloseReason::going_away());
                         break;
-                    }
-                    let remaining =
-                        std::time::Duration::from_nanos(deadline.duration_since(time_now));
-
-                    match crate::time::timeout(time_now, remaining, self.read_more(cx)).await {
-                        Ok(Ok(n)) => {
-                            if n == 0 {
-                                self.force_close(CloseReason::going_away());
-                                break;
-                            }
-                        }
-                        Ok(Err(e)) => return Err(e),
-                        Err(_) => {
-                            // Timeout elapsed
-                            self.force_close(CloseReason::going_away());
-                            break;
-                        }
                     }
                 }
             }
@@ -987,36 +999,25 @@ where
         op_cx: Option<&Cx>,
         reason: CloseReason,
     ) -> Result<(), WsError> {
-        if self.close_handshake.state() == CloseState::CloseReceived {
-            self.flush_write_buf_with_cx(op_cx).await?;
-            self.close_handshake.mark_response_sent();
+        if self.close_handshake.is_closed() && !self.close_flush_pending {
             return Ok(());
         }
-
-        if self.close_handshake.state() == CloseState::CloseSent {
-            self.flush_write_buf_with_cx(op_cx).await?;
-            return Ok(());
+        let candidate = CloseDeadline::new(op_cx, self.close_handshake.close_timeout());
+        if self.close_handshake.is_open() {
+            if let Some(frame) = self.close_handshake.initiate(reason) {
+                // Retain the Close before the first await. Cancellation or a
+                // dropped waiter must leave the same frame available for retry.
+                let entropy = Arc::clone(&self.entropy);
+                self.encode_frame_with_entropy(&frame, entropy.as_ref())?;
+            }
         }
-
-        if self.close_handshake.state() == CloseState::Closed && self.close_flush_pending {
-            // A split receive can observe the peer's crossing Close and then
-            // be dropped while flushing our previously queued local Close.
-            // Reunite preserves those bytes, so a retry must flush them even
-            // though the handshake has already reached Closed. The flag also
-            // retains an unfinished final poll_flush with an empty buffer,
-            // without flushing again after success or an abortive close.
-            self.flush_write_buf_with_cx(op_cx).await?;
-            return Ok(());
-        }
-
-        if let Some(frame) = self.close_handshake.initiate(reason) {
-            // The Close goes into the retained write buffer before the first
-            // await. The handshake is CloseSent from here on, so a close
-            // dropped before writing would otherwise lose the frame: a retry
-            // only flushes the buffer (br-asupersync-fmw87f M2).
-            let entropy = Arc::clone(&self.entropy);
-            self.encode_frame_with_entropy(&frame, entropy.as_ref())?;
-            self.flush_write_buf_with_cx(op_cx).await?;
+        self.close_handshake.start_deadline(candidate);
+        let deadline = self.close_handshake.deadline().expect("close deadline installed");
+        // Closed can still have a retained crossing Close or final flush.
+        // A resumed operation inherits both the original bytes and deadline.
+        match deadline.wait(op_cx, self.flush_write_buf_with_cx(op_cx)).await? {
+            Some(()) => self.close_handshake.mark_response_sent(),
+            None => self.force_close(CloseReason::going_away()),
         }
         Ok(())
     }
@@ -1199,6 +1200,24 @@ where
         frame: &Frame,
         entropy: &dyn EntropySource,
     ) -> Result<(), WsError> {
+        let Some(deadline) = self.active_close_deadline() else {
+            return self.send_frame_with_entropy_inner(op_cx, frame, entropy).await;
+        };
+        match deadline.wait(op_cx, self.send_frame_with_entropy_inner(op_cx, frame, entropy)).await? {
+            Some(()) => Ok(()),
+            None => {
+                self.force_close(CloseReason::going_away());
+                Err(close_timeout_error())
+            }
+        }
+    }
+
+    async fn send_frame_with_entropy_inner(
+        &mut self,
+        op_cx: Option<&Cx>,
+        frame: &Frame,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
         if !self.write_buf.is_empty() {
             self.flush_write_buf_with_cx(op_cx).await?;
         }
@@ -1225,6 +1244,17 @@ where
         // alone must never authorize retrying a failed connection's writes.
         self.close_flush_pending = false;
         self.close_handshake.force_close(reason);
+    }
+
+    fn active_close_deadline(&self) -> Option<CloseDeadline> {
+        if self.close_handshake.timed_out()
+            || !self.close_handshake.is_closed()
+            || self.close_flush_pending
+        {
+            self.close_handshake.deadline()
+        } else {
+            None
+        }
     }
 
     /// Internal: read more data into buffer.

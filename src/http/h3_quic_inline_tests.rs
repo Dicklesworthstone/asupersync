@@ -76,6 +76,245 @@
         panic!("buffered wire bytes did not produce the expected field event");
     }
 
+    fn receive_peer_field_limit(
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        limit: u64,
+    ) {
+        let stream = StreamId(if session.role == H3EndpointRole::Server { 2 } else { 3 });
+        let settings = H3Settings {
+            max_field_section_size: Some(limit),
+            ..H3Settings::default()
+        };
+        let mut wire = vec![0]; // Peer control-stream type.
+        H3Frame::Settings(settings.clone()).encode(&mut wire).unwrap();
+        connection.inner_mut().accept_remote_stream(cx, stream).unwrap();
+        connection
+            .inner_mut()
+            .receive_stream_bytes(cx, stream, 0, Bytes::from(wire), false)
+            .unwrap();
+        assert_eq!(
+            next_field_limit_event(cx, session, connection),
+            NativeH3Event::Settings(settings)
+        );
+    }
+
+    fn peer_field_limit_error() -> NativeH3SessionError {
+        NativeH3SessionError::InvalidState(
+            "field section exceeds peer SETTINGS_MAX_FIELD_SECTION_SIZE",
+        )
+    }
+
+    fn drain_peer_limit_stream(cx: &Cx, connection: &mut QuicConnection, stream: StreamId) {
+        connection
+            .inner_mut()
+            .generate_stream_frames_for(
+                cx,
+                crate::net::quic_native::PacketNumberSpace::ApplicationData,
+                stream,
+                65_536,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn peer_field_limit_refuses_both_request_paths_before_opening_a_stream() {
+        for incremental in [false, true] {
+            for duplicate_utf8 in [false, true] {
+                let cx = Cx::for_testing();
+                // Our receive limit must not be confused with the peer's limit.
+                let (mut session, mut connection) =
+                    field_limit_fixture(&cx, false, false, Some(0));
+                let mut head = field_limit_request();
+                let limit = if duplicate_utf8 {
+                    head.headers = vec![
+                        ("x".to_owned(), "é".to_owned()),
+                        ("x".to_owned(), "é".to_owned()),
+                    ];
+                    // Base 178 + two occurrences of (1 + 2 + 32) = 248.
+                    247
+                } else {
+                    head.pseudo.path = Some("//".to_owned());
+                    178
+                };
+                receive_peer_field_limit(&cx, &mut session, &mut connection, limit);
+                assert!(qpack_encode_request_field_section(&head).unwrap().len() < limit as usize);
+                let credit = connection.inner().streams().connection_send_remaining();
+                let error = if incremental {
+                    session
+                        .start_request_writer(&cx, &mut connection, &head, true)
+                        .unwrap_err()
+                } else {
+                    session
+                        .send_request(&cx, &mut connection, &head, Bytes::new())
+                        .unwrap_err()
+                };
+                assert_eq!(error, peer_field_limit_error());
+                assert_eq!(session.next_local_request_stream_id, 0);
+                assert!(session.request_writers.is_empty());
+                assert!(connection.inner().streams().stream(StreamId(0)).is_err());
+                assert_eq!(connection.inner().streams().connection_send_remaining(), credit);
+
+                if duplicate_utf8 {
+                    head.headers[1].1 = "e".to_owned();
+                } else {
+                    head.pseudo.path = Some("/".to_owned());
+                }
+                if incremental {
+                    let mut writer = session
+                        .start_request_writer(&cx, &mut connection, &head, true)
+                        .expect("exact uncompressed limit is permitted");
+                    assert_eq!(writer.stream_id(), StreamId(0));
+                    let mut task = TaskContext::from_waker(Waker::noop());
+                    assert!(matches!(
+                        writer.poll_flush(&cx, &mut connection, &mut task),
+                        Poll::Ready(Ok(Some(NativeH3RequestWriteEvent::Headers { end_stream: true })))
+                    ));
+                } else {
+                    assert_eq!(
+                        session.send_request(&cx, &mut connection, &head, Bytes::new()).unwrap(),
+                        StreamId(0)
+                    );
+                }
+                assert_eq!(session.next_local_request_stream_id, 4);
+            }
+        }
+    }
+
+    #[test]
+    fn peer_field_limit_applies_separately_to_informational_and_final_response_paths() {
+        for incremental in [false, true] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, true, false, None);
+            receive_request_head(&cx, &mut connection, StreamId(0), true);
+            while session.next_event(&cx, &mut connection).unwrap().is_some() {}
+            // :status + three status bytes + 32 bytes overhead is exactly 42.
+            receive_peer_field_limit(&cx, &mut session, &mut connection, 42);
+            let mut informational = H3ResponseHead::new(
+                103,
+                vec![("x".to_owned(), String::new())],
+            ).unwrap();
+            assert_eq!(
+                session.send_informational_response(
+                    &cx, &mut connection, StreamId(0), &informational,
+                ).unwrap_err(),
+                peer_field_limit_error()
+            );
+            assert_eq!(connection.inner().streams().stream(StreamId(0)).unwrap().send_offset, 0);
+            informational.headers.clear();
+            session.send_informational_response(
+                &cx, &mut connection, StreamId(0), &informational,
+            ).unwrap();
+            let offset = connection.inner().streams().stream(StreamId(0)).unwrap().send_offset;
+            drain_peer_limit_stream(&cx, &mut connection, StreamId(0));
+
+            let mut final_head = H3ResponseHead::new(
+                200,
+                vec![("x".to_owned(), String::new())],
+            ).unwrap();
+            let error = if incremental {
+                session.start_response_writer(&connection, StreamId(0), &final_head, true)
+                    .unwrap_err()
+            } else {
+                session.send_response(
+                    &cx, &mut connection, StreamId(0), &final_head, Bytes::new(),
+                ).unwrap_err()
+            };
+            assert_eq!(error, peer_field_limit_error());
+            let stream = connection.inner().streams().stream(StreamId(0)).unwrap();
+            assert_eq!(stream.send_offset, offset);
+            assert!(stream.send_final_size.is_none());
+            final_head.headers.clear();
+            if incremental {
+                let mut writer = session
+                    .start_response_writer(&connection, StreamId(0), &final_head, true)
+                    .unwrap();
+                let mut task = TaskContext::from_waker(Waker::noop());
+                assert!(matches!(
+                    writer.poll_flush_one(&cx, &mut connection, &mut task),
+                    Poll::Ready(Ok(Some(NativeH3WriteEvent::Head { end_stream: true })))
+                ));
+            } else {
+                session.send_response(
+                    &cx, &mut connection, StreamId(0), &final_head, Bytes::new(),
+                ).unwrap();
+            }
+            assert!(connection.inner().streams().stream(StreamId(0)).unwrap().send_final_size.is_some());
+        }
+    }
+
+    #[test]
+    fn existing_request_writer_observes_late_peer_limits_for_trailers() {
+        for limit in [0, 35] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, false, false, None);
+            let mut writer = session
+                .start_request_writer(&cx, &mut connection, &field_limit_request(), false)
+                .unwrap();
+            let mut task = TaskContext::from_waker(Waker::noop());
+            assert!(matches!(
+                writer.poll_flush(&cx, &mut connection, &mut task),
+                Poll::Ready(Ok(Some(NativeH3RequestWriteEvent::Headers { end_stream: false })))
+            ));
+            drain_peer_limit_stream(&cx, &mut connection, StreamId(0));
+            receive_peer_field_limit(&cx, &mut session, &mut connection, limit);
+            let oversized = vec![("x".to_owned(), "éé".to_owned())];
+            assert_eq!(writer.queue_trailers(&oversized).unwrap_err(), peer_field_limit_error());
+            assert!(!writer.has_pending_write());
+            assert!(!writer.is_finished());
+            assert!(connection.inner().streams().stream(StreamId(0)).unwrap().send_final_size.is_none());
+            let accepted = if limit == 0 {
+                Vec::new()
+            } else {
+                vec![("x".to_owned(), "é".to_owned())]
+            };
+            writer.queue_trailers(&accepted).expect("refusal leaves the writer usable");
+            assert!(matches!(
+                writer.poll_flush(&cx, &mut connection, &mut task),
+                Poll::Ready(Ok(Some(NativeH3RequestWriteEvent::Trailers)))
+            ));
+            assert!(writer.is_finished());
+        }
+    }
+
+    #[test]
+    fn existing_response_writer_observes_late_peer_limits_for_trailers() {
+        for limit in [0, 35] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, true, false, None);
+            receive_request_head(&cx, &mut connection, StreamId(0), true);
+            while session.next_event(&cx, &mut connection).unwrap().is_some() {}
+            let head = H3ResponseHead::new(200, Vec::new()).unwrap();
+            let mut writer = session
+                .start_response_writer(&connection, StreamId(0), &head, false)
+                .unwrap();
+            let mut task = TaskContext::from_waker(Waker::noop());
+            assert!(matches!(
+                writer.poll_flush_one(&cx, &mut connection, &mut task),
+                Poll::Ready(Ok(Some(NativeH3WriteEvent::Head { end_stream: false })))
+            ));
+            drain_peer_limit_stream(&cx, &mut connection, StreamId(0));
+            receive_peer_field_limit(&cx, &mut session, &mut connection, limit);
+            let oversized = vec![("x".to_owned(), "éé".to_owned())];
+            assert_eq!(writer.queue_trailers(&oversized).unwrap_err(), peer_field_limit_error());
+            assert!(!writer.has_pending_write());
+            assert!(!writer.is_finished());
+            assert!(connection.inner().streams().stream(StreamId(0)).unwrap().send_final_size.is_none());
+            let accepted = if limit == 0 {
+                Vec::new()
+            } else {
+                vec![("x".to_owned(), "é".to_owned())]
+            };
+            writer.queue_trailers(&accepted).expect("refusal leaves the writer usable");
+            assert!(matches!(
+                writer.poll_flush_one(&cx, &mut connection, &mut task),
+                Poll::Ready(Ok(Some(NativeH3WriteEvent::Trailers)))
+            ));
+            assert!(writer.is_finished());
+        }
+    }
+
     #[test]
     fn request_field_limit_refuses_before_fin_and_preserves_same_connection_recovery() {
         for streaming in [false, true] {
@@ -846,5 +1085,1007 @@
             assert_eq!(drain(&cx, &mut connection, &mut wire), 0);
             assert_eq!(wire.len(), 1);
             assert_eq!(connection.pending_stream_data_bytes(StreamId(0)), 0);
+        }
+    }
+
+    mod dynamic_receive {
+        use super::*;
+        use crate::http::h3_native::{
+            QpackBlockedStreamStatus, QpackFieldPlan, QpackInstructionStreamState,
+            qpack_decode_decoder_instruction, qpack_encode_encoder_instruction,
+            qpack_encode_field_section_with_context, qpack_static_plan_for_request,
+        };
+        use crate::net::atp::protocol::quic_frames::QuicFrame;
+        use crate::net::atp::protocol::varint::VarInt;
+        use crate::net::quic_native::PacketNumberSpace;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+
+        fn connection(cx: &Cx, server: bool) -> QuicConnection {
+            let mut connection = if server {
+                QuicConnection::server(NativeQuicConnectionConfig::default())
+            } else {
+                QuicConnection::client(NativeQuicConnectionConfig::default())
+            };
+            connection.begin_handshake(cx).unwrap();
+            connection.mark_handshake_keys_available(cx).unwrap();
+            connection.mark_app_keys_available(cx).unwrap();
+            if !server {
+                connection.record_verified_server_identity();
+            }
+            connection.confirm_handshake(cx).unwrap();
+            connection
+        }
+
+        fn fixture(
+            cx: &Cx,
+            server: bool,
+            streaming: bool,
+            settings: H3Settings,
+        ) -> (NativeH3Session, QuicConnection) {
+            let mut connection = connection(cx, server);
+            let mut session = NativeH3Session::with_config(
+                H3ConnectionConfig {
+                    endpoint_role: if server {
+                        H3EndpointRole::Server
+                    } else {
+                        H3EndpointRole::Client
+                    },
+                    ..H3ConnectionConfig::default()
+                }
+                .with_dynamic_qpack(),
+            );
+            if streaming {
+                session
+                    .enable_streaming_receive(NonZeroUsize::new(8).unwrap())
+                    .unwrap();
+            }
+            session.initialize(cx, &mut connection, settings).unwrap();
+            (session, connection)
+        }
+
+        fn peer_encoder(capacity: u64) -> QpackInstructionStreamState {
+            QpackInstructionStreamState::from_local_and_peer_settings(
+                H3QpackMode::DynamicTableAllowed,
+                &H3Settings::default(),
+                &H3Settings {
+                    qpack_max_table_capacity: Some(capacity),
+                    qpack_blocked_streams: Some(0),
+                    ..H3Settings::default()
+                },
+            )
+            .unwrap()
+        }
+
+        fn encoder_wire(
+            peer: &mut QpackInstructionStreamState,
+            fields: &[(&str, &str)],
+        ) -> Vec<u8> {
+            let mut wire = vec![2]; // QPACK encoder-stream type.
+            let capacity = QpackEncoderInstruction::SetDynamicTableCapacity {
+                capacity: u64::try_from(peer.context().max_table_capacity()).unwrap(),
+            };
+            peer.apply_local_encoder_instruction(&capacity).unwrap();
+            qpack_encode_encoder_instruction(&mut wire, &capacity).unwrap();
+            for (name, value) in fields {
+                let instruction = QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: (*name).to_owned(),
+                    value: (*value).to_owned(),
+                };
+                peer.apply_local_encoder_instruction(&instruction).unwrap();
+                qpack_encode_encoder_instruction(&mut wire, &instruction).unwrap();
+            }
+            wire
+        }
+
+        fn inject_encoder(
+            cx: &Cx,
+            session: &mut NativeH3Session,
+            connection: &mut QuicConnection,
+            wire: Vec<u8>,
+        ) {
+            let stream = StreamId(if session.role == H3EndpointRole::Server {
+                6
+            } else {
+                7
+            });
+            connection
+                .inner_mut()
+                .accept_remote_stream(cx, stream)
+                .unwrap();
+            connection
+                .inner_mut()
+                .receive_stream_bytes(cx, stream, 0, Bytes::from(wire), false)
+                .unwrap();
+            assert_eq!(session.next_event(cx, connection).unwrap(), None);
+        }
+
+        fn drain_stream(
+            cx: &Cx,
+            connection: &mut QuicConnection,
+            stream: StreamId,
+            wire: &mut Vec<u8>,
+        ) -> usize {
+            let mut fins = 0;
+            for frame in connection
+                .inner_mut()
+                .generate_stream_frames_for(cx, PacketNumberSpace::ApplicationData, stream, 65_536)
+                .unwrap()
+            {
+                if let QuicFrame::Stream {
+                    stream_id,
+                    offset,
+                    data,
+                    fin,
+                } = frame
+                {
+                    assert_eq!(stream_id.value(), stream.0);
+                    assert_eq!(offset.map_or(0, VarInt::value), wire.len() as u64);
+                    wire.extend_from_slice(&data);
+                    fins += usize::from(fin);
+                }
+            }
+            fins
+        }
+
+        fn feedback(
+            cx: &Cx,
+            session: &mut NativeH3Session,
+            connection: &mut QuicConnection,
+            peer: &mut QpackInstructionStreamState,
+            wire: &mut Vec<u8>,
+        ) -> Vec<QpackDecoderInstruction> {
+            let stream = session
+                .dynamic_receive
+                .as_ref()
+                .unwrap()
+                .decoder_stream
+                .expect("feedback opens the local decoder stream");
+            let previous = wire.len();
+            for _ in 0..64 {
+                assert_eq!(drain_stream(cx, connection, stream, wire), 0);
+                if session.dynamic_receive.as_ref().unwrap().feedback.is_empty() {
+                    break;
+                }
+                // Draining packet assembly admits the next retained prefix;
+                // encoder-only traffic does not supply another incoming event.
+                assert_eq!(session.next_event(cx, connection).unwrap(), None);
+            }
+            assert!(session.dynamic_receive.as_ref().unwrap().feedback.is_empty());
+            let mut bytes = &wire[previous..];
+            if previous == 0 {
+                assert_eq!(bytes.first(), Some(&3), "decoder-stream type prefix");
+                bytes = &bytes[1..];
+                peer.register_stream(stream.0, H3UniStreamType::QpackDecoder)
+                    .unwrap();
+            }
+            let outcome = peer.feed_decoder_stream_bytes(stream.0, bytes).unwrap();
+            let mut instructions = Vec::new();
+            while !bytes.is_empty() {
+                let (instruction, consumed) = qpack_decode_decoder_instruction(bytes).unwrap();
+                instructions.push(instruction);
+                bytes = &bytes[consumed..];
+            }
+            assert_eq!(outcome.instructions_processed(), instructions.len());
+            instructions
+        }
+
+        fn request_section(peer: &QpackInstructionStreamState, entry: u64) -> Vec<u8> {
+            let mut plan = qpack_static_plan_for_request(&field_limit_request());
+            plan.push(QpackFieldPlan::DynamicIndex(entry));
+            qpack_encode_field_section_with_context(&plan, Some(peer.context())).unwrap()
+        }
+
+        #[test]
+        fn fragmented_encoder_before_settings_survives_and_acknowledges_the_request() {
+            for streaming in [false, true] {
+                let cx = Cx::for_testing();
+                let (mut session, mut connection) =
+                    fixture(&cx, true, streaming, H3Settings::default());
+                let mut peer = peer_encoder(NATIVE_H3_DEFAULT_QPACK_DECODER_CAPACITY as u64);
+                let wire = encoder_wire(&mut peer, &[("x-before-settings", "retained")]);
+                let encoder = StreamId(6);
+                connection
+                    .inner_mut()
+                    .accept_remote_stream(&cx, encoder)
+                    .unwrap();
+                for (offset, byte) in wire.iter().enumerate() {
+                    connection
+                        .inner_mut()
+                        .receive_stream_bytes(
+                            &cx,
+                            encoder,
+                            offset as u64,
+                            Bytes::copy_from_slice(&[*byte]),
+                            false,
+                        )
+                        .unwrap();
+                    assert_eq!(session.next_event(&cx, &mut connection).unwrap(), None);
+                    assert_eq!(
+                        session
+                            .dynamic_receive
+                            .as_ref()
+                            .unwrap()
+                            .qpack
+                            .received_context()
+                            .dynamic_table()
+                            .insertion_counter(),
+                        u64::from(offset + 1 == wire.len()),
+                        "an incomplete encoder literal must not publish an insertion"
+                    );
+                }
+                let mut decoder_wire = Vec::new();
+                assert_eq!(
+                    feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                    vec![QpackDecoderInstruction::InsertCountIncrement { increment: 1 }]
+                );
+                assert_eq!(peer.known_received_count(), 1);
+
+                // SETTINGS arriving after the encoder stream must preserve its table.
+                receive_peer_field_limit(&cx, &mut session, &mut connection, 65_536);
+                let section = request_section(&peer, 0);
+                assert_eq!(
+                    peer.submit_field_section(0, &section).unwrap(),
+                    QpackBlockedStreamStatus::Ready
+                );
+                connection
+                    .inner_mut()
+                    .accept_remote_stream(&cx, StreamId(0))
+                    .unwrap();
+                inject_field_frame(&cx, &mut connection, StreamId(0), 0, section, true);
+                let NativeH3Event::RequestHeaders { stream_id, head } =
+                    next_field_limit_event(&cx, &mut session, &mut connection)
+                else {
+                    panic!("dynamic request HEADERS were not decoded");
+                };
+                assert_eq!(stream_id, StreamId(0));
+                assert_eq!(
+                    head.headers,
+                    vec![("x-before-settings".to_owned(), "retained".to_owned())]
+                );
+                assert_eq!(
+                    next_field_limit_event(&cx, &mut session, &mut connection),
+                    NativeH3Event::Finished { stream_id }
+                );
+                assert_eq!(
+                    feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                    vec![QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 0 }]
+                );
+                assert_eq!(peer.decoder_feedback().outstanding_reference_count(), 0);
+                assert!(peer.decoder_feedback().cancelled_stream_ids().is_empty());
+                assert!(session.dynamic_receive.as_ref().unwrap().feedback.is_empty());
+            }
+        }
+
+        #[test]
+        fn dynamic_informational_final_and_trailer_sections_each_emit_one_ack() {
+            for streaming in [false, true] {
+                let cx = Cx::for_testing();
+                let (mut session, mut connection) =
+                    fixture(&cx, false, streaming, H3Settings::default());
+                let stream = session
+                    .send_request(&cx, &mut connection, &field_limit_request(), Bytes::new())
+                    .unwrap();
+                let mut request_wire = Vec::new();
+                assert_eq!(drain_stream(&cx, &mut connection, stream, &mut request_wire), 1);
+                let (H3Frame::Headers(outbound), _) =
+                    H3Frame::decode(&request_wire, &H3ConnectionConfig::default()).unwrap()
+                else {
+                    panic!("outbound request HEADERS missing");
+                };
+                assert_eq!(&outbound[..2], &[0, 0], "outbound encoding stays static");
+
+                let mut peer = peer_encoder(NATIVE_H3_DEFAULT_QPACK_DECODER_CAPACITY as u64);
+                let wire = encoder_wire(
+                    &mut peer,
+                    &[(":status", "103"), (":status", "200"), ("x-checksum", "done")],
+                );
+                inject_encoder(&cx, &mut session, &mut connection, wire);
+                let mut decoder_wire = Vec::new();
+                let increments = feedback(
+                    &cx,
+                    &mut session,
+                    &mut connection,
+                    &mut peer,
+                    &mut decoder_wire,
+                );
+                assert_eq!(
+                    increments
+                        .iter()
+                        .map(|instruction| match instruction {
+                            QpackDecoderInstruction::InsertCountIncrement { increment } => {
+                                *increment
+                            }
+                            other => panic!("unexpected insertion feedback: {other:?}"),
+                        })
+                        .sum::<u64>(),
+                    3
+                );
+
+                let mut offset = 0;
+                for section_index in 0..4 {
+                    let dynamic_entry = match section_index {
+                        0 => Some(0),
+                        1 => None,
+                        2 => Some(1),
+                        _ => Some(2),
+                    };
+                    let section = if let Some(entry) = dynamic_entry {
+                        let section = qpack_encode_field_section_with_context(
+                            &[QpackFieldPlan::DynamicIndex(entry)],
+                            Some(peer.context()),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            peer.submit_field_section(stream.0, &section).unwrap(),
+                            QpackBlockedStreamStatus::Ready
+                        );
+                        section
+                    } else {
+                        qpack_encode_response_field_section(
+                            &H3ResponseHead::new(100, Vec::new()).unwrap(),
+                        )
+                        .unwrap()
+                    };
+                    offset = inject_field_frame(
+                        &cx,
+                        &mut connection,
+                        stream,
+                        offset,
+                        section,
+                        section_index == 3,
+                    );
+                    let event = next_field_limit_event(&cx, &mut session, &mut connection);
+                    if section_index == 3 {
+                        assert_eq!(event, NativeH3Event::Trailers {
+                            stream_id: stream,
+                            fields: vec![("x-checksum".to_owned(), "done".to_owned())],
+                        });
+                    } else {
+                        let NativeH3Event::ResponseHeaders { stream_id, head } = event else {
+                            panic!("response HEADERS missing");
+                        };
+                        assert_eq!(stream_id, stream);
+                        assert_eq!(head.status, [103, 100, 200][section_index]);
+                    }
+                    let expected = if dynamic_entry.is_some() {
+                        vec![QpackDecoderInstruction::HeaderAcknowledgement {
+                            stream_id: stream.0,
+                        }]
+                    } else {
+                        Vec::new()
+                    };
+                    assert_eq!(
+                        feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                        expected,
+                        "a static section must not consume a dynamic section's ACK"
+                    );
+                    assert_eq!(peer.decoder_feedback().outstanding_reference_count(), 0);
+                }
+                assert_eq!(
+                    next_field_limit_event(&cx, &mut session, &mut connection),
+                    NativeH3Event::Finished { stream_id: stream }
+                );
+                assert!(
+                    feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire)
+                        .is_empty()
+                );
+                assert!(peer.decoder_feedback().cancelled_stream_ids().is_empty());
+            }
+        }
+
+        #[test]
+        fn refused_dynamic_headers_acknowledge_before_cancelling_only_the_bad_stream() {
+            for streaming in [false, true] {
+                for oversized in [false, true] {
+                    let cx = Cx::for_testing();
+                    let (mut session, mut connection) = fixture(
+                        &cx,
+                        true,
+                        streaming,
+                        H3Settings {
+                            max_field_section_size: oversized.then_some(200),
+                            ..H3Settings::default()
+                        },
+                    );
+                    let mut peer =
+                        peer_encoder(NATIVE_H3_DEFAULT_QPACK_DECODER_CAPACITY as u64);
+                    let value = "x".repeat(64);
+                    let field = if oversized {
+                        ("x-padding", value.as_str())
+                    } else {
+                        ("connection", "keep-alive")
+                    };
+                    let wire = encoder_wire(&mut peer, &[field]);
+                    inject_encoder(&cx, &mut session, &mut connection, wire);
+                    let mut decoder_wire = Vec::new();
+                    assert_eq!(
+                        feedback(
+                            &cx,
+                            &mut session,
+                            &mut connection,
+                            &mut peer,
+                            &mut decoder_wire,
+                        ),
+                        vec![QpackDecoderInstruction::InsertCountIncrement { increment: 1 }]
+                    );
+                    let section = request_section(&peer, 0);
+                    peer.submit_field_section(0, &section).unwrap();
+                    connection
+                        .inner_mut()
+                        .accept_remote_stream(&cx, StreamId(0))
+                        .unwrap();
+                    inject_field_frame(&cx, &mut connection, StreamId(0), 0, section, false);
+                    assert_eq!(
+                        next_field_limit_event(&cx, &mut session, &mut connection),
+                        NativeH3Event::StreamReset {
+                            stream_id: StreamId(0),
+                            error_code: if oversized {
+                                H3_EXCESSIVE_LOAD
+                            } else {
+                                H3_MESSAGE_ERROR
+                            },
+                            final_size: 0,
+                        }
+                    );
+                    assert_eq!(
+                        feedback(
+                            &cx,
+                            &mut session,
+                            &mut connection,
+                            &mut peer,
+                            &mut decoder_wire,
+                        ),
+                        vec![
+                            QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 0 },
+                            QpackDecoderInstruction::StreamCancellation { stream_id: 0 },
+                        ],
+                        "QPACK decoding succeeds before HTTP validation refuses the stream"
+                    );
+                    assert_eq!(peer.decoder_feedback().outstanding_reference_count(), 0);
+                    assert!(peer.decoder_feedback().cancelled_stream_ids().contains(&0));
+                    let receive = session.dynamic_receive.as_ref().unwrap();
+                    assert_eq!(
+                        receive.qpack.received_decoder_feedback().outstanding_reference_count(),
+                        0
+                    );
+                    assert_eq!(
+                        receive.qpack.received_blocked_scheduler().pending_section_count(0),
+                        0
+                    );
+                    assert!(!session.incoming.contains_key(&StreamId(0)));
+                    assert_eq!(session.state.active_request_stream_count(), 0);
+
+                    receive_request_head(&cx, &mut connection, StreamId(4), false);
+                    assert!(matches!(
+                        next_field_limit_event(&cx, &mut session, &mut connection),
+                        NativeH3Event::RequestHeaders { stream_id: StreamId(4), .. }
+                    ));
+                    assert!(
+                        feedback(
+                            &cx,
+                            &mut session,
+                            &mut connection,
+                            &mut peer,
+                            &mut decoder_wire,
+                        )
+                        .is_empty()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn a_reset_before_headers_still_releases_the_peers_possible_qpack_references() {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) =
+                fixture(&cx, true, false, H3Settings::default());
+            connection
+                .inner_mut()
+                .accept_remote_stream(&cx, StreamId(0))
+                .unwrap();
+            connection
+                .inner_mut()
+                .reset_stream_receive(&cx, StreamId(0), H3_REQUEST_CANCELLED, 0)
+                .unwrap();
+            assert_eq!(
+                next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::StreamReset {
+                    stream_id: StreamId(0),
+                    error_code: H3_REQUEST_CANCELLED,
+                    final_size: 0,
+                }
+            );
+            let mut peer = peer_encoder(NATIVE_H3_DEFAULT_QPACK_DECODER_CAPACITY as u64);
+            let mut wire = Vec::new();
+            assert_eq!(
+                feedback(&cx, &mut session, &mut connection, &mut peer, &mut wire),
+                vec![QpackDecoderInstruction::StreamCancellation { stream_id: 0 }]
+            );
+            assert_eq!(peer.known_received_count(), 0);
+            assert!(peer.decoder_feedback().cancelled_stream_ids().contains(&0));
+            assert_eq!(session.next_event(&cx, &mut connection).unwrap(), None);
+            assert!(feedback(&cx, &mut session, &mut connection, &mut peer, &mut wire).is_empty());
+        }
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn grant_stream_credit(
+            cx: &Cx,
+            connection: &mut QuicConnection,
+            stream: StreamId,
+            limit: u64,
+        ) {
+            connection
+                .inner_mut()
+                .process_frame(
+                    cx,
+                    &QuicFrame::MaxStreamData {
+                        stream_id: VarInt::from_u64_unchecked(stream.0),
+                        maximum_stream_data: VarInt::from_u64_unchecked(limit),
+                    },
+                    PacketNumberSpace::ApplicationData,
+                )
+                .unwrap();
+        }
+
+        fn grant_connection_credit(cx: &Cx, connection: &mut QuicConnection, limit: u64) {
+            connection
+                .inner_mut()
+                .process_frame(
+                    cx,
+                    &QuicFrame::MaxData {
+                        maximum_data: VarInt::from_u64_unchecked(limit),
+                    },
+                    PacketNumberSpace::ApplicationData,
+                )
+                .unwrap();
+        }
+
+        #[test]
+        fn feedback_resumes_on_both_credit_wakes_without_new_input_and_detects_decoder_stop() {
+            for streaming in [false, true] {
+                assert_feedback_credit_wakes_and_critical_stop(streaming);
+            }
+        }
+
+        fn assert_feedback_credit_wakes_and_critical_stop(streaming: bool) {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) =
+                fixture(&cx, true, streaming, H3Settings::default());
+            let control = session.local_control_stream.unwrap();
+            drain_peer_limit_stream(&cx, &mut connection, control);
+            let used = connection.inner().streams().connection_send_limit()
+                - connection.inner().streams().connection_send_remaining();
+            connection
+                .inner_mut()
+                .constrain_connection_send_limit_for_testing(&cx, used)
+                .unwrap();
+            let mut peer = peer_encoder(NATIVE_H3_DEFAULT_QPACK_DECODER_CAPACITY as u64);
+            let wire = encoder_wire(&mut peer, &[("x-credit", "retained")]);
+            inject_encoder(&cx, &mut session, &mut connection, wire);
+            let decoder = session.dynamic_receive.as_ref().unwrap().decoder_stream.unwrap();
+            connection
+                .inner_mut()
+                .set_fresh_stream_send_limit(&cx, decoder, 0)
+                .unwrap();
+            assert_eq!(connection.pending_stream_data_bytes(decoder), 0);
+            assert!(!session.dynamic_receive.as_ref().unwrap().feedback.is_empty());
+
+            let counter = Arc::new(WakeCount::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = TaskContext::from_waker(&waker);
+            for _ in 0..3 {
+                assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            }
+            assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+
+            // Each credit scope wakes the real parked task. Opening only one
+            // scope must preserve the entire suffix and re-register the wait.
+            grant_stream_credit(&cx, &mut connection, decoder, 1);
+            assert!(counter.0.swap(0, Ordering::SeqCst) > 0);
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            assert_eq!(connection.pending_stream_data_bytes(decoder), 0);
+            assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+            grant_connection_credit(&cx, &mut connection, used + 1);
+            assert!(counter.0.swap(0, Ordering::SeqCst) > 0);
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            let mut decoder_wire = Vec::new();
+            assert_eq!(drain_stream(&cx, &mut connection, decoder, &mut decoder_wire), 0);
+            assert_eq!(decoder_wire, vec![3], "one-byte window sends only the type prefix");
+
+            counter.0.store(0, Ordering::SeqCst);
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+            grant_connection_credit(&cx, &mut connection, used + 2);
+            assert!(counter.0.swap(0, Ordering::SeqCst) > 0);
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            assert_eq!(connection.pending_stream_data_bytes(decoder), 0);
+            grant_stream_credit(&cx, &mut connection, decoder, 2);
+            assert!(counter.0.swap(0, Ordering::SeqCst) > 0);
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            assert_eq!(drain_stream(&cx, &mut connection, decoder, &mut decoder_wire), 0);
+            assert_eq!(decoder_wire, vec![3, 1], "increment survives prefix fragmentation");
+            assert!(session.dynamic_receive.as_ref().unwrap().feedback.is_empty());
+            peer.register_stream(decoder.0, H3UniStreamType::QpackDecoder).unwrap();
+            assert_eq!(
+                peer.feed_decoder_stream_bytes(decoder.0, &decoder_wire[1..])
+                    .unwrap()
+                    .instructions_processed(),
+                1
+            );
+            assert_eq!(peer.known_received_count(), 1);
+
+            // An empty feedback queue does not make the critical decoder stream optional.
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            counter.0.store(0, Ordering::SeqCst);
+            connection
+                .inner_mut()
+                .process_frame(
+                    &cx,
+                    &QuicFrame::StopSending {
+                        stream_id: VarInt::from_u64_unchecked(decoder.0),
+                        error_code: VarInt::from_u64_unchecked(H3_REQUEST_CANCELLED),
+                    },
+                    PacketNumberSpace::ApplicationData,
+                )
+                .unwrap();
+            assert!(counter.0.load(Ordering::SeqCst) > 0, "critical STOP must wake the session");
+            assert_eq!(
+                session.poll_event(&cx, &mut connection, &mut task),
+                Poll::Ready(Err(NativeH3SessionError::CriticalStreamClosed {
+                    stream_id: decoder,
+                    stream_type: H3UniStreamType::QpackDecoder,
+                }))
+            );
+        }
+
+        #[test]
+        fn dynamic_receive_rejects_an_unavailable_reference_with_zero_blocked_streams() {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) =
+                fixture(&cx, true, false, H3Settings::default());
+            let mut peer = peer_encoder(NATIVE_H3_DEFAULT_QPACK_DECODER_CAPACITY as u64);
+            // Encode a real dynamic reference, but deliberately withhold its encoder stream.
+            let _wire = encoder_wire(&mut peer, &[("x-late", "unavailable")]);
+            let section = request_section(&peer, 0);
+            connection
+                .inner_mut()
+                .accept_remote_stream(&cx, StreamId(0))
+                .unwrap();
+            inject_field_frame(&cx, &mut connection, StreamId(0), 0, section, false);
+            let error = session.next_event(&cx, &mut connection).unwrap_err();
+            assert_eq!(
+                error,
+                NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
+                    "qpack blocked stream capacity is zero"
+                ))
+            );
+            assert_eq!(session.next_event(&cx, &mut connection).unwrap_err(), error);
+            let receive = session.dynamic_receive.as_ref().unwrap();
+            assert_eq!(receive.qpack.received_blocked_scheduler().blocked_stream_count(), 0);
+            assert_eq!(receive.qpack.received_decoder_feedback().outstanding_reference_count(), 0);
+            assert!(receive.feedback.is_empty());
+            assert!(receive.decoder_stream.is_none());
+        }
+
+        #[test]
+        fn dynamic_settings_are_bounded_before_stream_mutation_and_static_defaults_stay_static() {
+            let cx = Cx::for_testing();
+            for invalid in [
+                H3Settings {
+                    qpack_max_table_capacity: Some(NATIVE_H3_MAX_QPACK_DECODER_CAPACITY as u64 + 1),
+                    ..H3Settings::default()
+                },
+                H3Settings {
+                    qpack_blocked_streams: Some(1),
+                    ..H3Settings::default()
+                },
+            ] {
+                let mut connection = connection(&cx, true);
+                let mut session = NativeH3Session::with_config(
+                    H3ConnectionConfig {
+                        endpoint_role: H3EndpointRole::Server,
+                        ..H3ConnectionConfig::default()
+                    }
+                    .with_dynamic_qpack(),
+                );
+                assert!(session.initialize(&cx, &mut connection, invalid).is_err());
+                assert!(!session.initialized);
+                assert!(session.local_control_stream.is_none());
+                assert!(connection.inner().streams().stream(StreamId(3)).is_err());
+                session.initialize(&cx, &mut connection, H3Settings::default()).unwrap();
+                assert_eq!(session.local_control_stream, Some(StreamId(3)));
+                let mut wire = Vec::new();
+                assert_eq!(drain_stream(&cx, &mut connection, StreamId(3), &mut wire), 0);
+                assert_eq!(wire.first(), Some(&0));
+                let (H3Frame::Settings(settings), consumed) =
+                    H3Frame::decode(&wire[1..], &H3ConnectionConfig::default()).unwrap()
+                else {
+                    panic!("local SETTINGS missing");
+                };
+                assert_eq!(consumed, wire.len() - 1);
+                assert_eq!(
+                    settings.qpack_max_table_capacity,
+                    Some(NATIVE_H3_DEFAULT_QPACK_DECODER_CAPACITY as u64)
+                );
+                assert_eq!(settings.qpack_blocked_streams, Some(0));
+                assert_eq!(
+                    settings.max_field_section_size,
+                    Some(NATIVE_H3_MAX_QPACK_FIELD_SECTION_SIZE)
+                );
+            }
+
+            let mut connection = connection(&cx, true);
+            let mut session = NativeH3Session::server();
+            session.initialize(&cx, &mut connection, H3Settings {
+                qpack_max_table_capacity: Some(4096),
+                qpack_blocked_streams: Some(8),
+                ..H3Settings::default()
+            }).unwrap();
+            assert!(session.dynamic_receive.is_none());
+            let mut wire = Vec::new();
+            assert_eq!(drain_stream(&cx, &mut connection, StreamId(3), &mut wire), 0);
+            let (H3Frame::Settings(settings), _) =
+                H3Frame::decode(&wire[1..], &H3ConnectionConfig::default()).unwrap()
+            else {
+                panic!("static local SETTINGS missing");
+            };
+            assert_eq!(settings.qpack_max_table_capacity, Some(0));
+            assert_eq!(settings.qpack_blocked_streams, Some(0));
+            assert_eq!(settings.max_field_section_size, None);
+        }
+
+        #[test]
+        fn repeated_large_dynamic_references_obey_the_decoded_field_limit() {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = fixture(
+                &cx,
+                true,
+                false,
+                H3Settings {
+                    qpack_max_table_capacity: Some(NATIVE_H3_MAX_QPACK_DECODER_CAPACITY as u64),
+                    max_field_section_size: Some(u64::MAX >> 2),
+                    ..H3Settings::default()
+                },
+            );
+            assert_eq!(
+                session.max_field_section_size,
+                Some(NATIVE_H3_MAX_QPACK_FIELD_SECTION_SIZE)
+            );
+            let mut peer = peer_encoder(NATIVE_H3_MAX_QPACK_DECODER_CAPACITY as u64);
+            let value = "x".repeat(64_000);
+            let wire = encoder_wire(&mut peer, &[("x-expanded", value.as_str())]);
+            inject_encoder(&cx, &mut session, &mut connection, wire);
+            let mut decoder_wire = Vec::new();
+            assert_eq!(
+                feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                vec![QpackDecoderInstruction::InsertCountIncrement { increment: 1 }]
+            );
+            let mut plan = qpack_static_plan_for_request(&field_limit_request());
+            plan.extend((0..17).map(|_| QpackFieldPlan::DynamicIndex(0)));
+            let section =
+                qpack_encode_field_section_with_context(&plan, Some(peer.context())).unwrap();
+            assert!(section.len() < 128, "small wire input expands past the one-MiB bound");
+            peer.submit_field_section(0, &section).unwrap();
+            connection
+                .inner_mut()
+                .accept_remote_stream(&cx, StreamId(0))
+                .unwrap();
+            inject_field_frame(&cx, &mut connection, StreamId(0), 0, section, false);
+            assert_eq!(
+                next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::StreamReset {
+                    stream_id: StreamId(0),
+                    error_code: H3_EXCESSIVE_LOAD,
+                    final_size: 0,
+                }
+            );
+            assert_eq!(
+                feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                vec![
+                    QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 0 },
+                    QpackDecoderInstruction::StreamCancellation { stream_id: 0 },
+                ]
+            );
+            assert_eq!(peer.decoder_feedback().outstanding_reference_count(), 0);
+            receive_request_head(&cx, &mut connection, StreamId(4), false);
+            assert!(matches!(
+                next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::RequestHeaders { stream_id: StreamId(4), .. }
+            ));
+        }
+
+        #[test]
+        fn feedback_exhaustion_is_sticky_and_does_not_acquire_field_section_references() {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) =
+                fixture(&cx, true, false, H3Settings::default());
+            let mut peer = peer_encoder(NATIVE_H3_DEFAULT_QPACK_DECODER_CAPACITY as u64);
+            let wire = encoder_wire(&mut peer, &[("x-pressure", "retained")]);
+            inject_encoder(&cx, &mut session, &mut connection, wire);
+            let mut decoder_wire = Vec::new();
+            assert_eq!(
+                feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                vec![QpackDecoderInstruction::InsertCountIncrement { increment: 1 }]
+            );
+            let decoder = session.dynamic_receive.as_ref().unwrap().decoder_stream.unwrap();
+            connection
+                .inner_mut()
+                .set_fresh_stream_send_limit(&cx, decoder, decoder_wire.len() as u64)
+                .unwrap();
+            let used = connection.inner().streams().connection_send_limit()
+                - connection.inner().streams().connection_send_remaining();
+            connection
+                .inner_mut()
+                .constrain_connection_send_limit_for_testing(&cx, used)
+                .unwrap();
+            // Plant exact queue pressure without creating 65,536 unrelated
+            // requests. No staged byte can leave either exhausted send window.
+            session.dynamic_receive.as_mut().unwrap().feedback.resize(
+                NATIVE_H3_MAX_QPACK_FEEDBACK_BYTES,
+                0x40,
+            );
+            let section = request_section(&peer, 0);
+            peer.submit_field_section(0, &section).unwrap();
+            connection
+                .inner_mut()
+                .accept_remote_stream(&cx, StreamId(0))
+                .unwrap();
+            inject_field_frame(&cx, &mut connection, StreamId(0), 0, section, false);
+            let error = NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
+                "qpack decoder feedback buffer limit exceeded",
+            ));
+            assert_eq!(session.next_event(&cx, &mut connection).unwrap_err(), error);
+            let receive = session.dynamic_receive.as_ref().unwrap();
+            assert_eq!(receive.feedback.len(), NATIVE_H3_MAX_QPACK_FEEDBACK_BYTES);
+            assert_eq!(receive.qpack.received_decoder_feedback().outstanding_reference_count(), 0);
+            assert_eq!(receive.qpack.received_blocked_scheduler().pending_section_count(0), 0);
+            // A cloned table retains reference counts. Successful eviction
+            // proves no entry was protected before ACK space was reserved.
+            let mut context = receive.qpack.received_context().clone();
+            context.set_dynamic_table_capacity(0).unwrap();
+            assert_eq!(connection.pending_stream_data_bytes(decoder), 0);
+            assert_eq!(session.next_event(&cx, &mut connection).unwrap_err(), error);
+        }
+
+        #[test]
+        fn a_coalesced_dynamic_header_burst_expands_only_the_event_being_delivered() {
+            for explicit_chunks in [false, true] {
+                let cx = Cx::for_testing();
+                let (mut session, mut connection) = fixture(
+                    &cx,
+                    false,
+                    explicit_chunks,
+                    H3Settings {
+                        qpack_max_table_capacity: Some(NATIVE_H3_MAX_QPACK_DECODER_CAPACITY as u64),
+                        ..H3Settings::default()
+                    },
+                );
+                assert_eq!(
+                    session.streaming_receive.as_ref().unwrap().max_chunk_bytes.get(),
+                    if explicit_chunks {
+                        8
+                    } else {
+                        NATIVE_H3_DYNAMIC_RECEIVE_CHUNK_BYTES
+                    }
+                );
+                assert_eq!(NATIVE_H3_DYNAMIC_RECEIVE_CHUNK_BYTES, 64 * 1024);
+                let stream = session
+                    .send_request(&cx, &mut connection, &field_limit_request(), Bytes::new())
+                    .unwrap();
+                let mut peer = peer_encoder(NATIVE_H3_MAX_QPACK_DECODER_CAPACITY as u64);
+                let value = "x".repeat(60_000);
+                let encoder = encoder_wire(&mut peer, &[("x-expanded", value.as_str())]);
+                inject_encoder(&cx, &mut session, &mut connection, encoder);
+                let mut decoder_wire = Vec::new();
+                assert_eq!(
+                    feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                    vec![QpackDecoderInstruction::InsertCountIncrement { increment: 1 }]
+                );
+
+                // Each tiny section expands to 960,000 value bytes. Decoding the
+                // entire coalesced read before delivering its first event
+                // would retain eight expanded copies in the session queue.
+                let mut plan = vec![QpackFieldPlan::StaticIndex(24)]; // :status 103
+                plan.extend((0..16).map(|_| QpackFieldPlan::DynamicIndex(0)));
+                let section =
+                    qpack_encode_field_section_with_context(&plan, Some(peer.context())).unwrap();
+                assert!(section.len() < 32);
+                let mut burst = Vec::new();
+                for _ in 0..8 {
+                    assert_eq!(
+                        peer.submit_field_section(stream.0, &section).unwrap(),
+                        QpackBlockedStreamStatus::Ready
+                    );
+                    H3Frame::Headers(section.clone()).encode(&mut burst).unwrap();
+                }
+                H3Frame::Headers(
+                    qpack_encode_response_field_section(
+                        &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .encode(&mut burst)
+                .unwrap();
+                assert!(burst.len() < 256);
+                connection
+                    .inner_mut()
+                    .receive_stream_bytes(&cx, stream, 0, Bytes::from(burst), true)
+                    .unwrap();
+
+                let mut task = TaskContext::from_waker(Waker::noop());
+                for index in 0..8 {
+                    // Alternate both public drivers without injecting any
+                    // more transport bytes or readiness notifications.
+                    let event = if index % 2 == 0 {
+                        next_field_limit_event(&cx, &mut session, &mut connection)
+                    } else {
+                        let Poll::Ready(Ok(event)) =
+                            session.poll_event(&cx, &mut connection, &mut task)
+                        else {
+                            panic!("retained field-section lookahead did not produce its event");
+                        };
+                        event
+                    };
+                    let NativeH3Event::ResponseHeaders { stream_id, head } = event else {
+                        panic!("informational HEADERS lost their receive order");
+                    };
+                    assert_eq!(stream_id, stream);
+                    assert_eq!(head.status, 103);
+                    assert_eq!(head.headers.len(), 16);
+                    assert!(head.headers.iter().all(|(name, value)| {
+                        name == "x-expanded" && value.len() == 60_000
+                    }));
+                    assert!(
+                        session.events.is_empty(),
+                        "later compressed sections must not be expanded into queued events"
+                    );
+                    assert!(!session.terminal_streams.contains(stream));
+                    assert!(
+                        session.streaming_receive.as_ref().unwrap().ready.contains_key(&stream)
+                    );
+                    if index == 0 && !explicit_chunks {
+                        assert!(!session.incoming.get(&stream).unwrap().bytes.is_empty());
+                    }
+                    drop(head);
+                }
+                let NativeH3Event::ResponseHeaders { stream_id, head } =
+                    next_field_limit_event(&cx, &mut session, &mut connection)
+                else {
+                    panic!("final response HEADERS missing");
+                };
+                assert_eq!(stream_id, stream);
+                assert_eq!(head.status, 200);
+                assert!(session.events.is_empty());
+                assert_eq!(
+                    next_field_limit_event(&cx, &mut session, &mut connection),
+                    NativeH3Event::Finished { stream_id: stream }
+                );
+                assert!(session.events.is_empty());
+                assert!(!session.incoming.contains_key(&stream));
+                assert_eq!(
+                    feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                    vec![
+                        QpackDecoderInstruction::HeaderAcknowledgement {
+                            stream_id: stream.0,
+                        };
+                        8
+                    ]
+                );
+                assert_eq!(peer.decoder_feedback().outstanding_reference_count(), 0);
+                assert!(peer.decoder_feedback().cancelled_stream_ids().is_empty());
+            }
         }
     }

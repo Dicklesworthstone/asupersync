@@ -155,6 +155,10 @@ pub struct LocalStoredTask {
     poll_count: u64,
     /// Budget polls remaining (set by executor before each poll, for tracing).
     polls_remaining: Option<u32>,
+    /// Weak ownership route used only when the owner's local store retires.
+    /// A parked local future must not keep its runtime alive through this
+    /// backstop, and ordinary scheduler completion does not publish it.
+    retirement_gateway: Option<std::sync::Weak<crate::runtime::spawn_mailbox::SpawnGateway>>,
 }
 
 impl LocalStoredTask {
@@ -169,6 +173,7 @@ impl LocalStoredTask {
             task_id: None,
             poll_count: 0,
             polls_remaining: None,
+            retirement_gateway: None,
         }
     }
 
@@ -183,7 +188,22 @@ impl LocalStoredTask {
             task_id: Some(task_id),
             poll_count: 0,
             polls_remaining: None,
+            retirement_gateway: None,
         }
+    }
+
+    pub(crate) fn with_retirement_gateway(
+        mut self,
+        gateway: Option<&std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
+    ) -> Self {
+        self.retirement_gateway = gateway.map(std::sync::Arc::downgrade);
+        self
+    }
+
+    pub(crate) fn take_retirement_gateway(
+        &mut self,
+    ) -> Option<std::sync::Weak<crate::runtime::spawn_mailbox::SpawnGateway>> {
+        self.retirement_gateway.take()
     }
 
     /// Sets the task ID for tracing.

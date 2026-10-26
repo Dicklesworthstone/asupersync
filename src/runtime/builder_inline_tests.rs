@@ -6065,6 +6065,143 @@ worker_threads = 16
         );
     }
 
+    fn assert_local_owner_exit_retires_admitted_tasks(sharded: bool) {
+        use crate::runtime::task_handle::JoinError;
+
+        struct ParkedLocal {
+            index: usize,
+            started: bool,
+            starts: Arc<AtomicUsize>,
+            drops: Arc<std::sync::Mutex<Vec<(usize, std::thread::ThreadId)>>>,
+            _local: std::rc::Rc<()>,
+        }
+
+        impl Future for ParkedLocal {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+                if !self.started {
+                    self.started = true;
+                    self.starts.fetch_add(1, Ordering::SeqCst);
+                }
+                Poll::Pending
+            }
+        }
+
+        impl Drop for ParkedLocal {
+            fn drop(&mut self) {
+                self.drops
+                    .lock()
+                    .unwrap()
+                    .push((self.index, std::thread::current().id()));
+                if self.index == 0 {
+                    panic!("parked local destructor");
+                }
+            }
+        }
+
+        // More than one consumer batch, with the first destructor panicking:
+        // neither containment nor a bounded drain may strand later records.
+        const TASKS: usize = 10;
+        let drops = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let owner_drops = Arc::clone(&drops);
+        let owner = std::thread::spawn(move || {
+            let runtime = RuntimeBuilder::current_thread()
+                .with_sharded_state(sharded)
+                .build()
+                .expect("build movable current-thread runtime");
+            let starts = Arc::new(AtomicUsize::new(0));
+            let handles = runtime.block_on(async {
+                let cx = Cx::current().expect("root context");
+                let mut handles = Vec::new();
+                for index in 0..TASKS {
+                    let task_starts = Arc::clone(&starts);
+                    let task_drops = Arc::clone(&owner_drops);
+                    handles.push(
+                        cx.spawn_local(move |_| ParkedLocal {
+                            index,
+                            started: false,
+                            starts: task_starts,
+                            drops: task_drops,
+                            _local: std::rc::Rc::new(()),
+                        })
+                        .expect("admit local task on the calling thread"),
+                    );
+                }
+                for _ in 0..128 {
+                    if starts.load(Ordering::SeqCst) == TASKS {
+                        break;
+                    }
+                    crate::runtime::yield_now().await;
+                }
+                assert_eq!(starts.load(Ordering::SeqCst), TASKS);
+                handles
+            });
+            assert!(owner_drops.lock().unwrap().is_empty());
+            (runtime, handles, std::thread::current().id())
+        });
+        let (runtime, mut handles, owner_id) = owner
+            .join()
+            .expect("one local destructor panic must not escape thread teardown");
+        {
+            let retired = drops.lock().unwrap();
+            assert_eq!(retired.len(), TASKS, "all owner-thread destructors finished");
+            assert!(retired.iter().all(|(_, thread)| *thread == owner_id));
+            let mut indexes: Vec<_> = retired.iter().map(|(index, _)| *index).collect();
+            indexes.sort_unstable();
+            assert_eq!(indexes, (0..TASKS).collect::<Vec<_>>());
+        }
+
+        assert_eq!(
+            runtime.drain_root_region(Duration::from_secs(5)),
+            RootDrainOutcome::Quiescent,
+            "sharded={sharded}: owner-thread exit must not strand local records"
+        );
+        for (index, handle) in handles.iter_mut().enumerate() {
+            assert!(handle.is_finished(), "local task {index} has retired");
+            match handle.try_join() {
+                Err(JoinError::Panicked(panic)) if index == 0 => {
+                    assert_eq!(panic.message(), "parked local destructor");
+                }
+                Err(JoinError::Cancelled(reason)) if index != 0 => {
+                    assert!(reason.is_shutdown());
+                }
+                other => panic!("sharded={sharded}: local task {index} joined as {other:?}"),
+            }
+            let task_id = handle.task_id();
+            if let Some(table) = runtime.inner.scheduler.dispatch_task_table() {
+                assert!(
+                    table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .task(task_id)
+                        .is_none()
+                );
+            } else {
+                assert!(
+                    runtime
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .task(task_id)
+                        .is_none()
+                );
+            }
+        }
+        assert!(runtime.is_quiescent());
+    }
+
+    #[test]
+    fn exited_local_owner_releases_joins_and_root_drain() {
+        assert_local_owner_exit_retires_admitted_tasks(false);
+    }
+
+    #[test]
+    fn exited_local_owner_retires_sharded_records_and_destructor_panics() {
+        assert_local_owner_exit_retires_admitted_tasks(true);
+    }
+
     #[test]
     fn browser_host_services_pump_contract_and_local_future_resolution() {
         use std::cell::Cell;

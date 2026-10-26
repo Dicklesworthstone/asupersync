@@ -952,6 +952,26 @@ impl NativeQuicConnection {
         }
     }
 
+    /// Wait for a critical send direction to close, even with no queued bytes.
+    #[cfg(feature = "http3")]
+    pub(crate) fn poll_stream_send_closed(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), NativeQuicConnectionError>> {
+        if let Err(error) = checkpoint(cx) {
+            return Poll::Ready(Err(error));
+        }
+        if let Err(error) = self.ensure_stream_active_state() {
+            return Poll::Ready(Err(error));
+        }
+        match self.streams.poll_stream_send_closed(id, task_cx) {
+            Poll::Ready(result) => Poll::Ready(result.map_err(map_stream_table_error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
     /// Poll until one stream has no prior queued frame and enough capacity for
     /// a new application frame.
     pub fn poll_stream_write_ready(

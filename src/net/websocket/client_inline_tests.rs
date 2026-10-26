@@ -1225,6 +1225,180 @@
         assert!(closed, "the connection is closed after the timeout");
     }
 
+    struct CloseShutdownIo {
+        inner: TestIo,
+        park_reads: bool,
+        shutdown_polls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AsyncRead for CloseShutdownIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.park_reads {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for CloseShutdownIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.shutdown_polls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Poll::Pending
+        }
+    }
+
+    struct CloseTimeoutWake(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for CloseTimeoutWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn client_close_clock(
+        start: u64,
+    ) -> (Arc<crate::time::VirtualClock>, crate::time::TimerDriverHandle, Cx) {
+        let clock = Arc::new(crate::time::VirtualClock::starting_at(
+            crate::types::Time::from_secs(start),
+        ));
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(91, 1),
+            TaskId::new_for_test(91, 1),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        (clock, timer, cx)
+    }
+
+    #[test]
+    fn close_deadline_still_bounds_transport_shutdown_after_the_peer_replies() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Waker};
+
+        let (clock, timer, cx) = client_close_clock(100);
+        let (_, _, foreign_cx) = client_close_clock(1_000_000);
+        let _ambient = Cx::set_current(Some(foreign_cx));
+        let shutdown_polls = Arc::new(AtomicUsize::new(0));
+        let io = CloseShutdownIo {
+            inner: TestIo::with_read_data(encode_server_frame(Frame::close(Some(1000), None))),
+            park_reads: false,
+            shutdown_polls: Arc::clone(&shutdown_polls),
+        };
+        let mut config = WebSocketConfig::default();
+        config.ping_interval = None;
+        config.close_config.close_timeout = Duration::from_secs(10);
+        let mut ws = WebSocket::from_upgraded_with_entropy(
+            io,
+            config,
+            Arc::new(FixedEntropy([1, 2, 3, 4])),
+        );
+        let counter = Arc::new(CloseTimeoutWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut task = Context::from_waker(&waker);
+        {
+            let mut close = std::pin::pin!(ws.close(&cx, CloseReason::normal()));
+            assert!(close.as_mut().poll(&mut task).is_pending());
+            assert!(shutdown_polls.load(Ordering::SeqCst) > 0);
+            clock.set(crate::types::Time::from_secs(109));
+            assert_eq!(timer.process_timers(), 0);
+            assert!(close.as_mut().poll(&mut task).is_pending());
+            let before = counter.0.load(Ordering::SeqCst);
+            clock.set(crate::types::Time::from_secs(110));
+            assert!(timer.process_timers() > 0);
+            assert!(counter.0.load(Ordering::SeqCst) > before);
+            assert!(matches!(close.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+        }
+        assert!(ws.is_closed());
+    }
+
+    #[test]
+    fn reunited_client_close_and_recv_keep_the_original_deadline_and_clock() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Waker};
+
+        for receive in [false, true] {
+            let (clock, timer, first_cx) = client_close_clock(100);
+            let (_, _, later_cx) = client_close_clock(1_000_000);
+            let io = CloseShutdownIo {
+                inner: TestIo::new(),
+                park_reads: true,
+                shutdown_polls: Arc::new(AtomicUsize::new(0)),
+            };
+            let mut config = WebSocketConfig::default();
+            config.ping_interval = None;
+            config.close_config.close_timeout = Duration::from_secs(10);
+            let ws = WebSocket::from_upgraded_with_entropy(
+                io,
+                config,
+                Arc::new(FixedEntropy([1, 2, 3, 4])),
+            );
+            let (read, mut write) = ws.split();
+            future::block_on(write.send(&first_cx, Message::Close(Some(CloseReason::normal()))))
+                .expect("the original Close is flushed");
+            clock.set(crate::types::Time::from_secs(103));
+            let mut ws = read.reunite(write).expect("matching halves reunite");
+            let _ambient = Cx::set_current(Some(later_cx.clone()));
+            let counter = Arc::new(CloseTimeoutWake(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            {
+                let mut operation = std::pin::pin!(async {
+                    if receive {
+                        ws.recv(&later_cx).await.map(|message| {
+                            assert!(message.is_none(), "the bounded receive ends on close timeout");
+                        })
+                    } else {
+                        ws.close(&later_cx, CloseReason::normal()).await
+                    }
+                });
+                assert!(operation.as_mut().poll(&mut task).is_pending());
+                clock.set(crate::types::Time::from_secs(109));
+                assert_eq!(timer.process_timers(), 0);
+                assert!(operation.as_mut().poll(&mut task).is_pending());
+                let before = counter.0.load(Ordering::SeqCst);
+                clock.set(crate::types::Time::from_secs(110));
+                assert!(timer.process_timers() > 0, "reunite must keep the original timer");
+                assert!(counter.0.load(Ordering::SeqCst) > before);
+                assert!(matches!(operation.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+            }
+            assert!(ws.is_closed(), "receive={receive}");
+        }
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct FixedEntropy([u8; 4]);
 

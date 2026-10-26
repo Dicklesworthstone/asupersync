@@ -38,6 +38,9 @@ use std::sync::{Arc, OnceLock, Weak};
 pub(crate) struct RetirementBarrier {
     open: AtomicBool,
     shutdown: AtomicBool,
+    /// A destroyed local future cannot publish through its typed result
+    /// sender. Preserve its authoritative failure after the task Cx retires.
+    closed_error: OnceLock<Box<JoinError>>,
     waker: Mutex<Option<std::task::Waker>>,
     // Present only in the opt-in task-causal lab. Publication of the result
     // precedes retirement, so the result channel's stamp cannot witness the
@@ -66,6 +69,7 @@ impl RetirementBarrier {
         Arc::new(Self {
             open: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            closed_error: OnceLock::new(),
             waker: Mutex::new(None),
             causality: OnceLock::new(),
         })
@@ -77,6 +81,7 @@ impl RetirementBarrier {
         Arc::new(Self {
             open: AtomicBool::new(true),
             shutdown: AtomicBool::new(false),
+            closed_error: OnceLock::new(),
             waker: Mutex::new(None),
             causality: OnceLock::new(),
         })
@@ -150,6 +155,24 @@ impl RetirementBarrier {
             reason.strengthen(&CancelReason::shutdown());
         }
         reason
+    }
+
+    /// Called only for a destroyed local future's terminal record, before
+    /// opening the barrier. The payload is plain owned data, not a callback.
+    pub(crate) fn publish_closed_error(&self, error: JoinError) {
+        let _ = self.closed_error.set(Box::new(error));
+    }
+
+    fn closed_error(&self, fallback: CancelReason) -> JoinError {
+        match self.closed_error.get().map(Box::as_ref) {
+            Some(JoinError::Cancelled(reason)) => {
+                let mut reason = reason.clone();
+                reason.strengthen(&fallback);
+                JoinError::Cancelled(self.strengthen_shutdown_reason(reason))
+            }
+            Some(error) => error.clone(),
+            None => JoinError::Cancelled(self.strengthen_shutdown_reason(fallback)),
+        }
     }
 
     /// Opens the barrier and wakes any parked consumer. Called by the scheduler
@@ -1032,7 +1055,7 @@ impl<T> TaskHandle<T> {
             Err(oneshot::TryRecvError::Empty) => Ok(None),
             Err(oneshot::TryRecvError::Closed) => {
                 self.terminal_consumed = true;
-                Err(JoinError::Cancelled(self.closed_reason()))
+                Err(self.barrier.closed_error(self.closed_reason()))
             }
         }
     }
@@ -1102,7 +1125,7 @@ impl<T> TaskHandle<T> {
             }
             std::task::Poll::Ready(Err(oneshot::RecvError::Closed)) => {
                 self.terminal_consumed = true;
-                std::task::Poll::Ready(Err(JoinError::Cancelled(self.closed_reason())))
+                std::task::Poll::Ready(Err(self.barrier.closed_error(self.closed_reason())))
             }
             std::task::Poll::Ready(Err(oneshot::RecvError::Cancelled)) => {
                 unreachable!("an uninterruptible receive cannot return Cancelled");
@@ -1280,7 +1303,7 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
             }
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Closed)) => {
                 *this.terminal_state = true;
-                std::task::Poll::Ready(Err(JoinError::Cancelled(this.closed_reason())))
+                std::task::Poll::Ready(Err(this.barrier.closed_error(this.closed_reason())))
             }
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Cancelled)) => {
                 unreachable!("RecvUninterruptibleFuture cannot return Cancelled");

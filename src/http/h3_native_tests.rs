@@ -2924,6 +2924,9 @@ mod tests {
     #[test]
     fn qpack_decoder_feedback_ack_rejects_unknown_duplicate_and_cancelled() {
         let mut context = QpackContext::new(128);
+        let insertion_id = context
+            .insert_dynamic_entry("x-feedback".to_string(), "value".to_string())
+            .expect("insert reference");
         let mut feedback = QpackDecoderFeedbackState::new();
 
         let err = qpack_apply_decoder_instruction(
@@ -2941,8 +2944,8 @@ mod tests {
 
         let mut duplicate = QpackDecoderFeedbackState::new();
         duplicate
-            .track_stream_references(&mut context, 8, &[])
-            .expect("track empty references");
+            .track_stream_references(&mut context, 8, &[insertion_id])
+            .expect("track dynamic section");
         qpack_apply_decoder_instruction(
             &mut duplicate,
             &mut context,
@@ -2965,7 +2968,7 @@ mod tests {
 
         let mut cancelled = QpackDecoderFeedbackState::new();
         cancelled
-            .track_stream_references(&mut context, 12, &[])
+            .track_stream_references(&mut context, 12, &[insertion_id])
             .expect("track stream");
         qpack_apply_decoder_instruction(
             &mut cancelled,
@@ -2988,21 +2991,19 @@ mod tests {
     }
 
     #[test]
-    fn qpack_decoder_feedback_cancellation_releases_references_and_rejects_edges() {
+    fn qpack_decoder_feedback_cancellation_releases_references_and_accepts_late_feedback() {
         let mut context = QpackContext::new(128);
         let mut unknown = QpackDecoderFeedbackState::new();
-        let err = qpack_apply_decoder_instruction(
+        qpack_apply_decoder_instruction(
             &mut unknown,
             &mut context,
             H3QpackMode::DynamicTableAllowed,
             &QpackDecoderInstruction::StreamCancellation { stream_id: 14 },
         )
-        .expect_err("unknown cancellation stream");
-        assert_eq!(
-            err,
-            H3NativeError::InvalidFrame("unknown qpack decoder feedback stream")
-        );
-        assert_eq!(unknown.first_error(), Some(&err));
+        .expect("cancellation may arrive before its section");
+        assert!(unknown.cancelled_stream_ids().contains(&14));
+        assert_eq!(unknown.known_received_count(), 0);
+        assert!(unknown.first_error().is_none());
 
         let insertion_id = context
             .insert_dynamic_entry("ref".to_string(), "value".to_string())
@@ -3026,21 +3027,22 @@ mod tests {
             .set_dynamic_table_capacity(0)
             .expect("cancellation released references");
 
-        let err = qpack_apply_decoder_instruction(
+        qpack_apply_decoder_instruction(
             &mut feedback,
             &mut context,
             H3QpackMode::DynamicTableAllowed,
             &QpackDecoderInstruction::StreamCancellation { stream_id: 16 },
         )
-        .expect_err("duplicate cancellation");
-        assert_eq!(
-            err,
-            H3NativeError::InvalidFrame("duplicate qpack stream cancellation")
-        );
+        .expect("repeated cancellation is idempotent");
+        assert_eq!(feedback.known_received_count(), 0);
 
+        let mut context = QpackContext::new(128);
+        let insertion_id = context
+            .insert_dynamic_entry("x-acknowledged".to_string(), "value".to_string())
+            .expect("insert acknowledged reference");
         let mut acked = QpackDecoderFeedbackState::new();
         acked
-            .track_stream_references(&mut context, 20, &[])
+            .track_stream_references(&mut context, 20, &[insertion_id])
             .expect("track acked stream");
         qpack_apply_decoder_instruction(
             &mut acked,
@@ -3049,17 +3051,16 @@ mod tests {
             &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 20 },
         )
         .expect("ack");
-        let err = qpack_apply_decoder_instruction(
+        qpack_apply_decoder_instruction(
             &mut acked,
             &mut context,
             H3QpackMode::DynamicTableAllowed,
             &QpackDecoderInstruction::StreamCancellation { stream_id: 20 },
         )
-        .expect_err("cancel after ack");
-        assert_eq!(
-            err,
-            H3NativeError::InvalidFrame("qpack stream cancellation after acknowledgement")
-        );
+        .expect("cancellation may follow an acknowledged section");
+        assert_eq!(acked.known_received_count(), 1);
+        assert_eq!(acked.outstanding_reference_count(), 0);
+        assert!(acked.cancelled_stream_ids().contains(&20));
     }
 
     #[test]
@@ -3148,9 +3149,12 @@ mod tests {
     #[test]
     fn qpack_decoder_feedback_static_only_rejects_before_mutation() {
         let mut context = QpackContext::new(128);
+        let insertion_id = context
+            .insert_dynamic_entry("x-protected".to_string(), "value".to_string())
+            .expect("insert protected reference");
         let mut feedback = QpackDecoderFeedbackState::new();
         feedback
-            .track_stream_references(&mut context, 24, &[])
+            .track_stream_references(&mut context, 24, &[insertion_id])
             .expect("track stream");
 
         let before = feedback.clone();
@@ -3185,12 +3189,15 @@ mod tests {
     }
 
     #[test]
-    fn qpack_decoder_feedback_track_rejects_duplicate_terminal_and_unknown_reference() {
+    fn qpack_decoder_feedback_tracks_successive_sections_and_rejects_cancelled_or_unknown() {
         let mut context = QpackContext::new(128);
+        let insertion_id = context
+            .insert_dynamic_entry("x-shared".to_string(), "value".to_string())
+            .expect("insert shared reference");
         let mut feedback = QpackDecoderFeedbackState::new();
 
         let err = feedback
-            .track_stream_references(&mut context, 28, &[0])
+            .track_stream_references(&mut context, 28, &[99])
             .expect_err("unknown reference");
         assert_eq!(
             err,
@@ -3198,35 +3205,53 @@ mod tests {
         );
         assert_eq!(feedback.first_error(), Some(&err));
 
-        let mut duplicate = QpackDecoderFeedbackState::new();
-        duplicate
-            .track_stream_references(&mut context, 32, &[])
-            .expect("track once");
-        let err = duplicate
-            .track_stream_references(&mut context, 32, &[])
-            .expect_err("duplicate track");
-        assert_eq!(
-            err,
-            H3NativeError::InvalidFrame("qpack stream already tracked")
-        );
-
-        let mut terminal = QpackDecoderFeedbackState::new();
-        terminal
-            .track_stream_references(&mut context, 36, &[])
-            .expect("track terminal");
+        let mut queued = QpackDecoderFeedbackState::new();
+        for _ in 0..2 {
+            queued
+                .track_stream_references(&mut context, 32, &[insertion_id])
+                .expect("another section on the same stream");
+        }
+        assert_eq!(queued.stream_outstanding_section_count(32), 2);
+        assert_eq!(queued.stream_outstanding_reference_count(32), 2);
         qpack_apply_decoder_instruction(
-            &mut terminal,
+            &mut queued,
             &mut context,
             H3QpackMode::DynamicTableAllowed,
-            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 36 },
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 32 },
         )
-        .expect("ack terminal");
-        let err = terminal
-            .track_stream_references(&mut context, 36, &[])
-            .expect_err("cannot retrack acked stream");
+        .expect("acknowledge only the first section");
+        assert_eq!(queued.stream_outstanding_section_count(32), 1);
+        assert_eq!(queued.stream_outstanding_reference_count(32), 1);
+        context
+            .set_dynamic_table_capacity(0)
+            .expect_err("the second section still protects the shared entry");
+        qpack_apply_decoder_instruction(
+            &mut queued,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 32 },
+        )
+        .expect("acknowledge the second section");
+        queued
+            .track_stream_references(&mut context, 32, &[insertion_id])
+            .expect("trailers can arrive after the earlier sections were acknowledged");
+        assert_eq!(queued.stream_outstanding_section_count(32), 1);
+        qpack_apply_decoder_instruction(
+            &mut queued,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::StreamCancellation { stream_id: 32 },
+        )
+        .expect("cancel the remaining section after earlier ACKs");
+        assert_eq!(queued.stream_outstanding_section_count(32), 0);
+        assert_eq!(queued.outstanding_reference_count(), 0);
+        assert_eq!(queued.known_received_count(), 1);
+        let err = queued
+            .track_stream_references(&mut context, 32, &[insertion_id])
+            .expect_err("cancellation closes the stream to later sections");
         assert_eq!(
             err,
-            H3NativeError::InvalidFrame("qpack stream already acknowledged")
+            H3NativeError::InvalidFrame("qpack stream already cancelled")
         );
     }
 
@@ -3238,6 +3263,286 @@ mod tests {
             &[QpackFieldPlan::DynamicIndex(insertion_id)],
             Some(context),
         )
+    }
+
+    fn qpack_section_fixture(entries: &[(&str, &str)]) -> (QpackContext, Vec<Vec<u8>>) {
+        let mut context = QpackContext::new(512);
+        let mut ids = Vec::new();
+        for (name, value) in entries {
+            ids.push(
+                context
+                    .insert_dynamic_entry((*name).to_string(), (*value).to_string())
+                    .expect("fixture insertion"),
+            );
+        }
+        let sections = ids
+            .into_iter()
+            .map(|id| qpack_dynamic_wire(&context, id).expect("fixture field section"))
+            .collect();
+        (context, sections)
+    }
+
+    #[test]
+    fn qpack_multiple_response_sections_acknowledge_in_wire_order() {
+        let mode = H3QpackMode::DynamicTableAllowed;
+        let (mut context, sections) = qpack_section_fixture(&[
+            (":status", "103"),
+            (":status", "200"),
+            ("x-checksum", "sha256-value"),
+        ]);
+        assert_eq!(
+            qpack_decode_response_field_section(&sections[0], mode, Some(&context))
+                .expect("informational response")
+                .status,
+            103
+        );
+        assert_eq!(
+            qpack_decode_response_field_section(&sections[1], mode, Some(&context))
+                .expect("final response")
+                .status,
+            200
+        );
+        assert_eq!(
+            qpack_decode_trailer_field_section(&sections[2], mode, Some(&context))
+                .expect("response trailers"),
+            vec![("x-checksum".to_string(), "sha256-value".to_string())]
+        );
+
+        let mut scheduler = QpackBlockedStreamScheduler::new(1);
+        let mut feedback = QpackDecoderFeedbackState::new();
+        let static_information = qpack_encode_field_section(&[QpackFieldPlan::StaticIndex(24)])
+            .expect("another informational response without dynamic references");
+        for section in [
+            &sections[0],
+            &static_information,
+            &sections[1],
+            &sections[2],
+        ] {
+            scheduler
+                .submit_field_section(&mut context, &mut feedback, mode, 4, section)
+                .expect("successive sections on one response stream");
+        }
+        assert_eq!(scheduler.pending_section_count(4), 3);
+        assert_eq!(scheduler.blocked_stream_count(), 1);
+        assert_eq!(feedback.stream_outstanding_section_count(4), 3);
+        assert_eq!(feedback.outstanding_reference_count(), 3);
+
+        for (expected_count, remaining) in [(1, 2), (2, 1), (3, 0)] {
+            assert_eq!(
+                scheduler.record(4).expect("oldest dynamic section").required_insert_count(),
+                expected_count
+            );
+            scheduler
+                .apply_decoder_instruction(
+                    &mut feedback,
+                    &mut context,
+                    mode,
+                    &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+                )
+                .expect("one acknowledgment retires one dynamic section");
+            assert_eq!(feedback.known_received_count(), expected_count);
+            assert_eq!(feedback.stream_outstanding_section_count(4), remaining);
+            assert_eq!(feedback.outstanding_reference_count(), remaining);
+            assert_eq!(scheduler.pending_section_count(4), remaining);
+            assert_eq!(scheduler.blocked_stream_count(), u64::from(remaining != 0));
+            assert_eq!(
+                context
+                    .dynamic_table()
+                    .get_by_insertion_id(expected_count - 1)
+                    .expect("acknowledged entry remains present")
+                    .reference_count,
+                0
+            );
+        }
+        context
+            .set_dynamic_table_capacity(0)
+            .expect("all three dynamic section references were released");
+        scheduler
+            .apply_decoder_instruction(
+                &mut feedback,
+                &mut context,
+                mode,
+                &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+            )
+            .expect_err("the static section must not create a fourth ACK slot");
+    }
+
+    #[test]
+    fn qpack_ack_releases_one_section_and_cancel_releases_every_remaining_reference() {
+        let mode = H3QpackMode::DynamicTableAllowed;
+        let (mut context, sections) = qpack_section_fixture(&[("x-shared", "v"), ("x-other", "v")]);
+        let combined = qpack_encode_field_section_with_context(
+            &[QpackFieldPlan::DynamicIndex(0), QpackFieldPlan::DynamicIndex(1)],
+            Some(&context),
+        )
+        .expect("section sharing an entry with its neighbors");
+        let mut scheduler = QpackBlockedStreamScheduler::new(1);
+        let mut feedback = QpackDecoderFeedbackState::new();
+        for section in [&sections[0], &combined, &sections[0]] {
+            scheduler
+                .submit_field_section(&mut context, &mut feedback, mode, 4, section)
+                .expect("queue another section");
+        }
+        assert_eq!(feedback.outstanding_reference_count(), 4);
+        assert_eq!(
+            context.dynamic_table().get_by_insertion_id(0).unwrap().reference_count,
+            3
+        );
+        scheduler
+            .apply_decoder_instruction(
+                &mut feedback,
+                &mut context,
+                mode,
+                &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+            )
+            .expect("acknowledge first section only");
+        assert_eq!(feedback.known_received_count(), 1);
+        assert_eq!(feedback.outstanding_reference_count(), 3);
+        assert_eq!(scheduler.pending_section_count(4), 2);
+        assert_eq!(
+            context.dynamic_table().get_by_insertion_id(0).unwrap().reference_count,
+            2
+        );
+        context
+            .set_dynamic_table_capacity(0)
+            .expect_err("later sections still protect their shared entry");
+        scheduler
+            .cancel_stream(&mut feedback, &mut context, mode, 4)
+            .expect("cancel every remaining section after an earlier ACK");
+        assert_eq!(feedback.known_received_count(), 1);
+        assert_eq!(feedback.outstanding_reference_count(), 0);
+        assert_eq!(scheduler.pending_section_count(4), 0);
+        assert_eq!(scheduler.blocked_stream_count(), 0);
+        context
+            .set_dynamic_table_capacity(0)
+            .expect("cancellation released both shared and unshared references");
+    }
+
+    #[test]
+    fn qpack_blocked_quota_counts_streams_even_when_the_oldest_section_is_ready() {
+        let mode = H3QpackMode::DynamicTableAllowed;
+        let (mut context, sections) = qpack_section_fixture(&[("x-first", "1"), ("x-last", "2")]);
+        let mut scheduler = QpackBlockedStreamScheduler::new(1);
+        let mut feedback = QpackDecoderFeedbackState::new();
+        for section in &sections {
+            assert_eq!(
+                scheduler
+                    .submit_field_section(&mut context, &mut feedback, mode, 4, section)
+                    .expect("more sections consume no extra blocked stream slot"),
+                QpackBlockedStreamStatus::Blocked
+            );
+        }
+        assert_eq!(scheduler.pending_section_count(4), 2);
+        assert_eq!(scheduler.blocked_stream_count(), 1);
+        scheduler
+            .apply_decoder_instruction(
+                &mut feedback,
+                &mut context,
+                mode,
+                &QpackDecoderInstruction::InsertCountIncrement { increment: 1 },
+            )
+            .expect("only the first section becomes ready");
+        assert_eq!(scheduler.record(4).unwrap().status(), QpackBlockedStreamStatus::Ready);
+        assert_eq!(scheduler.stream_status(4), Some(QpackBlockedStreamStatus::Blocked));
+        assert_eq!(scheduler.blocked_stream_count(), 1);
+        scheduler
+            .submit_field_section(&mut context, &mut feedback, mode, 8, &sections[1])
+            .expect_err("another blocked stream exceeds the unique-stream quota");
+        assert_eq!(scheduler.pending_section_count(4), 2);
+        assert_eq!(feedback.outstanding_reference_count(), 2);
+        for expected_count in [1, 2] {
+            scheduler
+                .apply_decoder_instruction(
+                    &mut feedback,
+                    &mut context,
+                    mode,
+                    &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+                )
+                .expect("rejected other stream did not replace accepted sections");
+            assert_eq!(feedback.known_received_count(), expected_count);
+        }
+        assert_eq!(feedback.outstanding_reference_count(), 0);
+        assert_eq!(scheduler.blocked_stream_count(), 0);
+    }
+
+    #[test]
+    fn qpack_section_limit_preserves_accepted_work_and_allows_ack_then_retry() {
+        let mode = H3QpackMode::DynamicTableAllowed;
+        let (mut context, sections) = qpack_section_fixture(&[("x-shared", "v")]);
+        let mut scheduler = QpackBlockedStreamScheduler::new(1)
+            .with_pending_section_limits(2, 0)
+            .expect("bounded outbound section queue");
+        let mut feedback = QpackDecoderFeedbackState::new();
+        for _ in 0..2 {
+            scheduler
+                .submit_field_section(&mut context, &mut feedback, mode, 4, &sections[0])
+                .expect("within section limit");
+        }
+        scheduler
+            .submit_field_section(&mut context, &mut feedback, mode, 4, &sections[0])
+            .expect_err("third outstanding section exceeds the per-stream limit");
+        assert!(scheduler.first_failure().is_none(), "local pressure is recoverable");
+        assert_eq!(scheduler.pending_section_count(4), 2);
+        assert_eq!(feedback.stream_outstanding_section_count(4), 2);
+        assert_eq!(feedback.outstanding_reference_count(), 2);
+        assert_eq!(
+            context.dynamic_table().get_by_insertion_id(0).unwrap().reference_count,
+            2
+        );
+        scheduler
+            .submit_field_section(&mut context, &mut feedback, mode, 4, &[0, 0])
+            .expect("a ready static section consumes no outstanding dynamic slot");
+        assert_eq!(scheduler.pending_section_count(4), 2);
+        scheduler
+            .apply_decoder_instruction(
+                &mut feedback,
+                &mut context,
+                mode,
+                &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+            )
+            .expect("free one outstanding section slot");
+        scheduler
+            .submit_field_section(&mut context, &mut feedback, mode, 4, &sections[0])
+            .expect("retry succeeds after the ACK releases capacity");
+        assert_eq!(scheduler.pending_section_count(4), 2);
+        assert_eq!(feedback.outstanding_reference_count(), 2);
+        scheduler.cancel_stream(&mut feedback, &mut context, mode, 4).unwrap();
+        context.set_dynamic_table_capacity(0).unwrap();
+
+        // The connection wrapper must preserve the same retry path; merely
+        // leaving the raw scheduler usable would still allow it to be poisoned.
+        let mut state = qpack_directional_state(128, 128, 1, 1)
+            .with_pending_section_limits(1, 0)
+            .expect("one outstanding section per direction");
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 128 },
+            )
+            .unwrap();
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: "x-shared".to_string(),
+                    value: "v".to_string(),
+                },
+            )
+            .unwrap();
+        let wire = qpack_dynamic_wire(state.context(), 0).unwrap();
+        state.submit_field_section(4, &wire).unwrap();
+        state.submit_field_section(4, &wire).expect_err("pending section limit");
+        assert!(state.first_failure().is_none());
+        state
+            .feed_decoder_stream_bytes(
+                7,
+                &qpack_decoder_instruction_bytes(
+                    &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+                ),
+            )
+            .expect("ACK can still free local admission capacity");
+        state.submit_field_section(4, &wire).expect("retry through the public wrapper");
+        assert_eq!(state.blocked_scheduler().pending_section_count(4), 1);
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 1);
+        assert!(state.first_failure().is_none());
     }
 
     #[test]
@@ -3725,112 +4030,77 @@ mod tests {
     fn qpack_blocked_scheduler_reaps_terminal_records_but_keeps_blocked() {
         // Regression for the insert-only streams map (asupersync-...-i7afx1):
         // terminal records must be reaped to bound memory on long-lived
-        // connections, while active Blocked records are always retained.
-        let mut context = QpackContext::new(128);
+        // connections, while every active section of a stream stays owned.
+        let mode = H3QpackMode::DynamicTableAllowed;
+        let (mut context, sections) =
+            qpack_section_fixture(&[("x-ready", "1"), ("x-blocked", "2")]);
         let mut feedback = QpackDecoderFeedbackState::new();
         let mut scheduler = QpackBlockedStreamScheduler::new(64);
-
-        // One active blocked stream (highest id) must survive reaping.
+        scheduler
+            .apply_decoder_instruction(
+                &mut feedback,
+                &mut context,
+                mode,
+                &QpackDecoderInstruction::InsertCountIncrement { increment: 1 },
+            )
+            .expect("first entry is known to the peer");
         let blocked_id = 1_000_000u64;
-        scheduler.streams.insert(
-            blocked_id,
-            QpackBlockedStreamRecord {
-                stream_id: blocked_id,
-                required_insert_count: 5,
-                base: 0,
-                status: QpackBlockedStreamStatus::Blocked,
-                blocked_reason: Some("waiting on inserts"),
-                protected_references: Vec::new(),
-                blocked_field_section: None,
-                first_failure: None,
-            },
-        );
-
-        // A ready stream with protected references is still live until ack/cancel
-        // feedback releases those references; it must not be treated as terminal.
+        scheduler
+            .submit_field_section(&mut context, &mut feedback, mode, blocked_id, &sections[1])
+            .expect("active blocked stream");
         let protected_ready_id = 2_000_000u64;
-        scheduler.streams.insert(
-            protected_ready_id,
-            QpackBlockedStreamRecord {
-                stream_id: protected_ready_id,
-                required_insert_count: 5,
-                base: 5,
-                status: QpackBlockedStreamStatus::Ready,
-                blocked_reason: None,
-                protected_references: vec![7],
-                blocked_field_section: None,
-                first_failure: None,
-            },
-        );
-
-        // Far more terminal (failed) records than the retention cap.
-        let extra = MAX_RETAINED_TERMINAL_RECORDS + 100;
-        for stream_id in 0..extra as u64 {
-            scheduler.streams.insert(
-                stream_id,
-                QpackBlockedStreamRecord::failed(
-                    stream_id,
-                    None,
-                    H3NativeError::InvalidFrame("boom"),
-                ),
-            );
+        for _ in 0..2 {
+            scheduler
+                .submit_field_section(
+                    &mut context,
+                    &mut feedback,
+                    mode,
+                    protected_ready_id,
+                    &sections[0],
+                )
+                .expect("both ready sections still protect their shared entry");
         }
-        feedback
-            .track_stream_references(&mut context, 0, &[])
-            .expect("track unreferenced ready stream feedback");
-        scheduler.streams.insert(
-            0,
-            QpackBlockedStreamRecord {
-                stream_id: 0,
-                required_insert_count: 0,
-                base: 0,
-                status: QpackBlockedStreamStatus::Ready,
-                blocked_reason: None,
-                protected_references: Vec::new(),
-                blocked_field_section: None,
-                first_failure: None,
-            },
-        );
-
+        scheduler
+            .submit_field_section(&mut context, &mut feedback, mode, 0, &[0, 0])
+            .expect("oldest unreferenced static record");
+        let extra = MAX_RETAINED_TERMINAL_RECORDS + 100;
+        for stream_id in 1..extra as u64 {
+            scheduler
+                .submit_field_section(
+                    &mut context,
+                    &mut feedback,
+                    mode,
+                    stream_id,
+                    &[0],
+                )
+                .expect_err("malformed sections leave only terminal history");
+        }
         scheduler.reap_excess_records();
-
-        // Unreferenced terminal records are bounded to the cap; the blocked
-        // stream stays.
-        let terminal = scheduler
-            .streams
-            .values()
-            .filter(|record| record.is_reapable_terminal())
-            .count();
-        assert_eq!(terminal, MAX_RETAINED_TERMINAL_RECORDS);
         assert_eq!(
             scheduler.tracked_record_count(),
             MAX_RETAINED_TERMINAL_RECORDS + 2
         );
         assert!(scheduler.record(blocked_id).is_some());
-        assert_eq!(
-            scheduler
-                .record(protected_ready_id)
-                .expect("protected ready record")
-                .protected_references(),
-            &[7]
-        );
+        assert_eq!(scheduler.pending_section_count(protected_ready_id), 2);
+        assert_eq!(feedback.stream_outstanding_reference_count(protected_ready_id), 2);
         assert_eq!(scheduler.blocked_stream_count(), 1);
-
-        // Oldest terminal records reaped first; newest retained.
         assert!(scheduler.record(0).is_none());
         assert!(scheduler.record((extra - 1) as u64).is_some());
+
+        // Retiring the head cannot release or reap the later ready section.
         scheduler
             .apply_decoder_instruction(
                 &mut feedback,
                 &mut context,
-                H3QpackMode::DynamicTableAllowed,
-                &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 0 },
+                mode,
+                &QpackDecoderInstruction::HeaderAcknowledgement {
+                    stream_id: protected_ready_id,
+                },
             )
-            .expect("feedback for compacted ready stream still applies");
-        assert!(feedback.acknowledged_stream_ids().contains(&0));
-
-        // Already at the cap: a further reap is a no-op (idempotent).
+            .expect("acknowledge the first ready section");
         scheduler.reap_excess_records();
+        assert_eq!(scheduler.pending_section_count(protected_ready_id), 1);
+        assert_eq!(feedback.stream_outstanding_reference_count(protected_ready_id), 1);
         assert_eq!(
             scheduler.tracked_record_count(),
             MAX_RETAINED_TERMINAL_RECORDS + 2
@@ -4700,6 +4970,289 @@ mod tests {
             assert_eq!(state.received_decoder_feedback().known_received_count(), 0);
             assert_eq!(state.known_received_count(), 0);
         }
+    }
+
+    #[test]
+    fn qpack_received_sections_keep_wire_order_and_own_deferred_references() {
+        let mode = H3QpackMode::DynamicTableAllowed;
+        let (encoder, sections) = qpack_section_fixture(&[
+            ("x-shared", "value"),
+            ("x-unused", "value"),
+            (":status", "103"),
+        ]);
+        let first = qpack_encode_field_section_with_context(
+            &[QpackFieldPlan::StaticIndex(24), QpackFieldPlan::DynamicIndex(0)],
+            Some(&encoder),
+        )
+        .expect("ready informational section");
+        let last = qpack_encode_field_section_with_context(
+            &[QpackFieldPlan::StaticIndex(25), QpackFieldPlan::DynamicIndex(0)],
+            Some(&encoder),
+        )
+        .expect("final response using an older entry");
+        let static_information = qpack_encode_field_section(&[QpackFieldPlan::StaticIndex(24)])
+            .expect("static informational section");
+
+        for finish in ["acknowledge", "cancel", "shrink"] {
+            let mut state = qpack_directional_state(512, 512, 1, 1);
+            state
+                .feed_encoder_stream_bytes(
+                    3,
+                    &qpack_encoder_instruction_bytes(
+                        &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 512 },
+                    ),
+                )
+                .unwrap();
+            state
+                .feed_encoder_stream_bytes(
+                    3,
+                    &qpack_encoder_instruction_bytes(
+                        &QpackEncoderInstruction::InsertWithoutNameReference {
+                            name: "x-shared".to_string(),
+                            value: "value".to_string(),
+                        },
+                    ),
+                )
+                .unwrap();
+            assert_eq!(
+                state.submit_received_field_section(4, &first).unwrap(),
+                QpackBlockedStreamStatus::Ready
+            );
+            for section in [&sections[2], &static_information, &last] {
+                assert_eq!(
+                    state.submit_received_field_section(4, section).unwrap(),
+                    QpackBlockedStreamStatus::Blocked
+                );
+            }
+            assert_eq!(
+                state.received_blocked_scheduler().records(4)
+                    .map(QpackBlockedStreamRecord::required_insert_count)
+                    .collect::<Vec<_>>(),
+                vec![1, 3, 0, 1]
+            );
+            assert_eq!(state.received_blocked_scheduler().pending_section_count(4), 4);
+            assert_eq!(state.received_blocked_scheduler().blocked_stream_count(), 1);
+            assert_eq!(state.received_decoder_feedback().stream_outstanding_section_count(4), 1);
+            assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 1);
+            assert_eq!(
+                state.received_context().dynamic_table().get_by_insertion_id(0)
+                    .unwrap().reference_count,
+                2,
+                "the deferred final section protects its available entry immediately"
+            );
+            let retained = state.received_blocked_scheduler().retained_field_section_bytes(4);
+            assert!(retained > 0);
+
+            state
+                .apply_local_decoder_instruction(
+                    &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+                )
+                .expect("ready head can be ACKed while a later section is blocked");
+            assert_eq!(state.received_decoder_feedback().known_received_count(), 1);
+            assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 0);
+            assert_eq!(state.received_blocked_scheduler().pending_section_count(4), 3);
+            assert_eq!(state.received_blocked_scheduler().blocked_stream_count(), 1);
+            assert_eq!(
+                state.received_blocked_scheduler().retained_field_section_bytes(4),
+                retained
+            );
+            assert!(state.received_blocked_scheduler().records(4)
+                .all(|record| record.status() == QpackBlockedStreamStatus::Blocked));
+            assert_eq!(
+                state.received_context().dynamic_table().get_by_insertion_id(0)
+                    .unwrap().reference_count,
+                1,
+                "ACK does not release the deferred section's independent reference"
+            );
+
+            if finish == "cancel" {
+                state
+                    .apply_local_decoder_instruction(
+                        &QpackDecoderInstruction::StreamCancellation { stream_id: 4 },
+                    )
+                    .expect("cancel blocked, static and preprotected sections together");
+                assert_eq!(state.received_decoder_feedback().known_received_count(), 1);
+                assert_eq!(state.received_blocked_scheduler().pending_section_count(4), 0);
+                assert_eq!(state.received_blocked_scheduler().retained_field_section_bytes(4), 0);
+                assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 0);
+                assert_eq!(
+                    state.received_context().dynamic_table().get_by_insertion_id(0)
+                        .unwrap().reference_count,
+                    0
+                );
+                assert!(state.first_failure().is_none());
+                continue;
+            }
+            if finish == "shrink" {
+                let before = state.received_context().dynamic_table().size();
+                state
+                    .feed_encoder_stream_bytes(
+                        3,
+                        &qpack_encoder_instruction_bytes(
+                            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+                        ),
+                    )
+                    .expect_err("the not-yet-ACKable tail still protects its table entry");
+                assert_eq!(state.received_context().dynamic_table().capacity(), 512);
+                assert_eq!(state.received_context().dynamic_table().size(), before);
+                assert_eq!(
+                    state.received_context().dynamic_table().get_by_insertion_id(0)
+                        .unwrap().reference_count,
+                    1
+                );
+                continue;
+            }
+
+            for (name, value) in [("x-unused", "value"), (":status", "103")] {
+                state
+                    .feed_encoder_stream_bytes(
+                        3,
+                        &qpack_encoder_instruction_bytes(
+                            &QpackEncoderInstruction::InsertWithoutNameReference {
+                                name: name.to_string(),
+                                value: value.to_string(),
+                            },
+                        ),
+                    )
+                    .expect("arriving inserts unblock sections in their original order");
+            }
+            assert_eq!(state.received_blocked_scheduler().blocked_stream_count(), 0);
+            assert_eq!(state.received_blocked_scheduler().pending_section_count(4), 2);
+            assert_eq!(state.received_decoder_feedback().stream_outstanding_section_count(4), 2);
+            assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 2);
+            assert_eq!(
+                state.received_context().dynamic_table().get_by_insertion_id(0)
+                    .unwrap().reference_count,
+                1,
+                "registering the deferred ACK slot does not reference the entry twice"
+            );
+            assert_eq!(
+                state.received_blocked_scheduler().record(4).unwrap().protected_references(),
+                &[2]
+            );
+            state
+                .apply_local_decoder_instruction(
+                    &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+                )
+                .expect("the previously blocked middle section is acknowledged first");
+            assert_eq!(state.received_decoder_feedback().known_received_count(), 3);
+            assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 1);
+            assert_eq!(
+                state.received_blocked_scheduler().record(4).unwrap().protected_references(),
+                &[0]
+            );
+            state
+                .apply_local_decoder_instruction(
+                    &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+                )
+                .expect("older-reference final section is acknowledged last");
+            assert_eq!(state.received_decoder_feedback().known_received_count(), 3);
+            assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 0);
+            assert_eq!(state.received_blocked_scheduler().pending_section_count(4), 0);
+            assert_eq!(
+                qpack_decode_response_field_section(&last, mode, Some(state.received_context()))
+                    .expect("final response remains decodable")
+                    .status,
+                200
+            );
+            assert!(state.first_failure().is_none());
+        }
+    }
+
+    #[test]
+    fn qpack_received_section_byte_limit_rejects_before_retaining_more_wire_data() {
+        let mut state = qpack_directional_state(128, 128, 1, 1)
+            .with_pending_section_limits(2, 5)
+            .expect("bounded receive queue");
+        let section = qpack_response_status_dynamic_wire();
+        assert_eq!(section.len(), 3);
+        state.submit_received_field_section(4, &section).unwrap();
+        let error = state
+            .submit_received_field_section(4, &section)
+            .expect_err("two three-byte blocked sections exceed the five-byte limit");
+        assert_eq!(state.received_blocked_scheduler().pending_section_count(4), 1);
+        assert_eq!(state.received_blocked_scheduler().retained_field_section_bytes(4), 3);
+        assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 0);
+        assert!(state.received_context().dynamic_table().is_empty());
+        assert_eq!(state.first_failure(), Some(&error));
+        assert_eq!(state.submit_received_field_section(4, &[0, 0]), Err(error));
+    }
+
+    #[test]
+    fn qpack_multiple_sections_on_the_same_id_keep_both_directions_independent() {
+        let mut state = qpack_directional_state(512, 512, 1, 1);
+        let capacity = QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 512 };
+        state.apply_local_encoder_instruction(&capacity).unwrap();
+        state.feed_encoder_stream_bytes(3, &qpack_encoder_instruction_bytes(&capacity)).unwrap();
+        for suffix in ["first", "middle", "last"] {
+            state
+                .apply_local_encoder_instruction(
+                    &QpackEncoderInstruction::InsertWithoutNameReference {
+                        name: format!("x-sent-{suffix}"),
+                        value: "local".to_string(),
+                    },
+                )
+                .unwrap();
+            state
+                .feed_encoder_stream_bytes(
+                    3,
+                    &qpack_encoder_instruction_bytes(
+                        &QpackEncoderInstruction::InsertWithoutNameReference {
+                            name: format!("x-peer-{suffix}"),
+                            value: "remote".to_string(),
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+        for id in 0..3 {
+            let outbound = qpack_dynamic_wire(state.context(), id).unwrap();
+            let inbound = qpack_dynamic_wire(state.received_context(), id).unwrap();
+            state.submit_field_section(4, &outbound).unwrap();
+            state.submit_received_field_section(4, &inbound).unwrap();
+        }
+        assert_eq!(state.blocked_scheduler().pending_section_count(4), 3);
+        assert_eq!(state.received_blocked_scheduler().pending_section_count(4), 3);
+        state
+            .apply_local_decoder_instruction(
+                &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+            )
+            .unwrap();
+        assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 2);
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 3);
+        assert_eq!(state.known_received_count(), 0);
+        let ack = qpack_decoder_instruction_bytes(
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+        );
+        state.feed_decoder_stream_bytes(7, &ack).unwrap();
+        assert_eq!(state.known_received_count(), 1);
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 2);
+        assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 2);
+        state
+            .apply_local_decoder_instruction(
+                &QpackDecoderInstruction::StreamCancellation { stream_id: 4 },
+            )
+            .unwrap();
+        assert_eq!(state.received_decoder_feedback().known_received_count(), 1);
+        assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 0);
+        assert_eq!(state.received_blocked_scheduler().pending_section_count(4), 0);
+        assert_eq!(state.blocked_scheduler().pending_section_count(4), 2);
+        assert_eq!(state.blocked_stream_count(), 1);
+        state.feed_decoder_stream_bytes(7, &ack).unwrap();
+        assert_eq!(state.known_received_count(), 2);
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 1);
+        state
+            .feed_decoder_stream_bytes(
+                7,
+                &qpack_decoder_instruction_bytes(
+                    &QpackDecoderInstruction::StreamCancellation { stream_id: 4 },
+                ),
+            )
+            .unwrap();
+        assert_eq!(state.known_received_count(), 2);
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 0);
+        assert_eq!(state.blocked_scheduler().pending_section_count(4), 0);
+        assert!(state.first_failure().is_none());
     }
 
     #[test]

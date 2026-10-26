@@ -65,6 +65,39 @@ impl LocalTaskStore {
     }
 }
 
+impl Drop for LocalTaskStore {
+    fn drop(&mut self) {
+        // A current-thread runtime can outlive the thread that last drove it.
+        // Destroy !Send futures here, on their owner thread, then let a live
+        // worker retire their records and obligations. Never lock runtime
+        // state or read Cx/TLS from this TLS destructor (asupersync-kopidb L3).
+        for slot in &mut self.slots {
+            let Some(mut task) = slot.take() else {
+                continue;
+            };
+            let task_id = task.task_id();
+            let gateway = task.take_retirement_gateway();
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(task)))
+                .err()
+                .map(|payload| {
+                    let message = crate::cx::scope::payload_to_string(&payload);
+                    // An opaque panic payload may itself panic when dropped.
+                    // One hostile destructor must not strand the other slots.
+                    std::mem::forget(payload);
+                    crate::types::PanicPayload::new(message)
+                });
+            if let (Some(task_id), Some(gateway)) =
+                (task_id, gateway.and_then(|gateway| gateway.upgrade()))
+            {
+                gateway.enqueue_local_task_retirement(
+                    crate::runtime::spawn_mailbox::LocalTaskRetirement { task_id, panic },
+                );
+            }
+        }
+        self.len = 0;
+    }
+}
+
 /// Next per-runtime local-store key. Keys are process-unique and never
 /// reused, so a store left on a thread by a runtime that has since been
 /// dropped can never be mistaken for a later runtime's store (a heap address
