@@ -1,8 +1,10 @@
 //! io_uring-backed async file operations for Linux.
 //!
-//! This module provides true async file I/O using io_uring's `READ`, `WRITE`,
-//! `OPENAT`, `FSYNC`, and `CLOSE` opcodes. Unlike poll-based async I/O, these
-//! operations complete asynchronously without blocking threads.
+//! This module uses io_uring's `READ`, `WRITE`, and `FSYNC` opcodes. The async
+//! traits offload terminal-completion waits to the inherited blocking pool;
+//! the synchronous constructors and borrowed operation futures retain their
+//! synchronous completion boundary. An absent or rejecting pool uses the inline
+//! fallback provided by ordinary filesystem I/O.
 //!
 //! # Platform Requirements
 //!
@@ -19,6 +21,15 @@
 //!   cancellation cannot interleave inside that synchronous poll
 //! - tracked operations used by teardown tests: cancellation is only a request;
 //!   drop drains their terminal completions before releasing kernel-owned data
+//! - async traits: owned buffers and file state survive a dropped borrowing
+//!   future. A retry collects the retained operation; interleaved reads and
+//!   flushes preserve write credit, and smaller reads retain unread bytes.
+//!   Other trait operations also preserve completed seek results, so retrying
+//!   a relative seek does not move the cursor twice.
+//!   Synchronous cursor and data operations return `WouldBlock` until a retained
+//!   trait operation has been collected. Polling the original trait operation
+//!   or `poll_flush` collects it. An explicit seek or a different write starts
+//!   a new write sequence, so identical bytes after a seek are written again.
 
 #![cfg(all(target_os = "linux", feature = "io-uring"))]
 #![allow(unsafe_code)]
@@ -28,6 +39,7 @@ use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use io_uring::{IoUring, opcode, types};
 use parking_lot::Mutex;
 use std::ffi::CString;
+use std::future::Future;
 use std::io::{self, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -35,7 +47,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 /// Default io_uring queue size for file operations.
 const DEFAULT_ENTRIES: u32 = 64;
@@ -116,10 +128,13 @@ impl std::fmt::Debug for IoUringFileInner {
     }
 }
 
-/// An async file backed by io_uring for true async I/O on Linux.
+/// An io_uring-backed file with asynchronous I/O traits on Linux.
 ///
-/// This file type uses io_uring's `READ` and `WRITE` opcodes for async I/O,
-/// avoiding the overhead of a blocking thread pool.
+/// The traits retain bounded owned buffers and use the inherited blocking
+/// pool to wait for terminal kernel completion. The borrowed operation futures
+/// keep their synchronous poll behavior. Finish a pending trait operation before
+/// mixing in synchronous cursor or data operations; otherwise they return
+/// [`io::ErrorKind::WouldBlock`].
 ///
 /// # Example
 ///
@@ -136,6 +151,7 @@ impl std::fmt::Debug for IoUringFileInner {
 #[derive(Debug)]
 pub struct IoUringFile {
     inner: Arc<IoUringFileInner>,
+    trait_io: Mutex<TraitIoState>,
 }
 
 fn any_ops_pending(inner: &IoUringFileInner) -> bool {
@@ -405,6 +421,7 @@ impl IoUringFile {
                 sync_state: Mutex::new(OpState::Idle),
                 next_user_data: AtomicU64::new(1),
             }),
+            trait_io: Mutex::new(TraitIoState::default()),
         })
     }
 
@@ -431,6 +448,7 @@ impl IoUringFile {
                 sync_state: Mutex::new(OpState::Idle),
                 next_user_data: AtomicU64::new(1),
             }),
+            trait_io: Mutex::new(TraitIoState::default()),
         })
     }
 
@@ -523,7 +541,14 @@ impl IoUringFile {
     /// Returns the logical current position used by sequential read/write operations.
     #[must_use]
     pub fn position(&self) -> u64 {
-        self.inner.position.load(Ordering::Relaxed)
+        let io = self.trait_io.lock();
+        if let Some(TraitOperation::Read { start, .. }) = &io.pending {
+            return *start;
+        }
+        self.inner
+            .position
+            .load(Ordering::Relaxed)
+            .saturating_sub(io.unread_len() as u64)
     }
 
     fn checked_seek_target(base: u64, delta: i64) -> io::Result<u64> {
@@ -533,7 +558,15 @@ impl IoUringFile {
 
     /// Sets the logical file position used by sequential read/write operations.
     pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
+        self.prepare_synchronous_operation(true, true)?;
+        // This synchronous call is a new seek, not a retry of a trait future
+        // whose result another operation already collected.
+        self.trait_io.lock().seek_credit = None;
         let _cursor_guard = self.inner.cursor_lock.lock();
+        self.seek_locked(pos)
+    }
+
+    fn seek_locked(&self, pos: SeekFrom) -> io::Result<u64> {
         let current = self.inner.position.load(Ordering::Relaxed);
 
         let new_pos = match pos {
@@ -553,6 +586,7 @@ impl IoUringFile {
     /// Uses a synchronous `ftruncate` syscall (no io_uring opcode for
     /// truncate), so the mutation completes before this function returns.
     pub fn set_len(&self, size: u64) -> io::Result<()> {
+        self.prepare_synchronous_operation(true, true)?;
         let fd = self.inner.fd.as_raw_fd();
         let size_off = libc::off_t::try_from(size)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "size out of range"))?;
@@ -1125,6 +1159,10 @@ impl std::future::Future for ReadFuture<'_> {
             return Poll::Ready(Err(polled_after_completion_error("read")));
         }
         let result = if this.update_position {
+            if let Err(error) = this.file.prepare_synchronous_operation(true, false) {
+                this.done = true;
+                return Poll::Ready(Err(error));
+            }
             let _cursor_guard = this.file.inner.cursor_lock.lock();
             let offset = this.file.inner.position.load(Ordering::Relaxed);
             let result = this.file.blocking_read_at(this.buf, offset);
@@ -1136,6 +1174,10 @@ impl std::future::Future for ReadFuture<'_> {
             }
             result
         } else {
+            if let Err(error) = this.file.prepare_synchronous_operation(false, false) {
+                this.done = true;
+                return Poll::Ready(Err(error));
+            }
             match this.offset {
                 Some(offset) => this.file.blocking_read_at(this.buf, offset),
                 None => Err(missing_explicit_offset_error("read")),
@@ -1165,6 +1207,10 @@ impl std::future::Future for WriteFuture<'_> {
             return Poll::Ready(Err(polled_after_completion_error("write")));
         }
         let result = if this.update_position {
+            if let Err(error) = this.file.prepare_synchronous_operation(true, true) {
+                this.done = true;
+                return Poll::Ready(Err(error));
+            }
             let _cursor_guard = this.file.inner.cursor_lock.lock();
             let offset = this.file.inner.position.load(Ordering::Relaxed);
             let result = this.file.blocking_write_at(this.buf, offset);
@@ -1176,6 +1222,12 @@ impl std::future::Future for WriteFuture<'_> {
             }
             result
         } else {
+            // A positioned mutation must invalidate unread trait data too,
+            // without changing the caller's logical sequential position.
+            if let Err(error) = this.file.prepare_synchronous_operation(true, true) {
+                this.done = true;
+                return Poll::Ready(Err(error));
+            }
             match this.offset {
                 Some(offset) => this.file.blocking_write_at(this.buf, offset),
                 None => Err(missing_explicit_offset_error("write")),
@@ -1203,64 +1255,485 @@ impl std::future::Future for SyncFuture<'_> {
             return Poll::Ready(Err(polled_after_completion_error("sync")));
         }
 
-        let result = this.file.blocking_sync(this.datasync);
+        let result = this
+            .file
+            .prepare_synchronous_operation(false, false)
+            .and_then(|()| this.file.blocking_sync(this.datasync));
         this.done = true;
         Poll::Ready(result)
     }
 }
 
-// Implement AsyncRead/AsyncWrite/AsyncSeek traits for compatibility
+// Trait operations own their memory until the matching CQE is observed on the
+// worker. Only their terminal result crosses back to the executor.
+const TRAIT_IO_CHUNK_BYTES: usize = 128 * 1024;
+type TraitIoFuture<T> = Pin<Box<dyn Future<Output = io::Result<T>> + Send>>;
+
+enum TraitOperation {
+    Read {
+        future: TraitIoFuture<Vec<u8>>,
+        // Report the logical cursor until the caller consumes the result.
+        // The worker still selects its actual offset under cursor_lock.
+        start: u64,
+    },
+    Write {
+        future: TraitIoFuture<usize>,
+        chunk: Arc<Vec<u8>>,
+    },
+    Sync(TraitIoFuture<()>),
+    Seek {
+        future: TraitIoFuture<u64>,
+        position: SeekFrom,
+    },
+}
+
+struct TraitReadAhead {
+    bytes: Vec<u8>,
+    consumed: usize,
+}
+
+struct TraitWriteCredit {
+    chunk: Arc<Vec<u8>>,
+    result: io::Result<usize>,
+}
+
+struct TraitSeekCredit {
+    position: SeekFrom,
+    result: io::Result<u64>,
+}
+
+fn copy_io_error(error: &io::Error) -> io::Error {
+    error.raw_os_error().map_or_else(
+        || io::Error::new(error.kind(), error.to_string()),
+        io::Error::from_raw_os_error,
+    )
+}
+
+/// A split reader/writer may both wait for the same serialized operation.
+/// Forward its wake to each role instead of replacing the writer's wake when
+/// a reader or flush starts waiting. User callbacks run outside this mutex.
+#[derive(Default)]
+struct TraitWaiters {
+    slots: Mutex<[Option<Waker>; 4]>,
+}
+
+impl TraitWaiters {
+    fn register(&self, role: usize, waker: &Waker) {
+        let incoming = waker.clone();
+        let old = self.slots.lock()[role].replace(incoming);
+        drop(old);
+    }
+
+    fn clear(&self, role: usize) {
+        let old = self.slots.lock()[role].take();
+        drop(old);
+    }
+}
+
+impl Wake for TraitWaiters {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let waiters = std::mem::take(&mut *self.slots.lock());
+        let mut first_panic = None;
+        for waker in waiters.into_iter().flatten() {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
+            {
+                if first_panic.is_none() {
+                    first_panic = Some(payload);
+                } else {
+                    std::mem::forget(payload);
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+#[derive(Default)]
+struct TraitIoState {
+    pending: Option<TraitOperation>,
+    read_ahead: Option<TraitReadAhead>,
+    write_credit: Option<TraitWriteCredit>,
+    seek_credit: Option<TraitSeekCredit>,
+    waiters: Arc<TraitWaiters>,
+}
+
+impl std::fmt::Debug for TraitIoState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TraitIoState")
+            .field("pending", &self.pending.is_some())
+            .field("unread_bytes", &self.unread_len())
+            .field("retained_write_credit", &self.write_credit.is_some())
+            .field("retained_seek_credit", &self.seek_credit.is_some())
+            .finish()
+    }
+}
+
+impl TraitIoState {
+    fn unread_len(&self) -> usize {
+        self.read_ahead
+            .as_ref()
+            .map_or(0, |read| read.bytes.len() - read.consumed)
+    }
+
+    /// Called only after the outstanding worker has returned. Exclusive trait
+    /// access excludes concurrent synchronous cursor operations; synchronous
+    /// callers take the cursor lock before invoking it.
+    fn rewind_read_ahead(&mut self, inner: &IoUringFileInner) -> io::Result<()> {
+        let unread = self.unread_len() as u64;
+        if unread != 0 {
+            let position = inner
+                .position
+                .load(Ordering::Relaxed)
+                .checked_sub(unread)
+                .ok_or_else(|| io::Error::other("io_uring read-ahead exceeds cursor position"))?;
+            inner.position.store(position, Ordering::Relaxed);
+        }
+        self.read_ahead = None;
+        Ok(())
+    }
+
+    fn settle(
+        &mut self,
+        cx: &mut Context<'_>,
+        retain_write: bool,
+        retain_seek: bool,
+    ) -> Poll<io::Result<()>> {
+        let Some(operation) = self.pending.take() else {
+            return Poll::Ready(Ok(()));
+        };
+        match operation {
+            TraitOperation::Read { mut future, start } => match future.as_mut().poll(cx) {
+                Poll::Pending => {
+                    self.pending = Some(TraitOperation::Read { future, start });
+                    Poll::Pending
+                }
+                Poll::Ready(result) => {
+                    let bytes = result?;
+                    if !bytes.is_empty() {
+                        self.read_ahead = Some(TraitReadAhead { bytes, consumed: 0 });
+                    }
+                    Poll::Ready(Ok(()))
+                }
+            },
+            TraitOperation::Write { mut future, chunk } => match future.as_mut().poll(cx) {
+                Poll::Pending => {
+                    self.pending = Some(TraitOperation::Write { future, chunk });
+                    Poll::Pending
+                }
+                Poll::Ready(result) => {
+                    if !retain_write {
+                        return Poll::Ready(result.map(|_| ()));
+                    }
+                    // The observer sees the failure too, but the writer keeps
+                    // its original error and must not silently resubmit on its
+                    // next poll. Preserve errno for errors produced by the OS.
+                    let observed = result.as_ref().map(|_| ()).map_err(copy_io_error);
+                    self.write_credit = Some(TraitWriteCredit { chunk, result });
+                    Poll::Ready(observed)
+                }
+            },
+            TraitOperation::Sync(mut future) => match future.as_mut().poll(cx) {
+                Poll::Pending => {
+                    self.pending = Some(TraitOperation::Sync(future));
+                    Poll::Pending
+                }
+                Poll::Ready(result) => Poll::Ready(result),
+            },
+            TraitOperation::Seek {
+                mut future,
+                position,
+            } => match future.as_mut().poll(cx) {
+                Poll::Pending => {
+                    self.pending = Some(TraitOperation::Seek { future, position });
+                    Poll::Pending
+                }
+                Poll::Ready(result) => {
+                    if !retain_seek {
+                        return Poll::Ready(result.map(|_| ()));
+                    }
+                    let observed = result.as_ref().map(|_| ()).map_err(copy_io_error);
+                    self.seek_credit = Some(TraitSeekCredit { position, result });
+                    Poll::Ready(observed)
+                }
+            },
+        }
+    }
+}
+
+fn poll_trait_operation<T>(
+    state: &mut TraitIoState,
+    role: usize,
+    cx: &Context<'_>,
+    poll: impl FnOnce(&mut TraitIoState, &mut Context<'_>) -> Poll<T>,
+) -> Poll<T> {
+    let waiters = Arc::clone(&state.waiters);
+    waiters.register(role, cx.waker());
+    let waker = Waker::from(Arc::clone(&waiters));
+    let result = poll(state, &mut Context::from_waker(&waker));
+    if result.is_ready() {
+        waiters.clear(role);
+    }
+    result
+}
+
+impl IoUringFile {
+    fn prepare_synchronous_operation(&self, rewind: bool, new_write: bool) -> io::Result<()> {
+        let mut state = self.trait_io.lock();
+        if state.pending.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "collect the pending io_uring trait operation before a synchronous operation",
+            ));
+        }
+        if rewind {
+            let _cursor_guard = self.inner.cursor_lock.lock();
+            state.rewind_read_ahead(&self.inner)?;
+        }
+        if new_write {
+            state.write_credit = None;
+        }
+        Ok(())
+    }
+
+    fn submit_trait_io<T: Send + 'static>(
+        inner: &Arc<IoUringFileInner>,
+        operation: impl FnOnce(&Self) -> io::Result<T> + Send + 'static,
+    ) -> TraitIoFuture<T> {
+        let file = Self {
+            inner: Arc::clone(inner),
+            trait_io: Mutex::new(TraitIoState::default()),
+        };
+        let run = move || {
+            let _cursor_guard = file.inner.cursor_lock.lock();
+            operation(&file)
+        };
+        // Match File's placement policy without restoring restricted SPAWN
+        // authority. A rejected pool or absent pool retains the inline fallback.
+        match crate::cx::Cx::current().and_then(|cx| cx.blocking_pool_handle_for_inheritance()) {
+            Some(pool) => Box::pin(crate::runtime::spawn_blocking::spawn_blocking_on_pool(
+                pool, run,
+            )),
+            None => Box::pin(std::future::ready(run())),
+        }
+    }
+}
 
 impl AsyncRead for IoUringFile {
     fn poll_read(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let _cursor_guard = self.inner.cursor_lock.lock();
-        let offset = self.inner.position.load(Ordering::Relaxed);
-        let n = self.blocking_read_at(buf.unfilled(), offset)?;
-        buf.advance(n);
-        self.inner
-            .position
-            .store(offset.saturating_add(n as u64), Ordering::Relaxed);
-        Poll::Ready(Ok(()))
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let this = self.get_mut();
+        let inner = &this.inner;
+        poll_trait_operation(this.trait_io.get_mut(), 0, cx, |state, task| loop {
+            if let Some(read) = state.read_ahead.as_mut() {
+                let count = (read.bytes.len() - read.consumed).min(buf.remaining());
+                buf.unfilled()[..count]
+                    .copy_from_slice(&read.bytes[read.consumed..read.consumed + count]);
+                buf.advance(count);
+                read.consumed += count;
+                if read.consumed == read.bytes.len() {
+                    state.read_ahead = None;
+                }
+                return Poll::Ready(Ok(()));
+            }
+            match state.pending.take() {
+                Some(TraitOperation::Read { mut future, start }) => {
+                    match future.as_mut().poll(task) {
+                        Poll::Pending => {
+                            state.pending = Some(TraitOperation::Read { future, start });
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(result) => {
+                            let bytes = result?;
+                            if bytes.is_empty() {
+                                return Poll::Ready(Ok(()));
+                            }
+                            state.read_ahead = Some(TraitReadAhead { bytes, consumed: 0 });
+                        }
+                    }
+                }
+                None => {
+                    let length = buf.remaining().min(TRAIT_IO_CHUNK_BYTES);
+                    let start = inner.position.load(Ordering::Relaxed);
+                    let future = Self::submit_trait_io(inner, move |file| {
+                        let mut bytes = vec![0; length];
+                        let offset = file.inner.position.load(Ordering::Relaxed);
+                        let count = file.blocking_read_at(&mut bytes, offset)?;
+                        file.inner
+                            .position
+                            .store(offset.saturating_add(count as u64), Ordering::Relaxed);
+                        bytes.truncate(count);
+                        Ok(bytes)
+                    });
+                    state.pending = Some(TraitOperation::Read { future, start });
+                }
+                other => {
+                    state.pending = other;
+                    match state.settle(task, true, true) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(result) => result?,
+                    }
+                }
+            }
+        })
     }
 }
 
 impl AsyncWrite for IoUringFile {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let _cursor_guard = self.inner.cursor_lock.lock();
-        let offset = self.inner.position.load(Ordering::Relaxed);
-        let n = self.blocking_write_at(buf, offset)?;
-        self.inner
-            .position
-            .store(offset.saturating_add(n as u64), Ordering::Relaxed);
-        Poll::Ready(Ok(n))
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let this = self.get_mut();
+        let inner = &this.inner;
+        poll_trait_operation(this.trait_io.get_mut(), 1, cx, |state, task| {
+            if let Some(credit) = state.write_credit.take()
+                && buf.starts_with(&credit.chunk)
+            {
+                return Poll::Ready(credit.result);
+            }
+            loop {
+                match state.pending.take() {
+                    Some(TraitOperation::Write { mut future, chunk })
+                        if buf.starts_with(&chunk) =>
+                    {
+                        return match future.as_mut().poll(task) {
+                            Poll::Pending => {
+                                state.pending = Some(TraitOperation::Write { future, chunk });
+                                Poll::Pending
+                            }
+                            Poll::Ready(result) => Poll::Ready(result),
+                        };
+                    }
+                    None => {
+                        state.rewind_read_ahead(inner)?;
+                        let chunk = Arc::new(buf[..buf.len().min(TRAIT_IO_CHUNK_BYTES)].to_vec());
+                        let submitted = Arc::clone(&chunk);
+                        let future = Self::submit_trait_io(inner, move |file| {
+                            let offset = file.inner.position.load(Ordering::Relaxed);
+                            let written = file.blocking_write_at(&submitted, offset)?;
+                            file.inner
+                                .position
+                                .store(offset.saturating_add(written as u64), Ordering::Relaxed);
+                            Ok(written)
+                        });
+                        state.pending = Some(TraitOperation::Write { future, chunk });
+                    }
+                    other => {
+                        state.pending = other;
+                        match state.settle(task, false, true) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(result) => result?,
+                        }
+                    }
+                }
+            }
+        })
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.blocking_sync(true)?;
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let inner = &this.inner;
+        poll_trait_operation(this.trait_io.get_mut(), 2, cx, |state, task| loop {
+            match state.pending.take() {
+                Some(TraitOperation::Sync(mut future)) => {
+                    return match future.as_mut().poll(task) {
+                        Poll::Pending => {
+                            state.pending = Some(TraitOperation::Sync(future));
+                            Poll::Pending
+                        }
+                        Poll::Ready(result) => Poll::Ready(result),
+                    };
+                }
+                None => {
+                    state.pending = Some(TraitOperation::Sync(Self::submit_trait_io(
+                        inner,
+                        |file| file.blocking_sync(true),
+                    )));
+                }
+                other => {
+                    state.pending = other;
+                    match state.settle(task, true, true) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(result) => result?,
+                    }
+                }
+            }
+        })
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(cx)
     }
 }
 
 impl AsyncSeek for IoUringFile {
     fn poll_seek(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        let new_pos = self.seek(pos)?;
-        Poll::Ready(Ok(new_pos))
+        let this = self.get_mut();
+        let inner = &this.inner;
+        poll_trait_operation(this.trait_io.get_mut(), 3, cx, |state, task| {
+            // A foreign operation may have collected this seek and then moved
+            // the cursor itself. Report the original result without applying a
+            // relative offset again or discarding a later write's completion.
+            if let Some(credit) = state.seek_credit.take()
+                && credit.position == pos
+            {
+                return Poll::Ready(credit.result);
+            }
+            // A deliberate cursor operation starts a new write sequence,
+            // matching File: identical bytes after seeking are a new write.
+            state.write_credit = None;
+            loop {
+                match state.pending.take() {
+                    Some(TraitOperation::Seek {
+                        mut future,
+                        position,
+                    }) if position == pos => {
+                        return match future.as_mut().poll(task) {
+                            Poll::Pending => {
+                                state.pending = Some(TraitOperation::Seek { future, position });
+                                Poll::Pending
+                            }
+                            Poll::Ready(result) => Poll::Ready(result),
+                        };
+                    }
+                    None => {
+                        state.rewind_read_ahead(inner)?;
+                        state.pending = Some(TraitOperation::Seek {
+                            future: Self::submit_trait_io(inner, move |file| file.seek_locked(pos)),
+                            position: pos,
+                        });
+                    }
+                    other => {
+                        state.pending = other;
+                        match state.settle(task, false, false) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(result) => result?,
+                        }
+                    }
+                }
+            }
+        })
     }
 }
 

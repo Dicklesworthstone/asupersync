@@ -362,7 +362,7 @@
     }
   },
   "summary": {
-    "boundary_rows": 101,
+    "boundary_rows": 102,
     "operation_count": 903,
     "operation_kind_counts": {
       "allow_unsafe_code": 109,
@@ -379,7 +379,7 @@
       "conformance-boundary": 2,
       "database-test-or-ffi-boundary": 2,
       "env-var-mutation": 6,
-      "filesystem-ffi": 3,
+      "filesystem-ffi": 4,
       "fuzz-target": 28,
       "network-ffi": 4,
       "observability-test-boundary": 1,
@@ -2048,88 +2048,104 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 24,
+          "line": 35,
           "pattern": "#![allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 353,
+          "line": 369,
           "pattern": "let result = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 387,
+          "line": 403,
           "pattern": "let fd = unsafe { libc::openat(libc::AT_FDCWD, c_path.as_ptr(), flags, mode) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 393,
+          "line": 409,
           "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 419,
+          "line": 436,
           "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 561,
+          "line": 595,
           "pattern": "let result = unsafe { libc::ftruncate(fd, size_off) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 577,
+          "line": 611,
           "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });"
         },
         {
           "kind": "unsafe_block",
-          "line": 584,
+          "line": 618,
           "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });"
         },
         {
           "kind": "unsafe_block",
-          "line": 629,
+          "line": 663,
           "pattern": "let push_result = unsafe { ring.submission().push(entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 763,
+          "line": 797,
           "pattern": "unsafe {"
         },
         {
+          "kind": "unsafe_fn",
+          "line": 434,
+          "pattern": "pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {"
+        }
+      ]
+    },
+    {
+      "site_id": "unsafe-src-fs-uring-inline-tests-rs",
+      "path": "src/fs/uring_inline_tests.rs",
+      "category": "filesystem-ffi",
+      "scope": "test-only-file-boundary",
+      "feature_or_platform_gate": "cfg(test), target_os = linux, feature = io-uring; included from src/fs/uring.rs",
+      "why_safe_rust_is_insufficient": "Existing io_uring regression fixtures exercise raw submission entries, descriptor ownership transfer, and pipe syscalls at the filesystem FFI boundary.",
+      "safety_invariant": "Test buffers remain alive until terminal completion; transferred descriptors are owned exactly once, and pipe fixtures close only descriptors they still own.",
+      "expected_evidence": "Existing io_uring descriptor and completion-lifetime regressions plus the unsafe-boundary-ledger-contract lane; locator maintenance does not constitute a fresh execution receipt.",
+      "explicit_no_claims": [
+        "These are existing test-only sites relocated from the src/fs/uring.rs inventory after test extraction; no unsafe operation is added.",
+        "Locator alignment alone does not prove production safety, platform coverage, or runtime execution."
+      ],
+      "operation_locators": [
+        {
           "kind": "unsafe_block",
-          "line": 1735,
+          "line": 527,
           "pattern": "let push_result = unsafe { ring.submission().push(&entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1870,
+          "line": 662,
           "pattern": "let file = unsafe { IoUringFile::from_raw_fd(raw_fd) }.unwrap();"
         },
         {
           "kind": "unsafe_block",
-          "line": 1905,
+          "line": 697,
           "pattern": "let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1911,
+          "line": 703,
           "pattern": "let err = unsafe { IoUringFile::from_raw_fd(read_fd) }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1924,
+          "line": 716,
           "pattern": "let write_result = unsafe { libc::write(write_fd, [0u8].as_ptr().cast(), 1) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1939,
+          "line": 731,
           "pattern": "let write_close_result = unsafe { libc::close(write_fd) };"
-        },
-        {
-          "kind": "unsafe_fn",
-          "line": 417,
-          "pattern": "pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {"
         }
       ]
     },

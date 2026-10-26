@@ -23,6 +23,66 @@
         std::task::Waker::noop().clone()
     }
 
+    /// The only worker stays occupied until released. This makes first-poll
+    /// Pending assertions independent of syscall or scheduler timing. Dropping
+    /// the guard releases the worker even if an assertion panics.
+    struct OccupiedTraitPool {
+        release: Option<std::sync::mpsc::Sender<()>>,
+        pool: crate::runtime::BlockingPool,
+    }
+
+    impl OccupiedTraitPool {
+        fn new() -> Self {
+            let pool = crate::runtime::BlockingPool::new(1, 1);
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            pool.spawn(move || {
+                started_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            });
+            let occupied = Self {
+                release: Some(release_tx),
+                pool,
+            };
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("blocking-pool worker did not start");
+            occupied
+        }
+
+        fn release_and_drain(&mut self) {
+            // The one-worker pool is FIFO: this marker follows the submitted
+            // file operation and proves its worker has retired before return.
+            let marker = self.pool.spawn(|| {});
+            drop(self.release.take());
+            assert!(marker.wait_timeout(std::time::Duration::from_secs(5)));
+        }
+    }
+
+    impl Drop for OccupiedTraitPool {
+        fn drop(&mut self) {
+            drop(self.release.take());
+        }
+    }
+
+    #[derive(Default)]
+    struct TraitWakeCount(AtomicU64);
+
+    impl Wake for TraitWakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    fn read_via_trait(file: &mut IoUringFile, bytes: &mut [u8]) -> io::Result<usize> {
+        futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            let mut read = ReadBuf::new(bytes);
+            Pin::new(&mut *file)
+                .poll_read(cx, &mut read)
+                .map_ok(|()| read.filled().len())
+        }))
+    }
+
     fn assert_polled_after_completion(err: &io::Error, operation: &str) {
         assert_eq!(err.kind(), io::ErrorKind::Other);
         assert_eq!(
@@ -1085,4 +1145,441 @@
             crate::assert_with_log!(buf == data, "data integrity", true, buf == data);
         });
         crate::test_complete!("test_uring_file_large_io");
+    }
+
+    #[test]
+    fn test_uring_traits_queue_owned_write_and_preserve_interleaved_credit() {
+        init_test("test_uring_traits_queue_owned_write_and_preserve_interleaved_credit");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trait_interleaved.txt");
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o600,
+        )
+        .unwrap();
+
+        let writer_wakes = Arc::new(TraitWakeCount::default());
+        let reader_wakes = Arc::new(TraitWakeCount::default());
+        let flusher_wakes = Arc::new(TraitWakeCount::default());
+        let writer = Waker::from(Arc::clone(&writer_wakes));
+        let reader = Waker::from(Arc::clone(&reader_wakes));
+        let flusher = Waker::from(Arc::clone(&flusher_wakes));
+        let mut submitted = b"hello".to_vec();
+        assert!(
+            Pin::new(&mut file)
+                .poll_write(&mut Context::from_waker(&writer), &submitted)
+                .is_pending()
+        );
+        // A dropped borrowing write must leave the owned original bytes alive.
+        submitted.fill(b'x');
+        drop(submitted);
+        let mut bytes = [0; 8];
+        assert!(
+            Pin::new(&mut file)
+                .poll_read(
+                    &mut Context::from_waker(&reader),
+                    &mut ReadBuf::new(&mut bytes),
+                )
+                .is_pending()
+        );
+        assert!(
+            Pin::new(&mut file)
+                .poll_flush(&mut Context::from_waker(&flusher))
+                .is_pending()
+        );
+
+        // The synchronous API cannot overtake a queued trait operation.
+        assert_eq!(
+            file.seek(SeekFrom::Start(0)).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(file.set_len(0).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            futures_lite::future::block_on(file.read_at(&mut bytes, 0))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            futures_lite::future::block_on(file.sync_data())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        occupied.release_and_drain();
+        assert!(writer_wakes.0.load(Ordering::Acquire) > 0);
+        assert!(reader_wakes.0.load(Ordering::Acquire) > 0);
+        assert!(flusher_wakes.0.load(Ordering::Acquire) > 0);
+        assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 0);
+        futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_flush(cx)
+        }))
+        .unwrap();
+
+        // The read collected the write and the flush preserved its result;
+        // its caller still gets the count without submitting the bytes again.
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut file).poll_write(&mut task, b"hello"),
+            Poll::Ready(Ok(5))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        assert_eq!(file.position(), 5);
+
+        // Leave another successful write's credit unclaimed, then seek.
+        // Seeking starts a new write sequence even for identical bytes.
+        let mut second = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(second.pool.handle()));
+        let _second_current = crate::cx::Cx::set_current(Some(cx));
+        assert!(Pin::new(&mut file).poll_write(&mut task, b"hello").is_pending());
+        assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
+        second.release_and_drain();
+        futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_flush(cx)
+        }))
+        .unwrap();
+        assert_eq!(file.position(), 10);
+        futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::End(0))
+        }))
+        .unwrap();
+        let written = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_write(cx, b"hello")
+        }))
+        .unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hellohellohello");
+        crate::test_complete!(
+            "test_uring_traits_queue_owned_write_and_preserve_interleaved_credit"
+        );
+    }
+
+    #[test]
+    fn test_uring_trait_read_preserves_uncollected_cursor_and_short_buffer_remainder() {
+        init_test("test_uring_trait_read_preserves_uncollected_cursor_and_short_buffer_remainder");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trait_read_ahead.txt");
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::open(&path).unwrap();
+        let mut first = vec![0; 6];
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(
+            Pin::new(&mut file)
+                .poll_read(&mut task, &mut ReadBuf::new(&mut first))
+                .is_pending()
+        );
+        drop(first);
+        occupied.release_and_drain();
+        assert_eq!(file.inner.position.load(Ordering::Relaxed), 6);
+        assert_eq!(file.position(), 0, "uncollected bytes are still unread");
+
+        let mut prefix = [0; 2];
+        assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
+        assert_eq!(&prefix, b"ab");
+        assert_eq!(file.position(), 2);
+        let mut next = [0; 1];
+        assert_eq!(read_via_trait(&mut file, &mut next).unwrap(), 1);
+        assert_eq!(&next, b"c");
+        assert_eq!(file.position(), 3);
+
+        let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(0))
+        }))
+        .unwrap();
+        assert_eq!(position, 3, "seek reconciles unread read-ahead");
+        let mut remaining = [0; 7];
+        assert_eq!(read_via_trait(&mut file, &mut remaining).unwrap(), 7);
+        assert_eq!(&remaining, b"defghij");
+        crate::test_complete!(
+            "test_uring_trait_read_preserves_uncollected_cursor_and_short_buffer_remainder"
+        );
+    }
+
+    #[test]
+    fn test_uring_positioned_write_invalidates_trait_read_ahead() {
+        init_test("test_uring_positioned_write_invalidates_trait_read_ahead");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trait_positioned_write.txt");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        let mut first = [0; 6];
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(
+            Pin::new(&mut file)
+                .poll_read(&mut task, &mut ReadBuf::new(&mut first))
+                .is_pending()
+        );
+        occupied.release_and_drain();
+        let mut prefix = [0; 2];
+        assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
+        assert_eq!(&prefix, b"ab");
+        assert_eq!(
+            futures_lite::future::block_on(file.write_at(b"XY", 2)).unwrap(),
+            2
+        );
+        assert_eq!(
+            file.position(),
+            2,
+            "positioned writes retain the logical cursor"
+        );
+        let mut rest = [0; 4];
+        assert_eq!(read_via_trait(&mut file, &mut rest).unwrap(), 4);
+        assert_eq!(&rest, b"XYef", "read-ahead must not mask a file mutation");
+        crate::test_complete!("test_uring_positioned_write_invalidates_trait_read_ahead");
+    }
+
+    #[test]
+    fn test_uring_trait_seek_and_flush_are_queued_on_the_inherited_pool() {
+        init_test("test_uring_trait_seek_and_flush_are_queued_on_the_inherited_pool");
+        for seek in [false, true] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("trait_seek_sync.txt");
+            std::fs::write(&path, b"abcdef").unwrap();
+            let mut occupied = OccupiedTraitPool::new();
+            let cx = crate::cx::Cx::for_testing()
+                .with_blocking_pool_handle(Some(occupied.pool.handle()));
+            let _current = crate::cx::Cx::set_current(Some(cx));
+            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+            let mut task = Context::from_waker(Waker::noop());
+            if seek {
+                assert!(
+                    Pin::new(&mut file)
+                        .poll_seek(&mut task, SeekFrom::End(-2))
+                        .is_pending()
+                );
+            } else {
+                assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
+            }
+            occupied.release_and_drain();
+            if seek {
+                assert!(matches!(
+                    Pin::new(&mut file).poll_seek(&mut task, SeekFrom::End(-2)),
+                    Poll::Ready(Ok(4))
+                ));
+                assert_eq!(file.position(), 4);
+            } else {
+                assert!(matches!(
+                    Pin::new(&mut file).poll_flush(&mut task),
+                    Poll::Ready(Ok(()))
+                ));
+            }
+        }
+        crate::test_complete!("test_uring_trait_seek_and_flush_are_queued_on_the_inherited_pool");
+    }
+
+    #[test]
+    fn test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush() {
+        init_test("test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush");
+        for read_observer in [false, true] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("trait_relative_seek.txt");
+            std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+            let mut occupied = OccupiedTraitPool::new();
+            let cx = crate::cx::Cx::for_testing()
+                .with_blocking_pool_handle(Some(occupied.pool.handle()));
+            let _current = crate::cx::Cx::set_current(Some(cx));
+            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(
+                Pin::new(&mut file)
+                    .poll_seek(&mut task, SeekFrom::Current(5))
+                    .is_pending()
+            );
+            let mut bytes = [0; 2];
+            if read_observer {
+                assert!(
+                    Pin::new(&mut file)
+                        .poll_read(&mut task, &mut ReadBuf::new(&mut bytes))
+                        .is_pending()
+                );
+            } else {
+                assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
+            }
+            occupied.release_and_drain();
+
+            // The foreign operation collects the seek's terminal result. A
+            // read then advances the cursor beyond the seek's returned offset.
+            if read_observer {
+                assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 2);
+                assert_eq!(&bytes, b"fg");
+            } else {
+                futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                    Pin::new(&mut file).poll_flush(cx)
+                }))
+                .unwrap();
+            }
+            let observed_position = if read_observer { 7 } else { 5 };
+            assert_eq!(file.position(), observed_position);
+            let requests = file.inner.next_user_data.load(Ordering::Relaxed);
+            assert!(matches!(
+                Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Current(5)),
+                Poll::Ready(Ok(5))
+            ));
+            assert_eq!(file.position(), observed_position, "relative seek was not repeated");
+            assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
+
+            // Once that result is consumed, an identical new seek is real work.
+            let next = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(5))
+            }))
+            .unwrap();
+            assert_eq!(next, observed_position + 5);
+            assert_eq!(file.position(), next);
+        }
+        crate::test_complete!(
+            "test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush"
+        );
+    }
+
+    #[test]
+    fn test_uring_failed_relative_seek_keeps_its_original_error_after_a_read() {
+        init_test("test_uring_failed_relative_seek_keeps_its_original_error_after_a_read");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trait_failed_relative_seek.txt");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::open(&path).unwrap();
+        file.seek(SeekFrom::Start(2)).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(
+            Pin::new(&mut file)
+                .poll_seek(&mut task, SeekFrom::Current(-3))
+                .is_pending()
+        );
+        let mut bytes = [0; 2];
+        assert!(
+            Pin::new(&mut file)
+                .poll_read(&mut task, &mut ReadBuf::new(&mut bytes))
+                .is_pending()
+        );
+        occupied.release_and_drain();
+        let observed = read_via_trait(&mut file, &mut bytes).unwrap_err();
+        assert_eq!(observed.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(file.position(), 2);
+
+        // Move far enough that re-executing the old offset would now succeed.
+        assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 2);
+        assert_eq!(&bytes, b"cd");
+        match Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Current(-3)) {
+            Poll::Ready(Err(original)) => {
+                assert_eq!(original.kind(), observed.kind());
+                assert_eq!(original.to_string(), observed.to_string());
+            }
+            other => panic!("original seek failure was lost or retried: {other:?}"),
+        }
+        assert_eq!(file.position(), 4);
+        let next = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(-3))
+        }))
+        .unwrap();
+        assert_eq!(next, 1, "a new seek after consuming the error is permitted");
+        crate::test_complete!(
+            "test_uring_failed_relative_seek_keeps_its_original_error_after_a_read"
+        );
+    }
+
+    #[test]
+    fn test_uring_shutdown_reports_and_retains_an_interleaved_write_error() {
+        init_test("test_uring_shutdown_reports_and_retains_an_interleaved_write_error");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trait_failed_write.txt");
+        std::fs::write(&path, b"unchanged").unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::open(&path).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut file).poll_write(&mut task, b"wrong").is_pending());
+        assert!(Pin::new(&mut file).poll_shutdown(&mut task).is_pending());
+        occupied.release_and_drain();
+
+        let error = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_shutdown(cx)
+        }))
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+        let requests = file.inner.next_user_data.load(Ordering::Relaxed);
+        match Pin::new(&mut file).poll_write(&mut task, b"wrong") {
+            Poll::Ready(Err(original)) => assert_eq!(original.raw_os_error(), Some(libc::EBADF)),
+            other => panic!("writer lost its original failure: {other:?}"),
+        }
+        assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
+        assert!(
+            file.trait_io.lock().pending.is_none(),
+            "failed write was not retried"
+        );
+        assert_eq!(file.position(), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
+        crate::test_complete!("test_uring_shutdown_reports_and_retains_an_interleaved_write_error");
+    }
+
+    #[test]
+    fn test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive() {
+        init_test(
+            "test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive",
+        );
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trait_drop_running.txt");
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::create(&path).unwrap();
+        let inner = Arc::clone(&file.inner);
+        let ring_guard = inner.ring.lock();
+        let mut bytes = b"owned while running".to_vec();
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut file).poll_write(&mut task, &bytes).is_pending());
+
+        // The worker takes the cursor before trying the deliberately held
+        // ring lock. Observe that claim before dropping its future; queued
+        // work is cancellable, but a running operation must retain ownership.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if inner.cursor_lock.try_lock().is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not claim the operation"
+            );
+            std::thread::yield_now();
+        }
+        bytes.fill(b'x');
+        drop(bytes);
+        drop(file);
+        assert_eq!(
+            Arc::strong_count(&inner),
+            2,
+            "worker retains the file descriptor and ring"
+        );
+        drop(ring_guard);
+        let marker = pool.spawn(|| {});
+        assert!(marker.wait_timeout(std::time::Duration::from_secs(5)));
+        assert_eq!(
+            Arc::strong_count(&inner),
+            1,
+            "worker retired after its terminal CQE"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"owned while running");
+        crate::test_complete!(
+            "test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive"
+        );
     }
