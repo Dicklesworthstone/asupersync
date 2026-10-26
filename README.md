@@ -607,6 +607,31 @@ its spawn gateway through transport completion. Request timeout/reset cancels
 that request, and awaited service exit joins admitted request regions and
 checks their cleanup outcomes.
 
+The native session and listener can opt in to dynamic QPACK **decoding**:
+
+```rust,ignore
+let mut config = NativeH3ListenerConfig::default();
+config.qpack_decoder_table_capacity = std::num::NonZeroUsize::new(4096);
+```
+
+This enables compressed incoming request headers and trailers; a directly
+configured client session also decodes dynamic informational and final responses.
+The profile advertises a finite table of at most 64 KiB and zero blocked streams,
+acknowledges received insertions, and retains decoder feedback across QUIC
+flow-control stalls. Peers can then reference acknowledged entries without
+blocking a request stream. Resolved field sizes are checked before copying table
+entries, with an advertised ceiling of 1 MiB per section and any smaller
+configured field limit. Outgoing headers and trailers use static QPACK. For an
+established connection, select `H3ConnectionConfig::with_dynamic_qpack()` and
+pass local settings to `NativeH3Session::initialize`; an omitted table capacity
+defaults to 4096 bytes. Dynamic receive yields after each decoded event and
+delivers DATA in chunks of at most 64 KiB by default; an explicit
+`enable_streaming_receive` setting selects another chunk size. This also bounds
+retention when one transport read contains many compressed field sections.
+Default sessions remain static. The new dynamic receive
+regressions still require Rust/RCH execution; this is not an interop or
+deployment-readiness claim.
+
 The native H3 listener also has an opt-in live request-body path:
 
 ```rust,ignore

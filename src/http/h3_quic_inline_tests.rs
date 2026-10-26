@@ -1959,4 +1959,133 @@
             assert_eq!(connection.pending_stream_data_bytes(decoder), 0);
             assert_eq!(session.next_event(&cx, &mut connection).unwrap_err(), error);
         }
+
+        #[test]
+        fn a_coalesced_dynamic_header_burst_expands_only_the_event_being_delivered() {
+            for explicit_chunks in [false, true] {
+                let cx = Cx::for_testing();
+                let (mut session, mut connection) = fixture(
+                    &cx,
+                    false,
+                    explicit_chunks,
+                    H3Settings {
+                        qpack_max_table_capacity: Some(NATIVE_H3_MAX_QPACK_DECODER_CAPACITY as u64),
+                        ..H3Settings::default()
+                    },
+                );
+                assert_eq!(
+                    session.streaming_receive.as_ref().unwrap().max_chunk_bytes.get(),
+                    if explicit_chunks {
+                        8
+                    } else {
+                        NATIVE_H3_DYNAMIC_RECEIVE_CHUNK_BYTES
+                    }
+                );
+                assert_eq!(NATIVE_H3_DYNAMIC_RECEIVE_CHUNK_BYTES, 64 * 1024);
+                let stream = session
+                    .send_request(&cx, &mut connection, &field_limit_request(), Bytes::new())
+                    .unwrap();
+                let mut peer = peer_encoder(NATIVE_H3_MAX_QPACK_DECODER_CAPACITY as u64);
+                let value = "x".repeat(60_000);
+                let encoder = encoder_wire(&mut peer, &[("x-expanded", value.as_str())]);
+                inject_encoder(&cx, &mut session, &mut connection, encoder);
+                let mut decoder_wire = Vec::new();
+                assert_eq!(
+                    feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                    vec![QpackDecoderInstruction::InsertCountIncrement { increment: 1 }]
+                );
+
+                // Each tiny section expands to 960,000 value bytes. Decoding the
+                // entire coalesced read before delivering its first event
+                // would retain eight expanded copies in the session queue.
+                let mut plan = vec![QpackFieldPlan::StaticIndex(24)]; // :status 103
+                plan.extend((0..16).map(|_| QpackFieldPlan::DynamicIndex(0)));
+                let section =
+                    qpack_encode_field_section_with_context(&plan, Some(peer.context())).unwrap();
+                assert!(section.len() < 32);
+                let mut burst = Vec::new();
+                for _ in 0..8 {
+                    assert_eq!(
+                        peer.submit_field_section(stream.0, &section).unwrap(),
+                        QpackBlockedStreamStatus::Ready
+                    );
+                    H3Frame::Headers(section.clone()).encode(&mut burst).unwrap();
+                }
+                H3Frame::Headers(
+                    qpack_encode_response_field_section(
+                        &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .encode(&mut burst)
+                .unwrap();
+                assert!(burst.len() < 256);
+                connection
+                    .inner_mut()
+                    .receive_stream_bytes(&cx, stream, 0, Bytes::from(burst), true)
+                    .unwrap();
+
+                let mut task = TaskContext::from_waker(Waker::noop());
+                for index in 0..8 {
+                    // Alternate both public drivers without injecting any
+                    // more transport bytes or readiness notifications.
+                    let event = if index % 2 == 0 {
+                        next_field_limit_event(&cx, &mut session, &mut connection)
+                    } else {
+                        let Poll::Ready(Ok(event)) =
+                            session.poll_event(&cx, &mut connection, &mut task)
+                        else {
+                            panic!("retained field-section lookahead did not produce its event");
+                        };
+                        event
+                    };
+                    let NativeH3Event::ResponseHeaders { stream_id, head } = event else {
+                        panic!("informational HEADERS lost their receive order");
+                    };
+                    assert_eq!(stream_id, stream);
+                    assert_eq!(head.status, 103);
+                    assert_eq!(head.headers.len(), 16);
+                    assert!(head.headers.iter().all(|(name, value)| {
+                        name == "x-expanded" && value.len() == 60_000
+                    }));
+                    assert!(
+                        session.events.is_empty(),
+                        "later compressed sections must not be expanded into queued events"
+                    );
+                    assert!(!session.terminal_streams.contains(stream));
+                    assert!(
+                        session.streaming_receive.as_ref().unwrap().ready.contains_key(&stream)
+                    );
+                    if index == 0 && !explicit_chunks {
+                        assert!(!session.incoming.get(&stream).unwrap().bytes.is_empty());
+                    }
+                    drop(head);
+                }
+                let NativeH3Event::ResponseHeaders { stream_id, head } =
+                    next_field_limit_event(&cx, &mut session, &mut connection)
+                else {
+                    panic!("final response HEADERS missing");
+                };
+                assert_eq!(stream_id, stream);
+                assert_eq!(head.status, 200);
+                assert!(session.events.is_empty());
+                assert_eq!(
+                    next_field_limit_event(&cx, &mut session, &mut connection),
+                    NativeH3Event::Finished { stream_id: stream }
+                );
+                assert!(session.events.is_empty());
+                assert!(!session.incoming.contains_key(&stream));
+                assert_eq!(
+                    feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                    vec![
+                        QpackDecoderInstruction::HeaderAcknowledgement {
+                            stream_id: stream.0,
+                        };
+                        8
+                    ]
+                );
+                assert_eq!(peer.decoder_feedback().outstanding_reference_count(), 0);
+                assert!(peer.decoder_feedback().cancelled_stream_ids().is_empty());
+            }
+        }
     }

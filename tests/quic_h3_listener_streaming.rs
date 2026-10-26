@@ -1271,6 +1271,38 @@ mod native_h3_listener_live {
         }
 
         #[test]
+        fn authenticated_listener_rejects_excessive_qpack_capacity_before_binding() {
+            run(1, async {
+                let cx = Cx::current().unwrap();
+                let mut listener_config = config(8);
+                listener_config.qpack_decoder_table_capacity = NonZeroUsize::new(
+                    asupersync::http::h3::NATIVE_H3_MAX_QPACK_DECODER_CAPACITY + 1,
+                );
+                let result = NativeH3Listener::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    Router::new(),
+                    server_config(
+                        vec![certificate("server")],
+                        leaf_key(),
+                        vec![H3_ALPN.to_vec()],
+                    )
+                    .unwrap(),
+                    transport_parameters(listener_config.endpoint.connection_config),
+                    listener_config,
+                )
+                .await;
+                assert!(matches!(
+                    result,
+                    Err(asupersync::web::NativeH3ListenerError::Endpoint(
+                        asupersync::net::quic_native::ManagedEndpointError::InvalidConfig(message)
+                    )) if message == "HTTP/3 QPACK decoder table capacity exceeds 64 KiB"
+                ));
+                assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+            });
+        }
+
+        #[test]
         fn authenticated_listener_streams_prefix_before_fin_current_thread() {
             prefix_before_fin(1);
         }
