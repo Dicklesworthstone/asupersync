@@ -814,8 +814,8 @@
     },
     {
       "path": "src/grpc/protobuf_wire.rs",
-      "sha256": "2aeb621e0897ae30a8486fcc611947a9a7e2b075af2cb6825dd2f56c197935a2",
-      "line_count": 1993,
+      "sha256": "9bcbd1dac96830dac226f242fbc6d03566c9bb4b72a0a95223cd0d099e8bdb7b",
+      "line_count": 2163,
       "anchors": ["The encoder is deterministic for the same ordered sequence", "pub struct ProtobufWireLimits"]
     },
     {
@@ -892,7 +892,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "0a6e74ce66cb9ce9b579b9fcfe42cbf287ae6464f049fe811a3cfcb2bbd1784b",
+      "sha256": "f5fcb856b06252a9316b83d7c202a5c2867d54dcbd5a36e36cea4c39da250fac",
       "line_count": 2240,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -910,7 +910,7 @@
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "70eaae19f400d3d02a6c0c1d20d3f8283c7a22c9034b4ef53a0711b55d294650",
+      "sha256": "dcda749858dbd99113576a8e530a5f94b27890812a097a8efc450c0426931562",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

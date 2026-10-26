@@ -559,9 +559,10 @@
     /// Answers the client's first PING with `BURST` messages for the client's
     /// subscription, then the PONG, so every message is dispatched before
     /// `ping` returns and none is received in between.
-    fn spawn_burst_server() -> (SocketAddr, JoinHandle<()>) {
+    fn spawn_burst_server(queue_group: Option<&str>) -> (SocketAddr, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind burst listener");
         let addr = listener.local_addr().expect("listener addr");
+        let queue_group = queue_group.map(str::to_owned);
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept burst client");
             stream
@@ -573,11 +574,15 @@
             let mut reader = BufReader::new(stream);
             assert!(read_protocol_line(&mut reader).starts_with("CONNECT "));
             let subscribe = read_protocol_line(&mut reader);
-            let sid = subscribe
-                .split_whitespace()
-                .nth(2)
-                .expect("SUB sid")
-                .to_string();
+            let parts: Vec<_> = subscribe.split_whitespace().collect();
+            assert_eq!(&parts[..2], &["SUB", "burst"]);
+            if let Some(queue_group) = queue_group {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[2], queue_group);
+            } else {
+                assert_eq!(parts.len(), 3);
+            }
+            let sid = parts.last().expect("SUB sid");
             assert_eq!(trim_protocol_line(read_protocol_line(&mut reader)), "PING");
             let mut burst = String::new();
             for index in 0..BURST {
@@ -587,6 +592,8 @@
             let stream = reader.get_mut();
             stream.write_all(burst.as_bytes()).expect("write burst");
             stream.flush().expect("flush burst");
+            let mut byte = [0_u8; 1];
+            assert_eq!(stream.read(&mut byte).expect("observe client close"), 0);
         });
         (addr, server)
     }
@@ -596,7 +603,7 @@
         // Frames that arrive while the subscriber is not receiving (here, all
         // of them before the PONG) are dispatched into its buffer, and the
         // buffer used to hold 256 whatever the burst.
-        let (addr, server) = spawn_burst_server();
+        let (addr, server) = spawn_burst_server(None);
         run_test_with_cx(|cx| async move {
             let config = NatsConfig {
                 host: addr.ip().to_string(),
@@ -619,6 +626,362 @@
             assert_eq!(received[BURST - 1], b"0299".to_vec());
         });
         server.join().expect("join burst server");
+    }
+
+    #[test]
+    fn nats_subscription_events_report_wire_overflow_without_consuming_messages() {
+        let (addr, server) = spawn_burst_server(None);
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut client = NatsClient::connect_with_config(&cx, config)
+                .await
+                .expect("connect burst server");
+            let mut sub = client.subscribe(&cx, "burst").await.expect("subscribe");
+            // The PONG follows every MSG, so this is an exact dispatch witness.
+            client.ping(&cx).await.expect("all burst messages dispatched");
+            let dropped = (BURST - DEFAULT_SUBSCRIPTION_CAPACITY) as u64;
+            assert_eq!(sub.dropped_messages(), dropped);
+            assert!(matches!(
+                sub.next_event(&cx).await.expect("loss event"),
+                Some(SubscriptionEvent::Lagged { dropped: count }) if count == dropped
+            ));
+            for index in 0..DEFAULT_SUBSCRIPTION_CAPACITY {
+                let Some(SubscriptionEvent::Message(message)) = sub.try_next_event() else {
+                    panic!("buffered message {index} was hidden or a loss was reported twice");
+                };
+                assert_eq!(message.payload, format!("{index:04}").as_bytes());
+            }
+            assert!(sub.try_next_event().is_none());
+            assert_eq!(sub.dropped_messages(), dropped);
+        });
+        server.join().expect("join burst server");
+    }
+
+    #[test]
+    fn nats_queue_subscription_capacity_preserves_a_full_wire_burst() {
+        let (addr, server) = spawn_burst_server(Some("workers"));
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("build native subscription runtime");
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("native subscription context");
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut client = NatsClient::connect_with_config(&cx, config)
+                .await
+                .expect("connect burst server");
+            assert!(matches!(&client.mode, NatsClientMode::Supervised(_)));
+            let mut sub = client
+                .queue_subscribe_with_capacity(&cx, "burst", "workers", BURST)
+                .await
+                .expect("queue subscription");
+            client.ping(&cx).await.expect("all burst messages dispatched");
+            for index in 0..BURST {
+                let Some(SubscriptionEvent::Message(message)) = sub.try_next_event() else {
+                    panic!("queue subscription lost message {index}");
+                };
+                assert_eq!(message.payload, format!("{index:04}").as_bytes());
+            }
+            assert!(sub.try_next_event().is_none());
+            assert_eq!(sub.dropped_messages(), 0);
+            client.close(&cx).await.expect("close supervised client");
+        }));
+        server.join().expect("join burst server");
+    }
+
+    fn subscription_event_fixture(capacity: usize) -> (NatsConnection, Subscription) {
+        let state = Arc::new(SharedState::new());
+        let loss = Arc::new(SubscriptionLoss::default());
+        let (sender, rx) = mpsc::channel(capacity);
+        state.subscriptions.lock().insert(
+            1,
+            SubscriptionState {
+                subject: "events".to_string(),
+                queue_group: None,
+                sender,
+                loss: Arc::clone(&loss),
+            },
+        );
+        let connection = NatsConnection {
+            config: NatsConfig::default(),
+            connect_policy: NatsConnectPolicy::default(),
+            stream: NatsStream::Closed,
+            read_buf: NatsReadBuffer::new(),
+            state: Arc::clone(&state),
+            next_sid: AtomicU64::new(2),
+            connected: true,
+            tls_required_on_connect: false,
+        };
+        let subscription = Subscription {
+            sid: 1,
+            subject: "events".to_string(),
+            rx,
+            state,
+            loss,
+            reported_dropped_messages: 0,
+        };
+        (connection, subscription)
+    }
+
+    fn subscription_event_message(value: u8) -> Message {
+        Message {
+            subject: "events".to_string(),
+            sid: 1,
+            reply_to: None,
+            headers: None,
+            payload: vec![value],
+        }
+    }
+
+    #[test]
+    fn nats_subscription_loss_survives_legacy_receive_unsubscribe_and_close() {
+        run_test_with_cx(|cx| async move {
+            let (mut connection, mut sub) = subscription_event_fixture(1);
+            connection.dispatch_message(subscription_event_message(1));
+            connection.dispatch_message(subscription_event_message(2));
+            assert_eq!(sub.try_next().expect("legacy message").payload, vec![1]);
+            connection.dispatch_message(subscription_event_message(3));
+            connection.dispatch_message(subscription_event_message(4));
+            assert_eq!(sub.dropped_messages(), 2);
+            connection.remove_local_subscription(sub.sid());
+            connection.dispatch_message(subscription_event_message(5));
+            connection.close(&cx).await.expect("close connection");
+            assert!(matches!(
+                sub.next_event(&cx).await.expect("loss survives close"),
+                Some(SubscriptionEvent::Lagged { dropped: 2 })
+            ));
+            let Some(SubscriptionEvent::Message(message)) =
+                sub.next_event(&cx).await.expect("message survives close")
+            else {
+                panic!("close discarded the accepted message");
+            };
+            assert_eq!(message.payload, vec![3]);
+            assert!(sub.next_event(&cx).await.expect("closed").is_none());
+            assert_eq!(sub.dropped_messages(), 2, "removed SID is not counted");
+        });
+    }
+
+    #[test]
+    fn nats_subscription_loss_wakes_without_a_buffered_message() {
+        let (connection, mut sub) = subscription_event_fixture(1);
+        let cx: Cx = Cx::for_testing();
+        connection.dispatch_message(subscription_event_message(1));
+        let (sender, loss) = {
+            let subscriptions = connection.state.subscriptions.lock();
+            let state = subscriptions.get(&1).expect("registered subscription");
+            (state.sender.clone(), Arc::clone(&state.loss))
+        };
+        // Split the real dispatch steps at the formerly vulnerable boundary:
+        // Full is known, but its loss count has not yet been published.
+        assert!(matches!(
+            sender.try_send(subscription_event_message(2)),
+            Err(mpsc::SendError::Full(_))
+        ));
+        assert_eq!(sub.try_next().expect("last buffered message").payload, vec![1]);
+
+        struct WakeCount(AtomicU64);
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let wake_count = Arc::new(WakeCount(AtomicU64::new(0)));
+        let waker = Waker::from(Arc::clone(&wake_count));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        let mut receive = Box::pin(sub.next_event(&cx));
+        assert!(receive.as_mut().poll(&mut task_cx).is_pending());
+        loss.record_drop();
+        assert!(wake_count.0.load(Ordering::Relaxed) > 0);
+        assert!(matches!(
+            receive.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(Some(SubscriptionEvent::Lagged { dropped: 1 })))
+        ));
+    }
+
+    #[test]
+    fn nats_subscription_cancelled_and_dropped_waits_preserve_loss() {
+        let (connection, mut sub) = subscription_event_fixture(1);
+        let cancelled: Cx = Cx::for_testing();
+        let live: Cx = Cx::for_testing();
+        let mut task_cx = std::task::Context::from_waker(Waker::noop());
+        {
+            let mut receive = Box::pin(sub.next_event(&cancelled));
+            assert!(receive.as_mut().poll(&mut task_cx).is_pending());
+        }
+        connection.dispatch_message(subscription_event_message(1));
+        connection.dispatch_message(subscription_event_message(2));
+        cancelled.cancel_with(crate::types::CancelKind::User, Some("cancel receive"));
+        {
+            let mut receive = Box::pin(sub.next_event(&cancelled));
+            assert!(matches!(
+                receive.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(NatsError::Cancelled))
+            ));
+        }
+        {
+            let mut receive = Box::pin(sub.next_event(&live));
+            assert!(matches!(
+                receive.as_mut().poll(&mut task_cx),
+                Poll::Ready(Ok(Some(SubscriptionEvent::Lagged { dropped: 1 })))
+            ));
+        }
+        assert_eq!(sub.try_next().expect("message remains").payload, vec![1]);
+        {
+            // A completed loss notification must not invent another Lagged.
+            let mut receive = Box::pin(sub.next_event(&live));
+            assert!(receive.as_mut().poll(&mut task_cx).is_pending());
+        }
+        connection.dispatch_message(subscription_event_message(3));
+        connection.dispatch_message(subscription_event_message(4));
+        assert!(matches!(
+            sub.try_next_event(),
+            Some(SubscriptionEvent::Lagged { dropped: 1 })
+        ));
+        assert_eq!(sub.dropped_messages(), 2);
+        assert_eq!(sub.try_next().expect("next accepted message").payload, vec![3]);
+    }
+
+    #[test]
+    fn nats_subscription_drop_count_saturates() {
+        let (connection, mut sub) = subscription_event_fixture(1);
+        sub.loss.count.store(u64::MAX - 1, Ordering::Release);
+        sub.reported_dropped_messages = u64::MAX - 1;
+        connection.dispatch_message(subscription_event_message(1));
+        connection.dispatch_message(subscription_event_message(2));
+        connection.dispatch_message(subscription_event_message(3));
+        assert_eq!(sub.dropped_messages(), u64::MAX);
+        assert!(matches!(
+            sub.try_next_event(),
+            Some(SubscriptionEvent::Lagged { dropped: 1 })
+        ));
+        assert_eq!(sub.try_next().expect("retained message").payload, vec![1]);
+        assert!(sub.try_next_event().is_none());
+    }
+
+    #[test]
+    fn nats_subscription_dispatch_wakes_outside_the_subscription_lock() {
+        struct ReentrantWake {
+            state: Arc<SharedState>,
+            wakes: AtomicU64,
+        }
+        impl std::task::Wake for ReentrantWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                assert!(
+                    self.state.subscriptions.try_lock().is_some(),
+                    "message and loss wake callbacks must permit reentry"
+                );
+                self.wakes.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let (connection, mut sub) = subscription_event_fixture(1);
+        let cx: Cx = Cx::for_testing();
+        let callback = Arc::new(ReentrantWake {
+            state: Arc::clone(&connection.state),
+            wakes: AtomicU64::new(0),
+        });
+        let waker = Waker::from(Arc::clone(&callback));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        {
+            let mut receive = Box::pin(sub.next_event(&cx));
+            assert!(receive.as_mut().poll(&mut task_cx).is_pending());
+            connection.dispatch_message(subscription_event_message(1));
+            connection.dispatch_message(subscription_event_message(2));
+            assert_eq!(callback.wakes.load(Ordering::Relaxed), 2);
+            assert!(matches!(
+                receive.as_mut().poll(&mut task_cx),
+                Poll::Ready(Ok(Some(SubscriptionEvent::Lagged { dropped: 1 })))
+            ));
+        }
+        assert_eq!(sub.try_next().expect("buffered message").payload, vec![1]);
+    }
+
+    #[test]
+    fn nats_subscription_close_waits_for_an_admitted_dispatch_loss() {
+        let (connection, mut sub) = subscription_event_fixture(1);
+        let cx: Cx = Cx::for_testing();
+        connection.dispatch_message(subscription_event_message(1));
+        let (sender, loss) = {
+            let subscriptions = connection.state.subscriptions.lock();
+            let state = subscriptions.get(&1).expect("registered subscription");
+            (state.sender.clone(), Arc::clone(&state.loss))
+        };
+        assert!(matches!(
+            sender.try_send(subscription_event_message(2)),
+            Err(mpsc::SendError::Full(_))
+        ));
+        assert!(sub.try_next().is_some());
+        drop(connection);
+        let mut task_cx = std::task::Context::from_waker(Waker::noop());
+        {
+            let mut receive = Box::pin(sub.next_event(&cx));
+            assert!(receive.as_mut().poll(&mut task_cx).is_pending());
+            loss.record_drop();
+            drop(sender);
+            assert!(matches!(
+                receive.as_mut().poll(&mut task_cx),
+                Poll::Ready(Ok(Some(SubscriptionEvent::Lagged { dropped: 1 })))
+            ));
+        }
+        let mut receive = Box::pin(sub.next_event(&cx));
+        assert!(matches!(
+            receive.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(None))
+        ));
+    }
+
+    #[test]
+    fn nats_subscription_legacy_receive_drains_a_dispatch_admitted_before_close() {
+        let (connection, mut sub) = subscription_event_fixture(1);
+        let cx: Cx = Cx::for_testing();
+        // Capture the same temporary sender dispatch_message obtains while
+        // the subscription is registered, then close before it sends.
+        let sender = connection
+            .state
+            .subscriptions
+            .lock()
+            .get(&sub.sid())
+            .expect("registered subscription")
+            .sender
+            .clone();
+        drop(connection);
+        assert!(sub.state.closed.load(Ordering::Acquire));
+        assert!(sub.state.subscriptions.lock().is_empty());
+        let mut task_cx = std::task::Context::from_waker(Waker::noop());
+        {
+            let mut receive = Box::pin(sub.next(&cx));
+            assert!(
+                receive.as_mut().poll(&mut task_cx).is_pending(),
+                "global closure must not hide an admitted dispatch"
+            );
+            sender
+                .try_send(subscription_event_message(7))
+                .expect("complete admitted dispatch");
+            drop(sender);
+            let Poll::Ready(Ok(Some(message))) = receive.as_mut().poll(&mut task_cx) else {
+                panic!("legacy receive discarded the final accepted message");
+            };
+            assert_eq!(message.payload, vec![7]);
+        }
+        let mut receive = Box::pin(sub.next(&cx));
+        assert!(matches!(
+            receive.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(None))
+        ));
     }
 
     fn deterministic_user_seed(byte: u8) -> String {
@@ -745,6 +1108,7 @@
                 subject: subject.to_string(),
                 queue_group: queue_group.map(str::to_string),
                 sender: tx,
+                loss: Arc::new(SubscriptionLoss::default()),
             },
         );
     }
@@ -2035,6 +2399,7 @@
                     subject: "svc.echo".to_string(),
                     queue_group: None,
                     sender: tx,
+                    loss: Arc::new(SubscriptionLoss::default()),
                 },
             );
 
@@ -2093,6 +2458,7 @@
                     subject: "_INBOX.reply".to_string(),
                     queue_group: None,
                     sender: tx,
+                    loss: Arc::new(SubscriptionLoss::default()),
                 },
             );
             let mut client = NatsConnection {
@@ -3019,12 +3385,14 @@
             let state = Arc::new(SharedState::new());
             let sid = 73;
             let (tx, rx) = mpsc::channel(8);
+            let loss = Arc::new(SubscriptionLoss::default());
             state.subscriptions.lock().insert(
                 sid,
                 SubscriptionState {
                     subject: "events.lifecycle".to_string(),
                     queue_group: None,
                     sender: tx,
+                    loss: Arc::clone(&loss),
                 },
             );
             let mut subscription = Subscription {
@@ -3032,6 +3400,8 @@
                 subject: "events.lifecycle".to_string(),
                 rx,
                 state: Arc::clone(&state),
+                loss,
+                reported_dropped_messages: 0,
             };
             let client = NatsConnection {
                 config: NatsConfig::default(),

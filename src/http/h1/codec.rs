@@ -1655,6 +1655,24 @@ impl Decoder for Http1Codec {
             Ok(v) => Ok(v),
         }
     }
+
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Request>, HttpError> {
+        match self.decode(src)? {
+            Some(request) => Ok(Some(request)),
+            None if src.is_empty() && matches!(self.state, DecodeState::Head) => Ok(None),
+            None => {
+                // Parsing can consume the entire head or the last available
+                // chunk without completing the request. An empty input buffer
+                // alone therefore does not establish a clean EOF.
+                self.state = DecodeState::Poisoned;
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "incomplete HTTP request at EOF",
+                )
+                .into())
+            }
+        }
+    }
 }
 
 impl Http1Codec {

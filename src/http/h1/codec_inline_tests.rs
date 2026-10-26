@@ -19,6 +19,96 @@
         buf.to_vec()
     }
 
+    #[test]
+    fn decode_eof_rejects_truncated_requests_at_every_input_split() {
+        // Several chunk states consume all available bytes while still
+        // requiring a terminator or more data. EOF must consult parser state,
+        // not just whether the caller's buffer happens to be empty.
+        let incomplete: &[&[u8]] = &[
+            b"POST /upload HTTP/1.1\r\nHost: example.com\r\n",
+            b"POST /upload HTTP/1.1\r\nContent-Length: 5\r\n\r\n",
+            b"POST /upload HTTP/1.1\r\nContent-Length: 5\r\n\r\nhell",
+            b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel",
+            b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello",
+            b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
+            b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n",
+            b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nx-checksum: abc\r\n",
+        ];
+        for &raw in incomplete {
+            for split in 0..=raw.len() {
+                let mut codec = Http1Codec::new();
+                let mut buf = BytesMut::from(&raw[..split]);
+                assert!(codec.decode(&mut buf).unwrap().is_none());
+                buf.extend_from_slice(&raw[split..]);
+                let result = codec.decode_eof(&mut buf);
+                assert!(
+                    matches!(&result, Err(HttpError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof),
+                    "split {split} of {raw:?}: {result:?}"
+                );
+
+                // Truncated framing is terminal even if someone retries the
+                // codec with a fresh, otherwise valid request buffer.
+                let mut replacement = BytesMut::from(&b"GET / HTTP/1.1\r\n\r\n"[..]);
+                assert!(matches!(
+                    codec.decode(&mut replacement),
+                    Err(HttpError::BadHeader)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn decode_eof_preserves_complete_pipelined_requests_and_trailers() {
+        let mut codec = Http1Codec::new();
+        let mut buf = BytesMut::from(
+            &b"GET /first HTTP/1.1\r\n\r\n\
+               POST /second HTTP/1.1\r\nContent-Length: 2\r\n\r\nok\
+               POST /third HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+               3\r\nend\r\n0\r\nx-checksum: abc\r\n\r\n"[..],
+        );
+        let first = codec.decode_eof(&mut buf).unwrap().unwrap();
+        assert_eq!(first.uri, "/first");
+        assert!(first.body.is_empty());
+        let second = codec.decode_eof(&mut buf).unwrap().unwrap();
+        assert_eq!(second.uri, "/second");
+        assert_eq!(second.body, b"ok");
+        let third = codec.decode_eof(&mut buf).unwrap().unwrap();
+        assert_eq!(third.uri, "/third");
+        assert_eq!(third.body, b"end");
+        assert_eq!(
+            third.trailers,
+            vec![("x-checksum".to_owned(), "abc".to_owned())]
+        );
+        assert!(buf.is_empty());
+        assert!(codec.decode_eof(&mut buf).unwrap().is_none());
+        assert!(codec.decode_eof(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn framed_request_reader_reports_truncation_once_instead_of_clean_eof() {
+        use crate::stream::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        for raw in [
+            &b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\n"[..],
+            &b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"[..],
+        ] {
+            let mut reader = crate::codec::FramedRead::new(raw, Http1Codec::new());
+            let mut task = Context::from_waker(Waker::noop());
+            let result = Pin::new(&mut reader).poll_next(&mut task);
+            assert!(
+                matches!(&result, Poll::Ready(Some(Err(HttpError::Io(error)))) if error.kind() == io::ErrorKind::UnexpectedEof),
+                "{result:?}"
+            );
+            assert!(matches!(
+                Pin::new(&mut reader).poll_next(&mut task),
+                Poll::Ready(None)
+            ));
+        }
+    }
+
     /// br-asupersync-2ovm8z: a complete request whose body contains a
     /// bare 0x0D byte (any binary upload — gRPC, protobuf, image — has
     /// 0x0D appearing in ~1/256 random bytes) must NOT poison the

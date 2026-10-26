@@ -175,6 +175,86 @@ fn repeated_numeric_decoder_accepts_packed_and_unpacked_records() {
     assert_eq!(decoded.packed_values, vec![-1, 7]);
 }
 
+#[derive(Clone, Debug, Default, PartialEq, ProtoMessage)]
+struct PackedFamilies {
+    #[proto(double, repeated, packed, tag = 1)]
+    doubles: Vec<f64>,
+    #[proto(sfixed32, repeated, packed, tag = 2)]
+    signed_fixed: Vec<i32>,
+    #[proto(int64, repeated, packed, tag = 3)]
+    signed_varints: Vec<i64>,
+    #[proto(float, repeated, packed, tag = 4)]
+    floats: Vec<f32>,
+}
+
+#[test]
+fn derived_packed_projections_preserve_slice_wire_bytes_and_exact_budgets() {
+    let doubles = [0.0, -0.0, f64::MIN, f64::MAX];
+    let signed_fixed = [i32::MIN, 0, i32::MAX];
+    let signed_varints = [i64::MIN, -1, 0, i64::MAX];
+    let floats = [0.0, -0.0, f32::MIN, f32::MAX];
+    let expected = PackedFamilies {
+        doubles: doubles.to_vec(),
+        signed_fixed: signed_fixed.to_vec(),
+        signed_varints: signed_varints.to_vec(),
+        floats: floats.to_vec(),
+    };
+    let mut slice_encoder = ProtobufWireEncoder::new(ProtobufWireLimits::default());
+    slice_encoder
+        .write_packed_fixed64(1, &doubles.map(f64::to_bits))
+        .expect("legacy packed doubles");
+    slice_encoder
+        .write_packed_fixed32(2, &signed_fixed.map(|value| value as u32))
+        .expect("legacy packed signed fixed32");
+    slice_encoder
+        .write_packed_varints(3, &signed_varints.map(|value| value as u64))
+        .expect("legacy packed signed varints");
+    slice_encoder
+        .write_packed_fixed32(4, &floats.map(f32::to_bits))
+        .expect("legacy packed floats");
+    let limits = ProtobufWireLimits::for_message_size(slice_encoder.len())
+        .with_max_field_len(32)
+        .with_max_fields(4)
+        .with_max_depth(0)
+        .with_max_work(slice_encoder.work_used());
+    let mut derived_encoder = ProtobufWireEncoder::new(limits);
+    expected
+        .encode_fields(&mut derived_encoder)
+        .expect("same exact limits as slice writers");
+    assert_eq!(derived_encoder.work_used(), slice_encoder.work_used());
+    assert_eq!(derived_encoder.fields_written(), slice_encoder.fields_written());
+    let wire = derived_encoder.finish().expect("finish projected values");
+    assert_eq!(wire, slice_encoder.finish().expect("finish legacy wire"));
+    assert_eq!(
+        PackedFamilies::decode_from_bytes(&wire, limits).expect("decode projected values"),
+        expected,
+    );
+}
+
+#[test]
+fn oversized_derived_packed_field_preserves_the_existing_encoder_prefix() {
+    let value = PackedFamilies {
+        doubles: vec![1.0; 4_096],
+        ..PackedFamilies::default()
+    };
+    let mut encoder = ProtobufWireEncoder::new(ProtobufWireLimits::for_message_size(12));
+    encoder.write_varint(9, 1).expect("existing prefix");
+    let before = encoder.as_bytes().to_vec();
+    assert!(matches!(
+        value.encode_fields(&mut encoder),
+        Err(ProtobufWireError::FieldLimitExceeded { .. }
+            | ProtobufWireError::MessageLimitExceeded { .. })
+    ));
+    assert_eq!(encoder.as_bytes(), before);
+    assert_eq!(encoder.fields_written(), 1);
+    assert_eq!(encoder.work_used(), 2);
+    encoder.write_varint(10, 3).expect("reuse after refusal");
+    assert_eq!(
+        encoder.finish().expect("finish prefix").as_ref(),
+        &[0x48, 1, 0x50, 3],
+    );
+}
+
 #[test]
 fn derived_unknown_field_member_round_trips_verbatim() {
     let limits = ProtobufWireLimits::default();

@@ -711,7 +711,7 @@ fn encode_call(
 
 fn packed_projection(kind: &Kind, value: &TokenStream2) -> TokenStream2 {
     match kind {
-        Kind::Double | Kind::Float => quote!(#value.to_bits()),
+        Kind::Double | Kind::Float => quote!((#value).to_bits()),
         Kind::Int32 => quote!(#value as i64 as u64),
         Kind::Int64 => quote!(#value as u64),
         Kind::Uint32 | Kind::Bool => quote!(u64::from(#value)),
@@ -735,23 +735,26 @@ fn packed_encode(kind: &Kind, ident: &Ident, tag: u32) -> TokenStream2 {
     match kind {
         Kind::Double | Kind::Fixed64 | Kind::Sfixed64 => quote! {
             if !self.#ident.is_empty() {
-                let __proto_packed: ::std::vec::Vec<u64> =
-                    self.#ident.iter().map(|value| #projection).collect();
-                encoder.write_packed_fixed64(#tag, &__proto_packed)?;
+                encoder.write_packed_fixed64_iter(
+                    #tag,
+                    self.#ident.iter().map(|value| #projection),
+                )?;
             }
         },
         Kind::Float | Kind::Fixed32 | Kind::Sfixed32 => quote! {
             if !self.#ident.is_empty() {
-                let __proto_packed: ::std::vec::Vec<u32> =
-                    self.#ident.iter().map(|value| #projection).collect();
-                encoder.write_packed_fixed32(#tag, &__proto_packed)?;
+                encoder.write_packed_fixed32_iter(
+                    #tag,
+                    self.#ident.iter().map(|value| #projection),
+                )?;
             }
         },
         _ => quote! {
             if !self.#ident.is_empty() {
-                let __proto_packed: ::std::vec::Vec<u64> =
-                    self.#ident.iter().map(|value| #projection).collect();
-                encoder.write_packed_varints(#tag, &__proto_packed)?;
+                encoder.write_packed_varints_iter(
+                    #tag,
+                    self.#ident.iter().map(|value| #projection),
+                )?;
             }
         },
     }
@@ -1497,7 +1500,7 @@ mod tests {
             .expect("valid message")
             .to_string();
         assert_eq!(first, second, "the same schema must expand byte-for-byte");
-        assert_eq!(fnv1a(first.as_bytes()), 14_716_714_724_283_674_067);
+        assert_eq!(fnv1a(first.as_bytes()), 5_424_611_108_638_315_706);
     }
 
     #[test]

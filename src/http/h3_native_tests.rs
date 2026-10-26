@@ -3847,6 +3847,361 @@ mod tests {
         bytes
     }
 
+    fn qpack_fragment_state(limit: usize) -> QpackInstructionStreamState {
+        let mut state =
+            QpackInstructionStreamState::new(H3QpackMode::DynamicTableAllowed, 16_384, 4)
+                .expect("dynamic state")
+                .with_max_instruction_size(limit)
+                .expect("instruction limit");
+        state
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder stream");
+        state
+            .register_stream(7, H3UniStreamType::QpackDecoder)
+            .expect("decoder stream");
+        state
+            .context
+            .dynamic_table_mut()
+            .insert("seed".to_string(), "value".to_string())
+            .expect("seed entry");
+        state
+    }
+
+    fn qpack_table_contents(state: &QpackInstructionStreamState) -> Vec<(u64, String, String)> {
+        state
+            .context()
+            .dynamic_table()
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.insertion_id(),
+                    entry.name().to_string(),
+                    entry.value().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn qpack_instruction_encoder_accepts_every_byte_split_without_partial_mutation() {
+        let instructions = [
+            QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 4096 },
+            QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Static(98),
+                value: "fragmented-value-".repeat(24),
+            },
+            QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Dynamic(0),
+                value: "fragmented-value-".repeat(24),
+            },
+            QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-fragmented-header-name-".repeat(3),
+                value: "fragmented-value-".repeat(24),
+            },
+            QpackEncoderInstruction::Duplicate { index: 0 },
+        ];
+        for instruction in instructions {
+            let wire = qpack_encoder_instruction_bytes(&instruction);
+            let mut whole = qpack_fragment_state(4096);
+            let expected = whole
+                .feed_encoder_stream_bytes(3, &wire)
+                .expect("complete instruction");
+            for split in 0..=wire.len() {
+                let mut fragmented = qpack_fragment_state(4096);
+                let before = qpack_table_contents(&fragmented);
+                let first = fragmented
+                    .feed_encoder_stream_bytes(3, &wire[..split])
+                    .expect("partial instruction is not malformed");
+                if split < wire.len() {
+                    assert_eq!(first.instructions_processed(), 0, "split {split}");
+                    assert_eq!(qpack_table_contents(&fragmented), before);
+                    assert_eq!(fragmented.context().dynamic_table().capacity(), 16_384);
+                }
+                let second = fragmented
+                    .feed_encoder_stream_bytes(3, &wire[split..])
+                    .expect("remaining instruction");
+                assert_eq!(
+                    first.instructions_processed() + second.instructions_processed(),
+                    1
+                );
+                let mut inserted = first.inserted_entry_ids().to_vec();
+                inserted.extend_from_slice(second.inserted_entry_ids());
+                assert_eq!(inserted, expected.inserted_entry_ids(), "split {split}");
+                assert_eq!(
+                    qpack_table_contents(&fragmented),
+                    qpack_table_contents(&whole)
+                );
+                assert_eq!(
+                    fragmented.context().dynamic_table().capacity(),
+                    whole.context().dynamic_table().capacity()
+                );
+                assert!(fragmented.encoder_pending.bytes.is_empty());
+                assert!(fragmented.first_failure().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn qpack_instruction_decoder_accepts_every_byte_split_exactly_once() {
+        let instructions = [
+            QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 300 },
+            QpackDecoderInstruction::StreamCancellation { stream_id: 300 },
+            QpackDecoderInstruction::InsertCountIncrement { increment: 128 },
+        ];
+        for instruction in instructions {
+            let wire = qpack_decoder_instruction_bytes(&instruction);
+            for split in 0..=wire.len() {
+                let mut state = qpack_fragment_state(16);
+                for index in 1..128 {
+                    state
+                        .context
+                        .dynamic_table_mut()
+                        .insert("x".to_string(), index.to_string())
+                        .expect("feedback insertion count");
+                }
+                state
+                    .decoder_feedback
+                    .track_stream_references(&mut state.context, 300, &[0])
+                    .expect("tracked reference");
+                let before = state.decoder_feedback().clone();
+                let first = state
+                    .feed_decoder_stream_bytes(7, &wire[..split])
+                    .expect("partial feedback");
+                if split < wire.len() {
+                    assert_eq!(first.instructions_processed(), 0);
+                    assert_eq!(state.decoder_feedback(), &before);
+                }
+                let second = state
+                    .feed_decoder_stream_bytes(7, &wire[split..])
+                    .expect("remaining feedback");
+                assert_eq!(
+                    first.instructions_processed() + second.instructions_processed(),
+                    1
+                );
+                match &instruction {
+                    QpackDecoderInstruction::HeaderAcknowledgement { .. } => {
+                        assert!(
+                            state
+                                .decoder_feedback()
+                                .acknowledged_stream_ids()
+                                .contains(&300)
+                        );
+                        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 0);
+                    }
+                    QpackDecoderInstruction::StreamCancellation { .. } => {
+                        assert!(
+                            state
+                                .decoder_feedback()
+                                .cancelled_stream_ids()
+                                .contains(&300)
+                        );
+                        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 0);
+                    }
+                    QpackDecoderInstruction::InsertCountIncrement { .. } => {
+                        assert_eq!(state.known_received_count(), 128);
+                        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 1);
+                    }
+                }
+                assert!(state.decoder_pending.bytes.is_empty());
+                assert!(state.first_failure().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn qpack_instruction_streams_retain_independent_partial_instructions() {
+        let mut state = qpack_fragment_state(4096);
+        state
+            .decoder_feedback
+            .track_stream_references(&mut state.context, 300, &[0])
+            .expect("tracked reference");
+        let ack = qpack_decoder_instruction_bytes(
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 300 },
+        );
+        assert_eq!(
+            state
+                .feed_decoder_stream_bytes(7, &ack[..1])
+                .expect("partial ack")
+                .instructions_processed(),
+            0
+        );
+        let insert = qpack_encoder_instruction_bytes(
+            &QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-bytewise".to_string(),
+                value: "one byte at a time".repeat(16),
+            },
+        );
+        let mut processed = 0;
+        for byte in &insert {
+            processed += state
+                .feed_encoder_stream_bytes(3, std::slice::from_ref(byte))
+                .expect("encoder byte")
+                .instructions_processed();
+        }
+        assert_eq!(processed, 1);
+        assert_eq!(state.context().dynamic_table().insertion_counter(), 2);
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 1);
+        assert_eq!(
+            state
+                .feed_decoder_stream_bytes(7, &ack[1..])
+                .expect("ack suffix")
+                .instructions_processed(),
+            1
+        );
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 0);
+        assert!(state.encoder_pending.bytes.is_empty());
+        assert!(state.decoder_pending.bytes.is_empty());
+    }
+
+    #[test]
+    fn qpack_instruction_limit_bounds_one_instruction_not_the_read() {
+        let mut state = qpack_fragment_state(8);
+        assert_eq!(state.max_instruction_size(), 8);
+        let literal = [0x41, b'x', 5, b'v', b'a', b'l', b'u', b'e'];
+        let mut batch = literal.to_vec();
+        batch.extend_from_slice(&literal[..3]);
+        let first = state
+            .feed_encoder_stream_bytes(3, &batch)
+            .expect("complete instruction and incomplete suffix");
+        assert_eq!(first.instructions_processed(), 1);
+        assert_eq!(first.inserted_entry_ids(), &[1]);
+        assert_eq!(state.encoder_pending.bytes, literal[..3]);
+        assert!(state.encoder_pending.bytes.capacity() <= 8);
+        let second = state
+            .feed_encoder_stream_bytes(3, &literal[3..])
+            .expect("literal exactly at limit");
+        assert_eq!(second.instructions_processed(), 1);
+        assert_eq!(second.inserted_entry_ids(), &[2]);
+        assert!(state.encoder_pending.bytes.is_empty());
+        let coalesced = state
+            .feed_encoder_stream_bytes(3, &[0x20; 1000])
+            .expect("many small capacity instructions");
+        assert_eq!(coalesced.instructions_processed(), 1000);
+        assert!(state.first_failure().is_none());
+        assert!(
+            QpackInstructionStreamState::new(H3QpackMode::StaticOnly, 0, 0)
+                .expect("static state")
+                .with_max_instruction_size(0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn qpack_instruction_oversize_declared_literal_is_rejected_before_retention() {
+        let mut declared = vec![0xc0];
+        qpack_encode_prefixed_int(&mut declared, 0, 7, 4096).expect("oversize value length");
+        let expected = H3NativeError::FrameTooLarge {
+            payload_size: declared.len() + 4096,
+            max_size: 16,
+        };
+        for split in 0..declared.len() {
+            let mut state = qpack_fragment_state(16);
+            state
+                .feed_encoder_stream_bytes(3, &declared[..split])
+                .expect("incomplete length prefix");
+            let error = state
+                .feed_encoder_stream_bytes(3, &declared[split..])
+                .expect_err("declared length rejected without literal bytes");
+            assert_eq!(error, expected);
+            assert!(state.encoder_pending.bytes.len() <= declared.len());
+            assert!(state.encoder_pending.bytes.capacity() <= 16);
+            assert_eq!(state.context().dynamic_table().insertion_counter(), 1);
+            assert_eq!(state.first_failure(), Some(&expected));
+            assert_eq!(
+                state.feed_encoder_stream_bytes(3, &[0x20]),
+                Err(expected.clone())
+            );
+            assert_eq!(
+                state.feed_decoder_stream_bytes(7, &[1]),
+                Err(expected.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn qpack_instruction_decoder_limit_and_application_failure_are_terminal() {
+        let mut limited = qpack_fragment_state(1);
+        let expected = H3NativeError::FrameTooLarge {
+            payload_size: 2,
+            max_size: 1,
+        };
+        assert_eq!(
+            limited.feed_decoder_stream_bytes(7, &[0xff]),
+            Err(expected.clone())
+        );
+        assert!(limited.decoder_pending.bytes.is_empty());
+        assert_eq!(limited.feed_decoder_stream_bytes(7, &[1]), Err(expected));
+        assert_eq!(limited.known_received_count(), 0);
+
+        let mut invalid_feedback = qpack_fragment_state(16);
+        let expected = H3NativeError::InvalidFrame(
+            "qpack known received count exceeds encoder insert count",
+        );
+        assert_eq!(
+            invalid_feedback.feed_decoder_stream_bytes(7, &[2]),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            invalid_feedback.feed_decoder_stream_bytes(7, &[1]),
+            Err(expected.clone())
+        );
+        assert_eq!(invalid_feedback.known_received_count(), 0);
+        assert_eq!(invalid_feedback.first_failure(), Some(&expected));
+    }
+
+    #[test]
+    fn qpack_instruction_incomplete_is_retryable_but_malformed_is_terminal() {
+        let mut state = qpack_fragment_state(16);
+        assert_eq!(
+            state
+                .feed_encoder_stream_bytes(3, &[0xc0])
+                .expect("name reference awaiting value")
+                .instructions_processed(),
+            0
+        );
+        state.feed_encoder_stream_bytes(3, &[]).expect("empty read");
+        assert!(state.first_failure().is_none());
+        let error = state
+            .feed_encoder_stream_bytes(3, &[0x81, 0x00])
+            .expect_err("invalid Huffman padding");
+        assert_eq!(
+            error,
+            H3NativeError::InvalidFrame("invalid qpack huffman string")
+        );
+        assert_eq!(state.context().dynamic_table().insertion_counter(), 1);
+        assert_eq!(
+            state.feed_encoder_stream_bytes(3, &[0x20]),
+            Err(error.clone())
+        );
+        assert_eq!(state.feed_decoder_stream_bytes(7, &[1]), Err(error.clone()));
+        assert_eq!(
+            state.submit_received_field_section(4, &[0, 0]),
+            Err(error.clone())
+        );
+        assert_eq!(state.first_failure(), Some(&error));
+
+        let mut decoder = qpack_fragment_state(16);
+        let error = decoder
+            .feed_decoder_stream_bytes(7, &[0])
+            .expect_err("zero increment is malformed, not incomplete");
+        assert_eq!(
+            error,
+            H3NativeError::InvalidFrame("qpack insert count increment must be non-zero")
+        );
+        assert_eq!(decoder.feed_decoder_stream_bytes(7, &[1]), Err(error));
+        assert_eq!(decoder.known_received_count(), 0);
+
+        let mut overflow = qpack_fragment_state(16);
+        let mut wire = vec![0x3f];
+        wire.extend_from_slice(&[0xff; 9]);
+        let error = overflow
+            .feed_encoder_stream_bytes(3, &wire)
+            .expect_err("overflowing integer is malformed");
+        assert_eq!(error, H3NativeError::InvalidFrame("qpack integer overflow"));
+        assert_eq!(overflow.feed_encoder_stream_bytes(3, &[0x20]), Err(error));
+    }
+
     fn qpack_response_status_dynamic_wire() -> Vec<u8> {
         let mut wire = Vec::new();
         let encoded_ric = qpack_encode_required_insert_count(1, 128).expect("encode RIC");
@@ -4293,8 +4648,8 @@ mod tests {
             .register_stream(3, H3UniStreamType::QpackEncoder)
             .expect("encoder stream");
         let err = malformed
-            .feed_encoder_stream_bytes(3, &[0b0100_0001])
-            .expect_err("truncated encoder instruction");
+            .feed_encoder_stream_bytes(3, &[0xc0, 0x81, 0x00])
+            .expect_err("malformed Huffman literal");
         rows.push(qpack_instruction_row(
             &malformed,
             "malformed-instruction",
