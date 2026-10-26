@@ -60,6 +60,569 @@
         Waker::from(Arc::new(FlagWake { flag }))
     }
 
+    fn multipath_quality(rtt: u32) -> PathQualitySnapshot {
+        PathQualitySnapshot::new(rtt, 0, 0)
+    }
+
+    fn repair_symbol(esi: u32) -> AuthenticatedSymbol {
+        AuthenticatedSymbol::from_parts(
+            Symbol::new(SymbolId::new_for_test(1, 0, esi), vec![esi as u8], SymbolKind::Repair),
+            AuthenticationTag::zero(),
+        )
+    }
+
+    #[test]
+    fn multipath_bounds_refuse_before_retaining_or_polling_input() {
+        for limits in [(0, 1, 1), (1025, 1, 1), (1, 0, 1), (1, 1, 0), (2, usize::MAX, 8)] {
+            assert!(MultipathSink::new(limits.0, limits.1, limits.2).is_err());
+        }
+        let mut sink = MultipathSink::new(1, 1, 1).unwrap();
+        let (output, _input) = channel(1);
+        sink.add_path(PathId(1), multipath_quality(0), output).unwrap();
+        let (duplicate, _duplicate_rx) = channel(1);
+        assert!(sink.add_path(PathId(1), multipath_quality(0), duplicate).is_err());
+        let (excess, _excess_rx) = channel(1);
+        assert!(sink.add_path(PathId(2), multipath_quality(0), excess).is_err());
+        let oversized = AuthenticatedSymbol::from_parts(
+            Symbol::new(SymbolId::new_for_test(1, 0, 4), vec![1, 2], SymbolKind::Source),
+            AuthenticationTag::zero(),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, oversized), Poll::Ready(Err(_))));
+        assert_eq!(sink.path_stats(PathId(1)).unwrap(), MultipathPathStats::default());
+        assert!(sink.update_path_quality(PathId(1), PathQualitySnapshot {
+            rtt_ewma_ms: u32::MAX,
+            loss_ewma_permille: u16::MAX,
+            reorder_depth: u16::MAX,
+        }));
+        assert_eq!(sink.paths[0].weight, 1);
+        assert!(!sink.update_path_quality(PathId(99), multipath_quality(0)));
+        let mut data = Vec::with_capacity(4096);
+        data.push(7);
+        let spare_capacity = AuthenticatedSymbol::new_verified(
+            Symbol::new(SymbolId::new_for_test(1, 0, 0), data, SymbolKind::Source),
+            AuthenticationTag::zero(),
+        );
+        assert!(matches!(
+            Pin::new(&mut sink).poll_send(&mut cx, spare_capacity),
+            Poll::Ready(Ok(()))
+        ));
+        let (_, _, mut retained) = sink.into_paths().next().unwrap();
+        let symbol = retained.pop_front().unwrap().symbol;
+        assert!(symbol.is_verified());
+        let data = symbol.into_symbol().into_data();
+        assert_eq!(data, [7]);
+        assert_eq!(data.capacity(), 1, "spare input capacity must not be retained");
+    }
+
+    #[test]
+    fn multipath_sources_follow_deterministic_weights_and_quality_windows() {
+        fn run(reverse: bool) -> (Vec<u32>, Vec<u32>) {
+            let (a, mut a_rx) = channel(64);
+            let (b, mut b_rx) = channel(64);
+            let mut sink = MultipathSink::new(2, 4, 1).unwrap();
+            if reverse {
+                sink.add_path(PathId(2), multipath_quality(29), b).unwrap();
+                sink.add_path(PathId(1), multipath_quality(9), a).unwrap();
+            } else {
+                sink.add_path(PathId(1), multipath_quality(9), a).unwrap();
+                sink.add_path(PathId(2), multipath_quality(29), b).unwrap();
+            }
+            future::block_on(sink.send_all((0..8).map(create_symbol))).unwrap();
+            future::block_on(sink.flush()).unwrap();
+            assert_eq!(sink.path_stats(PathId(1)).unwrap().sent_symbols, 6);
+            assert_eq!(sink.path_stats(PathId(2)).unwrap().sent_symbols, 2);
+            sink.update_path_quality(PathId(1), multipath_quality(29));
+            sink.update_path_quality(PathId(2), multipath_quality(9));
+            future::block_on(sink.send_all((8..16).map(create_symbol))).unwrap();
+            future::block_on(sink.close()).unwrap();
+            assert_eq!(sink.path_stats(PathId(1)).unwrap().flushed_symbols, 8);
+            assert_eq!(sink.path_stats(PathId(2)).unwrap().flushed_symbols, 8);
+            let a = future::block_on(async {
+                let mut ids = Vec::new();
+                while let Some(symbol) = a_rx.next().await {
+                    ids.push(symbol.unwrap().symbol().id().esi());
+                }
+                ids
+            });
+            let b = future::block_on(async {
+                let mut ids = Vec::new();
+                while let Some(symbol) = b_rx.next().await {
+                    ids.push(symbol.unwrap().symbol().id().esi());
+                }
+                ids
+            });
+            (a, b)
+        }
+        let normal = run(false);
+        assert_eq!(normal, run(true), "path insertion order must not affect routing");
+        let mut all = normal.0;
+        all.extend(normal.1);
+        all.sort_unstable();
+        assert_eq!(all, (0..16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn multipath_repairs_prefer_the_best_ready_survivor() {
+        let (mut fast, mut fast_rx) = channel(1);
+        let (slow, mut slow_rx) = channel(4);
+        future::block_on(fast.send(create_symbol(99))).unwrap();
+        let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(0), fast).unwrap();
+        sink.add_path(PathId(2), multipath_quality(500), slow).unwrap();
+        future::block_on(sink.send(repair_symbol(20))).unwrap();
+        future::block_on(sink.flush()).unwrap();
+        assert_eq!(sink.path_stats(PathId(1)).unwrap().sent_symbols, 0);
+        assert_eq!(sink.path_stats(PathId(2)).unwrap().sent_symbols, 1);
+        assert_eq!(future::block_on(slow_rx.next()).unwrap().unwrap().symbol().id().esi(), 20);
+        assert_eq!(future::block_on(fast_rx.next()).unwrap().unwrap().symbol().id().esi(), 99);
+        future::block_on(sink.send(repair_symbol(21))).unwrap();
+        future::block_on(sink.flush()).unwrap();
+        assert_eq!(future::block_on(fast_rx.next()).unwrap().unwrap().symbol().id().esi(), 21);
+    }
+
+    #[test]
+    fn multipath_full_queues_register_every_path_and_drop_unaccepted_waits() {
+        let (mut a, mut a_rx) = channel(1);
+        let (mut b, mut b_rx) = channel(1);
+        future::block_on(a.send(create_symbol(90))).unwrap();
+        future::block_on(b.send(create_symbol(91))).unwrap();
+        let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(9), a).unwrap();
+        sink.add_path(PathId(2), multipath_quality(9), b).unwrap();
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = flagged_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(0)), Poll::Ready(Ok(()))));
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(1)), Poll::Ready(Ok(()))));
+        {
+            let mut abandoned = Box::pin(sink.send(create_symbol(77)));
+            assert!(abandoned.as_mut().poll(&mut cx).is_pending());
+        }
+        for path in [PathId(1), PathId(2)] {
+            let stats = sink.path_stats(path).unwrap();
+            assert_eq!(stats.queued_symbols, 1);
+            assert_eq!(stats.high_water_symbols, 1);
+        }
+        woke.store(false, Ordering::Release);
+        assert_eq!(future::block_on(b_rx.next()).unwrap().unwrap().symbol().id().esi(), 91);
+        assert!(woke.load(Ordering::Acquire), "the second path must wake a parked sender");
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(2)), Poll::Ready(Ok(()))));
+        assert_eq!(future::block_on(b_rx.next()).unwrap().unwrap().symbol().id().esi(), 1);
+        assert_eq!(future::block_on(a_rx.next()).unwrap().unwrap().symbol().id().esi(), 90);
+        future::block_on(sink.flush()).unwrap();
+        assert_eq!(future::block_on(a_rx.next()).unwrap().unwrap().symbol().id().esi(), 0);
+        assert_eq!(future::block_on(b_rx.next()).unwrap().unwrap().symbol().id().esi(), 2);
+        future::block_on(sink.close()).unwrap();
+        assert!(future::block_on(a_rx.next()).is_none());
+        assert!(future::block_on(b_rx.next()).is_none());
+    }
+
+    #[test]
+    fn multipath_pre_send_path_failure_reassigns_owned_symbols_once() {
+        let (a, a_rx) = channel(2);
+        let failed_channel = Arc::clone(&a.shared);
+        let (b, mut b_rx) = channel(2);
+        let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(0), a).unwrap();
+        sink.add_path(PathId(2), multipath_quality(500), b).unwrap();
+        future::block_on(sink.send(create_symbol(7))).unwrap();
+        assert_eq!(sink.path_stats(PathId(1)).unwrap().queued_symbols, 1);
+        failed_channel.close();
+        drop(a_rx);
+        future::block_on(sink.flush()).unwrap();
+        let failed = sink.path_stats(PathId(1)).unwrap();
+        assert!(failed.failed);
+        assert!(!failed.outcome_uncertain);
+        assert_eq!(failed.reassigned_symbols, 1);
+        assert_eq!(failed.queued_symbols, 0);
+        assert!(matches!(sink.path_error(PathId(1)), Some(SinkError::Closed)));
+        assert_eq!(future::block_on(b_rx.next()).unwrap().unwrap().symbol().id().esi(), 7);
+        future::block_on(sink.close()).unwrap();
+        assert!(future::block_on(b_rx.next()).is_none());
+    }
+
+    struct MultipathGateState {
+        ready: bool,
+        pending_send: bool,
+        pending_at_send: usize,
+        needs_flush: bool,
+        fail_send: bool,
+        flush_ready: bool,
+        fail_flush: bool,
+        close_ready: bool,
+        fail_close: bool,
+        sent: Vec<AuthenticatedSymbol>,
+        sends: usize,
+        closes: usize,
+        flush_waker: Option<Waker>,
+        close_waker: Option<Waker>,
+    }
+
+    #[derive(Clone)]
+    struct MultipathGate(Arc<Mutex<MultipathGateState>>);
+
+    impl MultipathGate {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(MultipathGateState {
+                ready: false,
+                pending_send: false,
+                pending_at_send: 0,
+                needs_flush: false,
+                fail_send: false,
+                flush_ready: true,
+                fail_flush: false,
+                close_ready: true,
+                fail_close: false,
+                sent: Vec::new(),
+                sends: 0,
+                closes: 0,
+                flush_waker: None,
+                close_waker: None,
+            })))
+        }
+    }
+
+    impl SymbolSink for MultipathGate {
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            if self.0.lock().ready { Poll::Ready(Ok(())) } else { Poll::Pending }
+        }
+
+        fn poll_send(self: Pin<&mut Self>, _: &mut Context<'_>, symbol: AuthenticatedSymbol) -> Poll<Result<(), SinkError>> {
+            let mut state = self.0.lock();
+            state.sends += 1;
+            if state.sends == state.pending_at_send {
+                state.ready = false;
+                state.needs_flush = true;
+                return Poll::Pending;
+            }
+            if state.pending_send {
+                state.pending_send = false;
+                return Poll::Pending;
+            }
+            state.sent.push(symbol);
+            if state.fail_send {
+                Poll::Ready(Err(SinkError::SendFailed { reason: "accepted then connection lost".into() }))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            let mut state = self.0.lock();
+            if state.needs_flush {
+                state.needs_flush = false;
+                state.ready = true;
+            }
+            if !state.flush_ready {
+                state.flush_waker = Some(cx.waker().clone());
+                Poll::Pending
+            } else if state.fail_flush {
+                Poll::Ready(Err(SinkError::SendFailed { reason: "flush failed".into() }))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            let mut state = self.0.lock();
+            state.closes += 1;
+            if !state.close_ready {
+                state.close_waker = Some(cx.waker().clone());
+                Poll::Pending
+            } else if state.fail_close {
+                Poll::Ready(Err(SinkError::Closed))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    #[test]
+    fn multipath_uncertain_send_never_replays_and_flush_drains_healthy_paths() {
+        let a = MultipathGate::new();
+        let b = MultipathGate::new();
+        let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(9), a.clone()).unwrap();
+        sink.add_path(PathId(2), multipath_quality(9), b.clone()).unwrap();
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = flagged_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(0)), Poll::Ready(Ok(()))));
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(1)), Poll::Ready(Ok(()))));
+        { let mut state = a.0.lock(); state.ready = true; state.fail_send = true; }
+        { let mut state = b.0.lock(); state.ready = true; state.flush_ready = false; }
+        assert!(Pin::new(&mut sink).poll_flush(&mut cx).is_pending(), "healthy accepted work still needs flushing");
+        assert_eq!(a.0.lock().sent[0].symbol().id().esi(), 0);
+        assert_eq!(b.0.lock().sent[0].symbol().id().esi(), 1);
+        assert!(sink.path_stats(PathId(1)).unwrap().outcome_uncertain);
+        assert_eq!(sink.path_stats(PathId(2)).unwrap().unflushed_symbols, 1);
+        let wake = { let mut state = b.0.lock(); state.flush_ready = true; state.flush_waker.take().unwrap() };
+        woke.store(false, Ordering::Release);
+        wake.wake();
+        assert!(woke.load(Ordering::Acquire));
+        assert!(matches!(Pin::new(&mut sink).poll_flush(&mut cx), Poll::Ready(Err(_))));
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(2)), Poll::Ready(Err(_))));
+        assert_eq!(a.0.lock().sends, 1);
+        assert_eq!(b.0.lock().sent.len(), 1);
+        assert_eq!(sink.path_stats(PathId(2)).unwrap().flushed_symbols, 1);
+        assert!(matches!(Pin::new(&mut sink).poll_close(&mut cx), Poll::Ready(Err(_))));
+        assert_eq!(a.0.lock().closes, 1);
+        assert_eq!(b.0.lock().closes, 1);
+        let mut parts = sink.into_paths();
+        let (id, _, queued) = parts.next().unwrap();
+        assert_eq!(id, PathId(1));
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].attempted);
+        assert_eq!(queued[0].symbol.symbol().id().esi(), 0);
+        assert!(parts.next().unwrap().2.is_empty());
+    }
+
+    #[test]
+    fn multipath_pending_send_stays_on_its_path_and_flush_failure_is_sticky() {
+        let a = MultipathGate::new();
+        { let mut state = a.0.lock(); state.ready = true; state.pending_send = true; }
+        let b = MultipathGate::new();
+        b.0.lock().ready = true;
+        let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(0), a.clone()).unwrap();
+        sink.add_path(PathId(2), multipath_quality(500), b.clone()).unwrap();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(8)), Poll::Ready(Ok(()))));
+        assert!(Pin::new(&mut sink).poll_flush(&mut cx).is_pending());
+        assert_eq!(a.0.lock().sends, 1);
+        assert_eq!(b.0.lock().sends, 0);
+        sink.update_path_quality(PathId(2), multipath_quality(0));
+        a.0.lock().fail_flush = true;
+        assert!(matches!(Pin::new(&mut sink).poll_flush(&mut cx), Poll::Ready(Err(_))));
+        assert_eq!(a.0.lock().sends, 2);
+        assert_eq!(a.0.lock().sent.len(), 1);
+        assert_eq!(b.0.lock().sends, 0);
+        assert!(sink.path_stats(PathId(1)).unwrap().outcome_uncertain);
+        assert_eq!(sink.path_stats(PathId(1)).unwrap().unflushed_symbols, 1);
+        assert!(matches!(Pin::new(&mut sink).poll_flush(&mut cx), Poll::Ready(Err(_))));
+        assert_eq!(a.0.lock().sends, 2);
+    }
+
+    #[test]
+    fn multipath_close_drives_every_path_after_one_close_error() {
+        let a = MultipathGate::new();
+        { let mut state = a.0.lock(); state.ready = true; state.fail_close = true; }
+        let b = MultipathGate::new();
+        { let mut state = b.0.lock(); state.ready = true; state.close_ready = false; }
+        let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(9), a.clone()).unwrap();
+        sink.add_path(PathId(2), multipath_quality(9), b.clone()).unwrap();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut sink).poll_close(&mut cx).is_pending());
+        assert_eq!(a.0.lock().closes, 1);
+        assert_eq!(b.0.lock().closes, 1);
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(0)), Poll::Ready(Err(SinkError::Closed))));
+        let wake = { let mut state = b.0.lock(); state.close_ready = true; state.close_waker.take().unwrap() };
+        wake.wake();
+        assert!(matches!(Pin::new(&mut sink).poll_close(&mut cx), Poll::Ready(Err(_))));
+        assert_eq!(a.0.lock().closes, 1, "completed close must not be polled again");
+        assert_eq!(b.0.lock().closes, 2);
+    }
+
+    #[test]
+    fn multipath_pending_send_drives_prior_flush_without_reassigning() {
+        let path = MultipathGate::new();
+        let mut sink = MultipathSink::new(1, 2, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(9), path.clone()).unwrap();
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = flagged_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+        for esi in [0, 1] {
+            assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(esi)), Poll::Ready(Ok(()))));
+        }
+        { let mut state = path.0.lock(); state.ready = true; state.pending_at_send = 2; }
+        woke.store(false, Ordering::Release);
+        assert!(Pin::new(&mut sink).poll_flush(&mut cx).is_pending());
+        assert!(woke.load(Ordering::Acquire), "flush progress must schedule the retained send");
+        assert_eq!(path.0.lock().sends, 2);
+        assert_eq!(path.0.lock().sent.len(), 1);
+        assert!(matches!(Pin::new(&mut sink).poll_flush(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(path.0.lock().sends, 3);
+        assert_eq!(path.0.lock().sent.iter().map(|symbol| symbol.symbol().id().esi()).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(sink.path_stats(PathId(1)).unwrap().flushed_symbols, 2);
+    }
+
+    #[test]
+    fn multipath_global_poll_budget_yields_and_rotates_without_starvation() {
+        let mut sink = MultipathSink::new(64, 2, 1).unwrap();
+        let paths = (0..64).map(|id| {
+            let path = MultipathGate::new();
+            sink.add_path(PathId(id), multipath_quality(9), path.clone()).unwrap();
+            path
+        }).collect::<Vec<_>>();
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = flagged_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+        for esi in 0..128 {
+            assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(esi)), Poll::Ready(Ok(()))));
+        }
+        for path in &paths { path.0.lock().ready = true; }
+        woke.store(false, Ordering::Release);
+        assert!(Pin::new(&mut sink).poll_flush(&mut cx).is_pending());
+        assert_eq!(paths.iter().map(|path| path.0.lock().sends).sum::<usize>(), 64);
+        assert!(woke.load(Ordering::Acquire));
+        assert!(matches!(Pin::new(&mut sink).poll_flush(&mut cx), Poll::Ready(Ok(()))));
+        for (id, path) in paths.iter().enumerate() {
+            assert_eq!(path.0.lock().sends, 2);
+            let stats = sink.path_stats(PathId(id as u64)).unwrap();
+            assert_eq!(stats.flushed_symbols, 2);
+            assert_eq!(stats.high_water_symbols, 2);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn multipath_native_parked_cancel_preserves_admitted_symbols_and_quiescence() {
+        use std::time::{Duration, Instant};
+        for sharded in [false, true] {
+            let builder = if sharded {
+                crate::runtime::RuntimeBuilder::multi_thread().worker_threads(2)
+                    .with_sharded_state(true)
+            } else {
+                crate::runtime::RuntimeBuilder::current_thread()
+            };
+            let runtime = builder.build().unwrap();
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = crate::Cx::current().expect("native task context");
+                let (mut a, mut a_rx) = channel(1);
+                let (mut b, mut b_rx) = channel(1);
+                let a_state = Arc::clone(&a.shared);
+                let b_state = Arc::clone(&b.shared);
+                a.send(create_symbol(90)).await.unwrap();
+                b.send(create_symbol(91)).await.unwrap();
+                let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+                sink.add_path(PathId(1), multipath_quality(9), a).unwrap();
+                sink.add_path(PathId(2), multipath_quality(9), b).unwrap();
+                sink.send(create_symbol(0)).await.unwrap();
+                sink.send(create_symbol(1)).await.unwrap();
+                let parked = Arc::new(AtomicBool::new(false));
+                let witnessed = Arc::clone(&parked);
+                let mut child = cx.spawn(move |_child_cx| async move {
+                    let result = {
+                        let mut send = Box::pin(sink.send(create_symbol(77)));
+                        std::future::poll_fn(|task| {
+                            let result = send.as_mut().poll(task);
+                            if result.is_pending() { witnessed.store(true, Ordering::Release); }
+                            result
+                        }).await
+                    };
+                    (result, sink)
+                }).unwrap();
+                let started = Instant::now();
+                while !parked.load(Ordering::Acquire) {
+                    assert!(started.elapsed() < Duration::from_secs(5));
+                    crate::runtime::yield_now().await;
+                }
+                for state in [&a_state, &b_state] {
+                    assert_eq!(state.queue.lock().len(), 1);
+                    assert_eq!(state.send_wakers.lock().len(), 1);
+                }
+                child.abort();
+                let joined = {
+                    let mut join = Box::pin(child.join(&cx));
+                    std::future::poll_fn(|task| {
+                        let result = join.as_mut().poll(task);
+                        if result.is_pending() {
+                            assert!(started.elapsed() < Duration::from_secs(5));
+                            task.waker().wake_by_ref();
+                        }
+                        result
+                    }).await
+                };
+                let (result, mut sink) = joined.expect("acknowledged cancellation keeps typed result");
+                assert!(matches!(result, Err(SinkError::Io { source }) if source.kind() == std::io::ErrorKind::Interrupted));
+                for path in [PathId(1), PathId(2)] {
+                    assert_eq!(sink.path_stats(path).unwrap().queued_symbols, 1);
+                }
+                assert_eq!(a_rx.next().await.unwrap().unwrap().symbol().id().esi(), 90);
+                assert_eq!(b_rx.next().await.unwrap().unwrap().symbol().id().esi(), 91);
+                sink.flush().await.unwrap();
+                assert_eq!(a_rx.next().await.unwrap().unwrap().symbol().id().esi(), 0);
+                assert_eq!(b_rx.next().await.unwrap().unwrap().symbol().id().esi(), 1);
+                sink.close().await.unwrap();
+                assert!(a_rx.next().await.is_none());
+                assert!(b_rx.next().await.is_none());
+                drop(sink);
+                assert!(a_state.send_wakers.lock().is_empty());
+                assert!(b_state.send_wakers.lock().is_empty());
+            }));
+            assert_eq!(runtime.drain_root_region(Duration::from_secs(5)), crate::runtime::RootDrainOutcome::Quiescent);
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            assert!(runtime.is_quiescent());
+        }
+    }
+
+    #[test]
+    fn multipath_raptorq_authenticated_roundtrip_uses_real_channels_and_aggregation() {
+        use crate::config::RaptorQConfig;
+        use crate::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
+        use crate::security::{AuthMode, SecurityContext};
+        use crate::transport::{AggregatorConfig, MultipathAggregator};
+        use crate::transport::stream::VecStream;
+        use crate::types::{ObjectId, ObjectParams, Time};
+
+        let cx = crate::Cx::for_testing();
+        let security = SecurityContext::for_testing_with_mode(0x51_7a, AuthMode::Strict);
+        let data = (0..4096).map(|i| ((i * 31 + i / 7) % 251) as u8).collect::<Vec<_>>();
+        let object_id = ObjectId::new(0, 0x51_7a);
+        let mut config = RaptorQConfig::default();
+        config.encoding.symbol_size = 256;
+        config.encoding.max_block_size = 4096;
+        config.encoding.repair_overhead = 2.0;
+        let (a, mut a_rx) = channel(128);
+        let (b, mut b_rx) = channel(128);
+        let mut sink = MultipathSink::new(2, 4, 256).unwrap();
+        sink.add_path(PathId(1), multipath_quality(9), a).unwrap();
+        sink.add_path(PathId(2), multipath_quality(29), b).unwrap();
+        let mut sender = RaptorQSenderBuilder::new().config(config.clone())
+            .security(security.clone()).transport(sink).build().unwrap();
+        let sent = sender.send_object(&cx, object_id, &data).unwrap();
+        assert!(sent.source_symbols > 0 && sent.repair_symbols >= 3);
+        for id in [PathId(1), PathId(2)] {
+            let stats = sender.transport_mut().path_stats(id).unwrap();
+            assert!(stats.sent_symbols > 0, "both real paths must carry source symbols");
+            assert!(stats.high_water_symbols <= 4);
+            assert_eq!(stats.queued_symbols, 0);
+            assert_eq!(stats.unflushed_symbols, 0);
+        }
+        future::block_on(sender.transport_mut().close()).unwrap();
+        let aggregator = MultipathAggregator::new(AggregatorConfig::default());
+        let mut received = Vec::new();
+        let mut dropped = 0;
+        for (path, input) in [(PathId(1), &mut a_rx), (PathId(2), &mut b_rx)] {
+            while let Some(symbol) = future::block_on(input.next()) {
+                let symbol = symbol.unwrap();
+                if symbol.symbol().kind().is_source() && symbol.symbol().id().esi() < 3 {
+                    dropped += 1;
+                    continue;
+                }
+                let result = aggregator.process_fungible_symbol(symbol.symbol().clone(), path, Time::ZERO);
+                assert!(result.ready.is_some());
+                let duplicate = aggregator.process_fungible_symbol(symbol.symbol().clone(), path, Time::ZERO);
+                assert!(duplicate.was_duplicate && duplicate.ready.is_none());
+                received.push(symbol);
+            }
+        }
+        assert_eq!(dropped, 3);
+        assert_eq!(received.len() + dropped, sent.symbols_sent);
+        config.encoding.repair_overhead = 1.0;
+        let params = ObjectParams::new(object_id, data.len() as u64, 256, 1, sent.source_symbols as u16);
+        let mut receiver = RaptorQReceiverBuilder::new().config(config)
+            .security(security).source(VecStream::new(received)).build().unwrap();
+        let decoded = receiver.receive_object(&cx, &params).unwrap();
+        assert_eq!(decoded.data, data);
+        assert!(decoded.all_symbols_verified());
+    }
+
     #[allow(clippy::struct_excessive_bools)]
     struct TrackingSinkState {
         ready_after: usize,
