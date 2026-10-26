@@ -2278,6 +2278,98 @@ mod tests {
     }
 
     #[test]
+    fn qpack_required_insert_count_tracks_referenced_entries_not_total_insertions() {
+        let mut context = QpackContext::new(128);
+        for name in ["a", "b", "c"] {
+            context
+                .insert_dynamic_entry(name.to_string(), "1".to_string())
+                .expect("table insertion");
+        }
+        for plan in [
+            vec![QpackFieldPlan::DynamicIndex(0)],
+            vec![QpackFieldPlan::DynamicNameLiteral {
+                name_index: 0,
+                value: "different".to_string(),
+            }],
+        ] {
+            let wire = qpack_encode_field_section_with_context(&plan, Some(&context))
+                .expect("encode older reference");
+            let metadata = qpack_field_section_metadata(
+                &wire,
+                H3QpackMode::DynamicTableAllowed,
+                Some(&context),
+            )
+            .expect("field metadata");
+            assert_eq!(metadata.required_insert_count(), 1);
+            assert_eq!(
+                qpack_decode_field_section_with_context(
+                    &wire,
+                    H3QpackMode::DynamicTableAllowed,
+                    Some(&context),
+                )
+                .expect("decode older reference"),
+                plan
+            );
+        }
+    }
+
+    #[test]
+    fn qpack_field_sections_reject_inconsistent_required_insert_counts() {
+        let mut context = QpackContext::new(128);
+        for name in ["a", "b"] {
+            context
+                .insert_dynamic_entry(name.to_string(), "1".to_string())
+                .expect("table insertion");
+        }
+        let expected = H3NativeError::InvalidFrame(
+            "qpack required insert count does not match dynamic references",
+        );
+        for wire in [
+            vec![3, 0, 0x81],          // RIC 2, but largest referenced ID is 0.
+            vec![2, 1, 0x80],          // RIC 1, pre-base reference to ID 1.
+            vec![2, 0, 0x10],          // RIC 1, post-base reference to ID 1.
+            vec![2, 0],                // RIC 1 without any dynamic references.
+            vec![0, 0, 0x10],          // RIC 0 with a dynamic reference.
+            vec![2, 1, 0x40, 1, b'v'], // Pre-base dynamic name exceeds RIC.
+            vec![2, 0, 0x00, 1, b'v'], // Post-base dynamic name exceeds RIC.
+            vec![2, 0, 0xd1],          // Nonzero RIC with only a static field.
+        ] {
+            assert_eq!(
+                qpack_decode_field_section_with_context(
+                    &wire,
+                    H3QpackMode::DynamicTableAllowed,
+                    Some(&context),
+                ),
+                Err(expected.clone())
+            );
+            for incoming in [false, true] {
+                let mut scheduler = QpackBlockedStreamScheduler::new(1);
+                let mut feedback = QpackDecoderFeedbackState::new();
+                let result = if incoming {
+                    scheduler.submit_received_field_section(
+                        &mut context,
+                        &mut feedback,
+                        H3QpackMode::DynamicTableAllowed,
+                        4,
+                        &wire,
+                    )
+                } else {
+                    scheduler.submit_field_section(
+                        &mut context,
+                        &mut feedback,
+                        H3QpackMode::DynamicTableAllowed,
+                        4,
+                        &wire,
+                    )
+                };
+                assert_eq!(result, Err(expected.clone()));
+                assert_eq!(feedback.outstanding_reference_count(), 0);
+                assert_eq!(feedback.known_received_count(), 0);
+            }
+        }
+    }
+
+    #[test]
     fn qpack_required_insert_count_encoder_matches_decoder_boundaries() {
         for required_insert_count in [1, 2, 3, 127, 128, 129, 255, 256, 257] {
             let encoded =
@@ -2292,7 +2384,7 @@ mod tests {
     }
 
     #[test]
-    fn qpack_dynamic_lookup_preserves_evicted_absolute_gaps() {
+    fn qpack_dynamic_lookup_preserves_absolute_ids_after_fifo_eviction() {
         let mut table = QpackDynamicTable::new(76);
         let old = table
             .insert("old".to_string(), "1".to_string())
@@ -2300,7 +2392,7 @@ mod tests {
         let middle = table
             .insert("middle".to_string(), "2".to_string())
             .expect("insert middle");
-        assert!(table.reference_entry(old));
+        assert!(table.reference_entry(middle));
 
         let new = table
             .insert("new".to_string(), "3".to_string())
@@ -2310,8 +2402,8 @@ mod tests {
         assert_eq!(middle, 1);
         assert_eq!(new, 2);
         assert_eq!(table.evicted_count(), 1);
-        assert_eq!(qpack_dynamic_entry(&table, old), Some(("old", "1")));
-        assert_eq!(qpack_dynamic_entry(&table, middle), None);
+        assert_eq!(qpack_dynamic_entry(&table, old), None);
+        assert_eq!(qpack_dynamic_entry(&table, middle), Some(("middle", "2")));
         assert_eq!(qpack_dynamic_entry(&table, new), Some(("new", "3")));
     }
 
@@ -3593,15 +3685,14 @@ mod tests {
         );
 
         let mut evicted_context = QpackContext::new(76);
-        let old = evicted_context
+        let _old = evicted_context
             .insert_dynamic_entry("old".to_string(), "1".to_string())
             .expect("insert old");
         let evicted = evicted_context
             .insert_dynamic_entry("evicted".to_string(), "2".to_string())
             .expect("insert evicted");
-        assert!(evicted_context.dynamic_table_mut().reference_entry(old));
         evicted_context
-            .insert_dynamic_entry("new".to_string(), "3".to_string())
+            .insert_dynamic_entry("new".to_string(), "3".repeat(40))
             .expect("insert new");
         assert_eq!(
             qpack_dynamic_entry(evicted_context.dynamic_table(), evicted),
@@ -4200,6 +4291,625 @@ mod tests {
             .expect_err("overflowing integer is malformed");
         assert_eq!(error, H3NativeError::InvalidFrame("qpack integer overflow"));
         assert_eq!(overflow.feed_encoder_stream_bytes(3, &[0x20]), Err(error));
+    }
+
+    fn qpack_directional_state(
+        local_capacity: u64,
+        peer_capacity: u64,
+        local_blocked: u64,
+        peer_blocked: u64,
+    ) -> QpackInstructionStreamState {
+        let local = H3Settings {
+            qpack_max_table_capacity: Some(local_capacity),
+            qpack_blocked_streams: Some(local_blocked),
+            ..H3Settings::default()
+        };
+        let peer = H3Settings {
+            qpack_max_table_capacity: Some(peer_capacity),
+            qpack_blocked_streams: Some(peer_blocked),
+            ..H3Settings::default()
+        };
+        let mut state = QpackInstructionStreamState::from_local_and_peer_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &local,
+            &peer,
+        )
+        .expect("directional state");
+        state
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("peer encoder stream");
+        state
+            .register_stream(7, H3UniStreamType::QpackDecoder)
+            .expect("peer decoder stream");
+        state
+    }
+
+    #[test]
+    fn qpack_directional_settings_keep_permissions_and_active_capacities_separate() {
+        let mut state = qpack_directional_state(128, 512, 1, 2);
+        assert_eq!(state.context().max_table_capacity(), 512);
+        assert_eq!(state.received_context().max_table_capacity(), 128);
+        assert_eq!(state.context().dynamic_table().capacity(), 0);
+        assert_eq!(state.received_context().dynamic_table().capacity(), 0);
+        assert_eq!(state.settings_blocked_streams(), 2);
+        assert_eq!(state.received_blocked_scheduler().settings_blocked_streams(), 1);
+        let insert = QpackEncoderInstruction::InsertWithoutNameReference {
+            name: "x-local".to_string(),
+            value: "value".to_string(),
+        };
+        state
+            .apply_local_encoder_instruction(&insert)
+            .expect_err("local encoder must announce capacity before insertion");
+        assert!(state.first_failure().is_none());
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 512 },
+            )
+            .expect("peer permits larger outbound table");
+        assert_eq!(state.context().dynamic_table().capacity(), 512);
+        assert_eq!(state.received_context().dynamic_table().capacity(), 0);
+        let oversize = qpack_encoder_instruction_bytes(
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 129 },
+        );
+        let error = state
+            .feed_encoder_stream_bytes(3, &oversize)
+            .expect_err("peer permissions cannot increase the local decoder limit");
+        assert_eq!(
+            error,
+            H3NativeError::QpackPolicy("qpack dynamic table capacity exceeds peer limit")
+        );
+        assert_eq!(state.received_context().dynamic_table().capacity(), 0);
+        assert_eq!(state.context().dynamic_table().capacity(), 512);
+
+        let mut unannounced = qpack_directional_state(128, 512, 1, 2);
+        unannounced
+            .feed_encoder_stream_bytes(3, &qpack_encoder_instruction_bytes(&insert))
+            .expect_err("peer must announce its active capacity before insertion");
+        assert!(unannounced.received_context().dynamic_table().is_empty());
+
+        let legacy = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("legacy constructor");
+        assert_eq!(legacy.context().dynamic_table().capacity(), 128);
+        assert!(std::ptr::eq(legacy.context(), legacy.received_context()));
+    }
+
+    #[test]
+    fn qpack_directional_same_stream_id_has_independent_tables_references_and_feedback() {
+        let mut state = qpack_directional_state(128, 512, 1, 2);
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 512 },
+            )
+            .expect("local capacity");
+        let outbound_id = state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: "x-sent".to_string(),
+                    value: "local".to_string(),
+                },
+            )
+            .expect("local insertion")
+            .expect("insertion id");
+        let outbound = qpack_dynamic_wire(state.context(), outbound_id).expect("outbound section");
+        for stream_id in [4, 8] {
+            assert_eq!(
+                state
+                    .submit_field_section(stream_id, &outbound)
+                    .expect("outbound blocked"),
+                QpackBlockedStreamStatus::Blocked
+            );
+        }
+        let inbound = qpack_response_status_dynamic_wire();
+        assert_eq!(
+            state
+                .submit_received_field_section(4, &inbound)
+                .expect("inbound blocked"),
+            QpackBlockedStreamStatus::Blocked
+        );
+        state
+            .feed_encoder_stream_bytes(
+                3,
+                &qpack_encoder_instruction_bytes(
+                    &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 128 },
+                ),
+            )
+            .expect("peer capacity");
+        let received = state
+            .feed_encoder_stream_bytes(
+                3,
+                &qpack_encoder_instruction_bytes(
+                    &QpackEncoderInstruction::InsertWithoutNameReference {
+                        name: ":status".to_string(),
+                        value: "200".to_string(),
+                    },
+                ),
+            )
+            .expect("peer insertion");
+        assert_eq!(received.unblocked_stream_ids(), &[4]);
+        assert_eq!(state.received_blocked_scheduler().blocked_stream_count(), 0);
+        assert_eq!(state.blocked_stream_count(), 2);
+        assert_eq!(state.known_received_count(), 0);
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 2);
+        assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 1);
+        assert_eq!(
+            qpack_dynamic_entry(state.context().dynamic_table(), 0),
+            Some(("x-sent", "local"))
+        );
+        assert_eq!(
+            qpack_dynamic_entry(state.received_context().dynamic_table(), 0),
+            Some((":status", "200"))
+        );
+        assert_eq!(
+            qpack_decode_response_field_section(
+                &inbound,
+                H3QpackMode::DynamicTableAllowed,
+                Some(state.received_context()),
+            )
+            .expect("decode peer response")
+            .status,
+            200
+        );
+
+        let acknowledged = state
+            .feed_decoder_stream_bytes(
+                7,
+                &qpack_decoder_instruction_bytes(
+                    &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+                ),
+            )
+            .expect("peer acknowledgment");
+        assert_eq!(state.known_received_count(), 1);
+        assert_eq!(acknowledged.unblocked_stream_ids(), &[8]);
+        assert!(state.blocked_scheduler().record(4).is_none());
+        assert!(state.received_blocked_scheduler().record(4).is_some());
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 1);
+        assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 1);
+        assert_eq!(state.received_decoder_feedback().known_received_count(), 0);
+
+        state
+            .apply_local_decoder_instruction(
+                &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+            )
+            .expect("local acknowledgment retires received section only");
+        assert_eq!(state.received_decoder_feedback().known_received_count(), 1);
+        assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 0);
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 1);
+        state
+            .feed_encoder_stream_bytes(3, &[0x20])
+            .expect("peer can shrink its acknowledged receive table");
+        assert!(state.received_context().dynamic_table().is_empty());
+        assert_eq!(state.context().dynamic_table().len(), 1);
+        state
+            .feed_decoder_stream_bytes(
+                7,
+                &qpack_decoder_instruction_bytes(
+                    &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 8 },
+                ),
+            )
+            .expect("last outbound reference acknowledged");
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+            )
+            .expect("local table can now shrink independently");
+        assert!(state.context().dynamic_table().is_empty());
+        assert!(state.first_failure().is_none());
+    }
+
+    #[test]
+    fn qpack_directional_blocked_limits_apply_to_the_correct_endpoint() {
+        let mut inbound_denied = qpack_directional_state(128, 128, 0, 1);
+        inbound_denied
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 128 },
+            )
+            .expect("local capacity");
+        inbound_denied
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: ":status".to_string(),
+                    value: "200".to_string(),
+                },
+            )
+            .expect("local insertion");
+        let wire = qpack_response_status_dynamic_wire();
+        assert_eq!(
+            inbound_denied
+                .submit_field_section(4, &wire)
+                .expect("peer permits blocking"),
+            QpackBlockedStreamStatus::Blocked
+        );
+        assert_eq!(
+            inbound_denied.submit_received_field_section(4, &wire),
+            Err(H3NativeError::QpackPolicy("qpack blocked stream capacity is zero"))
+        );
+        assert_eq!(inbound_denied.blocked_stream_count(), 1);
+
+        let mut outbound_denied = qpack_directional_state(128, 128, 1, 0);
+        assert_eq!(
+            outbound_denied
+                .submit_received_field_section(4, &wire)
+                .expect("local permits blocking"),
+            QpackBlockedStreamStatus::Blocked
+        );
+        outbound_denied
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 128 },
+            )
+            .expect("local capacity");
+        outbound_denied
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: ":status".to_string(),
+                    value: "200".to_string(),
+                },
+            )
+            .expect("local insertion");
+        assert_eq!(
+            outbound_denied.submit_field_section(4, &wire),
+            Err(H3NativeError::QpackPolicy("qpack blocked stream capacity is zero"))
+        );
+        assert_eq!(outbound_denied.received_blocked_scheduler().blocked_stream_count(), 1);
+    }
+
+    #[test]
+    fn qpack_directional_cancel_discards_blocked_receive_without_touching_send() {
+        let mut state = qpack_directional_state(128, 128, 1, 1);
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 128 },
+            )
+            .expect("local capacity");
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: ":status".to_string(),
+                    value: "200".to_string(),
+                },
+            )
+            .expect("local insertion");
+        let wire = qpack_response_status_dynamic_wire();
+        state
+            .submit_field_section(4, &wire)
+            .expect("outbound blocked");
+        state
+            .submit_received_field_section(4, &wire)
+            .expect("inbound blocked");
+        state
+            .apply_local_decoder_instruction(
+                &QpackDecoderInstruction::StreamCancellation { stream_id: 4 },
+            )
+            .expect("cancel received section before its insert arrives");
+        assert!(state.received_blocked_scheduler().record(4).is_none());
+        assert_eq!(state.received_blocked_scheduler().blocked_stream_count(), 0);
+        assert_eq!(state.blocked_stream_count(), 1);
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 1);
+        assert_eq!(state.known_received_count(), 0);
+        state
+            .feed_encoder_stream_bytes(
+                3,
+                &qpack_encoder_instruction_bytes(
+                    &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 128 },
+                ),
+            )
+            .expect("peer capacity");
+        let late = state
+            .feed_encoder_stream_bytes(
+                3,
+                &qpack_encoder_instruction_bytes(
+                    &QpackEncoderInstruction::InsertWithoutNameReference {
+                        name: ":status".to_string(),
+                        value: "200".to_string(),
+                    },
+                ),
+            )
+            .expect("late insertion remains usable on other streams");
+        assert!(late.unblocked_stream_ids().is_empty());
+        assert_eq!(state.blocked_stream_count(), 1);
+        state
+            .feed_decoder_stream_bytes(
+                7,
+                &qpack_decoder_instruction_bytes(
+                    &QpackDecoderInstruction::StreamCancellation { stream_id: 4 },
+                ),
+            )
+            .expect("peer independently cancels outbound section");
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 0);
+        assert_eq!(state.known_received_count(), 0);
+        assert!(state.first_failure().is_none());
+    }
+
+    #[test]
+    fn qpack_directional_local_eviction_waits_for_acknowledged_insertions() {
+        let mut state = qpack_directional_state(128, 72, 1, 1);
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 72 },
+            )
+            .expect("local capacity");
+        for name in ["a", "b"] {
+            state
+                .apply_local_encoder_instruction(
+                    &QpackEncoderInstruction::InsertWithoutNameReference {
+                        name: name.to_string(),
+                        value: "1".to_string(),
+                    },
+                )
+                .expect("initial insertions fit without eviction");
+        }
+        let third = QpackEncoderInstruction::InsertWithoutNameReference {
+            name: "c".to_string(),
+            value: "1".to_string(),
+        };
+        let before = qpack_table_contents(&state);
+        state
+            .apply_local_encoder_instruction(&third)
+            .expect_err("unacknowledged oldest insertion is not evictable");
+        assert_eq!(qpack_table_contents(&state), before);
+        assert_eq!(state.context().dynamic_table().insertion_counter(), 2);
+        assert!(state.first_failure().is_none());
+        state
+            .feed_decoder_stream_bytes(7, &[1])
+            .expect("acknowledge oldest insertion");
+        assert_eq!(
+            state
+                .apply_local_encoder_instruction(&third)
+                .expect("retry insertion"),
+            Some(2)
+        );
+        assert!(qpack_dynamic_entry(state.context().dynamic_table(), 0).is_none());
+        assert!(qpack_dynamic_entry(state.context().dynamic_table(), 1).is_some());
+        let before = qpack_table_contents(&state);
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+            )
+            .expect_err("remaining insertions still unacknowledged");
+        assert_eq!(qpack_table_contents(&state), before);
+        assert_eq!(state.context().dynamic_table().capacity(), 72);
+        state
+            .feed_decoder_stream_bytes(7, &[2])
+            .expect("acknowledge remaining insertions");
+        state
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+            )
+            .expect("acknowledged entries can be evicted");
+        assert!(state.context().dynamic_table().is_empty());
+        assert!(state.first_failure().is_none());
+    }
+
+    #[test]
+    fn qpack_directional_local_ack_requires_a_decoded_dynamic_section() {
+        for wire in [vec![0, 0], qpack_response_status_dynamic_wire()] {
+            let mut state = qpack_directional_state(128, 128, 1, 1);
+            state
+                .submit_received_field_section(4, &wire)
+                .expect("static or blocked section");
+            assert_eq!(
+                state.apply_local_decoder_instruction(
+                    &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+                ),
+                Err(H3NativeError::InvalidFrame(
+                    "qpack local acknowledgement requires a ready dynamic field section"
+                ))
+            );
+            assert_eq!(state.received_decoder_feedback().known_received_count(), 0);
+            assert_eq!(state.known_received_count(), 0);
+        }
+    }
+
+    #[test]
+    fn qpack_directional_blocked_section_validates_required_count_when_unblocked() {
+        let mut state = qpack_directional_state(128, 0, 1, 0);
+        assert_eq!(
+            state
+                .submit_received_field_section(4, &[3, 0, 0x81])
+                .expect("wait for declared insert count before parsing the fields"),
+            QpackBlockedStreamStatus::Blocked
+        );
+        state
+            .feed_encoder_stream_bytes(
+                3,
+                &qpack_encoder_instruction_bytes(
+                    &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 128 },
+                ),
+            )
+            .expect("peer capacity");
+        let insert = qpack_encoder_instruction_bytes(
+            &QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-peer".to_string(),
+                value: "value".to_string(),
+            },
+        );
+        assert!(
+            state
+                .feed_encoder_stream_bytes(3, &insert)
+                .expect("first insertion still leaves the section blocked")
+                .unblocked_stream_ids()
+                .is_empty()
+        );
+        let expected = H3NativeError::InvalidFrame(
+            "qpack required insert count does not match dynamic references",
+        );
+        assert_eq!(
+            state.feed_encoder_stream_bytes(3, &insert),
+            Err(expected.clone())
+        );
+        assert_eq!(state.first_failure(), Some(&expected));
+        assert_eq!(state.received_decoder_feedback().outstanding_reference_count(), 0);
+        assert_eq!(state.received_decoder_feedback().known_received_count(), 0);
+    }
+
+    #[test]
+    fn qpack_directional_two_endpoint_instruction_and_feedback_roundtrip() {
+        fn transfer_encoder(
+            sender: &mut QpackInstructionStreamState,
+            receiver: &mut QpackInstructionStreamState,
+            instruction: &QpackEncoderInstruction,
+        ) {
+            sender
+                .apply_local_encoder_instruction(instruction)
+                .expect("apply locally emitted encoder instruction");
+            receiver
+                .feed_encoder_stream_bytes(3, &qpack_encoder_instruction_bytes(instruction))
+                .expect("peer accepts emitted encoder bytes");
+        }
+
+        fn transfer_decoder(
+            sender: &mut QpackInstructionStreamState,
+            receiver: &mut QpackInstructionStreamState,
+            instruction: &QpackDecoderInstruction,
+        ) {
+            sender
+                .apply_local_decoder_instruction(instruction)
+                .expect("apply locally emitted decoder instruction");
+            receiver
+                .feed_decoder_stream_bytes(7, &qpack_decoder_instruction_bytes(instruction))
+                .expect("peer accepts emitted decoder bytes");
+        }
+
+        let mut client = qpack_directional_state(128, 256, 1, 2);
+        let mut server = qpack_directional_state(256, 128, 2, 1);
+        transfer_encoder(
+            &mut client,
+            &mut server,
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 256 },
+        );
+        for name in ["x-old", "x-new"] {
+            transfer_encoder(
+                &mut client,
+                &mut server,
+                &QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: name.to_string(),
+                    value: "value".to_string(),
+                },
+            );
+        }
+        let request = qpack_dynamic_wire(client.context(), 0).expect("older-entry section");
+        assert_eq!(
+            client
+                .submit_field_section(4, &request)
+                .expect("outbound section"),
+            QpackBlockedStreamStatus::Blocked
+        );
+        assert_eq!(
+            server
+                .submit_received_field_section(4, &request)
+                .expect("peer decodes received section"),
+            QpackBlockedStreamStatus::Ready
+        );
+        transfer_decoder(
+            &mut server,
+            &mut client,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+        );
+        assert_eq!(client.known_received_count(), 1);
+        assert_eq!(server.received_decoder_feedback().known_received_count(), 1);
+        transfer_decoder(
+            &mut server,
+            &mut client,
+            &QpackDecoderInstruction::InsertCountIncrement { increment: 1 },
+        );
+        assert_eq!(client.known_received_count(), 2);
+        assert_eq!(server.received_decoder_feedback().known_received_count(), 2);
+        for stream_id in [4, 8, 8] {
+            transfer_decoder(
+                &mut server,
+                &mut client,
+                &QpackDecoderInstruction::StreamCancellation { stream_id },
+            );
+        }
+        assert_eq!(client.known_received_count(), 2);
+        assert_eq!(server.received_decoder_feedback().known_received_count(), 2);
+
+        transfer_encoder(
+            &mut server,
+            &mut client,
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 128 },
+        );
+        transfer_encoder(
+            &mut server,
+            &mut client,
+            &QpackEncoderInstruction::InsertWithoutNameReference {
+                name: ":status".to_string(),
+                value: "200".to_string(),
+            },
+        );
+        let response = qpack_dynamic_wire(server.context(), 0).expect("response on same stream");
+        server
+            .submit_field_section(4, &response)
+            .expect("send response");
+        client
+            .submit_received_field_section(4, &response)
+            .expect("receive response independently of cancelled request references");
+        transfer_decoder(
+            &mut client,
+            &mut server,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+        );
+        assert_eq!(server.known_received_count(), 1);
+        assert_eq!(client.received_decoder_feedback().known_received_count(), 1);
+        assert_eq!(client.decoder_feedback().outstanding_reference_count(), 0);
+        assert_eq!(server.decoder_feedback().outstanding_reference_count(), 0);
+        assert!(client.first_failure().is_none());
+        assert!(server.first_failure().is_none());
+    }
+
+    #[test]
+    fn qpack_directional_peer_ack_rejects_static_and_unscheduled_sections() {
+        for stream_id in [4, 8] {
+            let mut state = qpack_directional_state(128, 128, 1, 1);
+            state
+                .submit_field_section(4, &[0, 0])
+                .expect("static section");
+            assert_eq!(
+                state.feed_decoder_stream_bytes(
+                    7,
+                    &qpack_decoder_instruction_bytes(
+                        &QpackDecoderInstruction::HeaderAcknowledgement { stream_id },
+                    ),
+                ),
+                Err(H3NativeError::InvalidFrame(
+                    "qpack acknowledgement requires a dynamic field section"
+                ))
+            );
+            assert_eq!(state.known_received_count(), 0);
+        }
+    }
+
+    #[test]
+    fn qpack_directional_zero_capacity_and_static_policy_preserve_local_limits() {
+        let mut no_receive = qpack_directional_state(0, 128, 0, 1);
+        no_receive
+            .feed_encoder_stream_bytes(3, &[0x20])
+            .expect_err("zero local maximum forbids even capacity-zero instructions");
+        let mut no_send = qpack_directional_state(128, 0, 1, 0);
+        no_send
+            .apply_local_encoder_instruction(
+                &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+            )
+            .expect_err("zero peer maximum forbids local encoder instructions");
+        assert!(no_send.first_failure().is_none());
+        let static_state = QpackInstructionStreamState::from_local_and_peer_settings(
+            H3QpackMode::StaticOnly,
+            &H3Settings::default(),
+            &qpack_instruction_settings(),
+        )
+        .expect("static encoder can decline peer dynamic permission");
+        assert_eq!(static_state.context().max_table_capacity(), 0);
+        assert_eq!(static_state.received_context().max_table_capacity(), 0);
+        assert!(
+            QpackInstructionStreamState::from_local_and_peer_settings(
+                H3QpackMode::StaticOnly,
+                &qpack_instruction_settings(),
+                &H3Settings::default(),
+            )
+            .is_err()
+        );
     }
 
     fn qpack_response_status_dynamic_wire() -> Vec<u8> {
@@ -6429,9 +7139,9 @@ mod tests {
     // ========== QPACK Dynamic Table Eviction Conformance Tests ==========
 
     #[test]
-    fn qpack_conformance_dynamic_table_lru_eviction() {
+    fn qpack_conformance_dynamic_table_fifo_eviction() {
         // Conformance: RFC 9204 Section 3.2 - Dynamic Table
-        // LRU eviction must evict least recently inserted unreferenced entries first.
+        // FIFO eviction removes the oldest entries first.
 
         let mut table = QpackDynamicTable::new(200); // Small table for testing
 
@@ -6450,7 +7160,7 @@ mod tests {
             )
             .unwrap();
 
-        // First entry (oldest, LRU) should have been evicted
+        // First entry (oldest) should have been evicted
         assert!(table.len() < 4);
         assert!(!table.reference_entry(id1)); // id1 should be gone
         assert!(table.reference_entry(id2)); // id2+ should still exist
@@ -6474,17 +7184,64 @@ mod tests {
         // Reference the first entry
         assert!(table.reference_entry(id1));
 
-        // Insert entries that would normally evict both
-        let _id3 = table
+        // A protected oldest entry blocks insertion; a newer unreferenced entry
+        // cannot be skipped to make room without desynchronizing the peer table.
+        assert!(
+            table
+                .insert("push-header-1".into(), "push-value-1".into())
+                .is_err()
+        );
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.evicted_count(), 0);
+        assert!(table.get_by_insertion_id(id2).is_some());
+        assert!(table.unreference_entry(id1));
+        table
             .insert("push-header-1".into(), "push-value-1".into())
             .unwrap();
-        let _id4 = table
+        table
             .insert("push-header-2".into(), "push-value-2".into())
             .unwrap();
+        assert!(table.get_by_insertion_id(id1).is_none());
+        assert!(table.get_by_insertion_id(id2).is_none());
+    }
 
-        // Referenced entry should be protected, unreferenced should be evicted
-        assert!(table.reference_entry(id1)); // Still referenced and present
-        assert!(!table.reference_entry(id2)); // Should be evicted
+    #[test]
+    fn qpack_fifo_eviction_preflight_keeps_insert_and_shrink_failures_atomic() {
+        let mut table = QpackDynamicTable::new(102);
+        for name in ["a", "b", "c"] {
+            table
+                .insert(name.to_string(), "1".to_string())
+                .expect("fill table");
+        }
+        assert_eq!(table.size(), 102);
+        assert!(table.reference_entry(0));
+        assert!(table.insert("d".to_string(), "1".to_string()).is_err());
+        assert!(table.set_capacity(68).is_err());
+        assert_eq!(table.size(), 102);
+        assert_eq!(table.capacity(), 102);
+        assert_eq!(table.evicted_count(), 0);
+        assert_eq!(table.insertion_counter(), 3);
+
+        assert!(table.unreference_entry(0));
+        assert!(table.reference_entry(1));
+        assert!(table.insert("large".to_string(), "v".repeat(31)).is_err());
+        assert!(table.set_capacity(34).is_err());
+        assert!(table.get_by_insertion_id(0).is_some());
+        assert_eq!(table.len(), 3);
+        assert_eq!(table.size(), 102);
+        assert_eq!(table.capacity(), 102);
+        assert_eq!(table.evicted_count(), 0);
+        assert_eq!(table.insertion_counter(), 3);
+
+        assert!(table.unreference_entry(1));
+        assert_eq!(table.insert("large".to_string(), "v".repeat(31)), Ok(3));
+        assert_eq!(table.evicted_count(), 2);
+        assert_eq!(table.size(), 102);
+        assert_eq!(table.len(), 2);
+        assert!(table.get_by_insertion_id(0).is_none());
+        assert!(table.get_by_insertion_id(1).is_none());
+        assert!(table.get_by_insertion_id(2).is_some());
+        assert!(table.get_by_insertion_id(3).is_some());
     }
 
     #[test]
@@ -6557,7 +7314,7 @@ mod tests {
         // Some entries should have been evicted due to pressure
         assert!(table.evicted_count > 0);
 
-        // Verify LRU ordering - early entries should be evicted first
+        // Verify FIFO ordering - early entries should be evicted first
         let first_half_present = insertion_ids
             .iter()
             .take(10)
@@ -6663,7 +7420,7 @@ mod tests {
 
     #[test]
     fn qpack_conformance_dynamic_table_eviction_order_deterministic() {
-        // Conformance: Eviction order must be deterministic and follow LRU strictly.
+        // Conformance: Eviction order must be deterministic and follow FIFO strictly.
 
         let mut table1 = QpackDynamicTable::new(120);
         let mut table2 = QpackDynamicTable::new(120);

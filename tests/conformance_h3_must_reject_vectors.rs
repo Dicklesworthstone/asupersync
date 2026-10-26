@@ -143,9 +143,12 @@ fn rfc9204_fragmented_encoder_stream_unblocks_the_received_field_section() {
         qpack_blocked_streams: Some(1),
         ..H3Settings::default()
     };
-    let mut qpack =
-        QpackInstructionStreamState::from_settings(H3QpackMode::DynamicTableAllowed, &settings)
-            .expect("dynamic state");
+    let mut qpack = QpackInstructionStreamState::from_local_and_peer_settings(
+        H3QpackMode::DynamicTableAllowed,
+        &settings,
+        &H3Settings::default(),
+    )
+    .expect("directional state");
     assert_eq!(
         qpack.submit_received_field_section(0, &[0x02, 0x00, 0x80]),
         Ok(QpackBlockedStreamStatus::Blocked)
@@ -163,27 +166,64 @@ fn rfc9204_fragmented_encoder_stream_unblocks_the_received_field_section() {
         processed += outcome.instructions_processed();
         unblocked.extend_from_slice(outcome.unblocked_stream_ids());
         if index + 1 < wire.len() {
-            assert!(qpack.context().dynamic_table().is_empty());
-            assert_eq!(qpack.blocked_stream_count(), 1);
+            assert!(qpack.received_context().dynamic_table().is_empty());
+            assert_eq!(qpack.received_blocked_scheduler().blocked_stream_count(), 1);
             assert!(unblocked.is_empty());
         }
     }
     assert_eq!(processed, 2);
     assert_eq!(unblocked, vec![0]);
-    assert_eq!(qpack.blocked_stream_count(), 0);
+    assert_eq!(qpack.received_blocked_scheduler().blocked_stream_count(), 0);
     assert_eq!(
-        qpack_dynamic_entry(qpack.context().dynamic_table(), 0),
+        qpack_dynamic_entry(qpack.received_context().dynamic_table(), 0),
         Some(("x-test", "fragmented"))
     );
     assert_eq!(
         qpack
-            .blocked_scheduler()
+            .received_blocked_scheduler()
             .record(0)
             .expect("stream record")
             .status(),
         QpackBlockedStreamStatus::Ready
     );
+    assert!(qpack.context().dynamic_table().is_empty());
+    assert_eq!(qpack.context().dynamic_table().capacity(), 0);
     assert!(qpack.first_failure().is_none());
+}
+
+/// The peer's advertised capacity grants permission to our encoder; it cannot
+/// enlarge the limit our decoder advertised for incoming encoder instructions.
+#[test]
+fn rfc9204_peer_settings_must_not_raise_the_local_decoder_capacity() {
+    let mut connection =
+        H3ConnectionState::with_config(H3ConnectionConfig::default().with_dynamic_qpack());
+    connection
+        .on_remote_uni_stream_type(3, 0x02)
+        .expect("remote encoder stream");
+    let local_settings = H3Settings {
+        qpack_max_table_capacity: Some(128),
+        ..H3Settings::default()
+    };
+    let peer_settings = H3Settings {
+        qpack_max_table_capacity: Some(512),
+        ..H3Settings::default()
+    };
+    let mut qpack = QpackInstructionStreamState::from_local_and_peer_settings(
+        H3QpackMode::DynamicTableAllowed,
+        &local_settings,
+        &peer_settings,
+    )
+    .expect("directional state");
+    assert_eq!(qpack.context().max_table_capacity(), 512);
+    assert_eq!(qpack.received_context().max_table_capacity(), 128);
+    let error = connection
+        .feed_qpack_instruction_stream_bytes(&mut qpack, 3, b"\x3f\xe1\x03")
+        .expect_err("peer encoder exceeded the local advertised capacity");
+    assert!(matches!(&error, H3NativeError::QpackPolicy(_)));
+    assert_eq!(qpack.first_failure(), Some(&error));
+    assert_eq!(qpack.received_context().dynamic_table().capacity(), 0);
+    assert!(qpack.received_context().dynamic_table().is_empty());
+    assert!(qpack.context().dynamic_table().is_empty());
 }
 
 /// Declared instruction lengths are checked before retaining their payload,
