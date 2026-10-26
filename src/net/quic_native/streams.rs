@@ -1408,18 +1408,23 @@ impl StreamTable {
     /// Apply an already validated peer MAX_STREAMS limit. Limits count all
     /// streams opened in a direction over the connection's lifetime, including
     /// closed streams; a new grant never resets the next stream sequence.
+    /// Returns whether the grant strictly increased that direction's limit.
     pub(crate) fn increase_local_stream_limit(
         &mut self,
         direction: StreamDirection,
         maximum_streams: u64,
-    ) {
+    ) -> bool {
         let limit = match direction {
             StreamDirection::Bidirectional => &mut self.max_local_bidi,
             StreamDirection::Unidirectional => &mut self.max_local_uni,
         };
         // Reordered and retransmitted grants cannot revoke credit already
         // received (RFC 9000 sections 4.6 and 19.11).
-        *limit = (*limit).max(maximum_streams);
+        if maximum_streams <= *limit {
+            return false;
+        }
+        *limit = maximum_streams;
+        true
     }
 
     /// Set the maximum number of remotely-initiated streams (per direction) this

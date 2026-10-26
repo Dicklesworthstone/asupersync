@@ -11,6 +11,88 @@
     }
 
     #[test]
+    fn workflow_explicit_policy_reaches_both_cache_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let mut policy = TrustPolicy::local();
+        policy.add_authorized_scope("ci:allowed".to_string());
+        let mut coordinator = AtpWorkflowCoordinator::with_trust_policy(
+            OutputFormat::Json,
+            root.path().join("state"),
+            policy,
+        )
+        .unwrap();
+        let content = b"scoped cache and seeding content";
+        let hash = coordinator.compute_content_hash(content);
+        let key = CacheKey::new(
+            "manifest".to_string(),
+            hash.clone(),
+            Some("ci:allowed".to_string()),
+        );
+        coordinator.cache.put(key.clone(), content).unwrap();
+        assert_eq!(
+            coordinator.cache.get(&key).unwrap().as_deref(),
+            Some(content.as_slice())
+        );
+        coordinator
+            .seeding_service
+            .authorize_manifest(
+                "manifest".to_string(),
+                "ci:allowed".to_string(),
+                "high".to_string(),
+            )
+            .unwrap();
+        coordinator
+            .seeding_service
+            .add_seeded_content("manifest", &hash, content)
+            .unwrap();
+        assert!(
+            coordinator
+                .seeding_service
+                .get_seeded_content("manifest", &hash, &[])
+                .is_err()
+        );
+        assert_eq!(
+            coordinator
+                .seeding_service
+                .get_seeded_content("manifest", &hash, &["ci:allowed".to_string()])
+                .unwrap()
+                .as_deref(),
+            Some(content.as_slice())
+        );
+        coordinator
+            .seeding_service
+            .authorize_manifest(
+                "foreign".to_string(),
+                "ci:denied".to_string(),
+                "high".to_string(),
+            )
+            .unwrap();
+        assert!(matches!(
+            coordinator
+                .seeding_service
+                .add_seeded_content("foreign", &hash, content),
+            Err(crate::atp::seeding::SeedingError::CacheError(
+                crate::atp::cache::CacheError::TrustViolation(_)
+            ))
+        ));
+    }
+
+    #[test]
+    fn workflow_explicit_policy_refuses_shared_storage_before_creating_a_root() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let error = AtpWorkflowCoordinator::with_trust_policy(
+            OutputFormat::Json,
+            &state,
+            TrustPolicy::shared(),
+        )
+        .err()
+        .expect("workflow copies do not implement encrypted shared storage");
+        assert_eq!(error.error_type, "trust_policy_error");
+        assert!(!state.exists());
+    }
+
+    #[test]
     fn test_content_hash_computation() {
         run_test_with_cx(|_cx| async move {
             let coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();

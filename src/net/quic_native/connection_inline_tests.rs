@@ -3101,6 +3101,225 @@
         }
     }
 
+    #[derive(Default)]
+    struct StreamOpenWake(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for StreamOpenWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl StreamOpenWake {
+        fn count(&self) -> usize {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn exhausted_stream_connection(role: StreamRole) -> NativeQuicConnection {
+        let mut conn = match role {
+            StreamRole::Client => established_conn(),
+            StreamRole::Server => established_server_conn(),
+        };
+        conn.streams = StreamTable::new(role, 0, 0, 4096, 4096);
+        conn
+    }
+
+    #[test]
+    fn poll_open_waits_for_the_matching_wire_max_streams_grant() {
+        use std::sync::Arc;
+
+        for role in [StreamRole::Client, StreamRole::Server] {
+            let cx = test_cx();
+            let mut conn = exhausted_stream_connection(role);
+            let bidi_wakes = Arc::new(StreamOpenWake::default());
+            let uni_wakes = Arc::new(StreamOpenWake::default());
+            let bidi_waker = Waker::from(Arc::clone(&bidi_wakes));
+            let uni_waker = Waker::from(Arc::clone(&uni_wakes));
+            let mut bidi_cx = TaskContext::from_waker(&bidi_waker);
+            let mut uni_cx = TaskContext::from_waker(&uni_waker);
+            for _ in 0..64 {
+                assert!(conn.poll_open_local_bidi(&cx, &mut bidi_cx).is_pending());
+                assert!(conn.poll_open_local_uni(&cx, &mut uni_cx).is_pending());
+                assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 2);
+            }
+            assert_eq!(conn.streams().len(), 0, "Pending must allocate no stream");
+            assert_eq!((bidi_wakes.count(), uni_wakes.count()), (0, 0));
+            // A duplicate zero grant cannot wake a waiter or authorize an ID.
+            conn.process_packet_payload(
+                &cx, PacketNumberSpace::ApplicationData, 1, &[0x12, 0, 0x13, 0], 10,
+            ).unwrap();
+            assert_eq!((bidi_wakes.count(), uni_wakes.count()), (0, 0));
+
+            // Grant one bidirectional stream, followed by a reordered old grant.
+            conn.process_packet_payload(
+                &cx, PacketNumberSpace::ApplicationData, 2, &[0x12, 1, 0x12, 0], 20,
+            ).unwrap();
+            assert_eq!((bidi_wakes.count(), uni_wakes.count()), (1, 0));
+            assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+            assert_eq!(conn.streams().len(), 0, "grant wakes but does not allocate");
+            assert_eq!(
+                conn.poll_open_local_bidi(&cx, &mut bidi_cx),
+                Poll::Ready(Ok(StreamId::local(role, StreamDirection::Bidirectional, 0)))
+            );
+            assert!(conn.poll_open_local_bidi(&cx, &mut bidi_cx).is_pending());
+            conn.process_packet_payload(
+                &cx, PacketNumberSpace::ApplicationData, 3, &[0x12, 1], 30,
+            ).unwrap();
+            assert_eq!(bidi_wakes.count(), 1, "duplicate grant must not spin");
+            assert_eq!(conn.streams().len(), 1);
+
+            conn.process_packet_payload(
+                &cx, PacketNumberSpace::ApplicationData, 4, &[0x13, 1], 40,
+            ).unwrap();
+            assert_eq!((bidi_wakes.count(), uni_wakes.count()), (1, 1));
+            assert_eq!(
+                conn.poll_open_local_uni(&cx, &mut uni_cx),
+                Poll::Ready(Ok(StreamId::local(role, StreamDirection::Unidirectional, 0)))
+            );
+            assert!(conn.poll_open_local_uni(&cx, &mut uni_cx).is_pending());
+            conn.process_packet_payload(
+                &cx, PacketNumberSpace::ApplicationData, 5, &[0x12, 2, 0x13, 2], 50,
+            ).unwrap();
+            assert_eq!((bidi_wakes.count(), uni_wakes.count()), (2, 2));
+            assert_eq!(
+                conn.poll_open_local_bidi(&cx, &mut bidi_cx),
+                Poll::Ready(Ok(StreamId::local(role, StreamDirection::Bidirectional, 1)))
+            );
+            assert_eq!(
+                conn.poll_open_local_uni(&cx, &mut uni_cx),
+                Poll::Ready(Ok(StreamId::local(role, StreamDirection::Unidirectional, 1)))
+            );
+            assert_eq!(conn.streams().len(), 4);
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    #[test]
+    fn poll_open_replaces_and_releases_owned_cancellation_registrations() {
+        use std::sync::Arc;
+
+        let old_cx = test_cx();
+        let new_cx = test_cx();
+        let driver_cx = test_cx();
+        let old_wakes = Arc::new(StreamOpenWake::default());
+        let new_wakes = Arc::new(StreamOpenWake::default());
+        let old_waker = Waker::from(Arc::clone(&old_wakes));
+        let new_waker = Waker::from(Arc::clone(&new_wakes));
+        let mut old_task_cx = TaskContext::from_waker(&old_waker);
+        let mut new_task_cx = TaskContext::from_waker(&new_waker);
+        let mut conn = exhausted_stream_connection(StreamRole::Client);
+        assert!(conn.poll_open_local_uni(&old_cx, &mut old_task_cx).is_pending());
+        assert!(conn.poll_open_local_uni(&new_cx, &mut new_task_cx).is_pending());
+        assert!(old_cx.inner.read().cancel_waker_registrations.is_empty());
+        assert_eq!(new_cx.inner.read().cancel_waker_registrations.len(), 1);
+        old_cx.set_cancel_requested(true);
+        assert_eq!(old_wakes.count(), 0, "an abandoned owner was unregistered");
+        new_cx.set_cancel_requested(true);
+        assert_eq!(new_wakes.count(), 1, "cancellation must wake the active wait");
+        assert_eq!(
+            conn.poll_open_local_uni(&new_cx, &mut new_task_cx),
+            Poll::Ready(Err(NativeQuicConnectionError::Cancelled))
+        );
+        assert!(new_cx.inner.read().cancel_waker_registrations.is_empty());
+        assert_eq!(conn.streams().len(), 0);
+        conn.process_packet_payload(
+            &driver_cx, PacketNumberSpace::ApplicationData, 1, &[0x13, 1], 10,
+        ).unwrap();
+        assert_eq!(
+            conn.poll_open_local_uni(&new_cx, &mut new_task_cx),
+            Poll::Ready(Err(NativeQuicConnectionError::Cancelled))
+        );
+        assert_eq!(conn.streams().len(), 0, "cancel wins even with available credit");
+        assert_eq!(conn.open_local_uni(&driver_cx).unwrap(), StreamId(2));
+
+        // Clone retains the existing public connection-clone behavior but owns
+        // a separate cancellation token; dropping it cannot clear the original.
+        assert!(conn.poll_open_local_bidi(&driver_cx, &mut new_task_cx).is_pending());
+        let cloned = conn.clone();
+        assert_eq!(driver_cx.inner.read().cancel_waker_registrations.len(), 2);
+        drop(cloned);
+        assert_eq!(driver_cx.inner.read().cancel_waker_registrations.len(), 1);
+        drop(conn);
+        assert!(driver_cx.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn poll_open_waiters_wake_on_every_connection_close_path() {
+        use std::sync::Arc;
+
+        for close_path in 0..4 {
+            let cx = test_cx();
+            let mut conn = exhausted_stream_connection(StreamRole::Client);
+            let wakes = Arc::new(StreamOpenWake::default());
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = TaskContext::from_waker(&waker);
+            assert!(conn.poll_open_local_bidi(&cx, &mut task_cx).is_pending());
+            assert!(conn.poll_open_local_uni(&cx, &mut task_cx).is_pending());
+            match close_path {
+                0 => conn.begin_close(&cx, 10, 7).unwrap(),
+                1 => conn.close_immediately(&cx, 7).unwrap(),
+                2 => conn.process_packet_payload(
+                    &cx, PacketNumberSpace::ApplicationData, 1, &[0x1d, 7, 0], 10,
+                ).unwrap(),
+                _ => {
+                    conn.process_packet_payload(
+                        &cx, PacketNumberSpace::ApplicationData, 1,
+                        &[0x12, 0xd0, 0, 0, 0, 0, 0, 0, 1], 10,
+                    ).expect_err("unencodable peer grant closes the connection");
+                }
+            }
+            assert_eq!(wakes.count(), 2, "close path {close_path}");
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            assert!(matches!(
+                conn.poll_open_local_bidi(&cx, &mut task_cx),
+                Poll::Ready(Err(NativeQuicConnectionError::InvalidState(_)))
+            ));
+            assert!(matches!(
+                conn.poll_open_local_uni(&cx, &mut task_cx),
+                Poll::Ready(Err(NativeQuicConnectionError::InvalidState(_)))
+            ));
+            assert_eq!(conn.streams().len(), 0);
+            conn.poll(&cx, 10_000_000).unwrap();
+            assert_eq!(wakes.count(), 2, "drain expiry cannot repeat a wake");
+        }
+    }
+
+    #[test]
+    fn poll_open_close_notifies_both_directions_when_one_waker_panics() {
+        use std::sync::Arc;
+
+        struct PanickingWake(Arc<StreamOpenWake>);
+        impl std::task::Wake for PanickingWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                panic!("stream-open test waker panic");
+            }
+        }
+        let cx = test_cx();
+        let mut conn = exhausted_stream_connection(StreamRole::Client);
+        let bidi_wakes = Arc::new(StreamOpenWake::default());
+        let uni_wakes = Arc::new(StreamOpenWake::default());
+        let bidi_waker = Waker::from(Arc::new(PanickingWake(Arc::clone(&bidi_wakes))));
+        let uni_waker = Waker::from(Arc::clone(&uni_wakes));
+        assert!(conn.poll_open_local_bidi(&cx, &mut TaskContext::from_waker(&bidi_waker)).is_pending());
+        assert!(conn.poll_open_local_uni(&cx, &mut TaskContext::from_waker(&uni_waker)).is_pending());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            conn.close_immediately(&cx, 7).unwrap();
+        }));
+        assert!(result.is_err());
+        assert_eq!((bidi_wakes.count(), uni_wakes.count()), (1, 1));
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        assert_eq!(conn.state(), QuicConnectionState::Closed);
+    }
+
     #[test]
     fn received_max_streams_rejects_unencodable_grants_before_mutation() {
         let cx = test_cx();

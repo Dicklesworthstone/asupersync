@@ -13,11 +13,13 @@
 //! every test keeps its files, and its state root, in a temporary directory
 //! created there and removed on drop.
 
+use asupersync::atp::cache::trust::TrustPolicy;
 use asupersync::cli::output::OutputFormat;
 use asupersync::cli::{
     AtpArchiveAction, AtpArchiveArgs, AtpArchiveRetrieveArgs, AtpArchiveStoreArgs, AtpCiAction,
     AtpCiArgs, AtpCiPullArgs, AtpCiPushArgs, AtpDatasetAction, AtpDatasetArgs, AtpDatasetGetArgs,
-    AtpDatasetListArgs, AtpDatasetSeedArgs, AtpFuzzAction, AtpFuzzArgs, AtpFuzzMinimizeArgs,
+    AtpDatasetListArgs, AtpDatasetPinArgs, AtpDatasetSeedArgs, AtpDatasetUnpinArgs,
+    AtpFuzzAction, AtpFuzzArgs, AtpFuzzMinimizeArgs,
     AtpFuzzSyncArgs, AtpReleaseAction, AtpReleaseArgs, AtpReleaseInstallArgs,
     AtpReleasePublishArgs, AtpWorkflowCoordinator, CliError,
 };
@@ -106,8 +108,7 @@ fn ci_push_then_pull_restores_the_artifact() {
                         retention: "30d".to_string(),
                         compression_level: 6,
                         dedupe: true,
-                        // A scoped push needs an authorized scope, which nothing can
-                        // configure yet (asupersync-ipoyrq).
+                        // The legacy constructor continues to support unscoped content.
                         scope: None,
                     }),
                 },
@@ -407,13 +408,21 @@ fn coordinators_with_different_roots_share_nothing() {
 
 /// Workflows carry their capability scope; scoped push and seed succeed.
 #[test]
-#[ignore = "asupersync-ipoyrq: the coordinator's cache authorizes no scopes, so every scoped push fails closed"]
 fn capability_scoped_workflows() {
     run_test_with_cx(|cx| async move {
         let dir = workdir();
         let artifact = dir.path().join("scoped-artifact");
         write(&artifact, b"scoped content");
-        let mut coordinator = coordinator(&dir);
+        let state = dir.path().join("atp-state");
+        let mut policy = TrustPolicy::local();
+        policy.add_authorized_scope("ci:internal-only".to_string());
+        policy.add_authorized_scope("research:public".to_string());
+        let mut coordinator = AtpWorkflowCoordinator::with_trust_policy(
+            OutputFormat::Json,
+            &state,
+            policy.clone(),
+        )
+        .expect("explicit scoped coordinator");
 
         coordinator
             .handle_ci_command(
@@ -452,6 +461,361 @@ fn capability_scoped_workflows() {
             )
             .await
             .expect("scoped dataset seed");
+
+        // A new coordinator has neither in-memory cache populated. Both reads
+        // must honor the durable grant and return the actual persisted bytes.
+        drop(coordinator);
+        let mut reopened =
+            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy)
+                .expect("reopen authorized local state");
+        let ci_destination = dir.path().join("scoped-ci-out");
+        reopened
+            .handle_ci_command(
+                &cx,
+                AtpCiArgs {
+                    action: AtpCiAction::Pull(AtpCiPullArgs {
+                        build_id: Some("scoped-build".to_string()),
+                        tags: Vec::new(),
+                        destination: ci_destination.clone(),
+                        if_newer: false,
+                        verify: true,
+                    }),
+                },
+            )
+            .await
+            .expect("authorized disk-backed CI pull");
+        assert_eq!(
+            fs::read(ci_destination.join("scoped-artifact")).unwrap(),
+            b"scoped content"
+        );
+
+        reopened
+            .handle_dataset_command(
+                &cx,
+                AtpDatasetArgs {
+                    action: AtpDatasetAction::Unpin(AtpDatasetUnpinArgs {
+                        dataset_id: "scoped-dataset".to_string(),
+                        version: None,
+                    }),
+                },
+            )
+            .await
+            .expect("authorized unpin");
+        reopened
+            .handle_dataset_command(
+                &cx,
+                AtpDatasetArgs {
+                    action: AtpDatasetAction::Pin(AtpDatasetPinArgs {
+                        dataset_id: "scoped-dataset".to_string(),
+                        version: None,
+                    }),
+                },
+            )
+            .await
+            .expect("authorized pin");
+        let index: serde_json::Value = serde_json::from_slice(
+            &fs::read(state.join("datasets/scoped-dataset-default.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(index["grant_scope"], "research:public");
+        assert_eq!(index["pinned"], true);
+
+        let dataset_destination = dir.path().join("scoped-dataset-out");
+        reopened
+            .handle_dataset_command(
+                &cx,
+                AtpDatasetArgs {
+                    action: AtpDatasetAction::Get(AtpDatasetGetArgs {
+                        dataset_id: "scoped-dataset".to_string(),
+                        version: None,
+                        destination: Some(dataset_destination.clone()),
+                        pattern: None,
+                        resume: false,
+                    }),
+                },
+            )
+            .await
+            .expect("authorized disk-backed dataset get");
+        assert_eq!(
+            fs::read(dataset_destination.join("data.csv")).unwrap(),
+            b"1,2,3"
+        );
+
+        // Merely knowing the root and object identifiers grants no access.
+        let mut denied = AtpWorkflowCoordinator::with_root(OutputFormat::Json, &state).unwrap();
+        let denied_destination = dir.path().join("denied-out");
+        assert_eq!(
+            error_type(
+                denied
+                    .handle_ci_command(
+                        &cx,
+                        AtpCiArgs {
+                            action: AtpCiAction::Pull(AtpCiPullArgs {
+                                build_id: Some("scoped-build".to_string()),
+                                tags: Vec::new(),
+                                destination: denied_destination.clone(),
+                                if_newer: false,
+                                verify: true,
+                            }),
+                        },
+                    )
+                    .await
+            ),
+            "trust_policy_error"
+        );
+        assert_eq!(
+            error_type(
+                denied
+                    .handle_dataset_command(
+                        &cx,
+                        AtpDatasetArgs {
+                            action: AtpDatasetAction::Get(AtpDatasetGetArgs {
+                                dataset_id: "scoped-dataset".to_string(),
+                                version: None,
+                                destination: Some(denied_destination.clone()),
+                                pattern: None,
+                                resume: false,
+                            }),
+                        },
+                    )
+                    .await
+            ),
+            "trust_policy_error"
+        );
+        assert!(!denied_destination.exists());
+    });
+}
+
+#[test]
+fn explicit_workflow_policy_denies_ungranted_operations_before_source_reads() {
+    run_test_with_cx(|cx| async move {
+        let dir = workdir();
+        let state = dir.path().join("explicit-state");
+        let mut policy = TrustPolicy::local();
+        policy.add_authorized_scope("team:allowed".to_string());
+        let mut coordinator =
+            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy)
+                .unwrap();
+        let missing = dir.path().join("source-does-not-exist");
+        let ci_error = coordinator
+            .handle_ci_command(
+                &cx,
+                AtpCiArgs {
+                    action: AtpCiAction::Push(AtpCiPushArgs {
+                        paths: vec![missing.clone()],
+                        build_id: "denied".to_string(),
+                        tags: Vec::new(),
+                        retention: "7d".to_string(),
+                        compression_level: 1,
+                        dedupe: false,
+                        scope: Some("team:denied".to_string()),
+                    }),
+                },
+            )
+            .await;
+        assert_eq!(error_type(ci_error), "trust_policy_error");
+
+        // Omitting the dedicated option cannot bypass the scope in metadata.
+        let dataset_error = coordinator
+            .handle_dataset_command(
+                &cx,
+                AtpDatasetArgs {
+                    action: AtpDatasetAction::Seed(AtpDatasetSeedArgs {
+                        path: missing,
+                        dataset_id: "denied".to_string(),
+                        metadata: Some(r#"{"access_scope":"team:denied"}"#.to_string()),
+                        chunk_size: None,
+                        version: None,
+                        replication_factor: 1,
+                        access_scope: None,
+                    }),
+                },
+            )
+            .await;
+        assert_eq!(error_type(dataset_error), "trust_policy_error");
+        assert!(!state.exists(), "denial must precede every persistent write");
+    });
+}
+
+#[test]
+fn scoped_record_grants_survive_downgrade_and_sanitized_alias_attempts() {
+    run_test_with_cx(|cx| async move {
+        let dir = workdir();
+        let state = dir.path().join("protected-state");
+        let source = dir.path().join("artifact");
+        write(&source, b"same content for every alias attempt");
+        let mut policy = TrustPolicy::local();
+        policy.add_authorized_scope("team:allowed".to_string());
+        let mut owner =
+            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy)
+                .unwrap();
+        let ci_push = |build_id: &str, scope: Option<&str>| AtpCiArgs {
+            action: AtpCiAction::Push(AtpCiPushArgs {
+                paths: vec![source.clone()],
+                build_id: build_id.to_string(),
+                tags: Vec::new(),
+                retention: "7d".to_string(),
+                compression_level: 1,
+                dedupe: false,
+                scope: scope.map(str::to_owned),
+            }),
+        };
+        let dataset_seed = |dataset_id: &str, scope: Option<&str>| AtpDatasetArgs {
+            action: AtpDatasetAction::Seed(AtpDatasetSeedArgs {
+                path: source.clone(),
+                dataset_id: dataset_id.to_string(),
+                metadata: None,
+                chunk_size: None,
+                version: None,
+                replication_factor: 1,
+                access_scope: scope.map(str::to_owned),
+            }),
+        };
+        owner
+            .handle_ci_command(&cx, ci_push("team/build", Some("team:allowed")))
+            .await
+            .unwrap();
+        owner
+            .handle_dataset_command(&cx, dataset_seed("team/data", Some("team:allowed")))
+            .await
+            .unwrap();
+
+        let ci_index_dir = state.join("ci/index");
+        let ci_index = ci_index_dir.join(&file_names(&ci_index_dir)[0]);
+        let dataset_index = state.join("datasets/team_data-default.json");
+        let before_ci = fs::read(&ci_index).unwrap();
+        let before_dataset = fs::read(&dataset_index).unwrap();
+
+        // Even an authorized reader cannot accidentally declassify an existing
+        // record by replacing it with a scope-free operation.
+        assert_eq!(
+            error_type(
+                owner
+                    .handle_ci_command(&cx, ci_push("team/build", None))
+                    .await
+            ),
+            "trust_policy_error"
+        );
+        assert_eq!(
+            error_type(
+                owner
+                    .handle_dataset_command(&cx, dataset_seed("team/data", None))
+                    .await
+            ),
+            "trust_policy_error"
+        );
+        assert_eq!(
+            error_type(
+                owner
+                    .handle_ci_command(&cx, ci_push("team_build", Some("team:allowed")))
+                    .await
+            ),
+            "metadata_error"
+        );
+        assert_eq!(
+            error_type(
+                owner
+                    .handle_dataset_command(&cx, dataset_seed("team_data", Some("team:allowed")))
+                    .await
+            ),
+            "metadata_error"
+        );
+
+        let mut default_reader =
+            AtpWorkflowCoordinator::with_root(OutputFormat::Json, &state).unwrap();
+        assert_eq!(
+            error_type(
+                default_reader
+                    .handle_ci_command(&cx, ci_push("team/build", None))
+                    .await
+            ),
+            "trust_policy_error"
+        );
+        assert_eq!(
+            error_type(
+                default_reader
+                    .handle_dataset_command(&cx, dataset_seed("team/data", None))
+                    .await
+            ),
+            "trust_policy_error"
+        );
+        assert_eq!(fs::read(ci_index).unwrap(), before_ci);
+        assert_eq!(fs::read(dataset_index).unwrap(), before_dataset);
+        assert_eq!(file_names(&ci_index_dir).len(), 1);
+        assert_eq!(file_names(&state.join("datasets")).len(), 1);
+    });
+}
+
+#[test]
+fn explicit_policy_enforces_legacy_dataset_scope_and_seals_it_on_pin() {
+    run_test_with_cx(|cx| async move {
+        let dir = workdir();
+        let state = dir.path().join("atp-state");
+        let source = dir.path().join("legacy-source");
+        write(&source.join("data.csv"), b"legacy bytes");
+        let mut legacy = coordinator(&dir);
+        legacy
+            .handle_dataset_command(&cx, seed_args(source, "legacy", Some("1.0")))
+            .await
+            .unwrap();
+        let index_path = state.join("datasets/legacy-1.0.json");
+        let before: serde_json::Value =
+            serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+        assert!(before.get("grant_scope").is_none());
+
+        let mut denied = AtpWorkflowCoordinator::with_trust_policy(
+            OutputFormat::Json,
+            &state,
+            TrustPolicy::local(),
+        )
+        .unwrap();
+        let denied_destination = dir.path().join("denied-legacy");
+        assert_eq!(
+            error_type(
+                denied
+                    .handle_dataset_command(
+                        &cx,
+                        get_args("legacy", denied_destination.clone(), None),
+                    )
+                    .await
+            ),
+            "trust_policy_error"
+        );
+        assert!(!denied_destination.exists());
+
+        let mut policy = TrustPolicy::default();
+        policy.add_authorized_scope("research:ml".to_string());
+        let mut authorized =
+            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy)
+                .unwrap();
+        authorized
+            .handle_dataset_command(
+                &cx,
+                AtpDatasetArgs {
+                    action: AtpDatasetAction::Pin(AtpDatasetPinArgs {
+                        dataset_id: "legacy".to_string(),
+                        version: Some("1.0".to_string()),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        let after: serde_json::Value =
+            serde_json::from_slice(&fs::read(index_path).unwrap()).unwrap();
+        assert_eq!(after["grant_scope"], "research:ml");
+        assert_eq!(after["metadata"], before["metadata"]);
+        assert_eq!(
+            error_type(
+                legacy
+                    .handle_dataset_command(
+                        &cx,
+                        get_args("legacy", denied_destination.clone(), None),
+                    )
+                    .await
+            ),
+            "trust_policy_error"
+        );
+        assert!(!denied_destination.exists());
     });
 }
 

@@ -19,6 +19,53 @@
     }
 
     #[test]
+    fn poll_open_stream_resumes_from_peer_credit_and_carries_application_bytes() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Wake, Waker};
+
+        #[derive(Default)]
+        struct OpenWake(AtomicUsize);
+        impl Wake for OpenWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = test_cx();
+        let mut client = QuicConnection::client(NativeQuicConnectionConfig {
+            max_local_bidi: 0,
+            max_local_uni: 0,
+            ..NativeQuicConnectionConfig::default()
+        });
+        let mut server = QuicConnection::server(NativeQuicConnectionConfig::default());
+        server.inner_mut().set_remote_stream_limits(0, 0);
+        client.record_verified_server_identity();
+        establish_loopback(&cx, &mut client, &mut server).unwrap();
+        let wakes = Arc::new(OpenWake::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = TaskContext::from_waker(&waker);
+        assert!(client.poll_open_bidi_stream(&cx, &mut task_cx).is_pending());
+        assert!(client.poll_open_uni_stream(&cx, &mut task_cx).is_pending());
+        assert_eq!(client.inner().streams().len(), 0);
+
+        server.inner_mut().set_remote_stream_limits(1, 1);
+        assert!(pump_app_data(&cx, &mut server, &mut client, 1200, 10).unwrap() > 0);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
+        assert_eq!(client.inner().streams().len(), 0, "credit does not allocate");
+        assert_eq!(client.poll_open_bidi_stream(&cx, &mut task_cx), Poll::Ready(Ok(StreamId(0))));
+        assert_eq!(client.poll_open_uni_stream(&cx, &mut task_cx), Poll::Ready(Ok(StreamId(2))));
+        client.write_stream(&cx, StreamId(0), Bytes::from_static(b"request"), true).unwrap();
+        client.write_stream(&cx, StreamId(2), Bytes::from_static(b"feedback"), true).unwrap();
+        assert!(pump_app_data(&cx, &mut client, &mut server, 1200, 20).unwrap() > 0);
+        assert_eq!(server.read_stream(&cx, StreamId(0), 32).unwrap().as_ref(), b"request");
+        assert_eq!(server.read_stream(&cx, StreamId(2), 32).unwrap().as_ref(), b"feedback");
+        assert!(server.is_control_eof(StreamId(0)).unwrap());
+        assert!(server.is_control_eof(StreamId(2)).unwrap());
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
     fn loopback_reassembly_backpressure_retains_reliable_frames_for_retry() {
         let cx = test_cx();
         let (mut client, mut server) = established_pair(&cx);
