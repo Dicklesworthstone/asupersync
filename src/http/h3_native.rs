@@ -8,7 +8,7 @@
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::net::quic_core::{decode_varint, encode_varint};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::net::Ipv6Addr;
 
@@ -51,6 +51,11 @@ const QPACK_MAX_DECODED_HEADERS: usize = 1000;
 /// This is a local implementation limit, independent of peer SETTINGS. It
 /// bounds incomplete instruction retention before any literal is decoded.
 pub const QPACK_DEFAULT_MAX_INSTRUCTION_SIZE: usize = 1024 * 1024;
+
+/// Default maximum pending QPACK field sections on one stream.
+pub const QPACK_DEFAULT_MAX_PENDING_SECTIONS: usize = 64;
+/// Default maximum retained QPACK field-section wire bytes on one stream.
+pub const QPACK_DEFAULT_MAX_PENDING_SECTION_BYTES: usize = 1024 * 1024;
 
 /// HTTP/3 errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1302,7 +1307,7 @@ pub struct QpackDecoderFeedbackState {
     known_received_count: u64,
     acknowledged_streams: BTreeSet<u64>,
     cancelled_streams: BTreeSet<u64>,
-    outstanding_references: BTreeMap<u64, Vec<u64>>,
+    outstanding_references: BTreeMap<u64, VecDeque<Vec<u64>>>,
     first_error: Option<H3NativeError>,
 }
 
@@ -1319,7 +1324,9 @@ impl QpackDecoderFeedbackState {
         self.known_received_count
     }
 
-    /// Streams acknowledged by Header Acknowledgement instructions.
+    /// Streams with at least one acknowledged field section.
+    ///
+    /// Acknowledgment history does not prevent subsequent sections on a stream.
     #[must_use]
     pub fn acknowledged_stream_ids(&self) -> &BTreeSet<u64> {
         &self.acknowledged_streams
@@ -1334,7 +1341,11 @@ impl QpackDecoderFeedbackState {
     /// Total dynamic references still protected by live field sections.
     #[must_use]
     pub fn outstanding_reference_count(&self) -> usize {
-        self.outstanding_references.values().map(Vec::len).sum()
+        self.outstanding_references
+            .values()
+            .flat_map(|sections| sections.iter())
+            .map(Vec::len)
+            .sum()
     }
 
     /// Dynamic references still protected by one stream.
@@ -1342,7 +1353,15 @@ impl QpackDecoderFeedbackState {
     pub fn stream_outstanding_reference_count(&self, stream_id: u64) -> usize {
         self.outstanding_references
             .get(&stream_id)
-            .map_or(0, Vec::len)
+            .map_or(0, |sections| sections.iter().map(Vec::len).sum())
+    }
+
+    /// Dynamic field sections awaiting ordered acknowledgment on one stream.
+    #[must_use]
+    pub fn stream_outstanding_section_count(&self, stream_id: u64) -> usize {
+        self.outstanding_references
+            .get(&stream_id)
+            .map_or(0, VecDeque::len)
     }
 
     /// First decoder-feedback error observed by this state machine.
@@ -1354,26 +1373,21 @@ impl QpackDecoderFeedbackState {
     /// Track the dynamic-table references protected by a stream field section.
     ///
     /// The caller supplies absolute insertion IDs referenced by the encoded
-    /// field section. Entries are reference-protected until the stream is
-    /// acknowledged or cancelled.
+    /// field section. Each acknowledgment releases the earliest queued section;
+    /// cancellation releases all sections. Empty references need no ACK slot.
     pub fn track_stream_references(
         &mut self,
         context: &mut QpackContext,
         stream_id: u64,
         references: &[u64],
     ) -> Result<(), H3NativeError> {
-        if self.acknowledged_streams.contains(&stream_id) {
-            return self.fail(H3NativeError::InvalidFrame(
-                "qpack stream already acknowledged",
-            ));
-        }
         if self.cancelled_streams.contains(&stream_id) {
             return self.fail(H3NativeError::InvalidFrame(
                 "qpack stream already cancelled",
             ));
         }
-        if self.outstanding_references.contains_key(&stream_id) {
-            return self.fail(H3NativeError::InvalidFrame("qpack stream already tracked"));
+        if references.is_empty() {
+            return Ok(());
         }
         for insertion_id in references {
             if context
@@ -1391,7 +1405,31 @@ impl QpackDecoderFeedbackState {
             debug_assert!(referenced, "prechecked qpack reference must exist");
         }
         self.outstanding_references
-            .insert(stream_id, references.to_vec());
+            .entry(stream_id)
+            .or_default()
+            .push_back(references.to_vec());
+        Ok(())
+    }
+
+    // Received sections can protect available entries while waiting behind an
+    // earlier undecoded section. Register those protections in ACK order only
+    // when the preceding sections are decoded, without adding references twice.
+    fn register_protected_section(
+        &mut self,
+        stream_id: u64,
+        references: &[u64],
+    ) -> Result<(), H3NativeError> {
+        if self.cancelled_streams.contains(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack stream already cancelled",
+            ));
+        }
+        if !references.is_empty() {
+            self.outstanding_references
+                .entry(stream_id)
+                .or_default()
+                .push_back(references.to_vec());
+        }
         Ok(())
     }
 
@@ -1400,7 +1438,9 @@ impl QpackDecoderFeedbackState {
         context: &mut QpackContext,
         stream_id: u64,
     ) -> Result<(), H3NativeError> {
-        if self.acknowledged_streams.contains(&stream_id) {
+        if !self.outstanding_references.contains_key(&stream_id)
+            && self.acknowledged_streams.contains(&stream_id)
+        {
             return self.fail(H3NativeError::InvalidFrame(
                 "duplicate qpack header acknowledgement",
             ));
@@ -1413,9 +1453,10 @@ impl QpackDecoderFeedbackState {
         let required_insert_count = self
             .outstanding_references
             .get(&stream_id)
+            .and_then(VecDeque::front)
             .and_then(|references| references.iter().max())
             .map_or(0, |insertion_id| insertion_id.saturating_add(1));
-        self.release_stream_references(context, stream_id)?;
+        self.release_stream_references(context, stream_id, false)?;
         // RFC 9204 Section 2.1.4: a section acknowledgment also acknowledges
         // every insertion needed to decode that section.
         self.known_received_count = self.known_received_count.max(required_insert_count);
@@ -1428,17 +1469,9 @@ impl QpackDecoderFeedbackState {
         context: &mut QpackContext,
         stream_id: u64,
     ) -> Result<(), H3NativeError> {
-        if self.cancelled_streams.contains(&stream_id) {
-            return self.fail(H3NativeError::InvalidFrame(
-                "duplicate qpack stream cancellation",
-            ));
+        if self.outstanding_references.contains_key(&stream_id) {
+            self.release_stream_references(context, stream_id, true)?;
         }
-        if self.acknowledged_streams.contains(&stream_id) {
-            return self.fail(H3NativeError::InvalidFrame(
-                "qpack stream cancellation after acknowledgement",
-            ));
-        }
-        self.release_stream_references(context, stream_id)?;
         self.cancelled_streams.insert(stream_id);
         Ok(())
     }
@@ -1447,14 +1480,15 @@ impl QpackDecoderFeedbackState {
         &mut self,
         context: &mut QpackContext,
         stream_id: u64,
+        all_sections: bool,
     ) -> Result<(), H3NativeError> {
-        let Some(references) = self.outstanding_references.get(&stream_id) else {
+        let Some(sections) = self.outstanding_references.get(&stream_id) else {
             return self.fail(H3NativeError::InvalidFrame(
                 "unknown qpack decoder feedback stream",
             ));
         };
-        let references = references.clone();
-        for insertion_id in &references {
+        let count = if all_sections { sections.len() } else { 1 };
+        for insertion_id in sections.iter().take(count).flatten() {
             if context
                 .dynamic_table()
                 .get_by_insertion_id(*insertion_id)
@@ -1465,10 +1499,18 @@ impl QpackDecoderFeedbackState {
                 ));
             }
         }
-        self.outstanding_references.remove(&stream_id);
-        for insertion_id in references {
-            let released = context.dynamic_table_mut().unreference_entry(insertion_id);
-            debug_assert!(released, "prechecked qpack reference must still exist");
+        let sections = self
+            .outstanding_references
+            .get_mut(&stream_id)
+            .expect("prechecked section queue must exist");
+        for references in sections.drain(..count) {
+            for insertion_id in references {
+                let released = context.dynamic_table_mut().unreference_entry(insertion_id);
+                debug_assert!(released, "prechecked qpack reference must still exist");
+            }
+        }
+        if sections.is_empty() {
+            self.outstanding_references.remove(&stream_id);
         }
         Ok(())
     }
@@ -1676,6 +1718,8 @@ pub struct QpackBlockedStreamRecord {
     blocked_reason: Option<&'static str>,
     protected_references: Vec<u64>,
     blocked_field_section: Option<Vec<u8>>,
+    field_section_decoded: bool,
+    references_registered: bool,
     first_failure: Option<H3NativeError>,
 }
 
@@ -1687,6 +1731,7 @@ impl QpackBlockedStreamRecord {
         blocked_reason: Option<&'static str>,
         protected_references: Vec<u64>,
     ) -> Self {
+        let references_registered = !protected_references.is_empty();
         Self {
             stream_id,
             required_insert_count: metadata.required_insert_count(),
@@ -1695,6 +1740,8 @@ impl QpackBlockedStreamRecord {
             blocked_reason,
             protected_references,
             blocked_field_section: None,
+            field_section_decoded: true,
+            references_registered,
             first_failure: None,
         }
     }
@@ -1713,6 +1760,8 @@ impl QpackBlockedStreamRecord {
             blocked_reason: None,
             protected_references: Vec::new(),
             blocked_field_section: None,
+            field_section_decoded: false,
+            references_registered: false,
             first_failure: Some(error),
         }
     }
@@ -1792,7 +1841,9 @@ const MAX_RETAINED_TERMINAL_RECORDS: usize = 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QpackBlockedStreamScheduler {
     settings_blocked_streams: u64,
-    streams: BTreeMap<u64, QpackBlockedStreamRecord>,
+    streams: BTreeMap<u64, VecDeque<QpackBlockedStreamRecord>>,
+    max_pending_sections: usize,
+    max_pending_section_bytes: usize,
     first_failure: Option<H3NativeError>,
 }
 
@@ -1803,6 +1854,8 @@ impl QpackBlockedStreamScheduler {
         Self {
             settings_blocked_streams,
             streams: BTreeMap::new(),
+            max_pending_sections: QPACK_DEFAULT_MAX_PENDING_SECTIONS,
+            max_pending_section_bytes: QPACK_DEFAULT_MAX_PENDING_SECTION_BYTES,
             first_failure: None,
         }
     }
@@ -1811,6 +1864,73 @@ impl QpackBlockedStreamScheduler {
     #[must_use]
     pub fn from_settings(settings: &H3Settings) -> Self {
         Self::new(settings.qpack_blocked_streams.unwrap_or(0))
+    }
+
+    /// Bound pending sections and retained received wire bytes on each stream.
+    ///
+    /// Dynamic sections awaiting ACK count toward the section limit. Ready
+    /// static sections do not. A zero byte limit permits immediately decodable
+    /// sections but forbids buffering behind unavailable inserts or predecessors.
+    pub fn with_pending_section_limits(
+        mut self,
+        max_sections_per_stream: usize,
+        max_retained_bytes_per_stream: usize,
+    ) -> Result<Self, H3NativeError> {
+        self.validate_pending_section_limits(
+            max_sections_per_stream,
+            max_retained_bytes_per_stream,
+        )?;
+        self.max_pending_sections = max_sections_per_stream;
+        self.max_pending_section_bytes = max_retained_bytes_per_stream;
+        Ok(self)
+    }
+
+    fn validate_pending_section_limits(
+        &self,
+        max_sections_per_stream: usize,
+        max_retained_bytes_per_stream: usize,
+    ) -> Result<(), H3NativeError> {
+        if max_sections_per_stream == 0 {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack pending section limit must be non-zero",
+            ));
+        }
+        for stream_id in self.streams.keys() {
+            if self.pending_section_count(*stream_id) > max_sections_per_stream {
+                return Err(H3NativeError::QpackPolicy(
+                    "qpack pending section limit exceeded",
+                ));
+            }
+            if self.retained_field_section_bytes(*stream_id) > max_retained_bytes_per_stream {
+                return Err(H3NativeError::QpackPolicy(
+                    "qpack retained field section byte limit exceeded",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_pending_section_admission(
+        &self,
+        stream_id: u64,
+        pending: bool,
+        retained_bytes: usize,
+    ) -> Result<(), H3NativeError> {
+        if pending && self.pending_section_count(stream_id) >= self.max_pending_sections {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack pending section limit exceeded",
+            ));
+        }
+        if self
+            .retained_field_section_bytes(stream_id)
+            .checked_add(retained_bytes)
+            .is_none_or(|total| total > self.max_pending_section_bytes)
+        {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack retained field section byte limit exceeded",
+            ));
+        }
+        Ok(())
     }
 
     /// Peer SETTINGS_QPACK_BLOCKED_STREAMS limit.
@@ -1824,11 +1944,15 @@ impl QpackBlockedStreamScheduler {
     pub fn blocked_stream_count(&self) -> u64 {
         self.streams
             .values()
-            .filter(|record| record.status == QpackBlockedStreamStatus::Blocked)
+            .filter(|sections| {
+                sections
+                    .iter()
+                    .any(|record| record.status == QpackBlockedStreamStatus::Blocked)
+            })
             .count() as u64
     }
 
-    /// Total per-stream records currently retained; exposed so callers/tests can
+    /// Total streams with records currently retained; exposed so callers/tests can
     /// observe the scheduler's bounded terminal memory.
     #[must_use]
     pub fn tracked_record_count(&self) -> usize {
@@ -1845,7 +1969,7 @@ impl QpackBlockedStreamScheduler {
         let terminal = self
             .streams
             .values()
-            .filter(|record| record.is_reapable_terminal())
+            .filter(|sections| sections.iter().all(QpackBlockedStreamRecord::is_reapable_terminal))
             .count();
         if terminal <= MAX_RETAINED_TERMINAL_RECORDS {
             return;
@@ -1854,7 +1978,9 @@ impl QpackBlockedStreamScheduler {
         let victims: Vec<u64> = self
             .streams
             .iter()
-            .filter(|(_, record)| record.is_reapable_terminal())
+            .filter(|(_, sections)| {
+                sections.iter().all(QpackBlockedStreamRecord::is_reapable_terminal)
+            })
             .take(excess)
             .map(|(stream_id, _)| *stream_id)
             .collect();
@@ -1863,10 +1989,85 @@ impl QpackBlockedStreamScheduler {
         }
     }
 
-    /// Lookup a stream record.
+    /// Oldest retained field-section record on a stream.
+    ///
+    /// This section can be Ready while a later section makes `stream_status`
+    /// Blocked. Ready static sections do not hide pending dynamic sections.
     #[must_use]
     pub fn record(&self, stream_id: u64) -> Option<&QpackBlockedStreamRecord> {
-        self.streams.get(&stream_id)
+        self.streams.get(&stream_id).and_then(VecDeque::front)
+    }
+
+    /// Retained sections in stream order, including sections awaiting inserts.
+    pub fn records(&self, stream_id: u64) -> impl Iterator<Item = &QpackBlockedStreamRecord> {
+        self.streams
+            .get(&stream_id)
+            .into_iter()
+            .flat_map(|sections| sections.iter())
+    }
+
+    /// Pending dynamic ACK slots plus received sections waiting to be decoded in order.
+    #[must_use]
+    pub fn pending_section_count(&self, stream_id: u64) -> usize {
+        self.records(stream_id)
+            .filter(|record| !record.is_reapable_terminal())
+            .count()
+    }
+
+    /// Received wire bytes retained while sections wait for inserts or predecessors.
+    #[must_use]
+    pub fn retained_field_section_bytes(&self, stream_id: u64) -> usize {
+        self.records(stream_id)
+            .filter_map(|record| record.blocked_field_section.as_ref())
+            .map(Vec::len)
+            .sum()
+    }
+
+    /// Aggregate status across all retained sections on a stream.
+    #[must_use]
+    pub fn stream_status(&self, stream_id: u64) -> Option<QpackBlockedStreamStatus> {
+        let sections = self.streams.get(&stream_id)?;
+        if sections.iter().any(|record| record.status == QpackBlockedStreamStatus::Failed) {
+            return Some(QpackBlockedStreamStatus::Failed);
+        }
+        if sections.iter().any(|record| record.status == QpackBlockedStreamStatus::Blocked) {
+            return Some(QpackBlockedStreamStatus::Blocked);
+        }
+        sections.front().map(QpackBlockedStreamRecord::status)
+    }
+
+    fn stream_is_blocked(&self, stream_id: u64) -> bool {
+        self.records(stream_id)
+            .any(|record| record.status == QpackBlockedStreamStatus::Blocked)
+    }
+
+    fn acknowledgement_record(&self, stream_id: u64) -> Option<&QpackBlockedStreamRecord> {
+        self.records(stream_id)
+            .find(|record| record.required_insert_count > 0)
+    }
+
+    fn push_record(&mut self, stream_id: u64, record: QpackBlockedStreamRecord) {
+        self.reap_excess_records();
+        let sections = self.streams.entry(stream_id).or_default();
+        sections.retain(|previous| !previous.is_reapable_terminal());
+        if record.status == QpackBlockedStreamStatus::Ready
+            && record.is_reapable_terminal()
+            && !sections.is_empty()
+        {
+            return;
+        }
+        sections.push_back(record);
+    }
+
+    fn prune_terminal_sections(&mut self, stream_id: u64) {
+        if let Some(sections) = self.streams.get_mut(&stream_id) {
+            if sections.iter().any(|record| !record.is_reapable_terminal()) {
+                sections.retain(|record| !record.is_reapable_terminal());
+            } else if let Some(last) = sections.pop_back() {
+                sections.clear();
+                sections.push_back(last);
+            }
+        }
     }
 
     /// First scheduler-level failure observed.
@@ -1884,29 +2085,29 @@ impl QpackBlockedStreamScheduler {
         stream_id: u64,
         field_section: &[u8],
     ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
-        // Bound the streams map before adding another per-stream record.
-        self.reap_excess_records();
-        if self.streams.contains_key(&stream_id) {
-            return self.fail(H3NativeError::StreamProtocol(
-                "qpack stream already scheduled",
+        if feedback.cancelled_streams.contains(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack stream already cancelled",
             ));
         }
-
         let metadata = match qpack_field_section_metadata(field_section, mode, Some(context)) {
             Ok(metadata) => metadata,
             Err(error) => {
-                self.streams.insert(
+                self.push_record(
                     stream_id,
                     QpackBlockedStreamRecord::failed(stream_id, None, error.clone()),
                 );
                 return self.fail(error);
             }
         };
+        // Local pressure is recoverable: do not alter the queue, references, or
+        // terminal error state before the caller can receive ACKs and retry.
+        self.check_pending_section_admission(stream_id, metadata.required_insert_count() > 0, 0)?;
         let context_opt = (mode == H3QpackMode::DynamicTableAllowed).then_some(&*context);
         let plan = match qpack_decode_field_section_with_context(field_section, mode, context_opt) {
             Ok(plan) => plan,
             Err(error) => {
-                self.streams.insert(
+                self.push_record(
                     stream_id,
                     QpackBlockedStreamRecord::failed(stream_id, Some(&metadata), error.clone()),
                 );
@@ -1917,15 +2118,24 @@ impl QpackBlockedStreamScheduler {
         let will_block = metadata.required_insert_count() > feedback.known_received_count();
         if will_block && self.settings_blocked_streams == 0 {
             let error = H3NativeError::QpackPolicy("qpack blocked stream capacity is zero");
-            self.streams.insert(
+            if self.streams.contains_key(&stream_id) {
+                return Err(error);
+            }
+            self.push_record(
                 stream_id,
                 QpackBlockedStreamRecord::failed(stream_id, Some(&metadata), error.clone()),
             );
             return self.fail(error);
         }
-        if will_block && self.blocked_stream_count() >= self.settings_blocked_streams {
+        if will_block
+            && !self.stream_is_blocked(stream_id)
+            && self.blocked_stream_count() >= self.settings_blocked_streams
+        {
             let error = H3NativeError::QpackPolicy("qpack blocked stream capacity exceeded");
-            self.streams.insert(
+            if self.streams.contains_key(&stream_id) {
+                return Err(error);
+            }
+            self.push_record(
                 stream_id,
                 QpackBlockedStreamRecord::failed(stream_id, Some(&metadata), error.clone()),
             );
@@ -1934,7 +2144,7 @@ impl QpackBlockedStreamScheduler {
 
         if mode == H3QpackMode::DynamicTableAllowed {
             if let Err(error) = feedback.track_stream_references(context, stream_id, &references) {
-                self.streams.insert(
+                self.push_record(
                     stream_id,
                     QpackBlockedStreamRecord::failed(stream_id, Some(&metadata), error.clone()),
                 );
@@ -1949,7 +2159,7 @@ impl QpackBlockedStreamScheduler {
         };
         let blocked_reason =
             will_block.then_some("required insert count exceeds known received count");
-        self.streams.insert(
+        self.push_record(
             stream_id,
             QpackBlockedStreamRecord::new(stream_id, &metadata, status, blocked_reason, references),
         );
@@ -1965,18 +2175,16 @@ impl QpackBlockedStreamScheduler {
         stream_id: u64,
         field_section: &[u8],
     ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
-        // Bound the streams map before adding another per-stream record.
-        self.reap_excess_records();
-        if self.streams.contains_key(&stream_id) {
-            return self.fail(H3NativeError::StreamProtocol(
-                "qpack stream already scheduled",
+        if feedback.cancelled_streams.contains(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack stream already cancelled",
             ));
         }
 
         let metadata = match qpack_field_section_metadata(field_section, mode, Some(context)) {
             Ok(metadata) => metadata,
             Err(error) => {
-                self.streams.insert(
+                self.push_record(
                     stream_id,
                     QpackBlockedStreamRecord::failed(stream_id, None, error.clone()),
                 );
@@ -1984,20 +2192,34 @@ impl QpackBlockedStreamScheduler {
             }
         };
 
-        if mode == H3QpackMode::DynamicTableAllowed
-            && metadata.required_insert_count() > context.dynamic_table().insertion_counter()
-        {
-            if self.settings_blocked_streams == 0 {
+        let needs_inserts = metadata.required_insert_count()
+            > context.dynamic_table().insertion_counter();
+        let follows_undecoded = self
+            .records(stream_id)
+            .any(|record| record.blocked_field_section.is_some());
+        let will_wait = needs_inserts || follows_undecoded;
+        if let Err(error) = self.check_pending_section_admission(
+            stream_id,
+            will_wait || metadata.required_insert_count() > 0,
+            if will_wait { field_section.len() } else { 0 },
+        ) {
+            return self.fail(error);
+        }
+
+        if will_wait {
+            if needs_inserts && self.settings_blocked_streams == 0 {
                 let error = H3NativeError::QpackPolicy("qpack blocked stream capacity is zero");
-                self.streams.insert(
+                self.push_record(
                     stream_id,
                     QpackBlockedStreamRecord::failed(stream_id, Some(&metadata), error.clone()),
                 );
                 return self.fail(error);
             }
-            if self.blocked_stream_count() >= self.settings_blocked_streams {
+            if !self.stream_is_blocked(stream_id)
+                && self.blocked_stream_count() >= self.settings_blocked_streams
+            {
                 let error = H3NativeError::QpackPolicy("qpack blocked stream capacity exceeded");
-                self.streams.insert(
+                self.push_record(
                     stream_id,
                     QpackBlockedStreamRecord::failed(stream_id, Some(&metadata), error.clone()),
                 );
@@ -2008,11 +2230,32 @@ impl QpackBlockedStreamScheduler {
                 stream_id,
                 &metadata,
                 QpackBlockedStreamStatus::Blocked,
-                Some("required insert count exceeds dynamic table state"),
+                Some(if needs_inserts {
+                    "required insert count exceeds dynamic table state"
+                } else {
+                    "earlier field section is not decoded"
+                }),
                 Vec::new(),
             );
+            record.field_section_decoded = false;
+            if !needs_inserts {
+                let context_opt = (mode == H3QpackMode::DynamicTableAllowed).then_some(&*context);
+                let references = match qpack_decode_field_section_with_context(
+                    field_section,
+                    mode,
+                    context_opt,
+                ) {
+                    Ok(plan) => qpack_plan_dynamic_references(&plan),
+                    Err(error) => return self.fail(error),
+                };
+                if let Err(error) = Self::protect_received_references(context, &references) {
+                    return self.fail(error);
+                }
+                record.protected_references = references;
+                record.field_section_decoded = true;
+            }
             record.blocked_field_section = Some(field_section.to_vec());
-            self.streams.insert(stream_id, record);
+            self.push_record(stream_id, record);
             return Ok(QpackBlockedStreamStatus::Blocked);
         }
 
@@ -2020,7 +2263,7 @@ impl QpackBlockedStreamScheduler {
         let plan = match qpack_decode_field_section_with_context(field_section, mode, context_opt) {
             Ok(plan) => plan,
             Err(error) => {
-                self.streams.insert(
+                self.push_record(
                     stream_id,
                     QpackBlockedStreamRecord::failed(stream_id, Some(&metadata), error.clone()),
                 );
@@ -2030,7 +2273,7 @@ impl QpackBlockedStreamScheduler {
         let references = qpack_plan_dynamic_references(&plan);
         if mode == H3QpackMode::DynamicTableAllowed {
             if let Err(error) = feedback.track_stream_references(context, stream_id, &references) {
-                self.streams.insert(
+                self.push_record(
                     stream_id,
                     QpackBlockedStreamRecord::failed(stream_id, Some(&metadata), error.clone()),
                 );
@@ -2038,7 +2281,7 @@ impl QpackBlockedStreamScheduler {
             }
         }
 
-        self.streams.insert(
+        self.push_record(
             stream_id,
             QpackBlockedStreamRecord::new(
                 stream_id,
@@ -2049,6 +2292,24 @@ impl QpackBlockedStreamScheduler {
             ),
         );
         Ok(QpackBlockedStreamStatus::Ready)
+    }
+
+    fn protect_received_references(
+        context: &mut QpackContext,
+        references: &[u64],
+    ) -> Result<(), H3NativeError> {
+        for insertion_id in references {
+            if context.dynamic_table().get_by_insertion_id(*insertion_id).is_none() {
+                return Err(H3NativeError::InvalidFrame(
+                    "unknown dynamic qpack reference for stream",
+                ));
+            }
+        }
+        for insertion_id in references {
+            let protected = context.dynamic_table_mut().reference_entry(*insertion_id);
+            debug_assert!(protected, "prechecked qpack reference must exist");
+        }
+        Ok(())
     }
 
     /// Apply one decoder-stream instruction and update blocked-stream state.
@@ -2067,6 +2328,15 @@ impl QpackBlockedStreamScheduler {
             }
             QpackDecoderInstruction::HeaderAcknowledgement { stream_id } => {
                 let had_record = self.streams.contains_key(stream_id);
+                let was_blocked = self.stream_is_blocked(*stream_id);
+                if self
+                    .acknowledgement_record(*stream_id)
+                    .is_some_and(|record| !record.references_registered)
+                {
+                    return self.fail(H3NativeError::InvalidFrame(
+                        "qpack field section has not been decoded",
+                    ));
+                }
                 if let Err(error) =
                     qpack_apply_decoder_instruction(feedback, context, mode, instruction)
                 {
@@ -2077,11 +2347,43 @@ impl QpackBlockedStreamScheduler {
                     }
                     return Err(error);
                 }
-                self.streams.remove(stream_id);
-                Ok(self.unblock_ready(feedback.known_received_count()))
+                if let Some(sections) = self.streams.get_mut(stream_id) {
+                    if let Some(index) = sections
+                        .iter()
+                        .position(|record| record.required_insert_count > 0)
+                    {
+                        sections.remove(index);
+                    }
+                    if sections.is_empty() {
+                        self.streams.remove(stream_id);
+                    }
+                }
+                self.prune_terminal_sections(*stream_id);
+                let mut unblocked = self.unblock_ready(feedback.known_received_count());
+                if was_blocked
+                    && self.streams.contains_key(stream_id)
+                    && !self.stream_is_blocked(*stream_id)
+                    && !unblocked.contains(stream_id)
+                {
+                    unblocked.push(*stream_id);
+                    unblocked.sort_unstable();
+                }
+                Ok(unblocked)
             }
             QpackDecoderInstruction::StreamCancellation { stream_id } => {
                 let had_record = self.streams.contains_key(stream_id);
+                let unregistered: Vec<u64> = self
+                    .records(*stream_id)
+                    .filter(|record| !record.references_registered)
+                    .flat_map(|record| record.protected_references.iter().copied())
+                    .collect();
+                for insertion_id in &unregistered {
+                    if context.dynamic_table().get_by_insertion_id(*insertion_id).is_none() {
+                        return self.fail(H3NativeError::InvalidFrame(
+                            "tracked dynamic qpack reference missing",
+                        ));
+                    }
+                }
                 if let Err(error) =
                     qpack_apply_decoder_instruction(feedback, context, mode, instruction)
                 {
@@ -2093,6 +2395,10 @@ impl QpackBlockedStreamScheduler {
                     return Err(error);
                 }
                 self.streams.remove(stream_id);
+                for insertion_id in unregistered {
+                    let released = context.dynamic_table_mut().unreference_entry(insertion_id);
+                    debug_assert!(released, "prechecked qpack reference must still exist");
+                }
                 Ok(Vec::new())
             }
         }
@@ -2132,13 +2438,25 @@ impl QpackBlockedStreamScheduler {
 
     fn unblock_ready(&mut self, known_received_count: u64) -> Vec<u64> {
         let mut unblocked = Vec::new();
-        for record in self.streams.values_mut() {
-            if record.status == QpackBlockedStreamStatus::Blocked
-                && record.required_insert_count <= known_received_count
+        for (stream_id, sections) in &mut self.streams {
+            let was_blocked = sections
+                .iter()
+                .any(|record| record.status == QpackBlockedStreamStatus::Blocked);
+            for record in sections.iter_mut() {
+                if record.status == QpackBlockedStreamStatus::Blocked
+                    && record.blocked_field_section.is_none()
+                    && record.required_insert_count <= known_received_count
+                {
+                    record.status = QpackBlockedStreamStatus::Ready;
+                    record.blocked_reason = None;
+                }
+            }
+            if was_blocked
+                && !sections
+                    .iter()
+                    .any(|record| record.status == QpackBlockedStreamStatus::Blocked)
             {
-                record.status = QpackBlockedStreamStatus::Ready;
-                record.blocked_reason = None;
-                unblocked.push(record.stream_id);
+                unblocked.push(*stream_id);
             }
         }
         unblocked
@@ -2150,29 +2468,34 @@ impl QpackBlockedStreamScheduler {
         feedback: &mut QpackDecoderFeedbackState,
         mode: H3QpackMode,
     ) -> Result<Vec<u64>, H3NativeError> {
-        let ready_ids: Vec<u64> = self
+        let insertion_counter = context.dynamic_table().insertion_counter();
+        let ready_sections: Vec<(u64, usize)> = self
             .streams
             .iter()
-            .filter(|(_, record)| {
-                record.status == QpackBlockedStreamStatus::Blocked
-                    && record.blocked_field_section.is_some()
-                    && record.required_insert_count <= context.dynamic_table().insertion_counter()
+            .flat_map(|(stream_id, sections)| {
+                sections.iter().enumerate().filter_map(move |(index, record)| {
+                    (record.blocked_field_section.is_some()
+                        && !record.field_section_decoded
+                        && record.required_insert_count <= insertion_counter)
+                    .then_some((*stream_id, index))
+                })
             })
-            .map(|(stream_id, _)| *stream_id)
             .collect();
 
-        let mut unblocked = Vec::new();
-        for stream_id in ready_ids {
+        // Protect every newly available section, including tails that must wait
+        // for an earlier section before entering the feedback ACK queue.
+        for (stream_id, index) in ready_sections {
             let field_section = self
                 .streams
                 .get(&stream_id)
-                .and_then(|record| record.blocked_field_section.clone())
+                .and_then(|sections| sections.get(index))
+                .and_then(|record| record.blocked_field_section.as_ref())
                 .ok_or(H3NativeError::InvalidFrame(
                     "qpack blocked field section missing",
                 ))?;
             let context_opt = (mode == H3QpackMode::DynamicTableAllowed).then_some(&*context);
             let plan =
-                match qpack_decode_field_section_with_context(&field_section, mode, context_opt) {
+                match qpack_decode_field_section_with_context(field_section, mode, context_opt) {
                     Ok(plan) => plan,
                     Err(error) => {
                         self.record_stream_error(stream_id, &error);
@@ -2180,29 +2503,63 @@ impl QpackBlockedStreamScheduler {
                     }
                 };
             let references = qpack_plan_dynamic_references(&plan);
-            if mode == H3QpackMode::DynamicTableAllowed {
-                if let Err(error) =
-                    feedback.track_stream_references(context, stream_id, &references)
-                {
-                    self.record_stream_error(stream_id, &error);
-                    return Err(error);
+            if let Err(error) = Self::protect_received_references(context, &references) {
+                self.record_stream_error(stream_id, &error);
+                return Err(error);
+            }
+            if let Some(record) = self
+                .streams
+                .get_mut(&stream_id)
+                .and_then(|sections| sections.get_mut(index))
+            {
+                record.protected_references = references;
+                record.field_section_decoded = true;
+            }
+        }
+
+        let stream_ids: Vec<u64> = self.streams.keys().copied().collect();
+        let mut unblocked = Vec::new();
+        for stream_id in stream_ids {
+            let was_blocked = self.stream_is_blocked(stream_id);
+            let mut failure = None;
+            if let Some(sections) = self.streams.get_mut(&stream_id) {
+                for record in sections {
+                    if record.blocked_field_section.is_none() {
+                        continue;
+                    }
+                    if !record.field_section_decoded {
+                        break;
+                    }
+                    if let Err(error) = feedback
+                        .register_protected_section(stream_id, &record.protected_references)
+                    {
+                        record.record_failure(&error);
+                        failure = Some(error);
+                        break;
+                    }
+                    record.references_registered = !record.protected_references.is_empty();
+                    record.blocked_field_section = None;
+                    record.status = QpackBlockedStreamStatus::Ready;
+                    record.blocked_reason = None;
                 }
             }
-            if let Some(record) = self.streams.get_mut(&stream_id) {
-                record.status = QpackBlockedStreamStatus::Ready;
-                record.blocked_reason = None;
-                record.protected_references = references;
-                record.blocked_field_section = None;
+            if let Some(error) = failure {
+                return self.fail(error);
             }
-            unblocked.push(stream_id);
+            self.prune_terminal_sections(stream_id);
+            if was_blocked && !self.stream_is_blocked(stream_id) {
+                unblocked.push(stream_id);
+            }
         }
         Ok(unblocked)
     }
 
     fn record_stream_error(&mut self, stream_id: u64, error: &H3NativeError) {
         self.record_error(error);
-        if let Some(record) = self.streams.get_mut(&stream_id) {
-            record.record_failure(error);
+        if let Some(sections) = self.streams.get_mut(&stream_id) {
+            for record in sections {
+                record.record_failure(error);
+            }
         }
     }
 
@@ -2433,7 +2790,7 @@ fn qpack_apply_directional_decoder_instruction(
     }
     match instruction {
         QpackDecoderInstruction::HeaderAcknowledgement { stream_id }
-            if !scheduler.record(*stream_id).is_some_and(|record| {
+            if !scheduler.acknowledgement_record(*stream_id).is_some_and(|record| {
                 record.required_insert_count() > 0
                     && (!require_ready_ack || record.status() == QpackBlockedStreamStatus::Ready)
             }) =>
@@ -2443,16 +2800,6 @@ fn qpack_apply_directional_decoder_instruction(
             } else {
                 "qpack acknowledgement requires a dynamic field section"
             }))
-        }
-        QpackDecoderInstruction::StreamCancellation { stream_id }
-            if !feedback.outstanding_references.contains_key(stream_id) =>
-        {
-            // Cancellation can race ahead of a section or follow its ACK.
-            // It conveys no information about received insertions.
-            scheduler.streams.remove(stream_id);
-            feedback.acknowledged_streams.remove(stream_id);
-            feedback.cancelled_streams.insert(*stream_id);
-            Ok(Vec::new())
         }
         _ => scheduler.apply_decoder_instruction(feedback, context, mode, instruction),
     }
@@ -2590,6 +2937,34 @@ impl QpackInstructionStreamState {
         qpack_check_instruction_size(self.encoder_pending.bytes.len(), limit)?;
         qpack_check_instruction_size(self.decoder_pending.bytes.len(), limit)?;
         self.max_instruction_size = limit;
+        Ok(self)
+    }
+
+    /// Bound pending field sections and retained receive bytes per stream in both directions.
+    ///
+    /// Outbound admission at the section limit is recoverable after ACK or
+    /// cancellation. Incoming limit violations are terminal connection errors.
+    pub fn with_pending_section_limits(
+        mut self,
+        max_sections_per_stream: usize,
+        max_retained_bytes_per_stream: usize,
+    ) -> Result<Self, H3NativeError> {
+        self.blocked_scheduler.validate_pending_section_limits(
+            max_sections_per_stream,
+            max_retained_bytes_per_stream,
+        )?;
+        if let Some(received) = self.received.as_ref() {
+            received.blocked_scheduler.validate_pending_section_limits(
+                max_sections_per_stream,
+                max_retained_bytes_per_stream,
+            )?;
+        }
+        self.blocked_scheduler.max_pending_sections = max_sections_per_stream;
+        self.blocked_scheduler.max_pending_section_bytes = max_retained_bytes_per_stream;
+        if let Some(received) = self.received.as_mut() {
+            received.blocked_scheduler.max_pending_sections = max_sections_per_stream;
+            received.blocked_scheduler.max_pending_section_bytes = max_retained_bytes_per_stream;
+        }
         Ok(self)
     }
 

@@ -28,7 +28,7 @@
 use asupersync::http::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
     H3PseudoHeaders, H3QpackMode, H3RequestHead, H3Settings, QpackBlockedStreamStatus,
-    QpackInstructionStreamState, qpack_dynamic_entry,
+    QpackEncoderInstruction, QpackInstructionStreamState, qpack_dynamic_entry,
 };
 
 /// (1) RFC 9114 §6.2.1: HEADERS frame is not allowed on the control
@@ -224,6 +224,128 @@ fn rfc9204_peer_settings_must_not_raise_the_local_decoder_capacity() {
     assert_eq!(qpack.received_context().dynamic_table().capacity(), 0);
     assert!(qpack.received_context().dynamic_table().is_empty());
     assert!(qpack.context().dynamic_table().is_empty());
+}
+
+/// Decoder-stream ACKs retire dynamic field sections in order, not an entire
+/// request stream. Static sections create no ACK slot, and an earlier ACK must
+/// not prevent the sender from adding a later section on that stream.
+#[test]
+fn rfc9204_decoder_stream_acknowledges_each_dynamic_section_and_rejects_an_extra_ack() {
+    let mut connection =
+        H3ConnectionState::with_config(H3ConnectionConfig::default().with_dynamic_qpack());
+    connection
+        .on_remote_uni_stream_type(7, 0x03)
+        .expect("remote decoder stream");
+    let peer_settings = H3Settings {
+        qpack_max_table_capacity: Some(256),
+        qpack_blocked_streams: Some(1),
+        ..H3Settings::default()
+    };
+    let mut qpack = QpackInstructionStreamState::from_local_and_peer_settings(
+        H3QpackMode::DynamicTableAllowed,
+        &H3Settings::default(),
+        &peer_settings,
+    )
+    .expect("directional state");
+    qpack
+        .apply_local_encoder_instruction(
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 256 },
+        )
+        .expect("select encoder capacity");
+    for (name, value) in [(":status", "103"), (":status", "200"), ("x-checksum", "done")] {
+        qpack
+            .apply_local_encoder_instruction(&QpackEncoderInstruction::InsertWithoutNameReference {
+                name: name.to_string(),
+                value: value.to_string(),
+            })
+            .expect("insert section field");
+    }
+
+    // RIC 1, static status 103, RIC 2, RIC 3. The dynamic sections use
+    // Base == RIC and relative index zero, so each references its own insert.
+    for section in [
+        [0x02, 0x00, 0x80],
+        [0x00, 0x00, 0xD8],
+        [0x03, 0x00, 0x80],
+        [0x04, 0x00, 0x80],
+    ] {
+        qpack
+            .submit_field_section(0, &section)
+            .expect("informational, final, and trailer sections on one stream");
+    }
+    assert_eq!(
+        qpack.decoder_feedback().stream_outstanding_section_count(0),
+        3
+    );
+    assert_eq!(qpack.blocked_stream_count(), 1);
+
+    // 0x80 is a Section Acknowledgment for request stream zero.
+    let first = connection
+        .feed_qpack_instruction_stream_bytes(&mut qpack, 7, &[0x80])
+        .expect("acknowledge only the first section");
+    assert_eq!(first.instructions_processed(), 1);
+    assert!(first.unblocked_stream_ids().is_empty());
+    assert_eq!(qpack.decoder_feedback().known_received_count(), 1);
+    assert_eq!(
+        qpack.decoder_feedback().stream_outstanding_section_count(0),
+        2
+    );
+    assert_eq!(qpack.decoder_feedback().outstanding_reference_count(), 2);
+    qpack
+        .apply_local_encoder_instruction(
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+        )
+        .expect_err("later sections must remain protected after the first ACK");
+    assert!(qpack.first_failure().is_none());
+
+    assert_eq!(
+        qpack.submit_field_section(0, &[0x02, 0x00, 0x80]),
+        Ok(QpackBlockedStreamStatus::Ready)
+    );
+    assert_eq!(
+        qpack.decoder_feedback().stream_outstanding_section_count(0),
+        3
+    );
+    for (known_received_count, remaining) in [(2, 2), (3, 1), (3, 0)] {
+        let outcome = connection
+            .feed_qpack_instruction_stream_bytes(&mut qpack, 7, &[0x80])
+            .expect("acknowledge the next dynamic section");
+        assert_eq!(outcome.instructions_processed(), 1);
+        assert_eq!(
+            qpack.decoder_feedback().known_received_count(),
+            known_received_count
+        );
+        assert_eq!(
+            qpack.decoder_feedback().stream_outstanding_section_count(0),
+            remaining
+        );
+        assert_eq!(
+            qpack.decoder_feedback().outstanding_reference_count(),
+            remaining
+        );
+        assert_eq!(
+            qpack.blocked_stream_count(),
+            u64::from(known_received_count < 3)
+        );
+        if known_received_count == 3 && remaining == 1 {
+            assert_eq!(outcome.unblocked_stream_ids(), &[0]);
+        } else {
+            assert!(outcome.unblocked_stream_ids().is_empty());
+        }
+    }
+    qpack
+        .apply_local_encoder_instruction(
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+        )
+        .expect("every outstanding section has released its references");
+    assert!(qpack.context().dynamic_table().is_empty());
+    assert!(qpack.received_context().dynamic_table().is_empty());
+
+    let error = connection
+        .feed_qpack_instruction_stream_bytes(&mut qpack, 7, &[0x80])
+        .expect_err("the static section did not create an extra ACK slot");
+    assert!(matches!(&error, H3NativeError::InvalidFrame(_)));
+    assert_eq!(qpack.first_failure(), Some(&error));
 }
 
 /// Declared instruction lengths are checked before retaining their payload,
