@@ -7,9 +7,10 @@
 //! composition usable by both the deterministic lab transport and the native
 //! UDP driver without introducing another executor.
 //!
-//! Outgoing field sections use static QPACK. Opt-in dynamic receive maintains a
-//! bounded table and advertises zero blocked streams. Server push and external
-//! interoperability certification remain outside this adapter's current claim.
+//! Outgoing field sections use static QPACK unless acknowledged-only dynamic
+//! encoding is enabled explicitly. Opt-in dynamic receive maintains a
+//! bounded table and optionally admits bounded blocked streams. Server push and
+//! external interoperability certification remain outside this adapter's claim.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -25,6 +26,7 @@ use crate::net::quic_native::connection::NativeQuicConnectionError;
 use crate::net::quic_native::endpoint_api::QuicConnection;
 use crate::net::quic_native::streams::{
     FlowControlError, QuicStreamError, StreamDirection, StreamId, StreamReadiness, StreamRole,
+    StreamTableError,
 };
 
 #[path = "h3_receive_frame.rs"]
@@ -38,17 +40,24 @@ use request_writer::{
     MAX_REQUEST_WRITERS, RequestWriteOwner, RequestWriterState, RequestWriterWake,
 };
 
+#[path = "h3_send_qpack.rs"]
+mod send_qpack;
+use send_qpack::{NativeH3DynamicSend, PreparedQpackSection};
+
 use super::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
     H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, H3UniStreamType,
-    QpackDecoderInstruction, QpackEncoderInstruction, QpackInstructionStreamState,
+    QpackBlockedStreamStatus, QpackDecoderInstruction, QpackEncoderInstruction,
+    QpackFieldSectionMetadata, QpackInstructionStreamState,
     header_fields_to_request_head,
     header_fields_to_response_head, qpack_decode_decoder_instruction,
     qpack_decode_encoder_instruction, qpack_decode_field_section_with_context,
+    qpack_decode_field_section_with_metadata,
     qpack_encode_decoder_instruction, qpack_encode_request_field_section,
     qpack_encode_response_field_section, qpack_field_section_metadata,
     qpack_encode_trailer_field_section, qpack_plan_field_section_size,
     qpack_plan_to_header_fields, validate_trailer_fields,
+    qpack_static_plan_for_request, qpack_static_plan_for_response,
 };
 
 /// RFC 9114 application error code `H3_REQUEST_CANCELLED`.
@@ -79,8 +88,20 @@ pub const NATIVE_H3_DEFAULT_QPACK_DECODER_CAPACITY: usize = 4096;
 /// Maximum advertised receive-table capacity supported by this session profile.
 pub const NATIVE_H3_MAX_QPACK_DECODER_CAPACITY: usize = 64 * 1024;
 
+/// Maximum local active table capacity for opt-in dynamic QPACK encoding.
+pub const NATIVE_H3_MAX_QPACK_ENCODER_CAPACITY: usize = 64 * 1024;
+
 /// Maximum uncompressed field-section size advertised by dynamic receive sessions.
 pub const NATIVE_H3_MAX_QPACK_FIELD_SECTION_SIZE: u64 = 1024 * 1024;
+
+/// Maximum advertised number of request streams waiting for QPACK insertions.
+pub const NATIVE_H3_MAX_QPACK_BLOCKED_STREAMS: u64 = 16;
+
+/// Aggregate encoded field-section payload retained while awaiting QPACK inserts.
+///
+/// The parser and scheduler each retain a copy until decoding resumes, so this
+/// permits at most twice this many payload bytes plus bounded parser lookahead.
+pub const NATIVE_H3_MAX_QPACK_BLOCKED_SECTION_BYTES: usize = 1024 * 1024;
 
 const NATIVE_H3_MAX_QPACK_FEEDBACK_BYTES: usize = 64 * 1024;
 const NATIVE_H3_DYNAMIC_RECEIVE_CHUNK_BYTES: usize = 64 * 1024;
@@ -440,12 +461,13 @@ pub(crate) enum NativeH3WriteEvent {
     Finished,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct NativeH3PendingWrite {
     wire: Bytes,
     fin: bool,
     event: NativeH3WriteEvent,
     next_phase: NativeH3ResponsePhase,
+    qpack_section: Option<PreparedQpackSection>,
 }
 
 /// Incremental response writer for one established HTTP/3 request stream.
@@ -507,6 +529,7 @@ impl NativeH3ResponseWriter {
             fin: false,
             event: NativeH3WriteEvent::Data { payload_bytes },
             next_phase: NativeH3ResponsePhase::Open,
+            qpack_section: None,
         });
         Ok(())
     }
@@ -535,6 +558,7 @@ impl NativeH3ResponseWriter {
             fin: true,
             event: NativeH3WriteEvent::Trailers,
             next_phase: NativeH3ResponsePhase::Finished,
+            qpack_section: None,
         });
         self.phase = NativeH3ResponsePhase::TerminalPending;
         Ok(())
@@ -551,6 +575,7 @@ impl NativeH3ResponseWriter {
             fin: true,
             event: NativeH3WriteEvent::Finished,
             next_phase: NativeH3ResponsePhase::Finished,
+            qpack_section: None,
         });
         self.phase = NativeH3ResponsePhase::TerminalPending;
         Ok(())
@@ -585,15 +610,20 @@ impl NativeH3ResponseWriter {
             Poll::Pending => return Poll::Pending,
         };
 
-        let pending = self.pending.as_ref().expect("checked above");
+        let pending = self.pending.as_mut().expect("checked above");
         let count = pending
             .wire
             .len()
             .min(usize::try_from(capacity).unwrap_or(usize::MAX));
         let complete = count == pending.wire.len();
         let wire = pending.wire.slice(..count);
-        if let Err(error) = connection.write_stream(cx, self.stream_id, wire, complete && pending.fin) {
-            return Poll::Ready(Err(NativeH3SessionError::Transport(error)));
+        let fin = complete && pending.fin;
+        let written = match &mut pending.qpack_section {
+            Some(section) => section.write(cx, connection, self.stream_id, wire, fin),
+            None => connection.write_stream(cx, self.stream_id, wire, fin).map_err(Into::into),
+        };
+        if let Err(error) = written {
+            return Poll::Ready(Err(error));
         }
         if !complete {
             let pending = self.pending.as_mut().expect("frame retained until complete");
@@ -662,6 +692,20 @@ fn encode_frame(frame: H3Frame) -> Result<Bytes, NativeH3SessionError> {
     Ok(Bytes::from(wire))
 }
 
+fn write_prepared_head(
+    section: &mut Option<PreparedQpackSection>,
+    cx: &Cx,
+    connection: &mut QuicConnection,
+    stream_id: StreamId,
+    wire: Bytes,
+    fin: bool,
+) -> Result<(), NativeH3SessionError> {
+    match section {
+        Some(section) => section.write(cx, connection, stream_id, wire, fin),
+        None => connection.write_stream(cx, stream_id, wire, fin).map_err(Into::into),
+    }
+}
+
 /// Append `body` as DATA frames of at most `max_payload` bytes each. A peer
 /// with the same frame limit, such as this crate's sessions, refuses a larger
 /// DATA frame as a connection error.
@@ -684,10 +728,24 @@ fn encode_body_frames(
 #[derive(Debug, Clone)]
 struct NativeH3DynamicReceive {
     qpack: QpackInstructionStreamState,
+    pending_sections: BTreeMap<StreamId, PendingQpackSection>,
+    pending_section_bytes: usize,
     decoder_stream: Option<StreamId>,
     feedback: VecDeque<u8>,
     prefix_queued: bool,
     first_failure: Option<H3NativeError>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingQpackSection {
+    metadata: QpackFieldSectionMetadata,
+    wire_bytes: usize,
+}
+
+enum DecodedQpackFields {
+    Ready(Vec<(String, String)>),
+    Blocked,
+    Excessive,
 }
 
 impl NativeH3DynamicReceive {
@@ -701,6 +759,8 @@ impl NativeH3DynamicReceive {
         )?;
         Ok(Self {
             qpack,
+            pending_sections: BTreeMap::new(),
+            pending_section_bytes: 0,
             decoder_stream: None,
             feedback: VecDeque::new(),
             prefix_queued: false,
@@ -770,13 +830,11 @@ impl NativeH3DynamicReceive {
         mapping: &H3ConnectionState,
         stream_id: StreamId,
         bytes: &[u8],
-    ) -> Result<(), H3NativeError> {
+    ) -> Result<Vec<u64>, H3NativeError> {
         self.check_live()?;
-        if let Err(error) =
-            mapping.feed_qpack_instruction_stream_bytes(&mut self.qpack, stream_id.0, bytes)
-        {
-            return Err(self.record_error(error));
-        }
+        let outcome = mapping
+            .feed_qpack_instruction_stream_bytes(&mut self.qpack, stream_id.0, bytes)
+            .map_err(|error| self.record_error(error))?;
         let inserted = self.qpack.received_context().dynamic_table().insertion_counter();
         let acknowledged = self.qpack.received_decoder_feedback().known_received_count();
         if inserted > acknowledged {
@@ -786,7 +844,19 @@ impl NativeH3DynamicReceive {
                 increment: inserted - acknowledged,
             })?;
         }
-        Ok(())
+        Ok(outcome.unblocked_stream_ids().to_vec())
+    }
+
+    fn is_blocked(&self, stream_id: StreamId) -> bool {
+        self.pending_sections.contains_key(&stream_id)
+            && self.qpack.received_blocked_scheduler().stream_status(stream_id.0)
+                == Some(QpackBlockedStreamStatus::Blocked)
+    }
+
+    fn forget_pending_section(&mut self, stream_id: StreamId) {
+        if let Some(pending) = self.pending_sections.remove(&stream_id) {
+            self.pending_section_bytes -= pending.wire_bytes;
+        }
     }
 
     fn decode_fields(
@@ -794,7 +864,7 @@ impl NativeH3DynamicReceive {
         stream_id: StreamId,
         field_section: &[u8],
         field_limit: u64,
-    ) -> Result<Option<Vec<(String, String)>>, H3NativeError> {
+    ) -> Result<DecodedQpackFields, H3NativeError> {
         self.check_live()?;
         let result = self.decode_fields_inner(stream_id, field_section, field_limit);
         result.map_err(|error| self.record_error(error))
@@ -805,12 +875,48 @@ impl NativeH3DynamicReceive {
         stream_id: StreamId,
         field_section: &[u8],
         field_limit: u64,
-    ) -> Result<Option<Vec<(String, String)>>, H3NativeError> {
-        let metadata = qpack_field_section_metadata(
-            field_section,
-            H3QpackMode::DynamicTableAllowed,
-            Some(self.qpack.received_context()),
-        )?;
+    ) -> Result<DecodedQpackFields, H3NativeError> {
+        if self.is_blocked(stream_id) {
+            return Ok(DecodedQpackFields::Blocked);
+        }
+        let pending = self.pending_sections.get(&stream_id);
+        let was_pending = pending.is_some();
+        let metadata = match pending {
+            Some(pending) => pending.metadata.clone(),
+            None => qpack_field_section_metadata(
+                field_section,
+                H3QpackMode::DynamicTableAllowed,
+                Some(self.qpack.received_context()),
+            )?,
+        };
+        let needs_inserts = metadata.required_insert_count()
+            > self.qpack.received_context().dynamic_table().insertion_counter();
+        if !was_pending && needs_inserts {
+            // Exceeding our advertised QPACK promise is a connection error,
+            // even if the same section also exceeds local retention policy.
+            // Preflight without copying its wire bytes into the scheduler.
+            let scheduler = self.qpack.received_blocked_scheduler();
+            if scheduler.settings_blocked_streams() == 0 {
+                return Err(H3NativeError::QpackPolicy(
+                    "qpack blocked stream capacity is zero",
+                ));
+            }
+            if scheduler.blocked_stream_count() >= scheduler.settings_blocked_streams() {
+                return Err(H3NativeError::QpackPolicy(
+                    "qpack blocked stream capacity exceeded",
+                ));
+            }
+        }
+        if !was_pending
+            && needs_inserts
+            && field_section.len()
+                > NATIVE_H3_MAX_QPACK_BLOCKED_SECTION_BYTES
+                    .saturating_sub(self.pending_section_bytes)
+        {
+            // This is our local retention policy, not a malformed peer section.
+            // Refuse only this stream before the scheduler acquires ownership.
+            return Ok(DecodedQpackFields::Excessive);
+        }
         let acknowledgement = QpackDecoderInstruction::HeaderAcknowledgement {
             stream_id: stream_id.0,
         };
@@ -820,25 +926,43 @@ impl NativeH3DynamicReceive {
             None
         };
         // Reserve the ACK before the scheduler can add protected references.
-        // With the advertised blocked-stream limit of zero, a future insertion
-        // is a protocol error, so no request payload waits for another stream.
-        self.qpack.submit_received_field_section(stream_id.0, field_section)?;
-        let plan = qpack_decode_field_section_with_context(
+        // A resumed section already owns a scheduler record; submitting it
+        // again would duplicate its references and decoder acknowledgement.
+        if !was_pending
+            && self.qpack.submit_received_field_section(stream_id.0, field_section)?
+                == QpackBlockedStreamStatus::Blocked
+        {
+            self.pending_section_bytes += field_section.len();
+            self.pending_sections.insert(
+                stream_id,
+                PendingQpackSection {
+                    metadata,
+                    wire_bytes: field_section.len(),
+                },
+            );
+            return Ok(DecodedQpackFields::Blocked);
+        }
+        let plan = qpack_decode_field_section_with_metadata(
             field_section,
             H3QpackMode::DynamicTableAllowed,
             Some(self.qpack.received_context()),
+            &metadata,
         )?;
         let size = qpack_plan_field_section_size(&plan, Some(self.qpack.received_context()))?;
         let fields = if size <= field_limit {
-            Some(qpack_plan_to_header_fields(&plan, Some(self.qpack.received_context()))?)
+            DecodedQpackFields::Ready(qpack_plan_to_header_fields(
+                &plan,
+                Some(self.qpack.received_context()),
+            )?)
         } else {
-            None
+            DecodedQpackFields::Excessive
         };
         if let Some(wire) = feedback {
             // QPACK success is independent of HTTP semantic admission. A later
             // message/field-limit rejection queues cancellation after this ACK.
             self.apply_prepared_feedback(&acknowledgement, wire)?;
         }
+        self.forget_pending_section(stream_id);
         Ok(fields)
     }
 
@@ -850,14 +974,18 @@ impl NativeH3DynamicReceive {
         }
         self.queue_feedback(&QpackDecoderInstruction::StreamCancellation {
             stream_id: stream_id.0,
-        })
+        })?;
+        self.forget_pending_section(stream_id);
+        Ok(())
     }
 }
 
 /// HTTP/3 mapping over one established native QUIC connection.
 ///
-/// Outgoing field sections use static QPACK. Dynamic receive is an opt-in
-/// bounded profile that advertises no blocked streams and emits at most one
+/// Outgoing field sections use static QPACK by default. Explicit dynamic send
+/// uses only entries acknowledged by the peer and never blocks peer HEADERS.
+/// Dynamic receive is an opt-in
+/// bounded profile that optionally admits blocked streams and emits at most one
 /// application event per decoding step. Its DATA events can be chunked.
 #[derive(Debug, Clone)]
 pub struct NativeH3Session {
@@ -870,6 +998,7 @@ pub struct NativeH3Session {
     peer_max_field_section_size: Arc<AtomicU64>,
     local_control_stream: Option<StreamId>,
     dynamic_receive: Option<NativeH3DynamicReceive>,
+    dynamic_send: Option<NativeH3DynamicSend>,
     incoming: BTreeMap<StreamId, IncomingStream>,
     terminal_streams: TerminalStreamTracker,
     events: VecDeque<NativeH3Event>,
@@ -905,8 +1034,9 @@ impl NativeH3Session {
     ///
     /// Dynamic QPACK enables receive-table decoding only; outgoing field
     /// sections remain static. Initialization advertises a bounded local table
-    /// and requires a zero blocked-stream limit. It also enables bounded receive
-    /// with 64 KiB DATA chunks unless an explicit receive chunk was configured.
+    /// and a blocked-stream limit from zero through sixteen. It also enables
+    /// bounded receive with 64 KiB DATA chunks unless an explicit receive chunk
+    /// was configured.
     #[must_use]
     pub fn with_config(config: H3ConnectionConfig) -> Self {
         let mut state = H3ConnectionState::with_config(config);
@@ -922,6 +1052,7 @@ impl NativeH3Session {
             peer_max_field_section_size: Arc::new(AtomicU64::new(u64::MAX)),
             local_control_stream: None,
             dynamic_receive: None,
+            dynamic_send: None,
             incoming: BTreeMap::new(),
             terminal_streams: TerminalStreamTracker::default(),
             events: VecDeque::new(),
@@ -933,6 +1064,41 @@ impl NativeH3Session {
             request_writers: BTreeMap::new(),
             request_writer_wake: Arc::new(RequestWriterWake::default()),
         }
+    }
+
+    /// Enable bounded dynamic compression of outgoing initial/final HEADERS.
+    ///
+    /// Configure this before initialization. The active table is at most
+    /// `capacity` (maximum 64 KiB) and the peer's advertised allowance. Until
+    /// peer SETTINGS arrive, all fields remain static/literal. Only `accept`,
+    /// `accept-encoding`, `content-type`, `content-encoding`, `cache-control`
+    /// and `vary` are inserted; all other fields remain outside the table.
+    /// Entries are referenced only after peer acknowledgment, including when
+    /// the peer allows zero blocked streams. Table and reference pressure
+    /// fall back to literals. Trailers remain statically encoded.
+    ///
+    /// Continue driving session events and QUIC while sending: encoder bytes
+    /// wait for stream admission and byte credit, and decoder feedback enables
+    /// reuse. The session retains at most 64 KiB of encoder instruction bytes
+    /// and 4096 prepared or outstanding dynamic field sections. Unsent writers
+    /// release their prepared references when dropped; exposed references stay
+    /// protected until the peer acknowledges or cancels the section.
+    pub fn enable_dynamic_qpack_encoder(
+        &mut self,
+        capacity: NonZeroUsize,
+    ) -> Result<(), NativeH3SessionError> {
+        if self.initialized {
+            return Err(NativeH3SessionError::InvalidState(
+                "dynamic QPACK encoding must be configured before initialization",
+            ));
+        }
+        if capacity.get() > NATIVE_H3_MAX_QPACK_ENCODER_CAPACITY {
+            return Err(NativeH3SessionError::InvalidState(
+                "native QPACK encoder capacity exceeds 64 KiB",
+            ));
+        }
+        self.dynamic_send = Some(NativeH3DynamicSend::new(capacity.get()));
+        Ok(())
     }
 
     /// Enable bounded DATA delivery before initializing this session.
@@ -1037,9 +1203,17 @@ impl NativeH3Session {
     /// Huffman workspace and QUIC reassembly retain their own limits.
     ///
     /// When dynamic QPACK is enabled in the connection config, an omitted
-    /// receive-table capacity defaults to 4096 bytes. Values above 64 KiB and
-    /// positive blocked-stream limits are rejected before opening the control
-    /// stream. The local decoder stream is opened lazily when feedback exists.
+    /// receive-table capacity defaults to 4096 bytes. Values above 64 KiB or
+    /// blocked-stream limits above sixteen are rejected before opening the
+    /// control stream. An omitted blocked-stream limit remains zero. Positive
+    /// limits permit HEADERS to wait for encoder instructions while unrelated
+    /// requests progress. Their aggregate encoded payload is limited to 1 MiB,
+    /// retained once by the parser and once by the scheduler; exceeding this
+    /// local budget refuses only the new stream with `H3_EXCESSIVE_LOAD`.
+    /// Incomplete frames and parser lookahead retain their configured limits.
+    /// The local decoder stream is opened lazily when feedback exists. If the
+    /// peer has not granted another unidirectional stream, feedback remains
+    /// owned until a MAX_STREAMS grant; polling registers a transport wake.
     /// Dynamic receive always uses the bounded per-event receive engine, with
     /// 64 KiB DATA chunks by default; an explicit streaming chunk is preserved.
     /// This prevents a burst of compressed informational HEADERS from expanding
@@ -1068,9 +1242,10 @@ impl NativeH3Session {
         }
 
         let dynamic_receive = if self.config.qpack_mode == H3QpackMode::DynamicTableAllowed {
-            if settings.qpack_blocked_streams.unwrap_or(0) != 0 {
+            let blocked_streams = settings.qpack_blocked_streams.unwrap_or(0);
+            if blocked_streams > NATIVE_H3_MAX_QPACK_BLOCKED_STREAMS {
                 return Err(NativeH3SessionError::InvalidState(
-                    "native dynamic QPACK receive requires zero blocked streams",
+                    "native QPACK blocked stream limit exceeds sixteen",
                 ));
             }
             let capacity = settings.qpack_max_table_capacity
@@ -1081,7 +1256,7 @@ impl NativeH3Session {
                 ));
             }
             settings.qpack_max_table_capacity = Some(capacity);
-            settings.qpack_blocked_streams = Some(0);
+            settings.qpack_blocked_streams = Some(blocked_streams);
             settings.max_field_section_size = Some(
                 settings.max_field_section_size
                     .unwrap_or(NATIVE_H3_MAX_QPACK_FIELD_SECTION_SIZE)
@@ -1153,8 +1328,11 @@ impl NativeH3Session {
         }
 
         self.ensure_peer_request_field_limit(head)?;
+        let (field_section, mut qpack_section) = self.prepare_request_head(
+            StreamId(self.next_local_request_stream_id), head,
+        )?;
         let mut wire = Vec::new();
-        H3Frame::Headers(qpack_encode_request_field_section(head)?).encode(&mut wire)?;
+        H3Frame::Headers(field_section).encode(&mut wire)?;
         encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
         // The request goes out in one write, which takes all of it or none.
         // Refuse one that a new stream's credit cannot take, with the error
@@ -1184,7 +1362,7 @@ impl NativeH3Session {
             ));
         }
         self.next_local_request_stream_id = self.next_local_request_stream_id.saturating_add(4);
-        connection.write_stream(cx, stream_id, Bytes::from(wire), true)?;
+        write_prepared_head(&mut qpack_section, cx, connection, stream_id, Bytes::from(wire), true)?;
         Ok(stream_id)
     }
 
@@ -1246,7 +1424,9 @@ impl NativeH3Session {
             ));
         }
         self.ensure_peer_request_field_limit(head)?;
-        let field_section = qpack_encode_request_field_section(head)?;
+        let (field_section, qpack_section) = self.prepare_request_head(
+            StreamId(self.next_local_request_stream_id), head,
+        )?;
         if field_section.len() > self.config.max_frame_payload_size {
             return Err(NativeH3SessionError::Protocol(
                 H3NativeError::FrameTooLarge {
@@ -1285,6 +1465,7 @@ impl NativeH3Session {
                     } else {
                         NativeH3ResponsePhase::Open
                     },
+                    qpack_section,
                 }),
                 max_frame_payload_size: self.config.max_frame_payload_size,
                 peer_max_field_section_size: Arc::clone(&self.peer_max_field_section_size),
@@ -1344,9 +1525,10 @@ impl NativeH3Session {
         }
 
         self.ensure_peer_response_field_limit(head)?;
+        let (field_section, mut qpack_section) = self.prepare_response_head(stream_id, head)?;
         let mut wire = Vec::new();
-        H3Frame::Headers(qpack_encode_response_field_section(head)?).encode(&mut wire)?;
-        connection.write_stream(cx, stream_id, Bytes::from(wire), false)?;
+        H3Frame::Headers(field_section).encode(&mut wire)?;
+        write_prepared_head(&mut qpack_section, cx, connection, stream_id, Bytes::from(wire), false)?;
         Ok(())
     }
 
@@ -1381,7 +1563,7 @@ impl NativeH3Session {
         }
 
         self.ensure_peer_response_field_limit(head)?;
-        let field_section = qpack_encode_response_field_section(head)?;
+        let (field_section, qpack_section) = self.prepare_response_head(stream_id, head)?;
         if field_section.len() > self.config.max_frame_payload_size {
             return Err(NativeH3SessionError::Protocol(
                 H3NativeError::FrameTooLarge {
@@ -1403,6 +1585,7 @@ impl NativeH3Session {
                 fin: end_stream,
                 event: NativeH3WriteEvent::Head { end_stream },
                 next_phase,
+                qpack_section,
             }),
             max_frame_payload_size: self.config.max_frame_payload_size,
             peer_max_field_section_size: Arc::clone(&self.peer_max_field_section_size),
@@ -1441,11 +1624,34 @@ impl NativeH3Session {
         }
 
         self.ensure_peer_response_field_limit(head)?;
+        let (field_section, mut qpack_section) = self.prepare_response_head(stream_id, head)?;
         let mut wire = Vec::new();
-        H3Frame::Headers(qpack_encode_response_field_section(head)?).encode(&mut wire)?;
+        H3Frame::Headers(field_section).encode(&mut wire)?;
         encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
-        connection.write_stream(cx, stream_id, Bytes::from(wire), true)?;
+        write_prepared_head(&mut qpack_section, cx, connection, stream_id, Bytes::from(wire), true)?;
         Ok(())
+    }
+
+    fn prepare_request_head(
+        &self,
+        stream_id: StreamId,
+        head: &H3RequestHead,
+    ) -> Result<(Vec<u8>, Option<PreparedQpackSection>), NativeH3SessionError> {
+        match &self.dynamic_send {
+            Some(sender) => sender.prepare(stream_id, qpack_static_plan_for_request(head)).map_err(Into::into),
+            None => Ok((qpack_encode_request_field_section(head)?, None)),
+        }
+    }
+
+    fn prepare_response_head(
+        &self,
+        stream_id: StreamId,
+        head: &H3ResponseHead,
+    ) -> Result<(Vec<u8>, Option<PreparedQpackSection>), NativeH3SessionError> {
+        match &self.dynamic_send {
+            Some(sender) => sender.prepare(stream_id, qpack_static_plan_for_response(head)).map_err(Into::into),
+            None => Ok((qpack_encode_response_field_section(head)?, None)),
+        }
     }
 
     /// Queue `H3_REQUEST_CANCELLED` for one request stream.
@@ -1488,7 +1694,7 @@ impl NativeH3Session {
         if let Some(owner) = self.request_writers.get(&stream_id) {
             owner.cancel();
         }
-        self.drive_qpack_feedback(cx, connection, None)?;
+        self.drive_qpack_streams(cx, connection, None)?;
         Ok(())
     }
 
@@ -1538,7 +1744,7 @@ impl NativeH3Session {
         self.reap_request_writers(cx, connection)?;
         if self.streaming_receive.is_some() {
             loop {
-                self.drive_qpack_feedback(cx, connection, None)?;
+                self.drive_qpack_streams(cx, connection, None)?;
                 if let Some(event) = self.events.pop_front() {
                     return Ok(Some(event));
                 }
@@ -1548,7 +1754,7 @@ impl NativeH3Session {
             }
         }
         loop {
-            self.drive_qpack_feedback(cx, connection, None)?;
+            self.drive_qpack_streams(cx, connection, None)?;
             if let Some(event) = self.events.pop_front() {
                 return Ok(Some(event));
             }
@@ -1581,7 +1787,7 @@ impl NativeH3Session {
             return self.poll_streaming_event(cx, connection, task_cx);
         }
         loop {
-            if let Err(error) = self.drive_qpack_feedback(cx, connection, Some(task_cx)) {
+            if let Err(error) = self.drive_qpack_streams(cx, connection, Some(task_cx)) {
                 return Poll::Ready(Err(error));
             }
             if let Some(event) = self.events.pop_front() {
@@ -1617,7 +1823,7 @@ impl NativeH3Session {
         // Large non-DATA frames and streams that only carry ignored bytes
         // must yield as well. Chunk size alone does not bound poll work.
         for _ in 0..STREAMING_POLL_STEPS {
-            if let Err(error) = self.drive_qpack_feedback(cx, connection, Some(task_cx)) {
+            if let Err(error) = self.drive_qpack_streams(cx, connection, Some(task_cx)) {
                 return Poll::Ready(Err(error));
             }
             if let Some(event) = self.events.pop_front() {
@@ -1639,7 +1845,7 @@ impl NativeH3Session {
                 },
             }
         }
-        if let Err(error) = self.drive_qpack_feedback(cx, connection, Some(task_cx)) {
+        if let Err(error) = self.drive_qpack_streams(cx, connection, Some(task_cx)) {
             return Poll::Ready(Err(error));
         }
         if let Some(event) = self.events.pop_front() {
@@ -1649,9 +1855,22 @@ impl NativeH3Session {
         Poll::Pending
     }
 
+    fn drive_qpack_streams(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        mut task_cx: Option<&mut TaskContext<'_>>,
+    ) -> Result<(), NativeH3SessionError> {
+        self.drive_qpack_feedback(cx, connection, task_cx.as_deref_mut())?;
+        if let Some(sender) = &self.dynamic_send {
+            sender.drive(cx, connection, task_cx)?;
+        }
+        Ok(())
+    }
+
     /// Queue at most one retained feedback prefix, independently of application
-    /// events. Async callers register for both transport credit and queue drain;
-    /// synchronous callers leave a blocked suffix owned for their next drive.
+    /// events. Async callers register for stream-count credit, byte credit and
+    /// queue drain; synchronous callers leave feedback owned for their next drive.
     fn drive_qpack_feedback(
         &mut self,
         cx: &Cx,
@@ -1666,11 +1885,26 @@ impl NativeH3Session {
             Some(stream_id) => stream_id,
             None if dynamic.feedback.is_empty() => return Ok(()),
             None => {
-                // Uni-stream exhaustion is explicit: the transport has no
-                // MAX_STREAMS admission waiter to safely turn it into Pending.
-                // Initialization is already committed, so retry never opens a
-                // second control stream and the type prefix stays owned here.
-                let stream_id = connection.open_uni_stream(cx)?;
+                // Retain the stream type and every instruction while waiting
+                // for admission. Pending never consumes a stream ID, and only
+                // a successful open commits this decoder stream's identity.
+                let stream_id = if let Some(task_cx) = task_cx.as_deref_mut() {
+                    match connection.poll_open_uni_stream(cx, task_cx) {
+                        Poll::Ready(result) => result?,
+                        Poll::Pending => return Ok(()),
+                    }
+                } else {
+                    match connection.open_uni_stream(cx) {
+                        Ok(stream_id) => stream_id,
+                        Err(NativeQuicConnectionError::StreamTable(
+                            StreamTableError::StreamLimitExceeded {
+                                direction: StreamDirection::Unidirectional,
+                                limit,
+                            },
+                        )) if limit < (1u64 << 60) => return Ok(()),
+                        Err(error) => return Err(error.into()),
+                    }
+                };
                 dynamic.decoder_stream = Some(stream_id);
                 stream_id
             }
@@ -1808,6 +2042,7 @@ impl NativeH3Session {
         let mut next = None;
         for id in streaming.ready.keys() {
             if streaming.paused.contains(id)
+                || self.dynamic_receive.as_ref().is_some_and(|dynamic| dynamic.is_blocked(*id))
                 || !connection
                     .inner()
                     .streams()
@@ -1844,6 +2079,17 @@ impl NativeH3Session {
         // Consume parser lookahead before reading more transport bytes. This
         // prevents each small frame from adding another read of lookahead.
         self.decode_stream(stream_id)?;
+        if self.dynamic_receive.as_ref().is_some_and(|dynamic| dynamic.is_blocked(stream_id)) {
+            // Keep even an exhausted transport edge: this complete HEADERS
+            // frame and an already received FIN become runnable on encoder
+            // progress, without another packet on the request stream.
+            self.streaming_receive
+                .as_mut()
+                .expect("streaming enabled")
+                .ready
+                .insert(stream_id, readiness);
+            return Ok(true);
+        }
         if self.events.is_empty() && readiness.readable_bytes > 0 {
             let limit = usize::try_from(readiness.readable_bytes)
                 .unwrap_or(usize::MAX)
@@ -1862,6 +2108,14 @@ impl NativeH3Session {
             self.decode_stream(stream_id)?;
         }
         if self.reset_rejected_requests(cx, connection)? {
+            return Ok(true);
+        }
+        if self.dynamic_receive.as_ref().is_some_and(|dynamic| dynamic.is_blocked(stream_id)) {
+            self.streaming_receive
+                .as_mut()
+                .expect("streaming enabled")
+                .ready
+                .insert(stream_id, readiness);
             return Ok(true);
         }
 
@@ -2100,6 +2354,9 @@ impl NativeH3Session {
             if self.streaming_receive.is_some() && !self.events.is_empty() {
                 return Ok(());
             }
+            if self.dynamic_receive.as_ref().is_some_and(|dynamic| dynamic.is_blocked(stream_id)) {
+                return Ok(());
+            }
             let kind = self
                 .incoming
                 .get(&stream_id)
@@ -2141,8 +2398,14 @@ impl NativeH3Session {
                 && let Some(dynamic) = &mut self.dynamic_receive
             {
                 let stream = self.incoming.get_mut(&stream_id).expect("stream checked above");
-                dynamic.feed_instructions(&self.state, stream_id, &stream.bytes)?;
+                let unblocked = dynamic.feed_instructions(&self.state, stream_id, &stream.bytes)?;
                 stream.bytes.clear();
+                if !unblocked.is_empty()
+                    && let Some(streaming) = &mut self.streaming_receive
+                    && let Some(waker) = streaming.waker.take()
+                {
+                    waker.wake();
+                }
                 return Ok(());
             }
             if kind == IncomingStreamKind::QpackEncoder {
@@ -2182,6 +2445,13 @@ impl NativeH3Session {
                 return Ok(());
             }
             if kind == IncomingStreamKind::QpackDecoder {
+                if let Some(sender) = &self.dynamic_send {
+                    let stream = self.incoming.get_mut(&stream_id).expect("stream checked above");
+                    if sender.feed_decoder(&self.state, stream_id, &stream.bytes)? {
+                        stream.bytes.clear();
+                        return Ok(());
+                    }
+                }
                 // A peer whose own table capacity is non-zero sends Stream
                 // Cancellation whenever it resets or abandons a request stream
                 // (RFC 9204 section 4.4.2), whether or not our encoder used the
@@ -2283,20 +2553,39 @@ impl NativeH3Session {
             else {
                 return Ok(());
             };
-            let frame = {
+            let (frame, consumed) = {
                 let stream = self
                     .incoming
-                    .get_mut(&stream_id)
+                    .get(&stream_id)
                     .expect("stream checked above");
                 let (frame, consumed) = H3Frame::decode(&stream.bytes[..frame_len], &self.config)?;
                 debug_assert_eq!(consumed, frame_len);
-                stream.bytes.consume(consumed);
-                frame
+                (frame, consumed)
             };
+            let retain_until_decoded = self.dynamic_receive.is_some()
+                && kind == IncomingStreamKind::RequestResponse
+                && matches!(&frame, H3Frame::Headers(_));
+            if !retain_until_decoded {
+                self.incoming
+                    .get_mut(&stream_id)
+                    .expect("stream checked above")
+                    .bytes
+                    .consume(consumed);
+            }
             self.on_frame(stream_id, kind, frame)?;
             if !self.incoming.contains_key(&stream_id) {
                 // The frame rejected this stream as a malformed request.
                 return Ok(());
+            }
+            if retain_until_decoded {
+                if self.dynamic_receive.as_ref().is_some_and(|dynamic| dynamic.is_blocked(stream_id)) {
+                    return Ok(());
+                }
+                self.incoming
+                    .get_mut(&stream_id)
+                    .expect("stream checked above")
+                    .bytes
+                    .consume(consumed);
             }
         }
     }
@@ -2311,11 +2600,14 @@ impl NativeH3Session {
         let fields = if let Some(dynamic) = &mut self.dynamic_receive {
             let limit = self.max_field_section_size
                 .unwrap_or(NATIVE_H3_MAX_QPACK_FIELD_SECTION_SIZE);
-            let Some(fields) = dynamic.decode_fields(stream_id, field_section, limit)? else {
-                self.reject_request_stream(stream_id, H3_EXCESSIVE_LOAD)?;
-                return Ok(None);
-            };
-            fields
+            match dynamic.decode_fields(stream_id, field_section, limit)? {
+                DecodedQpackFields::Ready(fields) => fields,
+                DecodedQpackFields::Blocked => return Ok(None),
+                DecodedQpackFields::Excessive => {
+                    self.reject_request_stream(stream_id, H3_EXCESSIVE_LOAD)?;
+                    return Ok(None);
+                }
+            }
         } else {
             let plan = qpack_decode_field_section_with_context(
                 field_section,
@@ -2345,6 +2637,9 @@ impl NativeH3Session {
                 self.state.on_uni_stream_frame(stream_id.0, &frame)?;
                 match frame {
                     H3Frame::Settings(settings) => {
+                        if let Some(sender) = &self.dynamic_send {
+                            sender.configure_peer(&settings)?;
+                        }
                         self.peer_max_field_section_size.store(
                             settings.max_field_section_size.unwrap_or(u64::MAX),
                             Ordering::Release,
@@ -2615,6 +2910,9 @@ impl NativeH3Session {
     ) -> Result<(), NativeH3SessionError> {
         if let Some(dynamic) = &self.dynamic_receive {
             dynamic.check_live()?;
+        }
+        if let Some(sender) = &self.dynamic_send {
+            sender.check_live()?;
         }
         self.ensure_transport_role(connection)?;
         if !self.initialized {

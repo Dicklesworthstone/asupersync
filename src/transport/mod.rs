@@ -36,7 +36,7 @@ pub use router::{
     Endpoint, EndpointId, EndpointState, LoadBalanceStrategy, LoadBalancer, RouteKey, RouteResult,
     RoutingEntry, RoutingError, RoutingTable, SymbolDispatcher, SymbolRouter,
 };
-pub use sink::{SymbolSink, SymbolSinkExt};
+pub use sink::{MultipathPathStats, MultipathPendingSymbol, MultipathSink, SymbolSink, SymbolSinkExt};
 pub use stream::{SymbolStream, SymbolStreamExt};
 
 use crate::security::authenticated::AuthenticatedSymbol;

@@ -5,6 +5,7 @@
 //! These tests demonstrate actual ATP usage for real Asupersync artifacts
 //! and validate that dogfooding produces proper proof and replay artifacts.
 
+use asupersync::atp::cache::trust::TrustPolicy;
 use asupersync::cli::atp_workflows::AtpWorkflowCoordinator;
 use asupersync::cli::output::OutputFormat;
 use asupersync::cli::{
@@ -65,7 +66,15 @@ impl DogfoodTestConfig {
         let artifacts_dir = workspace_dir.join("artifacts");
         fs::create_dir_all(&artifacts_dir)?;
 
-        let coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json)?;
+        let mut policy = TrustPolicy::local();
+        for scope in ["dogfood:build", "dogfood:datasets", "dogfood:test", "dogfood:e2e"] {
+            policy.add_authorized_scope(scope.to_string());
+        }
+        let coordinator = AtpWorkflowCoordinator::with_trust_policy(
+            OutputFormat::Json,
+            workspace_dir.join(".asupersync").join("atp"),
+            policy,
+        )?;
 
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let ordinal = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);

@@ -74,6 +74,541 @@
     // URL parsing
     // =========================================================================
 
+    #[cfg(not(target_arch = "wasm32"))]
+    mod pooled_streaming {
+        use super::*;
+        use crate::bytes::Buf;
+        use crate::http::body::HeaderName;
+        use crate::runtime::RuntimeBuilder;
+        use crate::types::{Budget, RegionId, TaskId};
+        use std::io::{Read, Write as StdWrite};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+
+        fn listener() -> (TcpListener, String) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            (listener, url)
+        }
+
+        fn accept(listener: &TcpListener) -> std::net::TcpStream {
+            let end = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+                        return stream;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < end, "client did not connect");
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            }
+        }
+
+        fn request_head(stream: &mut std::net::TcpStream) -> String {
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {
+                assert!(bytes.len() < 16 * 1024);
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).unwrap(), 1, "request was truncated");
+                bytes.push(byte[0]);
+            }
+            String::from_utf8(bytes).unwrap()
+        }
+
+        fn expect_closed(stream: &mut std::net::TcpStream) {
+            let mut byte = [0];
+            match stream.read(&mut byte) {
+                Ok(0) => {}
+                Err(error) if matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe) => {}
+                result => panic!("abandoned response socket must close: {result:?}"),
+            }
+        }
+
+        async fn next(body: &mut PooledClientIncomingBody) -> Option<Result<Frame<crate::bytes::BytesCursor>, ClientError>> {
+            poll_fn(|task| Pin::new(&mut *body).poll_frame(task)).await
+        }
+
+        async fn drain(body: &mut PooledClientIncomingBody) -> Result<Vec<u8>, ClientError> {
+            let mut bytes = Vec::new();
+            while let Some(frame) = next(body).await {
+                if let Frame::Data(data) = frame? {
+                    bytes.extend_from_slice(data.chunk());
+                }
+            }
+            Ok(bytes)
+        }
+
+        fn runtime(multithread: bool) -> crate::runtime::Runtime {
+            if multithread {
+                RuntimeBuilder::new()
+                    .worker_threads(2)
+                    .with_sharded_state(true)
+                    .build()
+                    .unwrap()
+            } else {
+                RuntimeBuilder::current_thread().build().unwrap()
+            }
+        }
+
+        #[test]
+        fn pooled_streaming_holds_admission_until_final_frame_and_reuses_the_socket() {
+            for multithread in [false, true] {
+                let (listener, url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut socket = accept(&listener);
+                    assert!(request_head(&mut socket).starts_with("GET /first "));
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").unwrap();
+                    assert!(request_head(&mut socket).starts_with("GET /second "));
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\nx-end: complete\r\n\r\n")
+                        .unwrap();
+                    assert!(request_head(&mut socket).starts_with("GET /buffered "));
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+                    // One accepted TCP connection served every request.
+                    assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                });
+                let runtime = runtime(multithread);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let client = HttpClient::builder()
+                    .max_connections_per_host(1)
+                    .max_total_connections(1)
+                    .pool_wait_timeout(Duration::from_secs(3))
+                    .request_timeout(Duration::from_secs(4))
+                    .build();
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let mut first = client.request_streaming_pooled(&cx, Method::Get, &format!("{url}/first"), Vec::new(), Vec::new()).await.unwrap();
+                    assert_eq!(client.pool_stats().total_connections, 1);
+                    assert_eq!(client.pool_stats().idle_connections, 0);
+                    let second_url = format!("{url}/second");
+                    let mut second = Box::pin(client.request_streaming_pooled(&cx, Method::Get, &second_url, Vec::new(), Vec::new()));
+                    poll_fn(|task| {
+                        assert!(second.as_mut().poll(task).is_pending());
+                        assert_eq!(client.pool_released.waiter_count(), 1, "second request actually parked at admission");
+                        Poll::Ready(())
+                    }).await;
+                    let mut first_bytes = Vec::new();
+                    while !first.body.is_end_stream() {
+                        let Frame::Data(data) = next(&mut first.body).await.unwrap().unwrap() else {
+                            panic!("fixed response must yield DATA");
+                        };
+                        first_bytes.extend_from_slice(data.chunk());
+                        if !first.body.is_end_stream() {
+                            assert_eq!(client.pool_stats().idle_connections, 0);
+                        }
+                    }
+                    assert_eq!(first_bytes, b"hello");
+                    assert_eq!(client.pool_stats().idle_connections, 1, "last DATA releases before an EOF poll");
+                    assert!(next(&mut first.body).await.is_none());
+                    drop(first);
+
+                    let mut second = second.await.unwrap();
+                    let mut bytes = Vec::new();
+                    let mut trailers = false;
+                    while let Some(frame) = next(&mut second.body).await {
+                        match frame.unwrap() {
+                            Frame::Data(data) => bytes.extend_from_slice(data.chunk()),
+                            Frame::Trailers(fields) => {
+                                assert_eq!(fields.get(&HeaderName::from_static("x-end")).unwrap().to_str().unwrap(), "complete");
+                                assert_eq!(client.pool_stats().idle_connections, 1, "trailer delivery releases without a final poll");
+                                trailers = true;
+                            }
+                        }
+                    }
+                    assert_eq!(bytes, b"abcde");
+                    assert!(trailers);
+                    drop(second);
+                    assert_eq!(client.send_get(&cx, &format!("{url}/buffered")).await.unwrap().body, b"ok");
+                    assert_eq!(client.pool_stats().total_connections, 1);
+                    assert_eq!(client.pool_released.waiter_count(), 0);
+                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                });
+                drop(client);
+                peer.join().unwrap();
+                assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[test]
+        fn pooled_streaming_drop_and_parked_owner_cancel_release_waiting_requests() {
+            for multithread in [false, true] {
+                for cancel in [false, true] {
+                    let (listener, url) = listener();
+                    let peer = std::thread::spawn(move || {
+                        let mut abandoned = accept(&listener);
+                        request_head(&mut abandoned);
+                        abandoned.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n").unwrap();
+                        expect_closed(&mut abandoned);
+                        let mut replacement = accept(&listener);
+                        assert!(request_head(&mut replacement).starts_with("GET /next "));
+                        replacement.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                    });
+                    let runtime = runtime(multithread);
+                    let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+                    // The explicit body owner differs from the polling task's
+                    // ambient context; only its cancellation may stop the body.
+                    let owner = Cx::for_testing();
+                    let client = HttpClient::builder()
+                        .max_connections_per_host(1)
+                        .max_total_connections(1)
+                        .pool_wait_timeout(Duration::from_secs(3))
+                        .request_timeout(Duration::from_secs(4))
+                        .build();
+                    runtime.block_on_with_cx(driver.clone(), async {
+                        let mut first = client.request_streaming_pooled(&owner, Method::Get, &url, Vec::new(), Vec::new()).await.unwrap();
+                        let next_url = format!("{url}/next");
+                        let mut waiting = Box::pin(client.request_streaming_pooled(&driver, Method::Get, &next_url, Vec::new(), Vec::new()));
+                        poll_fn(|task| {
+                            assert!(waiting.as_mut().poll(task).is_pending());
+                            assert_eq!(client.pool_released.waiter_count(), 1);
+                            Poll::Ready(())
+                        }).await;
+                        if cancel {
+                            let (parked, witness) = std::sync::mpsc::channel();
+                            let cancel_owner = owner.clone();
+                            let canceller = std::thread::spawn(move || {
+                                witness.recv_timeout(Duration::from_secs(3)).unwrap();
+                                cancel_owner.cancel_with(crate::types::CancelKind::User, Some("parked pooled body"));
+                            });
+                            let started = Instant::now();
+                            let mut parked = Some(parked);
+                            let result = poll_fn(|task| {
+                                let result = Pin::new(&mut first.body).poll_frame(task);
+                                if result.is_pending() && let Some(witness) = parked.take() {
+                                    assert!(!owner.inner.read().cancel_waker_registrations.is_empty());
+                                    witness.send(()).unwrap();
+                                }
+                                result
+                            }).await;
+                            canceller.join().unwrap();
+                            assert!(matches!(result, Some(Err(ClientError::Cancelled))), "{result:?}");
+                            assert!(started.elapsed() < Duration::from_secs(2), "cancellation must wake before the request timer or peer timeout");
+                            assert!(first.body.is_end_stream());
+                            assert!(next(&mut first.body).await.is_none());
+                        }
+                        drop(first);
+                        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                        let mut replacement = waiting.await.unwrap();
+                        assert_eq!(drain(&mut replacement.body).await.unwrap(), b"ok");
+                        assert_eq!(client.pool_stats().total_connections, 0);
+                        assert_eq!(client.pool_released.waiter_count(), 0);
+                    });
+                    peer.join().unwrap();
+                    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+                }
+            }
+        }
+
+        #[test]
+        fn pooled_streaming_empty_responses_release_without_polling() {
+            let (listener, url) = listener();
+            let peer = std::thread::spawn(move || {
+                let mut socket = accept(&listener);
+                for response in [
+                    &b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n"[..],
+                    &b"HTTP/1.1 204 No Content\r\n\r\n"[..],
+                    &b"HTTP/1.1 304 Not Modified\r\n\r\n"[..],
+                    &b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"[..],
+                ] {
+                    request_head(&mut socket);
+                    socket.write_all(response).unwrap();
+                }
+            });
+            let runtime = runtime(false);
+            let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+            let client = HttpClient::builder().max_connections_per_host(1).request_timeout(Duration::from_secs(4)).build();
+            runtime.block_on_with_cx(cx.clone(), async {
+                for method in [Method::Head, Method::Get, Method::Get, Method::Get] {
+                    let response = client.request_streaming_pooled(&cx, method, &url, Vec::new(), Vec::new()).await.unwrap();
+                    assert!(response.body.is_end_stream());
+                    assert_eq!(client.pool_stats().idle_connections, 1);
+                    drop(response);
+                    assert_eq!(client.pool_stats().idle_connections, 1, "drop must not retire a reused lease twice");
+                }
+            });
+            peer.join().unwrap();
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+
+        #[test]
+        fn pooled_streaming_redirects_release_admission_and_keep_credentials_at_origin() {
+            let (origin_listener, origin_url) = listener();
+            let (other_listener, other_url) = listener();
+            let back = format!("{origin_url}/back");
+            let other = std::thread::spawn(move || {
+                let mut socket = accept(&other_listener);
+                let request = request_head(&mut socket).to_ascii_lowercase();
+                assert!(request.starts_with("get /other "));
+                assert!(!request.contains("authorization:"));
+                assert!(!request.contains("cookie:"));
+                write!(socket, "HTTP/1.1 302 Found\r\nLocation: {back}\r\nContent-Length: 0\r\n\r\n").unwrap();
+            });
+            let origin = std::thread::spawn(move || {
+                let mut socket = accept(&origin_listener);
+                let first = request_head(&mut socket).to_ascii_lowercase();
+                assert!(first.starts_with("get /start "));
+                assert!(first.contains("authorization: bearer retained-secret"));
+                assert!(first.contains("cookie: session=origin"));
+                write!(socket, "HTTP/1.1 302 Found\r\nLocation: {other_url}/other\r\nContent-Length: 0\r\n\r\n").unwrap();
+                // The return hop reuses the original connection and restores
+                // only its default credentials, despite an intervening origin.
+                let last = request_head(&mut socket).to_ascii_lowercase();
+                assert!(last.starts_with("get /back "));
+                assert!(last.contains("authorization: bearer retained-secret"));
+                assert!(last.contains("cookie: session=origin"));
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone").unwrap();
+            });
+            let runtime = runtime(false);
+            let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+            let client = HttpClient::builder()
+                .max_connections_per_host(1)
+                .max_total_connections(2)
+                .request_timeout(Duration::from_secs(4))
+                .default_header("Authorization", "Bearer retained-secret")
+                .default_header("Cookie", "session=origin")
+                .build();
+            runtime.block_on_with_cx(cx.clone(), async {
+                let mut response = client
+                    .request_streaming_pooled(
+                        &cx,
+                        Method::Get,
+                        &format!("{origin_url}/start"),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.head.status, 200);
+                assert_eq!(drain(&mut response.body).await.unwrap(), b"done");
+                assert_eq!(client.pool_stats().connections_created, 2);
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            });
+            drop(client);
+            origin.join().unwrap();
+            other.join().unwrap();
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+
+        #[test]
+        fn pooled_streaming_errors_and_close_delimiting_never_return_a_connection() {
+            for (method, wire, expected_error, expected_bytes) in [
+                (Method::Get, &b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc"[..], true, &b""[..]),
+                (Method::Get, &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nabX\n"[..], true, &b""[..]),
+                (Method::Get, &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"[..], false, &b"ok"[..]),
+                (Method::Get, &b"HTTP/1.1 200 OK\r\n\r\nok"[..], false, &b"ok"[..]),
+                (Method::Get, &b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: other\r\n\r\nUPGRADED"[..], false, &b""[..]),
+                (Method::Connect, &b"HTTP/1.1 200 Connection Established\r\nContent-Length: 2\r\n\r\nok"[..], false, &b"ok"[..]),
+            ] {
+                let (listener, url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut socket = accept(&listener);
+                    request_head(&mut socket);
+                    socket.write_all(wire).unwrap();
+                });
+                let runtime = runtime(false);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let client = HttpClient::builder().request_timeout(Duration::from_secs(4)).build();
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let mut response = client.request_streaming_pooled(&cx, method, &url, Vec::new(), Vec::new()).await.unwrap();
+                    let result = drain(&mut response.body).await;
+                    if expected_error {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(ClientError::HttpError(
+                                    crate::http::h1::codec::HttpError::BadContentLength
+                                        | crate::http::h1::codec::HttpError::BadChunkedEncoding
+                                ))
+                            ),
+                            "{result:?}"
+                        );
+                    } else {
+                        assert_eq!(result.unwrap(), expected_bytes);
+                    }
+                    assert!(response.body.is_end_stream());
+                    assert!(next(&mut response.body).await.is_none());
+                    drop(response);
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                });
+                peer.join().unwrap();
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn pooled_streaming_driverless_owner_ignores_a_foreign_ambient_clock() {
+            let now = crate::time::wall_now();
+            let owner = Cx::for_request_with_budget(Budget::INFINITE.with_deadline(now + Duration::from_secs(30)));
+            let foreign_clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_secs(1_000_000)));
+            let foreign_timer = crate::time::TimerDriverHandle::with_virtual_clock(foreign_clock);
+            let foreign = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(3, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(foreign_timer.clone()),
+                None,
+            );
+            let _ambient = Cx::set_current(Some(foreign));
+            let deadline = PooledStreamDeadline::capture(&owner, Some(Duration::from_secs(60)));
+            let mut retained = PooledStreamOwner::new(owner.clone(), &deadline);
+            let wakes = Arc::new(WakeCount::default());
+            let waker = std::task::Waker::from(Arc::clone(&wakes));
+            let mut task = Context::from_waker(&waker);
+            assert!(retained.poll_stop(&mut task).is_none(), "foreign virtual time cannot expire the owner's real deadline");
+            assert_eq!(foreign_timer.process_timers(), 0);
+            let before = wakes.0.load(Ordering::SeqCst);
+            owner.cancel_with(crate::types::CancelKind::User, Some("explicit owner"));
+            assert!(wakes.0.load(Ordering::SeqCst) > before);
+            assert!(matches!(retained.poll_stop(&mut task), Some(ClientError::Cancelled)));
+            retained.retire();
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+
+        #[test]
+        fn pooled_streaming_body_keeps_the_original_deadline_after_data() {
+            let (listener, url) = listener();
+            let peer = std::thread::spawn(move || {
+                let mut socket = accept(&listener);
+                request_head(&mut socket);
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na").unwrap();
+                expect_closed(&mut socket);
+            });
+            let runtime = runtime(false);
+            let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+            let clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_nanos(100)));
+            let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(4, 0),
+                Budget::INFINITE.with_deadline(Time::from_nanos(110)),
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let client = HttpClient::builder().build();
+            runtime.block_on_with_cx(driver.clone(), async {
+                let mut response = client.request_streaming_pooled(&owner, Method::Get, &url, Vec::new(), Vec::new()).await.unwrap();
+                let Frame::Data(data) = next(&mut response.body).await.unwrap().unwrap() else { panic!("first byte"); };
+                assert_eq!(data.chunk(), b"a");
+                clock.advance(9);
+                let wakes = Arc::new(WakeCount::default());
+                let waker = std::task::Waker::from(Arc::clone(&wakes));
+                let mut task = Context::from_waker(&waker);
+                assert!(Pin::new(&mut response.body).poll_frame(&mut task).is_pending());
+                assert_eq!(timer.process_timers(), 0);
+                let before = wakes.0.load(Ordering::SeqCst);
+                clock.advance(1);
+                assert!(timer.process_timers() > 0);
+                assert!(wakes.0.load(Ordering::SeqCst) > before);
+                assert!(matches!(Pin::new(&mut response.body).poll_frame(&mut task), Poll::Ready(Some(Err(ClientError::DeadlineExceeded)))));
+                assert_eq!(client.pool_stats().total_connections, 0);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            });
+            peer.join().unwrap();
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+
+        #[test]
+        fn pooled_streaming_admission_timeout_uses_the_owner_clock() {
+            let (listener, url) = listener();
+            let peer = std::thread::spawn(move || {
+                let mut socket = accept(&listener);
+                request_head(&mut socket);
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n").unwrap();
+                expect_closed(&mut socket);
+            });
+            let runtime = runtime(false);
+            let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+            let clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_nanos(100)));
+            let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(5, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let foreign_clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_secs(1_000_000)));
+            let foreign_timer = crate::time::TimerDriverHandle::with_virtual_clock(foreign_clock);
+            let foreign = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(6, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(foreign_timer.clone()),
+                None,
+            );
+            let client = HttpClient::builder()
+                .max_connections_per_host(1)
+                .max_total_connections(1)
+                .pool_wait_timeout(Duration::from_nanos(10))
+                .build();
+            runtime.block_on_with_cx(driver.clone(), async {
+                let first = client.request_streaming_pooled(&driver, Method::Get, &url, Vec::new(), Vec::new()).await.unwrap();
+                {
+                    let _ambient = Cx::set_current(Some(foreign));
+                    let mut waiting = Box::pin(client.request_streaming_pooled(&owner, Method::Get, &url, Vec::new(), Vec::new()));
+                    let wakes = Arc::new(WakeCount::default());
+                    let waker = std::task::Waker::from(Arc::clone(&wakes));
+                    let mut task = Context::from_waker(&waker);
+                    assert!(waiting.as_mut().poll(&mut task).is_pending());
+                    assert_eq!(client.pool_released.waiter_count(), 1);
+                    assert_eq!(foreign_timer.process_timers(), 0, "no timer may bind the foreign clock");
+                    clock.advance(9);
+                    assert_eq!(timer.process_timers(), 0);
+                    assert!(waiting.as_mut().poll(&mut task).is_pending());
+                    let before = wakes.0.load(Ordering::SeqCst);
+                    clock.advance(1);
+                    assert!(timer.process_timers() > 0);
+                    assert!(wakes.0.load(Ordering::SeqCst) > before);
+                    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Err(ClientError::PoolExhausted { .. }))));
+                    drop(waiting);
+                }
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(client.pool_released.waiter_count(), 0);
+                assert_eq!(client.pool_stats().total_connections, 1, "timeout cannot retire another body owner's slot");
+                drop(first);
+                assert_eq!(client.pool_stats().total_connections, 0);
+            });
+            peer.join().unwrap();
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+
+        #[test]
+        fn pooled_streaming_refuses_proxy_configuration_before_admission() {
+            let client = HttpClient::builder().proxy("http://127.0.0.1:9").build();
+            let result = block_on(client.request_streaming_pooled(&Cx::for_testing(), Method::Get, "http://127.0.0.1:9", Vec::new(), Vec::new()));
+            assert!(matches!(result, Err(ClientError::ProxyError(_))));
+            assert_eq!(client.pool_stats().total_connections, 0);
+        }
+    }
+
     #[test]
     fn parse_http_url() {
         let url = ParsedUrl::parse("http://example.com/path").unwrap();

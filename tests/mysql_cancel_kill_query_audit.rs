@@ -38,6 +38,8 @@ enum Operation {
     PreparedCollect,
     PreparedExecute,
     PreparedRows,
+    PreparedStreamHeader,
+    PreparedStreamRows,
     Ping,
 }
 
@@ -85,6 +87,18 @@ fn mysql_streaming_drop_and_cancel_retain_kill_ownership() {
 }
 
 #[test]
+fn mysql_prepared_streaming_drop_and_cancel_retain_kill_ownership() {
+    let _serial = SERIAL.lock().unwrap();
+    for workers in [0, 2] {
+        for cancel in [false, true] {
+            for operation in [Operation::PreparedStreamHeader, Operation::PreparedStreamRows] {
+                cancellation_case(workers, cancel, operation, KillPeer::Replies);
+            }
+        }
+    }
+}
+
+#[test]
 fn mysql_distinct_caller_and_owner_cancel_parked_protocol_exchanges() {
     let _serial = SERIAL.lock().unwrap();
     // Zero denotes the actual current-thread runtime, driven by block_on.
@@ -101,6 +115,8 @@ fn mysql_distinct_caller_and_owner_cancel_parked_protocol_exchanges() {
                 Operation::PreparedCollect,
                 Operation::PreparedExecute,
                 Operation::PreparedRows,
+                Operation::PreparedStreamHeader,
+                Operation::PreparedStreamRows,
                 Operation::Ping,
             ] {
                 cancellation_case_with_source(workers, true, operation, KillPeer::Replies, source);
@@ -282,7 +298,11 @@ fn cancellation_case_with_source(
         authenticate(&mut main, 42, true);
         if matches!(
             operation,
-            Operation::PreparedCollect | Operation::PreparedExecute | Operation::PreparedRows
+            Operation::PreparedCollect
+                | Operation::PreparedExecute
+                | Operation::PreparedRows
+                | Operation::PreparedStreamHeader
+                | Operation::PreparedStreamRows
         ) {
             assert_eq!(
                 read_packet(&mut main),
@@ -301,7 +321,10 @@ fn cancellation_case_with_source(
             };
             assert_eq!(read_packet(&mut main), (0, expected));
         }
-        if matches!(operation, Operation::StreamRows | Operation::PreparedRows) {
+        if matches!(
+            operation,
+            Operation::StreamRows | Operation::PreparedRows | Operation::PreparedStreamRows
+        ) {
             stream_header(&mut main);
         } else if matches!(operation, Operation::PrepareMetadata) {
             // One promised column, then silence while the client reads metadata.
@@ -345,6 +368,14 @@ fn cancellation_case_with_source(
     } else {
         RuntimeBuilder::multi_thread().worker_threads(workers)
     };
+    let builder = if matches!(
+        operation,
+        Operation::PreparedStreamHeader | Operation::PreparedStreamRows
+    ) {
+        builder.with_sharded_state(workers > 1)
+    } else {
+        builder
+    };
     let runtime = builder.build().unwrap();
     let caller_cx = runtime.request_cx_with_budget(Budget::INFINITE);
     let expected_reason = match source {
@@ -382,6 +413,7 @@ fn cancellation_case_with_source(
             other => panic!("main connect: {other:?}"),
         };
         let result = {
+            let prepared_rows_started = AtomicBool::new(false);
             let mut execute = Box::pin(async {
                 match operation {
                     Operation::Collect => connection
@@ -410,13 +442,30 @@ fn cancellation_case_with_source(
                         .map(|_| ()),
                     Operation::PreparedCollect
                     | Operation::PreparedExecute
-                    | Operation::PreparedRows => {
+                    | Operation::PreparedRows
+                    | Operation::PreparedStreamHeader
+                    | Operation::PreparedStreamRows => {
                         let statement = match connection.prepare(&cx, "SELECT SLEEP(30)").await {
                             Outcome::Ok(statement) => statement,
                             other => panic!("initial prepare: {other:?}"),
                         };
                         if matches!(operation, Operation::PreparedExecute) {
                             connection.execute_prepared(&cx, &statement, &[]).await.map(|_| ())
+                        } else if matches!(operation, Operation::PreparedStreamHeader) {
+                            connection
+                                .query_stream_prepared(&cx, &statement, &[])
+                                .await
+                                .map(|_| ())
+                        } else if matches!(operation, Operation::PreparedStreamRows) {
+                            match connection.query_stream_prepared(&cx, &statement, &[]).await {
+                                Outcome::Ok(mut stream) => {
+                                    prepared_rows_started.store(true, Ordering::Release);
+                                    stream.next(&cx).await.map(|_| ())
+                                }
+                                Outcome::Err(error) => Outcome::Err(error),
+                                Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+                                Outcome::Panicked(payload) => Outcome::Panicked(payload),
+                            }
                         } else {
                             connection.query_prepared(&cx, &statement, &[]).await.map(|_| ())
                         }
@@ -435,7 +484,11 @@ fn cancellation_case_with_source(
                     return Poll::Ready(None);
                 }
                 let result = execute.as_mut().poll(task_cx);
-                if result.is_pending() && task_probe.swap(false, Ordering::AcqRel) {
+                if result.is_pending()
+                    && (!matches!(operation, Operation::PreparedStreamRows)
+                        || prepared_rows_started.load(Ordering::Acquire))
+                    && task_probe.swap(false, Ordering::AcqRel)
+                {
                     parked_tx.send(()).unwrap();
                 }
                 result.map(Some)

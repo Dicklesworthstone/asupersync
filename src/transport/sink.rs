@@ -24,7 +24,9 @@
 //!   [`crate::channel`] (`mpsc`/`oneshot`), which hand the value back on a
 //!   cancelled reservation instead of losing it (aasraf).
 
+use crate::distributed::encoding::PathQualitySnapshot;
 use crate::security::authenticated::AuthenticatedSymbol;
+use crate::transport::aggregator::PathId;
 use crate::transport::error::SinkError;
 use crate::transport::{ChannelWaiter, SharedChannel};
 use smallvec::SmallVec;
@@ -528,6 +530,532 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
 }
 
 // ---- Implementations ----
+
+/// Local ownership and progress counters for one [`MultipathSink`] path.
+///
+/// A successful downstream send or flush is not a remote acknowledgement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MultipathPathStats {
+    /// Symbols currently retained by the adapter, including an uncertain send.
+    pub queued_symbols: usize,
+    /// Symbols accepted downstream since its last successful flush.
+    pub unflushed_symbols: usize,
+    /// Largest combined queued and unflushed count observed on this path.
+    pub high_water_symbols: usize,
+    /// Symbols whose downstream `poll_send` returned success.
+    pub sent_symbols: u64,
+    /// Symbols covered by a successful local downstream flush.
+    pub flushed_symbols: u64,
+    /// Never-attempted symbols moved from this failed path to another path.
+    pub reassigned_symbols: u64,
+    /// Whether the path has returned a terminal error.
+    pub failed: bool,
+    /// Whether a send or flush failed after downstream ownership was possible.
+    pub outcome_uncertain: bool,
+}
+
+/// A symbol retained when a multipath sink is decomposed for recovery.
+#[derive(Debug)]
+pub struct MultipathPendingSymbol {
+    /// The original authenticated symbol.
+    pub symbol: AuthenticatedSymbol,
+    /// Whether downstream `poll_send` was already invoked for this symbol.
+    ///
+    /// When true, replay can duplicate an operation with an unknown outcome.
+    /// Only false entries are known never to have crossed that boundary.
+    pub attempted: bool,
+}
+
+struct MultipathOutput {
+    id: PathId,
+    quality: PathQualitySnapshot,
+    weight: i64,
+    credit: i64,
+    sink: Box<dyn SymbolSink>,
+    queue: VecDeque<MultipathPendingSymbol>,
+    stats: MultipathPathStats,
+    error: Option<SinkError>,
+    ready: bool,
+    closed: bool,
+}
+
+/// Bounded, opt-in source striping and repair routing over real symbol sinks.
+///
+/// Source symbols use deterministic smooth weighted round-robin. Weights use
+/// the supplied RTT, loss and reorder snapshot; [`Self::update_path_quality`]
+/// starts a fresh scheduling window. Repair symbols prefer the highest-weight
+/// ready path, falling back to available bounded queue capacity. Equal scores
+/// select the lowest [`PathId`]. There is no delivery-order guarantee.
+///
+/// Each path owns at most `capacity_per_path` queued plus accepted-but-unflushed
+/// symbols, each with at most `max_symbol_bytes` payload bytes. The adapter
+/// copies accepted payloads to discard arbitrary spare input capacity, allocates
+/// queues lazily and retains at most one temporary symbol clone per downstream
+/// poll. Underlying sinks can have their own allocations and queues;
+/// their successful flush is a local progress boundary, not a remote ACK.
+///
+/// `poll_send` returns success once the adapter owns the symbol. It never
+/// retains a newly supplied symbol while returning `Pending`. Dropping a send
+/// future after that acceptance cannot remove the owned symbol: later readiness,
+/// flush or close polls continue driving it. Dropping the sink itself releases
+/// its retained work, just like [`BufferedSink`]; there are no hidden tasks.
+///
+/// A path failure before any downstream send attempt permits reassignment of
+/// that queued symbol. An attempted send or an unflushed acceptance is never
+/// replayed automatically. Such a failure prevents new admission, while flush
+/// and close still drain healthy paths before reporting the failure. The exact
+/// path error remains available through [`Self::path_error`], and
+/// [`Self::into_paths`] preserves remaining symbols and their uncertainty.
+pub struct MultipathSink {
+    paths: Vec<MultipathOutput>,
+    max_paths: usize,
+    capacity_per_path: usize,
+    max_symbol_bytes: usize,
+    next_start: usize,
+    closing: bool,
+    closed: bool,
+    close_failed: bool,
+}
+
+impl std::fmt::Debug for MultipathSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultipathSink")
+            .field("paths", &self.paths.len())
+            .field("capacity_per_path", &self.capacity_per_path)
+            .field("max_symbol_bytes", &self.max_symbol_bytes)
+            .field("closing", &self.closing)
+            .field("closed", &self.closed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MultipathSink {
+    /// Construct an empty sink with immutable ownership bounds.
+    ///
+    /// All limits must be nonzero, at most 1024 paths may be configured, and
+    /// the aggregate payload bound must fit `isize::MAX`.
+    pub fn new(
+        max_paths: usize,
+        capacity_per_path: usize,
+        max_symbol_bytes: usize,
+    ) -> Result<Self, SinkError> {
+        let bound = max_paths
+            .checked_mul(capacity_per_path)
+            .and_then(|count| count.checked_mul(max_symbol_bytes));
+        if max_paths == 0
+            || max_paths > 1024
+            || capacity_per_path == 0
+            || max_symbol_bytes == 0
+            || bound.is_none_or(|bytes| bytes > isize::MAX as usize)
+        {
+            return Err(Self::failure("invalid multipath ownership bounds"));
+        }
+        Ok(Self {
+            paths: Vec::new(),
+            max_paths,
+            capacity_per_path,
+            max_symbol_bytes,
+            next_start: 0,
+            closing: false,
+            closed: false,
+            close_failed: false,
+        })
+    }
+
+    /// Add a concrete transport. Path identifiers must be unique.
+    pub fn add_path<S: SymbolSink + 'static>(
+        &mut self,
+        id: PathId,
+        quality: PathQualitySnapshot,
+        sink: S,
+    ) -> Result<(), SinkError> {
+        if self.closing || self.closed {
+            return Err(SinkError::Closed);
+        }
+        if self.paths.len() == self.max_paths || self.paths.iter().any(|path| path.id == id) {
+            return Err(Self::failure("multipath path limit or duplicate identifier"));
+        }
+        self.paths.push(MultipathOutput {
+            id,
+            quality,
+            weight: Self::quality_weight(quality),
+            credit: 0,
+            sink: Box::new(sink),
+            queue: VecDeque::new(),
+            stats: MultipathPathStats::default(),
+            error: None,
+            ready: false,
+            closed: false,
+        });
+        self.paths.sort_by_key(|path| path.id);
+        self.reset_credits();
+        Ok(())
+    }
+
+    /// Replace the caller-observed quality and begin a fresh weighting window.
+    /// This does not resurrect a transport that has returned a terminal error.
+    pub fn update_path_quality(&mut self, id: PathId, quality: PathQualitySnapshot) -> bool {
+        let Some(path) = self.paths.iter_mut().find(|path| path.id == id) else {
+            return false;
+        };
+        path.quality = quality;
+        path.weight = Self::quality_weight(quality);
+        self.reset_credits();
+        true
+    }
+
+    /// Snapshot local counts without claiming remote receipt or loss.
+    #[must_use]
+    pub fn path_stats(&self, id: PathId) -> Option<MultipathPathStats> {
+        self.paths.iter().find(|path| path.id == id).map(|path| {
+            let mut stats = path.stats;
+            stats.queued_symbols = path.queue.len();
+            stats
+        })
+    }
+
+    /// The caller-supplied quality snapshot used for current routing weights.
+    #[must_use]
+    pub fn path_quality(&self, id: PathId) -> Option<PathQualitySnapshot> {
+        self.paths
+            .iter()
+            .find(|path| path.id == id)
+            .map(|path| path.quality)
+    }
+
+    /// The original terminal error returned by a path, if any.
+    #[must_use]
+    pub fn path_error(&self, id: PathId) -> Option<&SinkError> {
+        self.paths.iter().find(|path| path.id == id)?.error.as_ref()
+    }
+
+    /// Recover transports and retained symbols without retrying uncertain work.
+    ///
+    /// Successful downstream sends are owned by those transports and are not
+    /// duplicated here. Inspect `attempted` before deciding how to recover each
+    /// returned symbol. The iterator is in ascending path-ID order.
+    pub fn into_paths(
+        self,
+    ) -> impl Iterator<Item = (PathId, Box<dyn SymbolSink>, VecDeque<MultipathPendingSymbol>)> {
+        self.paths
+            .into_iter()
+            .map(|path| (path.id, path.sink, path.queue))
+    }
+
+    fn failure(reason: &str) -> SinkError {
+        SinkError::SendFailed {
+            reason: reason.to_owned(),
+        }
+    }
+
+    fn quality_weight(quality: PathQualitySnapshot) -> i64 {
+        let success = u64::from(1000 - quality.loss_ewma_permille.min(1000));
+        let cost = (u64::from(quality.rtt_ewma_ms) + 1) * (u64::from(quality.reorder_depth) + 1);
+        // Positive, bounded integer weights avoid floating-point drift, zero
+        // divisors and starvation of the sole surviving low-quality path.
+        i64::try_from((success * 1024 / (cost * 1000)).clamp(1, 1024)).unwrap_or(1)
+    }
+
+    fn reset_credits(&mut self) {
+        self.next_start = 0;
+        for path in &mut self.paths {
+            path.credit = 0;
+        }
+    }
+
+    fn has_capacity(path: &MultipathOutput, capacity: usize) -> bool {
+        !path.stats.failed
+            && !path.closed
+            && path.queue.len() < capacity.saturating_sub(path.stats.unflushed_symbols)
+    }
+
+    fn choose_path(&mut self, repair: bool) -> Option<usize> {
+        let prefer_ready = repair
+            && self
+                .paths
+                .iter()
+                .any(|path| path.ready && Self::has_capacity(path, self.capacity_per_path));
+        let mut selected = None;
+        let mut best = i64::MIN;
+        let mut total = 0_i64;
+        for (index, path) in self.paths.iter_mut().enumerate() {
+            if !Self::has_capacity(path, self.capacity_per_path) || (prefer_ready && !path.ready) {
+                continue;
+            }
+            let score = if repair {
+                path.weight
+            } else {
+                path.credit = path.credit.saturating_add(path.weight);
+                total += path.weight;
+                path.credit
+            };
+            if score > best {
+                best = score;
+                selected = Some(index);
+            }
+        }
+        if !repair
+            && let Some(index) = selected
+        {
+            self.paths[index].credit = self.paths[index].credit.saturating_sub(total);
+        }
+        selected
+    }
+
+    fn mark_failed(path: &mut MultipathOutput, error: SinkError) {
+        path.stats.outcome_uncertain |= path.stats.unflushed_symbols != 0
+            || path.queue.front().is_some_and(|symbol| symbol.attempted);
+        path.stats.failed = true;
+        path.ready = false;
+        path.error.get_or_insert(error);
+    }
+
+    fn terminal_error(&self) -> Option<SinkError> {
+        if self.paths.iter().any(|path| path.stats.outcome_uncertain) {
+            Some(Self::failure(
+                "multipath downstream outcome is uncertain; inspect path_error",
+            ))
+        } else if self.close_failed {
+            Some(Self::failure(
+                "multipath path close failed; inspect path_error",
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Poll every usable path so one blocked path cannot hide another's wake.
+    fn drive(&mut self, cx: &mut Context<'_>) {
+        if self.paths.is_empty() {
+            return;
+        }
+        let mut yielded = false;
+        let start = self.next_start % self.paths.len();
+        let mut last_progress = None;
+        let mut send_budget = 64;
+        for offset in 0..self.paths.len() {
+            let index = (start + offset) % self.paths.len();
+            let path = &mut self.paths[index];
+            if path.stats.failed || path.closed {
+                continue;
+            }
+            path.ready = false;
+            let mut sent_this_poll = 0;
+            for _ in 0..16 {
+                match Pin::new(&mut *path.sink).poll_ready(cx) {
+                    Poll::Ready(Ok(())) => path.ready = true,
+                    Poll::Ready(Err(error)) => {
+                        Self::mark_failed(path, error);
+                        break;
+                    }
+                    Poll::Pending => break,
+                }
+                let Some(front) = path.queue.front_mut() else {
+                    break;
+                };
+                if send_budget == 0 {
+                    yielded = true;
+                    break;
+                }
+                send_budget -= 1;
+                last_progress = Some(index);
+                // The original stays owned until the downstream result is
+                // known. A Pending send remains bound to this exact path.
+                front.attempted = true;
+                match Pin::new(&mut *path.sink).poll_send(cx, front.symbol.clone()) {
+                    Poll::Ready(Ok(())) => {
+                        path.queue.pop_front();
+                        path.ready = false;
+                        sent_this_poll += 1;
+                        path.stats.sent_symbols = path.stats.sent_symbols.saturating_add(1);
+                        path.stats.unflushed_symbols += 1;
+                    }
+                    Poll::Ready(Err(error)) => {
+                        Self::mark_failed(path, error);
+                        break;
+                    }
+                    Poll::Pending => {
+                        path.ready = false;
+                        break;
+                    }
+                }
+            }
+            if path.stats.failed {
+                continue;
+            }
+            if path.stats.unflushed_symbols != 0 {
+                match Pin::new(&mut *path.sink).poll_flush(cx) {
+                    Poll::Ready(Ok(())) => {
+                        path.stats.flushed_symbols = path
+                            .stats
+                            .flushed_symbols
+                            .saturating_add(path.stats.unflushed_symbols as u64);
+                        path.stats.unflushed_symbols = 0;
+                        // Flushing earlier accepted work can unblock the
+                        // retained front whose send just returned Pending.
+                        yielded |= !path.queue.is_empty();
+                    }
+                    Poll::Ready(Err(error)) => Self::mark_failed(path, error),
+                    Poll::Pending => {}
+                }
+            }
+            yielded |= sent_this_poll == 16 && !path.queue.is_empty();
+        }
+        self.next_start = (last_progress.unwrap_or(start) + 1) % self.paths.len();
+        // Only never-attempted symbols can cross paths after a failure. Take
+        // from the back: an uncertain front remains pinned and recoverable.
+        let mut reassign_budget = 64;
+        for offset in 0..self.paths.len() {
+            let source = (start + offset) % self.paths.len();
+            if !self.paths[source].stats.failed {
+                continue;
+            }
+            for _ in 0..16 {
+                let Some(symbol) = self.paths[source].queue.back() else {
+                    break;
+                };
+                if symbol.attempted {
+                    break;
+                }
+                if reassign_budget == 0 {
+                    yielded = true;
+                    break;
+                }
+                let repair = symbol.symbol.symbol().kind().is_repair();
+                let Some(target) = self.choose_path(repair) else {
+                    break;
+                };
+                let symbol = self.paths[source]
+                    .queue
+                    .pop_back()
+                    .expect("queued symbol checked");
+                reassign_budget -= 1;
+                self.paths[source].stats.reassigned_symbols = self.paths[source]
+                    .stats
+                    .reassigned_symbols
+                    .saturating_add(1);
+                self.paths[target].queue.push_back(symbol);
+                self.update_high_water(target);
+                yielded = true;
+            }
+        }
+        if yielded {
+            cx.waker().wake_by_ref();
+        }
+    }
+
+    fn update_high_water(&mut self, index: usize) {
+        let path = &mut self.paths[index];
+        path.stats.high_water_symbols = path.stats.high_water_symbols
+            .max(path.queue.len() + path.stats.unflushed_symbols);
+    }
+}
+
+impl SymbolSink for MultipathSink {
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+        if self.closing || self.closed {
+            return Poll::Ready(Err(SinkError::Closed));
+        }
+        self.drive(cx);
+        if let Some(error) = self.terminal_error() {
+            return Poll::Ready(Err(error));
+        }
+        if self
+            .paths
+            .iter()
+            .any(|path| Self::has_capacity(path, self.capacity_per_path))
+        {
+            Poll::Ready(Ok(()))
+        } else if self.paths.iter().all(|path| path.stats.failed || path.closed) {
+            Poll::Ready(Err(Self::failure("no usable multipath transport")))
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn poll_send(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        symbol: AuthenticatedSymbol,
+    ) -> Poll<Result<(), SinkError>> {
+        if symbol.symbol().data().len() > self.max_symbol_bytes {
+            return Poll::Ready(Err(Self::failure(
+                "multipath symbol exceeds payload bound",
+            )));
+        }
+        match self.as_mut().poll_ready(cx) {
+            Poll::Ready(Ok(())) => {}
+            other => return other,
+        }
+        let repair = symbol.symbol().kind().is_repair();
+        let Some(index) = self.choose_path(repair) else {
+            return Poll::Pending;
+        };
+        // Vec::clone copies the payload length, not an arbitrarily large spare
+        // input capacity. Preserve the authentication metadata with that copy.
+        let owned_symbol = symbol.clone();
+        drop(symbol);
+        self.paths[index].queue.push_back(MultipathPendingSymbol {
+            symbol: owned_symbol,
+            attempted: false,
+        });
+        self.update_high_water(index);
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+        if !self.closed {
+            self.drive(cx);
+        }
+        if self.paths.iter().any(|path| {
+            !path.stats.failed && (!path.queue.is_empty() || path.stats.unflushed_symbols != 0)
+        }) {
+            return Poll::Pending;
+        }
+        if let Some(error) = self.terminal_error() {
+            return Poll::Ready(Err(error));
+        }
+        if self.paths.iter().any(|path| !path.queue.is_empty()) {
+            return Poll::Ready(Err(Self::failure(
+                "multipath retained unsent symbols without a usable path",
+            )));
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+        self.closing = true;
+        if self.closed {
+            return self.as_mut().poll_flush(cx);
+        }
+        if self.as_mut().poll_flush(cx).is_pending() {
+            return Poll::Pending;
+        }
+        let mut pending = false;
+        let mut failed = false;
+        for path in &mut self.paths {
+            if path.closed {
+                continue;
+            }
+            match Pin::new(&mut *path.sink).poll_close(cx) {
+                Poll::Ready(Ok(())) => path.closed = true,
+                Poll::Ready(Err(error)) => {
+                    Self::mark_failed(path, error);
+                    path.closed = true;
+                    failed = true;
+                }
+                Poll::Pending => pending = true,
+            }
+        }
+        self.close_failed |= failed;
+        if pending {
+            Poll::Pending
+        } else {
+            self.closed = true;
+            self.as_mut().poll_flush(cx)
+        }
+    }
+}
 
 /// In-memory channel sink.
 pub struct ChannelSink {

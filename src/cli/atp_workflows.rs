@@ -10,6 +10,7 @@
 //! All workflows leverage the ATP cache and swarm infrastructure with
 //! capability-scoped access control.
 
+use crate::atp::cache::trust::TrustPolicy;
 use crate::atp::cache::{AtpCache, CacheConfig, CacheKey};
 use crate::atp::seeding::{AtpSeedingService, SeedingConfig};
 use crate::cli::ExitCode;
@@ -33,8 +34,8 @@ use crate::cli::output::{Output, OutputFormat, Outputtable};
 use crate::cx::Cx;
 use crate::util::path_security::SecurePath;
 use chrono::Utc;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -50,6 +51,27 @@ pub struct AtpWorkflowCoordinator {
     /// Explicit state root; `None` resolves `$ASUPERSYNC_ATP_WORKFLOW_ROOT`, else
     /// `./.asupersync/atp`, on every access.
     root: Option<PathBuf>,
+    /// Explicit policy for persisted scoped workflows. Legacy constructors keep
+    /// their existing treatment of unmarked dataset metadata.
+    trust_policy: Option<TrustPolicy>,
+}
+
+// Preserve the public output structs and the existing flat JSON shape. The
+// additive grant field binds new protected records across cache misses/restarts.
+#[derive(Serialize, Deserialize)]
+struct StoredCiArtifact {
+    #[serde(flatten)]
+    artifact: AtpCiArtifact,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant_scope: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredDataset {
+    #[serde(flatten)]
+    dataset: AtpDatasetInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant_scope: Option<String>,
 }
 
 impl AtpWorkflowCoordinator {
@@ -58,7 +80,7 @@ impl AtpWorkflowCoordinator {
     /// Workflow state lives under `$ASUPERSYNC_ATP_WORKFLOW_ROOT`, or
     /// `./.asupersync/atp` when that is unset.
     pub fn new(output_format: OutputFormat) -> Result<Self, CliError> {
-        Self::build(output_format, None)
+        Self::build(output_format, None, None)
     }
 
     /// Create a workflow coordinator whose state lives under `root`.
@@ -68,22 +90,82 @@ impl AtpWorkflowCoordinator {
     /// environment variable and does not depend on the current directory, so two
     /// coordinators with different roots never share state.
     pub fn with_root(output_format: OutputFormat, root: impl Into<PathBuf>) -> Result<Self, CliError> {
-        Self::build(output_format, Some(root.into()))
+        Self::build(output_format, Some(root.into()), None)
     }
 
-    fn build(output_format: OutputFormat, root: Option<PathBuf>) -> Result<Self, CliError> {
+    /// Create local workflows with an explicit root and scope authorization.
+    ///
+    /// The policy is applied to both caches and persisted CI/dataset records.
+    /// A scope supplied in an operation is a requested scope, not a grant:
+    /// callers must authorize non-public scopes in `policy.authorized_scopes` first. Reopening
+    /// protected records with the default constructor or a different policy
+    /// cannot bypass their grants, and changing pin state preserves the grant.
+    /// An existing protected record cannot be assigned another scope or made
+    /// unscoped by replacement, even by an authorized reader.
+    /// Index operations fail closed if any selected index contains an
+    /// unauthorized protected record; they do not silently omit it.
+    ///
+    /// Old unscoped CI records remain readable. This constructor also enforces
+    /// legacy dataset `access_scope` metadata, which the legacy constructors
+    /// treated as descriptive. Newly protected records persist their grant
+    /// separately so every constructor enforces it. Older library versions do
+    /// not understand that field and must not share a protected root.
+    ///
+    /// These are local filesystem workflows, not remote capability verification
+    /// or encryption. Shared-cache policies are refused because workflow copies
+    /// and indexes are plaintext. The caller must keep `root` and referenced
+    /// dataset source paths private from untrusted writers and serialize writes
+    /// to a root across coordinator instances.
+    pub fn with_trust_policy(
+        output_format: OutputFormat,
+        root: impl Into<PathBuf>,
+        policy: TrustPolicy,
+    ) -> Result<Self, CliError> {
+        policy.validate().map_err(|error| {
+            CliError::new("trust_policy_error", "Invalid workflow trust policy")
+                .detail(error.to_string())
+                .exit_code(ExitCode::USER_ERROR)
+        })?;
+        if policy.is_shared_cache {
+            return Err(CliError::new(
+                "trust_policy_error",
+                "Local workflows do not encrypt persisted files for shared caches",
+            )
+            .exit_code(ExitCode::USER_ERROR));
+        }
+        Self::build(output_format, Some(root.into()), Some(policy))
+    }
+
+    fn build(
+        output_format: OutputFormat,
+        root: Option<PathBuf>,
+        trust_policy: Option<TrustPolicy>,
+    ) -> Result<Self, CliError> {
         let mut cache_config = CacheConfig::default();
         if let Some(root) = &root {
             cache_config.storage_root = root.join("cache");
         }
-        let cache = AtpCache::new(cache_config.clone());
+        let make_cache = |config| match &trust_policy {
+            Some(policy) => AtpCache::with_trust_policy(config, policy.clone()).map_err(|error| {
+                CliError::new("trust_policy_error", "Invalid workflow cache policy")
+                    .detail(error.to_string())
+                    .exit_code(ExitCode::USER_ERROR)
+            }),
+            None => Ok(AtpCache::new(config)),
+        };
+        let cache = make_cache(cache_config.clone())?;
 
         let mut seeding_config = SeedingConfig::default();
         seeding_config.enabled = true;
         if let Some(root) = &root {
             seeding_config.seed_root = root.join("seeds");
         }
-        let seeding_service = AtpSeedingService::new(seeding_config, AtpCache::new(cache_config));
+        if trust_policy.is_some() {
+            // These cache instances evict independently and must not retire
+            // each other's content-addressed backing files.
+            cache_config.storage_root = cache_config.storage_root.join("seeding");
+        }
+        let seeding_service = AtpSeedingService::new(seeding_config, make_cache(cache_config)?);
 
         let output = Output::new(output_format);
 
@@ -92,6 +174,7 @@ impl AtpWorkflowCoordinator {
             seeding_service,
             output,
             root,
+            trust_policy,
         })
     }
 
@@ -178,6 +261,13 @@ impl AtpWorkflowCoordinator {
     async fn ci_push(&mut self, cx: &Cx, args: AtpCiPushArgs) -> Result<(), CliError> {
         cx.trace("Starting CI artifact push");
 
+        if self.trust_policy.is_some() {
+            self.authorize_scope(args.scope.as_deref())?;
+        }
+        // The final cache-statistics view traverses the index too. Authorize
+        // that view before admitting any new cache or persistent-file effects.
+        let _ = self.read_ci_index()?;
+
         // Create secure path validator for current working directory
         // This ensures all artifact paths are relative to the current directory
         let current_dir = std::env::current_dir().map_err(|e| {
@@ -233,6 +323,31 @@ impl AtpWorkflowCoordinator {
                 content_hash.clone(),
                 args.scope.clone(),
             );
+
+            let index_path = self.workflow_root()?.join("ci").join("index").join(format!(
+                "{}-{}.json",
+                Self::safe_component(&args.build_id),
+                content_hash
+            ));
+            if index_path.exists() {
+                let existing = self.read_stored_ci_artifact(&index_path)?;
+                if existing.artifact.build_id != args.build_id
+                    || existing.artifact.content_hash != content_hash
+                {
+                    return Err(CliError::new(
+                        "metadata_error",
+                        "CI index path aliases a different build or content hash",
+                    )
+                    .exit_code(ExitCode::USER_ERROR));
+                }
+                if existing.grant_scope.is_some() && existing.grant_scope != args.scope {
+                    return Err(CliError::new(
+                        "trust_policy_error",
+                        "An existing CI artifact's grant cannot be replaced or removed",
+                    )
+                    .exit_code(ExitCode::USER_ERROR));
+                }
+            }
 
             // Store in cache with deduplication
             self.cache.put(cache_key.clone(), &content).map_err(|e| {
@@ -290,13 +405,12 @@ impl AtpWorkflowCoordinator {
             if !artifact_path.exists() {
                 self.copy_file_no_overwrite(validated_path.as_path(), &artifact_path)?;
             }
-            let index_path = self.workflow_root()?.join("ci").join("index").join(format!(
-                "{}-{}.json",
-                Self::safe_component(&args.build_id),
-                content_hash
-            ));
-            self.write_json(&index_path, &artifact)?;
-            artifacts.push(artifact);
+            let stored = StoredCiArtifact {
+                artifact,
+                grant_scope: args.scope.clone(),
+            };
+            self.write_json(&index_path, &stored)?;
+            artifacts.push(stored.artifact);
         }
 
         let duration = start_time.elapsed();
@@ -327,10 +441,11 @@ impl AtpWorkflowCoordinator {
     async fn ci_pull(&mut self, cx: &Cx, args: AtpCiPullArgs) -> Result<(), CliError> {
         cx.trace("Starting CI artifact pull");
 
+        let indexed = self.read_ci_index()?;
         self.ensure_dir(&args.destination)?;
         let mut artifacts: Vec<AtpCiArtifact> = Vec::new();
         let mut bytes_transferred = 0u64;
-        for artifact in self.read_ci_index()? {
+        for artifact in indexed {
             if let Some(build_id) = &args.build_id {
                 if &artifact.build_id != build_id {
                     continue;
@@ -545,7 +660,6 @@ impl AtpWorkflowCoordinator {
     // Dataset workflow implementations
 
     async fn dataset_seed(&mut self, _cx: &Cx, args: AtpDatasetSeedArgs) -> Result<(), CliError> {
-        let (total_size_bytes, file_count, content_hash) = self.path_stats(&args.path)?;
         let mut metadata = match args.metadata.as_deref() {
             Some(text) => serde_json::from_str::<BTreeMap<String, serde_json::Value>>(text)
                 .map_err(|e| {
@@ -555,6 +669,44 @@ impl AtpWorkflowCoordinator {
                 })?,
             None => BTreeMap::new(),
         };
+        if let Some(scope) = &args.access_scope {
+            metadata.insert(
+                "access_scope".to_string(),
+                serde_json::Value::String(scope.clone()),
+            );
+        }
+        let grant_scope = if self.trust_policy.is_some() {
+            let scope = metadata
+                .get("access_scope")
+                .map(|value| {
+                    value.as_str().map(str::to_owned).ok_or_else(|| {
+                        CliError::new("metadata_error", "Dataset access_scope must be a string")
+                            .exit_code(ExitCode::USER_ERROR)
+                    })
+                })
+                .transpose()?;
+            self.authorize_scope(scope.as_deref())?;
+            scope
+        } else {
+            None
+        };
+        let index_path = self.dataset_index_path(&args.dataset_id, args.version.as_deref())?;
+        if index_path.exists() {
+            let existing = self.read_stored_dataset(&index_path)?;
+            Self::check_dataset_identity(
+                &existing.dataset,
+                &args.dataset_id,
+                args.version.as_deref(),
+            )?;
+            if existing.grant_scope.is_some() && existing.grant_scope != grant_scope {
+                return Err(CliError::new(
+                    "trust_policy_error",
+                    "An existing dataset's grant cannot be replaced or removed",
+                )
+                .exit_code(ExitCode::USER_ERROR));
+            }
+        }
+        let (total_size_bytes, file_count, content_hash) = self.path_stats(&args.path)?;
         metadata.insert(
             "source_path".to_string(),
             serde_json::Value::String(args.path.to_string_lossy().to_string()),
@@ -565,9 +717,6 @@ impl AtpWorkflowCoordinator {
         );
         if let Some(chunk_size) = args.chunk_size {
             metadata.insert("chunk_size".to_string(), serde_json::json!(chunk_size));
-        }
-        if let Some(scope) = args.access_scope {
-            metadata.insert("access_scope".to_string(), serde_json::Value::String(scope));
         }
         let dataset = AtpDatasetInfo {
             id: args.dataset_id.clone(),
@@ -581,10 +730,11 @@ impl AtpWorkflowCoordinator {
             updated_at: Utc::now(),
             pinned: true,
         };
-        self.write_json(
-            &self.dataset_index_path(&args.dataset_id, args.version.as_deref())?,
-            &dataset,
-        )?;
+        let stored = StoredDataset {
+            dataset,
+            grant_scope,
+        };
+        self.write_json(&index_path, &stored)?;
         let output = AtpDatasetOutput {
             summary: AtpDatasetSummary {
                 operation: "seed".to_string(),
@@ -594,7 +744,7 @@ impl AtpWorkflowCoordinator {
                 success: true,
                 error: None,
             },
-            datasets: vec![dataset],
+            datasets: vec![stored.dataset],
             swarm_health: Some(self.local_swarm_health(1, total_size_bytes)),
         };
 
@@ -731,11 +881,12 @@ impl AtpWorkflowCoordinator {
 
     async fn dataset_pin(&mut self, _cx: &Cx, args: AtpDatasetPinArgs) -> Result<(), CliError> {
         let path = self.dataset_index_path(&args.dataset_id, args.version.as_deref())?;
-        let mut dataset: AtpDatasetInfo = self.read_json(&path)?;
-        dataset.pinned = true;
-        dataset.updated_at = Utc::now();
-        self.write_json(&path, &dataset)?;
-        let total_size_bytes = dataset.size_bytes;
+        let mut stored = self.read_stored_dataset(&path)?;
+        Self::check_dataset_identity(&stored.dataset, &args.dataset_id, args.version.as_deref())?;
+        stored.dataset.pinned = true;
+        stored.dataset.updated_at = Utc::now();
+        self.write_json(&path, &stored)?;
+        let total_size_bytes = stored.dataset.size_bytes;
         let output = AtpDatasetOutput {
             summary: AtpDatasetSummary {
                 operation: "pin".to_string(),
@@ -745,7 +896,7 @@ impl AtpWorkflowCoordinator {
                 success: true,
                 error: None,
             },
-            datasets: vec![dataset],
+            datasets: vec![stored.dataset],
             swarm_health: None,
         };
 
@@ -755,11 +906,12 @@ impl AtpWorkflowCoordinator {
 
     async fn dataset_unpin(&mut self, _cx: &Cx, args: AtpDatasetUnpinArgs) -> Result<(), CliError> {
         let path = self.dataset_index_path(&args.dataset_id, args.version.as_deref())?;
-        let mut dataset: AtpDatasetInfo = self.read_json(&path)?;
-        dataset.pinned = false;
-        dataset.updated_at = Utc::now();
-        self.write_json(&path, &dataset)?;
-        let total_size_bytes = dataset.size_bytes;
+        let mut stored = self.read_stored_dataset(&path)?;
+        Self::check_dataset_identity(&stored.dataset, &args.dataset_id, args.version.as_deref())?;
+        stored.dataset.pinned = false;
+        stored.dataset.updated_at = Utc::now();
+        self.write_json(&path, &stored)?;
+        let total_size_bytes = stored.dataset.size_bytes;
         let output = AtpDatasetOutput {
             summary: AtpDatasetSummary {
                 operation: "unpin".to_string(),
@@ -769,7 +921,7 @@ impl AtpWorkflowCoordinator {
                 success: true,
                 error: None,
             },
-            datasets: vec![dataset],
+            datasets: vec![stored.dataset],
             swarm_health: None,
         };
 
@@ -1517,6 +1669,68 @@ impl AtpWorkflowCoordinator {
 
     // Helper methods
 
+    fn authorize_scope(&self, scope: Option<&str>) -> Result<(), CliError> {
+        let key = CacheKey::new(String::new(), String::new(), scope.map(str::to_owned));
+        let result = match &self.trust_policy {
+            Some(policy) => policy.check_access(&key),
+            None => TrustPolicy::default().check_access(&key),
+        };
+        result.map_err(|error| {
+            CliError::new("trust_policy_error", "Workflow scope is not authorized")
+                .detail(error.to_string())
+                .exit_code(ExitCode::USER_ERROR)
+        })
+    }
+
+    fn read_stored_ci_artifact(&self, path: &Path) -> Result<StoredCiArtifact, CliError> {
+        let stored: StoredCiArtifact = self.read_json(path)?;
+        self.authorize_scope(stored.grant_scope.as_deref())?;
+        Ok(stored)
+    }
+
+    fn dataset_scope(dataset: &AtpDatasetInfo) -> Result<Option<&str>, CliError> {
+        dataset.metadata.get("access_scope").map_or(Ok(None), |value| {
+            value.as_str().map(Some).ok_or_else(|| {
+                CliError::new("metadata_error", "Dataset access_scope must be a string")
+                    .exit_code(ExitCode::USER_ERROR)
+            })
+        })
+    }
+
+    fn read_stored_dataset(&self, path: &Path) -> Result<StoredDataset, CliError> {
+        let mut stored: StoredDataset = self.read_json(path)?;
+        if stored.grant_scope.is_some() || self.trust_policy.is_some() {
+            let declared_scope = Self::dataset_scope(&stored.dataset)?.map(str::to_owned);
+            if stored.grant_scope.is_some() && stored.grant_scope != declared_scope {
+                return Err(CliError::new(
+                    "metadata_error",
+                    "Dataset metadata does not match its persisted grant",
+                )
+                .exit_code(ExitCode::USER_ERROR));
+            }
+            self.authorize_scope(declared_scope.as_deref())?;
+            // Mutating a legacy record through the explicit API seals its
+            // previously descriptive access_scope for future reopeners too.
+            stored.grant_scope = declared_scope;
+        }
+        Ok(stored)
+    }
+
+    fn check_dataset_identity(
+        dataset: &AtpDatasetInfo,
+        dataset_id: &str,
+        version: Option<&str>,
+    ) -> Result<(), CliError> {
+        if dataset.id != dataset_id || dataset.version.as_deref() != version {
+            return Err(CliError::new(
+                "metadata_error",
+                "Dataset index path aliases a different dataset or version",
+            )
+            .exit_code(ExitCode::USER_ERROR));
+        }
+        Ok(())
+    }
+
     fn write_output<T: Outputtable>(&mut self, output: &T) -> Result<(), CliError> {
         self.output.write(output).map_err(|e| {
             CliError::new("output_error", "Failed to write output")
@@ -1719,7 +1933,7 @@ impl AtpWorkflowCoordinator {
                 })?
                 .path();
             if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-                artifacts.push(self.read_json(&path)?);
+                artifacts.push(self.read_stored_ci_artifact(&path)?.artifact);
             }
         }
         artifacts.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1758,7 +1972,7 @@ impl AtpWorkflowCoordinator {
                 })?
                 .path();
             if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-                datasets.push(self.read_json(&path)?);
+                datasets.push(self.read_stored_dataset(&path)?.dataset);
             }
         }
         datasets.sort_by(|a, b| a.id.cmp(&b.id).then(a.version.cmp(&b.version)));

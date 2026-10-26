@@ -38,7 +38,7 @@ impl RequestWriterWake {
         drop(previous);
     }
 
-    fn wake(&self) {
+    pub(super) fn wake(&self) {
         let waker = self.waker.lock().clone();
         if let Some(waker) = waker {
             waker.wake_by_ref();
@@ -244,16 +244,19 @@ impl NativeH3RequestWriter {
         };
         let count = remaining.min(usize::try_from(capacity).unwrap_or(usize::MAX));
         let end = self.write_offset + count;
+        let stream_id = self.stream_id();
         let pending = self
             .inner
             .pending
-            .as_ref()
+            .as_mut()
             .expect("frame retained during admission");
         let complete = end == pending.wire.len();
         let wire = pending.wire.slice(self.write_offset..end);
         let fin = complete && pending.fin;
-        if let Err(error) = connection.write_stream(cx, self.stream_id(), wire, fin) {
-            return self.fail(error.into());
+        if let Err(error) = super::write_prepared_head(
+            &mut pending.qpack_section, cx, connection, stream_id, wire, fin,
+        ) {
+            return self.fail(error);
         }
         self.write_offset = end;
         if !complete {

@@ -1121,6 +1121,28 @@ impl<T> ClientIncomingBody<T> {
         self.into_inner_with_buffer().0
     }
 
+    /// Whether this body reached an unambiguous reusable HTTP message boundary.
+    /// The pool additionally checks response/request connection policy. An EOF
+    /// body, unconsumed read-ahead, or a partial/error framing state is never
+    /// sufficient, even if the body has become terminal.
+    pub(super) fn is_complete_for_reuse(&self) -> bool {
+        self.is_at_message_end() && self.buffer.is_empty()
+    }
+
+    /// Used only on a fresh body or after a successful frame poll. This also
+    /// recognizes Content-Length: 0 before the caller performs an EOF poll.
+    pub(super) fn is_at_message_end(&self) -> bool {
+        matches!(
+            self.kind,
+            ClientBodyKind::Empty
+                | ClientBodyKind::ContentLength { remaining: 0 }
+                | ClientBodyKind::Chunked {
+                    state: ChunkedReadState::Done,
+                    ..
+                }
+        )
+    }
+
     fn try_decode_frame(&mut self) -> Result<Option<Frame<BytesCursor>>, HttpError> {
         if self.done {
             return Ok(None);

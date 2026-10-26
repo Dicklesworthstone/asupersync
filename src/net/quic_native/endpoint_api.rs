@@ -375,6 +375,32 @@ impl QuicConnection {
         self.inner.open_local_uni(cx)
     }
 
+    /// Open a bidirectional stream when the peer grants stream-count credit.
+    ///
+    /// `Pending` consumes no stream ID and retains one polling owner's Waker
+    /// for this direction. A peer MAX_STREAMS grant, Cx cancellation, or
+    /// connection close wakes it. The latest caller replaces the prior wait;
+    /// stop polling after `Ready`, and keep driving transport I/O while pending.
+    pub fn poll_open_bidi_stream(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<StreamId, NativeQuicConnectionError>> {
+        self.inner.poll_open_local_bidi(cx, task_cx)
+    }
+
+    /// Open a unidirectional stream when the peer grants stream-count credit.
+    ///
+    /// Uses an independent wait slot with the same single-owner and retry
+    /// semantics as [`Self::poll_open_bidi_stream`].
+    pub fn poll_open_uni_stream(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<StreamId, NativeQuicConnectionError>> {
+        self.inner.poll_open_local_uni(cx, task_cx)
+    }
+
     /// Queue reliable, ordered bytes (and an optional FIN) on a control stream.
     ///
     /// # Errors
@@ -400,6 +426,17 @@ impl QuicConnection {
         fin: bool,
     ) -> Result<(), NativeQuicConnectionError> {
         self.inner.write_stream_bytes(cx, stream, data, fin)
+    }
+
+    /// Callback-free byte admission after the owning caller's `Cx` checkpoint.
+    #[cfg(feature = "http3")]
+    pub(crate) fn write_stream_after_checkpoint(
+        &mut self,
+        stream: StreamId,
+        data: Bytes,
+        fin: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
+        self.inner.write_stream_bytes_after_checkpoint(stream, data, fin)
     }
 
     /// Whether one stream still has bytes or FIN queued for packet assembly.

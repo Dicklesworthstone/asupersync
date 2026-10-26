@@ -8,7 +8,7 @@
 //! It intentionally stays runtime-agnostic and does not perform socket I/O.
 
 use crate::bytes::{Buf, Bytes, BytesMut};
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError, QuicFrameType};
 use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt};
 use crate::net::quic_core::TransportParameters;
@@ -291,6 +291,56 @@ impl Default for NativeQuicConnectionConfig {
     }
 }
 
+/// One connection-owned wait. Replacing or retiring it removes exactly its
+/// cancellation registration; repeatedly abandoned polls cannot grow a queue.
+#[derive(Debug)]
+struct LocalStreamOpenWaiter {
+    cx: Cx,
+    token: Option<CancelWakerToken>,
+    waker: Waker,
+}
+
+impl LocalStreamOpenWaiter {
+    fn new(cx: &Cx, waker: &Waker) -> Self {
+        let cx = cx.clone();
+        let waker = waker.clone();
+        let token = Some(cx.refresh_cancel_waker(None, &waker));
+        Self { cx, token, waker }
+    }
+
+    fn clear_registration(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+
+    fn wake(mut self) {
+        self.clear_registration();
+        self.waker.wake_by_ref();
+    }
+}
+
+impl Clone for LocalStreamOpenWaiter {
+    fn clone(&self) -> Self {
+        // A cloned connection owns a distinct token. Dropping either snapshot
+        // must not unregister the other one's wait on the same Cx.
+        Self::new(&self.cx, &self.waker)
+    }
+}
+
+impl Drop for LocalStreamOpenWaiter {
+    fn drop(&mut self) {
+        self.clear_registration();
+    }
+}
+
+const fn stream_direction_index(direction: StreamDirection) -> usize {
+    match direction {
+        StreamDirection::Bidirectional => 0,
+        StreamDirection::Unidirectional => 1,
+    }
+}
+
 /// Cx-integrated native QUIC connection machine.
 #[derive(Debug, Clone)]
 pub struct NativeQuicConnection {
@@ -298,6 +348,8 @@ pub struct NativeQuicConnection {
     tls: QuicTlsMachine,
     transport: QuicTransportMachine,
     streams: StreamTable,
+    /// One polling owner per direction, bounded even across abandoned waits.
+    local_stream_open_waiters: [Option<LocalStreamOpenWaiter>; 2],
     next_packet_numbers: [u64; 3],
     /// First packet number eligible to use the current updated send key.
     /// A subsequent locally initiated update needs a real ACK at this floor
@@ -500,6 +552,7 @@ impl NativeQuicConnection {
             tls: QuicTlsMachine::new(),
             transport: QuicTransportMachine::new(),
             streams,
+            local_stream_open_waiters: [None, None],
             next_packet_numbers: [0, 0, 0],
             local_key_update_floor: None,
             received_ack_trackers: [
@@ -839,6 +892,93 @@ impl NativeQuicConnection {
         Ok(id)
     }
 
+    /// Open one local bidirectional stream, waiting for peer MAX_STREAMS credit.
+    ///
+    /// `Pending` consumes no stream ID. Only the latest polling caller owns
+    /// this direction's wait; the connection retains at most one Waker and one
+    /// owned cancellation registration per direction. A later poll replaces
+    /// an abandoned wait, and a grant, terminal close, or connection drop
+    /// releases it. Callers must stop polling after `Ready`: another call is
+    /// a request to open another stream. The transport driver must continue
+    /// receiving packets while the application waits.
+    pub fn poll_open_local_bidi(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<StreamId, NativeQuicConnectionError>> {
+        self.poll_open_local(cx, StreamDirection::Bidirectional, task_cx)
+    }
+
+    /// Open one local unidirectional stream, waiting for peer MAX_STREAMS credit.
+    ///
+    /// Uses the same single-owner, cancellation, and retry rules as
+    /// [`Self::poll_open_local_bidi`], with an independent wait slot.
+    pub fn poll_open_local_uni(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<StreamId, NativeQuicConnectionError>> {
+        self.poll_open_local(cx, StreamDirection::Unidirectional, task_cx)
+    }
+
+    fn poll_open_local(
+        &mut self,
+        cx: &Cx,
+        direction: StreamDirection,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<StreamId, NativeQuicConnectionError>> {
+        let index = stream_direction_index(direction);
+        self.local_stream_open_waiters[index] = None;
+        if let Err(error) = checkpoint(cx).and_then(|()| self.ensure_data_state()) {
+            return Poll::Ready(Err(error));
+        }
+        let result = match direction {
+            StreamDirection::Bidirectional => self.streams.open_local_bidi(),
+            StreamDirection::Unidirectional => self.streams.open_local_uni(),
+        };
+        match result {
+            Err(StreamTableError::StreamLimitExceeded { limit, .. }) if limit < (1u64 << 60) => {
+                self.local_stream_open_waiters[index] =
+                    Some(LocalStreamOpenWaiter::new(cx, task_cx.waker()));
+                // Cancellation can arrive between the first check and the
+                // registration. Recheck after arming, before returning Pending.
+                if let Err(error) = checkpoint(cx) {
+                    self.local_stream_open_waiters[index] = None;
+                    return Poll::Ready(Err(error));
+                }
+                Poll::Pending
+            }
+            result => Poll::Ready(result.map_err(map_stream_table_error)),
+        }
+    }
+
+    fn wake_local_stream_opener(&mut self, direction: StreamDirection) {
+        if let Some(waiter) =
+            self.local_stream_open_waiters[stream_direction_index(direction)].take()
+        {
+            waiter.wake();
+        }
+    }
+
+    fn wake_local_stream_openers(&mut self) {
+        // Retire both registration owners even if the first arbitrary Waker
+        // panics. Dispatch all notifications, then preserve the first panic.
+        let waiters = std::mem::replace(&mut self.local_stream_open_waiters, [None, None]);
+        let mut first_panic = None;
+        for waiter in waiters.into_iter().flatten() {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waiter.wake()))
+            {
+                if first_panic.is_none() {
+                    first_panic = Some(payload);
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     /// Accept a remote stream ID.
     pub fn accept_remote_stream(
         &mut self,
@@ -1037,6 +1177,21 @@ impl NativeQuicConnection {
         fin: bool,
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
+        self.write_stream_bytes_after_checkpoint(id, data, fin)
+    }
+
+    /// Queue bytes after the caller has observed its `Cx` checkpoint.
+    ///
+    /// This phase keeps all transport-state and credit validation but invokes
+    /// no user callbacks. HTTP/3 can therefore hold its QPACK ownership lock
+    /// across byte admission and ACK-slot publication without running a
+    /// checkpoint evidence sink under that lock.
+    pub(crate) fn write_stream_bytes_after_checkpoint(
+        &mut self,
+        id: StreamId,
+        data: Bytes,
+        fin: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
         self.ensure_data_state()?;
         let len = data.len() as u64;
         let result = self.streams.write_stream_bytes(id, data, fin);
@@ -1551,6 +1706,7 @@ impl NativeQuicConnection {
         if close_was_unattributed {
             self.peer_close_observed = false;
         }
+        self.wake_local_stream_openers();
         Ok(())
     }
 
@@ -1568,6 +1724,7 @@ impl NativeQuicConnection {
             self.peer_close_observed = false;
         }
         self.transport.close_immediately(app_error_code);
+        self.wake_local_stream_openers();
         Ok(())
     }
 
@@ -1597,6 +1754,7 @@ impl NativeQuicConnection {
         {
             self.peer_close_observed = false;
             self.local_close_frame_type = Some(frame_type);
+            self.wake_local_stream_openers();
         }
     }
 
@@ -1649,6 +1807,12 @@ impl NativeQuicConnection {
     pub fn poll(&mut self, cx: &Cx, now_micros: u64) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.transport.poll(now_micros);
+        if matches!(
+            self.transport.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
+            self.wake_local_stream_openers();
+        }
         Ok(())
     }
 
@@ -2876,8 +3040,12 @@ impl NativeQuicConnection {
                 } else {
                     StreamDirection::Unidirectional
                 };
-                self.streams
-                    .increase_local_stream_limit(direction, maximum_streams);
+                if self
+                    .streams
+                    .increase_local_stream_limit(direction, maximum_streams)
+                {
+                    self.wake_local_stream_opener(direction);
+                }
                 Ok(())
             }
             QuicFrame::PathChallenge { data } => {
@@ -2909,6 +3077,7 @@ impl NativeQuicConnection {
                 if close_was_unattributed {
                     self.peer_close_observed = true;
                 }
+                self.wake_local_stream_openers();
                 Ok(())
             }
             QuicFrame::HandshakeDone => {

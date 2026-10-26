@@ -6,6 +6,8 @@
     fn omitted_field_limit_preserves_default_wire_settings() {
         let config = NativeH3ListenerConfig::default();
         assert_eq!(config.max_request_field_section_size, None);
+        assert_eq!(config.qpack_decoder_blocked_streams, 0);
+        assert_eq!(config.qpack_encoder_table_capacity, None);
         assert_eq!(config.local_h3_settings(), H3Settings::default());
         let mut wire = Vec::new();
         config.local_h3_settings().encode_payload(&mut wire).unwrap();
@@ -45,16 +47,19 @@
         use crate::net::quic_native::{NativeQuicConnectionConfig, PacketNumberSpace};
 
         for streaming in [None, NonZeroUsize::new(8)] {
-            for (capacity, field_limit) in [
-                (None, None),
-                (None, Some(32)),
-                (NonZeroUsize::new(1), Some(0)),
-                (NonZeroUsize::new(4096), Some(512)),
-                (NonZeroUsize::new(65_536), None),
-                (NonZeroUsize::new(65_536), Some(QUIC_VARINT_MAX)),
+            for (capacity, blocked_streams, field_limit) in [
+                (None, 0, None),
+                (None, 0, Some(32)),
+                (NonZeroUsize::new(1), 0, Some(0)),
+                (NonZeroUsize::new(4096), 0, Some(512)),
+                (NonZeroUsize::new(4096), 1, Some(512)),
+                (NonZeroUsize::new(4096), 16, Some(512)),
+                (NonZeroUsize::new(65_536), 0, None),
+                (NonZeroUsize::new(65_536), 16, Some(QUIC_VARINT_MAX)),
             ] {
                 let config = NativeH3ListenerConfig {
                     qpack_decoder_table_capacity: capacity,
+                    qpack_decoder_blocked_streams: blocked_streams,
                     max_request_field_section_size: field_limit,
                     streaming_request_body_buffer_bytes: streaming,
                     ..NativeH3ListenerConfig::default()
@@ -117,7 +122,7 @@
                     settings.qpack_max_table_capacity,
                     capacity.map(|n| n.get() as u64)
                 );
-                assert_eq!(settings.qpack_blocked_streams, capacity.map(|_| 0));
+                assert_eq!(settings.qpack_blocked_streams, capacity.map(|_| blocked_streams));
                 let expected_field_limit = if capacity.is_some() {
                     Some(
                         field_limit

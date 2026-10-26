@@ -612,25 +612,71 @@ The native session and listener can opt in to dynamic QPACK **decoding**:
 ```rust,ignore
 let mut config = NativeH3ListenerConfig::default();
 config.qpack_decoder_table_capacity = std::num::NonZeroUsize::new(4096);
+config.qpack_decoder_blocked_streams = 8;
 ```
 
 This enables compressed incoming request headers and trailers; a directly
 configured client session also decodes dynamic informational and final responses.
-The profile advertises a finite table of at most 64 KiB and zero blocked streams,
-acknowledges received insertions, and retains decoder feedback across QUIC
-flow-control stalls. Peers can then reference acknowledged entries without
-blocking a request stream. Resolved field sizes are checked before copying table
-entries, with an advertised ceiling of 1 MiB per section and any smaller
-configured field limit. Outgoing headers and trailers use static QPACK. For an
+The profile advertises a finite table of at most 64 KiB, acknowledges received
+insertions, and retains decoder feedback across QUIC flow-control stalls.
+If peer stream-count credit prevents opening the decoder stream, the async
+driver parks until a `MAX_STREAMS` grant, cancellation, or connection close;
+the synchronous driver retains the same feedback for its next drive call.
+Blocked-stream allowance defaults to zero, so peers can reference acknowledged
+entries without blocking a request stream. The listener's
+`qpack_decoder_blocked_streams` option and a direct session's
+`H3Settings::qpack_blocked_streams` accept values up to 16. The listener requires
+a decoder table capacity for a positive allowance and validates both limits
+before binding its socket. HEADERS that
+arrive before their table entries then wait for encoder instructions while
+unrelated requests continue. DATA, subsequent headers, trailers, and FIN retain
+their stream order; cancellation releases the waiting section. The connection
+admits at most 1 MiB of pending encoded field-section payload, retained once by
+the parser and once by the scheduler, plus separately bounded parser lookahead.
+Exceeding this local byte budget resets only the new request; exceeding the
+advertised blocked-stream count remains a connection error.
+Resolved field sizes are checked before copying table entries, with an
+advertised ceiling of 1 MiB per section and any smaller
+configured field limit. Outgoing compression has a separate opt-in; trailers
+remain statically encoded. For an
 established connection, select `H3ConnectionConfig::with_dynamic_qpack()` and
 pass local settings to `NativeH3Session::initialize`; an omitted table capacity
 defaults to 4096 bytes. Dynamic receive yields after each decoded event and
 delivers DATA in chunks of at most 64 KiB by default; an explicit
 `enable_streaming_receive` setting selects another chunk size. This also bounds
 retention when one transport read contains many compressed field sections.
-Default sessions remain static. The new dynamic receive
-regressions still require Rust/RCH execution; this is not an interop or
-deployment-readiness claim.
+Default sessions remain static.
+
+The listener can also opt in to dynamic QPACK **encoding** of response headers:
+
+```rust,ignore
+let mut config = NativeH3ListenerConfig::default();
+config.qpack_encoder_table_capacity = std::num::NonZeroUsize::new(4096);
+```
+
+For a directly driven client or server session, call
+`session.enable_dynamic_qpack_encoder(NonZeroUsize::new(4096).unwrap())`
+before `initialize`. This applies to one-shot requests and responses,
+informational responses, and the initial headers of incremental writers.
+It is independent of dynamic receive and does not change local receive SETTINGS.
+The active send table is capped at 64 KiB and the peer's advertised allowance;
+the peer's full allowance still determines the wire insert-count encoding.
+Only `accept`, `accept-encoding`, `content-type`, `content-encoding`,
+`cache-control`, and `vary` are automatically inserted. Other fields, including
+authorization and cookies, stay outside the dynamic table. First occurrences
+remain literal; subsequent sections can reuse an entry after insertion feedback
+arrives, even when the peer permits zero blocked streams.
+
+Continue driving session events and QUIC while writing. The session retains
+up to 64 KiB of encoder instruction bytes across stream-count and byte-credit
+stalls. Table, instruction-queue, or reference-slot pressure falls back to
+literal headers. Prepared and unacknowledged dynamic sections share a
+4096-section connection limit. Dropping a writer before sending its first
+HEADERS byte releases its reservation; after partial transmission, references
+remain protected until peer acknowledgment or cancellation. This prevents a
+local reset from evicting entries the peer may still need. Trailers retain
+static encoding. The new dynamic QPACK regressions still require Rust/RCH
+execution; external interoperability and deployment readiness remain unproven.
 
 The native H3 listener also has an opt-in live request-body path:
 

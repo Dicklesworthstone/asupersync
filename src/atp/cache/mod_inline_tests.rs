@@ -74,6 +74,104 @@
     }
 
     #[test]
+    fn explicit_policy_cache_authorizes_scoped_storage_and_denies_aliases_before_lookup() {
+        let content = b"private team artifact";
+        let key = CacheKey::new(
+            "build-manifest".to_string(),
+            sha256_hex(content),
+            Some("team:build".to_string()),
+        );
+        let mut default_cache = AtpCache::new(CacheConfig::default());
+        assert!(matches!(
+            default_cache.put(key.clone(), content),
+            Err(CacheError::TrustViolation(_))
+        ));
+
+        let mut policy = trust::TrustPolicy::local();
+        policy.add_authorized_scope("team:build".to_string());
+        let mut cache = AtpCache::with_trust_policy(CacheConfig::default(), policy).unwrap();
+        cache.put(key.clone(), content).unwrap();
+        assert_eq!(cache.get(&key).unwrap().as_deref(), Some(content.as_slice()));
+
+        let mut foreign_key = key.clone();
+        foreign_key.grant_scope = Some("other:team".to_string());
+        assert!(matches!(
+            cache.get(&foreign_key),
+            Err(CacheError::TrustViolation(_))
+        ));
+        assert!(matches!(
+            cache.remove(&foreign_key),
+            Err(CacheError::TrustViolation(_))
+        ));
+        assert!(matches!(
+            cache.put(foreign_key, b"even the hash must not be checked"),
+            Err(CacheError::TrustViolation(_))
+        ));
+        let mut unscoped_alias = key.clone();
+        unscoped_alias.grant_scope = None;
+        assert!(cache.get(&unscoped_alias).unwrap().is_none());
+        assert_eq!(cache.metrics().entry_count, 1);
+        assert_eq!(cache.get(&key).unwrap().as_deref(), Some(content.as_slice()));
+        cache.remove(&key).unwrap();
+        assert!(cache.get(&key).unwrap().is_none());
+        assert_eq!(cache.metrics().entry_count, 0);
+    }
+
+    #[test]
+    fn explicit_policy_cache_preserves_shared_encryption_and_configuration_gates() {
+        let content = b"private plaintext";
+        let key = CacheKey::new(
+            "manifest".to_string(),
+            sha256_hex(content),
+            Some("team:encrypted".to_string()),
+        );
+        let mut policy = trust::TrustPolicy::shared();
+        policy.add_authorized_scope("team:encrypted".to_string());
+        let mut cache =
+            AtpCache::with_trust_policy(CacheConfig::default(), policy.clone()).unwrap();
+        assert!(matches!(
+            cache.put(key, content),
+            Err(CacheError::TrustViolation(_))
+        ));
+        assert_eq!(cache.metrics().entry_count, 0);
+
+        policy.allow_public_content = true;
+        assert!(matches!(
+            AtpCache::with_trust_policy(CacheConfig::default(), policy),
+            Err(CacheError::TrustViolation(_))
+        ));
+    }
+
+    #[test]
+    fn retiring_one_scoped_file_entry_preserves_other_grants_to_the_same_content() {
+        let root = tempfile::tempdir().unwrap();
+        let config = CacheConfig {
+            storage_root: root.path().to_path_buf(),
+            ..CacheConfig::default()
+        };
+        let content = vec![0x5a; 64 * 1024];
+        let mut policy = trust::TrustPolicy::local();
+        policy.add_authorized_scope("team:a".to_string());
+        policy.add_authorized_scope("team:b".to_string());
+        let mut cache = AtpCache::with_trust_policy(config, policy).unwrap();
+        let a = CacheKey::new(
+            "a".to_string(),
+            sha256_hex(&content),
+            Some("team:a".to_string()),
+        );
+        let b = CacheKey::new(
+            "b".to_string(),
+            sha256_hex(&content),
+            Some("team:b".to_string()),
+        );
+        cache.put(a.clone(), &content).unwrap();
+        cache.put(b.clone(), &content).unwrap();
+        cache.remove(&a).unwrap();
+        assert_eq!(cache.get(&b).unwrap(), Some(content));
+        assert_eq!(cache.metrics().entry_count, 1);
+    }
+
+    #[test]
     fn cache_put_existing_key_does_not_duplicate_metrics_or_lru_entries() {
         let mut config = CacheConfig::default();
         config.max_entries = 1;

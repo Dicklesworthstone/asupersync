@@ -61,11 +61,13 @@ pub struct NativeH3ListenerConfig {
     /// Opt in to dynamic QPACK decoding with this table capacity per connection.
     ///
     /// Values up to [`crate::http::h3::NATIVE_H3_MAX_QPACK_DECODER_CAPACITY`]
-    /// (64 KiB) are accepted. The listener advertises this capacity and zero
-    /// blocked streams, so peers can compress requests and trailers using
-    /// entries whose insertion the session has acknowledged. Decoder feedback
-    /// is retained across transport flow-control stalls. Responses use the
-    /// session's static encoder profile. Session parsing yields one event at
+    /// (64 KiB) are accepted. The listener advertises this capacity and
+    /// `qpack_decoder_blocked_streams`. With the default blocked-stream limit
+    /// of zero, peers can compress requests and trailers using entries whose
+    /// insertion the session has acknowledged. Decoder feedback
+    /// is retained across transport flow-control stalls. Response compression
+    /// is controlled independently by `qpack_encoder_table_capacity`.
+    /// Session parsing yields one event at
     /// a time; buffered Router dispatch still waits for the complete request.
     ///
     /// `None` preserves static-only decoding. This table limit is independent
@@ -73,6 +75,38 @@ pub struct NativeH3ListenerConfig {
     /// 1 MiB expansion ceiling; a smaller `max_request_field_section_size`
     /// further reduces the advertised and enforced allowance.
     pub qpack_decoder_table_capacity: Option<NonZeroUsize>,
+    /// Maximum request streams per connection waiting for QPACK insertions.
+    ///
+    /// Defaults to zero. A positive value requires
+    /// `qpack_decoder_table_capacity` and may not exceed
+    /// [`crate::http::h3::NATIVE_H3_MAX_QPACK_BLOCKED_STREAMS`] (sixteen).
+    /// The session retains compressed HEADERS until the peer encoder stream
+    /// supplies their referenced entries, while unrelated requests progress.
+    /// Buffered DATA and FIN remain behind those HEADERS. Request reset and
+    /// cancellation release the retained section and its decoder references.
+    ///
+    /// Blocked encoded sections share a separate 1 MiB budget per connection;
+    /// the parser and scheduler each retain one copy. A section that exceeds
+    /// the remaining local budget resets only its request with H3_EXCESSIVE_LOAD.
+    /// Parser lookahead, QUIC reassembly, and request-body limits remain
+    /// independent. Invalid configurations are rejected before socket binding.
+    pub qpack_decoder_blocked_streams: u64,
+    /// Opt in to bounded dynamic QPACK encoding for response headers.
+    ///
+    /// Values up to [`crate::http::h3::NATIVE_H3_MAX_QPACK_ENCODER_CAPACITY`]
+    /// (64 KiB) are accepted. The active table also respects each peer's
+    /// advertised capacity. Only acknowledged entries can be referenced, so
+    /// this profile works with a peer blocked-stream limit of zero. Reusable
+    /// metadata fields are selected by the session's conservative policy;
+    /// credentials, cookies, and arbitrary application fields are not cached.
+    /// Encoder instructions remain owned across stream-admission and
+    /// flow-control stalls. Table or queue pressure uses literal headers.
+    ///
+    /// `None` preserves static encoding. This option does not enable dynamic
+    /// request decoding or change the listener's advertised QPACK SETTINGS.
+    /// Trailers retain static encoding. Invalid capacity is rejected before
+    /// binding a socket.
+    pub qpack_encoder_table_capacity: Option<NonZeroUsize>,
     /// Maximum admitted request regions across all connections.
     pub max_concurrent_requests: usize,
     /// Optional listener-wide budget for request-body capacity reservations.
@@ -189,6 +223,8 @@ impl Default for NativeH3ListenerConfig {
                 .max_in_flight_dispatches(16),
             max_request_field_section_size: None,
             qpack_decoder_table_capacity: None,
+            qpack_decoder_blocked_streams: 0,
+            qpack_encoder_table_capacity: None,
             max_concurrent_requests: 128,
             max_total_request_body_reservation_bytes: None,
             max_pending_handshakes: 16,
@@ -214,7 +250,9 @@ impl NativeH3ListenerConfig {
             qpack_max_table_capacity: self
                 .qpack_decoder_table_capacity
                 .map(|capacity| capacity.get() as u64),
-            qpack_blocked_streams: self.qpack_decoder_table_capacity.map(|_| 0),
+            qpack_blocked_streams: self
+                .qpack_decoder_table_capacity
+                .map(|_| self.qpack_decoder_blocked_streams),
             ..crate::http::h3::H3Settings::default()
         }
     }
@@ -406,6 +444,30 @@ impl NativeH3Listener {
         }) {
             return Err(ManagedEndpointError::InvalidConfig(
                 "HTTP/3 QPACK decoder table capacity exceeds 64 KiB".to_string(),
+            )
+            .into());
+        }
+        if config.qpack_encoder_table_capacity.is_some_and(|capacity| {
+            capacity.get() > crate::http::h3::NATIVE_H3_MAX_QPACK_ENCODER_CAPACITY
+        }) {
+            return Err(ManagedEndpointError::InvalidConfig(
+                "HTTP/3 QPACK encoder table capacity exceeds 64 KiB".to_string(),
+            )
+            .into());
+        }
+        if config.qpack_decoder_blocked_streams
+            > crate::http::h3::NATIVE_H3_MAX_QPACK_BLOCKED_STREAMS
+        {
+            return Err(ManagedEndpointError::InvalidConfig(
+                "HTTP/3 QPACK blocked stream limit exceeds sixteen".to_string(),
+            )
+            .into());
+        }
+        if config.qpack_decoder_blocked_streams != 0
+            && config.qpack_decoder_table_capacity.is_none()
+        {
+            return Err(ManagedEndpointError::InvalidConfig(
+                "HTTP/3 QPACK blocked streams require a decoder table capacity".to_string(),
             )
             .into());
         }
@@ -1659,6 +1721,9 @@ impl ListenerState {
             }
             let mut session = NativeH3Session::with_config(self.config.session_config());
             let initialized = endpoint.with_connection_mut(cx, id, |connection| {
+                if let Some(capacity) = self.config.qpack_encoder_table_capacity {
+                    session.enable_dynamic_qpack_encoder(capacity)?;
+                }
                 if let Some(queue_bytes) = self.config.streaming_request_body_buffer_bytes {
                     session.enable_streaming_receive(
                         NonZeroUsize::new(streaming_chunk_bytes(queue_bytes))

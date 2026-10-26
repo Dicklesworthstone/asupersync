@@ -2278,6 +2278,197 @@ mod tests {
     }
 
     #[test]
+    fn qpack_dynamic_base_does_not_require_unreferenced_insertions() {
+        let mut context = QpackContext::new(128);
+        context
+            .insert_dynamic_entry("x-first".to_string(), "first".to_string())
+            .expect("insert the only referenced entry");
+
+        // RFC 9204 section 4.5.1.2: Base is an addressing origin. RIC 1,
+        // Base 2, relative index 1 names entry 0 even before entry 1 arrives.
+        for (wire, expected) in [
+            (vec![2, 1, 0x81], "first"),
+            (vec![2, 1, 0x41, 1, b'v'], "v"),
+        ] {
+            let metadata = qpack_field_section_metadata(
+                &wire,
+                H3QpackMode::DynamicTableAllowed,
+                Some(&context),
+            )
+            .expect("valid positive Delta Base");
+            assert_eq!(metadata.required_insert_count(), 1);
+            assert_eq!(metadata.base(), 2);
+            let plan = qpack_decode_field_section_with_context(
+                &wire,
+                H3QpackMode::DynamicTableAllowed,
+                Some(&context),
+            )
+            .expect("Base must not introduce another insertion dependency");
+            assert_eq!(
+                qpack_plan_to_header_fields(&plan, Some(&context)).unwrap(),
+                vec![("x-first".to_string(), expected.to_string())]
+            );
+        }
+
+        // Relaxing Base must not permit a reference beyond the declared RIC.
+        assert_eq!(
+            qpack_decode_field_section_with_context(
+                &[2, 1, 0x80],
+                H3QpackMode::DynamicTableAllowed,
+                Some(&context),
+            ),
+            Err(H3NativeError::InvalidFrame(
+                "qpack required insert count does not match dynamic references",
+            ))
+        );
+    }
+
+    #[test]
+    fn qpack_dynamic_zero_ric_allows_nonzero_base_without_dynamic_references() {
+        let context = QpackContext::new(128);
+        for base in [1, 7, u64::from(u32::MAX)] {
+            let mut wire = vec![0];
+            qpack_encode_prefixed_int(&mut wire, 0, 7, base).unwrap();
+            wire.push(0xd1); // Static :method GET.
+            for context in [None, Some(&context)] {
+                let metadata = qpack_field_section_metadata(
+                    &wire,
+                    H3QpackMode::DynamicTableAllowed,
+                    context,
+                )
+                .expect("static fields can use any nonnegative Base");
+                assert_eq!(metadata.required_insert_count(), 0);
+                assert_eq!(metadata.base(), base);
+                let plan = qpack_decode_field_section_with_context(
+                    &wire,
+                    H3QpackMode::DynamicTableAllowed,
+                    context,
+                )
+                .expect("no dynamic table is needed for a static field");
+                assert_eq!(plan, vec![QpackFieldPlan::StaticIndex(17)]);
+                assert_eq!(
+                    qpack_plan_to_header_fields(&plan, context).unwrap(),
+                    vec![(":method".to_string(), "GET".to_string())]
+                );
+            }
+            assert_eq!(
+                qpack_decode_field_section(&wire, H3QpackMode::StaticOnly),
+                Err(H3NativeError::QpackPolicy("base must be zero in static-only mode"))
+            );
+        }
+        assert!(
+            qpack_field_section_metadata(
+                &[0, 0x80, 0xd1],
+                H3QpackMode::DynamicTableAllowed,
+                Some(&context),
+            )
+            .is_err(),
+            "a zero RIC and negative Delta Base must still reject underflow"
+        );
+    }
+
+    #[test]
+    fn qpack_captured_prefix_never_aliases_an_entry_after_insert_count_wrap() {
+        let mode = H3QpackMode::DynamicTableAllowed;
+        let mut context = QpackContext::new(64);
+        let wire = [2, 0, 0x80]; // RIC 1, Base 1, absolute reference 0.
+        let captured = qpack_field_section_metadata(&wire, mode, Some(&context))
+            .expect("capture prefix before the required insertion arrives");
+        assert_eq!(captured.required_insert_count(), 1);
+
+        // This intentionally omits the scheduler's reference protection to
+        // exercise stale-reference rejection. At capacity 64, MaxEntries=2
+        // and the encoded RIC wraps every four inserts. No received old field
+        // may silently be reinterpreted as the fifth entry after eviction.
+        for value in ["a", "b", "c", "d", "e"] {
+            context
+                .insert_dynamic_entry("x".to_string(), value.to_string())
+                .expect("advance the unreferenced table");
+        }
+        assert_eq!(context.dynamic_table().insertion_counter(), 5);
+        assert!(context.dynamic_table().get_by_insertion_id(0).is_none());
+        let fresh = qpack_field_section_metadata(&wire, mode, Some(&context)).unwrap();
+        assert_eq!(fresh.required_insert_count(), 5);
+        let new_arrival =
+            qpack_decode_field_section_with_context(&wire, mode, Some(&context)).unwrap();
+        assert_eq!(new_arrival, vec![QpackFieldPlan::DynamicIndex(4)]);
+        assert_eq!(
+            qpack_plan_to_header_fields(&new_arrival, Some(&context)).unwrap(),
+            vec![("x".to_string(), "e".to_string())]
+        );
+
+        let resumed = qpack_decode_field_section_with_metadata(
+            &wire,
+            mode,
+            Some(&context),
+            &captured,
+        )
+        .expect("the captured prefix still identifies the original reference");
+        assert_eq!(resumed, vec![QpackFieldPlan::DynamicIndex(0)]);
+        assert!(
+            qpack_plan_to_header_fields(&resumed, Some(&context)).is_err(),
+            "an evicted original reference must fail instead of yielding new data"
+        );
+        #[cfg(feature = "http3")]
+        assert!(qpack_plan_field_section_size(&resumed, Some(&context)).is_err());
+    }
+
+    #[test]
+    fn qpack_blocked_section_unblocks_at_ric_even_when_base_is_larger() {
+        let mode = H3QpackMode::DynamicTableAllowed;
+        let mut context = QpackContext::new(128);
+        let mut feedback = QpackDecoderFeedbackState::new();
+        let mut scheduler = QpackBlockedStreamScheduler::new(1);
+        assert_eq!(
+            scheduler
+                .submit_received_field_section(
+                    &mut context,
+                    &mut feedback,
+                    mode,
+                    4,
+                    &[2, 1, 0x81],
+                )
+                .expect("wait for the referenced first entry"),
+            QpackBlockedStreamStatus::Blocked
+        );
+        assert_eq!(scheduler.blocked_stream_count(), 1);
+        assert_eq!(scheduler.retained_field_section_bytes(4), 3);
+        assert_eq!(feedback.outstanding_reference_count(), 0);
+        let (inserted, ready) = scheduler
+            .apply_encoder_instruction(
+                &mut context,
+                &mut feedback,
+                mode,
+                &QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: "x-first".to_string(),
+                    value: "first".to_string(),
+                },
+            )
+            .expect("one insertion satisfies RIC without satisfying Base");
+        assert_eq!(inserted, Some(0));
+        assert_eq!(ready, vec![4]);
+        assert_eq!(context.dynamic_table().insertion_counter(), 1);
+        assert_eq!(scheduler.blocked_stream_count(), 0);
+        assert_eq!(scheduler.retained_field_section_bytes(4), 0);
+        assert_eq!(scheduler.record(4).unwrap().base(), 2);
+        assert_eq!(scheduler.record(4).unwrap().protected_references(), &[0]);
+        assert_eq!(feedback.stream_outstanding_section_count(4), 1);
+        assert!(context.set_dynamic_table_capacity(0).is_err());
+        scheduler
+            .apply_decoder_instruction(
+                &mut feedback,
+                &mut context,
+                mode,
+                &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+            )
+            .expect("acknowledge exactly the first entry");
+        assert_eq!(feedback.known_received_count(), 1);
+        assert_eq!(feedback.outstanding_reference_count(), 0);
+        assert_eq!(scheduler.pending_section_count(4), 0);
+        context.set_dynamic_table_capacity(0).expect("all references released");
+    }
+
+    #[test]
     fn qpack_required_insert_count_tracks_referenced_entries_not_total_insertions() {
         let mut context = QpackContext::new(128);
         for name in ["a", "b", "c"] {
@@ -4592,6 +4783,217 @@ mod tests {
             .register_stream(7, H3UniStreamType::QpackDecoder)
             .expect("peer decoder stream");
         state
+    }
+
+    #[cfg(feature = "http3")]
+    fn qpack_prepared_sender(max_sections: usize) -> QpackInstructionStreamState {
+        let mut state = qpack_directional_state(0, 128, 0, 0)
+            .with_outbound_section_limit(max_sections)
+            .expect("bounded outbound profile");
+        state.apply_local_encoder_instruction(
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 128 },
+        ).expect("local capacity");
+        for name in ["x-a", "x-b"] {
+            state.apply_local_encoder_instruction(
+                &QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: name.to_string(),
+                    value: "one".to_string(),
+                },
+            ).expect("initial entries");
+        }
+        state.feed_decoder_stream_bytes(7, &[2]).expect("peer received both insertions");
+        state
+    }
+
+    #[cfg(feature = "http3")]
+    fn qpack_prepared_wire(state: &QpackInstructionStreamState, index: u64) -> Vec<u8> {
+        qpack_encode_field_section_with_context(
+            &[QpackFieldPlan::DynamicIndex(index)],
+            Some(state.context()),
+        ).expect("dynamic field section")
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn qpack_prepared_sections_pin_entries_without_accepting_peer_ack() {
+        let mut state = qpack_prepared_sender(2);
+        let wire = qpack_prepared_wire(&state, 0);
+        let token = state.prepare_outbound_field_section(0, &wire).unwrap().unwrap();
+        assert_eq!(state.prepared_outbound_section_count(), 1);
+        assert_eq!(state.decoder_feedback().stream_outstanding_section_count(0), 0);
+        assert!(state.blocked_scheduler().record(0).is_none());
+        state.apply_local_encoder_instruction(
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+        ).expect_err("a parked writer still protects its chosen entry");
+        assert!(state.first_failure().is_none(), "local capacity pressure is recoverable");
+
+        let error = state.feed_decoder_stream_bytes(7, &[0x80])
+            .expect_err("the peer cannot acknowledge unsent HEADERS");
+        assert_eq!(error, H3NativeError::InvalidFrame(
+            "qpack acknowledgement requires a dynamic field section",
+        ));
+        assert!(state.discard_prepared_outbound_field_section(token),
+            "writer cleanup works even after a sticky protocol error");
+        assert!(!state.discard_prepared_outbound_field_section(token));
+        assert_eq!(state.prepared_outbound_section_count(), 0);
+        assert_eq!(state.context.dynamic_table.entries[0].reference_count, 0);
+        assert_eq!(state.first_failure(), Some(&error));
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn qpack_prepared_sections_commit_in_wire_order_and_retain_exposed_references() {
+        let mut state = qpack_prepared_sender(4);
+        let first_wire = qpack_prepared_wire(&state, 0);
+        let second_wire = qpack_prepared_wire(&state, 1);
+        let first = state.prepare_outbound_field_section(0, &first_wire).unwrap().unwrap();
+        let second = state.prepare_outbound_field_section(0, &second_wire).unwrap().unwrap();
+
+        // ACK order follows the first accepted transport bytes, not the order
+        // in which application writers happened to prepare their sections.
+        state.commit_prepared_outbound_field_section(second).unwrap();
+        state.commit_prepared_outbound_field_section(first).unwrap();
+        assert_eq!(state.prepared_outbound_section_count(), 0);
+        assert_eq!(state.decoder_feedback().stream_outstanding_section_count(0), 2);
+        assert_eq!(state.context.dynamic_table.entries[0].reference_count, 1);
+        assert_eq!(state.context.dynamic_table.entries[1].reference_count, 1);
+        assert!(!state.discard_prepared_outbound_field_section(second),
+            "dropping a partially sent writer cannot free exposed references");
+        assert!(!state.discard_prepared_outbound_field_section(first));
+        state.apply_local_encoder_instruction(
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+        ).expect_err("only peer feedback can release exposed entries");
+
+        state.feed_decoder_stream_bytes(7, &[0x80]).unwrap();
+        assert_eq!(state.context.dynamic_table.entries[0].reference_count, 1);
+        assert_eq!(state.context.dynamic_table.entries[1].reference_count, 0);
+        assert_eq!(state.decoder_feedback().stream_outstanding_section_count(0), 1);
+        state.feed_decoder_stream_bytes(7, &[0x80]).unwrap();
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 0);
+        assert!(state.decoder_feedback().acknowledged_stream_ids().is_empty());
+        assert_eq!(state.blocked_scheduler().tracked_record_count(), 0);
+        state.apply_local_encoder_instruction(
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+        ).expect("all acknowledged entries are now evictable");
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn qpack_outbound_admission_counts_prepared_and_exposed_sections_together() {
+        let mut state = qpack_prepared_sender(3)
+            .with_pending_section_limits(1, 0).unwrap();
+        let wire = qpack_prepared_wire(&state, 0);
+        let exposed = state.prepare_outbound_field_section(0, &wire).unwrap().unwrap();
+        state.commit_prepared_outbound_field_section(exposed).unwrap();
+        let parked = state.prepare_outbound_field_section(4, &wire).unwrap().unwrap();
+        assert_eq!(state.prepare_outbound_field_section(4, &wire),
+            Err(H3NativeError::QpackPolicy("qpack pending section limit exceeded")));
+        let third = state.prepare_outbound_field_section(8, &wire).unwrap().unwrap();
+        assert_eq!(state.prepare_outbound_field_section(12, &wire),
+            Err(H3NativeError::QpackPolicy("qpack outbound section limit exceeded")));
+        assert_eq!(state.submit_field_section(12, &wire),
+            Err(H3NativeError::QpackPolicy("qpack outbound section limit exceeded")),
+            "the older submission API cannot bypass an enabled global bound");
+        assert_eq!(state.prepare_outbound_field_section(12, &[0, 0]).unwrap(), None,
+            "static fallback needs neither a reference nor a section slot");
+        assert!(state.first_failure().is_none());
+        assert_eq!(state.context.dynamic_table.entries[0].reference_count, 3);
+
+        state.feed_decoder_stream_bytes(7, &[0x80]).unwrap();
+        let replacement = state.prepare_outbound_field_section(12, &wire).unwrap().unwrap();
+        assert!(state.discard_prepared_outbound_field_section(parked));
+        assert!(state.discard_prepared_outbound_field_section(third));
+        assert!(state.discard_prepared_outbound_field_section(replacement));
+        assert_eq!(state.outbound_active_section_count(), 0);
+        assert_eq!(state.context.dynamic_table.entries[0].reference_count, 0);
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn qpack_peer_cancellation_preserves_only_unexposed_writer_protections() {
+        let mut state = qpack_prepared_sender(3);
+        let first_wire = qpack_prepared_wire(&state, 0);
+        let second_wire = qpack_prepared_wire(&state, 1);
+        let exposed = state.prepare_outbound_field_section(0, &first_wire).unwrap().unwrap();
+        state.commit_prepared_outbound_field_section(exposed).unwrap();
+        let parked = state.prepare_outbound_field_section(0, &second_wire).unwrap().unwrap();
+        state.feed_decoder_stream_bytes(7, &[0x40]).expect("peer cancels stream zero");
+        assert_eq!(state.decoder_feedback().outstanding_reference_count(), 0);
+        assert_eq!(state.context.dynamic_table.entries[0].reference_count, 0);
+        assert_eq!(state.context.dynamic_table.entries[1].reference_count, 1);
+        assert_eq!(state.validate_prepared_outbound_field_section(parked),
+            Err(H3NativeError::InvalidFrame("qpack stream already cancelled")));
+        assert_eq!(state.commit_prepared_outbound_field_section(parked),
+            Err(H3NativeError::InvalidFrame("qpack stream already cancelled")));
+        assert_eq!(state.prepared_outbound_section_count(), 1);
+        assert!(state.discard_prepared_outbound_field_section(parked));
+        assert_eq!(state.context.dynamic_table.entries[1].reference_count, 0);
+        assert!(state.decoder_feedback().cancelled_stream_ids().is_empty());
+        assert!(state.first_failure().is_none());
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn qpack_bounded_outbound_feedback_does_not_accumulate_terminal_stream_history() {
+        let mut state = qpack_prepared_sender(1);
+        let wire = qpack_prepared_wire(&state, 0);
+        for stream_id in (0..4096).step_by(4) {
+            let token = state.prepare_outbound_field_section(stream_id, &wire).unwrap().unwrap();
+            state.commit_prepared_outbound_field_section(token).unwrap();
+            state.feed_decoder_stream_bytes(7, &qpack_decoder_instruction_bytes(
+                &QpackDecoderInstruction::HeaderAcknowledgement { stream_id },
+            )).unwrap();
+            // Cancellation is permitted for streams with no dynamic section.
+            state.feed_decoder_stream_bytes(7, &qpack_decoder_instruction_bytes(
+                &QpackDecoderInstruction::StreamCancellation { stream_id: stream_id + 1_000_000 },
+            )).unwrap();
+            assert_eq!(state.outbound_active_section_count(), 0);
+            assert!(state.decoder_feedback().acknowledged_stream_ids().is_empty());
+            assert!(state.decoder_feedback().cancelled_stream_ids().is_empty());
+            assert_eq!(state.blocked_scheduler().tracked_record_count(), 0);
+        }
+        assert_eq!(state.feed_decoder_stream_bytes(7, &[0x80]),
+            Err(H3NativeError::InvalidFrame(
+                "qpack acknowledgement requires a dynamic field section",
+            )), "retiring history never makes a duplicate acknowledgment valid");
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn qpack_outbound_preparation_requires_peer_confirmation_and_uses_advertised_modulus() {
+        let mut state = qpack_directional_state(0, 128, 0, 0)
+            .with_outbound_section_limit(1).unwrap();
+        state.apply_local_encoder_instruction(
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 72 },
+        ).unwrap();
+        for index in 0..6 {
+            state.apply_local_encoder_instruction(
+                &QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: "x".to_string(),
+                    value: index.to_string(),
+                },
+            ).unwrap();
+            let wire = qpack_prepared_wire(&state, index);
+            assert_eq!(state.prepare_outbound_field_section(0, &wire),
+                Err(H3NativeError::QpackPolicy(
+                    "qpack outbound preparation requires acknowledged insertions",
+                )));
+            assert_eq!(state.outbound_active_section_count(), 0);
+            state.feed_decoder_stream_bytes(7, &[1]).unwrap();
+        }
+        let wire = qpack_prepared_wire(&state, 5);
+        assert_eq!(wire[0], 7,
+            "RIC=6 uses peer MaxEntries=4, not active capacity's MaxEntries=2");
+        let token = state.prepare_outbound_field_section(0, &wire).unwrap().unwrap();
+        assert_eq!(state.context().max_table_capacity(), 128);
+        assert_eq!(state.context().dynamic_table().capacity(), 72);
+        assert_eq!(state.context().dynamic_table().find_entry("x", "5")
+            .map(QpackDynamicEntry::insertion_id), Some(5));
+        assert!(state.context().dynamic_table().find_entry("x", "0").is_none());
+        state.commit_prepared_outbound_field_section(token).unwrap();
+        state.feed_decoder_stream_bytes(7, &[0x80]).unwrap();
+        assert_eq!(state.outbound_active_section_count(), 0);
+        assert!(state.first_failure().is_none());
     }
 
     #[test]

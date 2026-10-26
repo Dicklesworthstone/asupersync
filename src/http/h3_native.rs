@@ -1663,15 +1663,13 @@ pub fn qpack_field_section_metadata(
                 ));
             }
             if encoded_insert_count == 0 {
-                if sign || delta_base != 0 {
-                    return Err(H3NativeError::InvalidFrame(
-                        "base must be zero without required insert count",
-                    ));
-                }
                 return Ok(QpackFieldSectionMetadata {
                     encoded_insert_count,
                     required_insert_count: 0,
-                    base: 0,
+                    // RFC 9204 section 4.5.1.2 permits any Base when
+                    // there are no dynamic references. Signed underflow
+                    // remains malformed even though no reference uses it.
+                    base: qpack_decode_base(0, sign, delta_base)?,
                     prefix_len: pos,
                 });
             }
@@ -1718,6 +1716,7 @@ pub struct QpackBlockedStreamRecord {
     blocked_reason: Option<&'static str>,
     protected_references: Vec<u64>,
     blocked_field_section: Option<Vec<u8>>,
+    blocked_metadata: Option<QpackFieldSectionMetadata>,
     field_section_decoded: bool,
     references_registered: bool,
     first_failure: Option<H3NativeError>,
@@ -1740,6 +1739,7 @@ impl QpackBlockedStreamRecord {
             blocked_reason,
             protected_references,
             blocked_field_section: None,
+            blocked_metadata: None,
             field_section_decoded: true,
             references_registered,
             first_failure: None,
@@ -1760,6 +1760,7 @@ impl QpackBlockedStreamRecord {
             blocked_reason: None,
             protected_references: Vec::new(),
             blocked_field_section: None,
+            blocked_metadata: None,
             field_section_decoded: false,
             references_registered: false,
             first_failure: Some(error),
@@ -2255,6 +2256,7 @@ impl QpackBlockedStreamScheduler {
                 record.field_section_decoded = true;
             }
             record.blocked_field_section = Some(field_section.to_vec());
+            record.blocked_metadata = Some(metadata);
             self.push_record(stream_id, record);
             return Ok(QpackBlockedStreamStatus::Blocked);
         }
@@ -2485,17 +2487,24 @@ impl QpackBlockedStreamScheduler {
         // Protect every newly available section, including tails that must wait
         // for an earlier section before entering the feedback ACK queue.
         for (stream_id, index) in ready_sections {
-            let field_section = self
+            let record = self
                 .streams
                 .get(&stream_id)
                 .and_then(|sections| sections.get(index))
-                .and_then(|record| record.blocked_field_section.as_ref())
                 .ok_or(H3NativeError::InvalidFrame(
                     "qpack blocked field section missing",
                 ))?;
+            let field_section = record.blocked_field_section.as_ref().ok_or(
+                H3NativeError::InvalidFrame("qpack blocked field section missing"),
+            )?;
+            let metadata = record.blocked_metadata.as_ref().ok_or(
+                H3NativeError::InvalidFrame("qpack blocked field section metadata missing"),
+            )?;
             let context_opt = (mode == H3QpackMode::DynamicTableAllowed).then_some(&*context);
             let plan =
-                match qpack_decode_field_section_with_context(field_section, mode, context_opt) {
+                match qpack_decode_field_section_with_metadata(
+                    field_section, mode, context_opt, metadata,
+                ) {
                     Ok(plan) => plan,
                     Err(error) => {
                         self.record_stream_error(stream_id, &error);
@@ -2539,6 +2548,7 @@ impl QpackBlockedStreamScheduler {
                     }
                     record.references_registered = !record.protected_references.is_empty();
                     record.blocked_field_section = None;
+                    record.blocked_metadata = None;
                     record.status = QpackBlockedStreamStatus::Ready;
                     record.blocked_reason = None;
                 }
@@ -2775,6 +2785,25 @@ struct QpackReceiveState {
     blocked_scheduler: QpackBlockedStreamScheduler,
 }
 
+// A native writer protects its chosen entries while waiting for QUIC credit,
+// but the peer cannot acknowledge the section until some HEADERS bytes have
+// actually been accepted. Keep these protections outside the ACK FIFO.
+#[cfg(feature = "http3")]
+#[derive(Debug, Clone)]
+struct QpackPreparedOutboundSection {
+    stream_id: u64,
+    metadata: QpackFieldSectionMetadata,
+    references: Vec<u64>,
+}
+
+#[cfg(feature = "http3")]
+#[derive(Debug, Clone)]
+struct QpackOutboundPreparations {
+    max_sections: usize,
+    next_token: u64,
+    sections: BTreeMap<u64, QpackPreparedOutboundSection>,
+}
+
 fn qpack_apply_directional_decoder_instruction(
     scheduler: &mut QpackBlockedStreamScheduler,
     feedback: &mut QpackDecoderFeedbackState,
@@ -2825,6 +2854,8 @@ pub struct QpackInstructionStreamState {
     encoder_pending: QpackInstructionBuffer,
     decoder_pending: QpackInstructionBuffer,
     received: Option<QpackReceiveState>,
+    #[cfg(feature = "http3")]
+    outbound_preparations: Option<QpackOutboundPreparations>,
     first_failure: Option<H3NativeError>,
 }
 
@@ -2863,6 +2894,8 @@ impl QpackInstructionStreamState {
             encoder_pending: QpackInstructionBuffer::default(),
             decoder_pending: QpackInstructionBuffer::default(),
             received: None,
+            #[cfg(feature = "http3")]
+            outbound_preparations: None,
             first_failure: None,
         })
     }
@@ -2959,6 +2992,25 @@ impl QpackInstructionStreamState {
                 max_retained_bytes_per_stream,
             )?;
         }
+        #[cfg(feature = "http3")]
+        if let Some(preparations) = self.outbound_preparations.as_ref() {
+            let mut per_stream = BTreeMap::<u64, usize>::new();
+            for section in preparations.sections.values() {
+                *per_stream.entry(section.stream_id).or_default() += 1;
+            }
+            for (stream_id, prepared) in per_stream {
+                if self
+                    .blocked_scheduler
+                    .pending_section_count(stream_id)
+                    .saturating_add(prepared)
+                    > max_sections_per_stream
+                {
+                    return Err(H3NativeError::QpackPolicy(
+                        "qpack pending section limit exceeded",
+                    ));
+                }
+            }
+        }
         self.blocked_scheduler.max_pending_sections = max_sections_per_stream;
         self.blocked_scheduler.max_pending_section_bytes = max_retained_bytes_per_stream;
         if let Some(received) = self.received.as_mut() {
@@ -2966,6 +3018,285 @@ impl QpackInstructionStreamState {
             received.blocked_scheduler.max_pending_section_bytes = max_retained_bytes_per_stream;
         }
         Ok(self)
+    }
+
+    /// Bound all prepared and peer-acknowledgment-pending outbound sections.
+    ///
+    /// Native senders select this profile before preparing any HEADERS. It
+    /// also removes completed outbound ACK/cancellation history after feedback:
+    /// transport ownership, rather than unbounded tombstones, prevents reuse of
+    /// closed streams. Unknown acknowledgments remain protocol errors.
+    #[cfg(feature = "http3")]
+    pub(crate) fn with_outbound_section_limit(
+        mut self,
+        max_sections: usize,
+    ) -> Result<Self, H3NativeError> {
+        self.check_live()?;
+        if self.received.is_none() {
+            return Err(H3NativeError::QpackPolicy(
+                "outbound qpack preparation requires directional state",
+            ));
+        }
+        if max_sections == 0 {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack outbound section limit must be non-zero",
+            ));
+        }
+        if self.outbound_active_section_count() > max_sections {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack outbound section limit exceeded",
+            ));
+        }
+        match self.outbound_preparations.as_mut() {
+            Some(preparations) => preparations.max_sections = max_sections,
+            None => {
+                self.outbound_preparations = Some(QpackOutboundPreparations {
+                    max_sections,
+                    next_token: 0,
+                    sections: BTreeMap::new(),
+                });
+            }
+        }
+        self.retire_outbound_terminal_history();
+        Ok(self)
+    }
+
+    #[cfg(feature = "http3")]
+    fn outbound_active_section_count(&self) -> usize {
+        self.decoder_feedback
+            .outstanding_references
+            .values()
+            .map(VecDeque::len)
+            .sum::<usize>()
+            .saturating_add(
+                self.outbound_preparations
+                    .as_ref()
+                    .map_or(0, |preparations| preparations.sections.len()),
+            )
+    }
+
+    /// Native integration-test witness for a writer parked before its first byte.
+    #[cfg(all(feature = "http3", test))]
+    pub(crate) fn prepared_outbound_section_count(&self) -> usize {
+        self.outbound_preparations
+            .as_ref()
+            .map_or(0, |preparations| preparations.sections.len())
+    }
+
+    #[cfg(feature = "http3")]
+    fn check_outbound_section_admission(&self, stream_id: u64) -> Result<(), H3NativeError> {
+        let Some(preparations) = self.outbound_preparations.as_ref() else {
+            return Ok(());
+        };
+        if self.outbound_active_section_count() >= preparations.max_sections {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack outbound section limit exceeded",
+            ));
+        }
+        let prepared_on_stream = preparations
+            .sections
+            .values()
+            .filter(|section| section.stream_id == stream_id)
+            .count();
+        if self
+            .blocked_scheduler
+            .pending_section_count(stream_id)
+            .saturating_add(prepared_on_stream)
+            >= self.blocked_scheduler.max_pending_sections
+        {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack pending section limit exceeded",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Protect an acknowledged-only field section before any transport write.
+    ///
+    /// Static sections return `None` and consume no slot. Dynamic sections
+    /// return an opaque token without entering the decoder-feedback ACK FIFO.
+    /// Local admission pressure returns `qpack outbound section limit exceeded`
+    /// or `qpack pending section limit exceeded` without poisoning the state;
+    /// the native encoder can use a static representation instead.
+    #[cfg(feature = "http3")]
+    pub(crate) fn prepare_outbound_field_section(
+        &mut self,
+        stream_id: u64,
+        field_section: &[u8],
+    ) -> Result<Option<u64>, H3NativeError> {
+        self.check_live()?;
+        if self.outbound_preparations.is_none() {
+            return Err(H3NativeError::QpackPolicy(
+                "outbound qpack preparation requires a section limit",
+            ));
+        }
+        if self.decoder_feedback.cancelled_streams.contains(&stream_id) {
+            return Err(H3NativeError::InvalidFrame("qpack stream already cancelled"));
+        }
+        let metadata = qpack_field_section_metadata(field_section, self.mode, Some(&self.context))?;
+        let plan = qpack_decode_field_section_with_metadata(
+            field_section,
+            self.mode,
+            Some(&self.context),
+            &metadata,
+        )?;
+        let references = qpack_plan_dynamic_references(&plan);
+        if references.is_empty() {
+            return Ok(None);
+        }
+        if metadata.required_insert_count() > self.decoder_feedback.known_received_count() {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack outbound preparation requires acknowledged insertions",
+            ));
+        }
+        self.check_outbound_section_admission(stream_id)?;
+        let preparations = self
+            .outbound_preparations
+            .as_mut()
+            .expect("checked profile");
+        let token = preparations.next_token;
+        let next_token = token.checked_add(1).ok_or(H3NativeError::QpackPolicy(
+            "qpack outbound preparation token space exhausted",
+        ))?;
+        for insertion_id in &references {
+            if self
+                .context
+                .dynamic_table()
+                .get_by_insertion_id(*insertion_id)
+                .is_none()
+            {
+                return Err(H3NativeError::InvalidFrame(
+                    "unknown dynamic qpack reference for stream",
+                ));
+            }
+        }
+        for insertion_id in &references {
+            let protected = self
+                .context
+                .dynamic_table_mut()
+                .reference_entry(*insertion_id);
+            debug_assert!(protected, "prepared qpack reference was prechecked");
+        }
+        preparations.next_token = next_token;
+        preparations.sections.insert(
+            token,
+            QpackPreparedOutboundSection {
+                stream_id,
+                metadata,
+                references,
+            },
+        );
+        Ok(Some(token))
+    }
+
+    /// Recheck a prepared section before accepting its first HEADERS bytes.
+    ///
+    /// The native caller holds its send-state lock across this check, the QUIC
+    /// write, and commit, so decoder feedback cannot cancel it between them.
+    #[cfg(feature = "http3")]
+    pub(crate) fn validate_prepared_outbound_field_section(
+        &self,
+        token: u64,
+    ) -> Result<(), H3NativeError> {
+        self.check_live()?;
+        let section = self
+            .outbound_preparations
+            .as_ref()
+            .and_then(|preparations| preparations.sections.get(&token))
+            .ok_or(H3NativeError::InvalidFrame(
+                "unknown qpack outbound preparation",
+            ))?;
+        if self
+            .decoder_feedback
+            .cancelled_streams
+            .contains(&section.stream_id)
+        {
+            return Err(H3NativeError::InvalidFrame("qpack stream already cancelled"));
+        }
+        Ok(())
+    }
+
+    /// Transfer protections into the peer ACK FIFO after the first accepted byte.
+    ///
+    /// Even a partial HEADERS frame is exposed: dropping its writer must not
+    /// release these entries. Only peer acknowledgment/cancellation can do so.
+    /// No entry receives a second reference during this ownership transfer.
+    #[cfg(feature = "http3")]
+    pub(crate) fn commit_prepared_outbound_field_section(
+        &mut self,
+        token: u64,
+    ) -> Result<(), H3NativeError> {
+        self.validate_prepared_outbound_field_section(token)?;
+        let preparations = self
+            .outbound_preparations
+            .as_mut()
+            .expect("checked profile");
+        let section = preparations.sections.get(&token).expect("checked token");
+        self.decoder_feedback
+            .register_protected_section(section.stream_id, &section.references)?;
+        let section = preparations
+            .sections
+            .remove(&token)
+            .expect("registered token");
+        self.blocked_scheduler.push_record(
+            section.stream_id,
+            QpackBlockedStreamRecord::new(
+                section.stream_id,
+                &section.metadata,
+                QpackBlockedStreamStatus::Ready,
+                None,
+                section.references,
+            ),
+        );
+        Ok(())
+    }
+
+    /// Release only a never-exposed reservation, including after a sticky error.
+    ///
+    /// Returns false for a token already committed or discarded. In particular,
+    /// a dropped partially sent writer cannot release a committed ACK slot.
+    #[cfg(feature = "http3")]
+    pub(crate) fn discard_prepared_outbound_field_section(&mut self, token: u64) -> bool {
+        let Some(section) = self
+            .outbound_preparations
+            .as_mut()
+            .and_then(|preparations| preparations.sections.remove(&token))
+        else {
+            return false;
+        };
+        for insertion_id in section.references {
+            let released = self
+                .context
+                .dynamic_table_mut()
+                .unreference_entry(insertion_id);
+            debug_assert!(released, "unexposed qpack entry remained protected");
+        }
+        self.retire_outbound_terminal_history();
+        true
+    }
+
+    #[cfg(feature = "http3")]
+    fn retire_outbound_terminal_history(&mut self) {
+        let Some(preparations) = &self.outbound_preparations else {
+            return;
+        };
+        let prepared_streams: BTreeSet<u64> = preparations
+            .sections
+            .values()
+            .map(|section| section.stream_id)
+            .collect();
+        self.blocked_scheduler.streams.retain(|_, records| {
+            records.iter().any(|record| !record.is_reapable_terminal())
+        });
+        let outstanding = &self.decoder_feedback.outstanding_references;
+        self.decoder_feedback
+            .acknowledged_streams
+            .retain(|stream_id| {
+                outstanding.contains_key(stream_id) || prepared_streams.contains(stream_id)
+            });
+        self.decoder_feedback.cancelled_streams.retain(|stream_id| {
+            outstanding.contains_key(stream_id) || prepared_streams.contains(stream_id)
+        });
     }
 
     /// Local wire-size ceiling for a single QPACK instruction.
@@ -3248,6 +3579,8 @@ impl QpackInstructionStreamState {
                 self.context.dynamic_table.known_received_count =
                     Some(self.decoder_feedback.known_received_count());
             }
+            #[cfg(feature = "http3")]
+            self.retire_outbound_terminal_history();
             outcome.record_decoder_result(unblocked);
         }
         Ok(outcome)
@@ -3332,6 +3665,13 @@ impl QpackInstructionStreamState {
         field_section: &[u8],
     ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
         self.check_live()?;
+        #[cfg(feature = "http3")]
+        if self.outbound_preparations.is_some()
+            && qpack_field_section_metadata(field_section, self.mode, Some(&self.context))?
+                .required_insert_count() > 0
+        {
+            self.check_outbound_section_admission(stream_id)?;
+        }
         self.blocked_scheduler.submit_field_section(
             &mut self.context,
             &mut self.decoder_feedback,
@@ -3409,12 +3749,17 @@ impl QpackInstructionStreamState {
     /// `StreamCancellation` instruction instead.
     pub fn cancel_stream(&mut self, stream_id: u64) -> Result<(), H3NativeError> {
         self.check_live()?;
-        self.blocked_scheduler.cancel_stream(
+        let result = self.blocked_scheduler.cancel_stream(
             &mut self.decoder_feedback,
             &mut self.context,
             self.mode,
             stream_id,
-        )
+        );
+        #[cfg(feature = "http3")]
+        if result.is_ok() {
+            self.retire_outbound_terminal_history();
+        }
+        result
     }
 
     fn check_live(&self) -> Result<(), H3NativeError> {
@@ -3653,67 +3998,41 @@ pub(crate) fn qpack_decode_field_section_with_context(
     mode: H3QpackMode,
     qpack_context: Option<&QpackContext>,
 ) -> Result<Vec<QpackFieldPlan>, H3NativeError> {
-    let mut pos = 0usize;
+    let metadata = qpack_field_section_metadata(input, mode, qpack_context)?;
+    qpack_decode_field_section_with_metadata(input, mode, qpack_context, &metadata)
+}
 
-    // Field section prefix part 1: Required Insert Count (8-bit prefix int).
-    let first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
-    pos += 1;
-    let (encoded_insert_count, ric_extra) = qpack_decode_prefixed_int(first, 8, &input[pos..])?;
-    pos += ric_extra;
-
-    // Field section prefix part 2: S + Delta Base (7-bit prefix int).
-    let second = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
-    pos += 1;
-    let sign = (second & 0x80) != 0;
-    let (delta_base, db_extra) = qpack_decode_prefixed_int(second, 7, &input[pos..])?;
-    pos += db_extra;
-
-    let mut declared_required_insert_count = 0;
+/// Decode with the prefix captured when a field section arrived. Required
+/// Insert Count is modulo encoded; a blocked section must not reinterpret its
+/// absolute count or Base after subsequent encoder instructions advance it.
+pub(crate) fn qpack_decode_field_section_with_metadata(
+    input: &[u8],
+    mode: H3QpackMode,
+    qpack_context: Option<&QpackContext>,
+    metadata: &QpackFieldSectionMetadata,
+) -> Result<Vec<QpackFieldPlan>, H3NativeError> {
+    let mut pos = metadata.prefix_len();
+    if pos > input.len() {
+        return Err(H3NativeError::UnexpectedEof);
+    }
+    let declared_required_insert_count = metadata.required_insert_count();
     let dynamic_base = match mode {
-        H3QpackMode::StaticOnly => {
-            if encoded_insert_count != 0 {
-                return Err(H3NativeError::QpackPolicy(
-                    "required insert count must be zero in static-only mode",
-                ));
-            }
-            if sign || delta_base != 0 {
-                return Err(H3NativeError::QpackPolicy(
-                    "base must be zero in static-only mode",
-                ));
-            }
-            None
-        }
+        H3QpackMode::StaticOnly => None,
         H3QpackMode::DynamicTableAllowed => {
-            // Dynamic table operations are permitted - validate reasonable bounds
-            if encoded_insert_count > 65536 {
-                return Err(H3NativeError::QpackPolicy(
-                    "required insert count exceeds reasonable limit",
-                ));
-            }
-
             if let Some(context) = qpack_context {
                 let total_inserts = context.dynamic_table().insertion_counter();
-                let required_insert_count = qpack_decode_required_insert_count(
-                    encoded_insert_count,
-                    total_inserts,
-                    context.max_table_capacity,
-                )?;
-                declared_required_insert_count = required_insert_count;
-                if required_insert_count > total_inserts {
+                if declared_required_insert_count > total_inserts {
                     return Err(H3NativeError::QpackPolicy(
                         "required insert count exceeds dynamic table state",
                     ));
                 }
-
-                let base = qpack_decode_base(required_insert_count, sign, delta_base)?;
-                if base > total_inserts {
-                    return Err(H3NativeError::InvalidFrame(
-                        "dynamic qpack base exceeds dynamic table state",
-                    ));
-                }
-                Some(base)
+                // Base is an addressing origin, not a dependency. RFC 9204
+                // section 4.5.1.2 permits it to exceed Required Insert Count
+                // and the inserts currently received; each actual reference
+                // is checked below and when resolving the returned plan.
+                Some(metadata.base())
             } else {
-                if encoded_insert_count != 0 || sign || delta_base != 0 {
+                if declared_required_insert_count != 0 {
                     return Err(H3NativeError::InvalidFrame(
                         "dynamic table context required",
                     ));
@@ -5925,6 +6244,18 @@ impl QpackDynamicTable {
         self.entries
             .iter()
             .find(|entry| entry.insertion_order == insertion_id)
+    }
+
+    /// Find an exact field among the bounded, resident entries.
+    ///
+    /// Iterating resident entries avoids scanning the lifetime insertion-ID
+    /// range after a long-lived encoder has evicted most of its old entries.
+    #[cfg(feature = "http3")]
+    pub(crate) fn find_entry(&self, name: &str, value: &str) -> Option<&QpackDynamicEntry> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| entry.name == name && entry.value == value)
     }
 
     /// Get an entry by encoder-stream relative index.
