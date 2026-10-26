@@ -1137,20 +1137,25 @@ fn qpack_plan_required_insert_count(
     plan: &[QpackFieldPlan],
     qpack_context: Option<&QpackContext>,
 ) -> Result<u64, H3NativeError> {
-    let needs_dynamic = plan.iter().any(|field| {
-        matches!(
-            field,
-            QpackFieldPlan::DynamicIndex(_) | QpackFieldPlan::DynamicNameLiteral { .. }
-        )
-    });
-    if !needs_dynamic {
+    let largest_reference = plan
+        .iter()
+        .filter_map(|field| match field {
+            QpackFieldPlan::DynamicIndex(index) => Some(*index),
+            QpackFieldPlan::DynamicNameLiteral { name_index, .. } => Some(*name_index),
+            QpackFieldPlan::StaticIndex(_) | QpackFieldPlan::Literal { .. } => None,
+        })
+        .max();
+    let Some(largest_reference) = largest_reference else {
         return Ok(0);
-    }
-
-    let context = qpack_context.ok_or(H3NativeError::InvalidFrame(
+    };
+    qpack_context.ok_or(H3NativeError::InvalidFrame(
         "dynamic table context required",
     ))?;
-    Ok(context.dynamic_table().insertion_counter())
+    largest_reference
+        .checked_add(1)
+        .ok_or(H3NativeError::InvalidFrame(
+            "dynamic qpack absolute index overflow",
+        ))
 }
 
 /// Encode one RFC 9204 encoder-stream instruction.
@@ -1405,7 +1410,15 @@ impl QpackDecoderFeedbackState {
                 "qpack acknowledgement after stream cancellation",
             ));
         }
+        let required_insert_count = self
+            .outstanding_references
+            .get(&stream_id)
+            .and_then(|references| references.iter().max())
+            .map_or(0, |insertion_id| insertion_id.saturating_add(1));
         self.release_stream_references(context, stream_id)?;
+        // RFC 9204 Section 2.1.4: a section acknowledgment also acknowledges
+        // every insertion needed to decode that section.
+        self.known_received_count = self.known_received_count.max(required_insert_count);
         self.acknowledged_streams.insert(stream_id);
         Ok(())
     }
@@ -2065,7 +2078,7 @@ impl QpackBlockedStreamScheduler {
                     return Err(error);
                 }
                 self.streams.remove(stream_id);
-                Ok(Vec::new())
+                Ok(self.unblock_ready(feedback.known_received_count()))
             }
             QpackDecoderInstruction::StreamCancellation { stream_id } => {
                 let had_record = self.streams.contains_key(stream_id);
@@ -2398,12 +2411,61 @@ impl QpackInstructionBuffer {
     }
 }
 
+#[derive(Debug)]
+struct QpackReceiveState {
+    context: QpackContext,
+    decoder_feedback: QpackDecoderFeedbackState,
+    blocked_scheduler: QpackBlockedStreamScheduler,
+}
+
+fn qpack_apply_directional_decoder_instruction(
+    scheduler: &mut QpackBlockedStreamScheduler,
+    feedback: &mut QpackDecoderFeedbackState,
+    context: &mut QpackContext,
+    mode: H3QpackMode,
+    instruction: &QpackDecoderInstruction,
+    require_ready_ack: bool,
+) -> Result<Vec<u64>, H3NativeError> {
+    if mode != H3QpackMode::DynamicTableAllowed {
+        return Err(H3NativeError::QpackPolicy(
+            "decoder feedback requires dynamic qpack mode",
+        ));
+    }
+    match instruction {
+        QpackDecoderInstruction::HeaderAcknowledgement { stream_id }
+            if !scheduler.record(*stream_id).is_some_and(|record| {
+                record.required_insert_count() > 0
+                    && (!require_ready_ack || record.status() == QpackBlockedStreamStatus::Ready)
+            }) =>
+        {
+            Err(H3NativeError::InvalidFrame(if require_ready_ack {
+                "qpack local acknowledgement requires a ready dynamic field section"
+            } else {
+                "qpack acknowledgement requires a dynamic field section"
+            }))
+        }
+        QpackDecoderInstruction::StreamCancellation { stream_id }
+            if !feedback.outstanding_references.contains_key(stream_id) =>
+        {
+            // Cancellation can race ahead of a section or follow its ACK.
+            // It conveys no information about received insertions.
+            scheduler.streams.remove(stream_id);
+            feedback.acknowledged_streams.remove(stream_id);
+            feedback.cancelled_streams.insert(*stream_id);
+            Ok(Vec::new())
+        }
+        _ => scheduler.apply_decoder_instruction(feedback, context, mode, instruction),
+    }
+}
+
 /// Deterministic QPACK instruction-stream state for an HTTP/3 connection.
 ///
-/// This owns the peer-facing QPACK dynamic table, peer decoder-feedback
-/// accounting, and blocked-stream scheduler. It intentionally processes raw
-/// QPACK instruction bytes only; HTTP/3 DATA/HEADERS frame mapping remains the
-/// job of `H3ConnectionState`.
+/// Use `from_local_and_peer_settings` for independent send and receive tables,
+/// feedback, and blocked-stream accounting. The `new` and `from_settings`
+/// constructors retain the legacy shared-context behavior.
+///
+/// This processes raw QPACK instruction bytes only; HTTP/3 DATA/HEADERS frame
+/// mapping remains the job of `H3ConnectionState`.
 #[derive(Debug)]
 pub struct QpackInstructionStreamState {
     mode: H3QpackMode,
@@ -2415,11 +2477,14 @@ pub struct QpackInstructionStreamState {
     max_instruction_size: usize,
     encoder_pending: QpackInstructionBuffer,
     decoder_pending: QpackInstructionBuffer,
+    received: Option<QpackReceiveState>,
     first_failure: Option<H3NativeError>,
 }
 
 impl QpackInstructionStreamState {
-    /// Construct QPACK instruction-stream state from explicit negotiated limits.
+    /// Construct legacy shared-context state from explicit negotiated limits.
+    ///
+    /// For a bidirectional connection, use `from_local_and_peer_settings`.
     pub fn new(
         mode: H3QpackMode,
         max_table_capacity: u64,
@@ -2450,11 +2515,14 @@ impl QpackInstructionStreamState {
             max_instruction_size: QPACK_DEFAULT_MAX_INSTRUCTION_SIZE,
             encoder_pending: QpackInstructionBuffer::default(),
             decoder_pending: QpackInstructionBuffer::default(),
+            received: None,
             first_failure: None,
         })
     }
 
-    /// Construct QPACK instruction-stream state from peer HTTP/3 SETTINGS.
+    /// Construct legacy shared-context state from peer HTTP/3 SETTINGS.
+    ///
+    /// For independent send and receive limits, use `from_local_and_peer_settings`.
     pub fn from_settings(mode: H3QpackMode, settings: &H3Settings) -> Result<Self, H3NativeError> {
         if mode == H3QpackMode::StaticOnly {
             // Peer capacity is permission, not a requirement. A static-only
@@ -2467,6 +2535,45 @@ impl QpackInstructionStreamState {
             settings.qpack_max_table_capacity.unwrap_or(0),
             settings.qpack_blocked_streams.unwrap_or(0),
         )
+    }
+
+    /// Construct independent encoder and decoder state from both endpoints' SETTINGS.
+    ///
+    /// Local SETTINGS bound received encoder instructions and incoming blocked
+    /// field sections. Peer SETTINGS bound this endpoint's encoder and outbound
+    /// blocked field sections. Both active table capacities start at zero, as
+    /// required by RFC 9204 Section 3.2.2; each encoder must set its capacity
+    /// before inserting an entry.
+    ///
+    /// Record locally emitted instructions with `apply_local_encoder_instruction`
+    /// and `apply_local_decoder_instruction`. Feed only peer stream bytes to the
+    /// `feed_*` methods. Decode received field sections with `received_context`.
+    pub fn from_local_and_peer_settings(
+        mode: H3QpackMode,
+        local_settings: &H3Settings,
+        peer_settings: &H3Settings,
+    ) -> Result<Self, H3NativeError> {
+        let mut state = Self::from_settings(mode, peer_settings)?;
+        let mut received = Self::new(
+            mode,
+            local_settings.qpack_max_table_capacity.unwrap_or(0),
+            local_settings.qpack_blocked_streams.unwrap_or(0),
+        )?;
+        state
+            .context
+            .set_dynamic_table_capacity(0)
+            .map_err(H3NativeError::InvalidFrame)?;
+        received
+            .context
+            .set_dynamic_table_capacity(0)
+            .map_err(H3NativeError::InvalidFrame)?;
+        state.context.dynamic_table.known_received_count = Some(0);
+        state.received = Some(QpackReceiveState {
+            context: received.context,
+            decoder_feedback: received.decoder_feedback,
+            blocked_scheduler: received.blocked_scheduler,
+        });
+        Ok(state)
     }
 
     /// Set the local wire-size limit for one instruction (RFC 9204 Section 7.4).
@@ -2498,19 +2605,45 @@ impl QpackInstructionStreamState {
         self.mode
     }
 
-    /// Dynamic QPACK context.
+    /// Outbound encoder context, or the shared context in legacy mode.
     #[must_use]
     pub fn context(&self) -> &QpackContext {
         &self.context
     }
 
-    /// Decoder-feedback state.
+    /// Decoder context used to resolve received field sections.
+    ///
+    /// In legacy mode this is the same context returned by `context`.
+    #[must_use]
+    pub fn received_context(&self) -> &QpackContext {
+        self.received
+            .as_ref()
+            .map_or(&self.context, |received| &received.context)
+    }
+
+    /// Reference and insertion feedback generated by the local decoder.
+    #[must_use]
+    pub fn received_decoder_feedback(&self) -> &QpackDecoderFeedbackState {
+        self.received
+            .as_ref()
+            .map_or(&self.decoder_feedback, |received| &received.decoder_feedback)
+    }
+
+    /// Scheduler for received field sections and the local blocked-stream limit.
+    #[must_use]
+    pub fn received_blocked_scheduler(&self) -> &QpackBlockedStreamScheduler {
+        self.received
+            .as_ref()
+            .map_or(&self.blocked_scheduler, |received| &received.blocked_scheduler)
+    }
+
+    /// Peer decoder-feedback state for outbound field sections.
     #[must_use]
     pub fn decoder_feedback(&self) -> &QpackDecoderFeedbackState {
         &self.decoder_feedback
     }
 
-    /// Blocked-stream scheduler.
+    /// Outbound blocked-stream scheduler, or the shared scheduler in legacy mode.
     #[must_use]
     pub fn blocked_scheduler(&self) -> &QpackBlockedStreamScheduler {
         &self.blocked_scheduler
@@ -2553,6 +2686,14 @@ impl QpackInstructionStreamState {
             .as_ref()
             .or_else(|| self.blocked_scheduler.first_failure())
             .or_else(|| self.decoder_feedback.first_error())
+            .or_else(|| {
+                self.received.as_ref().and_then(|received| {
+                    received
+                        .blocked_scheduler
+                        .first_failure()
+                        .or_else(|| received.decoder_feedback.first_error())
+                })
+            })
     }
 
     /// Register a peer QPACK stream directly.
@@ -2647,12 +2788,28 @@ impl QpackInstructionStreamState {
                 Ok(None) => break,
                 Err(error) => return self.fail(error),
             };
-            let (inserted, unblocked) = match self.blocked_scheduler.apply_encoder_instruction(
-                &mut self.context,
-                &mut self.decoder_feedback,
-                self.mode,
-                &instruction,
-            ) {
+            let applied = if let Some(received) = self.received.as_mut() {
+                if received.context.max_table_capacity() == 0 {
+                    Err(H3NativeError::QpackPolicy(
+                        "qpack encoder instructions require non-zero table capacity permission",
+                    ))
+                } else {
+                    received.blocked_scheduler.apply_encoder_instruction(
+                        &mut received.context,
+                        &mut received.decoder_feedback,
+                        self.mode,
+                        &instruction,
+                    )
+                }
+            } else {
+                self.blocked_scheduler.apply_encoder_instruction(
+                    &mut self.context,
+                    &mut self.decoder_feedback,
+                    self.mode,
+                    &instruction,
+                )
+            };
+            let (inserted, unblocked) = match applied {
                 Ok(result) => result,
                 Err(error) => {
                     self.record_error(&error);
@@ -2688,18 +2845,34 @@ impl QpackInstructionStreamState {
                 Ok(None) => break,
                 Err(error) => return self.fail(error),
             };
-            let unblocked = match self.blocked_scheduler.apply_decoder_instruction(
-                &mut self.decoder_feedback,
-                &mut self.context,
-                self.mode,
-                &instruction,
-            ) {
+            let applied = if self.received.is_some() {
+                qpack_apply_directional_decoder_instruction(
+                    &mut self.blocked_scheduler,
+                    &mut self.decoder_feedback,
+                    &mut self.context,
+                    self.mode,
+                    &instruction,
+                    false,
+                )
+            } else {
+                self.blocked_scheduler.apply_decoder_instruction(
+                    &mut self.decoder_feedback,
+                    &mut self.context,
+                    self.mode,
+                    &instruction,
+                )
+            };
+            let unblocked = match applied {
                 Ok(result) => result,
                 Err(error) => {
                     self.record_error(&error);
                     return Err(error);
                 }
             };
+            if self.received.is_some() {
+                self.context.dynamic_table.known_received_count =
+                    Some(self.decoder_feedback.known_received_count());
+            }
             outcome.record_decoder_result(unblocked);
         }
         Ok(outcome)
@@ -2720,6 +2893,61 @@ impl QpackInstructionStreamState {
                     "qpack instruction stream requires qpack stream type",
                 )),
         }
+    }
+
+    /// Apply an encoder instruction that the local endpoint is about to emit.
+    ///
+    /// Requires `from_local_and_peer_settings`. On success, encode and send the
+    /// instruction on the local encoder stream. Capacity pressure is reported
+    /// without mutating the table or poisoning the connection, so the caller
+    /// can wait for peer feedback or choose a literal field representation.
+    pub fn apply_local_encoder_instruction(
+        &mut self,
+        instruction: &QpackEncoderInstruction,
+    ) -> Result<Option<u64>, H3NativeError> {
+        self.check_live()?;
+        if self.received.is_none() {
+            return Err(H3NativeError::QpackPolicy(
+                "local qpack instructions require directional state",
+            ));
+        }
+        if self.context.max_table_capacity() == 0 {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack encoder instructions require non-zero table capacity permission",
+            ));
+        }
+        qpack_apply_encoder_instruction(&mut self.context, self.mode, instruction)
+    }
+
+    /// Apply decoder feedback that the local endpoint is about to emit.
+    ///
+    /// Requires `from_local_and_peer_settings`. Encode and send a successful
+    /// instruction on the local decoder stream. It updates received-section
+    /// references only; peer feedback continues to govern outbound references.
+    /// Cancellation can retire a blocked section before any inserts arrive.
+    pub fn apply_local_decoder_instruction(
+        &mut self,
+        instruction: &QpackDecoderInstruction,
+    ) -> Result<(), H3NativeError> {
+        self.check_live()?;
+        let Some(received) = self.received.as_mut() else {
+            return Err(H3NativeError::QpackPolicy(
+                "local qpack instructions require directional state",
+            ));
+        };
+        let result = qpack_apply_directional_decoder_instruction(
+            &mut received.blocked_scheduler,
+            &mut received.decoder_feedback,
+            &mut received.context,
+            self.mode,
+            instruction,
+            true,
+        )
+        .map(|_| ());
+        if let Err(error) = &result {
+            self.record_error(error);
+        }
+        result
     }
 
     /// Schedule one outbound field section against peer Known Received Count.
@@ -2745,6 +2973,24 @@ impl QpackInstructionStreamState {
         field_section: &[u8],
     ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
         self.check_live()?;
+        if let Some(received) = self.received.as_mut() {
+            if received
+                .decoder_feedback
+                .cancelled_streams
+                .contains(&stream_id)
+            {
+                return self.fail(H3NativeError::InvalidFrame(
+                    "qpack stream already cancelled",
+                ));
+            }
+            return received.blocked_scheduler.submit_received_field_section(
+                &mut received.context,
+                &mut received.decoder_feedback,
+                self.mode,
+                stream_id,
+                field_section,
+            );
+        }
         self.blocked_scheduler.submit_received_field_section(
             &mut self.context,
             &mut self.decoder_feedback,
@@ -2754,7 +3000,10 @@ impl QpackInstructionStreamState {
         )
     }
 
-    /// Cancel a scheduled field section and release dynamic-table references.
+    /// Cancel an outbound field section and release its dynamic-table references.
+    ///
+    /// To cancel a received section in directional mode, apply a local decoder
+    /// `StreamCancellation` instruction instead.
     pub fn cancel_stream(&mut self, stream_id: u64) -> Result<(), H3NativeError> {
         self.check_live()?;
         self.blocked_scheduler.cancel_stream(
@@ -2912,7 +3161,7 @@ fn qpack_insert_error(err: &'static str) -> H3NativeError {
         "entry larger than table capacity" => {
             H3NativeError::InvalidFrame("qpack dynamic table entry exceeds capacity")
         }
-        "cannot evict enough space (all entries referenced)" => {
+        "cannot evict oldest protected qpack entry" => {
             H3NativeError::InvalidFrame("qpack dynamic table insert blocked by referenced entries")
         }
         _ => H3NativeError::InvalidFrame("qpack dynamic table insert failed"),
@@ -3016,6 +3265,7 @@ pub(crate) fn qpack_decode_field_section_with_context(
     let (delta_base, db_extra) = qpack_decode_prefixed_int(second, 7, &input[pos..])?;
     pos += db_extra;
 
+    let mut declared_required_insert_count = 0;
     let dynamic_base = match mode {
         H3QpackMode::StaticOnly => {
             if encoded_insert_count != 0 {
@@ -3045,6 +3295,7 @@ pub(crate) fn qpack_decode_field_section_with_context(
                     total_inserts,
                     context.max_table_capacity,
                 )?;
+                declared_required_insert_count = required_insert_count;
                 if required_insert_count > total_inserts {
                     return Err(H3NativeError::QpackPolicy(
                         "required insert count exceeds dynamic table state",
@@ -3231,6 +3482,14 @@ pub(crate) fn qpack_decode_field_section_with_context(
         }
     }
 
+    // RFC 9204 Sections 2.1.2 and 2.2.1: the count must cover every dynamic
+    // reference. Reject overdeclared counts as well, so an acknowledgment has
+    // exactly the same insertion-count meaning at both endpoints.
+    if qpack_plan_required_insert_count(&out, qpack_context)? != declared_required_insert_count {
+        return Err(H3NativeError::InvalidFrame(
+            "qpack required insert count does not match dynamic references",
+        ));
+    }
     Ok(out)
 }
 
@@ -5112,7 +5371,7 @@ impl QpackDynamicEntry {
 
 /// Dynamic table for QPACK header compression.
 ///
-/// Implements RFC 9204 QPACK dynamic table with LRU eviction and reference protection.
+/// Implements RFC 9204 FIFO eviction with reference protection.
 #[derive(Debug)]
 pub struct QpackDynamicTable {
     entries: Vec<QpackDynamicEntry>,
@@ -5120,6 +5379,9 @@ pub struct QpackDynamicTable {
     current_size: usize,
     insertion_counter: u64,
     evicted_count: usize,
+    // Local encoder tables also protect insertions not yet acknowledged by the
+    // peer. Decoder and legacy standalone tables do not need this watermark.
+    known_received_count: Option<u64>,
 }
 
 impl QpackDynamicTable {
@@ -5131,6 +5393,7 @@ impl QpackDynamicTable {
             current_size: 0,
             insertion_counter: 0,
             evicted_count: 0,
+            known_received_count: None,
         }
     }
 
@@ -5145,12 +5408,11 @@ impl QpackDynamicTable {
             return Err("entry larger than table capacity");
         }
 
-        // Evict entries to make space (LRU with reference checking)
-        // Use saturating arithmetic to prevent overflow in capacity check
-        while self.current_size.saturating_add(entry_size) > self.max_capacity {
-            if !self.evict_lru_unreferenced() {
-                return Err("cannot evict enough space (all entries referenced)");
-            }
+        // Entries must leave in insertion order. Preflight the complete prefix
+        // before removing anything, so a protected entry cannot cause a partial
+        // eviction or allow us to skip ahead to a newer unreferenced entry.
+        if !self.evict_to_size(self.max_capacity - entry_size) {
+            return Err("cannot evict oldest protected qpack entry");
         }
 
         let insertion_id = self.insertion_counter;
@@ -5162,60 +5424,47 @@ impl QpackDynamicTable {
         Ok(insertion_id)
     }
 
-    /// Set the table capacity and evict least-recently-inserted unreferenced entries as needed.
+    /// Set table capacity, evicting a contiguous oldest prefix as needed.
+    ///
+    /// If a required eviction reaches a protected entry, leave the entire table
+    /// and its capacity unchanged.
     pub fn set_capacity(&mut self, max_capacity: usize) -> Result<(), &'static str> {
         if self.current_size <= max_capacity {
             self.max_capacity = max_capacity;
             return Ok(());
         }
 
-        let mut candidates = Vec::new();
-        let mut freed = 0usize;
-        for (index, entry) in self.entries.iter().enumerate() {
-            if entry.is_referenced() {
-                continue;
-            }
-            candidates.push(index);
-            freed += entry.size;
-            if self.current_size - freed <= max_capacity {
-                break;
-            }
-        }
-
-        if self.current_size - freed > max_capacity {
+        if !self.evict_to_size(max_capacity) {
             return Err("cannot reduce table capacity while entries are referenced");
         }
-
         self.max_capacity = max_capacity;
-        for index in candidates.into_iter().rev() {
-            let evicted = self.entries.remove(index);
-            self.current_size -= evicted.size;
-            self.evicted_count += 1;
-        }
         Ok(())
     }
 
-    /// Evict the least recently inserted unreferenced entry.
-    fn evict_lru_unreferenced(&mut self) -> bool {
-        // Find the least recently used unreferenced entry
-        let mut lru_index = None;
-        let mut lru_insertion_order = u64::MAX;
-
-        for (i, entry) in self.entries.iter().enumerate() {
-            if !entry.is_referenced() && entry.insertion_order < lru_insertion_order {
-                lru_insertion_order = entry.insertion_order;
-                lru_index = Some(i);
+    fn evict_to_size(&mut self, target_size: usize) -> bool {
+        let mut remaining = self.current_size;
+        let mut count = 0;
+        for entry in &self.entries {
+            if remaining <= target_size {
+                break;
             }
+            if entry.is_referenced()
+                || self
+                    .known_received_count
+                    .is_some_and(|known| entry.insertion_order >= known)
+            {
+                return false;
+            }
+            remaining -= entry.size;
+            count += 1;
         }
-
-        if let Some(index) = lru_index {
-            let evicted = self.entries.remove(index);
-            self.current_size -= evicted.size;
-            self.evicted_count += 1;
-            true
-        } else {
-            false
+        if remaining > target_size {
+            return false;
         }
+        drop(self.entries.drain(..count));
+        self.current_size = remaining;
+        self.evicted_count += count;
+        true
     }
 
     /// Add a reference to an entry by insertion ID.
@@ -5328,9 +5577,9 @@ pub fn qpack_dynamic_name(table: &QpackDynamicTable, absolute_index: u64) -> Opt
 /// QPACK encoding/decoding context with dynamic table support.
 #[derive(Debug)]
 pub struct QpackContext {
-    /// Dynamic table for encoder and decoder
+    /// Dynamic table for this encoding direction.
     dynamic_table: QpackDynamicTable,
-    /// Maximum table capacity from peer settings
+    /// Maximum capacity advertised by the decoder for this direction.
     max_table_capacity: usize,
 }
 
@@ -5353,7 +5602,7 @@ impl QpackContext {
         &mut self.dynamic_table
     }
 
-    /// Get the peer-advertised maximum dynamic table capacity.
+    /// Get the maximum dynamic table capacity advertised by this direction's decoder.
     pub fn max_table_capacity(&self) -> usize {
         self.max_table_capacity
     }
