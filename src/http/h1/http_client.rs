@@ -37,8 +37,9 @@
 //! assert_eq!(resp.status, 200);
 //! ```
 
-use crate::cx::Cx;
-use crate::http::h1::client::{ClientStreamingResponse, Http1Client};
+use crate::cx::{CancelWakerToken, Cx};
+use crate::http::body::{Body, Frame, SizeHint};
+use crate::http::h1::client::{ClientIncomingBody, ClientStreamingResponse, Http1Client};
 use crate::http::h1::codec::{for_each_header_value_token, validate_header_field};
 use crate::http::h1::types::{
     Method, MultipartForm, Request, Response, Version, url_encode_params,
@@ -1307,6 +1308,146 @@ pub struct HttpClient {
     tls_connector: Arc<std::sync::OnceLock<Result<TlsConnector, String>>>,
 }
 
+/// A response whose streaming body retains its connection-pool admission.
+///
+/// Produced by [`HttpClient::request_streaming_pooled`]. Consuming the body to
+/// its complete HTTP message boundary returns a reusable connection to the
+/// shared pool. Dropping an unfinished body closes the connection and releases
+/// admission synchronously. No task is spawned to drain abandoned responses.
+#[derive(Debug)]
+pub struct PooledClientStreamingResponse {
+    /// Response status line and headers.
+    pub head: crate::http::h1::stream::ResponseHead,
+    /// The owned, cancellation-aware response body.
+    pub body: PooledClientIncomingBody,
+    /// Whether the request upload was withheld or interrupted by the peer.
+    /// Such connections are never reused, even after the response is drained.
+    pub body_withheld: bool,
+}
+
+/// An HTTP/1 body that owns a pool slot until completion or abandonment.
+///
+/// The original request context and absolute effective deadline remain in
+/// force while reading the body. A cancelled or expired parked read wakes and
+/// reports [`ClientError::Cancelled`] or [`ClientError::DeadlineExceeded`].
+/// Protocol and transport errors retain their [`ClientError::HttpError`]
+/// source. Any failure closes the connection before waking pool waiters.
+///
+/// A terminal body returns `None` on subsequent polls. Completing a final DATA
+/// or trailer frame releases the slot immediately; an additional EOF poll is
+/// unnecessary. Incomplete, close-delimited, upgraded and tainted connections
+/// are discarded instead of reused.
+pub struct PooledClientIncomingBody {
+    body: Option<ClientIncomingBody<ClientIo>>,
+    lease: Option<PooledStreamLease>,
+    owner: PooledStreamOwner,
+}
+
+impl std::fmt::Debug for PooledClientIncomingBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledClientIncomingBody")
+            .field("complete", &self.body.is_none())
+            .field("owns_pool_admission", &self.lease.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PooledClientIncomingBody {
+    fn new(
+        body: ClientIncomingBody<ClientIo>,
+        lease: PooledStreamLease,
+        cx: &Cx,
+        deadline: &PooledStreamDeadline,
+    ) -> Self {
+        let mut result = Self {
+            body: Some(body),
+            lease: Some(lease),
+            owner: PooledStreamOwner::new(cx.clone(), deadline),
+        };
+        if result
+            .body
+            .as_ref()
+            .is_some_and(ClientIncomingBody::is_at_message_end)
+        {
+            result.retire(true);
+        }
+        result
+    }
+
+    fn retire(&mut self, completed: bool) {
+        self.owner.retire();
+        let body = self.body.take();
+        let lease = self.lease.take();
+        match (body, lease) {
+            (Some(body), Some(lease))
+                if completed && lease.may_reuse && body.is_complete_for_reuse() =>
+            {
+                let (io, _empty_read_ahead) = body.into_inner_with_buffer();
+                lease.release(io);
+            }
+            (body, lease) => {
+                // Close the actual socket before publishing free admission.
+                drop(body);
+                drop(lease);
+            }
+        }
+    }
+}
+
+impl Body for PooledClientIncomingBody {
+    type Data = crate::bytes::BytesCursor;
+    type Error = ClientError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        if this.body.is_none() {
+            return Poll::Ready(None);
+        }
+        if let Some(error) = this.owner.poll_stop(task) {
+            this.retire(false);
+            return Poll::Ready(Some(Err(error)));
+        }
+        let result = Pin::new(this.body.as_mut().expect("body checked above")).poll_frame(task);
+        match result {
+            Poll::Ready(Some(Err(error))) => {
+                let error = cancellation_reported_as_cancelled::<()>(
+                    &this.owner.cx,
+                    Err(ClientError::from(error)),
+                )
+                .expect_err("an input error remains an error");
+                this.retire(false);
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(frame) => {
+                if frame.is_none() || this.body.as_ref().is_some_and(Body::is_end_stream) {
+                    this.retire(true);
+                }
+                Poll::Ready(frame.map(|frame| frame.map_err(ClientError::from)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_none()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body
+            .as_ref()
+            .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
+    }
+}
+
+impl Drop for PooledClientIncomingBody {
+    fn drop(&mut self) {
+        self.retire(false);
+    }
+}
+
 impl HttpClient {
     /// Create a new [`HttpClientBuilder`].
     #[must_use]
@@ -1539,6 +1680,58 @@ impl HttpClient {
         let fut =
             self.execute_with_redirects_streaming(cx, method, parsed, extra_headers, body, None, 0);
         drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
+    }
+
+    /// Stream a direct HTTP or HTTPS response through this client's pool.
+    ///
+    /// The request shares per-host/total connection admission and
+    /// [`HttpClientBuilder::pool_wait_timeout`] with buffered requests. Its
+    /// response body retains that admission until fully consumed or dropped.
+    /// Reuse requires complete framing, no unread prefetched bytes, and both
+    /// peers' keep-alive permission. An unfinished body is closed on drop.
+    ///
+    /// The original context's cancellation and the tighter of its deadline and
+    /// `request_timeout` bound the entire operation, including pool wait,
+    /// redirects, setup and all body reads. This absolute deadline is never
+    /// restarted per redirect or frame. Headers, cookies and redirect policy
+    /// follow the ordinary client rules; only safe stale-connection retries
+    /// before receiving a response head are allowed.
+    ///
+    /// Proxy configurations return [`ClientError::ProxyError`] before opening
+    /// a connection; they cannot silently bypass this API's pool guarantees.
+    /// Use [`Self::request_streaming`] for the existing unpooled proxy lane.
+    pub async fn request_streaming_pooled(
+        &self,
+        cx: &Cx,
+        method: Method,
+        url: &str,
+        extra_headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Result<PooledClientStreamingResponse, ClientError> {
+        check_cx(cx)?;
+        if self.config.proxy_url.is_some() {
+            return Err(ClientError::ProxyError(
+                "pooled streaming requires a direct HTTP or HTTPS connection".to_owned(),
+            ));
+        }
+        let deadline = PooledStreamDeadline::capture(cx, self.config.request_timeout);
+        let parsed = ParsedUrl::parse(url)?;
+        let mut owner = PooledStreamOwner::new(cx.clone(), &deadline);
+        let mut request = std::pin::pin!(self.execute_with_redirects_pooled_streaming(
+            cx,
+            method,
+            parsed,
+            extra_headers,
+            body,
+            &deadline,
+        ));
+        poll_fn(|task| {
+            if let Some(error) = owner.poll_stop(task) {
+                return Poll::Ready(Err(error));
+            }
+            request.as_mut().poll(task)
+        })
+        .await
     }
 
     /// Send a multipart request and stream the response body.
@@ -1833,6 +2026,168 @@ impl HttpClient {
 
             Ok(resp)
         })
+    }
+
+    async fn execute_with_redirects_pooled_streaming(
+        &self,
+        cx: &Cx,
+        mut method: Method,
+        mut parsed: ParsedUrl,
+        mut extra_headers: Vec<(String, String)>,
+        mut body: Vec<u8>,
+        deadline: &PooledStreamDeadline,
+    ) -> Result<PooledClientStreamingResponse, ClientError> {
+        let mut origin = None;
+        let mut redirect_count = 0_u32;
+        loop {
+            let response = self
+                .execute_single_pooled_streaming(
+                    cx,
+                    &method,
+                    &parsed,
+                    &extra_headers,
+                    &body,
+                    origin.as_ref(),
+                    deadline,
+                )
+                .await?;
+            if !is_redirect(response.head.status) {
+                return Ok(response);
+            }
+            let max = match &self.config.redirect_policy {
+                RedirectPolicy::None => return Ok(response),
+                RedirectPolicy::Limited(max) | RedirectPolicy::SameOrigin(max) => *max,
+            };
+            if redirect_count >= max {
+                return Err(ClientError::TooManyRedirects {
+                    count: redirect_count.saturating_add(1),
+                    max,
+                });
+            }
+            let Some(location) = get_header(&response.head.headers, "location") else {
+                return Ok(response);
+            };
+            let next_parsed = ParsedUrl::parse(&resolve_redirect(&parsed, &location))?;
+            if !redirect_policy_allows_target(&self.config.redirect_policy, &parsed, &next_parsed) {
+                return Ok(response);
+            }
+            let next_method = redirect_method(response.head.status, &method);
+            // Unread redirect bodies release admission before the next hop.
+            drop(response);
+            extra_headers = strip_sensitive_headers_on_redirect(
+                &parsed,
+                &next_parsed,
+                extra_headers,
+            );
+            if next_method != method {
+                extra_headers = strip_content_headers(extra_headers);
+            }
+            if next_method == Method::Get {
+                body.clear();
+            }
+            origin = Some(origin.unwrap_or_else(|| parsed.clone()));
+            method = next_method;
+            parsed = next_parsed;
+            redirect_count = redirect_count.saturating_add(1);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_single_pooled_streaming(
+        &self,
+        cx: &Cx,
+        method: &Method,
+        parsed: &ParsedUrl,
+        extra_headers: &[(String, String)],
+        body: &[u8],
+        origin: Option<&ParsedUrl>,
+        deadline: &PooledStreamDeadline,
+    ) -> Result<PooledClientStreamingResponse, ClientError> {
+        let mut retry_fresh = false;
+        loop {
+            check_cx(cx)?;
+            let request = self.build_request_with_origin(
+                method,
+                parsed,
+                extra_headers,
+                body,
+                None,
+                None,
+                origin,
+            );
+            let request_forbids_reuse = request_forbids_connection_reuse(&request.headers);
+            let key = parsed.pool_key();
+            let acquired = if retry_fresh {
+                self.acquire_fresh_connection_with_clock(cx, parsed, Some(deadline))
+                    .await?
+            } else {
+                self.acquire_connection_with_clock(cx, parsed, true, Some(deadline))
+                    .await?
+            };
+            let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
+            check_cx(cx)?;
+            let result = if let Some(max_body_size) = self.config.max_body_size {
+                Http1Client::request_streaming_with_max_body_size(
+                    acquired.io,
+                    request,
+                    max_body_size,
+                )
+                .await
+            } else {
+                Http1Client::request_streaming(acquired.io, request).await
+            };
+            match result {
+                Ok(response) => {
+                    check_cx(cx)?;
+                    self.store_response_cookies(
+                        &parsed.host,
+                        parsed.scheme,
+                        &response.head.headers,
+                    );
+                    let may_reuse = !request_forbids_reuse
+                        && !response.body_withheld
+                        && !header_has_token(&response.head.headers, "connection", "close")
+                        && !(matches!(method, Method::Connect)
+                            && (200..300).contains(&response.head.status))
+                        && response_head_can_be_reused(
+                            response.head.status,
+                            response.head.version,
+                            &response.head.headers,
+                            method,
+                        );
+                    let lease = PooledStreamLease {
+                        client: self.clone(),
+                        key,
+                        pool_id: acquired.pool_id,
+                        fresh: acquired.fresh,
+                        may_reuse,
+                    };
+                    // Transfer the slot before constructing a possibly empty
+                    // body, whose constructor may immediately release it.
+                    guard.defused = true;
+                    return Ok(PooledClientStreamingResponse {
+                        head: response.head,
+                        body: PooledClientIncomingBody::new(response.body, lease, cx, deadline),
+                        body_withheld: response.body_withheld,
+                    });
+                }
+                Err(error) => {
+                    let error = ClientError::from(error);
+                    if !retry_fresh
+                        && !acquired.fresh
+                        && self
+                            .config
+                            .retry_policy
+                            .should_retry_reused_connection_failure(method, &error)
+                    {
+                        drop(guard);
+                        retry_fresh = true;
+                    } else {
+                        return cancellation_reported_as_cancelled(cx, Err(error));
+                    }
+                }
+            }
+        }
     }
 
     /// Execute a single request (no redirect handling).
@@ -2555,6 +2910,16 @@ impl HttpClient {
         cx: &Cx,
         parsed: &ParsedUrl,
     ) -> Result<AcquiredConnection, ClientError> {
+        self.acquire_fresh_connection_with_clock(cx, parsed, None)
+            .await
+    }
+
+    async fn acquire_fresh_connection_with_clock(
+        &self,
+        cx: &Cx,
+        parsed: &ParsedUrl,
+        clock: Option<&PooledStreamDeadline>,
+    ) -> Result<AcquiredConnection, ClientError> {
         let key = parsed.pool_key();
         {
             let mut pool = self.pool.lock();
@@ -2563,14 +2928,26 @@ impl HttpClient {
                 Self::remove_idle_connection_locked(&mut idle, &key, id);
             }
         }
-        self.acquire_connection_with(cx, parsed, false).await
+        self.acquire_connection_with_clock(cx, parsed, false, clock)
+            .await
     }
 
     async fn acquire_connection_with(
         &self,
         cx: &Cx,
         parsed: &ParsedUrl,
+        reuse_idle: bool,
+    ) -> Result<AcquiredConnection, ClientError> {
+        self.acquire_connection_with_clock(cx, parsed, reuse_idle, None)
+            .await
+    }
+
+    async fn acquire_connection_with_clock(
+        &self,
+        cx: &Cx,
+        parsed: &ParsedUrl,
         mut reuse_idle: bool,
+        clock: Option<&PooledStreamDeadline>,
     ) -> Result<AcquiredConnection, ClientError> {
         struct ConnectGuard<'a> {
             client: &'a HttpClient,
@@ -2657,7 +3034,7 @@ impl HttpClient {
             let Some(wait) = self.config.pool_wait_timeout else {
                 return Err(exhausted());
             };
-            let timer_now = client_timer_now(cx);
+            let timer_now = clock.map_or_else(|| client_timer_now(cx), PooledStreamDeadline::now);
             let until = *wait_until.get_or_insert(timer_now + wait);
             let remaining = std::time::Duration::from_nanos(until.duration_since(timer_now));
             if remaining.is_zero() {
@@ -2674,7 +3051,25 @@ impl HttpClient {
                 }
                 Poll::Pending
             });
-            match crate::time::timeout(timer_now, remaining, std::pin::pin!(woken)).await {
+            let wake = if let Some(clock) = clock {
+                // The additive pooled-streaming lane retains its explicit
+                // owner's clock even if a different task polls admission.
+                let mut timer = clock.timer(until);
+                let mut woken = std::pin::pin!(woken);
+                poll_fn(|task| {
+                    if let Poll::Ready(released) = woken.as_mut().poll(task) {
+                        return Poll::Ready(Ok(released));
+                    }
+                    let _ambient = clock.clock.is_none().then(|| Cx::set_current(None));
+                    Pin::new(&mut timer).poll_deadline(task).map(|()| Err(()))
+                })
+                .await
+            } else {
+                crate::time::timeout(timer_now, remaining, std::pin::pin!(woken))
+                    .await
+                    .map_err(|_| ())
+            };
+            match wake {
                 // A connection released while this request waited has just
                 // finished an exchange, so even a fresh-connection retry (after
                 // a stale reuse) may take it from the idle set. Skipping the
@@ -2828,6 +3223,118 @@ struct AcquiredConnection {
     pool_id: Option<u64>,
     io: ClientIo,
     fresh: bool,
+}
+
+/// A single absolute bound is copied into each redirect's response owner.
+/// The clock is captured at entry and cannot be replaced by the context that
+/// happens to poll the body later.
+struct PooledStreamDeadline {
+    at: Option<Time>,
+    clock: Option<crate::time::TimerDriverHandle>,
+}
+
+impl PooledStreamDeadline {
+    fn capture(cx: &Cx, configured: Option<std::time::Duration>) -> Self {
+        let clock = cx.timer_driver();
+        let now = clock
+            .as_ref()
+            .map_or_else(crate::time::wall_now, |clock| clock.now());
+        let at = cx
+            .budget()
+            .deadline
+            .into_iter()
+            .chain(configured.map(|timeout| now + timeout))
+            .min();
+        Self { at, clock }
+    }
+
+    fn now(&self) -> Time {
+        self.clock
+            .as_ref()
+            .map_or_else(crate::time::wall_now, |clock| clock.now())
+    }
+
+    fn timer(&self, at: Time) -> crate::time::Sleep {
+        match &self.clock {
+            Some(clock) => crate::time::Sleep::with_timer_driver(at, clock.clone()),
+            None => {
+                let _ambient = Cx::set_current(None);
+                crate::time::Sleep::new(at)
+            }
+        }
+    }
+}
+
+struct PooledStreamOwner {
+    cx: Cx,
+    cancel_waker: Option<CancelWakerToken>,
+    deadline: Option<crate::time::Sleep>,
+    standalone_clock: bool,
+}
+
+impl PooledStreamOwner {
+    fn new(cx: Cx, deadline: &PooledStreamDeadline) -> Self {
+        let timer = deadline.at.map(|at| deadline.timer(at));
+        Self {
+            cx,
+            cancel_waker: None,
+            deadline: timer,
+            standalone_clock: deadline.clock.is_none(),
+        }
+    }
+
+    fn poll_stop(&mut self, task: &mut Context<'_>) -> Option<ClientError> {
+        self.cancel_waker = Some(self.cx.refresh_cancel_waker(self.cancel_waker, task.waker()));
+        if let Some(timer) = self.deadline.as_mut() {
+            // A driverless timer otherwise adopts a foreign ambient clock.
+            let _ambient = self.standalone_clock.then(|| Cx::set_current(None));
+            if Pin::new(timer).poll_deadline(task).is_ready() {
+                // Record an expired owner budget, while retaining the client's
+                // typed timeout verdict for the configured absolute deadline.
+                let _ = self.cx.checkpoint();
+                return Some(ClientError::DeadlineExceeded);
+            }
+        }
+        check_cx(&self.cx).err()
+    }
+
+    fn retire(&mut self) {
+        if let Some(token) = self.cancel_waker.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+        self.deadline = None;
+    }
+}
+
+impl Drop for PooledStreamOwner {
+    fn drop(&mut self) {
+        self.retire();
+    }
+}
+
+struct PooledStreamLease {
+    client: HttpClient,
+    key: PoolKey,
+    pool_id: Option<u64>,
+    fresh: bool,
+    may_reuse: bool,
+}
+
+impl PooledStreamLease {
+    fn release(mut self, io: ClientIo) {
+        let pool_id = self.pool_id.take();
+        // Releasing wakes arbitrary user wakers after publishing the idle
+        // connection. A reentrant wake may already acquire it, so unwinding
+        // this old lease must not remove its next owner's admission.
+        self.client
+            .release_connection(&self.key, pool_id, self.fresh, io);
+    }
+}
+
+impl Drop for PooledStreamLease {
+    fn drop(&mut self) {
+        self.client.drop_connection(&self.key, self.pool_id);
+    }
 }
 
 /// Whether an idle pooled connection can carry another request, judged by
@@ -3410,41 +3917,48 @@ fn socks5_reply_message(code: u8) -> &'static str {
 }
 
 fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
+    response_head_can_be_reused(response.status, response.version, &response.headers, req_method)
+}
+
+fn response_head_can_be_reused(
+    status: u16,
+    version: Version,
+    headers: &[(String, String)],
+    req_method: &Method,
+) -> bool {
     // Only a 101 switches protocols (RFC 9110 section 7.8). A server may
     // advertise Upgrade on any other response, with Connection: Upgrade
     // marking that header hop-by-hop: Apache's mod_http2 sends
     // "Upgrade: h2,h2c" on ordinary responses. That connection is still
     // HTTP/1.1. A request that asked to upgrade is never pooled
     // (request_forbids_connection_reuse).
-    if response.status == 101 {
+    if status == 101 {
         return false;
     }
 
     // RFC 9112 §6.3: when a response has no Content-Length and no
     // Transfer-Encoding, the body is delimited by connection close (EOF).
     // Such connections must not be reused.
-    let has_content_length = response
-        .headers
+    let has_content_length = headers
         .iter()
         .any(|(n, _)| n.eq_ignore_ascii_case("content-length"));
-    let has_transfer_encoding = response
-        .headers
+    let has_transfer_encoding = headers
         .iter()
         .any(|(n, _)| n.eq_ignore_ascii_case("transfer-encoding"));
     let is_bodyless =
-        matches!(response.status, 100..=199 | 204 | 304) || matches!(req_method, Method::Head);
+        matches!(status, 100..=199 | 204 | 304) || matches!(req_method, Method::Head);
 
     if !has_content_length && !has_transfer_encoding && !is_bodyless {
         return false;
     }
 
-    match response.version {
-        Version::Http11 => !header_has_token(&response.headers, "connection", "close"),
+    match version {
+        Version::Http11 => !header_has_token(headers, "connection", "close"),
         // RFC 9112 §6.1: Transfer-Encoding in an HTTP/1.0 message means its
         // framing is faulty; close the connection after this response.
         Version::Http10 => {
             !has_transfer_encoding
-                && header_has_token(&response.headers, "connection", "keep-alive")
+                && header_has_token(headers, "connection", "keep-alive")
         }
         // Unreachable for this h1 client (responses are parsed from h1 wire
         // text), but HTTP/2 connections are persistent by default and carry

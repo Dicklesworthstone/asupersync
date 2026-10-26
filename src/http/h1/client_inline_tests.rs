@@ -355,6 +355,36 @@
     }
 
     #[test]
+    fn pooled_streaming_reuse_requires_a_complete_message_without_read_ahead() {
+        for (wire, reusable, residual) in [
+            (&b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"[..], true, &b""[..]),
+            (&b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokNEXT"[..], false, &b"NEXT"[..]),
+            (&b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nNEXT"[..], false, &b"NEXT"[..]),
+            (&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-end: yes\r\n\r\n"[..], true, &b""[..]),
+            (&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\nNEXT"[..], false, &b"NEXT"[..]),
+            (&b"HTTP/1.1 200 OK\r\n\r\nok"[..], false, &b""[..]),
+        ] {
+            let request = Request {
+                method: Method::Get,
+                uri: "/".into(),
+                version: Version::Http11,
+                headers: vec![("Host".into(), "example.com".into())],
+                body: Vec::new(),
+                trailers: Vec::new(),
+                peer_addr: None,
+            };
+            let mut response = block_on(Http1Client::request_streaming(TestIo::new(wire), request))
+                .expect("parse the actual HTTP wire");
+            while let Some(frame) = poll_body(&mut response.body) {
+                frame.expect("body framing is valid");
+            }
+            assert_eq!(response.body.is_complete_for_reuse(), reusable, "{wire:?}");
+            let (_, buffer) = response.body.into_inner_with_buffer();
+            assert_eq!(buffer.as_ref(), residual, "read-ahead must remain visible");
+        }
+    }
+
+    #[test]
     fn request_streaming_chunked_with_trailers() {
         let response_bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nFoo: Bar\r\n\r\n";
         let io = TestIo::new(response_bytes);
