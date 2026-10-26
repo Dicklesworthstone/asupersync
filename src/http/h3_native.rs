@@ -46,6 +46,12 @@ pub const H3_SETTING_H3_DATAGRAM: u64 = 0x33;
 /// Maximum number of decoded headers per QPACK field section (DoS protection).
 const QPACK_MAX_DECODED_HEADERS: usize = 1000;
 
+/// Default wire-size ceiling for one QPACK encoder or decoder instruction.
+///
+/// This is a local implementation limit, independent of peer SETTINGS. It
+/// bounds incomplete instruction retention before any literal is decoded.
+pub const QPACK_DEFAULT_MAX_INSTRUCTION_SIZE: usize = 1024 * 1024;
+
 /// HTTP/3 errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum H3NativeError {
@@ -2245,6 +2251,153 @@ impl QpackInstructionStreamOutcome {
     }
 }
 
+enum QpackInstructionExtent {
+    Incomplete(usize),
+    Complete(usize),
+}
+
+fn qpack_check_instruction_size(size: usize, limit: usize) -> Result<usize, H3NativeError> {
+    if size > limit {
+        return Err(H3NativeError::FrameTooLarge {
+            payload_size: size,
+            max_size: limit,
+        });
+    }
+    Ok(size)
+}
+
+// Inspect lengths without decoding literals. In particular, an already received
+// Huffman name must not be repeatedly decoded while its value trickles in.
+fn qpack_instruction_string_end(
+    input: &[u8],
+    offset: usize,
+    prefix_len: u8,
+    limit: usize,
+) -> Result<usize, H3NativeError> {
+    qpack_check_instruction_size(offset.saturating_add(1), limit)?;
+    let first = *input.get(offset).ok_or(H3NativeError::UnexpectedEof)?;
+    let (length, extra) = qpack_decode_prefixed_int(first, prefix_len, &input[offset + 1..])?;
+    let length = usize::try_from(length).unwrap_or(usize::MAX);
+    qpack_check_instruction_size(
+        offset
+            .saturating_add(1)
+            .saturating_add(extra)
+            .saturating_add(length),
+        limit,
+    )
+}
+
+fn qpack_encoder_instruction_extent(
+    input: &[u8],
+    limit: usize,
+) -> Result<QpackInstructionExtent, H3NativeError> {
+    let length = (|| {
+        let first = *input.first().ok_or(H3NativeError::UnexpectedEof)?;
+        if first & 0x80 != 0 {
+            let (_, extra) = qpack_decode_prefixed_int(first, 6, &input[1..])?;
+            qpack_instruction_string_end(input, 1 + extra, 7, limit)
+        } else if first & 0x40 != 0 {
+            let name_end = qpack_instruction_string_end(input, 0, 5, limit)?;
+            if input.len() <= name_end {
+                return Ok(name_end.saturating_add(1));
+            }
+            qpack_instruction_string_end(input, name_end, 7, limit)
+        } else {
+            let (_, extra) = qpack_decode_prefixed_int(first, 5, &input[1..])?;
+            Ok(1 + extra)
+        }
+    })();
+    match length {
+        Ok(size) => {
+            let size = qpack_check_instruction_size(size, limit)?;
+            if input.len() < size {
+                Ok(QpackInstructionExtent::Incomplete(size))
+            } else {
+                Ok(QpackInstructionExtent::Complete(size))
+            }
+        }
+        Err(H3NativeError::UnexpectedEof) => Ok(QpackInstructionExtent::Incomplete(
+            qpack_check_instruction_size(input.len().saturating_add(1), limit)?,
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn qpack_decoder_instruction_extent(
+    input: &[u8],
+    limit: usize,
+) -> Result<QpackInstructionExtent, H3NativeError> {
+    let first = *input.first().ok_or(H3NativeError::UnexpectedEof)?;
+    let prefix_len = if first & 0x80 != 0 { 7 } else { 6 };
+    match qpack_decode_prefixed_int(first, prefix_len, &input[1..]) {
+        Ok((_, extra)) => Ok(QpackInstructionExtent::Complete(
+            qpack_check_instruction_size(1 + extra, limit)?,
+        )),
+        Err(H3NativeError::UnexpectedEof) => Ok(QpackInstructionExtent::Incomplete(
+            qpack_check_instruction_size(input.len().saturating_add(1), limit)?,
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Debug, Default)]
+struct QpackInstructionBuffer {
+    bytes: Vec<u8>,
+}
+
+impl QpackInstructionBuffer {
+    fn next<T>(
+        &mut self,
+        input: &mut &[u8],
+        limit: usize,
+        extent: fn(&[u8], usize) -> Result<QpackInstructionExtent, H3NativeError>,
+        decode: fn(&[u8]) -> Result<(T, usize), H3NativeError>,
+    ) -> Result<Option<T>, H3NativeError> {
+        loop {
+            if self.bytes.is_empty() && input.is_empty() {
+                return Ok(None);
+            }
+            let current = if self.bytes.is_empty() {
+                *input
+            } else {
+                &self.bytes
+            };
+            match extent(current, limit)? {
+                QpackInstructionExtent::Complete(size) => {
+                    let (instruction, consumed) = decode(&current[..size])?;
+                    debug_assert_eq!(consumed, size);
+                    if self.bytes.is_empty() {
+                        *input = &input[size..];
+                    } else {
+                        self.bytes.clear();
+                    }
+                    return Ok(Some(instruction));
+                }
+                QpackInstructionExtent::Incomplete(needed) => {
+                    if input.is_empty() {
+                        return Ok(None);
+                    }
+                    let take = if self.bytes.is_empty() {
+                        input.len()
+                    } else {
+                        (needed - self.bytes.len()).min(input.len())
+                    };
+                    let new_len = self.bytes.len() + take;
+                    if new_len > self.bytes.capacity() {
+                        let capacity = new_len
+                            .max(self.bytes.capacity().saturating_mul(2))
+                            .max(32)
+                            .min(limit);
+                        self.bytes.reserve_exact(capacity - self.bytes.len());
+                    }
+                    self.bytes.extend_from_slice(&input[..take]);
+                    *input = &input[take..];
+                }
+            }
+        }
+    }
+}
+
 /// Deterministic QPACK instruction-stream state for an HTTP/3 connection.
 ///
 /// This owns the peer-facing QPACK dynamic table, peer decoder-feedback
@@ -2259,6 +2412,9 @@ pub struct QpackInstructionStreamState {
     blocked_scheduler: QpackBlockedStreamScheduler,
     encoder_stream_id: Option<u64>,
     decoder_stream_id: Option<u64>,
+    max_instruction_size: usize,
+    encoder_pending: QpackInstructionBuffer,
+    decoder_pending: QpackInstructionBuffer,
     first_failure: Option<H3NativeError>,
 }
 
@@ -2291,6 +2447,9 @@ impl QpackInstructionStreamState {
             blocked_scheduler: QpackBlockedStreamScheduler::new(settings_blocked_streams),
             encoder_stream_id: None,
             decoder_stream_id: None,
+            max_instruction_size: QPACK_DEFAULT_MAX_INSTRUCTION_SIZE,
+            encoder_pending: QpackInstructionBuffer::default(),
+            decoder_pending: QpackInstructionBuffer::default(),
             first_failure: None,
         })
     }
@@ -2308,6 +2467,29 @@ impl QpackInstructionStreamState {
             settings.qpack_max_table_capacity.unwrap_or(0),
             settings.qpack_blocked_streams.unwrap_or(0),
         )
+    }
+
+    /// Set the local wire-size limit for one instruction (RFC 9204 Section 7.4).
+    ///
+    /// Encoder and decoder streams each retain at most this many incomplete
+    /// bytes. A read containing several complete instructions may exceed the
+    /// limit as long as each individual instruction fits.
+    pub fn with_max_instruction_size(mut self, limit: usize) -> Result<Self, H3NativeError> {
+        if limit == 0 {
+            return Err(H3NativeError::QpackPolicy(
+                "qpack instruction size limit must be non-zero",
+            ));
+        }
+        qpack_check_instruction_size(self.encoder_pending.bytes.len(), limit)?;
+        qpack_check_instruction_size(self.decoder_pending.bytes.len(), limit)?;
+        self.max_instruction_size = limit;
+        Ok(self)
+    }
+
+    /// Local wire-size ceiling for a single QPACK instruction.
+    #[must_use]
+    pub fn max_instruction_size(&self) -> usize {
+        self.max_instruction_size
     }
 
     /// QPACK mode used by this instruction-stream state.
@@ -2441,18 +2623,28 @@ impl QpackInstructionStreamState {
         }
     }
 
-    /// Feed encoder-stream instruction bytes.
+    /// Feed encoder-stream instruction bytes, retaining an incomplete suffix.
+    ///
+    /// Empty reads are not end-of-stream signals. Malformed or oversized
+    /// instructions are terminal; subsequent reads preserve the first error.
     pub fn feed_encoder_stream_bytes(
         &mut self,
         stream_id: u64,
         bytes: &[u8],
     ) -> Result<QpackInstructionStreamOutcome, H3NativeError> {
         self.ensure_stream_kind(stream_id, H3UniStreamType::QpackEncoder)?;
-        let mut pos = 0usize;
+        self.check_live()?;
+        let mut input = bytes;
         let mut outcome = QpackInstructionStreamOutcome::default();
-        while pos < bytes.len() {
-            let (instruction, consumed) = match qpack_decode_encoder_instruction(&bytes[pos..]) {
-                Ok(decoded) => decoded,
+        loop {
+            let instruction = match self.encoder_pending.next(
+                &mut input,
+                self.max_instruction_size,
+                qpack_encoder_instruction_extent,
+                qpack_decode_encoder_instruction,
+            ) {
+                Ok(Some(instruction)) => instruction,
+                Ok(None) => break,
                 Err(error) => return self.fail(error),
             };
             let (inserted, unblocked) = match self.blocked_scheduler.apply_encoder_instruction(
@@ -2468,23 +2660,32 @@ impl QpackInstructionStreamState {
                 }
             };
             outcome.record_encoder_result(inserted, unblocked);
-            pos += consumed;
         }
         Ok(outcome)
     }
 
-    /// Feed decoder-stream instruction bytes.
+    /// Feed decoder-stream instruction bytes, retaining an incomplete suffix.
+    ///
+    /// Empty reads are not end-of-stream signals. Malformed or oversized
+    /// instructions are terminal; subsequent reads preserve the first error.
     pub fn feed_decoder_stream_bytes(
         &mut self,
         stream_id: u64,
         bytes: &[u8],
     ) -> Result<QpackInstructionStreamOutcome, H3NativeError> {
         self.ensure_stream_kind(stream_id, H3UniStreamType::QpackDecoder)?;
-        let mut pos = 0usize;
+        self.check_live()?;
+        let mut input = bytes;
         let mut outcome = QpackInstructionStreamOutcome::default();
-        while pos < bytes.len() {
-            let (instruction, consumed) = match qpack_decode_decoder_instruction(&bytes[pos..]) {
-                Ok(decoded) => decoded,
+        loop {
+            let instruction = match self.decoder_pending.next(
+                &mut input,
+                self.max_instruction_size,
+                qpack_decoder_instruction_extent,
+                qpack_decode_decoder_instruction,
+            ) {
+                Ok(Some(instruction)) => instruction,
+                Ok(None) => break,
                 Err(error) => return self.fail(error),
             };
             let unblocked = match self.blocked_scheduler.apply_decoder_instruction(
@@ -2500,7 +2701,6 @@ impl QpackInstructionStreamState {
                 }
             };
             outcome.record_decoder_result(unblocked);
-            pos += consumed;
         }
         Ok(outcome)
     }
@@ -2528,6 +2728,7 @@ impl QpackInstructionStreamState {
         stream_id: u64,
         field_section: &[u8],
     ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
+        self.check_live()?;
         self.blocked_scheduler.submit_field_section(
             &mut self.context,
             &mut self.decoder_feedback,
@@ -2543,6 +2744,7 @@ impl QpackInstructionStreamState {
         stream_id: u64,
         field_section: &[u8],
     ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
+        self.check_live()?;
         self.blocked_scheduler.submit_received_field_section(
             &mut self.context,
             &mut self.decoder_feedback,
@@ -2554,12 +2756,20 @@ impl QpackInstructionStreamState {
 
     /// Cancel a scheduled field section and release dynamic-table references.
     pub fn cancel_stream(&mut self, stream_id: u64) -> Result<(), H3NativeError> {
+        self.check_live()?;
         self.blocked_scheduler.cancel_stream(
             &mut self.decoder_feedback,
             &mut self.context,
             self.mode,
             stream_id,
         )
+    }
+
+    fn check_live(&self) -> Result<(), H3NativeError> {
+        match self.first_failure() {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 
     fn ensure_stream_kind(

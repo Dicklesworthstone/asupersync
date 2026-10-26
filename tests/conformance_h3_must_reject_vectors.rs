@@ -28,7 +28,7 @@
 use asupersync::http::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
     H3PseudoHeaders, H3QpackMode, H3RequestHead, H3Settings, QpackBlockedStreamStatus,
-    QpackInstructionStreamState,
+    QpackInstructionStreamState, qpack_dynamic_entry,
 };
 
 /// (1) RFC 9114 §6.2.1: HEADERS frame is not allowed on the control
@@ -127,6 +127,98 @@ fn rfc9204_dynamic_field_section_in_static_only_mode_must_reject() {
         Ok(QpackBlockedStreamStatus::Blocked)
     );
     assert_eq!(dynamic.blocked_stream_count(), 1);
+}
+
+/// QPACK instructions are a byte stream, so a transport read boundary must
+/// neither reject nor prematurely apply an incomplete instruction.
+#[test]
+fn rfc9204_fragmented_encoder_stream_unblocks_the_received_field_section() {
+    let mut connection =
+        H3ConnectionState::with_config(H3ConnectionConfig::default().with_dynamic_qpack());
+    connection
+        .on_remote_uni_stream_type(3, 0x02)
+        .expect("remote encoder stream");
+    let settings = H3Settings {
+        qpack_max_table_capacity: Some(512),
+        qpack_blocked_streams: Some(1),
+        ..H3Settings::default()
+    };
+    let mut qpack =
+        QpackInstructionStreamState::from_settings(H3QpackMode::DynamicTableAllowed, &settings)
+            .expect("dynamic state");
+    assert_eq!(
+        qpack.submit_received_field_section(0, &[0x02, 0x00, 0x80]),
+        Ok(QpackBlockedStreamStatus::Blocked)
+    );
+
+    // RFC 9204 wire bytes: capacity 512, then a literal-name insert of
+    // x-test=fragmented. Capacity itself has a multi-byte prefixed integer.
+    let wire = b"\x3f\xe1\x03\x46x-test\x0afragmented";
+    let mut processed = 0;
+    let mut unblocked = Vec::new();
+    for (index, byte) in wire.iter().enumerate() {
+        let outcome = connection
+            .feed_qpack_instruction_stream_bytes(&mut qpack, 3, std::slice::from_ref(byte))
+            .expect("an ordinary read boundary is not a QPACK error");
+        processed += outcome.instructions_processed();
+        unblocked.extend_from_slice(outcome.unblocked_stream_ids());
+        if index + 1 < wire.len() {
+            assert!(qpack.context().dynamic_table().is_empty());
+            assert_eq!(qpack.blocked_stream_count(), 1);
+            assert!(unblocked.is_empty());
+        }
+    }
+    assert_eq!(processed, 2);
+    assert_eq!(unblocked, vec![0]);
+    assert_eq!(qpack.blocked_stream_count(), 0);
+    assert_eq!(
+        qpack_dynamic_entry(qpack.context().dynamic_table(), 0),
+        Some(("x-test", "fragmented"))
+    );
+    assert_eq!(
+        qpack
+            .blocked_scheduler()
+            .record(0)
+            .expect("stream record")
+            .status(),
+        QpackBlockedStreamStatus::Ready
+    );
+    assert!(qpack.first_failure().is_none());
+}
+
+/// Declared instruction lengths are checked before retaining their payload,
+/// and a failed connection cannot resume mutating its compression state.
+#[test]
+fn rfc9204_oversized_fragmented_instruction_must_reject_before_payload() {
+    let mut connection =
+        H3ConnectionState::with_config(H3ConnectionConfig::default().with_dynamic_qpack());
+    connection
+        .on_remote_uni_stream_type(3, 0x02)
+        .expect("remote encoder stream");
+    let mut qpack = QpackInstructionStreamState::new(H3QpackMode::DynamicTableAllowed, 512, 1)
+        .expect("dynamic state")
+        .with_max_instruction_size(16)
+        .expect("local instruction bound");
+    let partial = connection
+        .feed_qpack_instruction_stream_bytes(&mut qpack, 3, &[0x5f])
+        .expect("incomplete name-length integer");
+    assert_eq!(partial.instructions_processed(), 0);
+
+    // The next byte declares a 32-byte literal name; no payload is needed
+    // to establish that it cannot fit this receiver's 16-byte policy.
+    let error = connection
+        .feed_qpack_instruction_stream_bytes(&mut qpack, 3, &[0x01])
+        .expect_err("oversized declaration");
+    assert!(matches!(
+        &error,
+        H3NativeError::FrameTooLarge { payload_size, max_size: 16 } if *payload_size > 16
+    ));
+    assert_eq!(qpack.first_failure(), Some(&error));
+    let next = connection
+        .feed_qpack_instruction_stream_bytes(&mut qpack, 3, b"\x41x\x01y")
+        .expect_err("terminal instruction failure stays terminal");
+    assert_eq!(next, error);
+    assert!(qpack.context().dynamic_table().is_empty());
 }
 
 /// (4) RFC 9114 §5.2: GOAWAY id MUST NOT increase. After a smaller
