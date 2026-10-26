@@ -170,7 +170,9 @@ pub use morphism::{
     ObservabilityFacet, QuotaPolicy, ResponsePolicy, ReversibilityFacet, ReversibilityRequirement,
     SecrecyFacet, SemanticCycleClass, SharingPolicy, SubjectTransform, detect_semantic_cycles,
 };
-pub use nats::{Message as NatsMessage, NatsClient, NatsConfig, NatsError, Subscription};
+pub use nats::{
+    Message as NatsMessage, NatsClient, NatsConfig, NatsError, Subscription, SubscriptionEvent,
+};
 #[cfg(feature = "messaging-fabric")]
 pub use policy::{
     CompiledOperatorIntent, ControlCapsulePolicy, CrossTenantTrafficPolicy, DegradationDecision,

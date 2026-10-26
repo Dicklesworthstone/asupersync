@@ -1357,6 +1357,35 @@ struct SubscriptionState {
     subject: String,
     queue_group: Option<String>,
     sender: mpsc::Sender<Message>,
+    loss: Arc<SubscriptionLoss>,
+}
+
+#[derive(Default)]
+struct SubscriptionLoss {
+    count: AtomicU64,
+    changed: crate::sync::Notify,
+}
+
+impl SubscriptionLoss {
+    fn record_drop(&self) {
+        let mut previous = self.count.load(Ordering::Relaxed);
+        while previous != u64::MAX {
+            match self.count.compare_exchange_weak(
+                previous,
+                previous + 1,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // The counter is the durable condition. Broadcast avoids
+                    // accumulating one stored notify permit per dropped message.
+                    self.changed.notify_waiters();
+                    return;
+                }
+                Err(actual) => previous = actual,
+            }
+        }
+    }
 }
 
 struct SubscriptionReplay {
@@ -3037,6 +3066,7 @@ impl NatsConnection {
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
         // Bounded: a message that arrives while the buffer is full is dropped.
         let (tx, rx) = mpsc::channel(capacity.max(1));
+        let loss = Arc::new(SubscriptionLoss::default());
 
         // Register subscription
         {
@@ -3047,6 +3077,7 @@ impl NatsConnection {
                     subject: subject.to_string(),
                     queue_group: None,
                     sender: tx,
+                    loss: Arc::clone(&loss),
                 },
             );
         }
@@ -3077,15 +3108,18 @@ impl NatsConnection {
             subject: subject.to_string(),
             rx,
             state: Arc::clone(&self.state),
+            loss,
+            reported_dropped_messages: 0,
         })
     }
 
-    /// Subscribe with a queue group.
-    pub async fn queue_subscribe(
+    /// Subscribe with a queue group and an explicit local buffer capacity.
+    async fn queue_subscribe_with_capacity(
         &mut self,
         cx: &Cx,
         subject: &str,
         queue_group: &str,
+        capacity: usize,
     ) -> Result<Subscription, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
@@ -3096,7 +3130,8 @@ impl NatsConnection {
         validate_nats_token(queue_group, "queue group")?;
 
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(DEFAULT_SUBSCRIPTION_CAPACITY);
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let loss = Arc::new(SubscriptionLoss::default());
 
         {
             let mut subs = self.state.subscriptions.lock();
@@ -3106,6 +3141,7 @@ impl NatsConnection {
                     subject: subject.to_string(),
                     queue_group: Some(queue_group.to_string()),
                     sender: tx,
+                    loss: Arc::clone(&loss),
                 },
             );
         }
@@ -3133,6 +3169,8 @@ impl NatsConnection {
             subject: subject.to_string(),
             rx,
             state: Arc::clone(&self.state),
+            loss,
+            reported_dropped_messages: 0,
         })
     }
 
@@ -3237,15 +3275,25 @@ impl NatsConnection {
 
     /// Dispatch a message to the appropriate subscription.
     pub(crate) fn dispatch_message(&self, msg: Message) {
-        let subs = self.state.subscriptions.lock();
-        if let Some(sub) = subs.get(&msg.sid) {
-            // Try to send; warn if channel is full (backpressure)
-            if sub.sender.try_send(msg).is_err() {
-                warn!(
-                    subject = %sub.subject,
-                    "NATS message dropped due to backpressure - consumer too slow"
-                );
-            }
+        let delivery = self
+            .state
+            .subscriptions
+            .lock()
+            .get(&msg.sid)
+            .map(|sub| (sub.sender.clone(), Arc::clone(&sub.loss)));
+        let Some((sender, loss)) = delivery else {
+            return;
+        };
+        // Both channel delivery and overflow notification can wake arbitrary
+        // user code. Run them after releasing the subscription-map lock. The
+        // temporary sender also keeps a concurrent close from hiding an
+        // already admitted dispatch from a loss-aware receiver.
+        if let Err(mpsc::SendError::Full(message)) = sender.try_send(msg) {
+            loss.record_drop();
+            warn!(
+                subject = %message.subject,
+                "NATS message dropped because the subscription buffer is full"
+            );
         }
     }
 
@@ -3929,7 +3977,8 @@ impl NatsClient {
     ///
     /// The subscription buffers up to 256 messages; one that arrives while the
     /// buffer is full is dropped with a warning. Use
-    /// [`Self::subscribe_with_capacity`] for a larger buffer.
+    /// [`Self::subscribe_with_capacity`] for a larger buffer and
+    /// [`Subscription::next_event`] to observe local message loss.
     pub async fn subscribe(&mut self, cx: &Cx, subject: &str) -> Result<Subscription, NatsError> {
         self.subscribe_with_capacity(cx, subject, DEFAULT_SUBSCRIPTION_CAPACITY)
             .await
@@ -3941,6 +3990,8 @@ impl NatsClient {
     /// A message that arrives while the buffer is full is dropped with a
     /// warning, so size the buffer to the largest burst the subscriber must
     /// absorb between receives, such as a request expecting that many replies.
+    /// [`Subscription::dropped_messages`] counts these losses, and
+    /// [`Subscription::next_event`] reports them alongside received messages.
     pub async fn subscribe_with_capacity(
         &mut self,
         cx: &Cx,
@@ -3975,9 +4026,28 @@ impl NatsClient {
         subject: &str,
         queue_group: &str,
     ) -> Result<Subscription, NatsError> {
+        self.queue_subscribe_with_capacity(cx, subject, queue_group, DEFAULT_SUBSCRIPTION_CAPACITY)
+            .await
+    }
+
+    /// Subscribe with a queue group and an explicit local buffer capacity.
+    ///
+    /// The capacity is at least one message and has the same overflow
+    /// semantics as [`Self::subscribe_with_capacity`]. Queue-group delivery
+    /// does not provide local backpressure: an overflowing message is lost to
+    /// this subscriber, so use [`Subscription::next_event`] to observe loss.
+    pub async fn queue_subscribe_with_capacity(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        queue_group: &str,
+        capacity: usize,
+    ) -> Result<Subscription, NatsError> {
         match &mut self.mode {
             NatsClientMode::Direct(connection) => {
-                connection.queue_subscribe(cx, subject, queue_group).await
+                connection
+                    .queue_subscribe_with_capacity(cx, subject, queue_group, capacity)
+                    .await
             }
             NatsClientMode::Supervised(supervisor) => {
                 let subject = subject.to_string();
@@ -3987,7 +4057,7 @@ impl NatsClient {
                         cx,
                         subject,
                         queue_group,
-                        capacity: DEFAULT_SUBSCRIPTION_CAPACITY,
+                        capacity,
                         reply,
                     })
                     .await
@@ -4485,7 +4555,7 @@ async fn handle_supervisor_command(
             complete_supervisor_command(reply, async {
                 if let Some(queue_group) = queue_group {
                     connection
-                        .queue_subscribe(&cx, &subject, &queue_group)
+                        .queue_subscribe_with_capacity(&cx, &subject, &queue_group, capacity)
                         .await
                 } else {
                     connection
@@ -4744,12 +4814,36 @@ fn is_valid_nats_header_block(header_block: &[u8]) -> bool {
     first_line == b"NATS/1.0" || first_line.starts_with(b"NATS/1.0 ")
 }
 
+/// A received message or a notification of local subscription-buffer loss.
+///
+/// Loss notifications aggregate dropped incoming messages. They are delivered
+/// before the next receive when already known, but do not identify an exact
+/// position among buffered messages. They do not report server-side loss or
+/// messages missed while a connection was unavailable.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum SubscriptionEvent {
+    /// A message accepted into the subscription's local buffer.
+    Message(Message),
+    /// Incoming messages discarded because the local buffer was full.
+    Lagged {
+        /// Newly observed drops since the last loss notification.
+        dropped: u64,
+    },
+}
+
 /// A subscription to a NATS subject.
+///
+/// [`Self::next`] and [`Self::try_next`] preserve the message-only API. Use
+/// [`Self::next_event`] or [`Self::try_next_event`] when local overflow must
+/// be observable, or inspect [`Self::dropped_messages`] for cumulative loss.
 pub struct Subscription {
     sid: u64,
     subject: String,
     rx: mpsc::Receiver<Message>,
     state: Arc<SharedState>,
+    loss: Arc<SubscriptionLoss>,
+    reported_dropped_messages: u64,
 }
 
 impl fmt::Debug for Subscription {
@@ -4757,6 +4851,7 @@ impl fmt::Debug for Subscription {
         f.debug_struct("Subscription")
             .field("sid", &self.sid)
             .field("subject", &self.subject)
+            .field("dropped_messages", &self.dropped_messages())
             .finish_non_exhaustive()
     }
 }
@@ -4774,7 +4869,93 @@ impl Subscription {
         &self.subject
     }
 
+    /// Total messages discarded because this subscription's buffer was full.
+    ///
+    /// The count survives reconnects, unsubscribe, and connection closure,
+    /// saturates at [`u64::MAX`], and is not reset by any receive method. It
+    /// excludes deliveries to an already removed or dropped subscription.
+    #[must_use]
+    pub fn dropped_messages(&self) -> u64 {
+        self.loss.count.load(Ordering::Acquire)
+    }
+
+    fn take_lagged_event(&mut self) -> Option<SubscriptionEvent> {
+        let total = self.dropped_messages();
+        let dropped = total - self.reported_dropped_messages;
+        if dropped == 0 {
+            return None;
+        }
+        self.reported_dropped_messages = total;
+        Some(SubscriptionEvent::Lagged { dropped })
+    }
+
+    /// Receive a message or a notification of local buffer overflow.
+    ///
+    /// Cancellation-safe: a cancelled or dropped pending receive does not
+    /// consume a message or loss notification. Loss already observed by the
+    /// dispatcher is reported before receiving another message; loss that
+    /// races a receive can be reported by the following call. Buffered
+    /// messages and pending loss remain observable after unsubscribe or close.
+    /// Returns `None` once the subscription is closed and both are drained.
+    pub async fn next_event(&mut self, cx: &Cx) -> Result<Option<SubscriptionEvent>, NatsError> {
+        let loss = Arc::clone(&self.loss);
+        loop {
+            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            if let Some(event) = self.take_lagged_event() {
+                return Ok(Some(event));
+            }
+
+            let reported = self.reported_dropped_messages;
+            let received = {
+                let mut changed = std::pin::pin!(loss.changed.notified());
+                let mut receive = std::pin::pin!(self.rx.recv(cx));
+                std::future::poll_fn(|task_cx| {
+                    if cx.checkpoint().is_err() {
+                        return Poll::Ready(Some(Err(mpsc::RecvError::Cancelled)));
+                    }
+                    // Arm before checking the counter. A receiver may drain
+                    // the last buffered message after try_send reports Full
+                    // but before dispatch publishes that loss, so the message
+                    // channel alone cannot provide the required wakeup.
+                    let notified = changed.as_mut().poll(task_cx);
+                    if loss.count.load(Ordering::Acquire) != reported || notified.is_ready() {
+                        return Poll::Ready(None);
+                    }
+                    receive.as_mut().poll(task_cx).map(Some)
+                })
+                .await
+            };
+
+            match received {
+                // A notification can race a count report. Re-arm and check
+                // again; no message was consumed when this leg won.
+                None => {}
+                Some(Ok(message)) => return Ok(Some(SubscriptionEvent::Message(message))),
+                Some(Err(mpsc::RecvError::Cancelled)) => return Err(NatsError::Cancelled),
+                Some(Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Empty)) => {
+                    // Sender closure is authoritative here. In-flight
+                    // dispatches retain a sender until their loss is published.
+                    return Ok(self.take_lagged_event());
+                }
+            }
+        }
+    }
+
+    /// Try to receive a message or local-overflow notification without waiting.
+    ///
+    /// Returns `None` when neither is currently available. Like
+    /// [`Self::try_next`], this does not distinguish an empty buffer from a
+    /// closed subscription. A loss notification consumes only its report,
+    /// never a buffered message or the cumulative drop count.
+    pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
+        self.take_lagged_event()
+            .or_else(|| self.try_next().map(SubscriptionEvent::Message))
+    }
+
     /// Receive the next message. Cancellation-safe.
+    ///
+    /// Local overflow is available through [`Self::dropped_messages`] or the
+    /// event receive methods; this compatibility method returns messages only.
     pub async fn next(&mut self, cx: &Cx) -> Result<Option<Message>, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
@@ -4784,10 +4965,10 @@ impl Subscription {
             return Ok(Some(msg));
         }
 
-        if self.state.closed.load(Ordering::Acquire) {
-            return Ok(None);
-        }
-
+        // Every connection-close path retires the registered senders, but a
+        // dispatch admitted before close can still hold a temporary sender.
+        // Wait for that sender too, so the global closed flag cannot hide its
+        // final accepted message from the message-only receive API.
         match self.rx.recv(cx).await {
             Ok(msg) => Ok(Some(msg)),
             Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Empty) => Ok(None),
