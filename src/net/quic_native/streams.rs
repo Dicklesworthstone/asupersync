@@ -1726,6 +1726,34 @@ impl StreamTable {
         }
     }
 
+    /// Observe closure of a send direction without reserving payload credit.
+    ///
+    /// Critical protocol streams remain observable while their application
+    /// queue is empty. The existing writer wake also covers STOP_SENDING and
+    /// local reset; credit and queue-drain wakes simply require another poll.
+    #[cfg(feature = "http3")]
+    pub(crate) fn poll_stream_send_closed(
+        &mut self,
+        id: StreamId,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), StreamTableError>> {
+        let is_closed = |stream: &QuicStream| {
+            stream.stop_sending_error_code.is_some()
+                || stream.send_reset.is_some()
+                || stream.send_final_size.is_some()
+        };
+        if is_closed(self.stream(id)?) {
+            return Poll::Ready(Ok(()));
+        }
+        self.register_write_waker(id, cx.waker());
+        if is_closed(self.stream(id)?) {
+            self.write_wakers.remove(&id);
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+
     /// Poll until one stream can accept a new application frame.
     ///
     /// In addition to the flow-control admission performed by

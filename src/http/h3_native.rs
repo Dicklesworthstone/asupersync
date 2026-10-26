@@ -2710,7 +2710,7 @@ fn qpack_decoder_instruction_extent(
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct QpackInstructionBuffer {
     bytes: Vec<u8>,
 }
@@ -2768,7 +2768,7 @@ impl QpackInstructionBuffer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct QpackReceiveState {
     context: QpackContext,
     decoder_feedback: QpackDecoderFeedbackState,
@@ -2813,7 +2813,7 @@ fn qpack_apply_directional_decoder_instruction(
 ///
 /// This processes raw QPACK instruction bytes only; HTTP/3 DATA/HEADERS frame
 /// mapping remains the job of `H3ConnectionState`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QpackInstructionStreamState {
     mode: H3QpackMode,
     context: QpackContext,
@@ -3375,6 +3375,34 @@ impl QpackInstructionStreamState {
         )
     }
 
+    /// Retire received-stream history after an owning transport has made stream
+    /// reuse impossible. Live references and undecoded payloads are never lost.
+    #[cfg(feature = "http3")]
+    pub(crate) fn retire_received_stream_history(
+        &mut self,
+        stream_id: u64,
+    ) -> Result<(), H3NativeError> {
+        self.check_live()?;
+        let Some(received) = &mut self.received else {
+            return Err(H3NativeError::QpackPolicy(
+                "received stream retirement requires directional state",
+            ));
+        };
+        if received.decoder_feedback.stream_outstanding_section_count(stream_id) != 0
+            || received.decoder_feedback.stream_outstanding_reference_count(stream_id) != 0
+            || received.blocked_scheduler.records(stream_id)
+                .any(|record| !record.is_reapable_terminal())
+        {
+            return Err(H3NativeError::QpackPolicy(
+                "cannot retire active received qpack sections",
+            ));
+        }
+        received.blocked_scheduler.streams.remove(&stream_id);
+        received.decoder_feedback.acknowledged_streams.remove(&stream_id);
+        received.decoder_feedback.cancelled_streams.remove(&stream_id);
+        Ok(())
+    }
+
     /// Cancel an outbound field section and release its dynamic-table references.
     ///
     /// To cancel a received section in directional mode, apply a local decoder
@@ -3917,41 +3945,55 @@ pub fn qpack_plan_to_header_fields(
 ) -> Result<Vec<(String, String)>, H3NativeError> {
     let mut out = Vec::with_capacity(plan.len());
     for field in plan {
-        match field {
-            QpackFieldPlan::StaticIndex(index) => {
-                let (name, value) = qpack_static_entry(*index)
-                    .ok_or(H3NativeError::InvalidFrame("unknown static qpack index"))?;
-                out.push((name.to_string(), value.to_string()));
-            }
-            QpackFieldPlan::DynamicIndex(index) => {
-                if let Some(context) = qpack_context {
-                    let (name, value) = qpack_dynamic_entry(context.dynamic_table(), *index)
-                        .ok_or(H3NativeError::InvalidFrame("unknown dynamic qpack index"))?;
-                    out.push((name.to_string(), value.to_string()));
-                } else {
-                    return Err(H3NativeError::InvalidFrame(
-                        "dynamic table context required",
-                    ));
-                }
-            }
-            QpackFieldPlan::DynamicNameLiteral { name_index, value } => {
-                if let Some(context) = qpack_context {
-                    let name = qpack_dynamic_name(context.dynamic_table(), *name_index).ok_or(
-                        H3NativeError::InvalidFrame("unknown dynamic qpack name index"),
-                    )?;
-                    out.push((name.to_string(), value.clone()));
-                } else {
-                    return Err(H3NativeError::InvalidFrame(
-                        "dynamic table context required",
-                    ));
-                }
-            }
-            QpackFieldPlan::Literal { name, value } => {
-                out.push((name.clone(), value.clone()));
-            }
-        }
+        let (name, value) = qpack_resolve_field(field, qpack_context)?;
+        out.push((name.to_string(), value.to_string()));
     }
     Ok(out)
+}
+
+fn qpack_resolve_field<'a>(
+    field: &'a QpackFieldPlan,
+    qpack_context: Option<&'a QpackContext>,
+) -> Result<(&'a str, &'a str), H3NativeError> {
+    match field {
+        QpackFieldPlan::StaticIndex(index) => qpack_static_entry(*index)
+            .ok_or(H3NativeError::InvalidFrame("unknown static qpack index")),
+        QpackFieldPlan::DynamicIndex(index) => {
+            let context = qpack_context.ok_or(H3NativeError::InvalidFrame(
+                "dynamic table context required",
+            ))?;
+            qpack_dynamic_entry(context.dynamic_table(), *index)
+                .ok_or(H3NativeError::InvalidFrame("unknown dynamic qpack index"))
+        }
+        QpackFieldPlan::DynamicNameLiteral { name_index, value } => {
+            let context = qpack_context.ok_or(H3NativeError::InvalidFrame(
+                "dynamic table context required",
+            ))?;
+            let name = qpack_dynamic_name(context.dynamic_table(), *name_index)
+                .ok_or(H3NativeError::InvalidFrame("unknown dynamic qpack name index"))?;
+            Ok((name, value))
+        }
+        QpackFieldPlan::Literal { name, value } => Ok((name, value)),
+    }
+}
+
+/// Count resolved field occurrences without cloning dynamic table entries.
+#[cfg(feature = "http3")]
+pub(crate) fn qpack_plan_field_section_size(
+    plan: &[QpackFieldPlan],
+    qpack_context: Option<&QpackContext>,
+) -> Result<u64, H3NativeError> {
+    plan.iter().try_fold(0u64, |total, field| {
+        let (name, value) = qpack_resolve_field(field, qpack_context)?;
+        let size = name.len().checked_add(value.len())
+            .and_then(|size| size.checked_add(32))
+            .and_then(|size| u64::try_from(size).ok())
+            .and_then(|size| total.checked_add(size))
+            .ok_or(H3NativeError::QpackPolicy(
+                "decoded field section exceeds addressable range",
+            ))?;
+        Ok(size)
+    })
 }
 
 fn decoded_field_section_size(fields: &[(String, String)]) -> Result<u64, H3NativeError> {
@@ -5747,7 +5789,7 @@ impl QpackDynamicEntry {
 /// Dynamic table for QPACK header compression.
 ///
 /// Implements RFC 9204 FIFO eviction with reference protection.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QpackDynamicTable {
     entries: Vec<QpackDynamicEntry>,
     max_capacity: usize,
@@ -5950,7 +5992,7 @@ pub fn qpack_dynamic_name(table: &QpackDynamicTable, absolute_index: u64) -> Opt
 }
 
 /// QPACK encoding/decoding context with dynamic table support.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QpackContext {
     /// Dynamic table for this encoding direction.
     dynamic_table: QpackDynamicTable,
