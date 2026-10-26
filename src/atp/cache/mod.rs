@@ -305,23 +305,58 @@ pub struct AtpCache {
     metrics: CacheMetrics,
     /// Trust boundary policy.
     trust_policy: trust::TrustPolicy,
+    /// Explicit-policy caches authorize even misses and removals before lookup.
+    strict_authorization: bool,
 }
 
 impl AtpCache {
     /// Create a new ATP cache with the given configuration.
     pub fn new(config: CacheConfig) -> Self {
+        Self::build(config, trust::TrustPolicy::default(), false)
+    }
+
+    /// Create a cache with an explicit, validated trust policy.
+    ///
+    /// The policy is owned by this cache. Scoped entries follow its allowlist
+    /// and established public-scope rules; providing a scope in a [`CacheKey`]
+    /// does not authorize it. Unauthorized reads, writes and removals fail
+    /// before entry lookup, including cache misses. Shared-cache encryption requirements are
+    /// still enforced by [`put`](Self::put).
+    ///
+    /// This is a local authorization boundary, not a remote grant verifier or
+    /// filesystem access-control mechanism. The storage root must be private to
+    /// the owner; another process with write access can modify its files.
+    pub fn with_trust_policy(
+        config: CacheConfig,
+        policy: trust::TrustPolicy,
+    ) -> Result<Self, CacheError> {
+        policy
+            .validate()
+            .map_err(|error| CacheError::TrustViolation(error.to_string()))?;
+        Ok(Self::build(config, policy, true))
+    }
+
+    fn build(
+        config: CacheConfig,
+        trust_policy: trust::TrustPolicy,
+        strict_authorization: bool,
+    ) -> Self {
         Self {
             config,
             entries: HashMap::new(),
             memory_storage: HashMap::new(),
             access_order: Vec::new(),
             metrics: CacheMetrics::default(),
-            trust_policy: trust::TrustPolicy::default(),
+            trust_policy,
+            strict_authorization,
         }
     }
 
     /// Get cached content if available and authorized.
     pub fn get(&mut self, key: &CacheKey) -> Result<Option<Vec<u8>>, CacheError> {
+        if self.strict_authorization {
+            self.trust_policy.check_access(key)?;
+        }
         let index_key = key.as_index_key();
 
         // Atomically check TTL and remove if expired to prevent TOCTOU races
@@ -383,6 +418,9 @@ impl AtpCache {
 
     /// Store content in cache with verification.
     pub fn put(&mut self, key: CacheKey, content: &[u8]) -> Result<(), CacheError> {
+        if self.strict_authorization {
+            self.trust_policy.check_access(&key)?;
+        }
         // Verify content hash matches
         let actual_hash = self.compute_content_hash(content);
         if actual_hash != key.content_hash {
@@ -472,6 +510,9 @@ impl AtpCache {
 
     /// Remove an entry from the cache.
     pub fn remove(&mut self, key: &CacheKey) -> Result<(), CacheError> {
+        if self.strict_authorization {
+            self.trust_policy.check_access(key)?;
+        }
         let index_key = key.as_index_key();
 
         if let Some(entry) = self.entries.remove(&index_key) {
@@ -546,6 +587,15 @@ impl AtpCache {
     }
 
     fn remove_storage_location(&mut self, storage_location: &StorageLocation) {
+        // Distinct manifests/scopes may own the same content-addressed file.
+        // Retiring one grant must not destroy another entry's backing bytes.
+        if self
+            .entries
+            .values()
+            .any(|entry| &entry.storage_location == storage_location)
+        {
+            return;
+        }
         match storage_location {
             StorageLocation::File(path) => {
                 let _ = std::fs::remove_file(path);
