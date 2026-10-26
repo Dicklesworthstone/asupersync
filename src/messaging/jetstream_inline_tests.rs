@@ -1895,6 +1895,403 @@
         );
     }
 
+    const CONFIRMED_ACK_SUBJECT: &str =
+        "$JS.ACK.ORDERS.processor.1.42.7.1713790000000000000.0";
+
+    fn confirmation_test_message(pending: &Arc<AtomicUsize>) -> JsMessage {
+        JsMessage {
+            subject: "orders.created".to_string(),
+            payload: b"order".to_vec(),
+            sequence: 42,
+            delivered: 1,
+            reply_subject: CONFIRMED_ACK_SUBJECT.to_string(),
+            ack_state: AtomicU8::new(ACK_STATE_PENDING),
+            pending_acks: Some(Arc::clone(pending)),
+        }
+    }
+
+    #[test]
+    fn confirmed_ack_uses_reply_inbox_and_releases_credit_only_once() {
+        for reply in [
+            DeterministicServerReply::Request(Vec::new()),
+            // The reference client's DoubleAck leaves successful bodies opaque.
+            DeterministicServerReply::Request(b"accepted".to_vec()),
+            DeterministicServerReply::Status("NATS/1.0 200 OK"),
+            DeterministicServerReply::Status("NATS/1.0\r\nStatus: 200"),
+        ] {
+            let transcript = capture_wire_transcript(reply, |cx, addr| async move {
+                let mut client = NatsClient::connect_with_config(
+                    &cx,
+                    NatsConfig {
+                        host: addr.ip().to_string(),
+                        port: addr.port(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("connect confirmation server");
+                // A second message's credit catches double releases that a
+                // saturating zero counter would conceal.
+                let pending = Arc::new(AtomicUsize::new(2));
+                let message = confirmation_test_message(&pending);
+                let consumer = Consumer {
+                    stream: "ORDERS".to_string(),
+                    name: "processor".to_string(),
+                    prefix: "$JS.API".to_string(),
+                    pending_acks: Arc::clone(&pending),
+                    max_ack_pending: 1000,
+                    pull_rate_limiter: PullRateLimiter::new(),
+                };
+                assert!(!message.is_ack_confirmed());
+                consumer
+                    .ack_message_confirmed(&mut client, &cx, &message)
+                    .await
+                    .expect("broker confirmed acknowledgment");
+                assert!(message.is_ack_confirmed());
+                assert!(message.is_acked());
+                assert_eq!(consumer.pending_acks(), 1);
+
+                message
+                    .ack_confirmed(&mut client, &cx)
+                    .await
+                    .expect("repeated confirmation is a local no-op");
+                message
+                    .ack(&mut client, &cx)
+                    .await
+                    .expect("plain ack after confirmation is a local no-op");
+                assert!(matches!(
+                    message.nack(&mut client, &cx).await,
+                    Err(JsError::AlreadyAcknowledged)
+                ));
+                assert!(matches!(
+                    message.term(&mut client, &cx).await,
+                    Err(JsError::AlreadyAcknowledged)
+                ));
+                drop(message);
+                assert_eq!(consumer.pending_acks(), 1);
+            });
+            assert!(transcript.contains("SUB [INBOX] "), "{transcript}");
+            assert!(
+                transcript.contains(&format!(
+                    "PUB {CONFIRMED_ACK_SUBJECT} [INBOX] 4\r\n+ACK\r\n"
+                )),
+                "{transcript}"
+            );
+            assert!(transcript.contains("UNSUB "), "{transcript}");
+        }
+    }
+
+    #[test]
+    fn confirmed_ack_rejects_control_error_and_malformed_status_replies() {
+        for status in [
+            "NATS/1.0 100 Idle Heartbeat",
+            "NATS/1.0 409 Consumer Deleted",
+            "NATS/1.0 503",
+            "NATS/1.0\r\nStatus: 100",
+            "NATS/1.0 invalid",
+            "NATS/1.0 100 Idle Heartbeat\r\nStatus: 200",
+        ] {
+            capture_wire_transcript(
+                DeterministicServerReply::Status(status),
+                move |cx, addr| async move {
+                    let mut client = NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect status confirmation server");
+                    let pending = Arc::new(AtomicUsize::new(2));
+                    let message = confirmation_test_message(&pending);
+                    let error = message
+                        .ack_confirmed(&mut client, &cx)
+                        .await
+                        .expect_err("a status frame must not confirm the ack");
+                    if status == "NATS/1.0 503" {
+                        assert!(
+                            matches!(error, JsError::Nats(NatsError::Server(ref text))
+                                if text.contains("503") && text.contains("No Responders")),
+                            "{error:?}"
+                        );
+                    }
+                    assert!(!message.is_ack_confirmed(), "{status}");
+                    assert!(!message.is_acked(), "{status}");
+                    assert_eq!(pending.load(Ordering::Acquire), 2, "{status}");
+                    drop(message);
+                    assert_eq!(pending.load(Ordering::Acquire), 1, "{status}");
+                },
+            );
+        }
+
+        // Core request/reply treats status headers with a body as data. The
+        // confirmed ACK path must still reject an explicit failure status.
+        let reply = Message {
+            subject: "_INBOX.test".to_string(),
+            sid: 1,
+            reply_to: None,
+            headers: Some(b"NATS/1.0 503 No Responders\r\n\r\n".to_vec()),
+            payload: b"unavailable".to_vec(),
+        };
+        assert!(validate_ack_confirmation(&reply).is_err());
+    }
+
+    fn accept_ack_confirmation_client(
+        listener: &std::net::TcpListener,
+    ) -> std::net::TcpStream {
+        use std::io::Write;
+
+        let (mut stream, _) = listener.accept().expect("accept confirmation client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .expect("set confirmation peer timeout");
+        stream
+            .write_all(
+                b"INFO {\"server_id\":\"ack-confirmation\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+            )
+            .expect("send confirmation INFO");
+        assert!(read_crlf_line(&mut stream).starts_with(b"CONNECT "));
+        stream
+    }
+
+    fn read_ack_confirmation_request(stream: &mut std::net::TcpStream) -> (String, String) {
+        use std::io::Read;
+
+        let subscribe = loop {
+            let line = String::from_utf8(read_crlf_line(stream)).expect("SUB utf8");
+            if !line.starts_with("UNSUB ") {
+                break line;
+            }
+        };
+        let parts: Vec<_> = subscribe.split_whitespace().collect();
+        assert_eq!(parts.len(), 3, "{subscribe}");
+        assert_eq!(parts[0], "SUB");
+        assert!(parts[1].starts_with("_INBOX."));
+        let (inbox, sid) = (parts[1].to_string(), parts[2].to_string());
+        let publish = String::from_utf8(read_crlf_line(stream)).expect("PUB utf8");
+        assert_eq!(
+            publish,
+            format!("PUB {CONFIRMED_ACK_SUBJECT} {inbox} 4\r\n")
+        );
+        let mut body = [0_u8; 6];
+        stream.read_exact(&mut body).expect("read confirmed ACK body");
+        assert_eq!(&body, b"+ACK\r\n");
+        (inbox, sid)
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum AckConfirmationInterruption {
+        Drop,
+        Cancel,
+        Timeout,
+        Close,
+    }
+
+    /// Stop only after the broker has observed the first +ACK. Restoring the
+    /// local state must not be mistaken for proof that the broker rejected it.
+    fn confirmed_ack_retry_after_interruption(
+        previously_acked: bool,
+        interruption: AckConfirmationInterruption,
+    ) {
+        use std::future::Future;
+        use std::io::{Read, Write};
+
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind confirmation listener");
+        let addr = listener.local_addr().expect("confirmation listener address");
+        let (seen_tx, mut seen_rx) = crate::channel::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_ack_confirmation_client(&listener);
+            let mut competing_stream = accept_ack_confirmation_client(&listener);
+            if previously_acked {
+                let publish = String::from_utf8(read_crlf_line(&mut stream)).expect("plain ACK");
+                assert_eq!(publish, format!("PUB {CONFIRMED_ACK_SUBJECT} 4\r\n"));
+                let mut body = [0_u8; 6];
+                stream.read_exact(&mut body).expect("read plain ACK body");
+                assert_eq!(&body, b"+ACK\r\n");
+            }
+            let (first_inbox, first_sid) = read_ack_confirmation_request(&mut stream);
+            seen_tx.send_blocking(()).expect("report first wire ACK");
+            release_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("release first confirmation");
+            if interruption == AckConfirmationInterruption::Close {
+                stream
+                    .shutdown(std::net::Shutdown::Both)
+                    .expect("close before confirmation");
+                stream = accept_ack_confirmation_client(&listener);
+            } else {
+                // A reply arriving after the abandoned wait belongs to the
+                // first inbox; the retry must still use its own inbox.
+                write!(stream, "MSG {first_inbox} {first_sid} 0\r\n\r\n")
+                    .expect("send late first confirmation");
+            }
+            let (inbox, sid) = read_ack_confirmation_request(&mut stream);
+            if interruption != AckConfirmationInterruption::Close {
+                assert_ne!(inbox, first_inbox, "retry must allocate a new inbox");
+                assert_ne!(sid, first_sid, "retry must allocate a new subscription");
+            }
+            write!(stream, "MSG {inbox} {sid} 0\r\n\r\n")
+                .expect("confirm retry");
+            assert_eq!(read_crlf_line(&mut stream), format!("UNSUB {sid}\r\n").as_bytes());
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                stream.read(&mut byte).expect("read primary close"),
+                0,
+                "idempotent acknowledgments must not publish again"
+            );
+            assert_eq!(
+                competing_stream.read(&mut byte).expect("read competing close"),
+                0,
+                "concurrent terminal calls must not reach the wire"
+            );
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                request_timeout: if interruption == AckConfirmationInterruption::Timeout {
+                    Duration::from_secs(1)
+                } else {
+                    Duration::from_secs(10)
+                },
+                ..Default::default()
+            };
+            let mut client = NatsClient::connect_with_config(&cx, config.clone())
+                .await
+                .expect("connect primary confirmation client");
+            let mut competing_client = NatsClient::connect_with_config(&cx, config.clone())
+                .await
+                .expect("connect competing confirmation client");
+            let pending = Arc::new(AtomicUsize::new(2));
+            let message = confirmation_test_message(&pending);
+            if previously_acked {
+                message.ack(&mut client, &cx).await.expect("initial plain ack");
+            }
+            let expected_pending = if previously_acked { 1 } else { 2 };
+            assert!(!message.is_ack_confirmed());
+            let owner: Cx = Cx::for_testing();
+            let mut confirmation = Box::pin(message.ack_confirmed(&mut client, &owner));
+            {
+                let mut seen = std::pin::pin!(seen_rx.recv(&cx));
+                std::future::poll_fn(|task_cx| {
+                    assert!(
+                        confirmation.as_mut().poll(task_cx).is_pending(),
+                        "confirmation must await the withheld broker reply"
+                    );
+                    seen.as_mut().poll(task_cx)
+                })
+                .await
+                .expect("broker observed the ACK request");
+            }
+            assert!(!message.is_ack_confirmed());
+            assert_eq!(pending.load(Ordering::Acquire), expected_pending);
+            let competing_ack = message.ack(&mut competing_client, &cx).await;
+            if previously_acked {
+                competing_ack.expect("prior plain ack remains an idempotent success");
+            } else {
+                assert!(matches!(competing_ack, Err(JsError::AlreadyAcknowledged)));
+            }
+            assert!(matches!(
+                message.nack(&mut competing_client, &cx).await,
+                Err(JsError::AlreadyAcknowledged)
+            ));
+            assert!(matches!(
+                message.term(&mut competing_client, &cx).await,
+                Err(JsError::AlreadyAcknowledged)
+            ));
+            assert!(matches!(
+                message.ack_confirmed(&mut competing_client, &cx).await,
+                Err(JsError::AlreadyAcknowledged)
+            ));
+
+            match interruption {
+                AckConfirmationInterruption::Drop => drop(confirmation),
+                AckConfirmationInterruption::Cancel => {
+                    owner.cancel_with(crate::types::CancelKind::User, Some("abandon ACK wait"));
+                    assert!(matches!(
+                        confirmation.await,
+                        Err(JsError::Nats(NatsError::Cancelled))
+                    ));
+                }
+                AckConfirmationInterruption::Timeout => {
+                    let error = confirmation.await.expect_err("confirmation timed out");
+                    assert!(
+                        matches!(error, JsError::Nats(ref error) if error.is_timeout()),
+                        "{error:?}"
+                    );
+                }
+                AckConfirmationInterruption::Close => {
+                    release_tx.send(()).expect("close before first reply");
+                    assert!(matches!(
+                        confirmation.await,
+                        Err(JsError::Nats(NatsError::Closed))
+                    ));
+                }
+            }
+            assert_eq!(message.is_acked(), previously_acked);
+            assert!(!message.is_ack_confirmed());
+            assert_eq!(pending.load(Ordering::Acquire), expected_pending);
+
+            if interruption == AckConfirmationInterruption::Close {
+                client.close(&cx).await.expect("retire closed connection");
+                client = NatsClient::connect_with_config(&cx, config)
+                    .await
+                    .expect("reconnect for confirmation retry");
+            } else {
+                release_tx.send(()).expect("allow the late first reply");
+            }
+            message
+                .ack_confirmed(&mut client, &cx)
+                .await
+                .expect("retry must obtain broker confirmation");
+            assert!(message.is_ack_confirmed());
+            assert_eq!(pending.load(Ordering::Acquire), 1);
+            message
+                .ack_confirmed(&mut client, &cx)
+                .await
+                .expect("confirmed retry is idempotent");
+            message.ack(&mut client, &cx).await.expect("plain ack is idempotent");
+            drop(message);
+            assert_eq!(pending.load(Ordering::Acquire), 1);
+            client.close(&cx).await.expect("close confirmation client");
+            competing_client.close(&cx).await.expect("close competing client");
+        });
+        server.join().expect("join confirmation server");
+    }
+
+    #[test]
+    fn dropped_confirmed_ack_restores_state_and_can_retry_after_wire_send() {
+        for previously_acked in [false, true] {
+            confirmed_ack_retry_after_interruption(previously_acked, AckConfirmationInterruption::Drop);
+        }
+    }
+
+    #[test]
+    fn cancelled_confirmed_ack_restores_state_and_can_retry_after_wire_send() {
+        for previously_acked in [false, true] {
+            confirmed_ack_retry_after_interruption(previously_acked, AckConfirmationInterruption::Cancel);
+        }
+    }
+
+    #[test]
+    fn timed_out_confirmed_ack_restores_state_and_can_retry_after_wire_send() {
+        for previously_acked in [false, true] {
+            confirmed_ack_retry_after_interruption(previously_acked, AckConfirmationInterruption::Timeout);
+        }
+    }
+
+    #[test]
+    fn closed_confirmed_ack_restores_state_and_can_retry_on_another_connection() {
+        for previously_acked in [false, true] {
+            confirmed_ack_retry_after_interruption(previously_acked, AckConfirmationInterruption::Close);
+        }
+    }
+
     /// A pull answered with a status reply waited out its whole timeout and
     /// returned Ok with no messages, even for a deleted consumer: status
     /// replies carry no reply subject and were skipped as foreign messages.
