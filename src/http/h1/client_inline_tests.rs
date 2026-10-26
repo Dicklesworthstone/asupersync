@@ -1320,6 +1320,67 @@
     }
 
     #[test]
+    fn decode_eof_completes_close_delimited_responses_at_every_input_split() {
+        for raw in [
+            &b"HTTP/1.0 200 OK\r\n\r\nhello"[..],
+            &b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"[..],
+        ] {
+            for split in 0..=raw.len() {
+                let mut codec = Http1ClientCodec::new();
+                let mut buf = BytesMut::from(&raw[..split]);
+                assert!(codec.decode(&mut buf).unwrap().is_none());
+                buf.extend_from_slice(&raw[split..]);
+                let response = codec
+                    .decode_eof(&mut buf)
+                    .unwrap_or_else(|error| panic!("split {split} of {raw:?}: {error}"))
+                    .expect("EOF completes a close-delimited response");
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body, &raw[find_headers_end(raw).unwrap()..]);
+                assert!(buf.is_empty());
+                assert!(codec.decode_eof(&mut buf).unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn decode_eof_drains_pipeline_ending_in_a_close_delimited_response() {
+        let mut codec = Http1ClientCodec::new();
+        let mut buf = BytesMut::from(
+            &b"HTTP/1.1 100 Continue\r\n\r\n\
+               HTTP/1.1 204 No Content\r\n\r\n\
+               HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok\
+               HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nlast"[..],
+        );
+        for (status, body) in [
+            (100, &b""[..]),
+            (204, &b""[..]),
+            (200, &b"ok"[..]),
+            (200, &b"last"[..]),
+        ] {
+            let response = codec.decode_eof(&mut buf).unwrap().unwrap();
+            assert_eq!(response.status, status);
+            assert_eq!(response.body, body);
+        }
+        assert!(buf.is_empty());
+        assert!(codec.decode_eof(&mut buf).unwrap().is_none());
+        assert!(codec.decode_eof(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_eof_still_enforces_close_delimited_body_limits() {
+        let mut codec = Http1ClientCodec::new().max_body_size(4);
+        let mut buf = BytesMut::from(&b"HTTP/1.1 200 OK\r\n\r\nhello"[..]);
+        assert!(matches!(
+            codec.decode_eof(&mut buf),
+            Err(HttpError::BodyTooLarge)
+        ));
+        assert!(matches!(
+            codec.decode_eof(&mut buf),
+            Err(HttpError::BadHeader)
+        ));
+    }
+
+    #[test]
     fn decode_eof_mid_response_is_an_error_not_a_clean_end() {
         // A peer that closes after a response head whose body has not arrived,
         // or after the chunked decoder consumed every buffered byte, leaves

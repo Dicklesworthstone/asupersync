@@ -498,8 +498,11 @@ impl Http1ClientCodec {
     }
 
     fn decode_inner_eof(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
-        if matches!(&self.state, ClientDecodeState::Poisoned) {
-            return Err(HttpError::BadHeader);
+        // EOF decoding is a complete decoding entry point. In particular,
+        // framed transports do not call `decode` between successive final
+        // frames, so this call may itself discover a close-delimited body.
+        if let Some(response) = self.decode_inner(src)? {
+            return Ok(Some(response));
         }
         if matches!(&self.state, ClientDecodeState::Eof { .. }) {
             let old = std::mem::replace(&mut self.state, ClientDecodeState::Head);
@@ -528,18 +531,18 @@ impl Http1ClientCodec {
             }));
         }
 
-        match crate::codec::Decoder::decode(self, src)? {
-            Some(frame) => Ok(Some(frame)),
-            // Only between responses is an end of input a clean end of the
-            // stream. Mid-body the decoder may already have consumed every
-            // buffered byte, and the response is truncated, not complete
-            // (br-asupersync-vxmjgn).
-            None if src.is_empty() && matches!(self.state, ClientDecodeState::Head) => Ok(None),
-            None => Err(std::io::Error::new(
+        // Only between responses is an end of input a clean end of the
+        // stream. Mid-body the decoder may already have consumed every
+        // buffered byte, and the response is truncated, not complete
+        // (br-asupersync-vxmjgn).
+        if src.is_empty() && matches!(self.state, ClientDecodeState::Head) {
+            Ok(None)
+        } else {
+            Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "incomplete frame at EOF",
             )
-            .into()),
+            .into())
         }
     }
 }
