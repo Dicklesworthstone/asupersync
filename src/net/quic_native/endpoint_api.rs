@@ -428,6 +428,17 @@ impl QuicConnection {
         self.inner.write_stream_bytes(cx, stream, data, fin)
     }
 
+    /// Callback-free byte admission after the owning caller's `Cx` checkpoint.
+    #[cfg(feature = "http3")]
+    pub(crate) fn write_stream_after_checkpoint(
+        &mut self,
+        stream: StreamId,
+        data: Bytes,
+        fin: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
+        self.inner.write_stream_bytes_after_checkpoint(stream, data, fin)
+    }
+
     /// Whether one stream still has bytes or FIN queued for packet assembly.
     #[must_use]
     pub fn has_pending_stream_frames(&self, stream: StreamId) -> bool {

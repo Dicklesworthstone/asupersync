@@ -54,7 +54,8 @@ pub mod h3 {
     pub use super::h3_quic::{
         H3_REQUEST_CANCELLED, NATIVE_H3_MAX_QPACK_BLOCKED_SECTION_BYTES,
         NATIVE_H3_MAX_QPACK_BLOCKED_STREAMS, NATIVE_H3_MAX_QPACK_DECODER_CAPACITY,
-        NATIVE_H3_MAX_QPACK_FIELD_SECTION_SIZE, NativeH3Event, NativeH3RequestWriteEvent,
+        NATIVE_H3_MAX_QPACK_ENCODER_CAPACITY, NATIVE_H3_MAX_QPACK_FIELD_SECTION_SIZE,
+        NativeH3Event, NativeH3RequestWriteEvent,
         NativeH3RequestWriter, NativeH3Session, NativeH3SessionError,
     };
     pub(crate) use super::h3_quic::{

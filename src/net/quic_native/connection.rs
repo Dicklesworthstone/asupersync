@@ -1177,6 +1177,21 @@ impl NativeQuicConnection {
         fin: bool,
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
+        self.write_stream_bytes_after_checkpoint(id, data, fin)
+    }
+
+    /// Queue bytes after the caller has observed its `Cx` checkpoint.
+    ///
+    /// This phase keeps all transport-state and credit validation but invokes
+    /// no user callbacks. HTTP/3 can therefore hold its QPACK ownership lock
+    /// across byte admission and ACK-slot publication without running a
+    /// checkpoint evidence sink under that lock.
+    pub(crate) fn write_stream_bytes_after_checkpoint(
+        &mut self,
+        id: StreamId,
+        data: Bytes,
+        fin: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
         self.ensure_data_state()?;
         let len = data.len() as u64;
         let result = self.streams.write_stream_bytes(id, data, fin);
