@@ -1166,6 +1166,14 @@ enum Http2ProducerTerminal {
 }
 
 impl Http2BodySender {
+    pub(crate) fn send_initial_headers(&mut self, headers: HeaderMap) -> Result<(), HttpError> {
+        self.inner.send_initial_headers(headers)
+    }
+
+    pub(crate) fn initial_headers_pending(&self) -> bool {
+        self.inner.initial_headers_pending()
+    }
+
     /// Maximum DATA bytes accepted by one send operation.
     #[must_use]
     pub fn max_frame_bytes(&self) -> NonZeroUsize {
@@ -1243,6 +1251,7 @@ enum Http2ProducedResponseKind {
         response: Response,
         frame_capacity: NonZeroUsize,
         max_frame_bytes: NonZeroUsize,
+        deferred_initial_headers: bool,
         producer: Http2ProducerFactory,
     },
 }
@@ -1295,9 +1304,21 @@ impl Http2ProducedResponse {
                 response,
                 frame_capacity,
                 max_frame_bytes,
+                deferred_initial_headers: false,
                 producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
             },
         }
+    }
+
+    pub(crate) fn defer_initial_headers(mut self) -> Self {
+        if let Http2ProducedResponseKind::Streaming {
+            deferred_initial_headers,
+            ..
+        } = &mut self.kind
+        {
+            *deferred_initial_headers = true;
+        }
+        self
     }
 
     fn into_driver_response(self) -> H2DispatchResponse {
@@ -1307,11 +1328,13 @@ impl Http2ProducedResponse {
                 response,
                 frame_capacity,
                 max_frame_bytes,
+                deferred_initial_headers,
                 producer,
             } => H2DispatchResponse::Produced(Http2ProducedPlan {
                 response,
                 frame_capacity,
                 max_frame_bytes,
+                deferred_initial_headers,
                 producer,
             }),
         }
@@ -1322,6 +1345,7 @@ struct Http2ProducedPlan {
     response: Response,
     frame_capacity: NonZeroUsize,
     max_frame_bytes: NonZeroUsize,
+    deferred_initial_headers: bool,
     producer: Http2ProducerFactory,
 }
 
@@ -1335,8 +1359,11 @@ impl Http2ProducedPlan {
         Http2BodySender,
         Http2ProducerFactory,
     ) {
-        let (inner, body) =
+        let (mut inner, mut body) =
             OutgoingBody::channel_with_capacity(cx, BodyKind::Chunked, self.frame_capacity.get());
+        if self.deferred_initial_headers {
+            body.defer_initial_headers(&mut inner);
+        }
         let sender = Http2BodySender {
             inner,
             max_frame_bytes: self.max_frame_bytes,
@@ -1932,6 +1959,7 @@ fn classify_h2_producer_hop(
 
 struct ActiveProducedBody {
     body: OutgoingBody,
+    pending_initial_response: Option<Response>,
     cancellation: ProducedCancellationGuard,
     guard: Option<Arc<InFlightRequestGuard>>,
     producer_outcome: Option<Http2ProducerOutcome>,
@@ -1993,6 +2021,10 @@ impl ActiveProducedBody {
 }
 
 enum ProducedBodyEvent {
+    InitialHeaders {
+        stream_id: u32,
+        headers: Result<HeaderMap, HttpError>,
+    },
     Frame {
         stream_id: u32,
         frame: Result<BodyFrame<crate::bytes::BytesCursor>, HttpError>,
@@ -2540,6 +2572,14 @@ fn poll_produced_body_event(
         state: &mut ActiveProducedBody,
         task_cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<ProducedBodyEvent>> {
+        // HEADERS do not consume peer DATA credit. A zero window must never
+        // prevent service setup, its initial metadata, or an early error from
+        // making progress.
+        if state.pending_initial_response.is_some() {
+            return state.body.poll_initial_headers(task_cx).map(|headers| {
+                Some(ProducedBodyEvent::InitialHeaders { stream_id, headers })
+            });
+        }
         if state.body_eof || state.pending_trailers.is_some() {
             return Poll::Pending;
         }
@@ -4393,6 +4433,43 @@ where
                     Ok(_) => {}
                 },
                 DriverEvent::ProducedBody(event) => match event {
+                    ProducedBodyEvent::InitialHeaders { stream_id, headers } => {
+                        let Some(state) = produced_bodies.get_mut(&stream_id) else {
+                            continue;
+                        };
+                        let Some(mut response) = state.pending_initial_response.take() else {
+                            continue;
+                        };
+                        let queued = headers
+                            .map_err(|_| H2Error::connection(
+                                ErrorCode::InternalError,
+                                "produced response initial headers were not published",
+                            ))
+                            .and_then(|headers| {
+                                for (name, value) in headers.iter() {
+                                    let value = value.to_str().map_err(|_| H2Error::connection(
+                                        ErrorCode::InternalError,
+                                        "invalid produced response initial header value",
+                                    ))?;
+                                    response.headers.push((name.as_str().to_owned(), value.to_owned()));
+                                }
+                                validate_h2_produced_response_for_queue(&response)?;
+                                conn.send_headers(stream_id, h2_headers_from_response(&response)?, false)
+                            });
+                        if queued.is_err() {
+                            record_h2_body_diagnostic(
+                                stream_id,
+                                WebBodyDiagnostic::ResponseProducerFailure,
+                                "produced response initial headers could not be queued",
+                            );
+                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            cancel_produced_body(
+                                &mut produced_bodies,
+                                stream_id,
+                                "HTTP/2 produced response initial headers failed",
+                            );
+                        }
+                    }
                     ProducedBodyEvent::Frame {
                         stream_id,
                         frame: Ok(BodyFrame::Data(data)),
@@ -4601,24 +4678,30 @@ where
                             drop(guard);
                             continue;
                         }
-                        let headers = h2_headers_from_response(&response)
-                            .expect("validated produced response head must encode");
-                        if conn.send_headers(stream_id, headers, false).is_err() {
-                            record_h2_body_diagnostic(
-                                stream_id,
-                                WebBodyDiagnostic::ResponseProducerFailure,
-                                "produced response headers could not be queued",
-                            );
-                            cancellation
-                                .cancel("HTTP/2 produced response headers could not be queued");
-                            conn.reset_stream(stream_id, ErrorCode::InternalError);
-                            drop(guard);
-                            continue;
-                        }
+                        let pending_initial_response = if body.has_deferred_initial_headers() {
+                            Some(response)
+                        } else {
+                            let headers = h2_headers_from_response(&response)
+                                .expect("validated produced response head must encode");
+                            if conn.send_headers(stream_id, headers, false).is_err() {
+                                record_h2_body_diagnostic(
+                                    stream_id,
+                                    WebBodyDiagnostic::ResponseProducerFailure,
+                                    "produced response headers could not be queued",
+                                );
+                                cancellation
+                                    .cancel("HTTP/2 produced response headers could not be queued");
+                                conn.reset_stream(stream_id, ErrorCode::InternalError);
+                                drop(guard);
+                                continue;
+                            }
+                            None
+                        };
                         let previous = produced_bodies.insert(
                             stream_id,
                             ActiveProducedBody {
                                 body,
+                                pending_initial_response,
                                 cancellation,
                                 guard: Some(guard),
                                 producer_outcome: None,

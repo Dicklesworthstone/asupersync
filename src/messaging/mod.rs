@@ -154,8 +154,8 @@ pub use jetstream::{
     JsMessage, PubAck, RetentionPolicy, StorageType, StreamConfig, StreamInfo, StreamState,
 };
 pub use kafka::{
-    Acks, Compression, KafkaError, KafkaProducer, ProducerConfig, RecordMetadata, Transaction,
-    TransactionalConfig, TransactionalProducer,
+    Acks, Compression, KafkaDelivery, KafkaError, KafkaProducer, ProducerConfig, RecordMetadata,
+    Transaction, TransactionalConfig, TransactionalProducer,
 };
 pub use kafka_consumer::{
     AutoOffsetReset, ConsumerConfig as KafkaConsumerConfig, ConsumerRecord as KafkaConsumerRecord,

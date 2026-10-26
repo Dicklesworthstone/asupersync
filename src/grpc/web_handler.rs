@@ -129,6 +129,11 @@ impl Server {
     /// service resolution, interceptors, codec, absolute deadline, cancellation,
     /// and source destruction as the native HTTP/2 streaming lane. Application
     /// code starts only when the listener admits the response producer.
+    /// Methods opting into `ServiceHandler::defer_response_headers` can supply
+    /// initial metadata, validated and sent in the HTTP response head before
+    /// the first message. It remains separate from the terminal trailer frame,
+    /// with the same encoded metadata limits as H2. Existing registrations
+    /// retain eager headers.
     ///
     /// Binary responses carry incremental gRPC DATA frames followed by exactly
     /// one `0x80` trailer frame in the body. Text responses encode bounded
@@ -208,6 +213,7 @@ impl Server {
                     }
                 };
                 let mut head = prepared.head();
+                let defer_headers = prepared.defer_response_headers();
                 strip_transport_headers(&mut head.headers);
                 let mut response = Http1ProducedResponse::chunked_with_max_frame_bytes(
                     streaming.frame_capacity,
@@ -230,6 +236,9 @@ impl Server {
                 )
                 .with_header("content-type", mode.as_header_value())
                 .with_header("vary", "Accept");
+                if defer_headers {
+                    response = response.defer_initial_headers();
+                }
                 for (name, value) in head.headers {
                     response = response.with_header(name, value);
                 }
@@ -339,6 +348,14 @@ struct WebBodySender {
 
 impl ServerStreamSink for WebBodySender {
     const REGION_NAME: &'static str = "h1-grpc-web-stream";
+
+    fn initial_headers_pending(&self) -> bool {
+        self.sender.initial_headers_pending()
+    }
+
+    fn send_initial_headers(&mut self, headers: HeaderMap) -> Result<(), HttpError> {
+        self.sender.send_initial_headers(headers)
+    }
 
     fn message_limit(&self) -> Option<usize> {
         Some(self.max_message_bytes)

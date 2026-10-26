@@ -2,8 +2,10 @@
 //!
 //! This is an additive transport lane: existing unary bind/serve methods retain
 //! their signatures and behavior. Client-streaming and bidi methods are refused.
-//! Application initial metadata is not supported by this lane; application
-//! trailers are explicit on `RegisteredServerStream`.
+//! Application initial metadata and successful-completion trailers are separate
+//! blocks on `RegisteredServerStream`. Methods explicitly opting into deferred
+//! headers publish initial metadata after factory setup and before the
+//! transport commits its response head. Legacy methods retain eager headers.
 
 use super::{
     Bytes, BytesMut, CallContext, CompressionEncoding, Cx, FramedCodec, GrpcError, HostPolicy,
@@ -75,6 +77,10 @@ type ProducedGrpcFuture = Pin<Box<dyn Future<Output = Http2ProducedResponse> + S
 pub(in crate::grpc) trait ServerStreamSink: Send {
     const REGION_NAME: &'static str;
 
+    fn initial_headers_pending(&self) -> bool;
+
+    fn send_initial_headers(&mut self, headers: HeaderMap) -> Result<(), HttpError>;
+
     fn message_limit(&self) -> Option<usize> {
         None
     }
@@ -94,6 +100,14 @@ pub(in crate::grpc) trait ServerStreamSink: Send {
 
 impl ServerStreamSink for Http2BodySender {
     const REGION_NAME: &'static str = "h2-grpc-stream";
+
+    fn initial_headers_pending(&self) -> bool {
+        Http2BodySender::initial_headers_pending(self)
+    }
+
+    fn send_initial_headers(&mut self, headers: HeaderMap) -> Result<(), HttpError> {
+        Http2BodySender::send_initial_headers(self, headers)
+    }
 
     fn send_chunk<'a>(
         &'a mut self,
@@ -126,6 +140,10 @@ pub(in crate::grpc) struct PreparedServerStream {
 }
 
 impl PreparedServerStream {
+    pub(in crate::grpc) fn defer_response_headers(&self) -> bool {
+        self.service.defer_response_headers(&self.path)
+    }
+
     pub(in crate::grpc) fn head(&self) -> HttpResponse {
         let mut head = HttpResponse::new(200, "OK", Vec::new())
             .with_header("content-type", "application/grpc");
@@ -404,14 +422,20 @@ impl Server {
                 return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
             }
         };
-        // Do not call user code or create its stream here. The handler context
-        // is retired before H2 starts the distinct response-producer context.
-        Http2ProducedResponse::streaming(
+        // Do not invoke the service factory or create its stream here. The
+        // handler retires before H2 starts the response-producer context.
+        let defer_headers = prepared.defer_response_headers();
+        let response = Http2ProducedResponse::streaming(
             prepared.head(),
             config.frame_capacity,
             config.max_frame_bytes,
             move |cx, sender| prepared.run(cx, sender, config),
-        )
+        );
+        if defer_headers {
+            response.defer_initial_headers()
+        } else {
+            response
+        }
     }
 
     pub(in crate::grpc) fn prepare_registered_server_stream(
@@ -491,6 +515,7 @@ impl Server {
         let partial = &mut partial_frame;
         let failure = &mut transport_error;
         let call_deadline = &deadline;
+        let initial_metadata_limit = self.config.max_metadata_size;
         let dispatch = self.dispatch_unary(request, move |request| async move {
             let call_cx = Cx::current().unwrap_or_else(|| owner.clone());
             let stream = poll_cancellable(
@@ -513,6 +538,7 @@ impl Server {
                 partial,
                 failure,
                 config.max_frame_bytes.get(),
+                initial_metadata_limit,
                 call_deadline,
             )
             .await
@@ -543,6 +569,13 @@ impl Server {
                 io::ErrorKind::Interrupted,
                 "gRPC response interrupted while queuing a message frame",
             )));
+        }
+        // A factory, interceptor, metadata check, or source destructor may
+        // fail before the initial block is published. Make that decision
+        // before releasing the transport head, then send the existing bounded
+        // terminal status without exposing rejected application metadata.
+        if sender.initial_headers_pending() {
+            sender.send_initial_headers(HeaderMap::new())?;
         }
         let trailers = bounded_terminal_trailers(result, config.max_trailer_bytes);
         match crate::time::timeout(
@@ -629,9 +662,25 @@ pub(super) async fn forward_messages<S: ServerStreamSink>(
     partial_frame: &mut bool,
     transport_error: &mut Option<HttpError>,
     max_frame_bytes: usize,
+    initial_metadata_limit: usize,
     deadline: &StreamDeadline,
 ) -> Result<Response<Bytes>, Status> {
-    let (mut stream, trailers) = stream.into_parts();
+    let (mut stream, initial, trailers) = stream.into_parts_with_metadata();
+    if sender.initial_headers_pending() {
+        let headers = bounded_initial_metadata(&initial, initial_metadata_limit)?;
+        // Encoding metadata is synchronous work. Re-check the original deadline
+        // and owner cancellation before it can commit a successful response head.
+        poll_cancellable(owner, cx, std::future::ready(()), Some(deadline)).await?;
+        if let Err(error) = sender.send_initial_headers(headers) {
+            *transport_error = Some(error);
+            return Err(Status::unavailable("gRPC initial response headers could not be delivered"));
+        }
+    } else if !initial.is_empty() {
+        return Err(Status::internal(
+            "gRPC initial response metadata requires defer_response_headers opt-in",
+        ));
+    }
+    drop(initial);
     let mut messages_this_turn = 0;
     loop {
         let next = poll_cancellable(
@@ -713,6 +762,72 @@ fn encoded_metadata_len(metadata: &Metadata) -> Option<usize> {
         total = total.checked_add(name.len())?.checked_add(length)?;
     }
     Some(total)
+}
+
+/// Even a disabled configured cap cannot turn an application-supplied initial
+/// block into an unbounded retained transport allocation.
+const MAX_INITIAL_METADATA_BYTES: usize = 64 * 1024;
+
+fn initial_metadata_key_is_reserved(key: &str) -> bool {
+    super::metadata_key_uses_grpc_prefix(key)
+        || [
+            "connection",
+            "content-encoding",
+            "content-length",
+            "content-type",
+            "host",
+            "keep-alive",
+            "proxy-connection",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+        ]
+        .iter()
+        .any(|reserved| key.eq_ignore_ascii_case(reserved))
+}
+
+fn bounded_initial_metadata(metadata: &Metadata, configured_limit: usize) -> Result<HeaderMap, Status> {
+    let limit = if configured_limit == 0 {
+        MAX_INITIAL_METADATA_BYTES
+    } else {
+        configured_limit.min(MAX_INITIAL_METADATA_BYTES)
+    };
+    // Check base64 expansion and aggregate arithmetic before cloning strings
+    // or allocating the serialized header block. Every duplicate counts.
+    if encoded_metadata_len(metadata).is_none_or(|bytes| bytes > limit) {
+        return Err(Status::resource_exhausted(
+            "gRPC initial response metadata exceeds its encoded byte limit",
+        ));
+    }
+    for (key, value) in metadata.iter() {
+        let valid_key = !key.is_empty()
+            && key.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'-' | b'_' | b'.')
+            });
+        let valid_value = match value {
+            MetadataValue::Ascii(value) => {
+                !key.ends_with("-bin") && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+            }
+            MetadataValue::Binary(_) => key.ends_with("-bin"),
+        };
+        if !valid_key || !valid_value || initial_metadata_key_is_reserved(key) {
+            return Err(Status::internal("invalid or reserved gRPC initial response metadata"));
+        }
+    }
+    let mut headers = HeaderMap::new();
+    for (key, value) in metadata.iter() {
+        let value = match value {
+            MetadataValue::Ascii(value) => value.clone(),
+            MetadataValue::Binary(value) => {
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(value)
+            }
+        };
+        append_header(&mut headers, key, value);
+    }
+    Ok(headers)
 }
 
 pub(super) fn bounded_terminal_trailers(
