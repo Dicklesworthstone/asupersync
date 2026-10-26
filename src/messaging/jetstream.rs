@@ -1196,8 +1196,19 @@ impl fmt::Debug for JsMessage {
 
 impl JsMessage {
     /// Check if the message has been acknowledged.
+    ///
+    /// This includes an acknowledgment currently in flight. Use
+    /// [`Self::is_ack_confirmed`] to check for a successful broker reply.
     pub fn is_acked(&self) -> bool {
         self.ack_state.load(Ordering::Acquire) != ACK_STATE_PENDING
+    }
+
+    /// Check whether the broker confirmed this message's positive acknowledgment.
+    ///
+    /// Only a successful [`Self::ack_confirmed`] sets this flag. A plain
+    /// [`Self::ack`] sends the acknowledgment without waiting for confirmation.
+    pub fn is_ack_confirmed(&self) -> bool {
+        self.ack_state.load(Ordering::Acquire) == ACK_STATE_ACK_CONFIRMED
     }
 }
 
@@ -1819,6 +1830,20 @@ impl Consumer {
         msg.ack(client, cx).await
     }
 
+    /// Acknowledge a message and wait for the broker to confirm receipt.
+    ///
+    /// Pending consumer credit is released only after confirmation, unless a
+    /// previous plain acknowledgment already released it. See
+    /// [`JsMessage::ack_confirmed`] for retry and cancellation behavior.
+    pub async fn ack_message_confirmed(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        msg: &JsMessage,
+    ) -> Result<(), JsError> {
+        msg.ack_confirmed(client, cx).await
+    }
+
     /// Negative acknowledge a message and update pending ack count.
     ///
     /// This is the flow-control-aware version of `JsMessage::nack()`.
@@ -2173,6 +2198,9 @@ const ACK_STATE_NAK_IN_FLIGHT: u8 = 3;
 const ACK_STATE_NAKED: u8 = 4;
 const ACK_STATE_TERM_IN_FLIGHT: u8 = 5;
 const ACK_STATE_TERMED: u8 = 6;
+const ACK_STATE_ACK_CONFIRM_IN_FLIGHT: u8 = 7;
+const ACK_STATE_ACK_CONFIRM_UPGRADE_IN_FLIGHT: u8 = 8;
+const ACK_STATE_ACK_CONFIRMED: u8 = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerminalAckKind {
@@ -2896,9 +2924,79 @@ impl JsMessage {
     /// `Ok(())` without sending a second wire frame. On a transient
     /// publish failure the message is **not** marked acknowledged, so
     /// the caller can retry (br-asupersync-vl5agi).
+    ///
+    /// This does not wait for the broker to confirm receipt. Use
+    /// [`Self::ack_confirmed`] when that confirmation is required.
     pub async fn ack(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
         self.publish_terminal_ack(client, cx, Cow::Borrowed(b"+ACK"), TerminalAckKind::Ack)
             .await
+    }
+
+    /// Acknowledge the message and wait for the broker to confirm receipt.
+    ///
+    /// Sends `+ACK` to the delivered reply subject with a temporary reply
+    /// inbox, then waits for the broker's acknowledgment response. The
+    /// wait uses the client's configured request timeout and observes `cx`
+    /// cancellation. Pending consumer credit is released once the response
+    /// arrives, and [`Self::is_ack_confirmed`] then returns `true`.
+    ///
+    /// Calling this after a successful plain [`Self::ack`] still sends a
+    /// confirmation request; it does not release consumer credit a second
+    /// time. Repeating it after successful confirmation is a no-op. Other
+    /// terminal acknowledgments already in flight, negative acknowledgments,
+    /// and termination return [`JsError::AlreadyAcknowledged`].
+    ///
+    /// On error, cancellation, or a dropped future, the previous local state
+    /// and pending credit are preserved. The broker may already have processed
+    /// the acknowledgment even if its response was lost; retrying this method
+    /// is safe because `+ACK` is idempotent. Confirmation covers the broker's
+    /// acknowledgment, not side effects performed while processing the message.
+    ///
+    /// ```ignore
+    /// process_order(&message.payload);
+    /// message.ack_confirmed(&mut client, &cx).await?;
+    /// assert!(message.is_ack_confirmed());
+    /// ```
+    pub async fn ack_confirmed(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+    ) -> Result<(), JsError> {
+        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+
+        let (previous_state, in_flight) = loop {
+            let previous_state = self.ack_state.load(Ordering::Acquire);
+            let in_flight = match previous_state {
+                ACK_STATE_PENDING => ACK_STATE_ACK_CONFIRM_IN_FLIGHT,
+                ACK_STATE_ACKED => ACK_STATE_ACK_CONFIRM_UPGRADE_IN_FLIGHT,
+                ACK_STATE_ACK_CONFIRMED => return Ok(()),
+                _ => return Err(JsError::AlreadyAcknowledged),
+            };
+            if self
+                .ack_state
+                .compare_exchange(previous_state, in_flight, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break (previous_state, in_flight);
+            }
+        };
+
+        let _reservation = InFlightAck {
+            state: &self.ack_state,
+            in_flight,
+            previous_state,
+        };
+        let reply = client.request(cx, &self.reply_subject, b"+ACK").await?;
+        validate_ack_confirmation(&reply)?;
+
+        self.ack_state
+            .store(ACK_STATE_ACK_CONFIRMED, Ordering::Release);
+        if previous_state == ACK_STATE_PENDING {
+            if let Some(ref pending) = self.pending_acks {
+                decrement_pending_counter(pending);
+            }
+        }
+        Ok(())
     }
 
     /// Negative acknowledge (request redelivery).
@@ -2963,12 +3061,10 @@ impl JsMessage {
     /// meant a transient `client.publish` error left the message permanently
     /// \"acked\" with no path back. (br-asupersync-vl5agi)
     ///
-    /// Concurrency note: `JsMessage` is not designed for concurrent
-    /// terminal acks from multiple threads. Post-success repeated
-    /// `ack()` calls are intentionally idempotent, but a concurrent
-    /// same-ack racing with an in-flight publish still sees
-    /// `AlreadyAcknowledged`. If the first publish later rolls back,
-    /// that racing caller will already have failed.
+    /// A concurrent terminal acknowledgment sees `AlreadyAcknowledged`
+    /// while a first acknowledgment is in flight. An `ack()` remains a no-op
+    /// after a successful positive acknowledgment, including while a later
+    /// confirmation request is upgrading that acknowledgment.
     async fn publish_terminal_ack(
         &self,
         client: &mut NatsClient,
@@ -2997,7 +3093,17 @@ impl JsMessage {
                         break;
                     }
                 }
-                state if state == committed && kind.is_idempotent() => return Ok(()),
+                state
+                    if kind.is_idempotent()
+                        && matches!(
+                            state,
+                            ACK_STATE_ACKED
+                                | ACK_STATE_ACK_CONFIRM_UPGRADE_IN_FLIGHT
+                                | ACK_STATE_ACK_CONFIRMED
+                        ) =>
+                {
+                    return Ok(());
+                }
                 _ => return Err(JsError::AlreadyAcknowledged),
             }
         }
@@ -3009,6 +3115,7 @@ impl JsMessage {
         let _reservation = InFlightAck {
             state: &self.ack_state,
             in_flight,
+            previous_state: ACK_STATE_PENDING,
         };
 
         // The server takes acks only on the reply subject exactly as delivered:
@@ -3027,32 +3134,73 @@ impl JsMessage {
                 }
                 Ok(())
             }
-            Err(err) => {
-                self.ack_state.store(ACK_STATE_PENDING, Ordering::Release);
-                Err(JsError::Nats(err))
-            }
+            Err(err) => Err(JsError::Nats(err)),
         }
     }
 }
 
-/// Returns a terminal-ack reservation to pending when it is dropped still in
-/// flight, that is, when the publishing future was dropped before the publish
-/// finished. A finished publish has already stored the outcome, so the guard
-/// then does nothing.
+/// Restores the previous terminal-ack state on error or a dropped future.
+/// A finished operation has already stored its outcome, so the guard then
+/// does nothing. Only this guard publishes rollback: an earlier rollback
+/// would let a racing retry reserve the same state before this guard drops.
 struct InFlightAck<'a> {
     state: &'a AtomicU8,
     in_flight: u8,
+    previous_state: u8,
 }
 
 impl Drop for InFlightAck<'_> {
     fn drop(&mut self) {
         let _ = self.state.compare_exchange(
             self.in_flight,
-            ACK_STATE_PENDING,
+            self.previous_state,
             Ordering::AcqRel,
             Ordering::Acquire,
         );
     }
+}
+
+/// Informational and error status frames do not prove that the broker
+/// accepted the acknowledgment, even if generic NATS request/reply delivered
+/// them to the temporary inbox. Successful response bodies are left opaque,
+/// matching the NATS reference client's DoubleAck behavior.
+fn validate_ack_confirmation(reply: &Message) -> Result<(), JsError> {
+    let Some(headers) = reply.headers.as_deref() else {
+        return Ok(());
+    };
+    let header_text = std::str::from_utf8(headers).map_err(|_| {
+        NatsError::Protocol("invalid JetStream acknowledgment confirmation headers".to_string())
+    })?;
+    let validate_status = |value: &str| {
+        if matches!(value.parse::<u16>(), Ok(200..=299)) {
+            Ok(())
+        } else {
+            Err(NatsError::Protocol(format!(
+                "unexpected JetStream acknowledgment confirmation status: {value}"
+            )))
+        }
+    };
+    let mut lines = header_text.split("\r\n");
+    let first_line = lines.next().unwrap_or_default();
+    if let Some(status) = first_line.strip_prefix("NATS/1.0 ") {
+        validate_status(status.split_whitespace().next().unwrap_or_default())?;
+    } else if first_line != "NATS/1.0" {
+        return Err(NatsError::Protocol(
+            "invalid JetStream acknowledgment confirmation status line".to_string(),
+        )
+        .into());
+    }
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("Status") {
+                validate_status(value.trim())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_nak_payload(delay: Duration) -> Cow<'static, [u8]> {
