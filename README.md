@@ -616,10 +616,19 @@ config.qpack_decoder_table_capacity = std::num::NonZeroUsize::new(4096);
 
 This enables compressed incoming request headers and trailers; a directly
 configured client session also decodes dynamic informational and final responses.
-The profile advertises a finite table of at most 64 KiB and zero blocked streams,
-acknowledges received insertions, and retains decoder feedback across QUIC
-flow-control stalls. Peers can then reference acknowledged entries without
-blocking a request stream. Resolved field sizes are checked before copying table
+The profile advertises a finite table of at most 64 KiB, acknowledges received
+insertions, and retains decoder feedback across QUIC flow-control stalls.
+Blocked-stream allowance defaults to zero, so peers can reference acknowledged
+entries without blocking a request stream. Directly configured dynamic sessions
+can set `H3Settings::qpack_blocked_streams` to a value up to 16. HEADERS that
+arrive before their table entries then wait for encoder instructions while
+unrelated requests continue. DATA, subsequent headers, trailers, and FIN retain
+their stream order; cancellation releases the waiting section. The connection
+admits at most 1 MiB of pending encoded field-section payload, retained once by
+the parser and once by the scheduler, plus separately bounded parser lookahead.
+Exceeding this local byte budget resets only the new request; exceeding the
+advertised blocked-stream count remains a connection error.
+Resolved field sizes are checked before copying table
 entries, with an advertised ceiling of 1 MiB per section and any smaller
 configured field limit. Outgoing headers and trailers use static QPACK. For an
 established connection, select `H3ConnectionConfig::with_dynamic_qpack()` and

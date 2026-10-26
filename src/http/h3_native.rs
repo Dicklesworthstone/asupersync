@@ -1663,15 +1663,13 @@ pub fn qpack_field_section_metadata(
                 ));
             }
             if encoded_insert_count == 0 {
-                if sign || delta_base != 0 {
-                    return Err(H3NativeError::InvalidFrame(
-                        "base must be zero without required insert count",
-                    ));
-                }
                 return Ok(QpackFieldSectionMetadata {
                     encoded_insert_count,
                     required_insert_count: 0,
-                    base: 0,
+                    // RFC 9204 section 4.5.1.2 permits any Base when
+                    // there are no dynamic references. Signed underflow
+                    // remains malformed even though no reference uses it.
+                    base: qpack_decode_base(0, sign, delta_base)?,
                     prefix_len: pos,
                 });
             }
@@ -1718,6 +1716,7 @@ pub struct QpackBlockedStreamRecord {
     blocked_reason: Option<&'static str>,
     protected_references: Vec<u64>,
     blocked_field_section: Option<Vec<u8>>,
+    blocked_metadata: Option<QpackFieldSectionMetadata>,
     field_section_decoded: bool,
     references_registered: bool,
     first_failure: Option<H3NativeError>,
@@ -1740,6 +1739,7 @@ impl QpackBlockedStreamRecord {
             blocked_reason,
             protected_references,
             blocked_field_section: None,
+            blocked_metadata: None,
             field_section_decoded: true,
             references_registered,
             first_failure: None,
@@ -1760,6 +1760,7 @@ impl QpackBlockedStreamRecord {
             blocked_reason: None,
             protected_references: Vec::new(),
             blocked_field_section: None,
+            blocked_metadata: None,
             field_section_decoded: false,
             references_registered: false,
             first_failure: Some(error),
@@ -2255,6 +2256,7 @@ impl QpackBlockedStreamScheduler {
                 record.field_section_decoded = true;
             }
             record.blocked_field_section = Some(field_section.to_vec());
+            record.blocked_metadata = Some(metadata);
             self.push_record(stream_id, record);
             return Ok(QpackBlockedStreamStatus::Blocked);
         }
@@ -2485,17 +2487,24 @@ impl QpackBlockedStreamScheduler {
         // Protect every newly available section, including tails that must wait
         // for an earlier section before entering the feedback ACK queue.
         for (stream_id, index) in ready_sections {
-            let field_section = self
+            let record = self
                 .streams
                 .get(&stream_id)
                 .and_then(|sections| sections.get(index))
-                .and_then(|record| record.blocked_field_section.as_ref())
                 .ok_or(H3NativeError::InvalidFrame(
                     "qpack blocked field section missing",
                 ))?;
+            let field_section = record.blocked_field_section.as_ref().ok_or(
+                H3NativeError::InvalidFrame("qpack blocked field section missing"),
+            )?;
+            let metadata = record.blocked_metadata.as_ref().ok_or(
+                H3NativeError::InvalidFrame("qpack blocked field section metadata missing"),
+            )?;
             let context_opt = (mode == H3QpackMode::DynamicTableAllowed).then_some(&*context);
             let plan =
-                match qpack_decode_field_section_with_context(field_section, mode, context_opt) {
+                match qpack_decode_field_section_with_metadata(
+                    field_section, mode, context_opt, metadata,
+                ) {
                     Ok(plan) => plan,
                     Err(error) => {
                         self.record_stream_error(stream_id, &error);
@@ -2539,6 +2548,7 @@ impl QpackBlockedStreamScheduler {
                     }
                     record.references_registered = !record.protected_references.is_empty();
                     record.blocked_field_section = None;
+                    record.blocked_metadata = None;
                     record.status = QpackBlockedStreamStatus::Ready;
                     record.blocked_reason = None;
                 }
@@ -3653,67 +3663,41 @@ pub(crate) fn qpack_decode_field_section_with_context(
     mode: H3QpackMode,
     qpack_context: Option<&QpackContext>,
 ) -> Result<Vec<QpackFieldPlan>, H3NativeError> {
-    let mut pos = 0usize;
+    let metadata = qpack_field_section_metadata(input, mode, qpack_context)?;
+    qpack_decode_field_section_with_metadata(input, mode, qpack_context, &metadata)
+}
 
-    // Field section prefix part 1: Required Insert Count (8-bit prefix int).
-    let first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
-    pos += 1;
-    let (encoded_insert_count, ric_extra) = qpack_decode_prefixed_int(first, 8, &input[pos..])?;
-    pos += ric_extra;
-
-    // Field section prefix part 2: S + Delta Base (7-bit prefix int).
-    let second = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
-    pos += 1;
-    let sign = (second & 0x80) != 0;
-    let (delta_base, db_extra) = qpack_decode_prefixed_int(second, 7, &input[pos..])?;
-    pos += db_extra;
-
-    let mut declared_required_insert_count = 0;
+/// Decode with the prefix captured when a field section arrived. Required
+/// Insert Count is modulo encoded; a blocked section must not reinterpret its
+/// absolute count or Base after subsequent encoder instructions advance it.
+pub(crate) fn qpack_decode_field_section_with_metadata(
+    input: &[u8],
+    mode: H3QpackMode,
+    qpack_context: Option<&QpackContext>,
+    metadata: &QpackFieldSectionMetadata,
+) -> Result<Vec<QpackFieldPlan>, H3NativeError> {
+    let mut pos = metadata.prefix_len();
+    if pos > input.len() {
+        return Err(H3NativeError::UnexpectedEof);
+    }
+    let declared_required_insert_count = metadata.required_insert_count();
     let dynamic_base = match mode {
-        H3QpackMode::StaticOnly => {
-            if encoded_insert_count != 0 {
-                return Err(H3NativeError::QpackPolicy(
-                    "required insert count must be zero in static-only mode",
-                ));
-            }
-            if sign || delta_base != 0 {
-                return Err(H3NativeError::QpackPolicy(
-                    "base must be zero in static-only mode",
-                ));
-            }
-            None
-        }
+        H3QpackMode::StaticOnly => None,
         H3QpackMode::DynamicTableAllowed => {
-            // Dynamic table operations are permitted - validate reasonable bounds
-            if encoded_insert_count > 65536 {
-                return Err(H3NativeError::QpackPolicy(
-                    "required insert count exceeds reasonable limit",
-                ));
-            }
-
             if let Some(context) = qpack_context {
                 let total_inserts = context.dynamic_table().insertion_counter();
-                let required_insert_count = qpack_decode_required_insert_count(
-                    encoded_insert_count,
-                    total_inserts,
-                    context.max_table_capacity,
-                )?;
-                declared_required_insert_count = required_insert_count;
-                if required_insert_count > total_inserts {
+                if declared_required_insert_count > total_inserts {
                     return Err(H3NativeError::QpackPolicy(
                         "required insert count exceeds dynamic table state",
                     ));
                 }
-
-                let base = qpack_decode_base(required_insert_count, sign, delta_base)?;
-                if base > total_inserts {
-                    return Err(H3NativeError::InvalidFrame(
-                        "dynamic qpack base exceeds dynamic table state",
-                    ));
-                }
-                Some(base)
+                // Base is an addressing origin, not a dependency. RFC 9204
+                // section 4.5.1.2 permits it to exceed Required Insert Count
+                // and the inserts currently received; each actual reference
+                // is checked below and when resolving the returned plan.
+                Some(metadata.base())
             } else {
-                if encoded_insert_count != 0 || sign || delta_base != 0 {
+                if declared_required_insert_count != 0 {
                     return Err(H3NativeError::InvalidFrame(
                         "dynamic table context required",
                     ));
