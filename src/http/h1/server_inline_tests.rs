@@ -1113,6 +1113,89 @@
     }
 
     #[test]
+    fn produced_deferred_initial_headers_precede_body_after_parked_service_setup() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let observed = Arc::clone(&written);
+        let setup_polls = Arc::new(AtomicUsize::new(0));
+        let setup_observed = Arc::clone(&setup_polls);
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| {
+                let written = Arc::clone(&observed);
+                let setup_polls = Arc::clone(&setup_observed);
+                async move {
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        move |producer_cx, mut sender| async move {
+                            poll_fn(|task_cx| {
+                                assert!(written.lock().unwrap().is_empty(), "head escaped before service metadata");
+                                if setup_polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                                    task_cx.waker().wake_by_ref();
+                                    Poll::Pending
+                                } else {
+                                    Poll::Ready(())
+                                }
+                            }).await;
+                            let mut headers = HeaderMap::new();
+                            headers.insert(HeaderName::from_static("x-initial"), HeaderValue::from_static("ready"));
+                            sender.send_initial_headers(headers)?;
+                            sender.send_chunk(&producer_cx, b"alpha").await?;
+                            sender.send_chunk(&producer_cx, b"beta").await?;
+                            sender.finish(&producer_cx)?;
+                            Ok(sender)
+                        },
+                    ).defer_initial_headers()
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread().build().expect("native runtime");
+        let state = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime context");
+            server.serve_produced(&cx, io).await
+        }).expect("deferred produced response");
+        assert_eq!(state.requests_served, 1);
+        assert!(setup_polls.load(Ordering::SeqCst) >= 2, "service setup actually parked");
+        let written = written.lock().unwrap().clone();
+        let header_end = written.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap();
+        let head = std::str::from_utf8(&written[..header_end]).unwrap();
+        assert_eq!(head.matches("x-initial: ready").count(), 1);
+        assert_eq!(response_body_bytes(&written), b"5\r\nalpha\r\n4\r\nbeta\r\n0\r\n\r\n");
+    }
+
+    #[test]
+    fn produced_deferred_initial_header_abandonment_never_commits_success_head() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    |_producer_cx, _sender| async move { Err(HttpError::BadHeader) },
+                ).defer_initial_headers()
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread().build().expect("native runtime");
+        let error = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime context");
+            server.serve_produced(&cx, io).await
+        }).expect_err("abandoned setup is not a complete response");
+        assert!(matches!(error, HttpError::BadHeader));
+        assert!(written.lock().unwrap().is_empty(), "abandoned setup must not publish any response bytes");
+    }
+
+    #[test]
     fn produced_content_length_writes_raw_frames_without_chunk_terminator() {
         let written = Arc::new(Mutex::new(Vec::new()));
         let io = TestIo::new(

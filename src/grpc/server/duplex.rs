@@ -303,8 +303,12 @@ impl Server {
     /// Auth/request interceptors run once on a metadata envelope with an empty
     /// payload; they may add extensions and metadata, but cannot replace the
     /// streaming payload. Response interceptors see terminal trailers on an
-    /// empty response. Application initial response metadata is not supported
-    /// by this lane. Existing unary and server-streaming listeners are unchanged.
+    /// empty response. Server-streaming and bidirectional methods opting into
+    /// `ServiceHandler::defer_response_headers` may attach initial metadata to
+    /// `RegisteredServerStream`; it is validated before the response head and
+    /// before any source polling. Existing registrations retain eager headers.
+    /// The `Response` metadata of unary/client-streaming methods remains
+    /// terminal trailing metadata.
     /// One deadline captured when the admitted handler receives HEADERS covers input, handler setup,
     /// output polls and backpressure. Early handler completion stops unread input
     /// after response drain; an observed input error always prevents success.
@@ -549,7 +553,8 @@ impl Server {
             head.headers
                 .push(("grpc-encoding".to_owned(), encoding.to_owned()));
         }
-        Http2ProducedResponse::streaming(
+        let defer_headers = server_streaming && service.defer_response_headers(&path);
+        let response = Http2ProducedResponse::streaming(
             head,
             config.response.frame_capacity,
             config.response.max_frame_bytes,
@@ -568,7 +573,12 @@ impl Server {
                 )
                 .await
             },
-        )
+        );
+        if defer_headers {
+            response.defer_initial_headers()
+        } else {
+            response
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -596,6 +606,7 @@ impl Server {
         let transport_error = &mut failure;
         let call_deadline = &deadline;
         let input_terminal = Arc::clone(&terminal);
+        let initial_metadata_limit = self.config.max_metadata_size;
         let dispatch = self.dispatch_intercepted(
             envelope,
             move |request| async move {
@@ -660,6 +671,7 @@ impl Server {
                     partial_frame,
                     transport_error,
                     config.max_frame_bytes.get(),
+                    initial_metadata_limit,
                     call_deadline,
                 )
                 .await;
@@ -695,6 +707,9 @@ impl Server {
                 io::ErrorKind::Interrupted,
                 "gRPC response stopped inside a message frame",
             )));
+        }
+        if sender.initial_headers_pending() {
+            sender.send_initial_headers(HeaderMap::new())?;
         }
         let trailers = bounded_terminal_trailers(result, config.max_trailer_bytes);
         send_terminal(&cx, &mut sender, trailers, config.terminal_timeout).await?;

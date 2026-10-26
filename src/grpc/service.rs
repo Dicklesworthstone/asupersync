@@ -222,6 +222,25 @@ pub trait ServiceHandler: Send + Sync {
     /// Get method names.
     fn method_names(&self) -> Vec<&str>;
 
+    /// Opt a response-streaming method into application initial metadata.
+    ///
+    /// Returning `true` delays response headers until the server-streaming or
+    /// bidirectional factory returns its [`RegisteredServerStream`]. This lets
+    /// the transport validate and publish that stream's initial metadata before
+    /// any response message. The native H2 and gRPC-Web streaming adapters honor
+    /// this choice for the exact registered `path`; unary and client-streaming
+    /// methods always retain their existing header timing.
+    ///
+    /// The default preserves eager response headers for existing registrations,
+    /// including bidirectional factories that wait for request input. Such a
+    /// method must return empty initial metadata; a nonempty block fails with
+    /// `INTERNAL` before source polling instead of being dropped or moved into
+    /// trailers. An opted-in factory must not wait for input from a peer that
+    /// itself waits for response headers before uploading.
+    fn defer_response_headers(&self, _path: &str) -> bool {
+        false
+    }
+
     /// Dispatch one decoded unary request for `path`.
     ///
     /// [`crate::grpc::Server::bind_registered_http2`] calls this hook only
@@ -255,8 +274,9 @@ pub trait ServiceHandler: Send + Sync {
     /// request metadata.
     ///
     /// The default keeps existing implementations source-compatible and fails
-    /// closed with `UNIMPLEMENTED`. Successful application trailers belong on
-    /// the returned [`RegisteredServerStream`], not in the initial headers.
+    /// closed with `UNIMPLEMENTED`. The returned [`RegisteredServerStream`]
+    /// carries initial metadata separately from successful application trailers;
+    /// neither block is silently moved into the other.
     fn call_server_streaming<'a>(
         &'a self,
         _cx: &'a Cx,

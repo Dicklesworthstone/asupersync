@@ -24,7 +24,7 @@ use std::task::{Context, Poll, Waker};
 use parking_lot::Mutex;
 
 use crate::bytes::{Buf, Bytes, BytesCursor, BytesMut};
-use crate::channel::mpsc;
+use crate::channel::{mpsc, oneshot};
 use crate::channel::mpsc::{RecvError, SendError};
 use crate::cx::{CancelWakerToken, Cx};
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
@@ -2727,6 +2727,8 @@ struct OutgoingBodyChannelIdentity;
 #[derive(Debug)]
 pub struct OutgoingBody {
     receiver: mpsc::Receiver<Result<Frame<BytesCursor>, HttpError>>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    initial_headers: Option<oneshot::Receiver<HeaderMap>>,
     cx: Cx,
     // The native server validates sender/body pairing; browser callers retain
     // the same channel representation without that transport entry point.
@@ -2781,6 +2783,7 @@ impl OutgoingBody {
         let channel_identity = Arc::new(OutgoingBodyChannelIdentity);
         let body = Self {
             receiver: rx,
+            initial_headers: None,
             cx: cx.clone(),
             channel_identity: Arc::clone(&channel_identity),
             done: kind.is_empty(),
@@ -2850,6 +2853,41 @@ impl Body for OutgoingBody {
 }
 
 impl OutgoingBody {
+    /// Enable the private produced-response header handshake on a fresh pair.
+    /// The producer must publish its initial fields before any body operation.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn defer_initial_headers(&mut self, sender: &mut OutgoingBodySender) {
+        debug_assert!(sender.is_peer_of(self));
+        debug_assert!(self.initial_headers.is_none());
+        let (tx, rx) = oneshot::channel();
+        self.initial_headers = Some(rx);
+        sender.initial_headers = Some(tx);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn has_deferred_initial_headers(&self) -> bool {
+        self.initial_headers.is_some()
+    }
+
+    /// Committed initial headers precede producer cancellation, just like its
+    /// committed DATA/trailers. The supervising driver owns deadlines and drain.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn poll_initial_headers(
+        &mut self,
+        poll_cx: &mut Context<'_>,
+    ) -> Poll<Result<HeaderMap, HttpError>> {
+        let Some(receiver) = self.initial_headers.as_mut() else {
+            return Poll::Ready(Err(HttpError::BodyChannelClosed));
+        };
+        match receiver.poll_recv_uninterruptible(poll_cx) {
+            Poll::Ready(result) => {
+                self.initial_headers = None;
+                Poll::Ready(result.map_err(|_| HttpError::BodyChannelClosed))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
     /// Polls the next frame, delivering frames the producer already committed
     /// before observing cancellation of the producer's context.
     ///
@@ -2912,6 +2950,7 @@ impl OutgoingBody {
 #[derive(Debug)]
 pub struct OutgoingBodySender {
     sender: Option<mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>>,
+    initial_headers: Option<oneshot::Sender<HeaderMap>>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     channel_identity: Arc<OutgoingBodyChannelIdentity>,
     kind: BodyKind,
@@ -2935,6 +2974,7 @@ impl OutgoingBodySender {
         let finished = kind.is_empty();
         let mut this = Self {
             sender: Some(sender),
+            initial_headers: None,
             channel_identity,
             kind,
             max_frame_bytes,
@@ -2978,9 +3018,40 @@ impl OutgoingBodySender {
         self.max_frame_bytes
     }
 
+    /// Publish the opt-in initial metadata block exactly once. This is private
+    /// so applications cannot bypass their protocol's reserved-field policy.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_initial_headers(&mut self, headers: HeaderMap) -> Result<(), HttpError> {
+        if self.finished || self.initial_headers.is_none() {
+            return Err(HttpError::BodyChannelClosed);
+        }
+        let mut size = 0_usize;
+        for (name, value) in headers.iter() {
+            let value = value.to_str().map_err(|_| HttpError::InvalidHeaderValue)?;
+            validate_header_field(name.as_str(), value)?;
+            size = size
+                .checked_add(name.as_str().len())
+                .and_then(|size| size.checked_add(value.len()))
+                .ok_or(HttpError::HeadersTooLarge)?;
+            if size > 64 * 1024 {
+                return Err(HttpError::HeadersTooLarge);
+            }
+        }
+        self.initial_headers
+            .take()
+            .expect("initial header sender checked above")
+            .send_blocking(headers)
+            .map_err(|_| HttpError::BodyChannelClosed)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn initial_headers_pending(&self) -> bool {
+        self.initial_headers.is_some()
+    }
+
     /// Sends a Bytes chunk.
     pub async fn send_bytes(&mut self, cx: &Cx, data: Bytes) -> Result<(), HttpError> {
-        if self.finished {
+        if self.finished || self.initial_headers.is_some() {
             return Err(HttpError::BodyChannelClosed);
         }
         if data.is_empty() {
@@ -3012,6 +3083,9 @@ impl OutgoingBodySender {
 
     /// Sends a slice (copies into Bytes).
     pub async fn send_chunk(&mut self, cx: &Cx, data: &[u8]) -> Result<(), HttpError> {
+        if self.initial_headers.is_some() {
+            return Err(HttpError::BodyChannelClosed);
+        }
         if data.is_empty() {
             return Ok(());
         }
@@ -3020,6 +3094,9 @@ impl OutgoingBodySender {
 
     /// Sends trailing headers (only valid for chunked bodies).
     pub async fn send_trailers(&mut self, cx: &Cx, trailers: HeaderMap) -> Result<(), HttpError> {
+        if self.initial_headers.is_some() {
+            return Err(HttpError::BodyChannelClosed);
+        }
         if !matches!(self.kind, BodyKind::Chunked) {
             return Err(HttpError::TrailersNotAllowed);
         }
@@ -3041,6 +3118,9 @@ impl OutgoingBodySender {
 
     /// Finishes the body (no trailers).
     pub fn finish(&mut self, _cx: &Cx) -> Result<(), HttpError> {
+        if self.initial_headers.is_some() {
+            return Err(HttpError::BodyChannelClosed);
+        }
         if self.finished {
             return Ok(());
         }
@@ -3335,6 +3415,8 @@ pub struct Http1ProducedResponse {
     body_kind: BodyKind,
     capacity: NonZeroUsize,
     max_frame_bytes: NonZeroUsize,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    deferred_initial_headers: bool,
     // Retain ownership (including captured-value Drop) on all targets; only
     // the native server starts the producer through `into_parts`.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -3409,6 +3491,7 @@ impl Http1ProducedResponse {
             body_kind: BodyKind::Chunked,
             capacity,
             max_frame_bytes,
+            deferred_initial_headers: false,
             producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
         }
     }
@@ -3470,6 +3553,7 @@ impl Http1ProducedResponse {
             body_kind,
             capacity,
             max_frame_bytes,
+            deferred_initial_headers: false,
             producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
         }
     }
@@ -3511,6 +3595,14 @@ impl Http1ProducedResponse {
         self
     }
 
+    /// Wait for the supervised producer's initial fields before committing
+    /// the response head. Only protocol adapters opt into this handshake.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn defer_initial_headers(mut self) -> Self {
+        self.deferred_initial_headers = true;
+        self
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_head(self) -> ResponseHead {
         self.head
@@ -3523,12 +3615,15 @@ impl Http1ProducedResponse {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_parts(self, cx: &Cx) -> (StreamingResponse, Http1ProducedResponseFuture) {
-        let (sender, body) = OutgoingBody::channel_with_capacity_and_max_frame_bytes(
+        let (mut sender, mut body) = OutgoingBody::channel_with_capacity_and_max_frame_bytes(
             cx,
             self.body_kind,
             self.capacity.get(),
             self.max_frame_bytes,
         );
+        if self.deferred_initial_headers {
+            body.defer_initial_headers(&mut sender);
+        }
         let producer = (self.producer)(cx.clone(), sender);
         (
             StreamingResponse {

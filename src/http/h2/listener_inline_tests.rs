@@ -880,6 +880,7 @@
             1,
             ActiveProducedBody {
                 body,
+                pending_initial_response: None,
                 cancellation: ProducedCancellationGuard::new(producer_cx),
                 guard: Some(transport_guard),
                 producer_outcome: None,
@@ -925,6 +926,7 @@
                     response: Response::new(200, "OK", Vec::new()),
                     frame_capacity: NonZeroUsize::MIN,
                     max_frame_bytes: NonZeroUsize::new(8).expect("non-zero limit"),
+                    deferred_initial_headers: false,
                     producer: Box::new(|_, _| panic!("producer factory exploded")),
                 })
             });
@@ -995,6 +997,7 @@
                             .with_header("x-produced", "head"),
                         frame_capacity: NonZeroUsize::MIN,
                         max_frame_bytes: NonZeroUsize::new(8).expect("non-zero limit"),
+                        deferred_initial_headers: false,
                         producer: Box::new(move |_producer_cx, sender| {
                             factory_invoked.store(true, Ordering::SeqCst);
                             Box::pin(async move { Ok(sender) })
@@ -1083,6 +1086,7 @@
                 1,
                 ActiveProducedBody {
                     body,
+                    pending_initial_response: None,
                     cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
                     guard: Some(Arc::new(InFlightRequestGuard::acquire(None))),
                     producer_outcome: Some(Http2ProducerOutcome::Finished {
@@ -1222,6 +1226,7 @@
                 1,
                 ActiveProducedBody {
                     body,
+                    pending_initial_response: None,
                     cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
                     guard: Some(Arc::new(InFlightRequestGuard::acquire(None))),
                     producer_outcome: None,
@@ -1310,6 +1315,7 @@
                 1,
                 ActiveProducedBody {
                     body,
+                    pending_initial_response: None,
                     cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
                     guard: Some(Arc::new(InFlightRequestGuard::acquire(Some(&in_flight)))),
                     producer_outcome: Some(Http2ProducerOutcome::Finished {
@@ -1400,6 +1406,7 @@
                 1,
                 ActiveProducedBody {
                     body,
+                    pending_initial_response: None,
                     cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
                     guard: Some(Arc::new(InFlightRequestGuard::acquire(Some(&in_flight)))),
                     producer_outcome: Some(Http2ProducerOutcome::Finished {
@@ -1488,6 +1495,7 @@
                 1,
                 ActiveProducedBody {
                     body,
+                    pending_initial_response: None,
                     cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
                     guard: Some(Arc::new(InFlightRequestGuard::acquire(Some(&in_flight)))),
                     producer_outcome: None,
@@ -1625,6 +1633,7 @@
                 1,
                 ActiveProducedBody {
                     body,
+                    pending_initial_response: None,
                     cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
                     guard: Some(Arc::new(InFlightRequestGuard::acquire(Some(&in_flight)))),
                     producer_outcome: Some(Http2ProducerOutcome::Finished {

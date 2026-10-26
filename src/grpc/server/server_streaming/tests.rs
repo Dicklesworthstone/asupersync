@@ -36,6 +36,13 @@ static DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 enum Mode {
     Values,
     Empty,
+    InitialMetadata,
+    InitialMetadataEmpty,
+    UndeferredInitialMetadata,
+    ReservedInitialMetadata,
+    OversizedInitialMetadata,
+    FactoryError,
+    PendingFactory,
     Error,
     Never,
     Infinite,
@@ -74,6 +81,19 @@ impl ServiceHandler for FixtureService {
         vec!["Values", "Echo", "Bidi"]
     }
 
+    fn defer_response_headers(&self, path: &str) -> bool {
+        path == "/test.Watch/Values"
+            && matches!(
+                self.mode,
+                Mode::InitialMetadata
+                    | Mode::InitialMetadataEmpty
+                    | Mode::ReservedInitialMetadata
+                    | Mode::OversizedInitialMetadata
+                    | Mode::FactoryError
+                    | Mode::PendingFactory
+            )
+    }
+
     fn call_unary<'a>(
         &'a self,
         _cx: &'a Cx,
@@ -101,13 +121,38 @@ impl ServiceHandler for FixtureService {
         };
         Box::pin(async move {
             assert!(!matches!(stream.mode, Mode::FuturePanic), "private future panic");
+            if matches!(stream.mode, Mode::FactoryError) {
+                return Err(Status::permission_denied("factory refused"));
+            }
+            if matches!(stream.mode, Mode::PendingFactory) {
+                stream.probe.started.send(stream.cx.clone()).unwrap();
+                std::future::pending::<()>().await;
+            }
             let mut trailers = Metadata::new();
             assert!(trailers.insert("x-end", "finished"));
             assert!(trailers.insert_bin("x-proof-bin", Bytes::from(vec![0, 255])));
             if matches!(stream.mode, Mode::ForgedTrailer) {
                 assert!(trailers.insert("grpc-status", "0"));
             }
-            Ok(RegisteredServerStream::new(stream).with_trailers(trailers))
+            let mut initial = Metadata::new();
+            if matches!(
+                stream.mode,
+                Mode::InitialMetadata | Mode::InitialMetadataEmpty | Mode::UndeferredInitialMetadata
+            ) {
+                assert!(initial.insert("x-start", "first"));
+                assert!(initial.insert("x-start", "second"));
+                assert!(initial.insert_bin("x-start-bin", Bytes::from_static(b"\x00\xff")));
+            } else if matches!(stream.mode, Mode::ReservedInitialMetadata) {
+                assert!(initial.insert("x-start", "must not escape"));
+                assert!(initial.insert("grpc-status", "0"));
+            } else if matches!(stream.mode, Mode::OversizedInitialMetadata) {
+                // Decoded bytes fit the configured 8 KiB, but base64 plus
+                // the key exceeds it. No encoded block may reach the wire.
+                assert!(initial.insert_bin("x-start-bin", Bytes::from(vec![0; 6144])));
+            }
+            Ok(RegisteredServerStream::new(stream)
+                .with_initial_metadata(initial)
+                .with_trailers(trailers))
         })
     }
 }
@@ -136,7 +181,7 @@ impl Streaming for FixtureStream {
             Mode::PollPanic => panic!("private source poll panic"),
             Mode::LatePollPanic if index == 1 => panic!("private late source panic"),
             Mode::Never => Poll::Pending,
-            Mode::Empty => Poll::Ready(None),
+            Mode::Empty | Mode::InitialMetadataEmpty => Poll::Ready(None),
             Mode::Infinite => Poll::Ready(Some(Ok(Bytes::from(vec![0x33; 4096])))),
             Mode::Oversized => Poll::Ready(Some(Ok(Bytes::from(vec![0x44; 4097])))),
             Mode::Error if index == 1 => {
@@ -295,6 +340,7 @@ impl Peer {
             6 if flags & 1 == 0 => self.send(6, 1, 0, &payload),
             6 => return (false, payload == b"credit!!"),
             0 if stream == self.stream => {
+                assert!(!self.reply.initial.is_empty(), "DATA must follow initial HEADERS");
                 assert_eq!(flags & 8, 0, "fixture server emits unpadded DATA");
                 self.reply.body.extend_from_slice(&payload);
                 return (flags & 1 != 0, false);
@@ -464,6 +510,134 @@ fn native_empty_stream_has_success_trailers_without_a_phantom_message() {
             assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
         },
     );
+}
+
+#[test]
+fn native_initial_metadata_precedes_messages_even_without_data_credit() {
+    for mode in [Mode::InitialMetadata, Mode::InitialMetadataEmpty] {
+        let probe = wire_case(
+            mode, 0, "/test.Watch/Values", None, false,
+            move |peer, _, retired, _| {
+                while peer.reply.initial.is_empty() {
+                    assert!(!peer.step().0);
+                }
+                let values: Vec<_> = peer.reply.initial.iter()
+                    .filter(|header| header.name == "x-start")
+                    .map(|header| header.value.as_str())
+                    .collect();
+                assert_eq!(values, ["first", "second"]);
+                assert!(peer.reply.initial.iter().any(|header| {
+                    header.name == "x-start-bin" && header.value == "AP8"
+                }));
+                assert!(peer.reply.initial.iter().all(|header| header.name != "x-end"));
+                assert!(peer.reply.body.is_empty(), "initial HEADERS need no DATA credit");
+                peer.send(8, 0, 1, &65_535u32.to_be_bytes());
+                peer.finish();
+                assert_eq!(peer.reply.reset, None);
+                assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
+                assert_eq!(peer.reply.trailer("x-start"), None);
+                assert_eq!(peer.reply.trailer("x-end"), Some("finished"));
+                let expected = if matches!(mode, Mode::InitialMetadataEmpty) {
+                    Vec::new()
+                } else {
+                    vec![vec![0x11; 3000], vec![0x22; 3000]]
+                };
+                assert_eq!(peer.reply.messages(), expected);
+                retired.recv_timeout(Duration::from_secs(2)).expect("source retired");
+            },
+        );
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn native_initial_metadata_refusal_never_polls_source_or_leaks_headers() {
+    for (mode, expected) in [
+        (Mode::UndeferredInitialMetadata, "13"),
+        (Mode::ReservedInitialMetadata, "13"),
+        (Mode::OversizedInitialMetadata, "8"),
+        (Mode::FactoryError, "7"),
+    ] {
+        let probe = wire_case(
+            mode, 65_535, "/test.Watch/Values", None, false,
+            move |peer, _, retired, probe| {
+                peer.finish();
+                assert_eq!(peer.reply.reset, None);
+                assert_eq!(peer.reply.trailer("grpc-status"), Some(expected));
+                assert!(peer.reply.body.is_empty());
+                assert!(peer.reply.initial.iter().all(|header| {
+                    !header.name.starts_with("x-start") && header.name != "grpc-status"
+                }));
+                assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                retired.recv_timeout(Duration::from_secs(2)).expect("unpolled source retired");
+                assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+                peer.request(3, "/test.Watch/Echo", None);
+                peer.finish();
+                assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
+            },
+        );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn native_pending_factory_does_not_commit_headers_and_cancellation_releases_it() {
+    wire_case(
+        Mode::PendingFactory, 65_535, "/test.Watch/Values", None, false,
+        |peer, started, retired, probe| {
+            let cx = started.recv_timeout(Duration::from_secs(2))
+                .expect("factory is parked before yielding its metadata");
+            // The connection keeps making protocol progress while the head
+            // waits. A completed PING round trip is a witnessed read boundary.
+            peer.send(6, 0, 0, b"credit!!");
+            loop {
+                let (done, ack) = peer.step();
+                assert!(!done);
+                if ack { break; }
+            }
+            assert!(peer.reply.initial.is_empty());
+            assert!(peer.reply.body.is_empty());
+            cx.cancel_with(CancelKind::User, Some("cancel pending metadata factory"));
+            peer.finish();
+            assert_eq!(peer.reply.trailer("grpc-status"), Some("1"));
+            retired.recv_timeout(Duration::from_secs(2)).expect("factory state retired");
+            assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+        },
+    );
+}
+
+#[test]
+fn initial_metadata_bounds_encoded_bytes_and_preserves_duplicates() {
+    let mut metadata = Metadata::new();
+    assert!(metadata.insert_bin("x-bin", Bytes::from(vec![0; 6])));
+    assert_eq!(bounded_initial_metadata(&metadata, 12).unwrap_err().code(), Code::ResourceExhausted);
+    let headers = bounded_initial_metadata(&metadata, 13).unwrap();
+    assert_eq!(headers.get(&HeaderName::from_static("x-bin")).unwrap().to_str().unwrap(), "AAAAAAAA");
+    assert!(metadata.insert("x", ""));
+    assert_eq!(bounded_initial_metadata(&metadata, 13).unwrap_err().code(), Code::ResourceExhausted);
+
+    let mut duplicate = Metadata::new();
+    assert!(duplicate.insert("set-cookie", "first=1"));
+    assert!(duplicate.insert("set-cookie", "second=2"));
+    let headers = bounded_initial_metadata(&duplicate, 35).unwrap();
+    assert_eq!(headers.len(), 2);
+    assert_eq!(bounded_initial_metadata(&duplicate, 34).unwrap_err().code(), Code::ResourceExhausted);
+
+    for limit in [0, usize::MAX] {
+        let mut too_large = Metadata::new();
+        assert!(too_large.insert("x", "a".repeat(MAX_INITIAL_METADATA_BYTES)));
+        assert_eq!(bounded_initial_metadata(&too_large, limit).unwrap_err().code(), Code::ResourceExhausted);
+    }
+    for key in ["grpc-encoding", "grpc-status", "content-type", "transfer-encoding", "connection"] {
+        let mut reserved = Metadata::new();
+        assert!(reserved.insert(key, "ignored"));
+        assert_eq!(bounded_initial_metadata(&reserved, 1024).unwrap_err().code(), Code::Internal);
+    }
+    let malformed = Metadata::from_raw_entries_for_tests(vec![
+        ("x-injected".to_owned(), MetadataValue::Ascii("safe\r\nforged: header".to_owned())),
+    ]);
+    assert_eq!(bounded_initial_metadata(&malformed, 1024).unwrap_err().code(), Code::Internal);
 }
 
 #[test]

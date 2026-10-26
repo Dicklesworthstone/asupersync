@@ -82,6 +82,52 @@
     }
 
     #[test]
+    fn initial_metadata_stays_separate_from_trailers_and_the_source_stays_lazy() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut initial = Metadata::new();
+        assert!(initial.insert("x-start", "private initial"));
+        assert!(initial.insert_bin("x-token-bin", Bytes::from_static(b"\x00\xff")));
+        let mut trailers = Metadata::new();
+        assert!(trailers.insert("x-end", "private terminal"));
+        let response = RegisteredServerStream::new(source(&polls, &drops))
+            .with_initial_metadata(initial)
+            .with_trailers(trailers);
+        assert_eq!(response.initial_metadata().len(), 2);
+        assert!(!format!("{response:?}").contains("private"));
+        let (stream, initial, trailers) = response.into_parts_with_metadata();
+        assert!(matches!(
+            initial.get("x-start"),
+            Some(MetadataValue::Ascii(value)) if value == "private initial"
+        ));
+        assert!(matches!(
+            initial.get("x-token-bin"),
+            Some(MetadataValue::Binary(value)) if value.as_ref() == b"\x00\xff"
+        ));
+        assert!(initial.get("x-end").is_none());
+        assert!(trailers.get("x-start").is_none());
+        assert!(matches!(
+            trailers.get("x-end"),
+            Some(MetadataValue::Ascii(value)) if value == "private terminal"
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        drop(stream);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        // Existing callers keep the original two-part signature and receive
+        // their successful-completion trailers, never the initial block.
+        let mut initial = Metadata::new();
+        assert!(initial.insert("x-start", "not a trailer"));
+        let response = RegisteredServerStream::new(source(&polls, &drops))
+            .with_initial_metadata(initial);
+        let (stream, trailers) = response.into_parts();
+        assert!(trailers.is_empty());
+        drop(stream);
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn legacy_service_remains_object_safe_and_refuses_unimplemented_streams() {
         struct Legacy;
         static DESCRIPTOR: ServiceDescriptor = ServiceDescriptor::new("Legacy", "test", &[]);
@@ -96,6 +142,7 @@
         }
         fn require_send<T: Send>(_: &T) {}
         let service: Box<dyn ServiceHandler> = Box::new(Legacy);
+        assert!(!service.defer_response_headers("/test.Legacy/Watch"));
         let cx = Cx::for_testing();
         let mut future = service.call_server_streaming(
             &cx,

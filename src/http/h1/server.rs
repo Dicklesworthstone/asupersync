@@ -3470,8 +3470,61 @@ where
     T: AsyncWrite + Unpin,
 {
     validate_produced_response_head(&mut response.head, response.body.kind())?;
-    let encoded_head = response.head.serialize();
     let mut producer_result = None;
+    if response.body.has_deferred_initial_headers() {
+        let headers = response_write
+            .run(async {
+                Ok(poll_fn(|task_cx| {
+                    if producer_result.is_none()
+                        && let Poll::Ready(result) = producer.as_mut().poll(task_cx)
+                    {
+                        producer_result = Some(normalize_producer_result(result, &response.body));
+                    }
+                    if matches!(producer_result, Some(Err(_))) {
+                        return Poll::Ready(Err(HttpError::BodyChannelClosed));
+                    }
+                    response.body.poll_initial_headers(task_cx)
+                })
+                .await)
+            })
+            .await
+            .map_err(HttpError::Io)
+            .and_then(std::convert::identity);
+        let headers = match headers {
+            Ok(headers) => headers,
+            Err(error) => {
+                drain_producer_after_write_error(
+                    cx,
+                    producer.as_mut(),
+                    &mut producer_result,
+                    drain_grace,
+                )
+                .await;
+                let error = match producer_result.take() {
+                    Some(Err(producer_error)) => producer_error,
+                    _ => error,
+                };
+                record_h1_produced_error(cx, &error, "response initial headers were not published");
+                return Err(error);
+            }
+        };
+        for (name, value) in headers.iter() {
+            // Publication validated field syntax before committing the block.
+            let value = value.to_str().map_err(|_| HttpError::InvalidHeaderValue)?;
+            response.head.headers.push((name.as_str().to_owned(), value.to_owned()));
+        }
+        if let Err(error) = validate_produced_response_head(&mut response.head, response.body.kind()) {
+            drain_producer_after_write_error(
+                cx,
+                producer.as_mut(),
+                &mut producer_result,
+                drain_grace,
+            )
+            .await;
+            return Err(error);
+        }
+    }
+    let encoded_head = response.head.serialize();
     let body_kind = response.body.kind();
     let mut remaining = body_kind.exact_size();
     let defer_head = defer_completion && body_kind.is_empty();

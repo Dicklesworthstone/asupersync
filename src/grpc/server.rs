@@ -508,6 +508,10 @@ pub struct ServerConfig {
     /// metadata and returns `Status::resource_exhausted` when it is too large.
     /// The native HTTP/2 adapter applies the same limit to the combined decoded
     /// initial-header and request-trailer metadata retained for a call.
+    /// Registered streaming response metadata is also checked before initial
+    /// headers are committed, counting encoded field-name and field-value bytes
+    /// (including base64 expansion). That new output surface has an additional
+    /// 64 KiB ceiling even when the configured limit is zero.
     ///
     /// This is a post-decode dispatch/retention limit. It does not bound HPACK
     /// decoder allocation; an H2 transport must enforce its wire/header-list

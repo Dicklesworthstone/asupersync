@@ -7,20 +7,23 @@ use crate::bytes::Bytes;
 use crate::grpc::status::Status;
 use crate::grpc::streaming::{Metadata, Streaming};
 
-/// An owned, pinned response stream and its successful-completion trailers.
+/// An owned, pinned response stream with initial metadata and completion trailers.
 ///
 /// The native produced-response lane invokes the service factory and polls this
 /// stream inside the response producer's request context, not inside the earlier
 /// HTTP handler whose context has already retired. The stream may retain a clone
 /// of that context. It need not be `Unpin`.
 ///
-/// That lane sends transport-owned initial headers. Application metadata here
-/// is explicitly **trailing** metadata; it is not silently moved from an initial
-/// response block. The transport stops on an error item and replaces successful
-/// trailers with that status. Dropping this owner releases the stream's resources;
-/// independently spawned work must remain region-owned.
+/// Methods opting into [`super::ServiceHandler::defer_response_headers`] publish
+/// initial metadata to the transport before polling the message source, after
+/// the service factory succeeds. The transport validates reserved keys and the
+/// encoded byte bound before committing its response head. Successful-completion
+/// trailers remain separate; an error item replaces them with its terminal status.
+/// Dropping this owner releases the stream's resources; independently spawned
+/// work must remain region-owned.
 pub struct RegisteredServerStream {
     stream: Pin<Box<dyn Streaming<Message = Bytes> + Send + 'static>>,
+    initial_metadata: Metadata,
     trailers: Metadata,
 }
 
@@ -48,8 +51,36 @@ impl RegisteredServerStream {
     {
         Self {
             stream: Box::pin(stream),
+            initial_metadata: Metadata::new(),
             trailers: Metadata::new(),
         }
+    }
+
+    /// Attach application metadata to the initial response headers.
+    ///
+    /// The service must opt this method into
+    /// [`super::ServiceHandler::defer_response_headers`]. Native H2 server-streaming
+    /// and duplex listeners, and the gRPC-Web streaming adapter, then publish
+    /// this block before polling the message source. A nonempty block without
+    /// that opt-in fails with `INTERNAL`, without polling the source. Binary
+    /// values use unpadded base64 on the wire. Protocol-owned `grpc-*`, framing,
+    /// and connection headers cannot be overridden.
+    ///
+    /// The encoded field-name and field-value bytes must fit the server's
+    /// nonzero `max_metadata_size` and a 64 KiB transport ceiling. A zero
+    /// configured limit disables only the configured cap. Invalid metadata
+    /// terminates with `INTERNAL`; excess bytes terminate with
+    /// `RESOURCE_EXHAUSTED`, without polling the source or sending its metadata.
+    #[must_use]
+    pub fn with_initial_metadata(mut self, metadata: Metadata) -> Self {
+        self.initial_metadata = metadata;
+        self
+    }
+
+    /// Application metadata selected for the initial response headers.
+    #[must_use]
+    pub fn initial_metadata(&self) -> &Metadata {
+        &self.initial_metadata
     }
 
     /// Attach metadata emitted only after successful stream completion.
@@ -64,6 +95,8 @@ impl RegisteredServerStream {
 
     /// Split the pinned stream from its successful-completion metadata.
     ///
+    /// This legacy decomposition discards any initial metadata. Use
+    /// [`Self::into_parts_with_metadata`] to preserve both metadata blocks.
     /// The caller takes over polling, termination policy, and resource ownership.
     #[must_use]
     pub fn into_parts(
@@ -74,11 +107,27 @@ impl RegisteredServerStream {
     ) {
         (self.stream, self.trailers)
     }
+
+    /// Split into the pinned source, initial metadata, and completion trailers.
+    ///
+    /// The caller takes over header validation, polling, termination policy,
+    /// and resource ownership. Initial metadata must precede all messages.
+    #[must_use]
+    pub fn into_parts_with_metadata(
+        self,
+    ) -> (
+        Pin<Box<dyn Streaming<Message = Bytes> + Send + 'static>>,
+        Metadata,
+        Metadata,
+    ) {
+        (self.stream, self.initial_metadata, self.trailers)
+    }
 }
 
 impl std::fmt::Debug for RegisteredServerStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegisteredServerStream")
+            .field("initial_metadata_entries", &self.initial_metadata.len())
             .field("trailer_entries", &self.trailers.len())
             .finish_non_exhaustive()
     }

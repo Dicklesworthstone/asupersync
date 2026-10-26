@@ -20,6 +20,8 @@ const LIMIT: Duration = Duration::from_secs(10);
 const PAYLOAD: usize = 128 * 1024;
 const METHODS: &[MethodDescriptor] = &[
     MethodDescriptor::bidi_streaming("Echo", "/native.Duplex/Echo"),
+    MethodDescriptor::bidi_streaming("Metadata", "/native.Duplex/Metadata"),
+    MethodDescriptor::bidi_streaming("WaitFirst", "/native.Duplex/WaitFirst"),
     MethodDescriptor::bidi_streaming("Park", "/native.Duplex/Park"),
     MethodDescriptor::client_streaming("Aggregate", "/native.Duplex/Aggregate"),
     MethodDescriptor::client_streaming("Ignore", "/native.Duplex/Ignore"),
@@ -60,6 +62,10 @@ impl ServiceHandler for Service {
 
     fn method_names(&self) -> Vec<&str> {
         METHODS.iter().map(|method| method.name).collect()
+    }
+
+    fn defer_response_headers(&self, path: &str) -> bool {
+        path == "/native.Duplex/Metadata"
     }
 
     fn call_unary<'a>(
@@ -127,8 +133,9 @@ impl ServiceHandler for Service {
         request: Request<RegisteredRequestStream>,
     ) -> ServiceStreamingFuture<'a> {
         self.0.calls.fetch_add(1, Ordering::SeqCst);
-        let stream = Echo {
+        let mut stream = Echo {
             input: request.into_inner(),
+            first: None,
             guard: Guard(Arc::clone(&self.0)),
             cx: cx.clone(),
             park: path == "/native.Duplex/Park",
@@ -185,15 +192,40 @@ impl ServiceHandler for Service {
                     .await
                     .map_err(|_| Status::cancelled("descendant startup cancelled"))?;
             }
+            if path == "/native.Duplex/WaitFirst" {
+                // Existing factories can wait for input before returning their
+                // stream. Witness that wait so the peer must receive eager
+                // response headers before it releases the first request DATA.
+                let first = poll_fn(|task| {
+                    let result = Pin::new(&mut stream.input).poll_next(task);
+                    if result.is_pending() && !stream.witnessed {
+                        stream.witnessed = true;
+                        let _ = stream.guard.0.started.send(stream.cx.clone());
+                    }
+                    result
+                })
+                .await
+                .transpose()?
+                .ok_or_else(|| Status::invalid_argument("first request message required"))?;
+                stream.first = Some(first);
+            }
             let mut trailers = Metadata::new();
             assert!(trailers.insert("x-terminal", "echo"));
-            Ok(RegisteredServerStream::new(stream).with_trailers(trailers))
+            let mut initial = Metadata::new();
+            if path == "/native.Duplex/Metadata" {
+                assert!(initial.insert("x-begin", "duplex"));
+                assert!(initial.insert_bin("x-begin-bin", Bytes::from_static(b"\x00\xff")));
+            }
+            Ok(RegisteredServerStream::new(stream)
+                .with_initial_metadata(initial)
+                .with_trailers(trailers))
         })
     }
 }
 
 struct Echo {
     input: RegisteredRequestStream,
+    first: Option<Bytes>,
     guard: Guard,
     cx: Cx,
     park: bool,
@@ -213,6 +245,10 @@ impl Streaming for Echo {
         }
         if self.park {
             return Poll::Pending; // Never self-wakes; cancellation must wake the owner.
+        }
+        if let Some(message) = self.first.take() {
+            self.guard.0.messages.fetch_add(1, Ordering::SeqCst);
+            return Poll::Ready(Some(Ok(message)));
         }
         match Pin::new(&mut self.input).poll_next(cx) {
             Poll::Ready(Some(Ok(message))) => {
@@ -1134,6 +1170,108 @@ fn native_duplex_listener_preserves_unary_server_streaming_and_auth_refusal() {
             },
         )
     });
+}
+
+#[test]
+fn native_bidirectional_initial_metadata_arrives_before_request_messages() {
+    for workers in [1, 2] {
+        bounded_case(move || {
+            raw_case(
+                workers,
+                |_| {},
+                |address, starts, probe, count| {
+                    let mut peer = RawPeer::new(address, 0);
+                    peer.request(1, "/native.Duplex/Metadata", None);
+                    while peer.field("x-begin").is_none() {
+                        assert!(!peer.step());
+                    }
+                    assert_eq!(peer.field("x-begin"), Some("duplex"));
+                    assert_eq!(peer.field("x-begin-bin"), Some("AP8"));
+                    assert_eq!(peer.field("grpc-status"), None);
+                    assert_eq!(peer.field("x-terminal"), None);
+                    assert!(peer.body.is_empty());
+                    starts.recv_timeout(LIMIT).expect("source is waiting for input");
+                    assert_eq!(probe.messages.load(Ordering::SeqCst), 0);
+
+                    peer.send(8, 0, 1, &65_535u32.to_be_bytes());
+                    let wire = message(b"after initial metadata");
+                    peer.send(0, 0, 1, &wire);
+                    while peer.body.len() < wire.len() {
+                        assert!(!peer.step());
+                    }
+                    assert_eq!(peer.body, wire, "response precedes request half-close");
+                    peer.send(0, 1, 1, &[]);
+                    peer.finish();
+                    assert_eq!(peer.reset, None);
+                    assert_eq!(peer.field("grpc-status"), Some("0"));
+                    assert_eq!(peer.field("x-terminal"), Some("echo"));
+                    until(|| count.load(Ordering::SeqCst) == 0);
+                    assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+                },
+            );
+        });
+    }
+}
+
+#[test]
+fn native_legacy_duplex_headers_precede_request_upload_and_factory_completion() {
+    for workers in [1, 2] {
+        for path in [
+            "/native.Duplex/WaitFirst",
+            "/native.Duplex/Aggregate",
+            "/native.Duplex/Unary",
+        ] {
+            bounded_case(move || {
+                raw_case(
+                    workers,
+                    |_| {},
+                    move |address, starts, probe, count| {
+                        let mut peer = RawPeer::new(address, 0);
+                        peer.request(1, path, None);
+                        while peer.field(":status").is_none() {
+                            assert!(!peer.step());
+                        }
+                        assert_eq!(peer.field(":status"), Some("200"));
+                        assert!(peer.body.is_empty());
+                        assert_eq!(peer.field("grpc-status"), None);
+                        assert_eq!(peer.field("x-begin"), None);
+                        if path != "/native.Duplex/Unary" {
+                            starts.recv_timeout(LIMIT).expect("factory waiting for input");
+                        }
+                        assert_eq!(probe.messages.load(Ordering::SeqCst), 0);
+
+                        // A client that waits for response headers before its
+                        // first upload cannot be blocked behind factory setup.
+                        peer.send(8, 0, 1, &65_535u32.to_be_bytes());
+                        let payload = b"upload after headers";
+                        let wire = message(payload);
+                        let bidi = path == "/native.Duplex/WaitFirst";
+                        peer.send(0, u8::from(!bidi), 1, &wire);
+                        let expected = if path == "/native.Duplex/Aggregate" {
+                            message(&(payload.len() as u64).to_be_bytes())
+                        } else {
+                            wire
+                        };
+                        while peer.body.len() < expected.len() {
+                            assert!(!peer.step());
+                        }
+                        assert_eq!(peer.body, expected);
+                        if bidi {
+                            peer.send(0, 1, 1, &[]);
+                        }
+                        peer.finish();
+                        assert_eq!(peer.reset, None);
+                        assert_eq!(peer.field("grpc-status"), Some("0"));
+                        until(|| count.load(Ordering::SeqCst) == 0);
+                        assert_eq!(
+                            probe.drops.load(Ordering::SeqCst),
+                            usize::from(path != "/native.Duplex/Unary"),
+                        );
+                    },
+                );
+            });
+        }
+    }
 }
 
 /// The legacy `GrpcClient` streaming methods over a real connection: each
