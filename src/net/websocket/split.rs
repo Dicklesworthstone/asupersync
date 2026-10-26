@@ -34,7 +34,7 @@
 #![allow(clippy::significant_drop_tightening)]
 
 use super::client::{Message, MessageAssembler, WebSocket, WebSocketConfig, WsCancelWakerGuard};
-use super::close::{CloseHandshake, CloseReason, CloseState};
+use super::close::{CloseDeadline, CloseHandshake, CloseReason, CloseState, close_timeout_error};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder;
@@ -78,6 +78,8 @@ struct WebSocketShared<IO> {
     close_flush_pending: bool,
     /// Close handshake state.
     close_handshake: CloseHandshake,
+    /// A first Close or timeout wakes operations already parked on transport I/O.
+    close_changed: Arc<crate::sync::Notify>,
     /// Configuration.
     config: WebSocketConfig,
     /// Message assembler for fragmented frames.
@@ -113,6 +115,15 @@ impl<IO> WebSocketShared<IO> {
     }
 
     fn check_write_heartbeat(&mut self, task: &Context<'_>) -> io::Result<()> {
+        // Another half may expire the close budget after this operation's
+        // outer watchdog poll. Check under the same lock as transport I/O so
+        // an abort can never be followed by a stale retained frame write.
+        if self.close_handshake.timed_out() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebSocket close handshake timed out",
+            ));
+        }
         if self.heartbeat.failed() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -132,6 +143,95 @@ impl<IO> WebSocketShared<IO> {
 
 struct SplitWritePermit<IO> {
     shared: Arc<Mutex<WebSocketShared<IO>>>,
+}
+
+fn split_close_deadline<IO>(shared: &Arc<Mutex<WebSocketShared<IO>>>) -> Option<CloseDeadline> {
+    let shared = shared.lock();
+    if shared.close_handshake.timed_out()
+        || !shared.close_handshake.is_closed()
+        || shared.close_flush_pending
+    {
+        shared.close_handshake.deadline()
+    } else {
+        None
+    }
+}
+
+/// Watch for the first Close as well as its deadline. A read or DATA write
+/// may already be parked when the other half starts closing, so a snapshot
+/// taken only at operation entry is insufficient.
+async fn watch_split_close<IO, T>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    op_cx: Option<&Cx>,
+    future: impl Future<Output = Result<T, WsError>>,
+) -> Result<Option<T>, WsError> {
+    let changed = Arc::clone(&shared.lock().close_changed);
+    let mut notification = std::pin::pin!(changed.notified());
+    let mut future = std::pin::pin!(future);
+    let mut timer: Option<(CloseDeadline, crate::time::Sleep)> = None;
+    std::future::poll_fn(|task| {
+        let is_open = shared.lock().close_handshake.is_open();
+        // Pending transport/permit waits already own their cancellation
+        // registrations. Keep priority here without registering a second one.
+        if write_path_cancelled(op_cx, is_open) {
+            return Poll::Ready(Err(WsError::Io(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "cancelled",
+            ))));
+        }
+
+        // Register before inspecting shared state. A notification between the
+        // snapshot and a pending transport poll must still wake this operation.
+        loop {
+            let _ = notification.as_mut().enable();
+            if notification.as_mut().poll(task).is_pending() {
+                break;
+            }
+            notification.set(changed.notified());
+        }
+        if let Some(deadline) = split_close_deadline(shared) {
+            if timer.is_none() {
+                let sleep = deadline.sleep();
+                timer = Some((deadline, sleep));
+            }
+        } else {
+            timer = None;
+        }
+        if let Some((deadline, sleep)) = &mut timer {
+            // Both injected clocks and timer Wakers can run arbitrary code.
+            // No shared connection mutex is held while creating/polling them.
+            if deadline.poll(sleep, task).is_ready() {
+                let expired = {
+                    let mut state = shared.lock();
+                    if state.close_handshake.timed_out()
+                        || !state.close_handshake.is_closed()
+                        || state.close_flush_pending
+                    {
+                        deadline.expire();
+                        state.force_close(CloseReason::going_away());
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if expired {
+                    changed.notify_waiters();
+                    return Poll::Ready(Ok(None));
+                }
+                timer = None;
+            }
+        }
+        let result = future.as_mut().poll(task);
+        let interrupted = matches!(&result, Poll::Ready(Err(WsError::Io(error)))
+            if error.kind() == io::ErrorKind::Interrupted);
+        if shared.lock().close_handshake.timed_out() && !interrupted {
+            // A nested close flush may have observed the same deadline first.
+            Poll::Ready(Ok(None))
+        } else {
+            result.map(|result| result.map(Some))
+        }
+    })
+    .await
 }
 
 impl<IO> Drop for SplitWritePermit<IO> {
@@ -290,8 +390,12 @@ async fn flush_write_buf_with_cx<IO: AsyncWrite + Unpin>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
     op_cx: Option<&Cx>,
 ) -> Result<(), WsError> {
-    let _permit = acquire_write_permit_with_cx(shared, op_cx).await?;
-    flush_shared_write_buf_with_permit(shared, op_cx).await
+    watch_split_close(shared, op_cx, async {
+        let _permit = acquire_write_permit_with_cx(shared, op_cx).await?;
+        flush_shared_write_buf_with_permit(shared, op_cx).await
+    })
+    .await?
+    .ok_or_else(close_timeout_error)
 }
 
 async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
@@ -374,6 +478,21 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
 }
 
 async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    op_cx: Option<&Cx>,
+    buf: &mut BytesMut,
+    require_open: bool,
+) -> Result<(), WsError> {
+    watch_split_close(
+        shared,
+        op_cx,
+        write_owned_buf_with_permit_inner(shared, op_cx, buf, require_open),
+    )
+    .await?
+    .ok_or_else(close_timeout_error)
+}
+
+async fn write_owned_buf_with_permit_inner<IO: AsyncWrite + Unpin>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
     op_cx: Option<&Cx>,
     buf: &mut BytesMut,
@@ -610,6 +729,7 @@ where
             write_buf: self.write_buf,
             close_flush_pending: self.close_flush_pending,
             close_handshake: self.close_handshake,
+            close_changed: Arc::new(crate::sync::Notify::new()),
             config: self.config,
             assembler: self.assembler,
             protocol: self.protocol,
@@ -645,6 +765,13 @@ where
     ///
     /// This method is cancel-safe. If cancelled, no data is lost.
     pub async fn recv(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
+        let shared = Arc::clone(&self.shared);
+        watch_split_close(&shared, Some(cx), self.recv_inner(cx))
+            .await
+            .map(Option::flatten)
+    }
+
+    async fn recv_inner(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
         let mut steps = 0;
         loop {
             steps += 1;
@@ -789,9 +916,15 @@ where
                         self.shared.lock().heartbeat.received_pong(&frame.payload);
                     }
                     Opcode::Close => {
-                        let flush_close = {
+                        let timeout = self.shared.lock().close_handshake.close_timeout();
+                        let candidate = CloseDeadline::new(Some(cx), timeout);
+                        let changed = Arc::clone(&self.shared.lock().close_changed);
+                        let flush_close = (|| {
                             let shared = &mut *self.shared.lock();
                             let response = shared.close_handshake.receive_close(&frame)?;
+                            if response.is_some() || shared.close_flush_pending {
+                                shared.close_handshake.start_deadline(candidate);
+                            }
                             if let Some(response_frame) = response {
                                 // CloseReceived must never be visible without
                                 // its retained echo: the write half may retry
@@ -802,15 +935,17 @@ where
                                     cx.entropy(),
                                 )?;
                                 shared.close_flush_pending = true;
-                                true
+                                Ok::<_, WsError>(true)
                             } else {
                                 // A peer Close can cross a dropped local close
                                 // before its first byte was written. Finishing
                                 // the handshake must still flush our retained
                                 // Close, including a prior cancelled retry.
-                                shared.close_flush_pending
+                                Ok(shared.close_flush_pending)
                             }
-                        };
+                        })();
+                        changed.notify_waiters();
+                        let flush_close = flush_close?;
 
                         if flush_close {
                             let deadline = self.shared.lock().heartbeat.write_deadline();
@@ -1046,6 +1181,9 @@ where
             }
             let mut temp = [0u8; 4096];
             let mut shared = self.shared.lock();
+            if shared.close_handshake.timed_out() {
+                return Poll::Ready(Err(close_timeout_error()));
+            }
             let mut read_buf = ReadBuf::new(&mut temp);
             match Pin::new(&mut shared.io).poll_read(poll_cx, &mut read_buf) {
                 Poll::Ready(Ok(())) => {
@@ -1176,6 +1314,9 @@ where
         op_cx: Option<&Cx>,
         reason: CloseReason,
     ) -> Result<(), WsError> {
+        let timeout = self.shared.lock().close_handshake.close_timeout();
+        let candidate = CloseDeadline::new(op_cx, timeout);
+        let changed = Arc::clone(&self.shared.lock().close_changed);
         let close_state = {
             let shared = &mut *self.shared.lock();
             let state = shared.close_handshake.state();
@@ -1205,15 +1346,24 @@ where
                 shared.write_buf.extend_from_slice(&encoded);
                 shared.close_flush_pending = true;
             }
+            shared.close_handshake.start_deadline(candidate);
             state
         };
+        changed.notify_waiters();
 
         // The permit still serializes the wire. An active writer retains any
         // partially committed DATA tail ahead of this queued Close. A crossing
         // peer Close may have marked the handshake Closed before a dropped
         // local close's bytes were flushed, so that state can still need I/O,
         // including poll_flush after every byte left the shared write buffer.
-        flush_write_buf_with_cx(&self.shared, op_cx).await?;
+        if let Err(error) = flush_write_buf_with_cx(&self.shared, op_cx).await {
+            if self.shared.lock().close_handshake.timed_out()
+                && matches!(&error, WsError::Io(error) if error.kind() == io::ErrorKind::TimedOut)
+            {
+                return Ok(());
+            }
+            return Err(error);
+        }
         if close_state == CloseState::CloseReceived {
             self.shared.lock().close_handshake.mark_response_sent();
         }
