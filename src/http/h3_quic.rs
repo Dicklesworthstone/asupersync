@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use crate::bytes::Bytes;
@@ -444,6 +445,9 @@ pub(crate) struct NativeH3ResponseWriter {
     phase: NativeH3ResponsePhase,
     pending: Option<NativeH3PendingWrite>,
     max_frame_payload_size: usize,
+    // Shared with the session so trailers observe SETTINGS received after
+    // this writer was created. u64::MAX represents the absent setting.
+    peer_max_field_section_size: Arc<AtomicU64>,
 }
 
 impl NativeH3ResponseWriter {
@@ -498,6 +502,10 @@ impl NativeH3ResponseWriter {
         fields: &[(String, String)],
     ) -> Result<(), NativeH3SessionError> {
         self.ensure_open_without_pending()?;
+        ensure_outgoing_field_section_fits(
+            fields.iter().map(|(name, value)| (name.len(), value.len())),
+            self.peer_max_field_section_size.load(Ordering::Acquire),
+        )?;
         let field_section = qpack_encode_trailer_field_section(fields)?;
         if field_section.len() > self.max_frame_payload_size {
             return Err(NativeH3SessionError::Protocol(
@@ -662,6 +670,7 @@ pub struct NativeH3Session {
     local_control: H3ControlState,
     // Our advertised receive limit, not a limit learned from peer SETTINGS.
     max_field_section_size: Option<u64>,
+    peer_max_field_section_size: Arc<AtomicU64>,
     local_control_stream: Option<StreamId>,
     incoming: BTreeMap<StreamId, IncomingStream>,
     terminal_streams: TerminalStreamTracker,
@@ -711,6 +720,7 @@ impl NativeH3Session {
             state,
             local_control: H3ControlState::new(),
             max_field_section_size: None,
+            peer_max_field_section_size: Arc::new(AtomicU64::new(u64::MAX)),
             local_control_stream: None,
             incoming: BTreeMap::new(),
             terminal_streams: TerminalStreamTracker::default(),
@@ -873,7 +883,8 @@ impl NativeH3Session {
     /// The request is written in one piece, so it must fit both the peer's
     /// initial window for a stream this endpoint opens and the connection's
     /// remaining send credit. A larger request fails with the flow-control
-    /// error and opens no stream.
+    /// error and opens no stream. The peer's advertised uncompressed field
+    /// section limit is checked before encoding or opening a stream.
     pub fn send_request(
         &mut self,
         cx: &Cx,
@@ -903,6 +914,7 @@ impl NativeH3Session {
             ));
         }
 
+        self.ensure_peer_request_field_limit(head)?;
         let mut wire = Vec::new();
         H3Frame::Headers(qpack_encode_request_field_section(head)?).encode(&mut wire)?;
         encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
@@ -995,6 +1007,7 @@ impl NativeH3Session {
                 "incremental request writer limit reached",
             ));
         }
+        self.ensure_peer_request_field_limit(head)?;
         let field_section = qpack_encode_request_field_section(head)?;
         if field_section.len() > self.config.max_frame_payload_size {
             return Err(NativeH3SessionError::Protocol(
@@ -1036,6 +1049,7 @@ impl NativeH3Session {
                     },
                 }),
                 max_frame_payload_size: self.config.max_frame_payload_size,
+                peer_max_field_section_size: Arc::clone(&self.peer_max_field_section_size),
             },
             owner,
             write_offset: 0,
@@ -1091,6 +1105,7 @@ impl NativeH3Session {
             ));
         }
 
+        self.ensure_peer_response_field_limit(head)?;
         let mut wire = Vec::new();
         H3Frame::Headers(qpack_encode_response_field_section(head)?).encode(&mut wire)?;
         connection.write_stream(cx, stream_id, Bytes::from(wire), false)?;
@@ -1127,6 +1142,7 @@ impl NativeH3Session {
             ));
         }
 
+        self.ensure_peer_response_field_limit(head)?;
         let field_section = qpack_encode_response_field_section(head)?;
         if field_section.len() > self.config.max_frame_payload_size {
             return Err(NativeH3SessionError::Protocol(
@@ -1151,6 +1167,7 @@ impl NativeH3Session {
                 next_phase,
             }),
             max_frame_payload_size: self.config.max_frame_payload_size,
+            peer_max_field_section_size: Arc::clone(&self.peer_max_field_section_size),
         })
     }
 
@@ -1158,7 +1175,8 @@ impl NativeH3Session {
     ///
     /// The response is written in one piece, so it must fit the stream's and
     /// the connection's remaining send credit; a larger one fails with the
-    /// flow-control error and writes nothing.
+    /// flow-control error and writes nothing. The peer's advertised field
+    /// section limit is checked independently before any response bytes queue.
     pub fn send_response(
         &mut self,
         cx: &Cx,
@@ -1184,6 +1202,7 @@ impl NativeH3Session {
             ));
         }
 
+        self.ensure_peer_response_field_limit(head)?;
         let mut wire = Vec::new();
         H3Frame::Headers(qpack_encode_response_field_section(head)?).encode(&mut wire)?;
         encode_body_frames(&body, self.config.max_frame_payload_size, &mut wire)?;
@@ -1920,6 +1939,10 @@ impl NativeH3Session {
                 self.state.on_uni_stream_frame(stream_id.0, &frame)?;
                 match frame {
                     H3Frame::Settings(settings) => {
+                        self.peer_max_field_section_size.store(
+                            settings.max_field_section_size.unwrap_or(u64::MAX),
+                            Ordering::Release,
+                        );
                         self.events.push_back(NativeH3Event::Settings(settings));
                     }
                     H3Frame::Goaway(id) => self.events.push_back(NativeH3Event::Goaway(id)),
@@ -2124,6 +2147,41 @@ impl NativeH3Session {
         Ok(())
     }
 
+    fn ensure_peer_request_field_limit(
+        &self,
+        head: &H3RequestHead,
+    ) -> Result<(), NativeH3SessionError> {
+        // These are the pseudo-fields emitted by the static request encoder.
+        // Count occurrences and UTF-8 bytes without cloning header strings.
+        let pseudo = [
+            (":method", head.pseudo.method.as_deref()),
+            (":scheme", head.pseudo.scheme.as_deref()),
+            (":path", head.pseudo.path.as_deref()),
+            (":authority", head.pseudo.authority.as_deref()),
+        ];
+        let fields = pseudo
+            .into_iter()
+            .filter_map(|(name, value)| value.map(|value| (name.len(), value.len())))
+            .chain(head.headers.iter().map(|(name, value)| (name.len(), value.len())));
+        ensure_outgoing_field_section_fits(
+            fields,
+            self.peer_max_field_section_size.load(Ordering::Acquire),
+        )
+    }
+
+    fn ensure_peer_response_field_limit(
+        &self,
+        head: &H3ResponseHead,
+    ) -> Result<(), NativeH3SessionError> {
+        let status = head.status.to_string();
+        let fields = std::iter::once((":status".len(), status.len()))
+            .chain(head.headers.iter().map(|(name, value)| (name.len(), value.len())));
+        ensure_outgoing_field_section_fits(
+            fields,
+            self.peer_max_field_section_size.load(Ordering::Acquire),
+        )
+    }
+
     fn ensure_static_qpack(&self) -> Result<(), NativeH3SessionError> {
         if self.config.qpack_mode != H3QpackMode::StaticOnly {
             return Err(NativeH3SessionError::InvalidState(
@@ -2175,15 +2233,38 @@ impl NativeH3Session {
 /// Subtract from the remaining budget rather than summing potentially
 /// overflowing lengths. This does not allocate another header representation.
 fn received_field_section_fits(fields: &[(String, String)], limit: u64) -> bool {
+    field_section_lengths_fit(
+        fields.iter().map(|(name, value)| (name.len(), value.len())),
+        limit,
+    )
+}
+
+fn field_section_lengths_fit(
+    fields: impl IntoIterator<Item = (usize, usize)>,
+    limit: u64,
+) -> bool {
     fields
-        .iter()
+        .into_iter()
         .try_fold(limit, |remaining, (name, value)| {
             remaining
-                .checked_sub(u64::try_from(name.len()).ok()?)?
-                .checked_sub(u64::try_from(value.len()).ok()?)?
+                .checked_sub(u64::try_from(name).ok()?)?
+                .checked_sub(u64::try_from(value).ok()?)?
                 .checked_sub(32)
         })
         .is_some()
+}
+
+fn ensure_outgoing_field_section_fits(
+    fields: impl IntoIterator<Item = (usize, usize)>,
+    limit: u64,
+) -> Result<(), NativeH3SessionError> {
+    if field_section_lengths_fit(fields, limit) {
+        Ok(())
+    } else {
+        Err(NativeH3SessionError::InvalidState(
+            "field section exceeds peer SETTINGS_MAX_FIELD_SECTION_SIZE",
+        ))
+    }
 }
 
 fn decode_prefix(input: &[u8]) -> Result<Option<(u64, usize)>, NativeH3SessionError> {

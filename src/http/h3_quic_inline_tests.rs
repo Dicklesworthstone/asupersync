@@ -76,6 +76,245 @@
         panic!("buffered wire bytes did not produce the expected field event");
     }
 
+    fn receive_peer_field_limit(
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        limit: u64,
+    ) {
+        let stream = StreamId(if session.role == H3EndpointRole::Server { 2 } else { 3 });
+        let settings = H3Settings {
+            max_field_section_size: Some(limit),
+            ..H3Settings::default()
+        };
+        let mut wire = vec![0]; // Peer control-stream type.
+        H3Frame::Settings(settings.clone()).encode(&mut wire).unwrap();
+        connection.inner_mut().accept_remote_stream(cx, stream).unwrap();
+        connection
+            .inner_mut()
+            .receive_stream_bytes(cx, stream, 0, Bytes::from(wire), false)
+            .unwrap();
+        assert_eq!(
+            next_field_limit_event(cx, session, connection),
+            NativeH3Event::Settings(settings)
+        );
+    }
+
+    fn peer_field_limit_error() -> NativeH3SessionError {
+        NativeH3SessionError::InvalidState(
+            "field section exceeds peer SETTINGS_MAX_FIELD_SECTION_SIZE",
+        )
+    }
+
+    fn drain_peer_limit_stream(cx: &Cx, connection: &mut QuicConnection, stream: StreamId) {
+        connection
+            .inner_mut()
+            .generate_stream_frames_for(
+                cx,
+                crate::net::quic_native::PacketNumberSpace::ApplicationData,
+                stream,
+                65_536,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn peer_field_limit_refuses_both_request_paths_before_opening_a_stream() {
+        for incremental in [false, true] {
+            for duplicate_utf8 in [false, true] {
+                let cx = Cx::for_testing();
+                // Our receive limit must not be confused with the peer's limit.
+                let (mut session, mut connection) =
+                    field_limit_fixture(&cx, false, false, Some(0));
+                let mut head = field_limit_request();
+                let limit = if duplicate_utf8 {
+                    head.headers = vec![
+                        ("x".to_owned(), "é".to_owned()),
+                        ("x".to_owned(), "é".to_owned()),
+                    ];
+                    // Base 178 + two occurrences of (1 + 2 + 32) = 248.
+                    247
+                } else {
+                    head.pseudo.path = Some("//".to_owned());
+                    178
+                };
+                receive_peer_field_limit(&cx, &mut session, &mut connection, limit);
+                assert!(qpack_encode_request_field_section(&head).unwrap().len() < limit as usize);
+                let credit = connection.inner().streams().connection_send_remaining();
+                let error = if incremental {
+                    session
+                        .start_request_writer(&cx, &mut connection, &head, true)
+                        .unwrap_err()
+                } else {
+                    session
+                        .send_request(&cx, &mut connection, &head, Bytes::new())
+                        .unwrap_err()
+                };
+                assert_eq!(error, peer_field_limit_error());
+                assert_eq!(session.next_local_request_stream_id, 0);
+                assert!(session.request_writers.is_empty());
+                assert!(connection.inner().streams().stream(StreamId(0)).is_none());
+                assert_eq!(connection.inner().streams().connection_send_remaining(), credit);
+
+                if duplicate_utf8 {
+                    head.headers[1].1 = "e".to_owned();
+                } else {
+                    head.pseudo.path = Some("/".to_owned());
+                }
+                if incremental {
+                    let mut writer = session
+                        .start_request_writer(&cx, &mut connection, &head, true)
+                        .expect("exact uncompressed limit is permitted");
+                    assert_eq!(writer.stream_id(), StreamId(0));
+                    let mut task = TaskContext::from_waker(Waker::noop());
+                    assert!(matches!(
+                        writer.poll_flush(&cx, &mut connection, &mut task),
+                        Poll::Ready(Ok(Some(NativeH3RequestWriteEvent::Headers { end_stream: true })))
+                    ));
+                } else {
+                    assert_eq!(
+                        session.send_request(&cx, &mut connection, &head, Bytes::new()).unwrap(),
+                        StreamId(0)
+                    );
+                }
+                assert_eq!(session.next_local_request_stream_id, 4);
+            }
+        }
+    }
+
+    #[test]
+    fn peer_field_limit_applies_separately_to_informational_and_final_response_paths() {
+        for incremental in [false, true] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, true, false, None);
+            receive_request_head(&cx, &mut connection, StreamId(0), true);
+            while session.next_event(&cx, &mut connection).unwrap().is_some() {}
+            // :status + three status bytes + 32 bytes overhead is exactly 42.
+            receive_peer_field_limit(&cx, &mut session, &mut connection, 42);
+            let mut informational = H3ResponseHead::new(
+                103,
+                vec![("x".to_owned(), String::new())],
+            ).unwrap();
+            assert_eq!(
+                session.send_informational_response(
+                    &cx, &mut connection, StreamId(0), &informational,
+                ).unwrap_err(),
+                peer_field_limit_error()
+            );
+            assert_eq!(connection.inner().streams().stream(StreamId(0)).unwrap().send_offset, 0);
+            informational.headers.clear();
+            session.send_informational_response(
+                &cx, &mut connection, StreamId(0), &informational,
+            ).unwrap();
+            let offset = connection.inner().streams().stream(StreamId(0)).unwrap().send_offset;
+            drain_peer_limit_stream(&cx, &mut connection, StreamId(0));
+
+            let mut final_head = H3ResponseHead::new(
+                200,
+                vec![("x".to_owned(), String::new())],
+            ).unwrap();
+            let error = if incremental {
+                session.start_response_writer(&connection, StreamId(0), &final_head, true)
+                    .unwrap_err()
+            } else {
+                session.send_response(
+                    &cx, &mut connection, StreamId(0), &final_head, Bytes::new(),
+                ).unwrap_err()
+            };
+            assert_eq!(error, peer_field_limit_error());
+            let stream = connection.inner().streams().stream(StreamId(0)).unwrap();
+            assert_eq!(stream.send_offset, offset);
+            assert!(stream.send_final_size.is_none());
+            final_head.headers.clear();
+            if incremental {
+                let mut writer = session
+                    .start_response_writer(&connection, StreamId(0), &final_head, true)
+                    .unwrap();
+                let mut task = TaskContext::from_waker(Waker::noop());
+                assert!(matches!(
+                    writer.poll_flush_one(&cx, &mut connection, &mut task),
+                    Poll::Ready(Ok(Some(NativeH3WriteEvent::Head { end_stream: true })))
+                ));
+            } else {
+                session.send_response(
+                    &cx, &mut connection, StreamId(0), &final_head, Bytes::new(),
+                ).unwrap();
+            }
+            assert!(connection.inner().streams().stream(StreamId(0)).unwrap().send_final_size.is_some());
+        }
+    }
+
+    #[test]
+    fn existing_request_writer_observes_late_peer_limits_for_trailers() {
+        for limit in [0, 35] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, false, false, None);
+            let mut writer = session
+                .start_request_writer(&cx, &mut connection, &field_limit_request(), false)
+                .unwrap();
+            let mut task = TaskContext::from_waker(Waker::noop());
+            assert!(matches!(
+                writer.poll_flush(&cx, &mut connection, &mut task),
+                Poll::Ready(Ok(Some(NativeH3RequestWriteEvent::Headers { end_stream: false })))
+            ));
+            drain_peer_limit_stream(&cx, &mut connection, StreamId(0));
+            receive_peer_field_limit(&cx, &mut session, &mut connection, limit);
+            let oversized = vec![("x".to_owned(), "éé".to_owned())];
+            assert_eq!(writer.queue_trailers(&oversized).unwrap_err(), peer_field_limit_error());
+            assert!(!writer.has_pending_write());
+            assert!(!writer.is_finished());
+            assert!(connection.inner().streams().stream(StreamId(0)).unwrap().send_final_size.is_none());
+            let accepted = if limit == 0 {
+                Vec::new()
+            } else {
+                vec![("x".to_owned(), "é".to_owned())]
+            };
+            writer.queue_trailers(&accepted).expect("refusal leaves the writer usable");
+            assert!(matches!(
+                writer.poll_flush(&cx, &mut connection, &mut task),
+                Poll::Ready(Ok(Some(NativeH3RequestWriteEvent::Trailers)))
+            ));
+            assert!(writer.is_finished());
+        }
+    }
+
+    #[test]
+    fn existing_response_writer_observes_late_peer_limits_for_trailers() {
+        for limit in [0, 35] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, true, false, None);
+            receive_request_head(&cx, &mut connection, StreamId(0), true);
+            while session.next_event(&cx, &mut connection).unwrap().is_some() {}
+            let head = H3ResponseHead::new(200, Vec::new()).unwrap();
+            let mut writer = session
+                .start_response_writer(&connection, StreamId(0), &head, false)
+                .unwrap();
+            let mut task = TaskContext::from_waker(Waker::noop());
+            assert!(matches!(
+                writer.poll_flush_one(&cx, &mut connection, &mut task),
+                Poll::Ready(Ok(Some(NativeH3WriteEvent::Head { end_stream: false })))
+            ));
+            drain_peer_limit_stream(&cx, &mut connection, StreamId(0));
+            receive_peer_field_limit(&cx, &mut session, &mut connection, limit);
+            let oversized = vec![("x".to_owned(), "éé".to_owned())];
+            assert_eq!(writer.queue_trailers(&oversized).unwrap_err(), peer_field_limit_error());
+            assert!(!writer.has_pending_write());
+            assert!(!writer.is_finished());
+            assert!(connection.inner().streams().stream(StreamId(0)).unwrap().send_final_size.is_none());
+            let accepted = if limit == 0 {
+                Vec::new()
+            } else {
+                vec![("x".to_owned(), "é".to_owned())]
+            };
+            writer.queue_trailers(&accepted).expect("refusal leaves the writer usable");
+            assert!(matches!(
+                writer.poll_flush_one(&cx, &mut connection, &mut task),
+                Poll::Ready(Ok(Some(NativeH3WriteEvent::Trailers)))
+            ));
+            assert!(writer.is_finished());
+        }
+    }
+
     #[test]
     fn request_field_limit_refuses_before_fin_and_preserves_same_connection_recovery() {
         for streaming in [false, true] {
