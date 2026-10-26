@@ -7,8 +7,7 @@
 //! `N = K + repair` symbols; the receiver reconstructs the message once it has
 //! collected enough symbols, tolerating the loss of up to `repair` of them.
 //!
-//! This module owns the *transport-free, async-free* parts — the pieces that
-//! are pure functions of their inputs and therefore exhaustively unit-testable:
+//! The transport-independent foundation consists of:
 //!
 //! - [`EcConfig`]: the channel parameters and their validation.
 //! - [`BlockLayout`]: the per-message plan derived from the message size — how
@@ -25,10 +24,10 @@
 //!   deduplicates and reorders incoming symbols and reports decode readiness
 //!   against the [`BlockLayout`] — the pure core of the symbol aggregator.
 //!
-//! The async `EcSender`/`EcReceiver` composition over the RaptorQ pipeline
-//! ([`crate::raptorq::pipeline`]), the symbol transport, authenticated symbols,
-//! and the obligation ledger is layered on top of this foundation in sibling
-//! slices.
+//! [`channel`] retains the original unbounded, unauthenticated in-memory
+//! composition. [`authenticated_channel`] adds bounded whole-message
+//! publication, mandatory authentication and checked send obligations. Its
+//! explicit session identifier separates channels sharing a root key.
 //!
 //! # Obligation-semantics decision (recorded per the bead)
 //!
@@ -49,12 +48,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
-use crate::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use crate::channel::mpsc::{self, UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::config::EncodingConfig;
 use crate::cx::Cx;
 use crate::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
 use crate::encoding::EncodingPipeline;
-use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
+use crate::security::{AuthMode, AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use crate::util::DetRng;
@@ -64,6 +63,8 @@ const AUTHENTICATED_HEADER_DOMAIN: &[u8] =
     b"asupersync::channel::erasure::authenticated-header::v1";
 const TRANSFER_DIGEST_DOMAIN: &[u8] = b"asupersync::channel::erasure::transfer-digest::v1";
 const SYMBOL_BINDING_DOMAIN: &[u8] = b"asupersync::channel::erasure::symbol-binding::v1";
+const AUTHENTICATED_CHANNEL_DOMAIN: &[u8] =
+    b"asupersync::channel::erasure::authenticated-channel::v1";
 
 /// Configuration for an erasure-coded channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,6 +690,369 @@ impl EcReceiver {
     ) -> Result<T, EcError> {
         let bytes = self.recv(cx).await?;
         serde_json::from_slice(&bytes).map_err(|e| EcError::Serialization(e.to_string()))
+    }
+}
+
+/// Failures of the bounded authenticated erasure channel.
+///
+/// This separate error type preserves the legacy [`EcError`] enum while
+/// exposing checked runtime admission and construction failures.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum AuthenticatedEcError {
+    /// Invalid queue capacity or a bound that cannot be represented.
+    #[error("invalid authenticated erasure channel configuration: {0}")]
+    Configuration(&'static str),
+    /// Encoding, authentication, cancellation, transport or serialization error.
+    #[error(transparent)]
+    Message(#[from] EcError),
+    /// The reserving task or its region refused a send obligation.
+    #[error("authenticated erasure send obligation refused: {0}")]
+    Admission(crate::runtime::obligation_mailbox::ObligationAdmissionError),
+    /// The sender has already committed message `u64::MAX` in this session.
+    #[error("authenticated erasure message identifiers exhausted")]
+    MessageIdExhausted,
+    /// A transport envelope exceeds the configured geometry or symbol bounds.
+    #[error("invalid authenticated erasure envelope: {0}")]
+    InvalidEnvelope(&'static str),
+}
+
+#[derive(Debug)]
+struct AuthenticatedEcEnvelope {
+    header: AuthenticatedMessageHeader,
+    symbols: Vec<AuthenticatedSymbol>,
+}
+
+/// Creates a bounded, authenticated in-memory erasure channel.
+///
+/// `capacity` bounds whole messages, including a message being encoded under a
+/// reservation. Encoding starts only after capacity and the sender's runtime
+/// obligation are admitted. The header and all symbols enter the queue in one
+/// commit; a cancelled or dropped reservation publishes nothing. The send
+/// obligation resolves at that handoff, not at receiver decode.
+///
+/// A private strict authentication context is derived from `auth` and the
+/// explicit 32-byte `session_id` using the existing security key derivation.
+/// Both header geometry and payload are authenticated, and every received
+/// symbol is verified again regardless of its cached verification flag. Use a
+/// distinct session identifier for each channel sharing a root key. This
+/// binding prevents cross-session substitution; it is not a network replay
+/// window, key exchange, peer authorization or confidentiality mechanism.
+///
+/// The transport is reliable and ordered. Erasure coding and authentication
+/// compose here, but UDP/datagram framing and external symbol transports are
+/// outside this API. The legacy [`channel`] is unchanged.
+///
+/// # Bounds
+///
+/// Each queued message has at most the configured maximum block's symbol
+/// count, each of `symbol_size` bytes. Checked arithmetic rejects an
+/// unrepresentable aggregate queue bound. In addition to queued/reserved
+/// messages, one receiver may hold a message and decoder workspace. Encoder
+/// and decoder scratch space, allocator overhead, caller-owned input, and
+/// returned decoded values are not queue bytes. Coding runs synchronously
+/// after admission; this API does not preempt a long coding poll.
+///
+/// # Errors
+///
+/// Refuses zero capacity, invalid or unsupported single-block geometry, and
+/// overflowing aggregate bounds before creating the transport.
+pub fn authenticated_channel(
+    config: EcConfig,
+    capacity: usize,
+    auth: &SecurityContext,
+    session_id: [u8; 32],
+) -> Result<(AuthenticatedEcSender, AuthenticatedEcReceiver), AuthenticatedEcError> {
+    if capacity == 0 {
+        return Err(AuthenticatedEcError::Configuration(
+            "message capacity must be non-zero",
+        ));
+    }
+    let maximum = config.plan(config.max_message_size)?;
+    u32::try_from(config.max_message_size).map_err(|_| EcError::SymbolCountOverflow)?;
+    crate::raptorq::systematic::SystematicParams::try_for_source_block(
+        usize::from(maximum.source_symbols),
+        usize::from(config.symbol_size),
+    )
+    .map_err(|error| EcError::Coding(format!("invalid erasure coding geometry: {error:?}")))?;
+    let maximum_storage = usize::from(config.symbol_size)
+        .checked_add(std::mem::size_of::<AuthenticatedSymbol>())
+        .and_then(|symbol| symbol.checked_mul(usize::from(maximum.total_symbols)))
+        .and_then(|symbols| symbols.checked_add(std::mem::size_of::<AuthenticatedEcEnvelope>()))
+        .and_then(|message| message.checked_mul(capacity));
+    if maximum_storage.is_none() {
+        return Err(AuthenticatedEcError::Configuration(
+            "aggregate encoded message bound overflows usize",
+        ));
+    }
+    let mut purpose = Vec::with_capacity(AUTHENTICATED_CHANNEL_DOMAIN.len() + session_id.len());
+    purpose.extend_from_slice(AUTHENTICATED_CHANNEL_DOMAIN);
+    purpose.extend_from_slice(&session_id);
+    let auth = auth.derive_context(&purpose).with_mode(AuthMode::Strict);
+    let (tx, rx) = mpsc::channel(capacity);
+    Ok((
+        AuthenticatedEcSender {
+            config,
+            auth: auth.clone(),
+            tx,
+            next_message_id: Some(0),
+        },
+        AuthenticatedEcReceiver { config, auth, rx },
+    ))
+}
+
+/// Single-sender half of a bounded authenticated erasure channel.
+///
+/// The endpoint is deliberately not cloneable: one sequence owns message
+/// identifiers, and at most one encoding operation is admitted from it at a
+/// time. Cancellation never takes ownership of a borrowed input buffer.
+#[derive(Debug)]
+pub struct AuthenticatedEcSender {
+    config: EcConfig,
+    auth: SecurityContext,
+    tx: mpsc::Sender<AuthenticatedEcEnvelope>,
+    next_message_id: Option<u64>,
+}
+
+fn authenticated_send_error<T>(error: mpsc::SendError<T>) -> AuthenticatedEcError {
+    match error {
+        mpsc::SendError::Cancelled(_) => EcError::Cancelled.into(),
+        mpsc::SendError::Disconnected(_) => EcError::TransportClosed.into(),
+        mpsc::SendError::Full(_) => AuthenticatedEcError::InvalidEnvelope(
+            "a reserved message slot unexpectedly refused publication",
+        ),
+    }
+}
+
+impl AuthenticatedEcSender {
+    /// Waits for one message slot and synchronously admits its send obligation.
+    ///
+    /// No encoding or serialization occurs while waiting. Cancellation or drop
+    /// removes this capacity waiter. Dropping the returned permit returns its
+    /// capacity and aborts its obligation without consuming a message id.
+    pub async fn reserve<'a>(
+        &'a mut self,
+        cx: &'a Cx,
+    ) -> Result<AuthenticatedEcPermit<'a>, AuthenticatedEcError> {
+        cx.checkpoint().map_err(|_| EcError::Cancelled)?;
+        let message_id = self
+            .next_message_id
+            .ok_or(AuthenticatedEcError::MessageIdExhausted)?;
+        let permit = self
+            .tx
+            .reserve_checked(cx)
+            .await
+            .map_err(|error| match error {
+                mpsc::CheckedSendError::Channel(error) => authenticated_send_error(error),
+                mpsc::CheckedSendError::Admission { error, .. } => {
+                    AuthenticatedEcError::Admission(error)
+                }
+            })?;
+        Ok(AuthenticatedEcPermit {
+            config: self.config,
+            auth: &self.auth,
+            cx,
+            permit,
+            message_id,
+            next_message_id: &mut self.next_message_id,
+        })
+    }
+
+    /// Reserves capacity, then encodes and atomically publishes borrowed bytes.
+    ///
+    /// Cancellation is checked before waiting and again after encoding, before
+    /// publication. Once committed, the message and its id remain committed
+    /// even if cancellation arrives while the receiver is being notified.
+    pub async fn send(&mut self, cx: &Cx, message: &[u8]) -> Result<u64, AuthenticatedEcError> {
+        cx.checkpoint().map_err(|_| EcError::Cancelled)?;
+        self.config.plan(message.len())?;
+        self.reserve(cx).await?.send(message)
+    }
+
+    /// Serializes a borrowed value within the message-size limit after reserving.
+    ///
+    /// The JSON writer refuses bytes beyond `max_message_size` while serializing,
+    /// before encoding. A cancelled capacity wait never invokes the serializer.
+    pub async fn send_value<T: serde::Serialize>(
+        &mut self,
+        cx: &Cx,
+        value: &T,
+    ) -> Result<u64, AuthenticatedEcError> {
+        self.reserve(cx).await?.send_value(value)
+    }
+}
+
+/// One admitted whole-message publication right.
+///
+/// Commit is synchronous and checks cancellation before and after coding.
+/// Either a complete authenticated envelope is published or none of it is.
+/// The caller keeps its borrowed bytes/value on every failure. Runtime-built
+/// contexts use checked obligation accounting; deliberately stateless contexts
+/// retain the underlying MPSC's untracked behavior.
+#[derive(Debug)]
+#[must_use = "send a message through the permit or drop it to abort"]
+pub struct AuthenticatedEcPermit<'a> {
+    config: EcConfig,
+    auth: &'a SecurityContext,
+    cx: &'a Cx,
+    permit: mpsc::SendPermit<'a, AuthenticatedEcEnvelope>,
+    message_id: u64,
+    next_message_id: &'a mut Option<u64>,
+}
+
+impl AuthenticatedEcPermit<'_> {
+    /// Encodes, authenticates and publishes one complete message without waiting.
+    pub fn send(self, message: &[u8]) -> Result<u64, AuthenticatedEcError> {
+        self.cx.checkpoint().map_err(|_| EcError::Cancelled)?;
+        let (header, symbols) =
+            self.config
+                .encode_message_authenticated(self.message_id, message, self.auth)?;
+        self.cx.checkpoint().map_err(|_| EcError::Cancelled)?;
+        let (result, notification) = self
+            .permit
+            .try_send_deferred_wake(AuthenticatedEcEnvelope { header, symbols });
+        if result.is_ok() {
+            // Publication is authoritative even if an arbitrary receiver wake
+            // panics. Retire this id before invoking that callback.
+            *self.next_message_id = self.message_id.checked_add(1);
+        }
+        notification.wake();
+        result
+            .map(|()| self.message_id)
+            .map_err(authenticated_send_error)
+    }
+
+    /// Serializes at most the configured message bytes, then commits them.
+    pub fn send_value<T: serde::Serialize>(self, value: &T) -> Result<u64, AuthenticatedEcError> {
+        self.cx.checkpoint().map_err(|_| EcError::Cancelled)?;
+        let mut writer = BoundedEcJsonWriter {
+            bytes: Vec::new(),
+            maximum: self.config.max_message_size,
+            rejected_size: None,
+        };
+        let serialized = serde_json::to_writer(&mut writer, value);
+        if let Some(size) = writer.rejected_size {
+            return Err(EcError::MessageTooLarge {
+                size,
+                max: writer.maximum,
+            }
+            .into());
+        }
+        serialized.map_err(|error| EcError::Serialization(error.to_string()))?;
+        self.send(&writer.bytes)
+    }
+
+    /// Explicitly aborts the send obligation and returns the reserved capacity.
+    pub fn abort(self) {
+        self.permit.abort();
+    }
+}
+
+struct BoundedEcJsonWriter {
+    bytes: Vec<u8>,
+    maximum: usize,
+    rejected_size: Option<usize>,
+}
+
+impl std::io::Write for BoundedEcJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.rejected_size.is_some() {
+            return Err(std::io::Error::other("erasure message size limit exceeded"));
+        }
+        let length = self.bytes.len().checked_add(bytes.len());
+        let Some(length) = length.filter(|length| *length <= self.maximum) else {
+            self.rejected_size = Some(length.unwrap_or(usize::MAX));
+            return Err(std::io::Error::other("erasure message size limit exceeded"));
+        };
+        if length > self.bytes.capacity() {
+            let capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(length)
+                .min(self.maximum);
+            self.bytes
+                .try_reserve_exact(capacity - self.bytes.len())
+                .map_err(std::io::Error::other)?;
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Receiving half of a bounded authenticated erasure channel.
+#[derive(Debug)]
+pub struct AuthenticatedEcReceiver {
+    config: EcConfig,
+    auth: SecurityContext,
+    rx: mpsc::Receiver<AuthenticatedEcEnvelope>,
+}
+
+impl AuthenticatedEcReceiver {
+    /// Receives and verifies one whole message before returning decoded bytes.
+    ///
+    /// A cancelled wait returns [`EcError::Cancelled`] without consuming a
+    /// queued message. Once dequeued, verification and decoding are synchronous.
+    /// Invalid envelopes are consumed and reported; they cannot poison the next
+    /// message. A forged symbol is treated as an erasure by the authenticated
+    /// decoder, so authentic survivors may still recover the payload.
+    pub async fn recv(&mut self, cx: &Cx) -> Result<Vec<u8>, AuthenticatedEcError> {
+        let message = self.rx.recv(cx).await.map_err(|error| match error {
+            mpsc::RecvError::Cancelled => EcError::Cancelled,
+            mpsc::RecvError::Disconnected | mpsc::RecvError::Empty => EcError::TransportClosed,
+        })?;
+        self.decode(&message)
+    }
+
+    fn decode(&self, message: &AuthenticatedEcEnvelope) -> Result<Vec<u8>, AuthenticatedEcError> {
+        // Geometry validation inside verify is allocation-free. No received
+        // size or symbol count reaches decoder allocation before authentication.
+        message.header.verify(&self.auth)?;
+        let header = &message.header.header;
+        let expected = self.config.plan(header.message_size as usize)?;
+        if header.symbol_size != self.config.symbol_size
+            || header.source_symbols != expected.source_symbols
+            || header.total_symbols != expected.total_symbols
+        {
+            return Err(AuthenticatedEcError::InvalidEnvelope(
+                "header geometry differs from the channel configuration",
+            ));
+        }
+        if message.symbols.len() > usize::from(header.total_symbols) {
+            return Err(AuthenticatedEcError::InvalidEnvelope(
+                "received symbol count exceeds the message bound",
+            ));
+        }
+        for authenticated in &message.symbols {
+            let symbol = authenticated.symbol();
+            let id = symbol.id();
+            if symbol.data().len() != usize::from(header.symbol_size)
+                || id.object_id() != ObjectId::new(header.message_id, 0)
+                || id.sbn() != 0
+                || id.esi() >= u32::from(header.total_symbols)
+                || symbol.kind().is_source() != (id.esi() < u32::from(header.source_symbols))
+            {
+                return Err(AuthenticatedEcError::InvalidEnvelope(
+                    "symbol geometry differs from the authenticated header",
+                ));
+            }
+        }
+        decode_message_authenticated(&message.header, &message.symbols, &self.auth)
+            .map_err(AuthenticatedEcError::Message)
+    }
+
+    /// Receives an authenticated message and deserializes its JSON value.
+    pub async fn recv_value<T: serde::de::DeserializeOwned>(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<T, AuthenticatedEcError> {
+        let bytes = self.recv(cx).await?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| EcError::Serialization(error.to_string()).into())
     }
 }
 
