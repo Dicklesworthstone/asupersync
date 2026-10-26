@@ -171,6 +171,27 @@ mod native_h3_listener_live {
         config: NativeQuicConnectionConfig,
         expected_settings: H3Settings,
     ) -> (NativeQuicUdpConnection, NativeH3Session) {
+        connect_with_h3_profile(
+            cx,
+            server_addr,
+            peer,
+            config,
+            expected_settings,
+            asupersync::http::h3_native::H3ConnectionConfig::default(),
+            H3Settings::default(),
+        )
+        .await
+    }
+
+    async fn connect_with_h3_profile(
+        cx: &Cx,
+        server_addr: std::net::SocketAddr,
+        peer: u8,
+        config: NativeQuicConnectionConfig,
+        expected_settings: H3Settings,
+        session_config: asupersync::http::h3_native::H3ConnectionConfig,
+        local_settings: H3Settings,
+    ) -> (NativeQuicUdpConnection, NativeH3Session) {
         let socket = QuicUdpEndpoint::bind(
             cx,
             "127.0.0.1:0".parse().unwrap(),
@@ -197,9 +218,9 @@ mod native_h3_listener_live {
         .expect("public listener authenticates an unknown real UDP peer");
         assert_eq!(owner.negotiated_alpn(), H3_ALPN);
         assert_eq!(owner.peer_addr(), server_addr);
-        let mut session = NativeH3Session::client();
+        let mut session = NativeH3Session::with_config(session_config);
         session
-            .initialize(cx, owner.connection_mut(), H3Settings::default())
+            .initialize(cx, owner.connection_mut(), local_settings)
             .unwrap();
         owner.flush(cx).await.unwrap();
         loop {
@@ -1313,6 +1334,39 @@ mod native_h3_listener_live {
         }
 
         #[test]
+        fn authenticated_listener_rejects_excessive_qpack_encoder_capacity_before_binding() {
+            run(1, async {
+                let cx = Cx::current().unwrap();
+                let occupied = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                let mut listener_config = config(8);
+                listener_config.qpack_encoder_table_capacity = NonZeroUsize::new(
+                    asupersync::http::h3::NATIVE_H3_MAX_QPACK_ENCODER_CAPACITY + 1,
+                );
+                let result = NativeH3Listener::bind(
+                    &cx,
+                    occupied.local_addr().unwrap(),
+                    Router::new(),
+                    server_config(
+                        vec![certificate("server")],
+                        leaf_key(),
+                        vec![H3_ALPN.to_vec()],
+                    )
+                    .unwrap(),
+                    transport_parameters(listener_config.endpoint.connection_config),
+                    listener_config,
+                )
+                .await;
+                assert!(matches!(
+                    result,
+                    Err(asupersync::web::NativeH3ListenerError::Endpoint(
+                        asupersync::net::quic_native::ManagedEndpointError::InvalidConfig(message)
+                    )) if message == "HTTP/3 QPACK encoder table capacity exceeds 64 KiB"
+                ));
+                assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+            });
+        }
+
+        #[test]
         fn authenticated_listener_rejects_invalid_qpack_blocking_before_binding() {
             run(1, async {
                 let cx = Cx::current().unwrap();
@@ -1367,6 +1421,183 @@ mod native_h3_listener_live {
                     ));
                     assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
                 }
+            });
+        }
+
+        #[test]
+        fn authenticated_listener_compresses_repeated_response_headers_after_peer_feedback() {
+            use asupersync::http::h3_native::{
+                H3ConnectionConfig, H3QpackMode, H3UniStreamType, QpackDecoderInstruction,
+                QpackInstructionStreamState, qpack_decode_response_field_section,
+                qpack_encode_decoder_instruction, qpack_field_section_metadata,
+            };
+
+            async fn raw_compressed_response(
+                cx: &Cx,
+                owner: &mut NativeQuicUdpConnection,
+                peer: &mut QpackInstructionStreamState,
+                encoder_type_seen: &mut bool,
+                stream: StreamId,
+            ) -> (Vec<u8>, Vec<u8>) {
+                let mut response_wire = Vec::new();
+                loop {
+                    let encoder = StreamId(7);
+                    if owner.connection().inner().streams().stream(encoder).is_ok() {
+                        let bytes = owner.connection_mut().read_stream(cx, encoder, 1024).unwrap();
+                        if !bytes.is_empty() {
+                            let instructions = if *encoder_type_seen {
+                                bytes.as_ref()
+                            } else {
+                                assert_eq!(bytes[0], 2, "server's second uni stream is its encoder");
+                                *encoder_type_seen = true;
+                                &bytes[1..]
+                            };
+                            peer.feed_encoder_stream_bytes(encoder.0, instructions).unwrap();
+                        }
+                    }
+                    response_wire.extend_from_slice(
+                        &owner.connection_mut().read_stream(cx, stream, 1024).unwrap(),
+                    );
+                    assert!(response_wire.len() <= 4096);
+                    if owner.connection().is_stream_eof(stream).unwrap()
+                        && peer.received_context().dynamic_table().insertion_counter() == 1
+                    {
+                        break;
+                    }
+                    owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
+                }
+                let mut rest = response_wire.as_slice();
+                let mut section = None;
+                let mut body = Vec::new();
+                while !rest.is_empty() {
+                    let (frame, consumed) = H3Frame::decode(rest, &H3ConnectionConfig::default()).unwrap();
+                    rest = &rest[consumed..];
+                    match frame {
+                        H3Frame::Headers(bytes) => assert!(section.replace(bytes).is_none()),
+                        H3Frame::Data(bytes) => {
+                            assert!(section.is_some());
+                            body.extend_from_slice(&bytes);
+                        }
+                        other => panic!("unexpected compressed response frame: {other:?}"),
+                    }
+                }
+                (section.expect("response HEADERS"), body)
+            }
+
+            run(1, async {
+                const CONTENT_TYPE: &str = "application/asupersync-live-compressed+json";
+                const BODY: &[u8] = b"native response\0payload";
+                let cx = Cx::current().unwrap();
+                let calls = Arc::new(AtomicUsize::new(0));
+                let handler_calls = Arc::clone(&calls);
+                let router = Router::new().route("/compressed", post(FnHandler::new(move || {
+                    handler_calls.fetch_add(1, Ordering::SeqCst);
+                    Response::new(StatusCode::OK, BODY.to_vec())
+                        .header("content-type", CONTENT_TYPE)
+                        .header("set-cookie", "private=not-indexed")
+                })));
+                let mut listener_config = config(8);
+                listener_config.qpack_encoder_table_capacity = NonZeroUsize::new(256);
+                let listener = bind(&cx, router, listener_config).await;
+                let address = listener.local_addr();
+                let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                let serving = listener.serve_with_shutdown(&cx, async {
+                    shutdown_rx.recv(&cx).await.unwrap();
+                });
+                let client = async {
+                    let settings = H3Settings {
+                        qpack_max_table_capacity: Some(4096),
+                        qpack_blocked_streams: Some(0),
+                        ..H3Settings::default()
+                    };
+                    let (mut owner, _session) = connect_with_h3_profile(
+                        &cx, address, 110, connection_config(), H3Settings::default(),
+                        H3ConnectionConfig::default().with_dynamic_qpack(), settings.clone(),
+                    ).await;
+                    // Observe real encoded response sections before resolving
+                    // them. This peer owns its decoder/feedback after SETTINGS.
+                    let mut peer = QpackInstructionStreamState::from_local_and_peer_settings(
+                        H3QpackMode::DynamicTableAllowed, &settings, &H3Settings::default(),
+                    ).unwrap();
+                    peer.register_stream(7, H3UniStreamType::QpackEncoder).unwrap();
+                    let first = open_upload(&cx, &mut owner, "/compressed", Some(0)).await;
+                    write_data(&cx, &mut owner, first, b"", true).await;
+                    let mut encoder_type_seen = false;
+                    let (first_section, first_body) = raw_compressed_response(
+                        &cx, &mut owner, &mut peer, &mut encoder_type_seen, first,
+                    ).await;
+                    assert_eq!(first_body, BODY);
+                    assert_eq!(qpack_field_section_metadata(
+                        &first_section, H3QpackMode::DynamicTableAllowed, Some(peer.received_context()),
+                    ).unwrap().required_insert_count(), 0);
+                    let first_head = qpack_decode_response_field_section(
+                        &first_section, H3QpackMode::DynamicTableAllowed, Some(peer.received_context()),
+                    ).unwrap();
+                    assert_eq!(first_head.status, 200);
+                    assert!(first_head.headers.contains(&("content-type".to_owned(), CONTENT_TYPE.to_owned())));
+                    assert!(first_head.headers.contains(&("set-cookie".to_owned(), "private=not-indexed".to_owned())));
+                    assert_eq!(peer.received_context().dynamic_table().len(), 1);
+                    assert_eq!(peer.received_context().dynamic_table().get_by_insertion_id(0).unwrap().name(), "content-type");
+                    assert_eq!(peer.received_context().dynamic_table().capacity(), 256);
+
+                    let increment = QpackDecoderInstruction::InsertCountIncrement { increment: 1 };
+                    peer.apply_local_decoder_instruction(&increment).unwrap();
+                    let decoder = owner.connection_mut().open_uni_stream(&cx).unwrap();
+                    let mut feedback = vec![3];
+                    qpack_encode_decoder_instruction(&mut feedback, &increment).unwrap();
+                    owner.connection_mut().write_stream(&cx, decoder, Bytes::from(feedback), false).unwrap();
+                    owner.flush(&cx).await.unwrap();
+                    while owner.connection().inner().transport().bytes_in_flight() != 0 {
+                        owner.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                    }
+
+                    let second = open_upload(&cx, &mut owner, "/compressed", Some(0)).await;
+                    write_data(&cx, &mut owner, second, b"", true).await;
+                    let (compressed, second_body) = raw_compressed_response(
+                        &cx, &mut owner, &mut peer, &mut encoder_type_seen, second,
+                    ).await;
+                    assert_eq!(second_body, BODY);
+                    assert_eq!(qpack_field_section_metadata(
+                        &compressed, H3QpackMode::DynamicTableAllowed, Some(peer.received_context()),
+                    ).unwrap().required_insert_count(), 1);
+                    assert!(compressed.len() < first_section.len());
+                    assert_eq!(qpack_decode_response_field_section(
+                        &compressed, H3QpackMode::DynamicTableAllowed, Some(peer.received_context()),
+                    ).unwrap(), first_head);
+                    peer.submit_received_field_section(second.0, &compressed).unwrap();
+                    let ack = QpackDecoderInstruction::HeaderAcknowledgement { stream_id: second.0 };
+                    peer.apply_local_decoder_instruction(&ack).unwrap();
+                    let mut feedback = Vec::new();
+                    qpack_encode_decoder_instruction(&mut feedback, &ack).unwrap();
+                    owner.connection_mut().write_stream(&cx, decoder, Bytes::from(feedback), false).unwrap();
+                    owner.flush(&cx).await.unwrap();
+                    assert_eq!(peer.received_decoder_feedback().outstanding_reference_count(), 0);
+                    assert_eq!(calls.load(Ordering::SeqCst), 2);
+                    shutdown_tx.send(&cx, ()).unwrap();
+                    let mut expected_goaway = Vec::new();
+                    H3Frame::Goaway(second.0 + 4).encode(&mut expected_goaway).unwrap();
+                    let mut goaway = Vec::new();
+                    loop {
+                        owner.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                        if owner.connection().close_was_peer_initiated() {
+                            assert_eq!(goaway, expected_goaway);
+                            assert_eq!(owner.connection().inner().transport().close_code(), Some(0));
+                            break;
+                        }
+                        goaway.extend_from_slice(&owner.connection_mut().read_stream(&cx, StreamId(3), 64).unwrap());
+                        assert!(expected_goaway.starts_with(&goaway));
+                        owner.flush(&cx).await.unwrap();
+                    }
+                };
+                let (report, ()) = zip(serving, client).await;
+                let report = report.unwrap();
+                assert_eq!(report.accepted_connections, 1);
+                assert_eq!(report.completed_requests, 2);
+                assert_eq!(report.cancelled_requests, 0);
+                assert_eq!(report.refused_requests, 0);
+                assert_eq!(report.failed_request_cleanups, 0);
+                assert_eq!(report.failed_connections, 0);
+                assert!(!report.drain_timed_out);
             });
         }
 

@@ -7,6 +7,7 @@
         let config = NativeH3ListenerConfig::default();
         assert_eq!(config.max_request_field_section_size, None);
         assert_eq!(config.qpack_decoder_blocked_streams, 0);
+        assert_eq!(config.qpack_encoder_table_capacity, None);
         assert_eq!(config.local_h3_settings(), H3Settings::default());
         let mut wire = Vec::new();
         config.local_h3_settings().encode_payload(&mut wire).unwrap();

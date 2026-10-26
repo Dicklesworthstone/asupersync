@@ -686,6 +686,8 @@ pub struct MySqlRowStream<'a> {
     finished: bool,
     pending_row_count: u64,
     deprecate_eof: bool,
+    binary_protocol: bool,
+    read_in_progress: bool,
 }
 
 struct MySqlStreamHeader {
@@ -704,6 +706,16 @@ impl MySqlRowStream<'_> {
         if self.finished {
             return Outcome::Ok(None);
         }
+        if self.binary_protocol && self.read_in_progress {
+            // read_packet owns its partial packet buffer inside the future.
+            // A dropped next() cannot resume from that lost framing state.
+            self.finished = true;
+            self.connection.inner.closed = true;
+            return Outcome::Err(MySqlError::Protocol(
+                "a prepared row-stream read was abandoned; the connection is closed".to_string(),
+            ));
+        }
+        self.read_in_progress = self.binary_protocol;
         let result = self.next_inner(cx).await;
         if matches!(result, Outcome::Cancelled(_)) {
             self.connection.wire_cancel_in_drain(cx).await;
@@ -712,17 +724,24 @@ impl MySqlRowStream<'_> {
                 .inner
                 .query_in_flight
                 .store(false, std::sync::atomic::Ordering::Release);
-        } else if matches!(
-            result,
-            Outcome::Ok(None) | Outcome::Err(MySqlError::Server { .. })
-        ) {
+        } else if matches!(result, Outcome::Ok(None))
+            || (matches!(result, Outcome::Err(MySqlError::Server { .. }))
+                && (!self.binary_protocol || self.finished))
+        {
             self.finished = true;
             self.connection.inner.closed = false;
             self.connection
                 .inner
                 .query_in_flight
                 .store(false, std::sync::atomic::Ordering::Release);
+        } else if self.binary_protocol && matches!(result, Outcome::Err(_) | Outcome::Panicked(_)) {
+            // A malformed or partial binary row is terminal for this stream.
+            // Keep the poison and KILL ownership: a later next() must not
+            // consume a stray terminator and make this connection reusable.
+            self.finished = true;
+            self.connection.inner.closed = true;
         }
+        self.read_in_progress = false;
         result
     }
 
@@ -747,22 +766,43 @@ impl MySqlRowStream<'_> {
             self.connection.inner.sequence = seq.wrapping_add(1);
 
             if data.is_empty() {
+                if self.binary_protocol {
+                    return Outcome::Err(MySqlError::InvalidPacket(
+                        "Empty prepared row packet".to_string(),
+                    ));
+                }
                 continue;
             }
 
             match data[0] {
                 0xFF => {
                     // ERR packet
-                    return Outcome::Err(MySqlConnection::parse_error(&data));
+                    let error = MySqlConnection::parse_error(&data);
+                    if self.binary_protocol && matches!(error, MySqlError::Server { .. }) {
+                        // Only an ERR in the expected response sequence is a
+                        // clean terminal packet. An unsolicited disconnect
+                        // returned by read_packet must retain the poison.
+                        self.finished = true;
+                    }
+                    return Outcome::Err(error);
                 }
                 _ => {
                     if let (Some(cols), Some(indices)) = (&self.columns, &self.column_indices) {
                         // Try to parse as data row or terminator
-                        match MySqlConnection::parse_data_row_or_terminator(
-                            &data,
-                            cols,
-                            self.deprecate_eof,
-                        ) {
+                        let parsed = if self.binary_protocol {
+                            MySqlConnection::parse_binary_row_or_terminator(
+                                &data,
+                                cols,
+                                self.deprecate_eof,
+                            )
+                        } else {
+                            MySqlConnection::parse_data_row_or_terminator(
+                                &data,
+                                cols,
+                                self.deprecate_eof,
+                            )
+                        };
+                        match parsed {
                             Ok(Some(values)) => {
                                 // This is a data row - return it
                                 self.pending_row_count += 1;
@@ -774,14 +814,17 @@ impl MySqlRowStream<'_> {
                             }
                             Ok(None) => {
                                 // This is a terminator (EOF/OK) - stream complete
-                                self.finished = true;
                                 self.connection.inner.status_flags =
                                     match MySqlConnection::parse_result_set_terminator_status_flags(
                                         &data,
                                     ) {
                                         Ok(flags) => flags,
+                                        Err(error) if self.binary_protocol => {
+                                            return Outcome::Err(error);
+                                        }
                                         Err(_) => self.connection.inner.status_flags, // Keep existing flags on parse error
                                     };
+                                self.finished = true;
                                 return Outcome::Ok(None);
                             }
                             Err(e) => return Outcome::Err(e),
@@ -835,7 +878,108 @@ impl MySqlConnection {
         self.inner
             .query_in_flight
             .store(true, std::sync::atomic::Ordering::Release);
-        match self.query_stream_start_after_setup(cx, sql).await {
+        let result = self.query_stream_start_after_setup(cx, sql).await;
+        self.finish_query_stream_start(cx, result, false).await
+    }
+
+    /// Stream the binary rows of a prepared, parameterized query.
+    ///
+    /// Executes once and reads only the response's column metadata before
+    /// returning. Each [`MySqlRowStream::next`] then reads one row, so a large
+    /// result does not have to fit the collecting API's `max_result_rows` limit.
+    /// Packet byte and column-count limits still apply. Column types come from
+    /// this execution's metadata, not potentially older prepare metadata.
+    ///
+    /// The statement must belong to this connection and pooled-checkout epoch.
+    /// Pool session reset, abandoned-transaction rollback, deadline forwarding,
+    /// parameter encoding and wire cancellation match [`Self::query_prepared`].
+    /// Dropping an unfinished stream, interrupting a polled `next()` future, or
+    /// receiving malformed data leaves the connection closed to reuse. A fully
+    /// consumed terminator or server error ends the exchange cleanly.
+    pub async fn query_stream_prepared<'a>(
+        &'a mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<MySqlRowStream<'a>, MySqlError> {
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+        if let Err(error) = self.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
+        }
+        self.inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self.query_stream_prepared_start(cx, stmt, params).await;
+        self.finish_query_stream_start(cx, result, true).await
+    }
+
+    /// Prepare (or reuse the cached statement) and stream a parameterized query.
+    ///
+    /// The SQL is sent through COM_STMT_PREPARE and values through the binary
+    /// COM_STMT_EXECUTE binding path; values are never interpolated into SQL.
+    /// The returned stream borrows only the connection, so neither the SQL nor
+    /// the parameter slice must be retained while processing its rows.
+    pub async fn query_stream_params<'a>(
+        &'a mut self,
+        cx: &Cx,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Outcome<MySqlRowStream<'a>, MySqlError> {
+        let stmt = match self.prepare(cx, sql).await {
+            Outcome::Ok(stmt) => stmt,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+        self.query_stream_prepared(cx, &stmt, params).await
+    }
+
+    async fn query_stream_prepared_start(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<MySqlStreamHeader, MySqlError> {
+        let response = match self.start_prepared_query(cx, stmt, params).await {
+            Outcome::Ok(response) => response,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+        if response.first() == Some(&0x00) {
+            // A non-row statement still needs strict OK validation and the
+            // same prepared-cache invalidation as the collecting API.
+            let ok = match Self::parse_ok_packet(&response) {
+                Ok(ok) => ok,
+                Err(error) => return Outcome::Err(error),
+            };
+            self.inner.status_flags = ok.status_flags;
+            self.inner.closed = false;
+            if let Err(error) = self
+                .forget_prepared_statements_after(cx, stmt.statement_id)
+                .await
+            {
+                return outcome_from_error(error);
+            }
+        }
+        let result = self.read_stream_header(cx, &response, true).await;
+        if response.first() == Some(&0xFF)
+            && matches!(result, Outcome::Err(MySqlError::Server { .. }))
+        {
+            self.inner.closed = false;
+        }
+        result
+    }
+
+    async fn finish_query_stream_start<'a>(
+        &'a mut self,
+        cx: &Cx,
+        result: Outcome<MySqlStreamHeader, MySqlError>,
+        binary_protocol: bool,
+    ) -> Outcome<MySqlRowStream<'a>, MySqlError> {
+        match result {
             Outcome::Ok(header) => {
                 if header.finished {
                     self.inner
@@ -850,6 +994,8 @@ impl MySqlConnection {
                     finished: header.finished,
                     pending_row_count: 0,
                     deprecate_eof: header.deprecate_eof,
+                    binary_protocol,
+                    read_in_progress: false,
                 })
             }
             Outcome::Cancelled(reason) => {
@@ -862,7 +1008,9 @@ impl MySqlConnection {
                 Outcome::Cancelled(reason)
             }
             Outcome::Err(error) => {
-                if matches!(error, MySqlError::Server { .. }) {
+                if (!binary_protocol && matches!(error, MySqlError::Server { .. }))
+                    || !self.inner.closed
+                {
                     self.inner.closed = false;
                     self.inner
                         .query_in_flight
@@ -913,6 +1061,15 @@ impl MySqlConnection {
         };
         self.inner.sequence = seq.wrapping_add(1);
 
+        self.read_stream_header(cx, &first_packet, false).await
+    }
+
+    async fn read_stream_header(
+        &mut self,
+        cx: &Cx,
+        first_packet: &[u8],
+        binary_protocol: bool,
+    ) -> Outcome<MySqlStreamHeader, MySqlError> {
         if first_packet.is_empty() {
             return Outcome::Err(MySqlError::InvalidPacket("Empty response".to_string()));
         }
@@ -923,10 +1080,10 @@ impl MySqlConnection {
         match first_packet[0] {
             0xFF => {
                 // Error packet
-                Outcome::Err(Self::parse_error(&first_packet))
+                Outcome::Err(Self::parse_error(first_packet))
             }
             0x00 => {
-                self.inner.status_flags = Self::ok_flags(&first_packet, self.inner.status_flags);
+                self.inner.status_flags = Self::ok_flags(first_packet, self.inner.status_flags);
                 Outcome::Ok(MySqlStreamHeader {
                     columns: None,
                     column_indices: None,
@@ -936,11 +1093,17 @@ impl MySqlConnection {
             }
             _ => {
                 // Result set header - parse column count and metadata
-                let mut reader = PacketReader::new(&first_packet);
+                let mut reader = PacketReader::new(first_packet);
                 let column_count_raw = match reader.read_lenenc_int() {
                     Ok(count) => count,
                     Err(e) => return Outcome::Err(e),
                 };
+
+                if binary_protocol && (column_count_raw == 0 || reader.remaining() != 0) {
+                    return Outcome::Err(MySqlError::Protocol(
+                        "invalid prepared result-set column count packet".to_string(),
+                    ));
+                }
 
                 if column_count_raw > MAX_COLUMN_COUNT {
                     return Outcome::Err(MySqlError::Protocol(format!(
@@ -5879,12 +6042,14 @@ impl MySqlConnection {
         result
     }
 
-    async fn query_prepared_inner_impl(
+    /// Validate, bind, and start one binary-protocol query. Collecting and
+    /// streaming readers share this admission and first-packet boundary.
+    async fn start_prepared_query(
         &mut self,
         cx: &Cx,
         stmt: &MySqlStatement,
         params: &[&dyn ToSql],
-    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+    ) -> Outcome<Vec<u8>, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -5964,6 +6129,21 @@ impl MySqlConnection {
             ));
         }
 
+        Outcome::Ok(response_data)
+    }
+
+    async fn query_prepared_inner_impl(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        let response_data = match self.start_prepared_query(cx, stmt, params).await {
+            Outcome::Ok(response) => response,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
         match response_data[0] {
             0x00 => match Self::parse_ok_packet(&response_data) {
                 Ok(ok_packet) => {
