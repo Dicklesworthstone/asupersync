@@ -1102,10 +1102,18 @@
         use std::task::Wake;
 
         fn connection(cx: &Cx, server: bool) -> QuicConnection {
+            connection_with_config(cx, server, NativeQuicConnectionConfig::default())
+        }
+
+        fn connection_with_config(
+            cx: &Cx,
+            server: bool,
+            config: NativeQuicConnectionConfig,
+        ) -> QuicConnection {
             let mut connection = if server {
-                QuicConnection::server(NativeQuicConnectionConfig::default())
+                QuicConnection::server(config)
             } else {
-                QuicConnection::client(NativeQuicConnectionConfig::default())
+                QuicConnection::client(config)
             };
             connection.begin_handshake(cx).unwrap();
             connection.mark_handshake_keys_available(cx).unwrap();
@@ -1664,6 +1672,149 @@
         fn feedback_resumes_on_both_credit_wakes_without_new_input_and_detects_decoder_stop() {
             for streaming in [false, true] {
                 assert_feedback_credit_wakes_and_critical_stop(streaming);
+            }
+        }
+
+        fn feedback_stream_limit_fixture(cx: &Cx) -> (NativeH3Session, QuicConnection) {
+            let mut connection = connection_with_config(cx, true, NativeQuicConnectionConfig {
+                max_local_uni: 1,
+                ..NativeQuicConnectionConfig::default()
+            });
+            let mut session = NativeH3Session::with_config(H3ConnectionConfig {
+                endpoint_role: H3EndpointRole::Server,
+                ..H3ConnectionConfig::default()
+            }.with_dynamic_qpack());
+            session.initialize(cx, &mut connection, H3Settings {
+                qpack_blocked_streams: Some(1),
+                ..H3Settings::default()
+            }).unwrap();
+            assert_eq!(session.local_control_stream, Some(StreamId(3)));
+            (session, connection)
+        }
+
+        fn grant_stream_count(
+            cx: &Cx,
+            connection: &mut QuicConnection,
+            bidirectional: bool,
+            limit: u64,
+        ) {
+            connection.inner_mut().process_frame(
+                cx,
+                &QuicFrame::MaxStreams {
+                    bidirectional,
+                    maximum_streams: VarInt::from_u64_unchecked(limit),
+                },
+                PacketNumberSpace::ApplicationData,
+            ).unwrap();
+        }
+
+        #[test]
+        fn decoder_feedback_waits_for_stream_count_credit_and_replays_its_exact_fifo() {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = feedback_stream_limit_fixture(&cx);
+            let mut peer = peer_encoder_with_blocked_streams(4096, 1);
+            let encoder_bytes = encoder_wire(&mut peer, &[("x-credit", "retained")]);
+            inject_encoder(&cx, &mut session, &mut connection, encoder_bytes);
+            let section = request_section(&peer, 0);
+            peer.submit_field_section(0, &section).unwrap();
+            connection.inner_mut().accept_remote_stream(&cx, StreamId(0)).unwrap();
+            inject_field_frame(&cx, &mut connection, StreamId(0), 0, section, true);
+            assert!(matches!(
+                next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::RequestHeaders { stream_id: StreamId(0), .. }
+            ));
+            assert_eq!(
+                next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::Finished { stream_id: StreamId(0) }
+            );
+            let retained = session.dynamic_receive.as_ref().unwrap().feedback.clone();
+            assert_eq!(retained.iter().copied().collect::<Vec<_>>(), vec![3, 1, 0x80]);
+            assert!(session.dynamic_receive.as_ref().unwrap().decoder_stream.is_none());
+            assert!(connection.inner().streams().stream(StreamId(7)).is_err());
+            for _ in 0..3 {
+                assert_eq!(session.next_event(&cx, &mut connection).unwrap(), None);
+                assert_eq!(session.dynamic_receive.as_ref().unwrap().feedback, retained);
+            }
+
+            let counter = Arc::new(WakeCount::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = TaskContext::from_waker(&waker);
+            for _ in 0..3 {
+                assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            }
+            assert_eq!(counter.0.load(Ordering::SeqCst), 0, "stream-count wait must park");
+            grant_stream_count(&cx, &mut connection, true, 129);
+            grant_stream_count(&cx, &mut connection, false, 1);
+            assert_eq!(counter.0.load(Ordering::SeqCst), 0, "unrelated or duplicate grants do not wake");
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            grant_stream_count(&cx, &mut connection, false, 2);
+            assert!(counter.0.load(Ordering::SeqCst) > 0);
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            assert_eq!(session.dynamic_receive.as_ref().unwrap().decoder_stream, Some(StreamId(7)));
+            assert!(session.dynamic_receive.as_ref().unwrap().feedback.is_empty());
+            let mut decoder_wire = Vec::new();
+            assert_eq!(
+                feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                vec![
+                    QpackDecoderInstruction::InsertCountIncrement { increment: 1 },
+                    QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 0 },
+                ]
+            );
+            assert_eq!(decoder_wire, retained.into_iter().collect::<Vec<_>>());
+            assert_eq!(peer.decoder_feedback().outstanding_reference_count(), 0);
+            assert_eq!(peer.known_received_count(), 1);
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            assert!(feedback(&cx, &mut session, &mut connection, &mut peer, &mut decoder_wire).is_empty());
+            assert_eq!(connection.open_uni_stream(&cx).unwrap_err(), NativeQuicConnectionError::StreamTable(
+                StreamTableError::StreamLimitExceeded {
+                    direction: StreamDirection::Unidirectional, limit: 2,
+                }
+            ));
+        }
+
+        #[test]
+        fn parked_decoder_stream_admission_observes_cancellation_and_connection_close() {
+            for cancel in [false, true] {
+                let cx = Cx::for_testing();
+                let driver_cx = Cx::for_testing();
+                let (mut session, mut connection) = feedback_stream_limit_fixture(&cx);
+                let mut peer = peer_encoder_with_blocked_streams(4096, 1);
+                let encoder_bytes = encoder_wire(&mut peer, &[("x-credit", "retained")]);
+                inject_encoder(&cx, &mut session, &mut connection, encoder_bytes);
+                let retained = session.dynamic_receive.as_ref().unwrap().feedback.clone();
+                let counter = Arc::new(WakeCount::default());
+                let waker = Waker::from(Arc::clone(&counter));
+                let mut task = TaskContext::from_waker(&waker);
+                assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+                assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+                if cancel {
+                    cx.set_cancel_requested(true);
+                } else {
+                    connection.inner_mut().close_immediately(&driver_cx, H3_REQUEST_CANCELLED).unwrap();
+                }
+                assert!(counter.0.load(Ordering::SeqCst) > 0, "terminal transition must wake the owner");
+                let expected = if cancel {
+                    NativeH3SessionError::Transport(NativeQuicConnectionError::Cancelled)
+                } else {
+                    NativeH3SessionError::InvalidState("QUIC connection is not established for application data")
+                };
+                assert_eq!(session.poll_event(&cx, &mut connection, &mut task), Poll::Ready(Err(expected)));
+                assert_eq!(session.dynamic_receive.as_ref().unwrap().feedback, retained);
+                assert!(session.dynamic_receive.as_ref().unwrap().decoder_stream.is_none());
+                assert!(connection.inner().streams().stream(StreamId(7)).is_err());
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                if cancel {
+                    // Cancelling this drive attempt cannot erase already owed
+                    // feedback when the same session is driven with a fresh Cx.
+                    grant_stream_count(&driver_cx, &mut connection, false, 2);
+                    assert_eq!(session.next_event(&driver_cx, &mut connection).unwrap(), None);
+                    let mut decoder_wire = Vec::new();
+                    assert_eq!(
+                        feedback(&driver_cx, &mut session, &mut connection, &mut peer, &mut decoder_wire),
+                        vec![QpackDecoderInstruction::InsertCountIncrement { increment: 1 }]
+                    );
+                    assert_eq!(decoder_wire, retained.into_iter().collect::<Vec<_>>());
+                }
             }
         }
 

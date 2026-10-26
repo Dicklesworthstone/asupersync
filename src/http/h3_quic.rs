@@ -25,6 +25,7 @@ use crate::net::quic_native::connection::NativeQuicConnectionError;
 use crate::net::quic_native::endpoint_api::QuicConnection;
 use crate::net::quic_native::streams::{
     FlowControlError, QuicStreamError, StreamDirection, StreamId, StreamReadiness, StreamRole,
+    StreamTableError,
 };
 
 #[path = "h3_receive_frame.rs"]
@@ -1139,7 +1140,9 @@ impl NativeH3Session {
     /// retained once by the parser and once by the scheduler; exceeding this
     /// local budget refuses only the new stream with `H3_EXCESSIVE_LOAD`.
     /// Incomplete frames and parser lookahead retain their configured limits.
-    /// The local decoder stream is opened lazily when feedback exists.
+    /// The local decoder stream is opened lazily when feedback exists. If the
+    /// peer has not granted another unidirectional stream, feedback remains
+    /// owned until a MAX_STREAMS grant; polling registers a transport wake.
     /// Dynamic receive always uses the bounded per-event receive engine, with
     /// 64 KiB DATA chunks by default; an explicit streaming chunk is preserved.
     /// This prevents a burst of compressed informational HEADERS from expanding
@@ -1751,8 +1754,8 @@ impl NativeH3Session {
     }
 
     /// Queue at most one retained feedback prefix, independently of application
-    /// events. Async callers register for both transport credit and queue drain;
-    /// synchronous callers leave a blocked suffix owned for their next drive.
+    /// events. Async callers register for stream-count credit, byte credit and
+    /// queue drain; synchronous callers leave feedback owned for their next drive.
     fn drive_qpack_feedback(
         &mut self,
         cx: &Cx,
@@ -1767,11 +1770,26 @@ impl NativeH3Session {
             Some(stream_id) => stream_id,
             None if dynamic.feedback.is_empty() => return Ok(()),
             None => {
-                // Uni-stream exhaustion is explicit: the transport has no
-                // MAX_STREAMS admission waiter to safely turn it into Pending.
-                // Initialization is already committed, so retry never opens a
-                // second control stream and the type prefix stays owned here.
-                let stream_id = connection.open_uni_stream(cx)?;
+                // Retain the stream type and every instruction while waiting
+                // for admission. Pending never consumes a stream ID, and only
+                // a successful open commits this decoder stream's identity.
+                let stream_id = if let Some(task_cx) = task_cx.as_deref_mut() {
+                    match connection.poll_open_uni_stream(cx, task_cx) {
+                        Poll::Ready(result) => result?,
+                        Poll::Pending => return Ok(()),
+                    }
+                } else {
+                    match connection.open_uni_stream(cx) {
+                        Ok(stream_id) => stream_id,
+                        Err(NativeQuicConnectionError::StreamTable(
+                            StreamTableError::StreamLimitExceeded {
+                                direction: StreamDirection::Unidirectional,
+                                limit,
+                            },
+                        )) if limit < (1u64 << 60) => return Ok(()),
+                        Err(error) => return Err(error.into()),
+                    }
+                };
                 dynamic.decoder_stream = Some(stream_id);
                 stream_id
             }
