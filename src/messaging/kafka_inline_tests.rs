@@ -26,6 +26,519 @@
         std::task::Waker::noop().clone()
     }
 
+    #[derive(Default)]
+    struct ReceiptWake(AtomicUsize);
+
+    impl std::task::Wake for ReceiptWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn receipt_metadata() -> RecordMetadata {
+        RecordMetadata {
+            topic: "receipt-orders".to_owned(),
+            partition: 2,
+            offset: 41,
+            timestamp: Some(123),
+        }
+    }
+
+    #[test]
+    fn delivery_receipt_cancelled_and_dropped_waits_leave_other_observers_intact() {
+        let delivery = KafkaDelivery::pending();
+        let clone = delivery.clone();
+        let owner = Cx::for_testing();
+        let resumed_owner = Cx::for_testing();
+        let wakes = Arc::new(ReceiptWake::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut abandoned = Box::pin(delivery.wait(&owner));
+        let mut cancelled = Box::pin(clone.wait(&owner));
+        let mut surviving = Box::pin(delivery.wait(&resumed_owner));
+
+        assert!(abandoned.as_mut().poll(&mut task).is_pending());
+        assert!(cancelled.as_mut().poll(&mut task).is_pending());
+        assert!(surviving.as_mut().poll(&mut task).is_pending());
+        assert_eq!(delivery.inner.ready.waiter_count(), 3);
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 2);
+        drop(abandoned);
+        assert_eq!(delivery.inner.ready.waiter_count(), 2);
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+
+        let before = wakes.0.load(Ordering::SeqCst);
+        owner.cancel_with(crate::types::CancelKind::User, Some("stop this receipt wait"));
+        assert!(wakes.0.load(Ordering::SeqCst) > before);
+        let Poll::Ready(Outcome::Cancelled(reason)) = cancelled.as_mut().poll(&mut task) else {
+            panic!("a parked explicit-owner wait must observe cancellation");
+        };
+        assert_eq!(reason.kind, crate::types::CancelKind::User);
+        drop(cancelled);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert_eq!(delivery.inner.ready.waiter_count(), 1);
+        assert!(!delivery.is_ready());
+        assert!(surviving.as_mut().poll(&mut task).is_pending());
+
+        let before = wakes.0.load(Ordering::SeqCst);
+        delivery.inner.complete(Ok(receipt_metadata()));
+        assert!(wakes.0.load(Ordering::SeqCst) > before);
+        let Poll::Ready(Outcome::Ok(metadata)) = surviving.as_mut().poll(&mut task) else {
+            panic!("late delivery must wake the remaining observer");
+        };
+        assert_eq!((metadata.partition, metadata.offset), (2, 41));
+        drop(surviving);
+        assert!(
+            resumed_owner
+                .inner
+                .read()
+                .cancel_waker_registrations
+                .is_empty()
+        );
+        assert_eq!(delivery.inner.ready.waiter_count(), 0);
+
+        // The completed report wins even on the previously cancelled context,
+        // and reading it neither consumes nor clones the original metadata.
+        let report = delivery.result().unwrap().unwrap();
+        let repeated = futures_lite::future::block_on(clone.wait(&owner)).unwrap();
+        assert!(std::ptr::eq(report, repeated));
+        assert_eq!(repeated.timestamp, Some(123));
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn delivery_receipt_retains_exact_failure_and_source_after_cancellation() {
+        #[derive(Debug)]
+        struct DeliveryFailure(u32);
+        impl fmt::Display for DeliveryFailure {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "delivery failure {}", self.0)
+            }
+        }
+        impl std::error::Error for DeliveryFailure {}
+
+        let delivery = KafkaDelivery::pending();
+        let clone = delivery.clone();
+        let cancelled = Cx::for_testing();
+        cancelled.cancel_with(crate::types::CancelKind::User, Some("cancelled observer"));
+        assert!(matches!(
+            futures_lite::future::block_on(delivery.wait(&cancelled)),
+            Outcome::Cancelled(_)
+        ));
+        delivery.inner.complete(Err(KafkaError::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            DeliveryFailure(37),
+        ))));
+        // A later callback cannot replace the first terminal report.
+        delivery.inner.complete(Ok(receipt_metadata()));
+        let stored = delivery.result().unwrap().unwrap_err();
+        for observer in [&delivery, &clone] {
+            let Outcome::Err(error) = futures_lite::future::block_on(observer.wait(&cancelled))
+            else {
+                panic!("a stored failure must win over wait cancellation");
+            };
+            assert!(std::ptr::eq(stored, error));
+            let KafkaError::Io(error) = error else {
+                panic!("the original I/O error must remain typed");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            assert_eq!(
+                error
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<DeliveryFailure>()
+                    .unwrap()
+                    .0,
+                37
+            );
+        }
+        assert!(cancelled.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn delivery_receipt_deadline_uses_explicit_clock_and_keeps_late_report() {
+        use crate::types::Time;
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let owner = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(1, 0),
+            Budget::INFINITE.with_deadline(Time::from_nanos(110)),
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let foreign_clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(10_000)));
+        let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock);
+        let foreign = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(2, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(foreign_timer.clone()),
+            None,
+        );
+        let _ambient = Cx::set_current(Some(foreign.clone()));
+        let delivery = KafkaDelivery::pending();
+        let wakes = Arc::new(ReceiptWake::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut wait = Box::pin(delivery.wait(&owner));
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(foreign_timer.process_timers(), 0);
+        assert!(foreign.inner.read().cancel_waker_registrations.is_empty());
+        clock.advance(9);
+        assert_eq!(timer.process_timers(), 0);
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        let before = wakes.0.load(Ordering::SeqCst);
+        clock.advance(1);
+        assert!(timer.process_timers() > 0);
+        assert!(wakes.0.load(Ordering::SeqCst) > before);
+        let Poll::Ready(Outcome::Cancelled(reason)) = wait.as_mut().poll(&mut task) else {
+            panic!("the explicit owner's deadline must wake and end the parked wait");
+        };
+        assert_eq!(reason.kind, crate::types::CancelKind::Deadline);
+        drop(wait);
+        assert_eq!(delivery.inner.ready.waiter_count(), 0);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(!delivery.is_ready());
+        delivery.inner.complete(Ok(receipt_metadata()));
+        assert_eq!(
+            futures_lite::future::block_on(delivery.wait(&foreign))
+                .unwrap()
+                .offset,
+            41
+        );
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn delivery_receipt_callback_drop_is_unknown_and_dropped_observers_do_not_leak() {
+        let delivery = KafkaDelivery::pending();
+        let sender = DeliverySender::Retained(Arc::clone(&delivery.inner));
+        drop(sender);
+        let error = delivery.result().unwrap().unwrap_err();
+        assert!(matches!(error, KafkaError::Protocol(message) if message.contains("unknown")));
+        assert!(!error.is_retryable());
+        let completed = KafkaDelivery::pending();
+        let sender = DeliverySender::Retained(Arc::clone(&completed.inner));
+        let weak = Arc::downgrade(&completed.inner);
+        let clone = completed.clone();
+        drop(completed);
+        drop(clone);
+        assert!(
+            weak.upgrade().is_some(),
+            "the pending callback owns its report"
+        );
+        sender.complete(Ok(receipt_metadata()));
+        assert!(weak.upgrade().is_none(), "completion leaves no orphaned state");
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn delivery_receipt_model_enqueues_once_and_preserves_admission_and_wire_shape() {
+        let _broker = deterministic_broker_guard();
+        let cx = Cx::for_testing();
+        let cancelled = Cx::for_testing();
+        cancelled.cancel_with(crate::types::CancelKind::User, Some("before enqueue"));
+        let topic = "delivery-receipt-model";
+        let producer = KafkaProducer::new(ProducerConfig {
+            max_message_size: 8,
+            ..ProducerConfig::default()
+        })
+        .unwrap();
+        assert!(matches!(
+            producer.enqueue(&cancelled, topic, None, b"refused", Some(0)),
+            Err(KafkaError::Cancelled)
+        ));
+        assert!(matches!(
+            producer.enqueue(&cx, topic, None, b"too large", Some(0)),
+            Err(KafkaError::MessageTooLarge { .. })
+        ));
+        assert!(matches!(
+            producer.enqueue(&cx, "bad topic", None, b"a", Some(0)),
+            Err(KafkaError::InvalidTopic(_))
+        ));
+        assert_eq!(deterministic_broker_end_offset(topic, 0), 0);
+        let deliveries = [
+            producer.enqueue(&cx, topic, None, b"value", Some(0)).unwrap(),
+            producer
+                .enqueue_with_headers(&cx, topic, None, b"", &[("h", b"v")])
+                .unwrap(),
+            producer
+                .enqueue_nullable(&cx, topic, Some(b"delete"), None, Some(0))
+                .unwrap(),
+            producer
+                .enqueue_nullable_with_headers(
+                    &cx,
+                    topic,
+                    Some(b"key"),
+                    Some(b""),
+                    &[("h", None), ("h", Some(b"")), ("h", Some(b"v"))],
+                    Some(0),
+                )
+                .unwrap(),
+        ];
+        for (offset, delivery) in deliveries.iter().enumerate() {
+            for _ in 0..3 {
+                assert_eq!(
+                    futures_lite::future::block_on(delivery.wait(&cancelled))
+                        .unwrap()
+                        .offset,
+                    offset as i64
+                );
+            }
+        }
+        assert_eq!(deterministic_broker_end_offset(topic, 0), 4);
+        assert_eq!(deterministic_broker_fetch(topic, 0, 2).unwrap().payload, None);
+        let record = deterministic_broker_fetch(topic, 0, 3).unwrap();
+        assert_eq!(record.payload, Some(Vec::new()));
+        assert_eq!(
+            record.headers,
+            vec![
+                ("h".into(), None),
+                ("h".into(), Some(Vec::new())),
+                ("h".into(), Some(b"v".to_vec())),
+            ]
+        );
+        futures_lite::future::block_on(producer.close(&cx, Duration::ZERO)).unwrap();
+        assert!(matches!(
+            producer.enqueue(&cx, topic, None, b"closed", Some(0)),
+            Err(KafkaError::Config(_))
+        ));
+        assert_eq!(deterministic_broker_end_offset(topic, 0), 4);
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    fn native_delivery_receipt_cancel_resume(multithread: bool) {
+        use crate::runtime::RuntimeBuilder;
+        use rdkafka::message::Headers;
+        use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let topic = "retained-delivery-native";
+        cluster.create_topic(topic, 1, 1).unwrap();
+        let bootstrap = cluster.bootstrap_servers();
+        // A real native queue owns the record, but no broker can report its
+        // outcome before the test explicitly brings the broker back up.
+        cluster.broker_down(-1).unwrap();
+        let mut producer_config = ProducerConfig::new(vec![bootstrap.clone()])
+            .with_property("queue.buffering.max.messages", "1")
+            .with_property("message.timeout.ms", "30000")
+            .with_property("reconnect.backoff.ms", "10")
+            .with_property("reconnect.backoff.max.ms", "50");
+        producer_config.request_timeout = Duration::from_secs(5);
+        let producer = KafkaProducer::new(producer_config).unwrap();
+        let builder = if multithread {
+            RuntimeBuilder::new().worker_threads(2)
+        } else {
+            RuntimeBuilder::current_thread()
+        };
+        let runtime = builder.build().unwrap();
+        let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+        let owner = Cx::for_testing();
+        let cancelling_owner = owner.clone();
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        let canceller = std::thread::spawn(move || {
+            let witnessed = parked_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            if witnessed {
+                cancelling_owner.cancel_with(
+                    crate::types::CancelKind::User,
+                    Some("cancel a parked delivery observer"),
+                );
+            }
+            witnessed
+        });
+
+        runtime.block_on_with_cx(driver.clone(), async {
+            let headers = [
+                ("same", None),
+                ("same", Some(&b""[..])),
+                ("same", Some(&b"h"[..])),
+            ];
+            let delivery = producer
+                .enqueue_nullable_with_headers(
+                    &driver,
+                    topic,
+                    Some(b"retained"),
+                    None,
+                    &headers,
+                    Some(0),
+                )
+                .unwrap();
+            assert!(producer.producer.in_flight_count() > 0);
+            assert!(!delivery.is_ready());
+            assert!(matches!(
+                producer.enqueue(&driver, topic, None, b"must not enqueue", Some(0)),
+                Err(KafkaError::QueueFull)
+            ));
+
+            // First drop a genuinely parked wait, then await another on the
+            // same receipt. Neither path may submit another native record.
+            {
+                let mut abandoned = std::pin::pin!(delivery.wait(&owner));
+                std::future::poll_fn(|task| {
+                    assert!(abandoned.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(delivery.inner.ready.waiter_count(), 0);
+            let cancelled = {
+                let mut wait = std::pin::pin!(delivery.wait(&owner));
+                let mut witness = Some(parked_tx);
+                let observed = std::future::poll_fn(|task| {
+                    let result = wait.as_mut().poll(task);
+                    if result.is_pending()
+                        && let Some(witness) = witness.take()
+                    {
+                        assert!(!delivery.is_ready());
+                        assert_eq!(delivery.inner.ready.waiter_count(), 1);
+                        witness.send(()).unwrap();
+                    }
+                    result
+                });
+                crate::time::timeout(driver.now(), Duration::from_secs(3), observed).await
+            };
+            let registrations_retired = owner.inner.read().cancel_waker_registrations.is_empty();
+            let pending_after_cancel = !delivery.is_ready();
+
+            // Always release the broker before asserting the cancellation
+            // result, so a regressed wakeup path has bounded test cleanup.
+            cluster.broker_up(-1).unwrap();
+            let resumed = crate::time::timeout(
+                driver.now(),
+                Duration::from_secs(15),
+                delivery.wait(&driver),
+            )
+            .await;
+            let close = producer.close(&driver, Duration::from_secs(10)).await;
+            assert!(
+                matches!(
+                    cancelled,
+                    Ok(Outcome::Cancelled(ref reason))
+                        if reason.kind == crate::types::CancelKind::User
+                ),
+                "the native parked wait must wake on its explicit owner: {cancelled:?}"
+            );
+            assert!(registrations_retired);
+            assert!(
+                pending_after_cancel,
+                "wait cancellation must not forge a report"
+            );
+            close.unwrap();
+            let metadata = resumed.unwrap().unwrap();
+            assert_eq!((metadata.partition, metadata.offset), (0, 0));
+            let clone = delivery.clone();
+            assert!(std::ptr::eq(metadata, clone.wait(&owner).await.unwrap()));
+            assert_eq!(producer.producer.in_flight_count(), 0);
+            assert_eq!(producer.active_ops.load(Ordering::Acquire), 0);
+            assert_eq!(delivery.inner.ready.waiter_count(), 0);
+        });
+        assert!(
+            canceller.join().unwrap(),
+            "cancellation requires a parked-state witness"
+        );
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+
+        // Independent native consumer checks record count and the exact null
+        // and header wire shape, not the receipt's own metadata construction.
+        let observer: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", bootstrap)
+            .set("group.id", "retained-delivery-observer")
+            .set("enable.auto.commit", "false")
+            .create()
+            .unwrap();
+        assert_eq!(
+            observer
+                .fetch_watermarks(topic, 0, Duration::from_secs(10))
+                .unwrap(),
+            (0, 1),
+            "cancel, wait drop, re-wait and a refused enqueue must not duplicate the record"
+        );
+        let mut partitions = TopicPartitionList::new();
+        partitions
+            .add_partition_offset(topic, 0, Offset::Offset(0))
+            .unwrap();
+        observer.assign(&partitions).unwrap();
+        let started = std::time::Instant::now();
+        let record = loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "missing retained record"
+            );
+            if let Some(record) = observer.poll(Duration::from_millis(100)) {
+                break record.unwrap();
+            }
+        };
+        assert_eq!(record.key(), Some(&b"retained"[..]));
+        assert_eq!(record.payload(), None);
+        let headers = record.headers().unwrap();
+        assert_eq!(headers.count(), 3);
+        assert_eq!(headers.get(0).value, None);
+        assert_eq!(headers.get(1).value, Some(&b""[..]));
+        assert_eq!(headers.get(2).value, Some(&b"h"[..]));
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    #[test]
+    fn delivery_receipt_native_parked_cancel_resumes_once_on_both_runtime_modes() {
+        for multithread in [false, true] {
+            native_delivery_receipt_cancel_resume(multithread);
+        }
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    #[test]
+    fn delivery_receipt_native_broker_failure_is_retained_after_wait_cancel() {
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let topic = "retained-delivery-failure";
+        cluster.create_topic(topic, 1, 1).unwrap();
+        cluster.request_errors(
+            RDKafkaApiKey::Produce,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED],
+        );
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        runtime.block_on_with_cx(cx.clone(), async {
+            let mut producer_config = ProducerConfig::new(vec![cluster.bootstrap_servers()])
+                .with_property("message.timeout.ms", "10000");
+            producer_config.request_timeout = Duration::from_secs(5);
+            let producer = KafkaProducer::new(producer_config).unwrap();
+            let delivery = producer.enqueue(&cx, topic, None, b"denied", Some(0)).unwrap();
+            let report =
+                crate::time::timeout(cx.now(), Duration::from_secs(15), delivery.wait(&cx))
+                    .await
+                    .unwrap();
+            let Outcome::Err(error) = report else {
+                panic!("the injected broker refusal must be retained: {report:?}");
+            };
+            assert!(matches!(
+                error,
+                KafkaError::Authentication(message) if message.contains("TopicAuthorizationFailed")
+            ));
+            let cancelled = Cx::for_testing();
+            cancelled.cancel_with(crate::types::CancelKind::User, Some("report already available"));
+            let clone = delivery.clone();
+            let Outcome::Err(repeated) = clone.wait(&cancelled).await else {
+                panic!("wait cancellation must not overwrite the broker refusal");
+            };
+            assert!(std::ptr::eq(error, repeated));
+            assert!(!repeated.is_retryable());
+            producer.close(&cx, Duration::from_secs(5)).await.unwrap();
+            assert_eq!(producer.producer.in_flight_count(), 0);
+        });
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn nullable_model_sends_preserve_nulls_through_commit_and_discard_aborts() {

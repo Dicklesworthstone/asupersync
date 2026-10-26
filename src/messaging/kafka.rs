@@ -25,11 +25,12 @@
 //! - Cancellation waits for pending acks (with bounded timeout)
 //! - Uncommitted transactions abort on cancellation
 
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::messaging::kafka_consumer::{
     ConsumerGroupMetadata, PreparedTransactionOffsets, TopicPartitionOffset,
 };
 use crate::sync::Notify;
+use crate::types::{CancelReason, Outcome};
 use parking_lot::Mutex;
 #[cfg(feature = "kafka")]
 use rdkafka::producer::Producer;
@@ -37,7 +38,6 @@ use rdkafka::producer::Producer;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
-#[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -52,13 +52,12 @@ use rdkafka::{
     message::{BorrowedMessage, DeliveryResult, Header, Message, OwnedHeaders},
     producer::{BaseRecord, ProducerContext, ThreadedProducer},
 };
-#[cfg(feature = "kafka")]
 use std::future::Future;
-#[cfg(feature = "kafka")]
 use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(feature = "kafka")]
-use std::task::{Context, Poll, Waker};
+use std::task::Context;
+use std::task::{Poll, Waker};
 
 /// Error type for Kafka operations.
 #[derive(Debug)]
@@ -299,15 +298,27 @@ impl DeliveryState {
 
 #[cfg(feature = "kafka")]
 #[derive(Debug)]
-struct DeliverySender {
-    inner: Arc<Mutex<DeliveryState>>,
+enum DeliverySender {
+    Legacy(Arc<Mutex<DeliveryState>>),
+    Retained(Arc<KafkaDeliveryState>),
 }
 
 #[cfg(feature = "kafka")]
 impl Drop for DeliverySender {
     fn drop(&mut self) {
+        let Self::Legacy(inner) = self else {
+            if let Self::Retained(inner) = self
+                && inner.result.get().is_none()
+            {
+                inner.complete(Err(KafkaError::Protocol(
+                    "producer ended without a delivery report; delivery outcome is unknown"
+                        .to_string(),
+                )));
+            }
+            return;
+        };
         let waker = {
-            let mut state = self.inner.lock();
+            let mut state = inner.lock();
             if state.closed || state.value.is_some() {
                 return;
             }
@@ -324,8 +335,14 @@ impl Drop for DeliverySender {
 #[cfg(feature = "kafka")]
 impl DeliverySender {
     fn complete(self, value: Result<RecordMetadata, KafkaError>) {
+        let Self::Legacy(inner) = &self else {
+            if let Self::Retained(inner) = &self {
+                inner.complete(value);
+            }
+            return;
+        };
         let waker = {
-            let mut state = self.inner.lock();
+            let mut state = inner.lock();
             if state.closed || state.value.is_some() {
                 return;
             }
@@ -397,9 +414,7 @@ impl Future for DeliveryReceiver {
 fn delivery_channel(cx: &Cx) -> (DeliverySender, DeliveryReceiver) {
     let inner = Arc::new(Mutex::new(DeliveryState::new()));
     (
-        DeliverySender {
-            inner: Arc::clone(&inner),
-        },
+        DeliverySender::Legacy(Arc::clone(&inner)),
         DeliveryReceiver {
             inner,
             cx: cx.clone(),
@@ -703,33 +718,49 @@ async fn send_with_producer(
 
     let receiver = retry_immediate_send(cx, config, || {
         let (sender, receiver) = delivery_channel(cx);
-
-        let mut record = BaseRecord::with_opaque_to(request.topic, Box::new(sender));
-        if let Some(payload) = request.payload {
-            record = record.payload(payload);
-        }
-        if let Some(key) = request.key {
-            record = record.key(key);
-        }
-        if let Some(partition) = request.partition {
-            record = record.partition(partition);
-        }
-        if !matches!(request.headers, SendHeaders::None) {
-            let mut owned_headers = OwnedHeaders::new();
-            for (key, value) in request.headers.iter() {
-                owned_headers = owned_headers.insert(Header { key, value });
-            }
-            record = record.headers(owned_headers);
-        }
-
-        match producer.send(record) {
-            Ok(()) => Ok(receiver),
-            Err((err, _)) => Err(map_rdkafka_error(&err, None)),
-        }
+        enqueue_record(producer, cx, &request, sender)?;
+        Ok(receiver)
     })
     .await?;
 
     receiver.await
+}
+
+/// One native admission attempt shared by the legacy send and retained-receipt
+/// paths. On success librdkafka owns copies of the key and payload, the headers,
+/// and the delivery sender; there is no await after admission.
+#[cfg(feature = "kafka")]
+fn enqueue_record(
+    producer: &ThreadedProducer<KafkaContext>,
+    cx: &Cx,
+    request: &SendRequest<'_>,
+    sender: DeliverySender,
+) -> Result<(), KafkaError> {
+    let mut record = BaseRecord::with_opaque_to(request.topic, Box::new(sender));
+    if let Some(payload) = request.payload {
+        record = record.payload(payload);
+    }
+    if let Some(key) = request.key {
+        record = record.key(key);
+    }
+    if let Some(partition) = request.partition {
+        record = record.partition(partition);
+    }
+    if !matches!(request.headers, SendHeaders::None) {
+        let mut owned_headers = OwnedHeaders::new();
+        for (key, value) in request.headers.iter() {
+            owned_headers = owned_headers.insert(Header { key, value });
+        }
+        record = record.headers(owned_headers);
+    }
+
+    // Cancellation can arrive while allocating headers. Check at the final
+    // admission boundary, then publish a successful receipt without another
+    // checkpoint that could hide the accepted record.
+    cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+    producer
+        .send(record)
+        .map_err(|(err, _)| map_rdkafka_error(&err, None))
 }
 
 #[cfg(any(feature = "kafka", test))]
@@ -1785,6 +1816,157 @@ pub struct RecordMetadata {
     pub timestamp: Option<i64>,
 }
 
+/// Retained delivery report for one record accepted by a [`KafkaProducer`].
+///
+/// Obtain this handle with [`KafkaProducer::enqueue`] or its header/nullable
+/// variants. Admission happens exactly once, before the handle is returned.
+/// [`Self::wait`] may be cancelled, timed out, or dropped and then retried on
+/// this same handle without sending the record again. Clones observe the same
+/// report, including the original non-cloneable [`KafkaError`] and its source.
+///
+/// A cancelled wait says nothing about whether Kafka accepted the record. Keep
+/// the handle and wait again to learn the eventual outcome. A successful report
+/// has the guarantees of the producer's configured acknowledgements; it does
+/// not add transactional or exactly-once guarantees to that configuration.
+///
+/// The producer continues to own the native delivery work. Keep it alive and
+/// use [`KafkaProducer::close`] or [`KafkaProducer::flush`] to drain admitted
+/// records. Dropping all receipt handles abandons observation, not delivery.
+/// This handle creates no task or thread and does not keep the producer alive.
+#[derive(Debug, Clone)]
+#[must_use = "keep the delivery handle to observe the admitted record's outcome"]
+pub struct KafkaDelivery {
+    inner: Arc<KafkaDeliveryState>,
+}
+
+#[derive(Debug)]
+struct KafkaDeliveryState {
+    result: OnceLock<Result<RecordMetadata, KafkaError>>,
+    ready: Notify,
+}
+
+impl KafkaDeliveryState {
+    #[cfg(any(feature = "kafka", test, feature = "test-internals"))]
+    fn complete(&self, result: Result<RecordMetadata, KafkaError>) {
+        // Store before broadcasting. OnceLock keeps the exact report stable
+        // for all observers, without cloning an I/O error or erasing its source.
+        // Waker callbacks run only after publication has released its lock.
+        if self.result.set(result).is_ok() {
+            self.ready.notify_waiters();
+        }
+    }
+}
+
+/// A wait owns its cancellation registration independently of the receipt and
+/// of any other wait on a clone. Dropping a wait retires only its own token.
+struct KafkaDeliveryCancelGuard<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
+
+impl KafkaDeliveryCancelGuard<'_> {
+    fn refresh(&mut self, waker: &Waker) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    }
+}
+
+impl Drop for KafkaDeliveryCancelGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
+impl KafkaDelivery {
+    #[cfg(any(feature = "kafka", test, feature = "test-internals"))]
+    fn pending() -> Self {
+        Self {
+            inner: Arc::new(KafkaDeliveryState {
+                result: OnceLock::new(),
+                ready: Notify::new(),
+            }),
+        }
+    }
+
+    /// Whether the producer has published a terminal delivery report.
+    ///
+    /// This remains `true` after any observer reads the report.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.inner.result.get().is_some()
+    }
+
+    /// Observe the terminal delivery report without consuming it.
+    ///
+    /// `None` means the delivery outcome is still unknown. `Some(Err(_))` is
+    /// the producer's delivery failure, not cancellation of an earlier wait.
+    #[must_use]
+    pub fn result(&self) -> Option<Result<&RecordMetadata, &KafkaError>> {
+        self.inner.result.get().map(Result::as_ref)
+    }
+
+    /// Wait for this record's delivery report under the caller's context.
+    ///
+    /// `Outcome::Ok` and `Outcome::Err` borrow the retained producer report.
+    /// `Outcome::Cancelled` means only that this wait stopped; the report and
+    /// the admitted record are unaffected. A report already available when
+    /// cancellation is observed wins, so completed delivery is never hidden.
+    /// Waiting again, including through a clone, returns that same report.
+    ///
+    /// The explicit context supplies both cancellation and the deadline clock.
+    /// The wait may be dropped safely by a timeout or selection combinator.
+    pub async fn wait(&self, cx: &Cx) -> Outcome<&RecordMetadata, &KafkaError> {
+        let mut cancel = KafkaDeliveryCancelGuard { cx, token: None };
+        let clock = cx.timer_driver();
+        let mut deadline_timer = cx.budget().deadline.map(|deadline| match &clock {
+            Some(clock) => crate::time::Sleep::with_timer_driver(deadline, clock.clone()),
+            None => {
+                let _ambient = Cx::set_current(None);
+                crate::time::Sleep::new(deadline)
+            }
+        });
+        let mut notified = std::pin::pin!(self.inner.ready.notified());
+        notified.as_mut().enable();
+
+        std::future::poll_fn(|task| {
+            // Registration may clone or retire a caller-provided Waker. Check
+            // cancellation only after it, and never under a receipt lock.
+            cancel.refresh(task.waker());
+            if let Some(result) = self.result() {
+                return Poll::Ready(result.into());
+            }
+            if let Some(timer) = &mut deadline_timer {
+                // Sleep without an explicit driver otherwise adopts the
+                // polling task's ambient clock. A foreign context must not
+                // change the deadline's time domain or cancel this wait.
+                let _ambient = clock.is_none().then(|| Cx::set_current(None));
+                if Pin::new(timer).poll_deadline(task).is_ready() {
+                    // The checkpoint records the deadline reason. If masked,
+                    // keep waiting for the report without a ready-timer loop.
+                    deadline_timer = None;
+                }
+            }
+            if cx.checkpoint().is_err() {
+                // A report published while registering or checking the
+                // deadline still takes precedence over wait cancellation.
+                return Poll::Ready(self.result().map_or_else(
+                    || {
+                        Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| {
+                            CancelReason::user("Kafka delivery wait cancelled")
+                        }))
+                    },
+                    Outcome::from,
+                ));
+            }
+            let _ = notified.as_mut().poll(task);
+            self.result()
+                .map_or(Poll::Pending, |result| Poll::Ready(result.into()))
+        })
+        .await
+    }
+}
+
 /// Tracks whether the producer is truly idle or still finalizing a broker-side
 /// transaction outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1850,6 +2032,164 @@ impl KafkaProducer {
             #[cfg(feature = "kafka")]
             producer,
         })
+    }
+
+    /// Admit one record and return a retained delivery handle immediately.
+    ///
+    /// This makes one nonblocking native enqueue attempt. An error, including
+    /// [`KafkaError::QueueFull`] or cancellation observed before admission,
+    /// means this call did not enqueue a record. A successful return transfers
+    /// observation of the admitted record to [`KafkaDelivery`], before any
+    /// asynchronous wait can be cancelled. Call [`KafkaDelivery::wait`] as many
+    /// times as needed; those waits never enqueue another record.
+    ///
+    /// Unlike [`Self::send`], queue-full errors are not retried by this method.
+    /// The caller may retry admission after an error, or await an existing
+    /// delivery handle after success. The producer still applies its configured
+    /// broker delivery retries to each admitted record.
+    pub fn enqueue(
+        &self,
+        cx: &Cx,
+        topic: &str,
+        key: Option<&[u8]>,
+        payload: &[u8],
+        partition: Option<i32>,
+    ) -> Result<KafkaDelivery, KafkaError> {
+        self.enqueue_nullable(cx, topic, key, Some(payload), partition)
+    }
+
+    /// Admit a record with headers and retain its delivery report.
+    ///
+    /// Admission, cancellation, and retry behavior match [`Self::enqueue`].
+    pub fn enqueue_with_headers(
+        &self,
+        cx: &Cx,
+        topic: &str,
+        key: Option<&[u8]>,
+        payload: &[u8],
+        headers: &[(&str, &[u8])],
+    ) -> Result<KafkaDelivery, KafkaError> {
+        self.enqueue_request(
+            cx,
+            SendRequest {
+                topic,
+                key,
+                payload: Some(payload),
+                partition: None,
+                headers: SendHeaders::Bytes(headers),
+            },
+        )
+    }
+
+    /// Admit a nullable payload and retain its delivery report.
+    ///
+    /// `None` sends a tombstone and `Some(&[])` sends an empty value, just as
+    /// with [`Self::send_nullable`]. Other semantics match [`Self::enqueue`].
+    pub fn enqueue_nullable(
+        &self,
+        cx: &Cx,
+        topic: &str,
+        key: Option<&[u8]>,
+        payload: Option<&[u8]>,
+        partition: Option<i32>,
+    ) -> Result<KafkaDelivery, KafkaError> {
+        self.enqueue_request(
+            cx,
+            SendRequest {
+                topic,
+                key,
+                payload,
+                partition,
+                headers: SendHeaders::None,
+            },
+        )
+    }
+
+    /// Admit a nullable payload with ordered, nullable headers and retain its
+    /// delivery report. Duplicate header names and null/empty distinctions are
+    /// preserved, as with [`Self::send_nullable_with_headers`]. Admission and
+    /// retry behavior match [`Self::enqueue`].
+    pub fn enqueue_nullable_with_headers(
+        &self,
+        cx: &Cx,
+        topic: &str,
+        key: Option<&[u8]>,
+        payload: Option<&[u8]>,
+        headers: &[(&str, Option<&[u8]>)],
+        partition: Option<i32>,
+    ) -> Result<KafkaDelivery, KafkaError> {
+        self.enqueue_request(
+            cx,
+            SendRequest {
+                topic,
+                key,
+                payload,
+                partition,
+                headers: SendHeaders::Nullable(headers),
+            },
+        )
+    }
+
+    fn enqueue_request(
+        &self,
+        cx: &Cx,
+        request: SendRequest<'_>,
+    ) -> Result<KafkaDelivery, KafkaError> {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        validate_topic(request.topic)?;
+        let payload_size = request.payload.map_or(0, <[u8]>::len);
+        if payload_size > self.config.max_message_size {
+            return Err(KafkaError::MessageTooLarge {
+                size: payload_size,
+                max_size: self.config.max_message_size,
+            });
+        }
+
+        // close() cannot observe a false idle between its admission fence and
+        // the native queue owning the record. Once enqueued, in_flight_count
+        // accounts for it even when no observer is currently waiting.
+        let _operation = self.begin_operation()?;
+        #[cfg(feature = "kafka")]
+        {
+            let delivery = KafkaDelivery::pending();
+            enqueue_record(
+                &self.producer,
+                cx,
+                &request,
+                DeliverySender::Retained(Arc::clone(&delivery.inner)),
+            )?;
+            Ok(delivery)
+        }
+        #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
+        {
+            if !self.config.deterministic_broker_allowed_for_testing() {
+                return Err(KafkaError::FeatureDisabled);
+            }
+            let record = DeterministicBrokerRecord {
+                topic: request.topic.to_string(),
+                partition: request.partition.unwrap_or(0),
+                key: request.key.map(std::borrow::ToOwned::to_owned),
+                payload: request.payload.map(std::borrow::ToOwned::to_owned),
+                timestamp: None,
+                headers: request
+                    .headers
+                    .iter()
+                    .map(|(key, value)| {
+                        (key.to_owned(), value.map(std::borrow::ToOwned::to_owned))
+                    })
+                    .collect(),
+            };
+            let delivery = KafkaDelivery::pending();
+            cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+            delivery
+                .inner
+                .complete(Ok(deterministic_broker_publish(record)));
+            Ok(delivery)
+        }
+        #[cfg(all(not(feature = "kafka"), not(any(test, feature = "test-internals"))))]
+        {
+            Err(KafkaError::FeatureDisabled)
+        }
     }
 
     /// Send a message to a topic.
