@@ -58,6 +58,63 @@
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deferred_initial_headers_gate_body_and_wake_the_waiting_driver() {
+        let cx = Cx::for_testing();
+        let (mut sender, mut body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);
+        body.defer_initial_headers(&mut sender);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(body.poll_initial_headers(&mut task_cx).is_pending());
+        assert!(sender.initial_headers_pending());
+        assert!(matches!(block_on(sender.send_chunk(&cx, b"early")), Err(HttpError::BodyChannelClosed)));
+        assert!(matches!(block_on(sender.send_trailers(&cx, HeaderMap::new())), Err(HttpError::BodyChannelClosed)));
+        assert!(matches!(sender.finish(&cx), Err(HttpError::BodyChannelClosed)));
+        assert_eq!(sender.total_bytes(), 0);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HeaderName::from_static("x-initial"), HeaderValue::from_static("ready"));
+        sender.send_initial_headers(headers).expect("publish initial headers");
+        assert!(wakes.load(Ordering::SeqCst) > 0, "publication wakes a genuinely parked driver");
+        assert!(!sender.initial_headers_pending());
+        assert!(matches!(sender.send_initial_headers(HeaderMap::new()), Err(HttpError::BodyChannelClosed)));
+        let Poll::Ready(Ok(headers)) = body.poll_initial_headers(&mut task_cx) else {
+            panic!("committed initial headers must be readable");
+        };
+        assert_eq!(headers.get(&HeaderName::from_static("x-initial")).unwrap().to_str().unwrap(), "ready");
+        block_on(sender.send_chunk(&cx, b"body")).expect("body after headers");
+        sender.finish(&cx).expect("finish after headers");
+        assert_eq!(poll_body(&mut body).unwrap().unwrap().into_data().unwrap().chunk(), b"body");
+        assert!(poll_body(&mut body).is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deferred_initial_headers_preserve_publication_and_report_abandoned_setup() {
+        for publish in [false, true] {
+            let cx = Cx::for_testing();
+            let (mut sender, mut body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);
+            body.defer_initial_headers(&mut sender);
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(Arc::clone(&wakes));
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(body.poll_initial_headers(&mut task_cx).is_pending());
+            if publish {
+                sender.send_initial_headers(HeaderMap::new()).expect("publish empty initial block");
+            }
+            cx.cancel_with(CancelKind::User, Some("cancel after setup"));
+            drop(sender);
+            assert!(wakes.load(Ordering::SeqCst) > 0);
+            match body.poll_initial_headers(&mut task_cx) {
+                Poll::Ready(Ok(headers)) => assert!(publish && headers.is_empty()),
+                Poll::Ready(Err(HttpError::BodyChannelClosed)) => assert!(!publish),
+                other => panic!("unexpected setup outcome: {other:?}"),
+            }
+        }
+    }
+
     #[cfg(all(
         not(target_arch = "wasm32"),
         any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))

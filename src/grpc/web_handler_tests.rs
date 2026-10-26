@@ -475,6 +475,10 @@ fn zero_native_deadline_prevents_service_invocation() {
 #[derive(Clone, Copy)]
 enum WebStreamMode {
     Values,
+    InitialMetadata,
+    UndeferredInitialMetadata,
+    ReservedInitialMetadata,
+    OversizedInitialMetadata,
     Error,
     Never,
     Infinite,
@@ -530,6 +534,16 @@ impl ServiceHandler for WebWatch {
         vec!["Values"]
     }
 
+    fn defer_response_headers(&self, path: &str) -> bool {
+        path == "/web.Watch/Values"
+            && matches!(
+                self.mode,
+                WebStreamMode::InitialMetadata
+                    | WebStreamMode::ReservedInitialMetadata
+                    | WebStreamMode::OversizedInitialMetadata
+            )
+    }
+
     fn call_unary<'a>(
         &'a self,
         _cx: &'a Cx,
@@ -565,7 +579,23 @@ impl ServiceHandler for WebWatch {
             let mut trailers = Metadata::new();
             assert!(trailers.insert("x-end", "done"));
             assert!(trailers.insert_bin("x-proof-bin", Bytes::from(vec![1, 2])));
-            Ok(RegisteredServerStream::new(stream).with_trailers(trailers))
+            let mut initial = Metadata::new();
+            if matches!(
+                stream.mode,
+                WebStreamMode::InitialMetadata | WebStreamMode::UndeferredInitialMetadata
+            ) {
+                assert!(initial.insert("x-start", "first"));
+                assert!(initial.insert("x-start", "second"));
+                assert!(initial.insert_bin("x-start-bin", Bytes::from_static(b"\x00\xff")));
+            } else if matches!(stream.mode, WebStreamMode::ReservedInitialMetadata) {
+                assert!(initial.insert("x-start", "must not escape"));
+                assert!(initial.insert("content-length", "1234"));
+            } else if matches!(stream.mode, WebStreamMode::OversizedInitialMetadata) {
+                assert!(initial.insert_bin("x-start-bin", Bytes::from(vec![0; 6144])));
+            }
+            Ok(RegisteredServerStream::new(stream)
+                .with_initial_metadata(initial)
+                .with_trailers(trailers))
         })
     }
 }
@@ -684,6 +714,7 @@ impl Drop for WebStopOnDrop {
 struct WebStreamPeer {
     socket: Option<BufReader<TcpStream>>,
     mode: ContentType,
+    initial: Vec<(String, String)>,
     binary: Vec<u8>,
     quartet: Vec<u8>,
     padded_quartets: usize,
@@ -715,6 +746,7 @@ impl WebStreamPeer {
         let mut peer = Self {
             socket: Some(BufReader::new(socket)),
             mode,
+            initial: Vec::new(),
             binary: Vec::new(),
             quartet: Vec::new(),
             padded_quartets: 0,
@@ -729,6 +761,7 @@ impl WebStreamPeer {
                 break;
             }
             let (key, value) = line.trim_end_matches("\r\n").split_once(':').unwrap();
+            peer.initial.push((key.to_ascii_lowercase(), value.trim().to_owned()));
             if key.eq_ignore_ascii_case("content-type") {
                 content_type = Some(value.trim().to_owned());
             }
@@ -913,6 +946,60 @@ fn native_web_stream_delivers_before_source_eof_in_binary_and_padded_text() {
                 }
             },
         );
+    }
+}
+
+#[test]
+fn native_web_stream_initial_metadata_is_in_the_head_for_binary_and_text() {
+    for content_type in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+        web_native_case(
+            WebStreamMode::InitialMetadata,
+            content_type,
+            GrpcWebConfig::default(),
+            None,
+            |peer, parks, retired, probe| {
+                let values: Vec<_> = peer.initial.iter()
+                    .filter(|(key, _)| key == "x-start")
+                    .map(|(_, value)| value.as_str())
+                    .collect();
+                assert_eq!(values, ["first", "second"]);
+                assert!(peer.initial.iter().any(|(key, value)| key == "x-start-bin" && value == "AP8"));
+                assert!(peer.initial.iter().all(|(key, _)| key != "x-end"));
+                assert_eq!(peer.frame(), (0, b"first".to_vec()));
+                parks.recv_timeout(Duration::from_secs(2)).expect("source parked after first message");
+                probe.release();
+                assert_eq!(peer.frame(), (0, b"second".to_vec()));
+                let trailers = peer.terminal("0");
+                assert!(!trailers.contains("x-start"));
+                assert!(trailers.contains("x-end: done\r\n"));
+                retired.recv_timeout(Duration::from_secs(2)).expect("source retired");
+            },
+        );
+    }
+}
+
+#[test]
+fn native_web_stream_rejects_initial_metadata_before_source_polling() {
+    for content_type in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+        for (mode, status) in [
+            (WebStreamMode::UndeferredInitialMetadata, "13"),
+            (WebStreamMode::ReservedInitialMetadata, "13"),
+            (WebStreamMode::OversizedInitialMetadata, "8"),
+        ] {
+            web_native_case(
+                mode,
+                content_type,
+                GrpcWebConfig::default(),
+                None,
+                move |peer, _, retired, probe| {
+                    assert!(peer.initial.iter().all(|(key, _)| !key.starts_with("x-start")));
+                    peer.terminal(status);
+                    retired.recv_timeout(Duration::from_secs(2)).expect("unpolled source retired");
+                    assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                    assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+                },
+            );
+        }
     }
 }
 
