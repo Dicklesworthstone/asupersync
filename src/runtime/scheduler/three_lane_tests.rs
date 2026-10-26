@@ -6797,6 +6797,143 @@ fn mailbox_spawn_observer_reenters_after_publication_and_panic_is_contained() {
     assert_eq!(runtime.task_spawn_observer_panic_count(), 1);
 }
 
+fn local_owner_retirement_before_first_poll_case(sharded: bool, prior: Option<CancelReason>) {
+    use crate::runtime::local::{ScopedLocalStoreKey, retire_local_store};
+    use crate::runtime::spawn_mailbox::{
+        LocalTaskRetirement, ScopedLocalSpawnLaneOwner, SpawnGateway, SpawnMailbox,
+    };
+    use crate::runtime::task_handle::JoinError;
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let (region, pending) = {
+        let mut runtime = state.lock().unwrap();
+        let region = runtime.create_root_region(Budget::INFINITE);
+        let pending = runtime.region(region).unwrap().pending_spawn_handle();
+        (region, pending)
+    };
+    let shards = sharded.then(|| {
+        let mut runtime = state.lock().unwrap();
+        let shards = Arc::new(crate::runtime::ShardedState::new(
+            runtime.trace_handle(),
+            runtime.metrics_provider(),
+            runtime.sharded_construction_config(),
+        ));
+        runtime.install_shard_tables(Arc::clone(&shards));
+        shards
+    });
+    let mut scheduler = match &shards {
+        Some(shards) => ThreeLaneScheduler::new_with_sharded_state(
+            1,
+            &state,
+            shards,
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            false,
+            32,
+        ),
+        None => ThreeLaneScheduler::new(1, &state),
+    };
+    let validator = Arc::clone(state.lock().unwrap().cancel_protocol_validator());
+    let mailbox = Arc::new(SpawnMailbox::new());
+    scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+    let alive = Arc::new(());
+    let gateway = Arc::new(SpawnGateway::new(
+        Arc::clone(&mailbox),
+        scheduler.spawn_enqueued_notifier(),
+        None,
+        Arc::downgrade(&alive),
+    ));
+    state.lock().unwrap().set_spawn_gateway(Arc::clone(&gateway));
+    let producer: crate::cx::Cx =
+        crate::cx::Cx::new(region, TaskId::new_for_test(90, 0), Budget::INFINITE)
+            .with_spawn_gateway(Some(Arc::clone(&gateway)))
+            .with_pending_spawn_counter(Some(pending));
+    let mut worker = scheduler.take_workers().remove(0);
+    let _worker = ScopedWorkerId::new(worker.id);
+    let _lane = ScopedLocalSpawnLaneOwner::new(Arc::clone(&mailbox));
+    let key = worker.local_store_key();
+    let _store = ScopedLocalStoreKey::new(key);
+    let factory_called = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = std::rc::Rc::clone(&factory_called);
+    let mut handle = producer
+        .spawn_local(move |_| {
+            observed.set(true);
+            async {}
+        })
+        .expect("real local spawn owns its retirement barrier");
+    assert_eq!(worker.drain_local_spawn_admissions(), 1);
+    let task_id = handle.task_id();
+    assert!(worker.with_task_table_ref(|table| table.task(task_id).unwrap().is_local));
+    assert!(!factory_called.get(), "admission does not invoke the factory");
+    assert_eq!(
+        validator.lock().task_state(task_id),
+        Some(crate::cancel::protocol_state_machines::TaskState::Running),
+        "tracking must observe a fresh admitted task before owner exit"
+    );
+
+    if let Some(reason) = prior.as_ref() {
+        handle.abort_with_reason(reason.clone());
+        worker.drain_handle_cancel_requests();
+    }
+    retire_local_store(key);
+    assert_eq!(std::rc::Rc::strong_count(&factory_called), 1);
+    assert_eq!(handle.try_join(), Ok(None), "record retirement still gates join");
+    assert_eq!(worker.drain_local_task_retirements(), 1);
+    assert_eq!(
+        handle.try_join(),
+        Err(JoinError::Cancelled(prior.unwrap_or_else(CancelReason::shutdown)))
+    );
+    assert!(worker.with_task_table_ref(|table| table.task(task_id).is_none()));
+    assert!(!factory_called.get());
+    assert_eq!(validator.lock().task_state(task_id), None);
+    assert_eq!(
+        validator.lock().violation_count(),
+        0,
+        "sharded={sharded}: fresh abandonment must record RequestCancel before DrainComplete"
+    );
+    assert!(mailbox.is_empty());
+
+    if sharded {
+        return;
+    }
+
+    let (replacement, _replacement_handle) = state
+        .lock()
+        .unwrap()
+        .create_task(region, Budget::INFINITE, std::future::pending::<()>())
+        .expect("mint a replacement Send task after recycling");
+    assert_ne!(replacement, task_id, "canonical generations are never reused");
+    for id in [task_id, replacement] {
+        gateway.enqueue_local_task_retirement(LocalTaskRetirement {
+            task_id: id,
+            panic: Some(crate::types::PanicPayload::new("stale retirement")),
+        });
+    }
+    assert_eq!(worker.drain_local_task_retirements(), 2);
+    let runtime = state.lock().unwrap();
+    let replacement = runtime.task(replacement).expect("replacement must remain live");
+    assert!(!replacement.is_local);
+    assert!(!replacement.state.is_terminal());
+    assert!(mailbox.is_empty());
+}
+
+#[test]
+fn local_owner_retirement_before_first_poll_preserves_reason_and_rejects_stale_ids() {
+    local_owner_retirement_before_first_poll_case(
+        false,
+        Some(CancelReason::shutdown().with_message("owner already closing")),
+    );
+}
+
+#[test]
+fn fresh_local_owner_exit_materializes_cancellation_before_unified_retirement() {
+    local_owner_retirement_before_first_poll_case(false, None);
+}
+
+#[test]
+fn fresh_local_owner_exit_materializes_cancellation_before_sharded_retirement() {
+    local_owner_retirement_before_first_poll_case(true, None);
+}
+
 #[test]
 fn local_spawn_observer_reenters_after_publication_and_panic_is_contained() {
     use crate::runtime::state::spawn_observer_test_support::PanickingSpawnMetrics;

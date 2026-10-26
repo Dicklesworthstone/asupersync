@@ -1158,6 +1158,68 @@
         }
     }
 
+    #[test]
+    fn destroyed_local_future_failure_survives_on_every_join_surface() {
+        for error in [
+            JoinError::Cancelled(CancelReason::shutdown()),
+            JoinError::Panicked(PanicPayload::new("local owner destructor")),
+        ] {
+            for surface in 0..3 {
+                let cx = test_cx();
+                let (tx, rx) = task_result_channel::<i32>();
+                let barrier = RetirementBarrier::pending();
+                let mut handle = handle_with_barrier(
+                    TaskId::from_arena(ArenaIndex::new(42, 9)),
+                    rx,
+                    Weak::new(),
+                    std::sync::Arc::clone(&barrier),
+                );
+                // The task's Cx and typed result producer are already gone.
+                drop(tx);
+                barrier.publish_closed_error(error.clone());
+                assert_eq!(handle.try_join(), Ok(None));
+                let mut poll_cx = Context::from_waker(Waker::noop());
+                assert!(handle.poll_join(&mut poll_cx).is_pending());
+                assert!(
+                    std::pin::pin!(handle.join(&cx))
+                        .as_mut()
+                        .poll(&mut poll_cx)
+                        .is_pending()
+                );
+                barrier.open_and_wake();
+                let result = match surface {
+                    0 => handle.try_join().map(|value| value.expect("terminal result")),
+                    1 => match handle.poll_join(&mut poll_cx) {
+                        Poll::Ready(result) => result,
+                        Poll::Pending => panic!("retired local task must resolve poll_join"),
+                    },
+                    _ => match std::pin::pin!(handle.join(&cx)).as_mut().poll(&mut poll_cx) {
+                        Poll::Ready(result) => result,
+                        Poll::Pending => panic!("retired local task must resolve join"),
+                    },
+                };
+                assert_eq!(result, Err(error.clone()), "join surface {surface}");
+                assert_eq!(handle.try_join(), Err(JoinError::PolledAfterCompletion));
+            }
+        }
+    }
+
+    #[test]
+    fn closed_channel_fallback_does_not_replace_a_published_result() {
+        let (tx, rx) = task_result_channel::<i32>();
+        let barrier = RetirementBarrier::pending();
+        let mut handle = handle_with_barrier(
+            TaskId::from_arena(ArenaIndex::new(42, 10)),
+            rx,
+            Weak::new(),
+            std::sync::Arc::clone(&barrier),
+        );
+        publish_terminal_result(tx, Ok(42));
+        barrier.publish_closed_error(JoinError::Panicked(PanicPayload::new("fallback only")));
+        barrier.open_and_wake();
+        assert_eq!(handle.try_join(), Ok(Some(42)));
+    }
+
     // br-asupersync-yhueis: a terminal result published before the scheduler
     // retires the record must stay gated behind the retirement barrier, so a
     // consumer cannot surface completion (and a joined owner cannot close its

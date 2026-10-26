@@ -5278,6 +5278,13 @@ enum PolledCompletion {
     /// checkpoint-cancel acknowledgement is deliberately not consulted — a
     /// panic wins over cancellation reconciliation.
     Panicked(crate::types::Outcome<(), crate::error::Error>),
+    /// The owner thread destroyed a parked !Send future. No cancellation
+    /// checkpoint is fabricated; terminal record completion strengthens any
+    /// existing cancellation, and a destructor panic takes precedence.
+    AbandonedLocal {
+        panic: Option<crate::types::PanicPayload>,
+        barrier: Option<Arc<crate::runtime::task_handle::RetirementBarrier>>,
+    },
 }
 
 /// Owned effects a polled-task ordered completion hands back for post-lock
@@ -7564,6 +7571,76 @@ impl ThreeLaneWorker {
         count
     }
 
+    /// Retires local futures already destroyed on their owner thread. This
+    /// lane is separate from region commands because ordered task completion
+    /// must acquire its own task/state locks and dispatch all effects after
+    /// releasing them. One command per pop preserves the rest if completion
+    /// unwinds under the configured obligation-leak policy.
+    fn drain_local_task_retirements(&self) -> usize {
+        const LOCAL_RETIREMENT_BATCH: usize = 8;
+
+        let Some(mailbox) = self.spawn_mailbox.as_ref() else {
+            return 0;
+        };
+        if mailbox.local_task_retirements_are_empty() {
+            return 0;
+        }
+        let mut count = 0;
+        while count < LOCAL_RETIREMENT_BATCH {
+            let Some(retirement) = mailbox.dequeue_local_task_retirement() else {
+                break;
+            };
+            count += 1;
+            // TaskTable lookup checks the complete arena generation. A late
+            // or duplicate command must not retire a reused slot or Send task.
+            let Some(cx_inner) = self.with_task_table_ref(|table| {
+                table
+                    .task(retirement.task_id)
+                    .filter(|record| record.is_local)
+                    .map(|record| record.cx_inner.clone())
+            }) else {
+                continue;
+            };
+            // Cx reads belong outside both the state and external task locks.
+            let barrier = cx_inner.and_then(|inner| inner.read().retirement_barrier.clone());
+            let mut observers = crate::runtime::state::LifecycleObserverBatch::default();
+            let completed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.complete_polled_task_ordered(
+                    retirement.task_id,
+                    PolledCompletion::AbandonedLocal {
+                        panic: retirement.panic,
+                        barrier: barrier.clone(),
+                    },
+                    &mut observers,
+                )
+            }));
+            match completed {
+                Ok(effects) => effects.dispatch_post_lock(self),
+                Err(payload) => {
+                    // Match the poll execution guard: a leak-policy panic may
+                    // interrupt embedded-table completion after its terminal
+                    // transition. Resume retirement before propagating it.
+                    // The external path's own detach guard is idempotent here.
+                    if let Err(cleanup_panic) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.complete_task_after_unwind_ordered_with_closed_error(
+                                retirement.task_id,
+                                &mut observers,
+                                barrier.as_deref(),
+                            )
+                            .dispatch_post_lock(self);
+                        }))
+                    {
+                        std::mem::forget(cleanup_panic);
+                    }
+                    observers.dispatch();
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        }
+        count
+    }
+
     pub fn next_task(&mut self) -> Option<TaskId> {
         // PHASE -0.6: TaskHandle abort/JoinFuture Drop enqueue callback-free
         // commands. Apply their authoritative task-state transition here.
@@ -7594,6 +7671,7 @@ impl ThreeLaneWorker {
         // credit released by the denial path) before the close protocol
         // advances — otherwise the credit strands the region in Closing.
         self.drain_region_commands();
+        self.drain_local_task_retirements();
 
         // Admission publication can run a retained cancellation Waker after
         // making the new task visible. If that callback aborts another managed
@@ -8552,7 +8630,8 @@ impl ThreeLaneWorker {
         }
         let drained = self.drain_spawn_admissions()
             + self.drain_local_spawn_admissions()
-            + self.drain_region_commands();
+            + self.drain_region_commands()
+            + self.drain_local_task_retirements();
         drained > 0
     }
 
@@ -9562,6 +9641,40 @@ impl ThreeLaneWorker {
                     record.complete(outcome);
                 }
             }
+            PolledCompletion::AbandonedLocal { panic, barrier } => {
+                if !record.state.is_terminal() {
+                    let outcome = panic.map_or_else(
+                        || crate::types::Outcome::Cancelled(crate::types::CancelReason::shutdown()),
+                        crate::types::Outcome::Panicked,
+                    );
+                    record.complete(outcome);
+                }
+                // The typed sender died with the future. Publish the actual
+                // terminal classification, including a stronger prior reason,
+                // before the usual post-lock barrier opening can wake joins.
+                if let Some(barrier) = barrier {
+                    Self::publish_closed_record_error(record, &barrier);
+                }
+            }
+        }
+    }
+
+    fn publish_closed_record_error(
+        record: &crate::record::task::TaskRecord,
+        barrier: &crate::runtime::task_handle::RetirementBarrier,
+    ) {
+        match &record.state {
+            crate::record::task::TaskState::Completed(crate::types::Outcome::Cancelled(reason)) => {
+                barrier.publish_closed_error(crate::runtime::task_handle::JoinError::Cancelled(
+                    reason.clone(),
+                ));
+            }
+            crate::record::task::TaskState::Completed(crate::types::Outcome::Panicked(panic)) => {
+                barrier.publish_closed_error(crate::runtime::task_handle::JoinError::Panicked(
+                    panic.clone(),
+                ));
+            }
+            _ => {}
         }
     }
 
@@ -9621,6 +9734,10 @@ impl ThreeLaneWorker {
         completion: PolledCompletion,
         obligation_observers: &mut crate::runtime::state::LifecycleObserverBatch,
     ) -> PolledCompletionArtifacts {
+        let abandoned_cancel = matches!(
+            &completion,
+            PolledCompletion::AbandonedLocal { panic: None, .. }
+        );
         // Sample an injected clock before any task/state lock is acquired.
         let capture_time = self.schedule_capture.get().map(|_| self.capture_now());
         if self.task_table.is_some() {
@@ -9709,8 +9826,20 @@ impl ThreeLaneWorker {
             // wrong-table completion bug and shard/state lock nesting around
             // validator, region, and observer work.
             let (cancel_ack, cancel_wakes, detached_record) = self.with_task_table(|tt| {
+                // Destruction is a real shutdown request, not a checkpoint
+                // acknowledgement. External completion validates the request
+                // from the record's cancel_epoch after this shard unlocks.
+                let mut cancel_wakes = if abandoned_cancel {
+                    tt.update_task(task_id, |record| {
+                        record.request_cancel(crate::types::CancelReason::shutdown())
+                    })
+                    .map_or_else(Default::default, |effects| effects.into_parts().1)
+                } else {
+                    crate::types::task_context::CancelWakeEffects::default()
+                };
                 let effects = Self::consume_cancel_ack_from_table(tt, task_id);
-                let (cancel_ack, cancel_wakes) = effects.into_parts();
+                let (cancel_ack, checkpoint_wakes) = effects.into_parts();
+                cancel_wakes.merge(checkpoint_wakes);
                 let ack_materialized = cancel_ack.is_some();
                 let _ = tt.update_task(task_id, |record| {
                     Self::apply_polled_completion(record, completion, ack_materialized);
@@ -9790,8 +9919,21 @@ impl ThreeLaneWorker {
             state.revoke_obligation_admission_before_completion(task_id, None);
             let _ =
                 state.drain_obligation_posts_before_completion_deferred(None, obligation_observers);
-            let (cancel_ack, cancel_wakes) =
+            // Materialize RequestCancel through the ordinary runtime path so
+            // the tracked protocol never sees Running -> DrainComplete. The
+            // future is already gone, so retain the effects for post-lock
+            // dispatch without publishing another runnable task or fake ack.
+            let mut cancel_wakes = if abandoned_cancel {
+                state
+                    .cancel_task(task_id, &crate::types::CancelReason::shutdown())
+                    .into_parts()
+                    .1
+            } else {
+                crate::types::task_context::CancelWakeEffects::default()
+            };
+            let (cancel_ack, checkpoint_wakes) =
                 Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
+            cancel_wakes.merge(checkpoint_wakes);
             if let (Some(receipt), Some(now)) = (cancel_ack.as_ref(), capture_time) {
                 self.capture_cancel_ack(task_id, receipt, now);
             }
@@ -9837,6 +9979,21 @@ impl ThreeLaneWorker {
         task_id: TaskId,
         obligation_observers: &mut crate::runtime::state::LifecycleObserverBatch,
     ) -> UnwindCompletionArtifacts {
+        self.complete_task_after_unwind_ordered_with_closed_error(
+            task_id,
+            obligation_observers,
+            None,
+        )
+    }
+
+    /// Local-owner cleanup also retains failure attribution if the initial
+    /// ordered completion unwound before applying its terminal transition.
+    fn complete_task_after_unwind_ordered_with_closed_error(
+        &self,
+        task_id: TaskId,
+        obligation_observers: &mut crate::runtime::state::LifecycleObserverBatch,
+        closed_barrier: Option<&crate::runtime::task_handle::RetirementBarrier>,
+    ) -> UnwindCompletionArtifacts {
         self.drain_completion_obligation_posts(task_id, obligation_observers);
         let panic_outcome = crate::types::Outcome::Panicked(
             crate::types::outcome::PanicPayload::new("task panicked during scheduler bookkeeping"),
@@ -9852,6 +10009,9 @@ impl ThreeLaneWorker {
                         PolledCompletion::Panicked(panic_outcome),
                         false,
                     );
+                    if let Some(barrier) = closed_barrier {
+                        Self::publish_closed_record_error(record, barrier);
+                    }
                 });
                 tt.remove_task(task_id)
             })
@@ -9863,6 +10023,9 @@ impl ThreeLaneWorker {
                         PolledCompletion::Panicked(panic_outcome),
                         false,
                     );
+                    if let Some(barrier) = closed_barrier {
+                        Self::publish_closed_record_error(record, barrier);
+                    }
                 });
             });
             None

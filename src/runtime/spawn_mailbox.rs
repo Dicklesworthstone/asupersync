@@ -1515,6 +1515,16 @@ impl fmt::Debug for CreateRegionRequest {
     }
 }
 
+/// A local future was destroyed on its owner thread before this was queued.
+/// Native local admission installs the weak producer route; the lab never
+/// creates these records. There is at most one command per abandoned future,
+/// and no future, Cx, Waker, or user callback crosses the thread boundary.
+#[derive(Debug)]
+pub(crate) struct LocalTaskRetirement {
+    pub(crate) task_id: TaskId,
+    pub(crate) panic: Option<crate::types::PanicPayload>,
+}
+
 /// Commands that mutate region lifecycle state but carry no task payload.
 #[derive(Debug)]
 pub(crate) enum RegionCommand {
@@ -1914,6 +1924,7 @@ pub struct SpawnMailbox {
     queue: GlobalFifoQueue<SpawnRequest>,
     handle_cancels: GlobalFifoQueue<HandleCancelRequest>,
     region_commands: GlobalFifoQueue<RegionCommand>,
+    local_task_retirements: GlobalFifoQueue<LocalTaskRetirement>,
     ids: SpawnIdAllocator,
     trace: Option<TraceBufferHandle>,
     total_enqueued: AtomicU64,
@@ -1931,6 +1942,7 @@ impl SpawnMailbox {
             queue: GlobalFifoQueue::default(),
             handle_cancels: GlobalFifoQueue::default(),
             region_commands: GlobalFifoQueue::default(),
+            local_task_retirements: GlobalFifoQueue::default(),
             ids: SpawnIdAllocator::new(),
             trace: None,
             total_enqueued: AtomicU64::new(0),
@@ -2042,6 +2054,17 @@ impl SpawnMailbox {
         self.handle_cancels.is_empty()
     }
 
+    /// Pop one at a time: completion can unwind under the configured leak
+    /// policy, and later retirements must remain queued for another turn.
+    pub(crate) fn dequeue_local_task_retirement(&self) -> Option<LocalTaskRetirement> {
+        self.local_task_retirements.pop()
+    }
+
+    #[must_use]
+    pub(crate) fn local_task_retirements_are_empty(&self) -> bool {
+        self.local_task_retirements.is_empty()
+    }
+
     /// Returns true when the spawn-request lane itself is empty. Runtime
     /// admission uses this narrower predicate; scheduler parking and Lab
     /// quiescence use [`Self::is_empty`] across both work lanes.
@@ -2075,6 +2098,9 @@ impl SpawnMailbox {
     /// polled, and the runtime is gone by now (br-asupersync-fbifws,
     /// br-asupersync-werypv).
     pub(crate) fn retire_region_commands(&self) {
+        // Task-table teardown owns any remaining local records at this point.
+        // Retained Cx values can keep the mailbox itself alive.
+        while self.dequeue_local_task_retirement().is_some() {}
         let watches = std::mem::take(&mut *self.teardown_watches.lock());
         for watch in watches.iter().filter_map(Weak::upgrade) {
             if let Err(payload) =
@@ -2109,19 +2135,23 @@ impl SpawnMailbox {
         self.region_commands.is_empty()
     }
 
-    /// Best-effort snapshot of queued spawn requests plus handle-cancel and
-    /// region lifecycle commands. Lifetime enqueue/dequeue counters below
-    /// remain spawn-only.
+    /// Best-effort snapshot of queued spawn requests, handle cancellations,
+    /// local task retirements, and region lifecycle commands. Lifetime
+    /// enqueue/dequeue counters below remain spawn-only.
     #[must_use]
     pub fn len(&self) -> usize {
         self.queue
             .len()
             .saturating_add(self.handle_cancels.len())
             .saturating_add(self.region_commands.len())
+            .saturating_add(self.local_task_retirements.len())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty() && self.handle_cancels.is_empty() && self.region_commands.is_empty()
+        self.queue.is_empty()
+            && self.handle_cancels.is_empty()
+            && self.region_commands.is_empty()
+            && self.local_task_retirements.is_empty()
     }
 
     /// Total requests ever enqueued.
@@ -2291,6 +2321,17 @@ impl SpawnGateway {
             std::mem::forget(payload);
         }
         true
+    }
+
+    /// Called after a local future's destructor, including from TLS teardown.
+    /// The liveness guard excludes publication after the final shutdown drain;
+    /// a notifier panic must never escape the owner's destructor stack.
+    pub(crate) fn enqueue_local_task_retirement(&self, retirement: LocalTaskRetirement) {
+        let Some(_liveness_guard) = self.liveness_guard() else {
+            return;
+        };
+        self.mailbox.local_task_retirements.push(retirement);
+        self.notify_handle_cancel();
     }
 
     pub(crate) fn enqueue_handle_cancel_with_admitted_slot(

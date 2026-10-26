@@ -15,6 +15,125 @@
     }
 
     #[test]
+    fn owner_thread_exit_posts_each_retirement_after_its_future_drops() {
+        use crate::runtime::spawn_mailbox::{SpawnGateway, SpawnMailbox};
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::task::{Context, Poll};
+
+        struct UnpolledLocal {
+            owner: std::thread::ThreadId,
+            dropped: Arc<AtomicUsize>,
+            panic: bool,
+            _local: std::rc::Rc<()>,
+        }
+
+        impl Future for UnpolledLocal {
+            type Output = Outcome<(), ()>;
+
+            fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+                panic!("the admitted-before-first-poll fixture must not be polled");
+            }
+        }
+
+        impl Drop for UnpolledLocal {
+            fn drop(&mut self) {
+                assert_eq!(std::thread::current().id(), self.owner);
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+                if self.panic {
+                    panic!("local future destructor");
+                }
+            }
+        }
+
+        let mailbox = Arc::new(SpawnMailbox::new());
+        let alive = Arc::new(());
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let notified_after = Arc::new(Mutex::new(Vec::new()));
+        let notify_dropped = Arc::clone(&dropped);
+        let notify_observations = Arc::clone(&notified_after);
+        let gateway = Arc::new(SpawnGateway::new(
+            Arc::clone(&mailbox),
+            Arc::new(move || {
+                notify_observations
+                    .lock()
+                    .unwrap()
+                    .push(notify_dropped.load(Ordering::SeqCst));
+            }),
+            None,
+            Arc::downgrade(&alive),
+        ));
+        let owner_gateway = Arc::clone(&gateway);
+        let owner_dropped = Arc::clone(&dropped);
+        std::thread::spawn(move || {
+            let _store = ScopedLocalStoreKey::new(allocate_local_store_key());
+            for index in 0..3 {
+                let task_id = TaskId::new_for_test(index, 7);
+                let task = LocalStoredTask::new_with_id(
+                    UnpolledLocal {
+                        owner: std::thread::current().id(),
+                        dropped: Arc::clone(&owner_dropped),
+                        panic: index == 0,
+                        _local: std::rc::Rc::new(()),
+                    },
+                    task_id,
+                )
+                .with_retirement_gateway(Some(&owner_gateway));
+                store_local_task(task_id, task);
+            }
+            assert_eq!(local_task_count(), 3);
+        })
+        .join()
+        .expect("a local future panic must not escape TLS teardown");
+
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
+        assert_eq!(*notified_after.lock().unwrap(), vec![1, 2, 3]);
+        assert_eq!(mailbox.len(), 3);
+        assert!(!mailbox.is_empty(), "retirements keep the worker awake");
+        for index in 0..3 {
+            let retirement = mailbox
+                .dequeue_local_task_retirement()
+                .expect("one command per destroyed future");
+            assert_eq!(retirement.task_id, TaskId::new_for_test(index, 7));
+            assert_eq!(
+                retirement.panic.as_ref().map(|panic| panic.message()),
+                (index == 0).then_some("local future destructor"),
+            );
+        }
+        assert!(mailbox.is_empty());
+        assert_eq!(mailbox.total_enqueued(), 0, "spawn counters stay spawn-only");
+    }
+
+    #[test]
+    fn local_retirement_route_does_not_retain_the_gateway() {
+        use crate::runtime::spawn_mailbox::{SpawnGateway, SpawnMailbox};
+        use std::sync::Arc;
+
+        let mailbox = Arc::new(SpawnMailbox::new());
+        let alive = Arc::new(());
+        let gateway = Arc::new(SpawnGateway::new(
+            Arc::clone(&mailbox),
+            Arc::new(|| panic!("an expired weak route must not notify")),
+            None,
+            Arc::downgrade(&alive),
+        ));
+        let weak = Arc::downgrade(&gateway);
+        let mut store = LocalTaskStore::new();
+        let task_id = TaskId::new_for_test(0, 1);
+        store.insert(
+            task_id,
+            LocalStoredTask::new_with_id(std::future::pending(), task_id)
+                .with_retirement_gateway(Some(&gateway)),
+        );
+        drop(gateway);
+        assert!(weak.upgrade().is_none());
+        drop(store);
+        assert!(mailbox.is_empty());
+    }
+
+    #[test]
     fn retirement_intervals_preserve_live_gaps_and_merge_out_of_order() {
         let mut retired = RetiredLocalStoreKeys::new();
         for key in [8, 4, 6, 2, 7, 3] {

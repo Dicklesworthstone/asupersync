@@ -6125,7 +6125,8 @@ impl RuntimeState {
         let stored = LocalStoredTask::new_with_id(
             crate::runtime::spawn_mailbox::LocalLazyFactoryTask::new(factory, cx.clone()),
             task_id,
-        );
+        )
+        .with_retirement_gateway(self.spawn_gateway.as_ref());
         let cx_inner = std::sync::Arc::downgrade(&cx.inner);
         if let Some(slot) = admitted_slot.as_ref() {
             slot.publish_reserved(crate::runtime::spawn_mailbox::AdmittedTask::pending(
