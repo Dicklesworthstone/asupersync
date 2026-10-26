@@ -1550,6 +1550,40 @@ impl ProtobufWireEncoder {
         Ok(())
     }
 
+    /// Emit packed varints from a lazy projection without allocating a
+    /// temporary collection.
+    ///
+    /// A cloned iterator sizes the payload, checking shared message, field,
+    /// and work budgets after every value. This pass stops at the first
+    /// refusal, including for an unbounded iterator, before reserving output.
+    /// The original iterator then writes directly into the admitted buffer.
+    /// Wire bytes and resource accounting match [`Self::write_packed_varints`];
+    /// packed scalars do not consume nested-message depth.
+    ///
+    /// Cloning must replay the same values. If the emitted payload length
+    /// differs from the sizing pass, the operation returns
+    /// [`ProtobufWireError::SchemaInvariant`].
+    ///
+    /// Prefer cheaply cloned borrowed projections such as
+    /// `values.iter().copied()` or `values.iter().map(...)`. Work and allocation
+    /// performed by an iterator's own `Clone` or `next` implementation are
+    /// outside the encoder's accounting.
+    ///
+    /// Errors restore the output and accounting to their entry state. An
+    /// iterator panic also restores the encoder before resuming the panic;
+    /// effects performed by the iterator itself cannot be rolled back.
+    pub fn write_packed_varints_iter<I>(
+        &mut self,
+        field_number: u32,
+        values: I,
+    ) -> Result<(), ProtobufWireError>
+    where
+        I: IntoIterator<Item = u64>,
+        I::IntoIter: Clone,
+    {
+        self.write_packed_iter(field_number, values.into_iter(), encode_varint_to_array)
+    }
+
     /// Emit packed fixed32 payloads.
     pub fn write_packed_fixed32(
         &mut self,
@@ -1570,6 +1604,24 @@ impl ProtobufWireEncoder {
         Ok(())
     }
 
+    /// Emit packed fixed32 values without materializing a projected slice.
+    ///
+    /// Shares the bounded, transactional iterator behavior of
+    /// [`Self::write_packed_varints_iter`].
+    pub fn write_packed_fixed32_iter<I>(
+        &mut self,
+        field_number: u32,
+        values: I,
+    ) -> Result<(), ProtobufWireError>
+    where
+        I: IntoIterator<Item = u32>,
+        I::IntoIter: Clone,
+    {
+        self.write_packed_iter(field_number, values.into_iter(), |value| {
+            (value.to_le_bytes(), 4)
+        })
+    }
+
     /// Emit packed fixed64 payloads.
     pub fn write_packed_fixed64(
         &mut self,
@@ -1588,6 +1640,124 @@ impl ProtobufWireEncoder {
             self.output.extend_from_slice(&value.to_le_bytes());
         }
         Ok(())
+    }
+
+    /// Emit packed fixed64 values without materializing a projected slice.
+    ///
+    /// Shares the bounded, transactional iterator behavior of
+    /// [`Self::write_packed_varints_iter`].
+    pub fn write_packed_fixed64_iter<I>(
+        &mut self,
+        field_number: u32,
+        values: I,
+    ) -> Result<(), ProtobufWireError>
+    where
+        I: IntoIterator<Item = u64>,
+        I::IntoIter: Clone,
+    {
+        self.write_packed_iter(field_number, values.into_iter(), |value| {
+            (value.to_le_bytes(), 8)
+        })
+    }
+
+    fn write_packed_iter<I, F, const N: usize>(
+        &mut self,
+        field_number: u32,
+        values: I,
+        pack: F,
+    ) -> Result<(), ProtobufWireError>
+    where
+        I: Iterator + Clone,
+        F: Fn(I::Item) -> ([u8; N], usize),
+    {
+        let key = make_key(field_number, WireType::LengthDelimited, self.output.len())?;
+        let key_len = encoded_varint_len(u64::from(key));
+        self.check_packed_payload(key_len, 0)?;
+        let mut payload_len = 0usize;
+        for value in values.clone() {
+            let (_, length) = pack(value);
+            payload_len = payload_len.checked_add(length).ok_or(
+                ProtobufWireError::FieldLimitExceeded {
+                    offset: self.output.len(),
+                    length: u64::MAX,
+                    limit: self.limits.effective_field_limit(),
+                },
+            )?;
+            self.check_packed_payload(key_len, payload_len)?;
+        }
+
+        let start_len = self.output.len();
+        let start_fields = self.fields_written;
+        let start_work = self.work_used;
+        self.prepare_length_delimited(field_number, payload_len)?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut remaining = payload_len;
+            for value in values {
+                let (bytes, length) = pack(value);
+                remaining = remaining.checked_sub(length).ok_or(
+                    ProtobufWireError::SchemaInvariant {
+                        offset: self.output.len(),
+                        invariant: "packed iterator changed its encoded length between passes",
+                    },
+                )?;
+                self.output.extend_from_slice(&bytes[..length]);
+            }
+            if remaining != 0 {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: self.output.len(),
+                    invariant: "packed iterator changed its encoded length between passes",
+                });
+            }
+            Ok(())
+        }));
+        if !matches!(&result, Ok(Ok(()))) {
+            self.output.truncate(start_len);
+            self.fields_written = start_fields;
+            self.work_used = start_work;
+        }
+        match result {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn check_packed_payload(
+        &self,
+        key_len: usize,
+        payload_len: usize,
+    ) -> Result<(), ProtobufWireError> {
+        let field_limit = self.limits.effective_field_limit();
+        if payload_len > field_limit {
+            return Err(ProtobufWireError::FieldLimitExceeded {
+                offset: self.output.len(),
+                length: payload_len as u64,
+                limit: field_limit,
+            });
+        }
+        let Some(additional) = key_len
+            .checked_add(encoded_varint_len(payload_len as u64))
+            .and_then(|length| length.checked_add(payload_len))
+        else {
+            return Err(ProtobufWireError::MessageLimitExceeded {
+                length: usize::MAX,
+                limit: self.limits.effective_message_limit(),
+            });
+        };
+        let Some(prospective_fields) = self.fields_written.checked_add(1) else {
+            return Err(ProtobufWireError::FieldCountExceeded {
+                offset: self.output.len(),
+                count: usize::MAX,
+                limit: self.limits.max_fields,
+            });
+        };
+        let Some(prospective_work) = self.work_used.checked_add(additional) else {
+            return Err(ProtobufWireError::WorkLimitExceeded {
+                offset: self.output.len(),
+                work: usize::MAX,
+                limit: self.limits.max_work,
+            });
+        };
+        self.check_output_with_wrapper(additional, prospective_fields, prospective_work, None)
     }
 
     /// Emit packed IEEE-754 doubles without materializing their bit patterns.

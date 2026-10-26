@@ -356,6 +356,271 @@
     }
 
     #[test]
+    fn packed_iterators_match_slice_writers_for_all_wire_families() {
+        let limits = generous_limits(128).with_max_depth(0);
+        let varints = [0, 127, 128, u64::MAX];
+        let fixed32 = [0, u32::MAX];
+        let fixed64 = [0, u64::MAX];
+        let mut expected = ProtobufWireEncoder::new(limits);
+        expected.write_packed_varints(1, &varints).unwrap();
+        expected.write_packed_fixed32(16, &fixed32).unwrap();
+        expected.write_packed_fixed64(17, &fixed64).unwrap();
+        expected.write_packed_varints(2, &[]).unwrap();
+        expected.write_packed_fixed32(3, &[]).unwrap();
+        expected.write_packed_fixed64(4, &[]).unwrap();
+
+        let tight_limits = ProtobufWireLimits::for_message_size(expected.len())
+            .with_max_field_len(16)
+            .with_max_fields(6)
+            .with_max_depth(0)
+            .with_max_work(expected.work_used());
+        let mut actual = ProtobufWireEncoder::new(tight_limits);
+        actual.write_packed_varints_iter(1, varints).unwrap();
+        actual.write_packed_fixed32_iter(16, fixed32).unwrap();
+        actual.write_packed_fixed64_iter(17, fixed64).unwrap();
+        actual
+            .write_packed_varints_iter(2, std::iter::empty())
+            .unwrap();
+        actual
+            .write_packed_fixed32_iter(3, std::iter::empty())
+            .unwrap();
+        actual
+            .write_packed_fixed64_iter(4, std::iter::empty())
+            .unwrap();
+        assert_eq!(actual.fields_written(), 6);
+        assert_eq!(actual.work_used(), expected.work_used());
+        assert_eq!(actual.finish().unwrap(), expected.finish().unwrap());
+    }
+
+    #[test]
+    fn packed_iterators_stop_before_exhausting_an_unbounded_source() {
+        for (family, expected_calls) in [(0, 9), (1, 3), (2, 2)] {
+            let mut encoder = ProtobufWireEncoder::new(generous_limits(12));
+            encoder.write_varint(9, 1).unwrap();
+            let before = encoder.as_bytes().to_vec();
+            let calls = std::cell::Cell::new(0);
+            let values = std::iter::repeat_with(|| {
+                calls.set(calls.get() + 1);
+                1_u64
+            });
+            let result = match family {
+                0 => encoder.write_packed_varints_iter(1, values),
+                1 => encoder.write_packed_fixed32_iter(1, values.map(|value| value as u32)),
+                _ => encoder.write_packed_fixed64_iter(1, values),
+            };
+            assert!(matches!(
+                result,
+                Err(ProtobufWireError::MessageLimitExceeded { .. }
+                    | ProtobufWireError::FieldLimitExceeded { .. })
+            ));
+            assert_eq!(calls.get(), expected_calls, "wire family {family}");
+            assert_eq!(encoder.as_bytes(), before);
+            assert_eq!(encoder.fields_written(), 1);
+            assert_eq!(encoder.work_used(), 2);
+            encoder.write_varint(10, 3).unwrap();
+            assert_eq!(encoder.finish().unwrap().as_ref(), &[0x48, 1, 0x50, 3]);
+        }
+    }
+
+    #[test]
+    fn packed_iterator_preflight_refuses_before_requesting_any_value() {
+        for (field_number, limits) in [
+            (0, generous_limits(128)),
+            (1, generous_limits(1)),
+            (1, generous_limits(128).with_max_fields(0)),
+            (1, generous_limits(128).with_max_work(1)),
+        ] {
+            let mut encoder = ProtobufWireEncoder::new(limits);
+            let calls = std::cell::Cell::new(0);
+            let values = std::iter::repeat_with(|| {
+                calls.set(calls.get() + 1);
+                1_u64
+            });
+            assert!(encoder.write_packed_varints_iter(field_number, values).is_err());
+            assert_eq!(calls.get(), 0);
+            assert!(encoder.is_empty());
+            assert_eq!(encoder.fields_written(), 0);
+            assert_eq!(encoder.work_used(), 0);
+        }
+    }
+
+    #[test]
+    fn packed_iterator_field_and_work_refusals_stop_projection_and_restore_state() {
+        for (limits, expected_calls) in [
+            (generous_limits(128).with_max_field_len(2), 3),
+            (generous_limits(128).with_max_work(5), 4),
+        ] {
+            let mut encoder = ProtobufWireEncoder::new(limits);
+            let calls = std::cell::Cell::new(0);
+            let values = std::iter::repeat_with(|| {
+                calls.set(calls.get() + 1);
+                0_u64
+            });
+            assert!(matches!(
+                encoder.write_packed_varints_iter(1, values),
+                Err(ProtobufWireError::FieldLimitExceeded { .. }
+                    | ProtobufWireError::WorkLimitExceeded { .. })
+            ));
+            assert_eq!(calls.get(), expected_calls);
+            assert!(encoder.is_empty());
+            assert_eq!(encoder.fields_written(), 0);
+            assert_eq!(encoder.work_used(), 0);
+        }
+    }
+
+    #[test]
+    fn packed_iterators_share_parent_budgets_without_consuming_message_depth() {
+        let limits = ProtobufWireLimits::for_message_size(7)
+            .with_max_fields(2)
+            .with_max_depth(1)
+            .with_max_work(12);
+        let mut encoder = ProtobufWireEncoder::new(limits);
+        encoder
+            .write_nested_message(1, |nested| {
+                nested.write_packed_varints_iter(2, [0, 1, 127])
+            })
+            .unwrap();
+        assert_eq!(encoder.fields_written(), 2);
+        assert_eq!(encoder.work_used(), 12);
+        assert_eq!(
+            encoder.finish().unwrap().as_ref(),
+            &[0x0a, 5, 0x12, 3, 0, 1, 127]
+        );
+
+        for refused in [limits.with_max_work(11), limits.with_max_fields(1)] {
+            let mut encoder = ProtobufWireEncoder::new(refused);
+            assert!(encoder
+                .write_nested_message(1, |nested| {
+                    nested.write_packed_varints_iter(2, [0, 1, 127])
+                })
+                .is_err());
+            assert!(encoder.is_empty());
+            assert_eq!(encoder.fields_written(), 0);
+            assert_eq!(encoder.work_used(), 0);
+        }
+
+        let mut group = ProtobufWireEncoder::new(generous_limits(7).with_max_depth(1));
+        group.start_group(1).unwrap();
+        group.write_packed_varints_iter(2, [0, 1, 127]).unwrap();
+        group.end_group(1).unwrap();
+        assert_eq!(
+            group.finish().unwrap().as_ref(),
+            &[0x0b, 0x12, 3, 0, 1, 127, 0x0c]
+        );
+    }
+
+    #[test]
+    fn packed_iterator_panic_restores_parent_groups_and_preserves_panic_payload() {
+        struct PanicOnEmission {
+            yielded: bool,
+            sizing: bool,
+            marker: std::sync::Arc<u8>,
+        }
+
+        impl Clone for PanicOnEmission {
+            fn clone(&self) -> Self {
+                Self {
+                    yielded: self.yielded,
+                    sizing: true,
+                    marker: self.marker.clone(),
+                }
+            }
+        }
+
+        impl Iterator for PanicOnEmission {
+            type Item = u64;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if !self.yielded {
+                    self.yielded = true;
+                    Some(7)
+                } else if self.sizing {
+                    None
+                } else {
+                    std::panic::panic_any(self.marker.clone());
+                }
+            }
+        }
+
+        let mut encoder = ProtobufWireEncoder::new(generous_limits(128));
+        encoder.start_group(1).unwrap();
+        encoder.write_varint(9, 1).unwrap();
+        let before = encoder.as_bytes().to_vec();
+        let fields = encoder.fields_written();
+        let work = encoder.work_used();
+        let marker = std::sync::Arc::new(17_u8);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let values = PanicOnEmission {
+                yielded: false,
+                sizing: false,
+                marker: marker.clone(),
+            };
+            encoder.write_packed_varints_iter(2, values)
+        }))
+        .expect_err("iterator panic must propagate");
+        assert!(std::sync::Arc::ptr_eq(
+            panic.downcast_ref::<std::sync::Arc<u8>>().unwrap(),
+            &marker,
+        ));
+        assert_eq!(encoder.as_bytes(), before);
+        assert_eq!(encoder.fields_written(), fields);
+        assert_eq!(encoder.work_used(), work);
+        encoder.write_packed_varints_iter(2, [7]).unwrap();
+        encoder.end_group(1).unwrap();
+        assert_eq!(
+            encoder.finish().unwrap().as_ref(),
+            &[0x0b, 0x48, 1, 0x12, 1, 7, 0x0c]
+        );
+    }
+
+    #[test]
+    fn packed_iterator_length_divergence_never_leaves_a_partial_field() {
+        struct DivergingValues {
+            remaining: usize,
+            clone_length: usize,
+        }
+
+        impl Clone for DivergingValues {
+            fn clone(&self) -> Self {
+                Self {
+                    remaining: self.clone_length,
+                    clone_length: self.clone_length,
+                }
+            }
+        }
+
+        impl Iterator for DivergingValues {
+            type Item = u64;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.remaining = self.remaining.checked_sub(1)?;
+                Some(1)
+            }
+        }
+
+        for (remaining, clone_length) in [(1, 3), (3, 1)] {
+            let mut encoder = ProtobufWireEncoder::new(generous_limits(128));
+            encoder.write_varint(9, 1).unwrap();
+            let before = encoder.as_bytes().to_vec();
+            assert!(matches!(
+                encoder.write_packed_varints_iter(
+                    1,
+                    DivergingValues {
+                        remaining,
+                        clone_length,
+                    },
+                ),
+                Err(ProtobufWireError::SchemaInvariant { .. })
+            ));
+            assert_eq!(encoder.as_bytes(), before);
+            assert_eq!(encoder.fields_written(), 1);
+            assert_eq!(encoder.work_used(), 2);
+            encoder.write_varint(10, 3).unwrap();
+            assert_eq!(encoder.finish().unwrap().as_ref(), &[0x48, 1, 0x50, 3]);
+        }
+    }
+
+    #[test]
     fn protobuf_wire_unknown_and_group_preservation_br_asupersync_5z2scg_1_1() {
         let limits = generous_limits(128);
         let raw = [0x2b, 0x08, 0x96, 0x01, 0x33, 0x0d, 1, 2, 3, 4, 0x34, 0x2c];
