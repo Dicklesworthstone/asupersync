@@ -11,6 +11,58 @@
         cap: usize,
     }
 
+    #[test]
+    fn streaming_cdc_matches_complete_input_boundaries_under_short_reads() {
+        for len in [0, 1, 16_383, 16_384, 65_535, 65_536, 65_537, 131_073, 2_000_003] {
+            let mut state = 0x6a09_e667_f3bc_c909u64;
+            let data = (0..len).map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            }).collect::<Vec<_>>();
+            let expected = cdc::chunk_spans(&data).into_iter()
+                .map(|(offset, len)| data[offset..offset + len].to_vec())
+                .collect::<Vec<_>>();
+            for cap in [1, 997, 128 * 1024] {
+                let mut reader = cdc::ChunkReader::new(ShortReader {
+                    data: data.clone(), pos: 0, cap,
+                });
+                let chunks = futures_lite::future::block_on(async {
+                    let mut chunks = Vec::new();
+                    while let Some(chunk) = reader.next_chunk().await.unwrap() {
+                        assert!(chunk.len() <= cdc::MAX_CHUNK_BYTES);
+                        chunks.push(chunk);
+                    }
+                    assert!(reader.next_chunk().await.unwrap().is_none());
+                    chunks
+                });
+                assert_eq!(chunks, expected, "input {len}, read cap {cap}");
+                assert_eq!(chunks.concat(), data);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_cdc_merges_short_tail_without_changing_the_last_full_boundary() {
+        for byte in [0, 0x37, 0xff] {
+            for len in [16_385, 65_537, 81_919, 131_081] {
+                let data = vec![byte; len];
+                let spans = cdc::chunk_spans(&data);
+                let mut reader = cdc::ChunkReader::new(ShortReader {
+                    data: data.clone(), pos: 0, cap: 523,
+                });
+                futures_lite::future::block_on(async {
+                    for (offset, size) in spans {
+                        let chunk = reader.next_chunk().await.unwrap().unwrap();
+                        assert_eq!(chunk, data[offset..offset + size]);
+                    }
+                    assert!(reader.next_chunk().await.unwrap().is_none());
+                });
+            }
+        }
+    }
+
     impl crate::io::AsyncRead for ShortReader {
         fn poll_read(
             self: Pin<&mut Self>,
