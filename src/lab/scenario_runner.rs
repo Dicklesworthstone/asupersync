@@ -48,6 +48,19 @@
 //! `fail_times`. When the budget runs out, the failing worker stays stopped;
 //! the supervisor does not escalate.
 //!
+//! A worker can opt into executable lifecycle faults with
+//! `properties.lifecycle: { work_ms: 500 }`. Each generation then needs that
+//! much active virtual time before its configured failure or success. A
+//! `process_stall` pauses its progress until `duration_ms` expires or a
+//! `process_resume` arrives. A `host_crash` terminates the current generation
+//! with a failure, discarding its progress; the managed supervisor's replacement
+//! waits for `host_restart` before doing new work. The optional lifecycle
+//! `host` names a declared participant and defaults to the worker's own name,
+//! allowing multiple workers to share one fault target. The derived restart
+//! budget includes planned crash episodes; an explicit `max_restarts` still
+//! governs. This models managed worker availability, not OS process death or
+//! persistent state recovery. Work and each stall are bounded to 60000 ms.
+//!
 //! Saga roles: each `saga-coordinator` runs a [`Saga`] with one step per
 //! `saga-participant`. Participants go to the coordinators round-robin in
 //! declaration order, and participants without any coordinator share one
@@ -136,9 +149,10 @@
 //! - a peer echoed another ping's sequence number, or a hub that was not
 //!   cancelled never finished.
 //!
-//! Apart from cutting saga, replication, lease and hub links and skewing
-//! lease clocks, timed faults stay trace and effect-summary records; they do
-//! not partition the bound channels or crash the supervised workers.
+//! Apart from cutting saga, replication, lease and hub links, skewing lease
+//! clocks, and controlling opted-in workers, timed faults stay trace and
+//! effect-summary records. Workers without `lifecycle` keep their original
+//! behavior; channel roles are not partitioned by these faults.
 //!
 //! Every other role is unbound: the runner validates the participant and
 //! schedules no work for it. A scenario without bound participants still
@@ -191,6 +205,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 mod cancellation;
+mod lifecycle;
 pub use cancellation::{
     ScenarioCancellationError, ScenarioCancellationInjection, ScenarioCancellationLimits,
     ScenarioCancellationReport, ScenarioCancellationTermination, ScenarioCancellationTrial,
@@ -1116,6 +1131,7 @@ struct LeaseTerms {
 struct PlannedParticipant {
     name: String,
     work: PlannedWork,
+    lifecycle: Option<lifecycle::Plan>,
 }
 
 /// Validated workload for the bound participants of one scenario.
@@ -1159,10 +1175,24 @@ impl WorkloadPlan {
                 _ => continue,
             };
             match work {
-                Ok(work) => participants.push(PlannedParticipant {
-                    name: participant.name.clone(),
-                    work,
-                }),
+                Ok(work) => {
+                    let lifecycle = if matches!(work, PlannedWork::Work { .. }) {
+                        match lifecycle::Plan::parse(participant, scenario) {
+                            Ok(plan) => plan,
+                            Err(error) => {
+                                errors.push(error);
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    participants.push(PlannedParticipant {
+                        name: participant.name.clone(),
+                        work,
+                        lifecycle,
+                    });
+                }
                 Err(error) => errors.push(error),
             }
         }
@@ -1441,22 +1471,21 @@ impl WorkloadPlan {
             })
     }
 
-    /// True when the plan runs a saga coordinator, a primary, a lease holder
-    /// or a hub, declared or implicit; their rounds wait on virtual-time
-    /// timers.
+    /// True when a role or an opted-in worker waits on virtual-time timers.
     fn is_timed(&self) -> bool {
         self.participants.iter().any(|participant| {
-            matches!(
-                participant.work,
-                PlannedWork::Coordinate { .. }
-                    | PlannedWork::Participate
-                    | PlannedWork::Lead { .. }
-                    | PlannedWork::Follow
-                    | PlannedWork::Grant { .. }
-                    | PlannedWork::Hold(_)
-                    | PlannedWork::Ping(_)
-                    | PlannedWork::Echo
-            )
+            participant.lifecycle.is_some()
+                || matches!(
+                    participant.work,
+                    PlannedWork::Coordinate { .. }
+                        | PlannedWork::Participate
+                        | PlannedWork::Lead { .. }
+                        | PlannedWork::Follow
+                        | PlannedWork::Grant { .. }
+                        | PlannedWork::Hold(_)
+                        | PlannedWork::Ping(_)
+                        | PlannedWork::Echo
+                )
         })
     }
 }
@@ -1659,9 +1688,11 @@ struct WorkerState {
     attempts: AtomicU64,
     /// Generations that returned `Outcome::Err`.
     failures: AtomicU64,
+    /// Failures caused by a host crash, distinct from configured failures.
+    crashes: AtomicU64,
     /// Generations that stopped at a cancellation checkpoint.
     cancelled: AtomicU64,
-    /// Generations whose number disagreed with the attempt count.
+    /// Generations whose identity or active-time clock violated the contract.
     unexpected: AtomicU64,
 }
 
@@ -1671,6 +1702,7 @@ struct AssignedWorker {
     name: String,
     fail_times: u64,
     state: Arc<WorkerState>,
+    lifecycle: Option<Arc<lifecycle::Control>>,
 }
 
 /// How a managed supervisor's controller ended.
@@ -1792,6 +1824,11 @@ impl AssignedWorker {
             child.map_or(0, |child| child.generations),
             child.map_or_else(|| "none".to_owned(), |child| child.exit.label()),
         );
+        let detail = if self.lifecycle.is_some() {
+            format!("{detail},crashes={}", count(&s.crashes))
+        } else {
+            detail
+        };
         if count(&s.unexpected) > 0 {
             violations.push(format!("{label}:unexpected_outcome:{detail}"));
         }
@@ -1799,7 +1836,9 @@ impl AssignedWorker {
             Some(child) if child.exit == ChildExit::Succeeded => {
                 // One-for-one, transient: every failure restarts exactly this
                 // worker, and success stops it.
-                if child.generations.saturating_sub(1) != self.fail_times {
+                if child.generations.saturating_sub(1)
+                    != self.fail_times.saturating_add(count(&s.crashes))
+                {
                     violations.push(format!("{label}:restart_mismatch:{detail}"));
                 }
                 if count(&s.attempts) != child.generations {
@@ -2637,6 +2676,8 @@ struct ParticipantWorkload {
     network: Arc<NetworkModel>,
     /// Participant clock offsets from `clock_skew` faults; lease roles read them.
     clocks: Arc<ClockTable>,
+    /// Opted-in workers whose actual generations receive lifecycle faults.
+    lifecycle: Vec<Arc<lifecycle::Control>>,
     /// True when some task waits on virtual-time timers.
     timed: bool,
 }
@@ -2787,10 +2828,16 @@ impl ParticipantWorkload {
                     endpoints.push(Endpoint::Supervise { max_restarts });
                 }
                 PlannedWork::Work { fail_times } => {
+                    let lifecycle = participant.lifecycle.as_ref().map(|plan| {
+                        let control = Arc::new(lifecycle::Control::new(plan.clone(), runtime.now()));
+                        workload.lifecycle.push(Arc::clone(&control));
+                        control
+                    });
                     let worker = AssignedWorker {
                         name: participant.name.clone(),
                         fail_times,
                         state: Arc::new(WorkerState::default()),
+                        lifecycle,
                     };
                     if supervisor_count == 0 {
                         orphans.push(worker);
@@ -3253,7 +3300,11 @@ impl ParticipantWorkload {
     ) {
         let budget = max_restarts.unwrap_or_else(|| {
             let failures = workers.iter().fold(0_u64, |total, worker| {
-                total.saturating_add(worker.fail_times)
+                total
+                    .saturating_add(worker.fail_times)
+                    .saturating_add(worker.lifecycle.as_ref().map_or(0, |control| {
+                        control.plan.crash_allowance
+                    }))
             });
             u32::try_from(failures).unwrap_or(u32::MAX)
         });
@@ -3484,11 +3535,18 @@ fn managed_supervisor(
             .child(ChildSpec::new(worker.name.as_str(), refuse_legacy_start).with_required(false));
         let fail_times = worker.fail_times;
         let state = Arc::clone(&worker.state);
+        let lifecycle = worker.lifecycle.clone();
         bindings.push(ManagedChildBinding::new(
             worker.name.as_str(),
             ManagedRestartMode::Transient,
             move |cx: Cx, generation: ManagedGeneration| {
-                run_worker_generation(cx, generation, fail_times, Arc::clone(&state))
+                run_worker_generation(
+                    cx,
+                    generation,
+                    fail_times,
+                    Arc::clone(&state),
+                    lifecycle.clone(),
+                )
             },
         ));
     }
@@ -3524,19 +3582,45 @@ async fn run_supervisor(
 
 /// Body of one generation of a bound `worker`, run by its supervisor.
 ///
-/// The generation yields once, then fails with its attempt number until the
-/// worker has failed `fail_times` times, and succeeds after that.
+/// A legacy generation yields once; an opted-in one performs its active-time
+/// work. Configured failures and injected crashes both drive real replacements.
 async fn run_worker_generation(
     cx: Cx,
     generation: ManagedGeneration,
     fail_times: u64,
     state: Arc<WorkerState>,
+    lifecycle: Option<Arc<lifecycle::Control>>,
 ) -> Outcome<(), u64> {
     let attempt = state.attempts.fetch_add(1, Ordering::Relaxed) + 1;
     if generation.number != attempt {
         bump(&state.unexpected);
     }
-    yield_now().await;
+    if let Some(control) = lifecycle {
+        match control.work(&cx, generation.number).await {
+            lifecycle::WorkExit::Crashed => {
+                bump(&state.failures);
+                bump(&state.crashes);
+                return Outcome::Err(attempt);
+            }
+            lifecycle::WorkExit::Cancelled => {
+                bump(&state.cancelled);
+                return Outcome::Cancelled(
+                    cx.cancel_reason().unwrap_or_else(|| {
+                        CancelReason::user("worker generation cancelled")
+                    }),
+                );
+            }
+            lifecycle::WorkExit::ClockExhausted => {
+                bump(&state.failures);
+                bump(&state.unexpected);
+                cx.trace("scenario worker active-time clock exhausted");
+                return Outcome::Err(attempt);
+            }
+            lifecycle::WorkExit::Completed => {}
+        }
+    } else {
+        yield_now().await;
+    }
     if cx.checkpoint().is_err() {
         bump(&state.cancelled);
         return Outcome::Cancelled(
@@ -3544,7 +3628,7 @@ async fn run_worker_generation(
                 .unwrap_or_else(|| CancelReason::user("worker generation cancelled")),
         );
     }
-    if attempt <= fail_times {
+    if attempt.saturating_sub(count(&state.crashes)) <= fail_times {
         bump(&state.failures);
         Outcome::Err(attempt)
     } else {
@@ -4727,6 +4811,9 @@ impl ScenarioRunner {
             fault_effect_summary.apply_fault(fault, scenario.resource_caps.max_artifact_bytes);
             workload.partitions.apply(fault);
             workload.clocks.apply(fault);
+            for control in &workload.lifecycle {
+                control.apply(fault, now);
+            }
         }
 
         (fault_log, fault_effect_summary)
@@ -4950,7 +5037,7 @@ impl ScenarioRunner {
     /// Run a scenario, optionally overriding the seed.
     ///
     /// Bound participants run as lab tasks (see the module docs). A malformed
-    /// `messages`, `capacity`, `tasks`, `max_restarts` or `fail_times`
+    /// `messages`, `capacity`, `tasks`, `max_restarts`, `fail_times` or `lifecycle`
     /// property on one of them is a validation error.
     ///
     /// # Errors

@@ -1439,6 +1439,288 @@
         crate::test_complete!("supervised_workers_stopped_by_chaos_are_counted_not_failed");
     }
 
+    fn lifecycle_scenario() -> Scenario {
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-worker-lifecycle".to_owned();
+        let mut worker = participant_with("worker", "worker", "fail_times", serde_json::json!(0));
+        worker.properties.insert("lifecycle".to_owned(), serde_json::json!({"work_ms": 500}));
+        scenario.participants = vec![participant("sup", "supervisor"), worker];
+        scenario
+    }
+
+    fn lifecycle_fault(at_ms: u64, action: FaultAction, host: &str) -> FaultEvent {
+        let mut args = BTreeMap::from([("host".to_owned(), serde_json::json!(host))]);
+        if action == FaultAction::ProcessStall {
+            args.insert("duration_ms".to_owned(), serde_json::json!(200));
+        }
+        FaultEvent { at_ms, action, args }
+    }
+
+    #[test]
+    fn lifecycle_crash_replaces_the_actual_worker_and_replay_repeats_its_work() {
+        init_test("lifecycle_crash_replaces_the_actual_worker_and_replay_repeats_its_work");
+        let mut scenario = lifecycle_scenario();
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(400, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert!(result.lab_report.quiescent);
+        assert_eq!(result.lab_report.now_nanos, 900_000_000);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 1);
+        assert_eq!(summary.children[0].generations, 2);
+        assert_eq!(summary.children[0].exit, ChildExit::Succeeded);
+        let worker = &supervisor_state(&tasks, "sup").workers[0];
+        assert_eq!(count(&worker.state.attempts), 2);
+        assert_eq!(count(&worker.state.crashes), 1);
+        assert_eq!(count(&worker.state.failures), 1);
+        assert_eq!(count(&worker.state.cancelled), 0);
+
+        // Legacy control: the same faults remain records when the worker has
+        // not opted in. It finishes once, before either timed fault.
+        let mut legacy = scenario.clone();
+        legacy.participants[1].properties.remove("lifecycle");
+        let (legacy_result, legacy_tasks) = ScenarioRunner::run_seeded(&legacy, None).unwrap();
+        assert!(legacy_result.passed());
+        assert_eq!(legacy_result.lab_report.now_nanos, 400_000_000);
+        assert_eq!(supervisor_summary(&legacy_tasks, "sup").children[0].generations, 1);
+        assert_ne!(result.certificate.event_hash, legacy_result.certificate.event_hash);
+
+        let replay = ScenarioRunner::validate_replay(&scenario).unwrap();
+        assert!(replay.passed());
+        assert_eq!(replay.certificate, result.certificate);
+        let identity = ScenarioRunner::scenario_identity(&scenario, None);
+        let identified = ScenarioRunner::run_with_identity(&scenario, &identity).unwrap();
+        assert!(identified.passed());
+        assert_eq!(identified.lab_report.now_nanos, 900_000_000);
+        assert!(ScenarioRunner::explore_seeds(&scenario, 1, 3).unwrap().all_passed());
+        crate::test_complete!("lifecycle_crash_replaces_the_actual_worker_and_replay_repeats_its_work");
+    }
+
+    #[test]
+    fn lifecycle_stalls_pause_active_work_and_resume_by_timer_or_explicit_fault() {
+        init_test("lifecycle_stalls_pause_active_work_and_resume_by_timer_or_explicit_fault");
+        for (resume, expected_ms) in [(None, 700), (Some(150), 550), (Some(400), 700)] {
+            let mut scenario = lifecycle_scenario();
+            scenario.faults.push(lifecycle_fault(100, FaultAction::ProcessStall, "worker"));
+            if let Some(at) = resume {
+                scenario.faults.push(lifecycle_fault(at, FaultAction::ProcessResume, "worker"));
+            }
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+            assert!(result.passed(), "resume={resume:?}: {}", failure_detail(&result));
+            assert_eq!(result.lab_report.now_nanos, expected_ms * 1_000_000);
+            let summary = supervisor_summary(&tasks, "sup");
+            assert_eq!(summary.children[0].generations, 1);
+            assert_eq!(summary.restart_batches, 0);
+            assert_eq!(count(&supervisor_state(&tasks, "sup").workers[0].state.crashes), 0);
+        }
+        crate::test_complete!("lifecycle_stalls_pause_active_work_and_resume_by_timer_or_explicit_fault");
+    }
+
+    #[test]
+    fn lifecycle_fault_at_the_completion_instant_precedes_the_due_timer() {
+        init_test("lifecycle_fault_at_the_completion_instant_precedes_the_due_timer");
+        for action in [FaultAction::HostCrash, FaultAction::ProcessStall] {
+            let mut scenario = lifecycle_scenario();
+            scenario.faults.push(lifecycle_fault(500, action.clone(), "worker"));
+            let expected_ms = if action == FaultAction::HostCrash {
+                scenario.faults.push(lifecycle_fault(700, FaultAction::HostRestart, "worker"));
+                1200
+            } else {
+                700
+            };
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+            assert!(result.passed(), "{action:?}: {}", failure_detail(&result));
+            assert_eq!(result.lab_report.now_nanos, expected_ms * 1_000_000);
+            assert_eq!(supervisor_summary(&tasks, "sup").children[0].generations,
+                if action == FaultAction::HostCrash { 2 } else { 1 });
+        }
+        crate::test_complete!("lifecycle_fault_at_the_completion_instant_precedes_the_due_timer");
+    }
+
+    #[test]
+    fn lifecycle_repeated_crash_while_down_is_one_failure_and_each_recovery_resets_work() {
+        init_test("lifecycle_repeated_crash_while_down_is_one_failure_and_each_recovery_resets_work");
+        let mut scenario = lifecycle_scenario();
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(200, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(300, FaultAction::HostRestart, "worker"),
+            lifecycle_fault(500, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(600, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert_eq!(result.lab_report.now_nanos, 1_100_000_000);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 2);
+        assert_eq!(summary.children[0].generations, 3);
+        assert_eq!(count(&supervisor_state(&tasks, "sup").workers[0].state.crashes), 2);
+        crate::test_complete!("lifecycle_repeated_crash_while_down_is_one_failure_and_each_recovery_resets_work");
+    }
+
+    #[test]
+    fn lifecycle_crashes_do_not_consume_the_workers_configured_failures() {
+        init_test("lifecycle_crashes_do_not_consume_the_workers_configured_failures");
+        let mut scenario = lifecycle_scenario();
+        scenario.participants[1].properties.insert("fail_times".to_owned(), serde_json::json!(2));
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(400, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert_eq!(result.lab_report.now_nanos, 1_900_000_000);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 3);
+        assert_eq!(summary.children[0].generations, 4);
+        let worker = &supervisor_state(&tasks, "sup").workers[0];
+        assert_eq!(count(&worker.state.failures), 3);
+        assert_eq!(count(&worker.state.crashes), 1);
+        crate::test_complete!("lifecycle_crashes_do_not_consume_the_workers_configured_failures");
+    }
+
+    #[test]
+    fn lifecycle_crashes_do_not_override_an_explicit_restart_budget() {
+        init_test("lifecycle_crashes_do_not_override_an_explicit_restart_budget");
+        let mut scenario = lifecycle_scenario();
+        scenario.participants[0].properties.insert("max_restarts".to_owned(), serde_json::json!(0));
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(400, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(!result.passed());
+        assert!(result.lab_report.quiescent);
+        assert_eq!(result.lab_report.now_nanos, 400_000_000);
+        assert_eq!(tasks[0].planned, 0);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 0);
+        assert_eq!(summary.children[0].generations, 1);
+        assert_eq!(summary.children[0].exit, ChildExit::Failed(1));
+        assert!(result.lab_report.invariant_violations.iter().any(|v|
+            v.starts_with("workload:worker:worker:never_succeeded:")));
+        crate::test_complete!("lifecycle_crashes_do_not_override_an_explicit_restart_budget");
+    }
+
+    #[test]
+    fn lifecycle_missing_restart_returns_an_incomplete_run_without_spinning() {
+        init_test("lifecycle_missing_restart_returns_an_incomplete_run_without_spinning");
+        let mut scenario = lifecycle_scenario();
+        scenario.faults = vec![lifecycle_fault(150, FaultAction::HostCrash, "worker")];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(!result.passed());
+        assert!(!result.lab_report.quiescent);
+        assert_eq!(result.lab_report.now_nanos, 150_000_000);
+        assert!(result.lab_report.steps_total < 10_000);
+        let worker = &supervisor_state(&tasks, "sup").workers[0];
+        assert_eq!(count(&worker.state.attempts), 2);
+        assert_eq!(count(&worker.state.crashes), 1);
+        assert!(result.lab_report.invariant_violations.iter().any(|v|
+            v.starts_with("workload:supervisor:sup:no_report:")));
+        crate::test_complete!("lifecycle_missing_restart_returns_an_incomplete_run_without_spinning");
+    }
+
+    #[test]
+    fn lifecycle_offline_and_stalled_workers_are_still_cancellable_and_drained() {
+        init_test("lifecycle_offline_and_stalled_workers_are_still_cancellable_and_drained");
+        for action in [FaultAction::HostCrash, FaultAction::ProcessStall] {
+            let mut scenario = lifecycle_scenario();
+            scenario.faults = vec![lifecycle_fault(100, action.clone(), "worker")];
+            let plan = ScenarioRunner::workload_plan(&scenario).unwrap();
+            let mut runtime = LabRuntime::new(ScenarioRunner::lab_config_for(&scenario, None));
+            let workload = ParticipantWorkload::spawn(&mut runtime, &plan, &scenario.network);
+            ScenarioRunner::inject_faults(&mut runtime, &scenario, &workload);
+            runtime.run_until_idle();
+            let state = supervisor_state(&workload.tasks, "sup");
+            let worker = &state.workers[0];
+            assert_eq!(count(&worker.state.attempts), if action == FaultAction::HostCrash { 2 } else { 1 });
+            assert!(state.summary.lock().is_none(), "controller is parked on its child");
+            assert!(!runtime.is_quiescent());
+
+            workload.handles[0].1.abort();
+            runtime.run_until_idle();
+            assert!(runtime.is_quiescent(), "{action:?}: cancellation must drain the child");
+            assert_eq!(runtime.now(), Time::from_millis(100));
+            assert_eq!(runtime.state.timer_driver_handle().unwrap().pending_count(), 0);
+            let mut violations = Vec::new();
+            let tasks = workload.finish(&mut violations);
+            assert!(violations.is_empty(), "{action:?}: {violations:?}");
+            assert_eq!(count(&supervisor_state(&tasks, "sup").workers[0].state.cancelled), 1);
+        }
+        crate::test_complete!("lifecycle_offline_and_stalled_workers_are_still_cancellable_and_drained");
+    }
+
+    #[test]
+    fn lifecycle_shared_host_crashes_each_bound_worker_but_leaves_other_hosts_running() {
+        init_test("lifecycle_shared_host_crashes_each_bound_worker_but_leaves_other_hosts_running");
+        let mut scenario = lifecycle_scenario();
+        scenario.participants[1].properties.insert("lifecycle".to_owned(), serde_json::json!({"work_ms": 500, "host": "sup"}));
+        let mut second = scenario.participants[1].clone();
+        second.name = "second".to_owned();
+        let mut independent = scenario.participants[1].clone();
+        independent.name = "independent".to_owned();
+        independent.properties.insert("lifecycle".to_owned(), serde_json::json!({"work_ms": 500}));
+        scenario.participants.extend([second, independent]);
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "sup"),
+            lifecycle_fault(400, FaultAction::HostRestart, "sup"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert_eq!(result.lab_report.now_nanos, 900_000_000);
+        let state = supervisor_state(&tasks, "sup");
+        assert_eq!(state.workers.iter().map(|w| count(&w.state.crashes)).collect::<Vec<_>>(), [1, 1, 0]);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 2);
+        assert_eq!(summary.children.iter().map(|c| c.generations).collect::<Vec<_>>(), [2, 2, 1]);
+        crate::test_complete!("lifecycle_shared_host_crashes_each_bound_worker_but_leaves_other_hosts_running");
+    }
+
+    #[test]
+    fn lifecycle_plan_refuses_malformed_or_unbounded_properties_before_running() {
+        init_test("lifecycle_plan_refuses_malformed_or_unbounded_properties_before_running");
+        for value in [
+            serde_json::json!(true), serde_json::json!({}),
+            serde_json::json!({"work_ms": 0}), serde_json::json!({"work_ms": 60_001}),
+            serde_json::json!({"work_ms": 1.5}), serde_json::json!({"work_ms": 1, "host": "missing"}),
+            serde_json::json!({"work_ms": 1, "typo": true}),
+        ] {
+            let mut scenario = lifecycle_scenario();
+            scenario.participants[1].properties.insert("lifecycle".to_owned(), value.clone());
+            let error = ScenarioRunner::run(&scenario).unwrap_err();
+            assert!(error.to_string().contains("properties.lifecycle"), "{value}: {error}");
+        }
+        let mut scenario = lifecycle_scenario();
+        let mut fault = lifecycle_fault(1, FaultAction::ProcessStall, "worker");
+        fault.args.insert("duration_ms".to_owned(), serde_json::json!(60_001));
+        scenario.faults = vec![fault];
+        assert!(ScenarioRunner::run(&scenario).unwrap_err().to_string().contains("duration_ms"));
+        crate::test_complete!("lifecycle_plan_refuses_malformed_or_unbounded_properties_before_running");
+    }
+
+    #[test]
+    fn lifecycle_exhausted_virtual_clock_fails_instead_of_spinning_inside_a_poll() {
+        init_test("lifecycle_exhausted_virtual_clock_fails_instead_of_spinning_inside_a_poll");
+        let mut scenario = lifecycle_scenario();
+        scenario.faults = vec![
+            lifecycle_fault(0, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(u64::MAX, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(!result.passed());
+        assert!(result.lab_report.steps_total < 1000);
+        assert_eq!(result.lab_report.now_nanos, u64::MAX);
+        let worker = &supervisor_state(&tasks, "sup").workers[0];
+        assert_eq!(count(&worker.state.crashes), 1);
+        assert_eq!(count(&worker.state.unexpected), 1);
+        assert!(result.lab_report.invariant_violations.iter().any(|v|
+            v.starts_with("workload:worker:worker:unexpected_outcome:")));
+        crate::test_complete!("lifecycle_exhausted_virtual_clock_fails_instead_of_spinning_inside_a_poll");
+    }
+
     fn saga_record<'a>(tasks: &'a [BoundTask], name: &str) -> &'a SagaRecord {
         tasks
             .iter()
