@@ -30,7 +30,7 @@ mod engine;
 use engine::Engine;
 mod observation;
 use observation::ObservationState;
-pub use observation::{SwimDriverStatus, SwimObservation, SwimObserver};
+pub use observation::{SwimContact, SwimDriverStatus, SwimObservation, SwimObserver};
 
 // A maintenance deadline can elapse while an engine turn is running. Remember
 // that completion until the next rearm: Sleep itself must never be repolled

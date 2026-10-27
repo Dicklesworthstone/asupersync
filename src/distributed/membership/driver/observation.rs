@@ -3,7 +3,7 @@ use crate::distributed::membership::{MembershipEvent, MembershipKind};
 use crate::remote::NodeId;
 use crate::sync::Notify;
 use parking_lot::Mutex;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Driver lifetime, separate from any peer's observed membership state.
@@ -55,8 +55,25 @@ pub(super) struct ObservationState {
 
 struct ObservedState {
     observation: SwimObservation,
-    contacted: BTreeSet<NodeId>,
+    contacts: BTreeMap<NodeId, ContactState>,
 }
+
+struct ContactState {
+    incarnation: u64,
+    since: Option<u64>,
+}
+
+impl ObservedState {
+    fn contact_epoch(&self, node: &NodeId) -> Option<u64> {
+        if self.observation.status != SwimDriverStatus::Running
+            || self.observation.membership.kind_of(node) != Some(MembershipKind::Alive)
+        {
+            return None;
+        }
+        self.contacts.get(node).and_then(|contact| contact.since)
+    }
+}
+
 impl ObservationState {
     pub(super) fn new(retained: usize) -> Self {
         Self {
@@ -67,7 +84,7 @@ impl ObservationState {
                     membership: MembershipView::new(),
                     stats: SwimDriverStats::default(),
                 },
-                contacted: BTreeSet::new(),
+                contacts: BTreeMap::new(),
             }),
             retained,
             changed: Notify::new(),
@@ -92,16 +109,20 @@ impl ObservationState {
             let revision = state.observation.revision.checked_add(1).ok_or(SwimDriverError::ObservationExhausted)?;
             state.observation.membership.event_count().checked_add(events.len())
                 .ok_or(SwimDriverError::ObservationExhausted)?;
-            let invalidated: BTreeSet<_> = events.iter()
-                .filter(|event| event.kind != MembershipKind::Alive)
-                .map(|event| event.node.clone())
-                .collect();
+            let mut invalidated = BTreeSet::new();
             for event in events {
-                // Suspicion/departure invalidates old contact evidence. A later
-                // Alive rumor alone cannot reuse a pre-failure packet.
-                if event.kind != MembershipKind::Alive {
-                    state.contacted.remove(&event.node);
+                let contact = state.contacts.entry(event.node.clone()).or_insert(ContactState {
+                    incarnation: event.incarnation,
+                    since: None,
+                });
+                // Retain the epoch outside the compacted event log. Even an
+                // unobserved loss/recovery or incarnation change permanently
+                // ends tokens issued before the transition.
+                if event.kind != MembershipKind::Alive || contact.incarnation != event.incarnation {
+                    contact.since = None;
+                    invalidated.insert(event.node.clone());
                 }
+                contact.incarnation = event.incarnation;
                 // Compact every append, rather than retaining a whole batch in
                 // the shared log while the producer drains a burst.
                 state.observation.membership.apply(event);
@@ -113,11 +134,16 @@ impl ObservationState {
                 // A turn can receive a packet before its maintenance tick
                 // discovers a failure. Conservatively require a later turn's
                 // contact after any invalidation in this batch.
-                if !invalidated.contains(&node)
+                if status == SwimDriverStatus::Running && !invalidated.contains(&node)
                     && state.observation.membership.kind_of(&node) == Some(MembershipKind::Alive)
                 {
-                    state.contacted.insert(node);
+                    if let Some(contact) = state.contacts.get_mut(&node) {
+                        contact.since.get_or_insert(revision);
+                    }
                 }
+            }
+            if status != SwimDriverStatus::Running {
+                for contact in state.contacts.values_mut() { contact.since = None; }
             }
             state.observation.revision = revision;
             state.observation.status = status;
@@ -132,6 +158,7 @@ impl ObservationState {
             let mut state = self.state.lock();
             state.observation.status = status;
             state.observation.stats = stats;
+            for contact in state.contacts.values_mut() { contact.since = None; }
             // Even at sequence exhaustion the terminal status makes every wait
             // ready. Never wrap a revision back to an old observer's version.
             state.observation.revision = state.observation.revision.saturating_add(1);
@@ -194,10 +221,22 @@ impl SwimObserver {
     /// The lookup holds one short lock and does not clone the membership log.
     #[must_use]
     pub fn has_live_contact(&self, node: &NodeId) -> bool {
-        let state = self.shared.state.lock();
-        state.observation.status == SwimDriverStatus::Running
-            && state.observation.membership.kind_of(node) == Some(MembershipKind::Alive)
-            && state.contacted.contains(node)
+        self.shared.state.lock().contact_epoch(node).is_some()
+    }
+
+    /// Capture the current uninterrupted direct-contact epoch for one peer.
+    ///
+    /// Unlike repeated `has_live_contact` calls, this token permanently ends on
+    /// any observed loss, incarnation change, or detector stop. A later direct
+    /// recovery permits a fresh token, never revives an earlier one. Compacted
+    /// or coalesced observations cannot conceal the intervening loss.
+    ///
+    /// This is only a conservative local veto. It conveys no authenticated
+    /// authority, process identity, lease renewal, or remote drain guarantee.
+    #[must_use]
+    pub fn live_contact(&self, node: &NodeId) -> Option<SwimContact> {
+        let epoch = self.shared.state.lock().contact_epoch(node)?;
+        Some(SwimContact { observer: self.clone(), node: node.clone(), epoch })
     }
 
     /// Wait for a different publication version or terminal driver status.
@@ -211,5 +250,37 @@ impl SwimObserver {
             state.observation.revision != after || state.observation.status.is_terminal()
         }).await;
         self.snapshot()
+    }
+}
+
+/// A captured direct-contact epoch. Once ended, this token never becomes live.
+///
+/// Cloning retains the same epoch; it does not refresh contact or own a driver.
+/// Use a fresh `SwimObserver::live_contact` result for a new operation after
+/// recovery, while independently checking its authenticated authorization.
+#[derive(Debug, Clone)]
+pub struct SwimContact {
+    observer: SwimObserver,
+    node: NodeId,
+    epoch: u64,
+}
+
+impl SwimContact {
+    /// The exact logical peer whose detector contact was captured.
+    #[must_use]
+    pub fn node(&self) -> &NodeId { &self.node }
+
+    /// Whether the detector still retains this uninterrupted contact epoch.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.observer.shared.state.lock().contact_epoch(&self.node) == Some(self.epoch)
+    }
+
+    /// Wait for permanent local invalidation, including detector teardown.
+    ///
+    /// Registration/check races use the existing predicate notification path.
+    /// Dropping the wait unregisters it without cancelling the detector.
+    pub async fn ended(&self) {
+        self.observer.shared.changed.wait_until(|| !self.is_live()).await;
     }
 }

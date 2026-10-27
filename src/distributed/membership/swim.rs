@@ -728,7 +728,7 @@ impl Swim {
             // (qe0zdf).
             return false;
         }
-        let prev_state = {
+        let (prev_state, prev_incarnation) = {
             let member = self
                 .members
                 .entry(node.clone())
@@ -751,12 +751,14 @@ impl Swim {
             } else {
                 member.suspect_from.clear();
             }
-            prev
+            (prev, prev_incarnation)
         };
         if is_new {
             self.refresh_cluster_size();
         }
-        if is_new || prev_state != state {
+        // A new incarnation is a new observation even when its kind stays
+        // Alive. Consumers must be able to fence the previous contact epoch.
+        if is_new || prev_state != state || prev_incarnation != incarnation {
             self.events.push(MembershipEvent {
                 node,
                 kind: MembershipKind::from_state(state),

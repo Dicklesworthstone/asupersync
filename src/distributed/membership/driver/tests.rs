@@ -408,6 +408,120 @@ fn only_accepted_direct_datagrams_create_contact_evidence() {
 }
 
 #[test]
+fn captured_contact_cannot_revive_after_missed_recovery_or_log_compaction() {
+    let shared = Arc::new(ObservationState::new(1));
+    let observer = SwimObserver { shared: Arc::clone(&shared) };
+    let event = |kind| MembershipEvent { node: node("b"), kind, incarnation: 4 };
+    let stats = SwimDriverStats::default();
+    shared.publish(vec![event(MembershipKind::Alive)], [node("b")],
+        SwimDriverStatus::Running, stats).unwrap();
+    let contact = observer.live_contact(&node("b")).expect("direct live contact");
+    assert_eq!(contact.node(), &node("b"));
+    assert!(observer.live_contact(&node("unknown")).is_none());
+    let mut ended = std::pin::pin!(contact.ended());
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(ended.as_mut().poll(&mut task).is_pending());
+
+    // The consumer is not polled between loss and recovery.
+    shared.publish(vec![event(MembershipKind::Suspect)], std::iter::empty(),
+        SwimDriverStatus::Running, stats).unwrap();
+    shared.publish(vec![event(MembershipKind::Alive)], [node("b")],
+        SwimDriverStatus::Running, stats).unwrap();
+    assert!(observer.has_live_contact(&node("b")));
+    assert_eq!(observer.snapshot().membership.compact_base(), 2);
+    assert!(!contact.is_live());
+    assert!(ended.as_mut().poll(&mut task).is_ready());
+    // Even a wait first registered after recovery observes the old epoch's end.
+    assert!(std::pin::pin!(contact.ended()).as_mut().poll(&mut task).is_ready());
+
+    let recovered = observer.live_contact(&node("b")).unwrap();
+    shared.publish(vec![MembershipEvent {
+        node: node("c"), kind: MembershipKind::Dead, incarnation: 8,
+    }], [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    assert!(recovered.is_live(), "healthy traffic and another peer preserve this epoch");
+    assert!(!contact.is_live(), "cloning or repeated packets cannot renew an old token");
+    assert!(!contact.clone().is_live());
+}
+
+#[test]
+fn contact_incarnation_change_requires_new_direct_evidence_and_a_new_token() {
+    let shared = Arc::new(ObservationState::new(1));
+    let observer = SwimObserver { shared: Arc::clone(&shared) };
+    let stats = SwimDriverStats::default();
+    let event = |incarnation| MembershipEvent {
+        node: node("b"), kind: MembershipKind::Alive, incarnation,
+    };
+    shared.publish(vec![event(4)], [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    let previous = observer.live_contact(&node("b")).unwrap();
+    shared.publish(vec![event(5)], [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    assert!(!previous.is_live());
+    assert!(observer.live_contact(&node("b")).is_none(),
+        "a same-turn packet may precede the incarnation transition");
+    shared.publish(Vec::new(), [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    assert!(observer.live_contact(&node("b")).unwrap().is_live());
+    assert!(!previous.is_live());
+}
+
+#[test]
+fn leaving_and_every_detector_terminal_status_permanently_end_captured_contact() {
+    for status in [SwimDriverStatus::Leaving, SwimDriverStatus::Left,
+        SwimDriverStatus::Cancelled, SwimDriverStatus::Failed, SwimDriverStatus::Dropped]
+    {
+        let shared = Arc::new(ObservationState::new(1));
+        let observer = SwimObserver { shared: Arc::clone(&shared) };
+        let stats = SwimDriverStats::default();
+        shared.publish(vec![MembershipEvent {
+            node: node("b"), kind: MembershipKind::Alive, incarnation: 0,
+        }], [node("b")], SwimDriverStatus::Running, stats).unwrap();
+        let contact = observer.live_contact(&node("b")).unwrap();
+        let mut ended = std::pin::pin!(contact.ended());
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(ended.as_mut().poll(&mut task).is_pending());
+        if status == SwimDriverStatus::Leaving {
+            shared.publish(Vec::new(), std::iter::empty(), status, stats).unwrap();
+        } else {
+            shared.finish(status, stats);
+        }
+        assert!(!contact.is_live(), "{status:?}");
+        assert!(observer.live_contact(&node("b")).is_none(), "{status:?}");
+        assert!(ended.as_mut().poll(&mut task).is_ready(), "{status:?}");
+    }
+}
+
+#[test]
+fn accepted_new_incarnation_datagram_ends_the_old_contact_epoch() {
+    let mut swim = Swim::new(node("a"), protocol(), 7);
+    swim.add_peer(0, node("b"));
+    let mut engine = Engine::new(swim, BTreeMap::from([(node("b"), address(2))]), 1400, config());
+    let shared = Arc::new(ObservationState::new(1));
+    let observer = SwimObserver { shared: Arc::clone(&shared) };
+    shared.publish(engine.swim.drain_events(), std::mem::take(&mut engine.contacts),
+        SwimDriverStatus::Running, engine.stats).unwrap();
+    engine.receive(1, address(2), &bytes(Packet::new(Payload::Ping { seq: 1 }))).unwrap();
+    shared.publish(engine.swim.drain_events(), std::mem::take(&mut engine.contacts),
+        SwimDriverStatus::Running, engine.stats).unwrap();
+    let previous = observer.live_contact(&node("b")).unwrap();
+
+    engine.receive(2, address(2), &bytes(Packet {
+        payload: Payload::Ping { seq: 2 },
+        gossip: vec![Rumor::alive(node("b"), 1)],
+    })).unwrap();
+    let events = engine.swim.drain_events();
+    assert!(events.iter().any(|event| event.node == node("b")
+        && event.kind == MembershipKind::Alive && event.incarnation == 1),
+        "same-kind incarnation changes must reach observers");
+    shared.publish(events, std::mem::take(&mut engine.contacts),
+        SwimDriverStatus::Running, engine.stats).unwrap();
+    assert!(!previous.is_live());
+    assert!(observer.live_contact(&node("b")).is_none());
+    engine.receive(3, address(2), &bytes(Packet::new(Payload::Ping { seq: 3 }))).unwrap();
+    shared.publish(engine.swim.drain_events(), std::mem::take(&mut engine.contacts),
+        SwimDriverStatus::Running, engine.stats).unwrap();
+    assert!(observer.live_contact(&node("b")).is_some());
+    assert!(!previous.is_live(), "the direct recovery cannot refresh a captured epoch");
+}
+
+#[test]
 fn raw_driver_and_owned_run_future_preserve_send_and_drop_retirement() {
     fn is_send<T: Send>() {}
     is_send::<UdpSwimDriver>();
