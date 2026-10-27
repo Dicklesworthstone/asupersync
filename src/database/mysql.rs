@@ -336,6 +336,7 @@ mod command {
     pub const COM_STMT_SEND_LONG_DATA: u8 = 0x18;
     pub const COM_STMT_CLOSE: u8 = 0x19;
     pub const COM_STMT_RESET: u8 = 0x1A;
+    pub const COM_STMT_FETCH: u8 = 0x1C;
     pub const COM_RESET_CONNECTION: u8 = 0x1F;
 }
 
@@ -856,7 +857,476 @@ impl Drop for MySqlRowStream<'_> {
     }
 }
 
+/// A read-only server cursor that requests at most `fetch_rows` rows at a time.
+///
+/// Created by [`MySqlConnection::query_cursor_prepared`] or
+/// [`MySqlConnection::query_cursor_params`]. No fetch is sent until `next()` is
+/// polled, and only one decoded row is retained by the cursor. The ordinary
+/// packet and column limits still apply; rows retained by the caller are outside
+/// this bound. MySQL may materialize the complete result in a server-side
+/// temporary table, so this is a client/network bound, not a server-memory bound.
+///
+/// Exhaust the cursor or await [`Self::close`] before reusing the connection.
+/// Dropping an unfinished cursor, abandoning a polled `next()`/`close()` future,
+/// cancellation, and malformed or failed fetches make the connection unusable.
+/// No unread batch is ever mistaken for the response to a subsequent command.
+#[must_use]
+#[derive(Debug)]
+pub struct MySqlCursor<'a> {
+    connection: &'a mut MySqlConnection,
+    statement_id: u32,
+    columns: Arc<Vec<MySqlColumn>>,
+    column_indices: Arc<BTreeMap<String, usize>>,
+    fetch_rows: u32,
+    row_count: u64,
+    deprecate_eof: bool,
+    state: MySqlCursorState,
+    io_in_progress: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MySqlCursorState {
+    Ready,
+    Fetching { received: u32 },
+    Complete,
+    Failed,
+}
+
+impl MySqlCursor<'_> {
+    const CURSOR_EXISTS: u16 = 0x0040;
+    const LAST_ROW_SENT: u16 = 0x0080;
+    const MORE_RESULTS: u16 = 0x0008;
+
+    /// Maximum rows requested by one COM_STMT_FETCH command.
+    #[must_use]
+    pub const fn fetch_rows(&self) -> u32 {
+        self.fetch_rows
+    }
+
+    /// Rows delivered to the caller, excluding rows discarded by `close()`.
+    #[must_use]
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    /// Metadata from this execution, which may differ from prepare metadata.
+    #[must_use]
+    pub fn columns(&self) -> &[MySqlColumn] {
+        &self.columns
+    }
+
+    /// Fetch the next row on demand. An empty final batch is successful EOF.
+    ///
+    /// A batch terminator with CURSOR_EXISTS permits a later fetch; only
+    /// LAST_ROW_SENT terminates the cursor. An empty non-final batch, excess
+    /// rows, additional result sets, or missing cursor status fails closed.
+    pub async fn next(&mut self, cx: &Cx) -> Outcome<Option<MySqlRow>, MySqlError> {
+        if self.state == MySqlCursorState::Complete {
+            return Outcome::Ok(None);
+        }
+        if let Err(error) = self.begin_operation() {
+            return Outcome::Err(error);
+        }
+        let result = self.next_inner(cx).await;
+        self.finish_operation(cx, result).await
+    }
+
+    /// Discard only the remainder of the already requested batch, then close
+    /// the server cursor with an acknowledged COM_STMT_RESET.
+    ///
+    /// This never fetches an additional batch. The prepared statement remains
+    /// valid and cached. Cancellation or abandoning this future poisons the
+    /// connection; use a live cleanup context if the request was cancelled.
+    pub async fn close(&mut self, cx: &Cx) -> Outcome<(), MySqlError> {
+        if self.state == MySqlCursorState::Complete {
+            return Outcome::Ok(());
+        }
+        if let Err(error) = self.begin_operation() {
+            return Outcome::Err(error);
+        }
+        let result = self.close_inner(cx).await;
+        self.finish_operation(cx, result).await
+    }
+
+    fn begin_operation(&mut self) -> Result<(), MySqlError> {
+        if self.state == MySqlCursorState::Failed {
+            return Err(MySqlError::ConnectionClosed);
+        }
+        if self.io_in_progress {
+            self.fail();
+            return Err(MySqlError::Protocol(
+                "a cursor operation was abandoned; the connection is closed".to_string(),
+            ));
+        }
+        self.io_in_progress = true;
+        Ok(())
+    }
+
+    async fn finish_operation<T>(
+        &mut self,
+        cx: &Cx,
+        result: Result<T, MySqlError>,
+    ) -> Outcome<T, MySqlError> {
+        if matches!(&result, Err(MySqlError::Cancelled(_))) {
+            // Poison before awaiting cleanup: dropping its future must leave
+            // the cursor failed and retain KILL-on-drop ownership until the
+            // bounded drain finishes. Keep the socket alive for that exchange.
+            self.state = MySqlCursorState::Failed;
+            self.connection.inner.closed = true;
+            self.connection.wire_cancel_in_drain(cx).await;
+            self.connection
+                .inner
+                .query_in_flight
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        if result.is_err() {
+            self.fail();
+        }
+        self.io_in_progress = false;
+        match result {
+            Ok(value) => Outcome::Ok(value),
+            Err(error) => outcome_from_error(error),
+        }
+    }
+
+    fn fail(&mut self) {
+        self.state = MySqlCursorState::Failed;
+        self.connection.inner.closed = true;
+        let _ = self
+            .connection
+            .inner
+            .stream
+            .shutdown(std::net::Shutdown::Both);
+    }
+
+    fn complete(&mut self) {
+        self.state = MySqlCursorState::Complete;
+        self.connection.inner.closed = false;
+        self.connection
+            .inner
+            .query_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    async fn next_inner(&mut self, cx: &Cx) -> Result<Option<MySqlRow>, MySqlError> {
+        loop {
+            if self.state == MySqlCursorState::Complete {
+                return Ok(None);
+            }
+            if let Some(reason) = io_cancel_reason(Some(cx)) {
+                return Err(MySqlError::Cancelled(reason));
+            }
+            if self.state == MySqlCursorState::Ready {
+                let mut buffer = PacketBuffer::new();
+                buffer.write_byte(command::COM_STMT_FETCH);
+                buffer.write_u32_le(self.statement_id);
+                buffer.write_u32_le(self.fetch_rows);
+                self.send_command(cx, &buffer.build_packet()).await?;
+                self.state = MySqlCursorState::Fetching { received: 0 };
+            }
+            if let Some(row) = self.read_batch_packet(cx).await? {
+                self.row_count = self
+                    .row_count
+                    .checked_add(1)
+                    .ok_or_else(|| MySqlError::Protocol("cursor row count overflow".to_string()))?;
+                return Ok(Some(row));
+            }
+        }
+    }
+
+    async fn send_command(&mut self, cx: &Cx, packet: &EncodedPacket) -> Result<(), MySqlError> {
+        self.connection.write_all(Some(cx), &packet.bytes).await?;
+        self.connection.inner.sequence = packet.next_sequence;
+        Ok(())
+    }
+
+    async fn read_batch_packet(&mut self, cx: &Cx) -> Result<Option<MySqlRow>, MySqlError> {
+        let MySqlCursorState::Fetching { received } = self.state else {
+            return Err(MySqlError::Protocol(
+                "no cursor fetch is active".to_string(),
+            ));
+        };
+        let (data, sequence) = self.connection.read_packet(Some(cx)).await?;
+        self.connection.inner.sequence = sequence.wrapping_add(1);
+        match data.first() {
+            Some(0xFF) => Err(MySqlConnection::parse_error(&data)),
+            Some(0xFE) => {
+                let status = Self::terminator_status(&data, self.deprecate_eof)?;
+                if status & Self::MORE_RESULTS != 0 {
+                    return Err(MySqlError::Protocol(
+                        "additional result sets are not supported by a cursor".to_string(),
+                    ));
+                }
+                self.connection.inner.status_flags = status;
+                if status & Self::LAST_ROW_SENT != 0 {
+                    self.complete();
+                } else if status & Self::CURSOR_EXISTS != 0 && received != 0 {
+                    self.state = MySqlCursorState::Ready;
+                } else {
+                    return Err(MySqlError::Protocol(
+                        "cursor fetch ended without progress or terminal status".to_string(),
+                    ));
+                }
+                Ok(None)
+            }
+            _ => {
+                if received >= self.fetch_rows {
+                    return Err(MySqlError::Protocol(
+                        "server exceeded the requested cursor row limit".to_string(),
+                    ));
+                }
+                let values = MySqlConnection::parse_binary_row(&data, &self.columns)?;
+                self.state = MySqlCursorState::Fetching {
+                    received: received + 1,
+                };
+                Ok(Some(MySqlRow {
+                    columns: Arc::clone(&self.columns),
+                    column_indices: Arc::clone(&self.column_indices),
+                    values,
+                }))
+            }
+        }
+    }
+
+    fn terminator_status(data: &[u8], deprecate_eof: bool) -> Result<u16, MySqlError> {
+        // Short 0xFE OK packets are NOT legacy EOF packets: the status fields
+        // have different offsets. Classify with the negotiated capability.
+        if deprecate_eof {
+            if !MySqlConnection::is_deprecate_eof_ok_packet(data) {
+                return Err(MySqlError::Protocol(
+                    "invalid cursor OK terminator".to_string(),
+                ));
+            }
+            MySqlConnection::parse_ok_packet_like_status_flags(data)
+        } else {
+            if data.len() != 5 {
+                return Err(MySqlError::Protocol(
+                    "invalid cursor EOF terminator".to_string(),
+                ));
+            }
+            MySqlConnection::parse_eof_packet_status_flags(data)
+        }
+    }
+
+    async fn close_inner(&mut self, cx: &Cx) -> Result<(), MySqlError> {
+        if let Some(reason) = io_cancel_reason(Some(cx)) {
+            return Err(MySqlError::Cancelled(reason));
+        }
+        while matches!(self.state, MySqlCursorState::Fetching { .. }) {
+            let _ = self.read_batch_packet(cx).await?;
+        }
+        if self.state == MySqlCursorState::Complete {
+            return Ok(());
+        }
+        let mut buffer = PacketBuffer::new();
+        buffer.write_byte(command::COM_STMT_RESET);
+        buffer.write_u32_le(self.statement_id);
+        self.send_command(cx, &buffer.build_packet()).await?;
+        let (data, sequence) = self.connection.read_packet(Some(cx)).await?;
+        self.connection.inner.sequence = sequence.wrapping_add(1);
+        if data.first() == Some(&0xFF) {
+            return Err(MySqlConnection::parse_error(&data));
+        }
+        let ok = MySqlConnection::parse_ok_packet(&data)?;
+        if ok.status_flags & (Self::CURSOR_EXISTS | Self::MORE_RESULTS) != 0 {
+            return Err(MySqlError::Protocol(
+                "cursor reset was not terminal".to_string(),
+            ));
+        }
+        self.connection.inner.status_flags = ok.status_flags;
+        self.complete();
+        Ok(())
+    }
+}
+
+impl Drop for MySqlCursor<'_> {
+    fn drop(&mut self) {
+        if self.state != MySqlCursorState::Complete {
+            self.fail();
+        }
+    }
+}
+
 impl MySqlConnection {
+    /// Open a read-only prepared cursor with a nonzero per-fetch row limit.
+    ///
+    /// Unlike `query_stream_prepared`, this requests a server cursor with
+    /// COM_STMT_EXECUTE and sends COM_STMT_FETCH only as the consumer needs rows.
+    /// The statement, binding, pool reset, transaction cleanup and deadline
+    /// checks are shared with the existing prepared-query path. The server must
+    /// explicitly confirm CURSOR_EXISTS; queries that bypass MySQL's cursor
+    /// machinery are refused instead of falling back to an unbounded result.
+    ///
+    /// Packet/column limits remain enforced. The limit applies to requested
+    /// network batches; MySQL itself may materialize the whole result. Exhaust
+    /// the cursor or await `close()` to recover the connection for further work.
+    pub async fn query_cursor_prepared<'a>(
+        &'a mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+        fetch_rows: u32,
+    ) -> Outcome<MySqlCursor<'a>, MySqlError> {
+        if fetch_rows == 0 {
+            return Outcome::Err(MySqlError::InvalidParameter(
+                "cursor fetch_rows must be nonzero".to_string(),
+            ));
+        }
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+        if let Err(error) = self.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
+        }
+        self.inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self.query_cursor_start(cx, stmt, params).await;
+        match result {
+            Outcome::Ok(header) => {
+                let (Some(columns), Some(column_indices)) = (header.columns, header.column_indices)
+                else {
+                    return Outcome::Err(MySqlError::Protocol(
+                        "cursor metadata is missing".to_string(),
+                    ));
+                };
+                Outcome::Ok(MySqlCursor {
+                    connection: self,
+                    statement_id: stmt.statement_id,
+                    columns,
+                    column_indices,
+                    fetch_rows,
+                    row_count: 0,
+                    deprecate_eof: header.deprecate_eof,
+                    state: MySqlCursorState::Ready,
+                    io_in_progress: false,
+                })
+            }
+            Outcome::Cancelled(reason) => {
+                if self.inner.closed {
+                    self.wire_cancel_in_drain(cx).await;
+                }
+                self.inner
+                    .query_in_flight
+                    .store(false, std::sync::atomic::Ordering::Release);
+                Outcome::Cancelled(reason)
+            }
+            Outcome::Err(error) => {
+                if !self.inner.closed {
+                    self.inner
+                        .query_in_flight
+                        .store(false, std::sync::atomic::Ordering::Release);
+                } else {
+                    let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+                }
+                Outcome::Err(error)
+            }
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    /// Prepare or reuse a statement, then open its bounded read-only cursor.
+    ///
+    /// A zero fetch size is rejected before preparation or any other wire work.
+    /// SQL and parameter values are not borrowed by the returned cursor.
+    pub async fn query_cursor_params<'a>(
+        &'a mut self,
+        cx: &Cx,
+        sql: &str,
+        params: &[&dyn ToSql],
+        fetch_rows: u32,
+    ) -> Outcome<MySqlCursor<'a>, MySqlError> {
+        if fetch_rows == 0 {
+            return Outcome::Err(MySqlError::InvalidParameter(
+                "cursor fetch_rows must be nonzero".to_string(),
+            ));
+        }
+        let stmt = match self.prepare(cx, sql).await {
+            Outcome::Ok(stmt) => stmt,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+        self.query_cursor_prepared(cx, &stmt, params, fetch_rows)
+            .await
+    }
+
+    async fn query_cursor_start(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<MySqlStreamHeader, MySqlError> {
+        let response = match self
+            .start_prepared_query_with_flags(cx, stmt, params, 0x01)
+            .await
+        {
+            Outcome::Ok(response) => response,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+        if response.first() == Some(&0xFF) {
+            let error = Self::parse_error(&response);
+            if matches!(error, MySqlError::Server { .. }) {
+                self.inner.closed = false;
+            }
+            return Outcome::Err(error);
+        }
+        if response.first() == Some(&0x00) {
+            let ok = match Self::parse_ok_packet(&response) {
+                Ok(ok) => ok,
+                Err(error) => return Outcome::Err(error),
+            };
+            self.inner.status_flags = ok.status_flags;
+            if ok.status_flags & (MySqlCursor::CURSOR_EXISTS | MySqlCursor::MORE_RESULTS) != 0 {
+                return Outcome::Err(MySqlError::Protocol(
+                    "unexpected cursor command status".to_string(),
+                ));
+            }
+            self.inner.closed = false;
+            if let Err(error) = self
+                .forget_prepared_statements_after(cx, stmt.statement_id)
+                .await
+            {
+                return outcome_from_error(error);
+            }
+            return Outcome::Err(MySqlError::InvalidParameter(
+                "statement did not produce a cursor result set".to_string(),
+            ));
+        }
+        let mut reader = PacketReader::new(&response);
+        let column_count = match reader.read_lenenc_int() {
+            Ok(count) if count > 0 && count <= MAX_COLUMN_COUNT && reader.remaining() == 0 => count,
+            _ => {
+                return Outcome::Err(MySqlError::Protocol(
+                    "invalid cursor result-set column count".to_string(),
+                ));
+            }
+        };
+        let (columns, column_indices) = match self
+            .read_result_set_columns_with_cursor(cx, column_count as usize, true)
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(error) => return outcome_from_error(error),
+        };
+        if self.inner.status_flags
+            & (MySqlCursor::CURSOR_EXISTS | MySqlCursor::MORE_RESULTS | MySqlCursor::LAST_ROW_SENT)
+            != MySqlCursor::CURSOR_EXISTS
+        {
+            return Outcome::Err(MySqlError::Protocol(
+                "server did not open the requested read-only cursor".to_string(),
+            ));
+        }
+        Outcome::Ok(MySqlStreamHeader {
+            columns: Some(columns),
+            column_indices: Some(column_indices),
+            finished: false,
+            deprecate_eof: self.inner.capabilities & capability::CLIENT_DEPRECATE_EOF != 0,
+        })
+    }
+
     /// Execute a streaming query with bounded memory usage.
     ///
     /// DEFECT FIX: This replaces the collect-all-rows pattern with streaming
@@ -4337,6 +4807,16 @@ impl MySqlConnection {
         cx: &Cx,
         column_count: usize,
     ) -> Result<(Arc<Vec<MySqlColumn>>, Arc<BTreeMap<String, usize>>), MySqlError> {
+        self.read_result_set_columns_with_cursor(cx, column_count, false)
+            .await
+    }
+
+    async fn read_result_set_columns_with_cursor(
+        &mut self,
+        cx: &Cx,
+        column_count: usize,
+        cursor: bool,
+    ) -> Result<(Arc<Vec<MySqlColumn>>, Arc<BTreeMap<String, usize>>), MySqlError> {
         let mut columns = Vec::with_capacity(column_count);
         let mut indices = BTreeMap::new();
 
@@ -4352,7 +4832,16 @@ impl MySqlConnection {
         // In CLIENT_DEPRECATE_EOF mode, there is no metadata terminator after
         // column definitions; rows start immediately and the final terminator
         // is an OK packet. Without DEPRECATE_EOF we still expect EOF here.
-        if Self::expects_metadata_eof(self.inner.capabilities) {
+        if cursor {
+            // Cursor execute always terminates metadata with its status: a
+            // legacy EOF or a 0xFE-header OK in CLIENT_DEPRECATE_EOF mode.
+            let (data, sequence) = self.read_packet(Some(cx)).await?;
+            self.inner.sequence = sequence.wrapping_add(1);
+            self.inner.status_flags = MySqlCursor::terminator_status(
+                &data,
+                !Self::expects_metadata_eof(self.inner.capabilities),
+            )?;
+        } else if Self::expects_metadata_eof(self.inner.capabilities) {
             self.read_metadata_eof(cx, "columns").await?;
         }
 
@@ -6050,6 +6539,17 @@ impl MySqlConnection {
         stmt: &MySqlStatement,
         params: &[&dyn ToSql],
     ) -> Outcome<Vec<u8>, MySqlError> {
+        self.start_prepared_query_with_flags(cx, stmt, params, 0)
+            .await
+    }
+
+    async fn start_prepared_query_with_flags(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+        flags: u8,
+    ) -> Outcome<Vec<u8>, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -6099,7 +6599,7 @@ impl MySqlConnection {
         buf.set_sequence(0);
         buf.write_byte(command::COM_STMT_EXECUTE);
         buf.write_u32_le(stmt.statement_id);
-        buf.write_byte(0x00); // flags
+        buf.write_byte(flags);
         buf.write_u32_le(1); // iteration count
 
         if let Err(e) = write_stmt_execute_params(&mut buf, params) {
