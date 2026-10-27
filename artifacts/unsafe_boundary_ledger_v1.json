@@ -1685,27 +1685,27 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1988,
+          "line": 1994,
           "pattern": "let term_result = unsafe { libc::kill(native_pid, libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2000,
+          "line": 2006,
           "pattern": "let check_result = unsafe { libc::kill(native_pid, 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2009,
+          "line": 2015,
           "pattern": "let _ = unsafe { libc::kill(native_pid, libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2046,
+          "line": 2052,
           "pattern": "let errno = unsafe { *libc::__errno_location() };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2190,
+          "line": 2196,
           "pattern": "let signal_result = unsafe { libc::kill(native_pid, libc::SIGHUP) };"
         }
       ]
