@@ -113,3 +113,98 @@
         assert!(read_policy(&parent.join("large")).is_err());
         assert!(read_policy(Path::new("relative.json")).is_err());
     }
+
+    fn session_document(generation: u64, clients: &[&str], keys: &[(&str, &str)]) -> Vec<u8> {
+        let sessions: Vec<_> = keys.iter().map(|(certificate, nonce)| json!({
+            "certificate_sha256": certificate, "stream_nonce": nonce,
+        })).collect();
+        serde_json::to_vec(&json!({
+            "schema_version": 2, "generation": generation,
+            "revoked_certificates": clients, "revoked_sessions": sessions,
+        })).unwrap()
+    }
+
+    #[test]
+    fn session_policy_requires_explicit_v2_and_rejects_ambiguous_or_unbounded_keys() {
+        let certificate = "ab".repeat(32);
+        let nonce = "cd".repeat(32);
+        let valid = session_document(1, &[], &[(&certificate, &nonce)]);
+        let snapshot = Snapshot::decode(&valid).unwrap();
+        assert_eq!(snapshot.version, 2);
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert!(snapshot.revoked.is_empty());
+        // This is the same strict shape used by the previous implementation.
+        assert!(serde_json::from_slice::<DocumentV1>(&valid).is_err());
+        let mut document: Value = serde_json::from_slice(&valid).unwrap();
+        for version in [0, 1, 3] {
+            document["schema_version"] = json!(version);
+            assert!(Snapshot::decode(&serde_json::to_vec(&document).unwrap()).is_err());
+        }
+        document["schema_version"] = json!(2);
+        document["revoked_sessions"][0]["extra"] = json!(true);
+        assert!(Snapshot::decode(&serde_json::to_vec(&document).unwrap()).is_err());
+        let upper_certificate = certificate.to_ascii_uppercase();
+        let upper_nonce = nonce.to_ascii_uppercase();
+        for bytes in [
+            session_document(1, &[], &[(&certificate, "bad")]),
+            session_document(1, &[], &[("bad", &nonce)]),
+            session_document(1, &[], &[
+                (&certificate, &nonce), (&upper_certificate, &upper_nonce),
+            ]),
+            br#"{"schema_version":1,"generation":1,"revoked_certificates":[],"revoked_sessions":null}"#.to_vec(),
+            br#"{"schema_version":2,"generation":1,"revoked_certificates":[]}"#.to_vec(),
+            br#"{"schema_version":2,"generation":1,"revoked_certificates":[],"revoked_sessions":null}"#.to_vec(),
+            br#"{"schema_version":2,"schema_version":2,"generation":1,"revoked_certificates":[],"revoked_sessions":[]}"#.to_vec(),
+        ] {
+            assert!(Snapshot::decode(&bytes).is_err());
+        }
+        let many = vec![(certificate.as_str(), nonce.as_str()); MAX_REVOKED_RESUME_SESSIONS + 1];
+        assert!(Snapshot::decode(&session_document(1, &[], &many)).is_err());
+    }
+
+    #[test]
+    fn session_policy_never_removes_a_key_or_downgrades_to_certificate_only() {
+        let a = "11".repeat(32);
+        let b = "22".repeat(32);
+        let first = "aa".repeat(32);
+        let second = "bb".repeat(32);
+        let legacy = Snapshot::decode(&document(7, &[&a])).unwrap();
+        let policy = Snapshot::decode(&session_document(8, &[&a], &[(&b, &first)])).unwrap();
+        assert!(policy.follows(&legacy).is_ok());
+        assert!(policy.follows(&policy).is_ok());
+        let successor = session_document(9, &[&a], &[(&b, &first), (&b, &second)]);
+        assert!(Snapshot::decode(&successor).unwrap().follows(&policy).is_ok());
+        for candidate in [
+            document(9, &[&a, &b]),
+            session_document(7, &[&a], &[(&b, &first)]),
+            session_document(8, &[&a], &[(&b, &first), (&b, &second)]),
+            session_document(9, &[&a, &b], &[]),
+            session_document(9, &[], &[(&b, &first)]),
+            session_document(9, &[&a], &[(&b, &second)]),
+        ] {
+            assert!(Snapshot::decode(&candidate).unwrap().follows(&policy).is_err());
+        }
+    }
+
+    #[test]
+    fn protected_session_policy_reopens_with_the_exact_authenticated_key() {
+        let path = directory().join("sessions.json");
+        let certificate = "23".repeat(32);
+        let nonce = "45".repeat(32);
+        let bytes = session_document(19, &[], &[(&certificate, &nonce)]);
+        write(&path, &bytes);
+        let first = read_policy(&path).unwrap();
+        let reopened = read_policy(&path).unwrap();
+        assert_eq!(first.snapshot, reopened.snapshot);
+        assert_eq!(first.directory, reopened.directory);
+        assert_eq!(reopened.snapshot.version, 2);
+        assert_eq!(reopened.snapshot.generation, 19);
+        assert_eq!(
+            reopened.snapshot.sessions.into_iter().collect::<Vec<_>>(),
+            vec![ResumeSessionKey {
+                client: NativeClientCertificateId::from_sha256([0x23; 32]),
+                nonce: [0x45; 32],
+            }],
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }

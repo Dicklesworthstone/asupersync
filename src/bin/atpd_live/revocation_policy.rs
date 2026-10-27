@@ -7,7 +7,7 @@
 use super::super::settings::{invalid, selector};
 use asupersync::Cx;
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::service::{
-    MAX_REVOKED_RESUME_CLIENTS, ResumableService,
+    MAX_REVOKED_RESUME_CLIENTS, MAX_REVOKED_RESUME_SESSIONS, ResumableService, ResumeSessionKey,
 };
 use asupersync::net::atp::sdk::{NativeClientAuthorization, NativeClientCertificateId};
 use asupersync::runtime::spawn_blocking_io;
@@ -25,16 +25,34 @@ const MAX_POLICY_BYTES: usize = 128 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Document {
+struct DocumentV1 {
     schema_version: u32,
     generation: u64,
     revoked_certificates: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionDenial {
+    certificate_sha256: String,
+    stream_nonce: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocumentV2 {
+    schema_version: u32,
+    generation: u64,
+    revoked_certificates: Vec<String>,
+    revoked_sessions: Vec<SessionDenial>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Snapshot {
+    version: u32,
     generation: u64,
     revoked: BTreeSet<NativeClientCertificateId>,
+    sessions: BTreeSet<ResumeSessionKey>,
 }
 
 impl Snapshot {
@@ -42,32 +60,56 @@ impl Snapshot {
         if bytes.len() > MAX_POLICY_BYTES {
             return Err(invalid("revocation policy exceeds its byte limit"));
         }
-        let document: Document = serde_json::from_slice(bytes)
+        // Inspect only the discriminator here; deserialize the selected strict
+        // document again so duplicate keys and all unknown fields still fail.
+        // In particular v1 never starts accepting a session field, even null.
+        let value: Value = serde_json::from_slice(bytes)
             .map_err(|_| invalid("invalid revocation policy document"))?;
-        if document.schema_version != 1
-            || document.generation == 0
-            || document.revoked_certificates.len() > MAX_REVOKED_RESUME_CLIENTS
+        let (version, generation, certificates, session_denials) =
+            match value.get("schema_version").and_then(Value::as_u64) {
+                Some(1) => {
+                    let doc: DocumentV1 = serde_json::from_slice(bytes)
+                        .map_err(|_| invalid("invalid revocation policy document"))?;
+                    (doc.schema_version, doc.generation, doc.revoked_certificates, Vec::new())
+                }
+                Some(2) => {
+                    let doc: DocumentV2 = serde_json::from_slice(bytes)
+                        .map_err(|_| invalid("invalid session revocation policy document"))?;
+                    (doc.schema_version, doc.generation, doc.revoked_certificates, doc.revoked_sessions)
+                }
+                _ => return Err(invalid("invalid revocation policy version, generation or count")),
+            };
+        if generation == 0
+            || certificates.len() > MAX_REVOKED_RESUME_CLIENTS
+            || session_denials.len() > MAX_REVOKED_RESUME_SESSIONS
         {
-            return Err(invalid(
-                "invalid revocation policy version, generation or count",
-            ));
+            return Err(invalid("invalid revocation policy version, generation or count"));
         }
         let mut revoked = BTreeSet::new();
-        for certificate in document.revoked_certificates {
+        for certificate in certificates {
             if !revoked.insert(selector(&certificate)?) {
                 return Err(invalid("duplicate revocation certificate"));
             }
         }
-        Ok(Self {
-            generation: document.generation,
-            revoked,
-        })
+        let mut sessions = BTreeSet::new();
+        for denial in session_denials {
+            let client = selector(&denial.certificate_sha256)?;
+            let mut nonce = [0; 32];
+            hex::decode_to_slice(&denial.stream_nonce, &mut nonce)
+                .map_err(|_| invalid("revocation session nonce must be 32 bytes of hexadecimal"))?;
+            if !sessions.insert(ResumeSessionKey { client, nonce }) {
+                return Err(invalid("duplicate revocation session"));
+            }
+        }
+        Ok(Self { version, generation, revoked, sessions })
     }
 
     fn follows(&self, previous: &Self) -> io::Result<()> {
-        if self.generation < previous.generation
+        if self.version < previous.version
+            || self.generation < previous.generation
             || (self.generation == previous.generation && self != previous)
             || !self.revoked.is_superset(&previous.revoked)
+            || !self.sessions.is_superset(&previous.sessions)
         {
             return Err(invalid(
                 "revocation policy cannot roll back or remove a denial",
@@ -195,26 +237,26 @@ impl RevocationPolicy {
         snapshot: &Snapshot,
         service: &mut ResumableService<W>,
     ) -> io::Result<Value> {
-        let mut newly_revoked = 0;
-        let mut signalled_connections = 0;
-        let mut retained_sessions = 0;
-        for certificate in &snapshot.revoked {
-            let changed = service
-                .revoke_client(
-                    *certificate,
-                    CancelReason::user("atpd-live client revocation policy"),
-                )
-                .map_err(|_| invalid("revocation service policy could not be applied"))?;
-            newly_revoked += usize::from(changed.newly_revoked);
-            signalled_connections += changed.signalled_connections;
-            retained_sessions += changed.retained_sessions;
-        }
-        Ok(
-            json!({"schema_version": 1, "event": "revocation_policy_applied",
+        let clients: Vec<_> = snapshot.revoked.iter().copied().collect();
+        let sessions: Vec<_> = snapshot.sessions.iter().copied().collect();
+        let changed = service.apply_revocations(
+            &clients,
+            &sessions,
+            CancelReason::user("atpd-live client revocation policy"),
+        ).map_err(|_| invalid("revocation service policy could not be applied"))?;
+        let mut event = json!({"schema_version": 1, "event": "revocation_policy_applied",
             "generation": snapshot.generation, "revoked_clients": snapshot.revoked.len(),
-            "newly_revoked": newly_revoked, "signalled_connections": signalled_connections,
-            "retained_sessions": retained_sessions, "drained": false}),
-        )
+            "newly_revoked": changed.newly_revoked_clients,
+            "signalled_connections": changed.signalled_connections,
+            "retained_sessions": changed.retained_sessions, "drained": false});
+        // Preserve the exact v1 event shape. Only the opt-in v2 document
+        // produces session-denial fields and a v2 event.
+        if snapshot.version == 2 {
+            event["schema_version"] = json!(2);
+            event["revoked_sessions"] = json!(snapshot.sessions.len());
+            event["newly_revoked_sessions"] = json!(changed.newly_revoked_sessions);
+        }
+        Ok(event)
     }
 
     pub(super) fn install<W>(&self, service: &mut ResumableService<W>) -> io::Result<()> {
@@ -241,6 +283,12 @@ impl RevocationPolicy {
         if candidate.directory != self.current.directory {
             return Err(invalid("revocation policy directory identity changed"));
         }
+        // Preflight both complete denial sets before changing TLS or signalling
+        // any task. A session-capacity refusal must not partly apply a policy.
+        let clients: Vec<_> = candidate.snapshot.revoked.iter().copied().collect();
+        let sessions: Vec<_> = candidate.snapshot.sessions.iter().copied().collect();
+        service.check_revocations(&clients, &sessions)
+            .map_err(|_| invalid("revocation service policy could not be admitted"))?;
         // Do not yield admission between TLS tightening and service revocation.
         self.apply_tls(&candidate.snapshot)?;
         let event = Self::install_snapshot(&candidate.snapshot, service)?;

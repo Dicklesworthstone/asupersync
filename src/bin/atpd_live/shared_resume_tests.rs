@@ -251,6 +251,8 @@ fn refusal_projection_keeps_busy_retired_quota_and_factory_failures_distinct() {
     let cases = [
         (ResumeServiceRejection::Busy, "session_busy"),
         (ResumeServiceRejection::Retired, "session_retired"),
+        (ResumeServiceRejection::Revoked, "client_revoked"),
+        (ResumeServiceRejection::SessionRevoked, "session_revoked"),
         (
             ResumeServiceRejection::Capacity("untrusted text must not escape"),
             "session_capacity_refused",

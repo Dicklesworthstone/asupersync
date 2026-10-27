@@ -351,6 +351,8 @@ async fn serve_loop(
                     }
                     if service.is_client_revoked(&key.client) {
                         Some((*key, Retirement::Revoked))
+                    } else if service.is_session_revoked(key) {
+                        Some((*key, Retirement::SessionRevoked))
                     } else {
                         retained
                             .expired(now)
@@ -489,6 +491,9 @@ fn retirement<W>(
             let snapshot = service.session_snapshot(&key)?;
             if service.is_client_revoked(&key.client) {
                 return Some(Retirement::Revoked);
+            }
+            if service.is_session_revoked(&key) {
+                return Some(Retirement::SessionRevoked);
             }
             if snapshot.failed {
                 return Some(Retirement::LocalFailure);
