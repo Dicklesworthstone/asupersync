@@ -5614,6 +5614,8 @@ impl RuntimeState {
             inner.runnable_publication =
                 crate::types::task_context::RunnablePublication::Unpublished;
             inner.retirement_barrier = retirement_barrier;
+            inner.caller_owned_poll_quota =
+                slot.is_some_and(AdmittedTaskSlot::caller_owned_poll_quota);
         }
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());

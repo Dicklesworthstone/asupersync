@@ -973,6 +973,11 @@ pub struct CxInner {
     pub budget: Budget,
     /// Baseline budget used for checkpoint accounting.
     pub budget_baseline: Budget,
+    /// The native `block_on` driver charges the actual root future's polls.
+    /// Its local accounting task must not also spend that quota on admission,
+    /// cancellation bookkeeping, or retirement. Installed before admission
+    /// publishes the task; ordinary child tasks never inherit this flag.
+    pub(crate) caller_owned_poll_quota: bool,
     /// Explicit capability/resource envelope carried by this context.
     pub capability_budget: CapabilityBudget,
     /// Whether cancellation has been requested.
@@ -1074,6 +1079,7 @@ impl CxInner {
             task_type: None,
             budget,
             budget_baseline: budget,
+            caller_owned_poll_quota: false,
             capability_budget: CapabilityBudget::UNSPECIFIED,
             cancel_requested: false,
             cancel_reason: None,

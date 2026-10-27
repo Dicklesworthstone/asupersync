@@ -4009,6 +4009,55 @@ impl<Caps> Cx<Caps> {
         crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
     }
 
+    /// Charges one actual caller-polled root turn, using the native worker's
+    /// cooperative quota semantics. Cancellation and terminal cleanup remain
+    /// advisory: a pending user/deadline cancellation must keep its reason.
+    /// Publish exhaustion under the same lock as the charge, then wake outside
+    /// it so a callback may safely inspect or cancel this context.
+    pub(crate) fn consume_root_poll(&self) {
+        let wakers = {
+            let mut inner = self.inner.write();
+            if inner.is_cancel_requested()
+                || inner.cleanup_phase
+                || inner.budget.poll_quota == u32::MAX
+                || inner.budget.consume_poll().is_some()
+            {
+                return;
+            }
+            inner.set_cancel_requested(true);
+            let reason = CancelReason::poll_quota();
+            if let Some(existing) = inner.cancel_reason.as_mut() {
+                existing.strengthen(&reason);
+            } else {
+                inner.cancel_reason = Some(reason);
+            }
+            let wakers = inner.cancel_waker_snapshot();
+            inner.cancel_wakers_pending = false;
+            wakers
+        };
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
+    }
+
+    /// Publishes cancellation requested by a checkpoint during a root poll.
+    /// Workers do this while reconciling the task record; a caller-polled root
+    /// must discharge the same wake debt before parking or returning: an
+    /// unregistered adapter context has no task retirement to do it later.
+    pub(crate) fn flush_root_cancel_wakes(&self) {
+        if !self.has_published_cancellation() {
+            return;
+        }
+        let wakers = {
+            let mut inner = self.inner.write();
+            if !inner.cancel_wakers_pending {
+                return;
+            }
+            let wakers = inner.cancel_waker_snapshot();
+            inner.cancel_wakers_pending = false;
+            wakers
+        };
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
+    }
+
     /// Derives a cancellation scope inside this task: the context of one
     /// fiber (br-asupersync-issue65-criticisms-kpmoy5.3.1).
     ///
@@ -5651,6 +5700,38 @@ where
             &gateway,
             &pending,
             crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            false,
+            f,
+        )
+    }
+
+    /// Registers the current-thread driver's bookkeeping task with its exact
+    /// inherited budget. Admission marks the caller as the poll-quota owner
+    /// before any scheduler poll, so even a zero-quota root receives its task
+    /// identity before the actual root future is charged.
+    pub(crate) fn spawn_root_accounting<F, Fut>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let Some(pending) = self.pending_spawn_counter_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        self.spawn_local_via_lane(
+            self.region_id(),
+            self.inherited_budget(),
+            self.capability_budget(),
+            &gateway,
+            &pending,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            true,
             f,
         )
     }
@@ -5698,6 +5779,7 @@ where
             &gateway,
             &pending,
             crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            false,
             f,
         )
     }
@@ -5733,6 +5815,7 @@ where
             &gateway,
             &pending,
             crate::runtime::task_handle::SpawnCompletionPolicy::CancellationDominant,
+            false,
             f,
         )
     }
@@ -5751,6 +5834,7 @@ where
         gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
         pending: &Arc<crate::record::region::PendingSpawnCounter>,
         completion_policy: crate::runtime::task_handle::SpawnCompletionPolicy,
+        caller_owned_poll_quota: bool,
         f: F,
     ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
     where
@@ -5786,6 +5870,7 @@ where
         let admitted_slot = Arc::new(
             AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
                 .with_runtime_mask(self.runtime_mask)
+                .with_caller_owned_poll_quota(caller_owned_poll_quota)
                 .with_retirement_barrier(Arc::clone(&barrier))
                 // Admission builds the task's one context with these, so
                 // `Cx::current()` in the task carries them (br-asupersync-93zkbz).

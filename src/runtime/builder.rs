@@ -4258,13 +4258,37 @@ impl Runtime {
     ///   (closed region or task limit), the compatibility fallback runs without
     ///   checked holder authority.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.block_on_with_budget(Budget::INFINITE, future)
+    }
+
+    /// Run a future to completion with an explicit root budget.
+    ///
+    /// Uses the same task ownership, worker borrowing, and panic behavior as
+    /// [`Self::block_on`]. The future may borrow from the caller and need not
+    /// be `Send` or `'static`. [`Cx::current`](crate::cx::Cx::current) exposes
+    /// the root's live budget; tasks spawned through it inherit the remaining
+    /// budget and spend their own poll quotas.
+    ///
+    /// Each actual poll of the root consumes one finite quota unit. A poll
+    /// attempted after exhaustion requests [`CancelKind::PollQuota`](crate::types::CancelKind::PollQuota);
+    /// a checkpoint can also observe exhaustion on the poll that spends the
+    /// last unit. Admission and retirement of the current-thread root's
+    /// accounting task do not consume quota. `Budget::INFINITE` preserves
+    /// [`Self::block_on`]'s unlimited root budget.
+    ///
+    /// Cancellation is cooperative: this returns the future's own output,
+    /// after its cleanup completes. It cannot preempt a poll that does not
+    /// yield. Once cancellation or terminal cleanup begins, the driver stops
+    /// charging polls and does not replace an existing cancellation reason.
+    /// Explicit checkpoints retain their usual budget-exhaustion checks.
+    pub fn block_on_with_budget<F: Future>(&self, budget: Budget, future: F) -> F::Output {
         let _guard = ScopedRuntimeHandle::new(self.handle());
         // #41: install an ambient Cx backed by this runtime's drivers (IO, timer, blocking pool,
         // observability). Without it `Cx::current()` is None inside the polled future, and public
         // async networking (e.g. `TcpListener::accept`) spins on `WouldBlock` instead of waiting
         // through the reactor. `_cx_guard` installs it for the poll and removes it on return, as
         // `block_on_with_cx` does for a caller that has a request-scoped Cx.
-        let request_cx = self.request_cx_with_budget(Budget::INFINITE);
+        let request_cx = self.request_cx_with_budget(budget);
         let _cx_guard = crate::cx::Cx::set_current(Some(request_cx.clone()));
         // GH#58 / br-asupersync-94jh37: on a `RuntimeBuilder::current_thread()`
         // runtime the calling thread drives the single worker for the life
@@ -4298,7 +4322,11 @@ impl Runtime {
         run_future_with_budget(
             future,
             self.inner.config.poll_budget,
-            registration.as_ref().map(|registration| &registration.cx),
+            Some(
+                registration
+                    .as_ref()
+                    .map_or(&request_cx, |registration| &registration.cx),
+            ),
         )
     }
 
@@ -4319,8 +4347,8 @@ impl Runtime {
         future: F,
     ) -> F::Output {
         let _runtime_guard = ScopedRuntimeHandle::new(self.handle());
-        let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
-        run_future_with_budget(future, self.inner.config.poll_budget, None)
+        let _cx_guard = crate::cx::Cx::set_current(Some(request_cx.clone()));
+        run_future_with_budget(future, self.inner.config.poll_budget, Some(&request_cx))
     }
 
     /// Run a future to completion using the currently installed runtime handle
@@ -4338,8 +4366,12 @@ impl Runtime {
     ) -> Option<F::Output> {
         let handle = Self::current_handle()?;
         let inner = handle.try_inner().ok()?;
-        let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
-        Some(run_future_with_budget(future, inner.config.poll_budget, None))
+        let _cx_guard = crate::cx::Cx::set_current(Some(request_cx.clone()));
+        Some(run_future_with_budget(
+            future,
+            inner.config.poll_budget,
+            Some(&request_cx),
+        ))
     }
 
     /// Create a request-scoped [`Cx`](crate::cx::Cx) backed by this runtime's
@@ -7239,13 +7271,13 @@ fn current_runtime_has_live_tasks() -> bool {
 /// cancellation cannot unpark a caller that waits on a primitive with no
 /// cancellation waker of its own (an mpsc receive, a semaphore acquire), and a
 /// root drain waits out its full timeout (asupersync-h64i97).
-struct CallerCancelWake {
+pub(super) struct CallerCancelWake {
     cx: crate::cx::Cx,
     token: crate::cx::CancelWakerToken,
 }
 
 impl CallerCancelWake {
-    fn new(cx: &crate::cx::Cx, waker: &Waker) -> Self {
+    pub(super) fn new(cx: &crate::cx::Cx, waker: &Waker) -> Self {
         Self {
             cx: cx.clone(),
             token: cx.refresh_cancel_waker(None, waker),
@@ -7262,7 +7294,7 @@ impl Drop for CallerCancelWake {
 fn run_future_with_budget<F: Future>(
     future: F,
     poll_budget: u32,
-    cancel_owner: Option<&crate::cx::Cx>,
+    root_cx: Option<&crate::cx::Cx>,
 ) -> F::Output {
     let thread = std::thread::current();
     let thread_waker = Arc::new(ThreadWaker {
@@ -7270,7 +7302,7 @@ fn run_future_with_budget<F: Future>(
         woken: std::sync::atomic::AtomicBool::new(false),
     });
     let waker = Waker::from(Arc::clone(&thread_waker));
-    let _cancel_wake = cancel_owner.map(|cx| CallerCancelWake::new(cx, &waker));
+    let _cancel_wake = root_cx.map(|cx| CallerCancelWake::new(cx, &waker));
     let mut cx = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
     let mut polls = 0u32;
@@ -7285,7 +7317,15 @@ fn run_future_with_budget<F: Future>(
             .woken
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
-        match future.as_mut().poll(&mut cx) {
+        if let Some(root_cx) = root_cx {
+            root_cx.consume_root_poll();
+        }
+
+        let polled = future.as_mut().poll(&mut cx);
+        if let Some(root_cx) = root_cx {
+            root_cx.flush_root_cancel_wakes();
+        }
+        match polled {
             Poll::Ready(output) => return output,
             Poll::Pending => {
                 if thread_waker
@@ -7539,3 +7579,7 @@ mod mailbox_observer_tests;
 #[cfg(test)]
 #[path = "builder_close_wake_tests.rs"]
 mod close_wake_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "builder_root_budget_tests.rs"]
+mod root_budget_tests;

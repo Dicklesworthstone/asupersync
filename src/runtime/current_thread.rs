@@ -682,7 +682,8 @@ fn drive_root_on<F: Future>(
         .ok()
         .and_then(RootRegistration::take_cx)
         .unwrap_or_else(|| request_cx.clone());
-    let root_cx_guard = Cx::set_current(Some(root_cx));
+    let root_cx_guard = Cx::set_current(Some(root_cx.clone()));
+    let cancel_wake = super::builder::CallerCancelWake::new(&root_cx, &waker);
 
     // Phase 2: poll the root whenever its waker fired; run the worker
     // (dispatch, admission, timers, reactor, park) in between.
@@ -691,6 +692,7 @@ fn drive_root_on<F: Future>(
             break drive_root_after_shutdown(
                 loaned(slot),
                 &root_waker,
+                &root_cx,
                 &mut ctx,
                 future.as_mut().as_pin_mut().expect("root is still live"),
             );
@@ -701,11 +703,14 @@ fn drive_root_on<F: Future>(
                 .expect("worker stays on loan for the whole drive");
             driver.park_reentrant(parked);
             let polled = catch_unwind(AssertUnwindSafe(|| {
-                future
+                root_cx.consume_root_poll();
+                let polled = future
                     .as_mut()
                     .as_pin_mut()
                     .expect("root is still live")
-                    .poll(&mut ctx)
+                    .poll(&mut ctx);
+                root_cx.flush_root_cancel_wakes();
+                polled
             }));
             *slot = Some(
                 driver
@@ -736,6 +741,7 @@ fn drive_root_on<F: Future>(
             .expect("a nested drive hands the worker back before root drop returns"),
     );
     let result = result.and_then(|output| dropped.map(|()| output));
+    drop(cancel_wake);
     drop(root_cx_guard);
 
     // Phase 3: retire the task with one direct poll of its record (so the
@@ -768,6 +774,7 @@ fn loaned(slot: &mut Option<Box<ThreeLaneWorker>>) -> &mut ThreeLaneWorker {
 fn drive_root_after_shutdown<F: Future>(
     worker: &ThreeLaneWorker,
     root_waker: &Arc<RootWaker>,
+    root_cx: &Cx,
     ctx: &mut Context<'_>,
     mut future: Pin<&mut F>,
 ) -> std::thread::Result<F::Output> {
@@ -776,7 +783,12 @@ fn drive_root_after_shutdown<F: Future>(
             let _ = timer.process_timers();
         }
         if root_waker.take_woken() {
-            match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(ctx))) {
+            match catch_unwind(AssertUnwindSafe(|| {
+                root_cx.consume_root_poll();
+                let polled = future.as_mut().poll(ctx);
+                root_cx.flush_root_cancel_wakes();
+                polled
+            })) {
                 Ok(Poll::Ready(output)) => return Ok(output),
                 Ok(Poll::Pending) => {}
                 Err(payload) => return Err(payload),
@@ -848,7 +860,7 @@ impl RootRegistration {
             done: Cell::new(false),
         });
         let task_shared = Rc::clone(&shared);
-        let handle = parent.spawn_local(move |cx: Cx| async move {
+        let handle = parent.spawn_root_accounting(move |cx: Cx| async move {
             *task_shared.cx.borrow_mut() = Some(cx);
             // No waker registration: the driver polls this record directly
             // once the root completed (`finish_now`).
