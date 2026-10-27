@@ -533,9 +533,10 @@ pub fn base64_encode(binary: &[u8]) -> String {
 /// **Whole-input decoder.** This expects the COMPLETE base64 stream
 /// in one call and rejects partial input. For chunked HTTP body
 /// streams (where each chunk may end mid-base64-quartet), use
-/// [`Base64StreamDecoder`] instead — it holds 0–3 chars of partial-
-/// quartet across `push` calls so chunked input can be decoded
-/// incrementally without buffering the entire body in memory first.
+/// [`Base64StreamDecoder`] instead — it holds partial quartets across
+/// `push` calls so chunked input can be decoded incrementally. Select
+/// [`Base64StreamDecoder::new_chunked`] for gRPC-Web streams whose server
+/// may flush independently padded base64 segments within one HTTP body.
 pub fn base64_decode(text: &str) -> Result<Vec<u8>, GrpcError> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
@@ -548,12 +549,13 @@ pub fn base64_decode(text: &str) -> Result<Vec<u8>, GrpcError> {
 ///
 /// Holds incomplete base64 quartets across HTTP body chunks so a
 /// chunked body can be decoded incrementally without buffering the
-/// entire stream in memory before decode. Padding (`=`) is interpreted
-/// as the stream-end marker — once observed, the decoder is sealed
-/// and all subsequent `push` calls fail. Callers that omit padding
-/// (the gRPC-Web spec permits unpadded base64 since the binary stream
-/// length is independently known from `content-length` /
-/// chunked-encoding terminator) finalize via [`Self::finish`].
+/// entire stream in memory before decode. [`Self::new`] and `Default`
+/// preserve the single-entity contract: padding (`=`) seals the decoder
+/// and later `push` calls fail. [`Self::new_chunked`] instead accepts
+/// independently padded segments, as emitted by gRPC-Web servers that
+/// flush before the response is complete. In that mode only an explicit
+/// [`Self::finish`] ends the stream; a malformed segment poisons it.
+/// An unpadded final segment is decoded by `finish` in either mode.
 ///
 /// # Example
 ///
@@ -574,7 +576,7 @@ pub fn base64_decode(text: &str) -> Result<Vec<u8>, GrpcError> {
 /// gRPC-Web text mode uses RFC 4648 STANDARD base64. STANDARD
 /// requires padding when the binary length is not a multiple of 3,
 /// but the gRPC-Web spec is permissive: many clients omit padding.
-/// `Base64StreamDecoder` accepts both:
+/// The single-entity mode accepts both:
 ///
 /// - Padded streams: `=` chars mark the FINAL quartet. If the padded
 ///   quartet is split across chunks, the decoder buffers it until the
@@ -587,15 +589,28 @@ pub fn base64_decode(text: &str) -> Result<Vec<u8>, GrpcError> {
 ///   without padding. A 1-char trailing remainder is invalid base64
 ///   and surfaces as `Err`.
 ///
+/// Chunked mode validates each complete quartet with the same strict
+/// alphabet, padding placement, and zero trailing-bit rules, but allows a
+/// new segment immediately after a padded quartet. HTTP chunk boundaries
+/// may occur anywhere, including between the two `=` characters. Only the
+/// final segment may omit required padding. At most three input bytes are
+/// retained between calls, and each call allocates only its decoded output.
+/// Frame boundaries and the terminal trailer remain the responsibility of
+/// [`WebFrameCodec`]; padding alone does not delimit a gRPC message.
+///
 /// (br-asupersync-37svtb)
 #[derive(Debug, Default)]
 pub struct Base64StreamDecoder {
     /// Buffered partial-quartet input (0–3 ASCII bytes).
     pending: Vec<u8>,
     /// True once `finish()` has run or padding has been observed in
-    /// `push()`. Sealed decoders reject further `push` calls and
-    /// `finish` becomes a no-op.
+    /// `push()` in single-entity mode. Sealed decoders reject further
+    /// `push` calls; successful `finish` calls are idempotent.
     sealed: bool,
+    /// Accept separately padded segments until explicit end of input.
+    chunked: bool,
+    /// A malformed segment in chunked mode is terminal, including at EOF.
+    poisoned: bool,
 }
 
 impl Base64StreamDecoder {
@@ -605,11 +620,33 @@ impl Base64StreamDecoder {
         Self {
             pending: Vec::with_capacity(3),
             sealed: false,
+            chunked: false,
+            poisoned: false,
+        }
+    }
+
+    /// Create a decoder for independently padded gRPC-Web text segments.
+    ///
+    /// Unlike [`Self::new`], a padded quartet does not end the HTTP body.
+    /// This mode consumes responses from
+    /// `Server::registered_grpc_web_streaming_handler`
+    /// without buffering the entire response. Call [`Self::finish`] at HTTP
+    /// body EOF, then require a terminal trailer through [`WebFrameCodec`].
+    /// Invalid input fails closed: subsequent `push` and `finish` calls
+    /// return an error rather than resuming after a corrupted segment.
+    #[must_use]
+    pub fn new_chunked() -> Self {
+        Self {
+            pending: Vec::with_capacity(4),
+            sealed: false,
+            chunked: true,
+            poisoned: false,
         }
     }
 
     /// Returns true once the decoder has been sealed by either
-    /// observing padding in `push` or by an explicit `finish` call.
+    /// an explicit `finish` call, a terminal chunked-mode error, or
+    /// observing padding in single-entity mode.
     #[must_use]
     pub fn is_sealed(&self) -> bool {
         self.sealed
@@ -619,11 +656,16 @@ impl Base64StreamDecoder {
     ///
     /// Decodes all complete quartets formed by joining the previous
     /// partial-quartet residue with this chunk; the trailing 0–3
-    /// chars are buffered for the next `push`. If the chunk contains
-    /// padding (`=`), the chunk is treated as the FINAL one — the
-    /// combined buffer is decoded with strict STANDARD validation
-    /// and the decoder is sealed.
+    /// chars are buffered for the next `push`. In single-entity mode,
+    /// padding (`=`) seals the decoder after strict STANDARD validation.
+    /// In chunked mode, padding ends only that base64 segment and later
+    /// segments may arrive in the same call or any subsequent call.
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<u8>, GrpcError> {
+        if self.poisoned {
+            return Err(GrpcError::protocol(
+                "chunked base64 stream decoder is poisoned",
+            ));
+        }
         if self.sealed {
             return Err(GrpcError::protocol(
                 "base64 stream decoder is sealed — cannot push after \
@@ -633,6 +675,15 @@ impl Base64StreamDecoder {
         }
         if chunk.is_empty() {
             return Ok(Vec::new());
+        }
+        if self.chunked {
+            let result = self.push_chunked(chunk);
+            if result.is_err() {
+                self.pending.clear();
+                self.sealed = true;
+                self.poisoned = true;
+            }
+            return result;
         }
 
         let mut combined = Vec::with_capacity(self.pending.len() + chunk.len());
@@ -693,14 +744,60 @@ impl Base64StreamDecoder {
         Ok(decoded)
     }
 
+    fn push_chunked(&mut self, mut chunk: &[u8]) -> Result<Vec<u8>, GrpcError> {
+        use base64::Engine;
+
+        let complete_quartets = chunk
+            .len()
+            .checked_add(self.pending.len())
+            .ok_or(GrpcError::MessageTooLarge)?
+            / 4;
+        let mut decoded = Vec::with_capacity(complete_quartets * 3);
+        let mut quartet_output = [0_u8; 3];
+        let mut decode_quartet = |quartet: &[u8]| {
+            let written = base64::engine::general_purpose::STANDARD
+                .decode_slice(quartet, &mut quartet_output)
+                .map_err(|error| {
+                    GrpcError::protocol(format!("invalid base64 in grpc-web-text segment: {error}"))
+                })?;
+            decoded.extend_from_slice(&quartet_output[..written]);
+            Ok::<(), GrpcError>(())
+        };
+
+        if !self.pending.is_empty() {
+            let take = (4 - self.pending.len()).min(chunk.len());
+            self.pending.extend_from_slice(&chunk[..take]);
+            chunk = &chunk[take..];
+            if self.pending.len() < 4 {
+                return Ok(decoded);
+            }
+            decode_quartet(&self.pending)?;
+            self.pending.clear();
+        }
+
+        let mut quartets = chunk.chunks_exact(4);
+        for quartet in &mut quartets {
+            decode_quartet(quartet)?;
+        }
+        self.pending.extend_from_slice(quartets.remainder());
+        Ok(decoded)
+    }
+
     /// Finalize the stream. Decodes any 2–3 char trailing partial
     /// quartet without padding (STANDARD_NO_PAD permits unpadded
     /// 2- or 3-char tails since the binary stream length is
     /// independently known). A single trailing char is invalid base64
     /// and surfaces as `Err`. Idempotent: calling `finish` again
-    /// after the decoder has been sealed (by either prior `finish`
-    /// or in-band padding) returns `Ok(Vec::new())`.
+    /// after successful completion returns `Ok(Vec::new())`. Chunked
+    /// mode retains a terminal error instead of reporting success on a
+    /// later call. In single-entity mode, in-band padding also completes
+    /// the stream; chunked mode requires this explicit end-of-body call.
     pub fn finish(&mut self) -> Result<Vec<u8>, GrpcError> {
+        if self.poisoned {
+            return Err(GrpcError::protocol(
+                "chunked base64 stream decoder is poisoned",
+            ));
+        }
         if self.sealed {
             return Ok(Vec::new());
         }
@@ -713,6 +810,7 @@ impl Base64StreamDecoder {
         if self.pending.len() == 1 {
             let byte = self.pending[0];
             self.pending.clear();
+            self.poisoned = self.chunked;
             return Err(GrpcError::protocol(format!(
                 "trailing single base64 character at stream end is invalid: \
                  0x{byte:02x} (a complete base64 group is at least 2 chars; \
@@ -728,9 +826,12 @@ impl Base64StreamDecoder {
                     "invalid base64 trailing data at stream end: {e} \
                      (br-asupersync-37svtb)"
                 ))
-            })?;
+            });
+        if decoded.is_err() {
+            self.poisoned = self.chunked;
+        }
         self.pending.clear();
-        Ok(decoded)
+        decoded
     }
 }
 
@@ -752,4 +853,3 @@ pub fn is_text_mode(content_type: &str) -> bool {
 #[cfg(test)]
 #[path = "web_inline_tests.rs"]
 mod tests;
-

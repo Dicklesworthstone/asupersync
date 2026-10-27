@@ -1467,6 +1467,166 @@
     }
 
     #[test]
+    fn chunked_base64_decodes_independently_padded_segments_at_every_boundary() {
+        init_test("chunked_base64_decodes_independently_padded_segments_at_every_boundary");
+        // Segment boundaries deliberately split message headers, payloads, and
+        // the terminal trailer. HTTP chunks need not align with either layer.
+        let binary = b"\x00\x00\x00\x00\x05first\x00\x00\x00\x00\x06second\x80\x00\x00\x00\x10grpc-status: 0\r\n";
+        for segment_size in 1..=7 {
+            let encoded: String = binary.chunks(segment_size).map(base64_encode).collect();
+            for split in 0..=encoded.len() {
+                let mut decoder = Base64StreamDecoder::new_chunked();
+                let mut decoded = decoder.push(&encoded.as_bytes()[..split]).unwrap();
+                assert!(decoder.pending.len() <= 3);
+                decoded.extend(decoder.push(&encoded.as_bytes()[split..]).unwrap());
+                assert!(decoder.pending.len() <= 3);
+                assert!(
+                    !decoder.is_sealed(),
+                    "padding must not finish the HTTP body"
+                );
+                decoded.extend(decoder.finish().unwrap());
+                assert_eq!(decoded, binary, "segment={segment_size}, split={split}");
+                assert!(decoder.is_sealed());
+                assert!(decoder.finish().unwrap().is_empty());
+                assert!(decoder.push(b"AAAA").is_err());
+            }
+        }
+        crate::test_complete!(
+            "chunked_base64_decodes_independently_padded_segments_at_every_boundary"
+        );
+    }
+
+    #[test]
+    fn chunked_base64_retains_only_a_partial_quartet_after_a_large_push() {
+        init_test("chunked_base64_retains_only_a_partial_quartet_after_a_large_push");
+        let mut decoder = Base64StreamDecoder::new_chunked();
+        let input = format!("{}TQ=", "QUJD".repeat(4096));
+        assert_eq!(decoder.push(input.as_bytes()).unwrap(), b"ABC".repeat(4096));
+        assert_eq!(decoder.pending, b"TQ=");
+        assert!(
+            decoder.pending.capacity() <= 4,
+            "only one quartet is retained"
+        );
+        assert_eq!(decoder.push(b"=Tg==").unwrap(), b"MN");
+        assert!(decoder.pending.is_empty());
+        assert!(!decoder.is_sealed());
+        assert!(decoder.finish().unwrap().is_empty());
+        crate::test_complete!("chunked_base64_retains_only_a_partial_quartet_after_a_large_push");
+    }
+
+    #[test]
+    fn chunked_base64_rejects_noncanonical_segments_and_stays_poisoned() {
+        init_test("chunked_base64_rejects_noncanonical_segments_and_stays_poisoned");
+        for malformed in [
+            *b"A===",
+            *b"=AAA",
+            *b"AA=A",
+            *b"AB==",
+            *b"AAB=",
+            *b"AA-A",
+            *b"AA_A",
+            *b"AA\nA",
+            *b"AA\rA",
+            *b"AA A",
+            [b'A', b'A', 0xff, b'A'],
+        ] {
+            for fragment_size in 1..=4 {
+                let mut decoder = Base64StreamDecoder::new_chunked();
+                assert_eq!(decoder.push(b"TQ==").unwrap(), b"M");
+                let mut failed = false;
+                for fragment in malformed.chunks(fragment_size) {
+                    if decoder.push(fragment).is_err() {
+                        failed = true;
+                        break;
+                    }
+                }
+                assert!(failed, "accepted malformed quartet {malformed:?}");
+                assert!(decoder.is_sealed());
+                assert!(decoder.pending.is_empty());
+                assert!(decoder.push(b"Tg==").is_err());
+                assert!(
+                    decoder.finish().is_err(),
+                    "failure must not become clean EOF"
+                );
+            }
+        }
+        crate::test_complete!("chunked_base64_rejects_noncanonical_segments_and_stays_poisoned");
+    }
+
+    #[test]
+    fn chunked_base64_finishes_an_unpadded_final_segment_and_rejects_truncation() {
+        init_test("chunked_base64_finishes_an_unpadded_final_segment_and_rejects_truncation");
+        for (input, expected) in [("TQ==Tg", "MN"), ("TQ==TWE", "MMa")] {
+            let mut decoder = Base64StreamDecoder::new_chunked();
+            let mut decoded = Vec::new();
+            for byte in input.as_bytes().chunks(1) {
+                decoded.extend(decoder.push(byte).unwrap());
+            }
+            decoded.extend(decoder.finish().unwrap());
+            assert_eq!(decoded, expected.as_bytes());
+            assert!(decoder.finish().unwrap().is_empty());
+        }
+        for input in ["TQ==A", "TQ==TQ=", "TQ==AB", "TQ==AAB"] {
+            let mut decoder = Base64StreamDecoder::new_chunked();
+            assert_eq!(decoder.push(input.as_bytes()).unwrap(), b"M");
+            assert!(
+                decoder.finish().is_err(),
+                "accepted incomplete tail {input}"
+            );
+            assert!(decoder.is_sealed());
+            assert!(decoder.pending.is_empty());
+            assert!(decoder.finish().is_err());
+            assert!(decoder.push(b"AAAA").is_err());
+        }
+        let mut empty = Base64StreamDecoder::new_chunked();
+        assert!(empty.push(b"").unwrap().is_empty());
+        assert!(!empty.is_sealed());
+        assert!(empty.finish().unwrap().is_empty());
+        assert!(empty.is_sealed());
+        crate::test_complete!(
+            "chunked_base64_finishes_an_unpadded_final_segment_and_rejects_truncation"
+        );
+    }
+
+    #[test]
+    fn chunked_base64_is_opt_in_and_cannot_hide_frames_after_terminal_trailers() {
+        init_test("chunked_base64_is_opt_in_and_cannot_hide_frames_after_terminal_trailers");
+        for mut strict in [Base64StreamDecoder::new(), Base64StreamDecoder::default()] {
+            assert!(strict.push(b"TQ==Tg==").is_err());
+            assert_eq!(strict.push(b"TQ==").unwrap(), b"M");
+            assert!(strict.is_sealed());
+            assert!(strict.push(b"Tg==").is_err());
+        }
+
+        let terminal = b"\x80\x00\x00\x00\x10grpc-status: 0\r\n";
+        let mut decoder = Base64StreamDecoder::new_chunked();
+        let codec = WebFrameCodec::new();
+        let mut binary = BytesMut::new();
+        binary.extend_from_slice(&decoder.push(base64_encode(terminal).as_bytes()).unwrap());
+        assert!(matches!(
+            codec.decode(&mut binary).unwrap(),
+            Some(WebFrame::Trailers(_))
+        ));
+        assert!(
+            !decoder.is_sealed(),
+            "base64 EOF is independent of the RPC trailer"
+        );
+        binary.extend_from_slice(
+            &decoder
+                .push(base64_encode(b"\x00\x00\x00\x00\x00").as_bytes())
+                .unwrap(),
+        );
+        assert!(
+            codec.decode(&mut binary).is_err(),
+            "a later padded segment cannot start another RPC"
+        );
+        assert!(codec.is_poisoned());
+        crate::test_complete!(
+            "chunked_base64_is_opt_in_and_cannot_hide_frames_after_terminal_trailers"
+        );
+    }
+
+    #[test]
     fn grpc_web_text_mode_chunked_trailer_only_stream_round_trips_vs_grpcweb() {
         // gRPC-Web text mode base64-encodes the entire binary frame
         // stream, including trailer-only responses. grpcweb-style HTTP
