@@ -30,6 +30,11 @@ use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
+mod apply;
+pub use apply::{
+    NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectorySyncReport,
+};
+
 /// Resource limits for each root inventory and each copied file.
 ///
 /// Publicly constructed values are checked at every operation boundary.
