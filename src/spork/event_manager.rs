@@ -590,7 +590,11 @@ async fn run_handler<E: Send + Sync + 'static, X: Send + 'static>(
     }
     if !cleanup.is_ok() {
         let receipt = match &cleanup {
-            Outcome::Ok(()) => Outcome::Ok(()), Outcome::Err(_) => Outcome::Err(()),
+            Outcome::Ok(()) => Outcome::Ok(()),
+            // The supervisor stores TaskOutcome, while the original typed
+            // handler error remains in the returned EventHandlerFailure.
+            Outcome::Err(_) => Outcome::Err(crate::error::Error::new(crate::error::ErrorKind::User)
+                .with_message("event handler termination failed")),
             Outcome::Cancelled(reason) => Outcome::Cancelled(reason.clone()),
             Outcome::Panicked(payload) => Outcome::Panicked(payload.clone()),
         };
