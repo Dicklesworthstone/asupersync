@@ -586,6 +586,114 @@
         assert_eq!(status.code(), Code::ResourceExhausted);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_unary_encoding_is_a_single_initial_final_header() {
+        for encoding in ["gzip", "deflate", "identity"] {
+            let mut accumulator = NativeUnaryAccumulator::new(1024);
+            let error = accumulator
+                .observe(
+                    1,
+                    unary_headers(
+                        &[
+                            (":status", "200"),
+                            ("content-type", "application/grpc"),
+                            ("grpc-encoding", encoding),
+                            ("grpc-encoding", "identity"),
+                        ],
+                        false,
+                    ),
+                )
+                .expect_err("a duplicate cannot overwrite compression negotiation");
+            assert_eq!(error.code(), Code::Internal);
+            assert!(error.message().contains("duplicate grpc-encoding"));
+            assert_eq!(accumulator.grpc_encoding.as_deref(), Some(encoding));
+        }
+
+        for encoding in [None, Some("identity"), Some("gzip"), Some("deflate")] {
+            let mut fields = vec![(":status", "200"), ("content-type", "application/grpc")];
+            if let Some(encoding) = encoding {
+                fields.push(("grpc-encoding", encoding));
+            }
+            let mut accumulator = NativeUnaryAccumulator::new(1024);
+            accumulator.observe(1, unary_headers(&fields, false)).unwrap();
+            let error = accumulator
+                .observe(
+                    1,
+                    unary_headers(&[("grpc-encoding", "identity"), ("grpc-status", "0")], true),
+                )
+                .expect_err("trailers cannot introduce or replace a response encoding");
+            assert_eq!(error.code(), Code::Internal);
+            assert!(error.message().contains("grpc-encoding in trailers"));
+            assert_eq!(accumulator.grpc_encoding.as_deref(), encoding);
+        }
+
+        let mut accumulator = NativeUnaryAccumulator::new(1024);
+        let error = accumulator
+            .observe(1, unary_headers(&[(":status", "103"), ("grpc-encoding", "gzip")], false))
+            .expect_err("informational headers cannot select the final response encoding");
+        assert_eq!(error.code(), Code::Internal);
+        assert!(error.message().contains("informational"));
+        assert!(accumulator.grpc_encoding.is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_unary_initial_encoding_and_trailers_only_status_remain_valid() {
+        for encoding in ["identity", "gzip"] {
+            let mut accumulator = NativeUnaryAccumulator::new(1024);
+            // Informational headers without framing fields do not consume the
+            // one final initial header block.
+            accumulator.observe(1, unary_headers(&[(":status", "103")], false)).unwrap();
+            accumulator
+                .observe(
+                    1,
+                    unary_headers(
+                        &[
+                            (":status", "200"),
+                            ("content-type", "application/grpc"),
+                            ("grpc-encoding", encoding),
+                        ],
+                        false,
+                    ),
+                )
+                .unwrap();
+            accumulator
+                .observe(
+                    1,
+                    ReceivedFrame::Data {
+                        stream_id: 1,
+                        data: Bytes::from_static(&[0, 0, 0, 0, 0]),
+                        end_stream: false,
+                    },
+                )
+                .unwrap();
+            accumulator.observe(1, unary_headers(&[("grpc-status", "0")], true)).unwrap();
+            let response = accumulator.finish().expect("valid initial encoding and success trailers");
+            assert_eq!(response.grpc_encoding.as_deref(), Some(encoding));
+            assert_eq!(response.body.as_ref(), &[0, 0, 0, 0, 0]);
+        }
+
+        // A trailers-only error carries no message. Its encoding remains moot,
+        // and the actual gRPC status must win over negotiation and HTTP mapping.
+        let mut accumulator = NativeUnaryAccumulator::new(1024);
+        accumulator
+            .observe(
+                1,
+                unary_headers(
+                    &[
+                        (":status", "503"),
+                        ("content-type", "application/grpc"),
+                        ("grpc-encoding", "unsupported"),
+                        ("grpc-status", "8"),
+                    ],
+                    true,
+                ),
+            )
+            .unwrap();
+        assert_eq!(accumulator.finish().unwrap_err().code(), Code::ResourceExhausted);
+    }
+
     #[test]
     fn validate_rpc_path_rejects_empty_or_extra_segments() {
         for path in ["/test.Svc/", "//Method", "/test.Svc/Method/Extra"] {

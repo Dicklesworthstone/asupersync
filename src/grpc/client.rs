@@ -2590,6 +2590,20 @@ impl NativeUnaryAccumulator {
     }
 
     fn observe_headers(&mut self, headers: Vec<Header>) -> Result<(), Status> {
+        // Compression belongs to the initial final response headers. Retaining
+        // a replacement from trailers (or a second initial field) would let a
+        // peer rewrite an unsupported/unaccepted encoding to identity before
+        // the channel's negotiation check. Refuse here so exchange fails and
+        // its transport cannot enter the reusable pool.
+        // br-asupersync-grpc-client-server-audit-jq0c7j.
+        let initial_headers = self.http_status.is_none();
+        let informational = headers.iter().any(|header| {
+            header.name == ":status"
+                && header
+                    .value
+                    .parse::<u16>()
+                    .is_ok_and(|status| (100..200).contains(&status))
+        });
         for Header { name, value } in headers {
             if name == ":status" {
                 let status = value
@@ -2610,6 +2624,21 @@ impl NativeUnaryAccumulator {
                 continue;
             }
             if name.eq_ignore_ascii_case("grpc-encoding") {
+                if !initial_headers {
+                    return Err(Status::internal(
+                        "gRPC response contains grpc-encoding in trailers",
+                    ));
+                }
+                if informational {
+                    return Err(Status::internal(
+                        "informational gRPC response contains grpc-encoding",
+                    ));
+                }
+                if self.grpc_encoding.is_some() {
+                    return Err(Status::internal(
+                        "gRPC response contains duplicate grpc-encoding",
+                    ));
+                }
                 self.grpc_encoding = Some(value);
                 continue;
             }
