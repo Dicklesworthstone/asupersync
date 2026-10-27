@@ -179,6 +179,200 @@
     }
 
     #[test]
+    fn spawn_all_preserves_member_order_identity_region_and_traces() {
+        let entries = run_in_runtime(|cx| async move {
+            let collector = LogCollector::new(16).with_min_level(LogLevel::Trace);
+            cx.set_log_collector(collector.clone());
+            let region = cx.region_id();
+            let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
+            set.spawn(&cx, |_| async { Ok(10) }).expect("prefix");
+            set.spawn_all(
+                &cx,
+                [20, 30, 40].into_iter().map(move |value| {
+                    move |child: Cx| async move {
+                        assert_eq!(child.region_id(), region);
+                        Ok(value)
+                    }
+                }),
+            )
+            .expect("batch");
+            set.spawn(&cx, |_| async { Ok(50) }).expect("suffix");
+            assert_eq!(set.len(), 5);
+
+            let values = set
+                .join_all(&cx)
+                .await
+                .into_iter()
+                .map(|outcome| outcome.expect("member ok"))
+                .collect::<Vec<_>>();
+            assert_eq!(values, vec![10, 20, 30, 40, 50]);
+            collector.peek()
+        });
+
+        let spawns = entries
+            .iter()
+            .filter(|entry| entry.message() == "join_set.spawn")
+            .collect::<Vec<_>>();
+        assert_eq!(spawns.len(), 5);
+        let mut identities = BTreeSet::new();
+        for (index, entry) in spawns.iter().enumerate() {
+            let expected_index = index.to_string();
+            let expected_count = (index + 1).to_string();
+            assert_eq!(entry.get_field("member_index"), Some(expected_index.as_str()));
+            assert_eq!(entry.get_field("active_members"), Some(expected_count.as_str()));
+            assert_eq!(entry.get_field("spawn_kind"), Some("send"));
+            identities.insert(entry.get_field("member_task_id").expect("task identity"));
+        }
+        assert_eq!(identities.len(), 5, "each member has its own identity");
+    }
+
+    #[test]
+    fn spawn_all_empty_succeeds_without_runtime_wiring() {
+        type Factory = fn(Cx) -> std::future::Ready<Result<u32, ()>>;
+        let cx = Cx::for_testing();
+        let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
+        set.spawn_all(&cx, std::iter::empty::<Factory>())
+            .expect("an empty batch has no runtime effects");
+        assert!(set.is_empty());
+        assert_eq!(set.next_member_index, 0);
+    }
+
+    #[test]
+    fn spawn_all_setup_failure_preserves_existing_members() {
+        let cx = Cx::for_testing();
+        let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
+        let (sender, handle) = manual_handle::<Result<u32, ()>>(31);
+        set.insert_member(handle);
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let factory_invoked = Arc::clone(&invoked);
+        let result = set.spawn_all(&cx, [move |_| {
+            factory_invoked.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(99))
+        }]);
+
+        assert!(matches!(
+            result,
+            Err(crate::cx::SpawnBatchError::Spawn(SpawnError::RuntimeUnavailable))
+        ));
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.next_member_index, 1);
+        sender.send(&cx, Ok(Ok(7))).expect("existing member completes");
+        assert_eq!(set.try_join_next(), Some(Outcome::Ok(7)));
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn spawn_all_oversized_batch_publishes_no_partial_members() {
+        run_in_runtime(|cx| async move {
+            let mut set = JoinSet::<usize, (), _>::in_cx(&cx);
+            set.spawn(&cx, |_| async { Ok(7) }).expect("existing member");
+            let iterated = Arc::new(AtomicUsize::new(0));
+            let invoked = Arc::new(AtomicUsize::new(0));
+            let iterator_count = Arc::clone(&iterated);
+            let factory_count = Arc::clone(&invoked);
+            let factories = std::iter::repeat_with(move || {
+                iterator_count.fetch_add(1, Ordering::SeqCst);
+                let factory_count = Arc::clone(&factory_count);
+                move |_| {
+                    factory_count.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(99))
+                }
+            });
+            let result = set.spawn_all(&cx, factories);
+            assert!(matches!(
+                result,
+                Err(crate::cx::SpawnBatchError::TooManyTasks { limit })
+                    if limit == crate::cx::MAX_SPAWN_BATCH_SIZE
+            ));
+            assert_eq!(iterated.load(Ordering::SeqCst), crate::cx::MAX_SPAWN_BATCH_SIZE + 1);
+            assert_eq!(invoked.load(Ordering::SeqCst), 0);
+            assert_eq!(set.len(), 1);
+            assert_eq!(set.next_member_index, 1);
+            let outcomes = set.join_all(&cx).await;
+            assert_eq!(outcomes, vec![Outcome::Ok(7)]);
+        });
+    }
+
+    #[test]
+    fn spawn_all_pre_admission_cancellation_drains_every_member() {
+        let (outcomes, started) = run_in_runtime(|cx| async move {
+            let started = Arc::new(AtomicUsize::new(0));
+            let factory_started = Arc::clone(&started);
+            let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
+            set.spawn_all(&cx, (0..4).map(move |value| {
+                let started = Arc::clone(&factory_started);
+                move |_| async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    Ok(value)
+                }
+            }))
+            .expect("batch");
+            assert_eq!(started.load(Ordering::SeqCst), 0);
+            let outcomes = set
+                .cancel_all_with_reason(&cx, CancelReason::race_loser())
+                .await;
+            (outcomes, started.load(Ordering::SeqCst))
+        });
+
+        assert_eq!(started, 0, "cancelled provisional tasks never poll user work");
+        assert_eq!(outcomes.len(), 4);
+        assert!(outcomes.iter().all(is_race_lost_or_stronger));
+        let losers = outcomes.iter().collect::<Vec<_>>();
+        let witness = crate::combinator::race::verify_losers_drained(&losers)
+            .expect("every batched loser drained");
+        assert_eq!(witness.losers_checked(), 4);
+    }
+
+    #[test]
+    fn spawn_all_cancellation_drains_parked_members_after_async_cleanup() {
+        let (outcomes, cleaned) = run_in_runtime(|cx| async move {
+            let cleaned = Arc::new(AtomicUsize::new(0));
+            let mut parked_receivers = Vec::new();
+            let mut held_senders = Vec::new();
+            let factories = (0..3).map(|value| {
+                let (parked_sender, parked_receiver) = oneshot::channel();
+                let (held_sender, mut held_receiver) = oneshot::channel::<()>();
+                parked_receivers.push(parked_receiver);
+                held_senders.push(held_sender);
+                let cleaned = Arc::clone(&cleaned);
+                move |member_cx: Cx| async move {
+                    let mut waiting = Box::pin(held_receiver.recv(&member_cx));
+                    std::future::poll_fn(|task_cx| {
+                        assert!(waiting.as_mut().poll(task_cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    parked_sender.send_blocking(()).expect("parked witness");
+                    assert_eq!(waiting.await, Err(oneshot::RecvError::Cancelled));
+                    // Acknowledged cancellation may cross another Pending
+                    // while cleanup runs. JoinSet must still classify the
+                    // eventual value as cancellation and wait for retirement.
+                    yield_now().await;
+                    cleaned.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>(value)
+                }
+            });
+            let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
+            set.spawn_all(&cx, factories).expect("batch");
+            for mut receiver in parked_receivers {
+                receiver.recv(&cx).await.expect("member reached Pending");
+            }
+            assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+            let outcomes = set
+                .cancel_all_with_reason(&cx, CancelReason::race_loser())
+                .await;
+            let completed_cleanup = cleaned.load(Ordering::SeqCst);
+            drop(held_senders);
+            (outcomes, completed_cleanup)
+        });
+
+        assert_eq!(cleaned, 3, "collection waits for every cleanup future");
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(is_race_lost_or_stronger));
+    }
+
+    #[test]
     fn join_next_returns_none_for_empty_set() {
         let observed = run_in_runtime(|cx| async move {
             let mut set = JoinSet::<u32, (), _>::in_cx(&cx);

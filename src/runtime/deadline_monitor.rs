@@ -10,11 +10,214 @@ use crate::record::TaskRecord;
 use crate::types::{RegionId, TaskId, Time};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn wall_clock_now() -> Instant {
     Instant::now()
+}
+
+/// Maximum queued native completion observations before the monitor reports loss.
+pub const MAX_QUEUED_DEADLINE_COMPLETIONS: usize = 4096;
+
+/// Maximum distinct task types retained by adaptive deadline history.
+///
+/// A new type evicts the oldest admitted type when this bound is reached.
+pub const MAX_ADAPTIVE_TASK_TYPES: usize = 256;
+
+/// Bounded native deadline-monitor delivery counters.
+///
+/// These counters describe observations, not task admission. A full diagnostic
+/// queue drops its newest observation without delaying or rejecting user work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeadlineMonitorStats {
+    /// Observations accepted by the queue since monitoring started.
+    pub accepted_completions: u64,
+    /// Accepted observations processed by the monitor.
+    pub processed_completions: u64,
+    /// Observations refused because the bounded queue was full.
+    pub dropped_completions: u64,
+    /// Observations refused after the monitor sealed its queue for shutdown.
+    pub rejected_after_shutdown: u64,
+    /// Accepted observations still waiting in the queue.
+    pub queued_completions: usize,
+    /// Panics contained at native warning or metric callback boundaries.
+    pub callback_panics: u64,
+    /// Whether the queue has stopped accepting observations.
+    pub closed: bool,
+}
+
+/// Shared by a native scan and the completing task's observation. The task
+/// identity includes its arena generation, so slot reuse cannot erase an old
+/// observation's deadline-violation receipt.
+#[derive(Debug, Default)]
+pub(crate) struct DeadlineCompletionState {
+    flags: AtomicU8,
+}
+
+impl DeadlineCompletionState {
+    const COMPLETED: u8 = 1;
+    const VIOLATED: u8 = 2;
+
+    fn complete(&self) {
+        self.flags.fetch_or(Self::COMPLETED, Ordering::AcqRel);
+    }
+
+    fn is_completed(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & Self::COMPLETED != 0
+    }
+
+    fn claim_live_violation(&self) -> bool {
+        self.flags
+            .compare_exchange(0, Self::VIOLATED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn completion_violation_was_reported(&self) -> bool {
+        self.flags.fetch_or(Self::VIOLATED, Ordering::AcqRel) & Self::VIOLATED != 0
+    }
+}
+
+#[derive(Debug)]
+struct DeadlineCompletion {
+    task_id: TaskId,
+    task_type: Option<String>,
+    duration: Duration,
+    deadline: Option<Time>,
+    finished_at: Time,
+    state: Option<Arc<DeadlineCompletionState>>,
+}
+
+#[derive(Debug, Default)]
+struct DeadlineCompletionQueueState {
+    completions: VecDeque<DeadlineCompletion>,
+    tracked: HashMap<TaskId, Arc<DeadlineCompletionState>>,
+    accepted: u64,
+    processed: u64,
+    dropped: u64,
+    rejected_after_shutdown: u64,
+    closed: bool,
+}
+
+/// Runtime-owned facts only: queue operations cannot invoke a user callback,
+/// Waker or destructor. The monitor never holds this mutex while taking runtime
+/// locks or dispatching callbacks.
+#[derive(Debug)]
+pub(crate) struct DeadlineCompletionQueue {
+    inner: parking_lot::Mutex<DeadlineCompletionQueueState>,
+    capacity: usize,
+    callback_panics: AtomicU64,
+}
+
+impl DeadlineCompletionQueue {
+    pub(crate) fn new() -> Self {
+        Self::with_capacity(MAX_QUEUED_DEADLINE_COMPLETIONS)
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(DeadlineCompletionQueueState::default()),
+            capacity,
+            callback_panics: AtomicU64::new(0),
+        }
+    }
+
+    /// Called while the snapshot still owns its task-table guard. A completion
+    /// cannot retire that same record before this shared witness is registered.
+    pub(crate) fn observe_task(&self, task_id: TaskId) -> Arc<DeadlineCompletionState> {
+        let mut inner = self.inner.lock();
+        Arc::clone(inner.tracked.entry(task_id).or_default())
+    }
+
+    fn capture_state(&self, task_id: TaskId) -> Option<Arc<DeadlineCompletionState>> {
+        let mut inner = self.inner.lock();
+        let state = inner.tracked.remove(&task_id);
+        if let Some(state) = &state {
+            state.complete();
+        }
+        state
+    }
+
+    fn publish(&self, completion: DeadlineCompletion) {
+        let mut inner = self.inner.lock();
+        if inner.closed {
+            inner.rejected_after_shutdown = inner.rejected_after_shutdown.saturating_add(1);
+        } else if inner.completions.len() == self.capacity {
+            inner.dropped = inner.dropped.saturating_add(1);
+        } else {
+            inner.completions.push_back(completion);
+            inner.accepted = inner.accepted.saturating_add(1);
+        }
+    }
+
+    fn take(&self, close: bool) -> VecDeque<DeadlineCompletion> {
+        let mut inner = self.inner.lock();
+        if close {
+            inner.closed = true;
+            inner.tracked.clear();
+        }
+        std::mem::take(&mut inner.completions)
+    }
+
+    fn processed(&self) {
+        let mut inner = self.inner.lock();
+        inner.processed = inner.processed.saturating_add(1);
+    }
+
+    pub(crate) fn stats(&self) -> DeadlineMonitorStats {
+        let inner = self.inner.lock();
+        DeadlineMonitorStats {
+            accepted_completions: inner.accepted,
+            processed_completions: inner.processed,
+            dropped_completions: inner.dropped,
+            rejected_after_shutdown: inner.rejected_after_shutdown,
+            queued_completions: inner.completions.len(),
+            callback_panics: self.callback_panics.load(Ordering::Relaxed),
+            closed: inner.closed,
+        }
+    }
+}
+
+/// Captured before the task record is recycled; published at the existing
+/// completion-observer/retirement boundary after runtime locks are released.
+pub(crate) struct DeadlineCompletionObservation {
+    queue: Arc<DeadlineCompletionQueue>,
+    completion: DeadlineCompletion,
+}
+
+impl DeadlineCompletionObservation {
+    pub(crate) fn capture(
+        queue: &Arc<DeadlineCompletionQueue>,
+        task: &TaskRecord,
+        finished_at: Time,
+    ) -> Box<Self> {
+        let (task_type, deadline) = task.cx_inner.as_ref().map_or((None, None), |inner| {
+            let inner = inner.read();
+            (inner.task_type.clone(), inner.budget.deadline)
+        });
+        Box::new(Self {
+            queue: Arc::clone(queue),
+            completion: DeadlineCompletion {
+                task_id: task.id,
+                task_type,
+                duration: Duration::from_nanos(finished_at.duration_since(task.created_at())),
+                // Cancellation installs a separate cleanup budget in CxInner.
+                // The admitted deadline remains authoritative for task metrics.
+                deadline: task.deadline.or(deadline),
+                finished_at,
+                // Capture is still inside the authoritative completion lock.
+                // Retained scan snapshots must stop observing this task now,
+                // even if post-lock observer delivery is delayed.
+                state: queue.capture_state(task.id),
+            },
+        })
+    }
+
+    pub(crate) fn publish(self: Box<Self>) {
+        self.queue.publish(self.completion);
+    }
 }
 
 /// Adaptive threshold configuration for deadline monitoring.
@@ -113,7 +316,7 @@ impl DurationHistory {
     fn new(max_history: usize) -> Self {
         let cap = max_history.max(1);
         Self {
-            samples: VecDeque::with_capacity(cap),
+            samples: VecDeque::new(),
             max_history: cap,
         }
     }
@@ -174,6 +377,7 @@ pub(crate) struct DeadlineTaskSnapshot {
     checkpoint_history: Vec<(Time, String)>,
     checkpoint_count: u64,
     task_type: Option<String>,
+    completion_state: Option<Arc<DeadlineCompletionState>>,
 }
 
 impl DeadlineTaskSnapshot {
@@ -202,6 +406,7 @@ impl DeadlineTaskSnapshot {
             checkpoint_history,
             checkpoint_count,
             task_type,
+            completion_state: None,
         }
     }
 
@@ -250,7 +455,27 @@ impl DeadlineTaskSnapshot {
             checkpoint_history,
             checkpoint_count,
             task_type,
+            completion_state: None,
         }
+    }
+
+    pub(crate) fn for_native_monitor(
+        task: &TaskRecord,
+        completions: &DeadlineCompletionQueue,
+    ) -> Option<Self> {
+        if task.state.is_terminal()
+            || (task.deadline.is_none()
+                && task
+                    .cx_inner
+                    .as_ref()
+                    .is_none_or(|inner| inner.read().budget.deadline.is_none()))
+        {
+            return None;
+        }
+        let mut snapshot = Self::from_task_record(task);
+        snapshot.deadline = task.deadline.or(snapshot.deadline);
+        snapshot.completion_state = Some(completions.observe_task(task.id));
+        Some(snapshot)
     }
 }
 
@@ -260,6 +485,8 @@ pub struct DeadlineMonitor {
     on_warning: Option<Box<dyn Fn(DeadlineWarning) + Send + Sync>>,
     monitored: Vec<Option<MonitoredTask>>,
     history: HashMap<String, DurationHistory>,
+    history_order: VecDeque<String>,
+    native_completions: Option<Arc<DeadlineCompletionQueue>>,
     metrics_provider: Option<Arc<dyn MetricsProvider>>,
     last_scan_time: Option<Time>,
     last_scan_instant: Option<Instant>,
@@ -293,6 +520,8 @@ impl DeadlineMonitor {
             on_warning: None,
             monitored: Vec::with_capacity(16),
             history: HashMap::with_capacity(16),
+            history_order: VecDeque::new(),
+            native_completions: None,
             metrics_provider: None,
             last_scan_time: None,
             last_scan_instant: None,
@@ -318,7 +547,34 @@ impl DeadlineMonitor {
         self.metrics_provider = Some(provider);
     }
 
+    pub(crate) fn attach_native_completions(&mut self, queue: Arc<DeadlineCompletionQueue>) {
+        self.native_completions = Some(queue);
+    }
+
+    /// Consume a bounded batch without holding either queue or runtime locks.
+    /// Closing atomically seals the queue and takes every accepted observation.
+    pub(crate) fn drain_native_completions(&mut self, close: bool) {
+        let Some(queue) = self.native_completions.clone() else {
+            return;
+        };
+        for completion in queue.take(close) {
+            self.record_completion_with_state(
+                completion.task_id,
+                completion.task_type.as_deref().unwrap_or("default"),
+                completion.duration,
+                completion.deadline,
+                completion.finished_at,
+                completion.state.as_deref(),
+            );
+            queue.processed();
+        }
+    }
+
     /// Records a completed task duration for adaptive thresholding and metrics.
+    ///
+    /// Histories retain at most [`MAX_ADAPTIVE_TASK_TYPES`] distinct labels.
+    /// Admitting another label evicts the oldest admitted label; its next task
+    /// uses the configured fallback until enough new samples arrive.
     pub fn record_completion(
         &mut self,
         task_id: TaskId,
@@ -327,14 +583,33 @@ impl DeadlineMonitor {
         deadline: Option<Time>,
         now: Time,
     ) {
+        self.record_completion_with_state(task_id, task_type, duration, deadline, now, None);
+    }
+
+    fn record_completion_with_state(
+        &mut self,
+        task_id: TaskId,
+        task_type: &str,
+        duration: Duration,
+        deadline: Option<Time>,
+        now: Time,
+        completion_state: Option<&DeadlineCompletionState>,
+    ) {
         let task_type = normalize_task_type(task_type);
-        if let Some(h) = self.history.get_mut(task_type) {
-            h.record(duration);
-        } else {
-            self.history
-                .entry(task_type.to_string())
-                .or_insert_with(|| DurationHistory::new(self.config.adaptive.max_history))
-                .record(duration);
+        if self.config.adaptive.adaptive_enabled {
+            if let Some(h) = self.history.get_mut(task_type) {
+                h.record(duration);
+            } else {
+                if self.history.len() == MAX_ADAPTIVE_TASK_TYPES {
+                    if let Some(oldest) = self.history_order.pop_front() {
+                        self.history.remove(&oldest);
+                    }
+                }
+                let mut history = DurationHistory::new(self.config.adaptive.max_history);
+                history.record(duration);
+                self.history_order.push_back(task_type.to_string());
+                self.history.insert(task_type.to_string(), history);
+            }
         }
 
         if let Some(deadline) = deadline {
@@ -343,11 +618,16 @@ impl DeadlineMonitor {
 
             let deadline_exceeded = now > deadline;
             let slot = task_id.arena_index().index() as usize;
-            let already_violated = self
+            let scan_violated = self
                 .monitored
                 .get(slot)
                 .and_then(Option::as_ref)
                 .is_some_and(|entry| entry.task_id == task_id && entry.violated);
+            // The shared receipt outlives scans, pruning and task-slot reuse.
+            // A completion and a stale snapshot cannot both claim a violation.
+            let already_violated = completion_state.map_or(scan_violated, |state| {
+                deadline_exceeded && state.completion_violation_was_reported()
+            });
             if deadline_exceeded && !already_violated {
                 let over_by = Duration::from_nanos(now.duration_since(deadline));
                 self.emit_deadline_violation(task_type, over_by);
@@ -389,31 +669,33 @@ impl DeadlineMonitor {
 
     fn emit_deadline_warning(&self, task_type: &str, reason: WarningReason, remaining: Duration) {
         if let Some(provider) = &self.metrics_provider {
-            provider.deadline_warning(task_type, reason_label(reason), remaining);
+            self.dispatch_callback(|| {
+                provider.deadline_warning(task_type, reason_label(reason), remaining);
+            });
             if matches!(
                 reason,
                 WarningReason::NoProgress | WarningReason::ApproachingDeadlineNoProgress
             ) {
-                provider.task_stuck_detected(task_type);
+                self.dispatch_callback(|| provider.task_stuck_detected(task_type));
             }
         }
     }
 
     fn emit_deadline_violation(&self, task_type: &str, over_by: Duration) {
         if let Some(provider) = &self.metrics_provider {
-            provider.deadline_violation(task_type, over_by);
+            self.dispatch_callback(|| provider.deadline_violation(task_type, over_by));
         }
     }
 
     fn emit_deadline_remaining(&self, task_type: &str, remaining: Duration) {
         if let Some(provider) = &self.metrics_provider {
-            provider.deadline_remaining(task_type, remaining);
+            self.dispatch_callback(|| provider.deadline_remaining(task_type, remaining));
         }
     }
 
     fn emit_checkpoint_interval(&self, task_type: &str, interval: Duration) {
         if let Some(provider) = &self.metrics_provider {
-            provider.checkpoint_interval(task_type, interval);
+            self.dispatch_callback(|| provider.checkpoint_interval(task_type, interval));
         }
     }
 
@@ -460,7 +742,12 @@ impl DeadlineMonitor {
         let scan_generation = self.scan_generation;
 
         for task in tasks {
-            if task.is_terminal {
+            if task.is_terminal
+                || task
+                    .completion_state
+                    .as_ref()
+                    .is_some_and(|state| state.is_completed())
+            {
                 continue;
             }
 
@@ -536,7 +823,13 @@ impl DeadlineMonitor {
                 let deadline_exceeded = now > deadline;
                 if deadline_exceeded && !entry.violated {
                     entry.violated = true;
-                    deadline_violation = Some(Duration::from_nanos(now.duration_since(deadline)));
+                    let report_violation = task
+                        .completion_state
+                        .as_ref()
+                        .is_none_or(|state| state.claim_live_violation());
+                    if report_violation {
+                        deadline_violation = Some(Duration::from_nanos(now.duration_since(deadline)));
+                    }
                 }
 
                 if !entry.warned {
@@ -595,7 +888,20 @@ impl DeadlineMonitor {
 
     fn emit_warning(&self, warning: DeadlineWarning) {
         if let Some(ref callback) = self.on_warning {
-            callback(warning);
+            self.dispatch_callback(|| callback(warning));
+        }
+    }
+
+    fn dispatch_callback(&self, callback: impl FnOnce()) {
+        let Some(queue) = self.native_completions.as_ref() else {
+            callback();
+            return;
+        };
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+            queue.callback_panics.fetch_add(1, Ordering::Relaxed);
+            // Opaque panic payloads may themselves panic on drop. This native
+            // diagnostic boundary must keep processing accepted observations.
+            std::mem::forget(payload);
         }
     }
 }

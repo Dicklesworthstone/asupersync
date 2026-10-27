@@ -422,7 +422,7 @@ impl NativeThreadHostServices {
         state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
         dispatch_task_table: Option<Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
     ) -> DeadlineMonitorHostService {
-        use crate::runtime::deadline_monitor::DeadlineMonitor;
+        use crate::runtime::deadline_monitor::{DeadlineCompletionQueue, DeadlineMonitor};
 
         let monitor_config = match config.deadline_monitor {
             Some(ref mc) if mc.enabled => mc,
@@ -433,6 +433,8 @@ impl NativeThreadHostServices {
         let dm_state = Arc::clone(state);
         let check_interval = monitor_config.check_interval;
         let mut monitor = DeadlineMonitor::new(monitor_config.clone());
+        let completions = Arc::new(DeadlineCompletionQueue::new());
+        monitor.attach_native_completions(Arc::clone(&completions));
         if let Some(ref handler) = config.deadline_warning_handler {
             let handler = Arc::clone(handler);
             monitor.on_warning(move |w| handler(w));
@@ -440,6 +442,7 @@ impl NativeThreadHostServices {
         monitor.set_metrics_provider(Arc::clone(&config.metrics_provider));
 
         let thread_name = format!("{}-deadline-monitor", config.thread_name_prefix);
+        let monitor_completions = Arc::clone(&completions);
         let thread = std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
@@ -450,7 +453,9 @@ impl NativeThreadHostServices {
                     let (logical_now, driver) = (guard.now, guard.timer_driver_handle());
                     let mut tasks = guard
                         .tasks_iter()
-                        .map(|(_, record)| DeadlineTaskSnapshot::from_task_record(record))
+                        .filter_map(|(_, record)| {
+                            DeadlineTaskSnapshot::for_native_monitor(record, &monitor_completions)
+                        })
                         .collect::<Vec<_>>();
                     drop(guard);
                     // E1.2 subsystem 3d (E1.1 row B01): a dispatch-table
@@ -464,13 +469,33 @@ impl NativeThreadHostServices {
                         tasks.extend(
                             table
                                 .iter()
-                                .map(|(_, record)| DeadlineTaskSnapshot::from_task_record(record)),
+                                .filter_map(|(_, record)| {
+                                    DeadlineTaskSnapshot::for_native_monitor(
+                                        record,
+                                        &monitor_completions,
+                                    )
+                                }),
                         );
                     }
+                    // Consume completions before pruning disappeared tasks.
+                    // A shared receipt also covers a task finishing after its
+                    // snapshot was taken or after an earlier scan was pruned.
+                    monitor.drain_native_completions(false);
                     monitor.check_snapshots(driver.map_or(logical_now, |d| d.now()), tasks);
                 }
+                // Runtime teardown signals only after worker retirement. Seal
+                // admission atomically and deliver every accepted observation,
+                // including work completed since the monitor's last scan.
+                monitor.drain_native_completions(true);
             })
             .ok();
+
+        if thread.is_some() {
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_deadline_completions(completions);
+        }
 
         DeadlineMonitorHostService {
             shutdown: Some(dm_shutdown),
@@ -6694,9 +6719,7 @@ impl Drop for RuntimeInner {
 
         // Signal consumers before transferring their join handles. In the
         // worker-owned case the current poll must return before it can join.
-        if let Some(shutdown) = self.deadline_monitor_shutdown.take() {
-            let _ = shutdown.send(());
-        }
+        let deadline_monitor_shutdown = self.deadline_monitor_shutdown.take();
         self.scheduler.shutdown();
         if let Some(driver) = self.current_thread_driver.get() {
             driver.shutdown();
@@ -6733,9 +6756,6 @@ impl Drop for RuntimeInner {
         let state = Arc::clone(&self.state);
         let sharded_state = self.sharded_state.clone();
         let teardown = move || {
-            if let Some(thread) = deadline_monitor {
-                let _ = thread.join();
-            }
             // Dropping the sampler stops and joins its thread.
             #[cfg(not(target_arch = "wasm32"))]
             drop(resource_sampler);
@@ -6745,6 +6765,15 @@ impl Drop for RuntimeInner {
                 let _ = handle.join();
             }
             retire_stopped_tasks(&state, sharded_state.as_ref(), gateway_mailbox.as_deref());
+            // Worker and stopped-task completion effects have now published.
+            // Keep the monitor alive until this point so its final drain can
+            // process every accepted completion without racing new producers.
+            if let Some(shutdown) = deadline_monitor_shutdown {
+                let _ = shutdown.send(());
+            }
+            if let Some(thread) = deadline_monitor {
+                let _ = thread.join();
+            }
             drop(sharded_state);
             drop(state);
             drop(blocking_pool); // Joined last: its jobs may wait on retired values.
@@ -7480,6 +7509,26 @@ impl Runtime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .obligation_conservation_report()
+    }
+
+    /// Returns native deadline-monitor delivery counters, or `None` when the
+    /// monitor is disabled or its host thread could not start.
+    ///
+    /// The bounded queue never backpressures tasks. Check `dropped_completions`
+    /// before interpreting adaptive history or deadline metrics as complete.
+    /// Callback panics are counted and contained independently so one observer
+    /// cannot terminate monitoring or discard the rest of an accepted batch.
+    #[must_use]
+    pub fn deadline_monitor_stats(
+        &self,
+    ) -> Option<crate::runtime::deadline_monitor::DeadlineMonitorStats> {
+        let queue = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deadline_completions();
+        queue.map(|queue| queue.stats())
     }
 }
 

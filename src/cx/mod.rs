@@ -98,7 +98,7 @@ pub use child_region::{
 pub(crate) use cx::CancelWakerToken;
 pub use cx::{
     BudgetStats, CapabilityLayerSnapshot, CapabilitySnapshot, CostBudgetStats, Cx,
-    DeadlineBudgetStats, PollBudgetStats, SpanGuard,
+    DeadlineBudgetStats, MAX_SPAWN_BATCH_SIZE, PollBudgetStats, SpanGuard, SpawnBatchError,
 };
 pub use dynamic_service::{
     DynamicControlError, DynamicServiceChildInfo, DynamicServiceChildState, DynamicServiceConfig,

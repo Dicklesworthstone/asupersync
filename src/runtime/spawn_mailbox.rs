@@ -2305,6 +2305,39 @@ impl SpawnGateway {
         Ok(())
     }
 
+    /// Publishes prepared batch members in input order with one notification.
+    ///
+    /// This remains one queue insertion and one enqueue trace event per member;
+    /// consumers can admit a prefix while the producer publishes the remainder.
+    /// The shared timestamp is sampled once and runtime liveness covers the
+    /// entire publication. An empty batch neither needs liveness nor wakes a
+    /// worker. On runtime loss every request is resolved before returning.
+    pub(crate) fn enqueue_batch_and_notify(
+        &self,
+        requests: Vec<SpawnRequest>,
+    ) -> Result<(), SpawnError> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let Some(_liveness_guard) = self.liveness_guard() else {
+            for request in requests {
+                request
+                    .into_parts()
+                    .resolve_failed(SpawnError::RuntimeUnavailable);
+            }
+            return Err(SpawnError::RuntimeUnavailable);
+        };
+        let now = self
+            .clock
+            .as_ref()
+            .map_or(Time::ZERO, crate::time::TimerDriverHandle::now);
+        for request in requests {
+            self.mailbox.enqueue(request, now);
+        }
+        (self.notify)();
+        Ok(())
+    }
+
     /// Enqueues a task-handle cancellation command and wakes a worker. The
     /// command contains no Wakers or user callbacks, so this is safe from a
     /// caller's `Drop` stack and while the caller holds unrelated locks.

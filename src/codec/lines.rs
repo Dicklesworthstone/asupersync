@@ -143,6 +143,13 @@ impl Decoder for LinesCodec {
     type Item = String;
     type Error = LinesCodecError;
 
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        // max_length includes a possible CR, but not the terminating LF.
+        // with_unbounded() deliberately has no finite hint, so it does not
+        // silently turn off the framed transport's independent memory bound.
+        self.max_length.checked_add(1)
+    }
+
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<String>, Self::Error> {
         self.reset_stale_scan_state(src);
 

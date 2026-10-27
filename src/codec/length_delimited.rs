@@ -248,6 +248,19 @@ impl Decoder for LengthDelimitedCodec {
     type Item = BytesMut;
     type Error = io::Error;
 
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        let header_len = self
+            .builder
+            .length_field_offset
+            .checked_add(self.builder.length_field_length)?;
+        // max_frame_length already bounds the adjusted payload length. The
+        // decoder retains the complete wire prefix until that payload arrives,
+        // including any application header after the length field (num_skip).
+        header_len
+            .max(self.num_skip(header_len))
+            .checked_add(self.builder.max_frame_length)
+    }
+
     fn decode(&mut self, src: &mut BytesMut) -> io::Result<Option<BytesMut>> {
         loop {
             match self.state {

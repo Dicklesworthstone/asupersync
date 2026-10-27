@@ -230,6 +230,149 @@
     }
 
     #[test]
+    fn staged_sync_failure_preserves_source_destination_and_parent_batch() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let staging = root.path().join("staging");
+        let destination = root.path().join("destination");
+        std::fs::write(&staging, b"new payload").expect("write staged bytes");
+        std::fs::write(&destination, b"old payload").expect("write old bytes");
+        let mut batch = DeferredParentSyncs::default();
+        let result = futures_lite::future::block_on(async {
+            let pending = StagedFileSync::open(&staging).await?;
+            let synced = pending
+                .sync_with(|file| {
+                    assert_eq!(file.metadata()?.len(), 11);
+                    assert_eq!(std::fs::read(&destination)?, b"old payload");
+                    Err(io::Error::other("planted data-sync failure"))
+                })
+                .map_err(|error| StreamingError::new(error.to_string()))?;
+            batch.commit_synced_regular_file(synced, &destination).await
+        });
+
+        let error = result.expect_err("failed sync must prevent publication");
+        assert!(error.to_string().contains("planted data-sync failure"));
+        assert_eq!(std::fs::read(&staging).unwrap(), b"new payload");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old payload");
+        assert!(batch.parents.is_empty(), "no rename was acknowledged");
+    }
+
+    /// A real kernel sync refusal distinguishes fsync from a no-op. Procfs
+    /// exposes a readable regular file but does not support syncing it. Every
+    /// production entry point must report that refusal before trying a rename.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn regular_commit_paths_propagate_real_sync_failure_before_rename() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let staging = Path::new("/proc/self/status");
+        assert!(std::fs::symlink_metadata(staging).unwrap().is_file());
+        for mode in 0..3 {
+            let destination = root.path().join(format!("destination-{mode}"));
+            std::fs::write(&destination, b"old payload").expect("write old bytes");
+            let mut batch = DeferredParentSyncs::default();
+            let result = match mode {
+                0 => futures_lite::future::block_on(commit_staged_regular_file_transactionally(
+                    staging,
+                    &destination,
+                )),
+                1 => futures_lite::future::block_on(
+                    batch.commit_staged_regular_file(staging, &destination),
+                ),
+                _ => install_staged_regular_file_sync(staging, &destination),
+            };
+            let error = result.expect_err("procfs cannot sync staged file data");
+            assert!(
+                error.to_string().contains("sync staged file before commit"),
+                "mode {mode} must fail at the data sync, before rename: {error}"
+            );
+            assert_eq!(std::fs::read(&destination).unwrap(), b"old payload");
+            assert!(staging.exists(), "the source must remain untouched");
+            assert!(batch.parents.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_sync_handle_preserves_restrictive_metadata_and_final_bytes() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let staging = root.path().join("staging");
+        let destination = root.path().join("destination");
+        std::fs::write(&destination, b"old").unwrap();
+        let mut writer = std::fs::File::create(&staging).unwrap();
+        writer.write_all(b"complete payload").unwrap();
+        let pending = StagedFileSync::from_file(staging.clone(), writer).unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0)).unwrap();
+        let synced = pending
+            .sync_with(|file| {
+                assert_eq!(file.metadata()?.permissions().mode() & 0o7777, 0);
+                assert_eq!(file.metadata()?.len(), 16);
+                assert_eq!(std::fs::read(&destination)?, b"old");
+                file.sync_all()
+            })
+            .expect("the retained handle can sync mode-000 data");
+        let mut batch = DeferredParentSyncs::default();
+        futures_lite::future::block_on(batch.commit_synced_regular_file(synced, &destination))
+            .expect("publish already synced data without reopening it");
+        assert!(!staging.exists());
+        assert_eq!(
+            std::fs::metadata(&destination).unwrap().permissions().mode() & 0o7777,
+            0
+        );
+        futures_lite::future::block_on(batch.sync()).expect("sync destination directory");
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete payload");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transactional_bytes_and_hardlink_keep_mode_zero_without_reopening() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let primary = root.path().join("primary");
+        let alias = root.path().join("alias");
+        let metadata = EntryMetadata {
+            unix_mode: Some(0),
+            ..EntryMetadata::default()
+        };
+        futures_lite::future::block_on(commit_regular_bytes_with_metadata_transactionally(
+            &primary,
+            b"durable primary",
+            Some(&metadata),
+        ))
+        .expect("original writable handle survives restrictive metadata");
+        futures_lite::future::block_on(commit_hardlink_transactionally(&primary, &alias))
+            .expect("adding a link does not reopen the primary's bytes");
+        assert_eq!(
+            inode_key_if_regular_sync(&primary).unwrap(),
+            inode_key_if_regular_sync(&alias).unwrap()
+        );
+        for path in [&primary, &alias] {
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o7777, 0);
+        }
+        std::fs::set_permissions(&primary, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&alias).unwrap(), b"durable primary");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_sync_refuses_fifo_and_symlink_without_opening_them() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let fifo = root.path().join("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, b"target").unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        for path in [fifo, link] {
+            let result = StagedFileSync::open_sync(path);
+            assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::InvalidInput));
+        }
+    }
+
+    #[test]
     fn transactional_regular_metadata_verifier_refuses_before_publication() {
         fn planted_refusal(
             _staging_path: &Path,

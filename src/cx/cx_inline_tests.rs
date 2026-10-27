@@ -94,6 +94,136 @@
     }
 
     #[test]
+    fn spawn_batch_empty_requires_no_runtime_and_has_no_effects() {
+        let cx = test_cx();
+        let empty = std::iter::empty::<fn(Cx) -> std::future::Ready<usize>>;
+        assert!(cx.spawn_batch(empty()).unwrap().is_empty());
+        assert!(cx.spawn_batch_in(&cx.scope(), empty()).unwrap().is_empty());
+
+        let (_lab, live_cx, _root) = lab_with_spawn_cx();
+        let mailbox = live_cx.spawn_gateway_handle().unwrap().mailbox().clone();
+        let before = mailbox.total_enqueued();
+        assert!(live_cx.spawn_batch(empty()).unwrap().is_empty());
+        assert_eq!(mailbox.total_enqueued(), before);
+        assert_eq!(live_cx.pending_spawn_counter_handle().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spawn_batch_rejects_unbounded_input_before_reserving_or_invoking() {
+        let (_lab, cx, _root) = lab_with_spawn_cx();
+        let mailbox = cx.spawn_gateway_handle().unwrap().mailbox().clone();
+        let before = mailbox.total_enqueued();
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let input = std::iter::from_fn(|| {
+            consumed.fetch_add(1, Ordering::SeqCst);
+            let invoked = Arc::clone(&invoked);
+            Some(move |_child: Cx| {
+                invoked.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(())
+            })
+        });
+
+        let result = cx.spawn_batch(input);
+        assert!(matches!(
+            result,
+            Err(SpawnBatchError::TooManyTasks {
+                limit: MAX_SPAWN_BATCH_SIZE
+            })
+        ));
+        assert_eq!(consumed.load(Ordering::SeqCst), MAX_SPAWN_BATCH_SIZE + 1);
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+        assert_eq!(mailbox.total_enqueued(), before);
+        assert_eq!(cx.pending_spawn_counter_handle().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spawn_batch_iterator_panic_cannot_publish_a_partial_batch() {
+        let (_lab, cx, _root) = lab_with_spawn_cx();
+        let mailbox = cx.spawn_gateway_handle().unwrap().mailbox().clone();
+        let before = mailbox.total_enqueued();
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let input = (0..8).map(|index| {
+                assert_ne!(index, 3, "iterator fails after producing three factories");
+                let invoked = Arc::clone(&invoked);
+                move |_child: Cx| {
+                    invoked.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(index)
+                }
+            });
+            let _ = cx.spawn_batch(input);
+        }));
+        assert!(result.is_err());
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+        assert_eq!(mailbox.total_enqueued(), before);
+        assert_eq!(cx.pending_spawn_counter_handle().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spawn_batch_setup_refusal_preserves_mailbox_and_region_counters() {
+        let (mut lab, mut cx, root) = lab_with_spawn_cx();
+        let mailbox = cx.spawn_gateway_handle().unwrap().mailbox().clone();
+        let before = mailbox.total_enqueued();
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let factories = || {
+            let invoked = Arc::clone(&invoked);
+            (0..3).map(move |_| {
+                let invoked = Arc::clone(&invoked);
+                move |_child: Cx| {
+                    invoked.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(())
+                }
+            })
+        };
+
+        cx.runtime_mask = cap::CapMask::none();
+        assert!(matches!(
+            cx.spawn_batch(factories()),
+            Err(SpawnBatchError::Spawn(
+                crate::runtime::state::SpawnError::RuntimeUnavailable
+            ))
+        ));
+        assert!(matches!(
+            cx.spawn_batch_in(&cx.scope(), factories()),
+            Err(SpawnBatchError::Spawn(
+                crate::runtime::state::SpawnError::RuntimeUnavailable
+            ))
+        ));
+        cx.runtime_mask = cap::CapMask::all();
+        let child = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .unwrap();
+        let unwired: crate::cx::Scope<'static> =
+            crate::cx::Scope::new(child, Budget::INFINITE);
+        assert!(matches!(
+            cx.spawn_batch_in(&unwired, factories()),
+            Err(SpawnBatchError::Spawn(
+                crate::runtime::state::SpawnError::RuntimeUnavailable
+            ))
+        ));
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+        assert_eq!(mailbox.total_enqueued(), before);
+        assert_eq!(cx.pending_spawn_counter_handle().unwrap().count(), 0);
+        assert_eq!(lab.state.region(child).unwrap().pending_spawn_count(), 0);
+    }
+
+    #[test]
+    fn spawn_batch_error_codes_preserve_the_underlying_runtime_diagnostic() {
+        let too_large = SpawnBatchError::TooManyTasks {
+            limit: MAX_SPAWN_BATCH_SIZE,
+        };
+        assert_eq!(too_large.code(), "ASUP-E010");
+        assert!(too_large.to_string().starts_with("[ASUP-E010]"));
+        assert!(std::error::Error::source(&too_large).is_none());
+        let unavailable = SpawnBatchError::from(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        assert_eq!(unavailable.code(), "ASUP-E001");
+        assert!(unavailable.to_string().starts_with("[ASUP-E001]"));
+        assert!(std::error::Error::source(&unavailable).is_some());
+    }
+
+    #[test]
     fn spawn_registered_in_admits_and_registers_through_gateway() {
         struct YieldOnce(bool);
 

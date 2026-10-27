@@ -507,6 +507,123 @@
         assert_eq!(framed.max_buffer_len(), 8 * 1024 * 1024 + 4);
     }
 
+    fn next_with_bounded_polls<S: Stream + Unpin>(stream: &mut S) -> Option<S::Item> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..64 {
+            if let Poll::Ready(item) = Pin::new(&mut *stream).poll_next(&mut cx) {
+                return item;
+            }
+        }
+        panic!("ready transport did not produce its frame within the poll budget");
+    }
+
+    #[test]
+    fn framed_read_accepts_default_payload_with_eight_byte_length_prefix() {
+        let payload_len = 8 * 1024 * 1024;
+        let mut wire = (payload_len as u64).to_be_bytes().to_vec();
+        wire.resize(8 + payload_len, b'x');
+        wire.extend_from_slice(&2_u64.to_be_bytes());
+        wire.extend_from_slice(b"ok");
+        let reader = SliceReader { data: wire, pos: 0 };
+        let decoder = LengthDelimitedCodec::builder()
+            .length_field_length(8)
+            .new_codec();
+        let mut framed = FramedRead::new(reader, decoder);
+        assert_eq!(framed.effective_max_buffer_len(), payload_len + 8);
+
+        let frame = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+        assert_eq!(frame.len(), payload_len);
+        assert!(frame.iter().all(|byte| *byte == b'x'));
+        let next = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+        assert_eq!(&next[..], b"ok");
+        assert!(next_with_bounded_polls(&mut framed).is_none());
+    }
+
+    #[test]
+    fn framed_read_updated_decoder_admits_large_offset_and_adjusted_frame() {
+        let payload_len = DEFAULT_MAX_BUFFER_LEN + 17;
+        let mut wire = vec![0xaa, 0xbb];
+        wire.extend_from_slice(&((payload_len - 3) as u64).to_be_bytes());
+        wire.extend_from_slice(&[0xcc, 0xdd]);
+        wire.resize(12 + payload_len, b'y');
+        let reader = SliceReader { data: wire, pos: 0 };
+        let mut framed = FramedRead::new(reader, LengthDelimitedCodec::new());
+        *framed.decoder_mut() = LengthDelimitedCodec::builder()
+            .length_field_offset(2)
+            .length_field_length(8)
+            .length_adjustment(3)
+            .num_skip(12)
+            .max_frame_length(payload_len)
+            .new_codec();
+        assert_eq!(framed.effective_max_buffer_len(), payload_len + 12);
+
+        let frame = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+        assert_eq!(frame.len(), payload_len);
+        assert!(frame.iter().all(|byte| *byte == b'y'));
+        assert!(next_with_bounded_polls(&mut framed).is_none());
+    }
+
+    #[test]
+    fn framed_read_explicit_cap_wins_after_decoder_mutation() {
+        let mut wire = 65_u64.to_be_bytes().to_vec();
+        wire.resize(73, b'x');
+        let reader = SliceReader { data: wire, pos: 0 };
+        let mut framed =
+            FramedRead::new(reader, LengthDelimitedCodec::new()).with_max_buffer_len(64);
+        *framed.decoder_mut() = LengthDelimitedCodec::builder()
+            .length_field_length(8)
+            .max_frame_length(DEFAULT_MAX_BUFFER_LEN + 100)
+            .new_codec();
+        assert_eq!(framed.effective_max_buffer_len(), 64);
+
+        let error = next_with_bounded_polls(&mut framed).unwrap().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("max_buffer_len"));
+        assert_eq!(framed.read_buffer().len(), 64);
+        assert!(next_with_bounded_polls(&mut framed).is_none());
+    }
+
+    #[test]
+    fn framed_read_unknown_and_unbounded_hints_keep_default_protection() {
+        let foreign = FramedRead::new(SliceReader::new(b""), GateDecoder { ready: false });
+        assert_eq!(foreign.decoder().max_buffered_frame_len(), None);
+        assert_eq!(foreign.effective_max_buffer_len(), DEFAULT_MAX_BUFFER_LEN);
+        let mut wire = vec![b'x'; DEFAULT_MAX_BUFFER_LEN + 1];
+        wire.push(b'\n');
+        let reader = SliceReader { data: wire, pos: 0 };
+        let mut framed = FramedRead::new(reader, LinesCodec::with_unbounded());
+        assert_eq!(framed.effective_max_buffer_len(), DEFAULT_MAX_BUFFER_LEN);
+
+        let error = next_with_bounded_polls(&mut framed).unwrap().unwrap_err();
+        assert_eq!(error.io_kind(), Some(io::ErrorKind::InvalidData));
+        assert_eq!(framed.read_buffer().len(), DEFAULT_MAX_BUFFER_LEN);
+        assert!(next_with_bounded_polls(&mut framed).is_none());
+    }
+
+    #[test]
+    fn framed_read_finite_line_hint_and_explicit_zero_accept_large_lines() {
+        let line_len = DEFAULT_MAX_BUFFER_LEN + 1;
+        for unbounded in [false, true] {
+            let mut wire = vec![b'x'; line_len];
+            wire.push(b'\n');
+            let reader = SliceReader { data: wire, pos: 0 };
+            let mut framed = if unbounded {
+                FramedRead::new(reader, LinesCodec::with_unbounded()).with_max_buffer_len(0)
+            } else {
+                FramedRead::new(reader, LinesCodec::new_with_max_length(line_len))
+            };
+            assert_eq!(
+                framed.effective_max_buffer_len(),
+                if unbounded { 0 } else { line_len + 1 }
+            );
+            let line = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+            assert_eq!(line.len(), line_len);
+            assert!(line.bytes().all(|byte| byte == b'x'));
+            assert!(next_with_bounded_polls(&mut framed).is_none());
+        }
+    }
+
     #[test]
     fn framed_read_with_max_buffer_len_overrides_default() {
         let reader = SliceReader::new(b"");

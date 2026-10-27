@@ -735,6 +735,178 @@
             matches!(first, Err(TraceFileError::Truncated)),
             "got: {first:?}"
         );
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none());
+        assert_eq!(iter.len(), 0);
+    }
+
+    #[test]
+    fn iterator_preserves_the_unread_suffix_and_legacy_exact_size_interface() {
+        fn exact_len(iter: &impl ExactSizeIterator) -> usize {
+            iter.len()
+        }
+
+        let temp = NamedTempFile::new().expect("create temp file");
+        let events = sample_events();
+        write_trace(temp.path(), &TraceMetadata::new(42), &events).expect("write trace");
+        let mut reader = TraceReader::open(temp.path()).expect("open trace");
+        assert_eq!(
+            reader.read_event().expect("read first"),
+            Some(events[0].clone())
+        );
+        let mut iter = reader.events();
+        assert_eq!(exact_len(&iter), events.len() - 1);
+        assert_eq!(
+            iter.by_ref()
+                .collect::<TraceFileResult<Vec<_>>>()
+                .expect("read suffix"),
+            events[1..]
+        );
+        assert_eq!(exact_len(&iter), 0);
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn try_events_does_not_allocate_from_a_hostile_header_count() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let event = ReplayEvent::RngSeed { seed: 7 };
+        write_v2_trace(
+            temp.path(),
+            &TraceMetadata::new(7),
+            std::slice::from_ref(&event),
+            u64::MAX,
+        );
+        let mut stream = TraceReader::open(temp.path())
+            .expect("open trace")
+            .try_events();
+        assert_eq!(stream.size_hint(), (0, usize::try_from(u64::MAX).ok()));
+        let decoded: Vec<_> = stream.by_ref().collect();
+        assert_eq!(decoded.len(), 2);
+        assert!(matches!(&decoded[0], Ok(actual) if *actual == event));
+        assert!(matches!(&decoded[1], Err(TraceFileError::Truncated)));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+        assert!(stream.next().is_none());
+        assert!(matches!(
+            TraceReader::open(temp.path())
+                .expect("open trace")
+                .load_all(),
+            Err(TraceFileError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn malformed_event_is_terminal_until_explicit_rewind() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let event = ReplayEvent::RngSeed { seed: 7 };
+        write_v2_trace(temp.path(), &TraceMetadata::new(7), &[], 2);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(temp.path())
+            .expect("append frames");
+        file.write_all(&1u32.to_le_bytes())
+            .expect("write malformed length");
+        file.write_all(&[0xc1]).expect("write invalid MessagePack");
+        let bytes = rmp_serde::to_vec(&event).expect("encode later event");
+        file.write_all(&(bytes.len() as u32).to_le_bytes())
+            .expect("write valid length");
+        file.write_all(&bytes).expect("write later event");
+        file.flush().expect("flush frames");
+
+        let mut reader = TraceReader::open(temp.path()).expect("open trace");
+        assert!(matches!(
+            reader.read_event(),
+            Err(TraceFileError::Deserialize(_))
+        ));
+        assert_eq!(reader.events_read(), 0);
+        assert!(matches!(
+            reader.read_event(),
+            Err(TraceFileError::Io(err)) if err.kind() == io::ErrorKind::InvalidData
+        ));
+        reader.rewind().expect("rewind failed reader");
+        assert!(matches!(
+            reader.read_event(),
+            Err(TraceFileError::Deserialize(_))
+        ));
+        let mut stream = TraceReader::open(temp.path())
+            .expect("open trace")
+            .try_events();
+        assert!(matches!(
+            stream.next(),
+            Some(Err(TraceFileError::Deserialize(_)))
+        ));
+        assert!(
+            stream.next().is_none(),
+            "must not skip to the later valid frame"
+        );
+    }
+
+    #[test]
+    fn raw_frame_limit_is_checked_before_payload_read_and_decode() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        write_v2_trace(temp.path(), &TraceMetadata::new(7), &[], 1);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(temp.path())
+            .expect("append length");
+        file.write_all(&65_536u32.to_le_bytes())
+            .expect("write length without payload");
+        file.flush().expect("flush length");
+        let mut reader = TraceReader::open(temp.path())
+            .expect("open trace")
+            .with_max_event_len(64);
+        assert!(matches!(
+            reader.read_event(),
+            Err(TraceFileError::OversizedField {
+                field: "event_len",
+                actual: 65_536,
+                max: 64,
+            })
+        ));
+        assert_eq!(reader.events_read(), 0);
+    }
+
+    #[test]
+    fn raw_frame_limit_admits_exact_boundary_and_keeps_format_maximum() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let event = ReplayEvent::RngSeed { seed: 7 };
+        let bytes = rmp_serde::to_vec(&event).expect("encode event");
+        write_trace(
+            temp.path(),
+            &TraceMetadata::new(7),
+            std::slice::from_ref(&event),
+        )
+        .expect("write trace");
+        let reader = TraceReader::open(temp.path())
+            .expect("open trace")
+            .with_max_event_len(bytes.len());
+        assert_eq!(reader.load_all().expect("read exact boundary"), vec![event]);
+        let reader = TraceReader::open(temp.path())
+            .expect("open trace")
+            .with_max_event_len(usize::MAX);
+        assert_eq!(reader.max_event_len, MAX_EVENT_LEN);
+    }
+
+    #[test]
+    fn event_stream_checksum_error_is_emitted_once_after_direct_reads() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let events = sample_events();
+        write_trace(temp.path(), &TraceMetadata::new(42), &events).expect("write trace");
+        let mut reader = TraceReader::open(temp.path()).expect("open trace");
+        reader.expected_event_digest = Some([0; TRACE_CHECKSUM_LEN]);
+        assert_eq!(
+            reader.read_event().expect("read first"),
+            Some(events[0].clone())
+        );
+        let mut stream = reader.try_events();
+        let decoded: Vec<_> = stream.by_ref().collect();
+        assert_eq!(decoded.len(), events.len() - 1);
+        assert!(matches!(
+            decoded.last(),
+            Some(Err(TraceFileError::ChecksumMismatch {
+                section: "event stream"
+            }))
+        ));
+        assert!(stream.next().is_none());
     }
 
     #[test]
@@ -926,6 +1098,76 @@
         let result = writer.finish();
         assert!(matches!(
             result,
+            Err(TraceFileError::Io(err)) if is_disk_full_os_error(err.raw_os_error())
+        ));
+    }
+
+    #[test]
+    fn failed_frame_write_poisoning_preserves_count_digest_and_failure() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let mut writer = TraceWriter::create(temp.path()).expect("create writer");
+        writer
+            .write_metadata(&TraceMetadata::new(42))
+            .expect("write metadata");
+        writer.writer.flush().expect("persist incomplete header");
+        let digest_before: [u8; TRACE_CHECKSUM_LEN] = writer.event_hasher.clone().finalize().into();
+        // A read-only descriptor gives a deterministic real write failure.
+        writer.writer = BufWriter::with_capacity(0, File::open(temp.path()).expect("open read-only"));
+        let event = ReplayEvent::RngSeed { seed: 7 };
+        let first = writer.write_event(&event).expect_err("write must fail");
+        let TraceFileError::Io(first) = first else {
+            panic!("expected I/O failure")
+        };
+        assert_eq!(writer.event_count(), 0);
+        let digest_after: [u8; TRACE_CHECKSUM_LEN] = writer.event_hasher.clone().finalize().into();
+        assert_eq!(
+            digest_after, digest_before,
+            "failed frame must not enter integrity digest"
+        );
+        assert!(matches!(
+            writer.write_event(&event),
+            Err(TraceFileError::Io(err))
+                if err.kind() == first.kind() && err.raw_os_error() == first.raw_os_error()
+        ));
+        assert!(matches!(
+            writer.finish(),
+            Err(TraceFileError::Io(err))
+                if err.kind() == first.kind() && err.raw_os_error() == first.raw_os_error()
+        ));
+        assert!(
+            matches!(
+                TraceReader::open(temp.path()),
+                Err(TraceFileError::ChecksumMismatch {
+                    section: "event stream"
+                })
+            ),
+            "failed writer must not finalize an apparently successful empty trace"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn early_enospc_remains_an_error_for_later_writes_and_finish() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let mut writer = TraceWriter::create(temp.path()).expect("create writer");
+        writer
+            .write_metadata(&TraceMetadata::new(42))
+            .expect("write metadata");
+        writer.writer.flush().expect("flush metadata");
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("open /dev/full");
+        writer.writer = BufWriter::with_capacity(0, full);
+        for _ in 0..2 {
+            assert!(matches!(
+                writer.write_event(&ReplayEvent::RngSeed { seed: 7 }),
+                Err(TraceFileError::Io(err)) if is_disk_full_os_error(err.raw_os_error())
+            ));
+        }
+        assert_eq!(writer.event_count(), 0);
+        assert!(matches!(
+            writer.finish(),
             Err(TraceFileError::Io(err)) if is_disk_full_os_error(err.raw_os_error())
         ));
     }
@@ -1239,6 +1481,39 @@
                 matches!(first, Err(TraceFileError::Truncated)),
                 "got: {first:?}"
             );
+            assert!(iter.next().is_none());
+            assert!(iter.next().is_none());
+        }
+
+        #[test]
+        fn compressed_stream_keeps_partial_read_state_and_raw_frame_limit() {
+            let temp = NamedTempFile::new().expect("create temp file");
+            let events = sample_events();
+            let config = TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 });
+            write_trace_with_config(temp.path(), &TraceMetadata::new(42), &events, config)
+                .expect("write compressed trace");
+            let mut reader = TraceReader::open(temp.path()).expect("open trace");
+            assert_eq!(
+                reader.read_event().expect("read first"),
+                Some(events[0].clone())
+            );
+            let suffix = reader
+                .try_events()
+                .collect::<TraceFileResult<Vec<_>>>()
+                .expect("decode suffix and verify whole-stream checksum");
+            assert_eq!(suffix, events[1..]);
+
+            let mut bounded = TraceReader::open(temp.path())
+                .expect("open trace")
+                .with_max_event_len(1)
+                .try_events();
+            assert!(matches!(
+                bounded.next(),
+                Some(Err(TraceFileError::OversizedField {
+                    field: "event_len", actual, max: 1,
+                })) if actual > 1
+            ));
+            assert!(bounded.next().is_none());
         }
 
         #[test]

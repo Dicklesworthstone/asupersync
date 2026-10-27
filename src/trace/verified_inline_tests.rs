@@ -56,6 +56,135 @@
     }
 
     #[test]
+    fn frame_limit_rejects_before_reading_or_decoding_a_large_payload() {
+        let temp = NamedTempFile::new().unwrap();
+        write_legacy(temp.path(), &[], 1);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(temp.path())
+            .unwrap();
+        file.write_all(&65_536u32.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+        // No payload exists: a post-decode check would report Truncated instead.
+        assert!(matches!(
+            VerifiedTraceReader::open_with_frame_limit(temp.path(), limits(), 64),
+            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+                field: "event_len",
+                actual: 65_536,
+                max: 64,
+            }))
+        ));
+    }
+
+    #[test]
+    fn frame_limit_preserves_canonical_budget_and_checkpoint_semantics() {
+        let temp = NamedTempFile::new().unwrap();
+        let event = ReplayEvent::RngSeed { seed: 7 };
+        let encoded_len = rmp_serde::to_vec(&event).unwrap().len();
+        write_trace(temp.path(), &metadata(), std::slice::from_ref(&event)).unwrap();
+        let mut reader = VerifiedTraceReader::open_with_frame_limit(
+            temp.path(),
+            TraceReadLimits::new(1, encoded_len as u64),
+            encoded_len,
+        )
+        .unwrap();
+        let checkpoint = reader.checkpoint().unwrap();
+        assert_eq!(reader.next_event().unwrap(), Some(event.clone()));
+        assert!(reader.is_complete());
+        let mut resumed = VerifiedTraceReader::resume_with_frame_limit(
+            temp.path(),
+            checkpoint,
+            limits(),
+            encoded_len,
+        )
+        .unwrap();
+        assert_eq!(resumed.next_event().unwrap(), Some(event));
+        assert!(resumed.is_complete());
+        assert!(matches!(
+            VerifiedTraceReader::resume_with_frame_limit(
+                temp.path(),
+                checkpoint,
+                limits(),
+                encoded_len - 1,
+            ),
+            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { .. }))
+        ));
+        assert!(matches!(
+            VerifiedTraceReader::open_with_frame_limit(
+                temp.path(),
+                TraceReadLimits::new(1, 0),
+                encoded_len,
+            ),
+            Err(VerifiedTraceError::ByteLimit {
+                event_index: 0,
+                limit: 0,
+            })
+        ));
+    }
+
+    #[test]
+    fn raw_frame_limit_does_not_redefine_the_existing_canonical_byte_budget() {
+        let temp = NamedTempFile::new().unwrap();
+        let event = ReplayEvent::RngSeed { seed: 7 };
+        let mut encoded = rmp_serde::to_vec(&event).unwrap();
+        let canonical_len = encoded.len();
+        // A uint8 encoding of 7 is valid MessagePack but one byte larger than
+        // the positive fixint emitted by canonical serialization.
+        assert_eq!(encoded.pop(), Some(7));
+        encoded.extend_from_slice(&[0xcc, 7]);
+        assert_eq!(rmp_serde::from_slice::<ReplayEvent>(&encoded).unwrap(), event);
+        write_legacy(temp.path(), &[], 1);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(temp.path())
+            .unwrap();
+        file.write_all(&(encoded.len() as u32).to_le_bytes()).unwrap();
+        file.write_all(&encoded).unwrap();
+        file.flush().unwrap();
+
+        let budget = TraceReadLimits::new(1, canonical_len as u64);
+        let mut legacy = VerifiedTraceReader::open(temp.path(), budget).unwrap();
+        assert_eq!(legacy.next_event().unwrap(), Some(event));
+        assert!(legacy.is_complete());
+        assert!(matches!(
+            VerifiedTraceReader::open_with_frame_limit(temp.path(), budget, canonical_len),
+            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { .. }))
+        ));
+        assert!(
+            VerifiedTraceReader::open_with_frame_limit(temp.path(), budget, encoded.len()).is_ok()
+        );
+    }
+
+    #[cfg(feature = "trace-compression")]
+    #[test]
+    fn frame_limit_is_enforced_inside_compressed_chunks() {
+        use crate::trace::file::{CompressionMode, TraceFileConfig, write_trace_with_config};
+        let temp = NamedTempFile::new().unwrap();
+        write_trace_with_config(
+            temp.path(),
+            &metadata(),
+            &events(),
+            TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 }),
+        )
+        .unwrap();
+        assert!(matches!(
+            VerifiedTraceReader::open_with_frame_limit(temp.path(), limits(), 1),
+            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+                field: "event_len",
+                actual,
+                max: 1,
+            })) if actual > 1
+        ));
+        let mut reader =
+            VerifiedTraceReader::open_with_frame_limit(temp.path(), limits(), 1024).unwrap();
+        assert_eq!(
+            reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            events()
+        );
+        assert!(reader.is_complete());
+    }
+
+    #[test]
     fn every_checkpoint_position_roundtrips_and_resumes_the_correct_suffix() {
         let temp = NamedTempFile::new().unwrap();
         write_trace(temp.path(), &metadata(), &events()).unwrap();

@@ -10,6 +10,24 @@
     use proptest::prelude::*;
 
     #[test]
+    fn buffered_line_hint_includes_delimiter_and_keeps_unbounded_explicit() {
+        assert_eq!(
+            LinesCodec::new_with_max_length(0).max_buffered_frame_len(),
+            Some(1)
+        );
+        assert_eq!(
+            LinesCodec::new_with_max_length(5).max_buffered_frame_len(),
+            Some(6)
+        );
+        assert_eq!(LinesCodec::with_unbounded().max_buffered_frame_len(), None);
+        let mut codec = LinesCodec::new_with_max_length(5);
+        let mut wire = BytesMut::from("abcd\r\n");
+        assert_eq!(codec.max_buffered_frame_len(), Some(wire.len()));
+        assert_eq!(codec.decode(&mut wire).unwrap().as_deref(), Some("abcd"));
+        assert!(wire.is_empty());
+    }
+
+    #[test]
     fn test_lines_codec_decode() {
         let mut codec = LinesCodec::new();
         let mut buf = BytesMut::from("hello\nworld\n");

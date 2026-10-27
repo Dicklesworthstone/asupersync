@@ -798,6 +798,7 @@ struct SuppressedCompletionEffects {
     metrics: Option<Arc<dyn MetricsProvider>>,
     lifecycle: Vec<LifecycleObserverEffect>,
     watch_effects: Option<crate::monitor::WatchEffects>,
+    deadline_completion: Option<Box<super::deadline_monitor::DeadlineCompletionObservation>>,
 }
 
 impl TaskCompletionRetirements {
@@ -825,13 +826,15 @@ impl TaskCompletionRetirements {
         };
         let lifecycle = std::mem::take(&mut observer.lifecycle);
         let watch_effects = observer.watch_effects.take();
+        let deadline_completion = observer.deadline_completion.take();
         drop(observer);
-        if metrics.is_some() || watch_effects.is_some() {
+        if metrics.is_some() || watch_effects.is_some() || deadline_completion.is_some() {
             debug_assert!(self.suppressed.is_none());
             self.suppressed = Some(Box::new(SuppressedCompletionEffects {
                 metrics,
                 lifecycle,
                 watch_effects,
+                deadline_completion,
             }));
         }
     }
@@ -842,7 +845,11 @@ impl TaskCompletionRetirements {
                 metrics,
                 lifecycle,
                 watch_effects,
+                deadline_completion,
             } = *suppressed;
+            if let Some(completion) = deadline_completion {
+                completion.publish();
+            }
             // Each observation and the provider's retirement get their own
             // unwind boundary, as in TaskCompletionObserver::dispatch. The
             // observer-panic counter is not charged: dispatch was suppressed.
@@ -908,6 +915,9 @@ pub struct TaskCompletionObserver {
     /// Runtime-owned data only: no provider, Waker, closure or user destructor
     /// is stored in this completion-local buffer.
     lifecycle: Vec<LifecycleObserverEffect>,
+    /// Boxed only when native monitoring is enabled; no sample allocation or
+    /// task-context read is added to disabled-monitor completion paths.
+    deadline_completion: Option<Box<super::deadline_monitor::DeadlineCompletionObservation>>,
 }
 
 enum TaskCompletionObserverPayload {
@@ -955,6 +965,7 @@ impl TaskCompletionObserver {
             epoch_telemetry: None,
             watch_effects: None,
             lifecycle: Vec::new(),
+            deadline_completion: None,
         }
     }
 
@@ -966,6 +977,7 @@ impl TaskCompletionObserver {
             epoch_telemetry: None,
             watch_effects: None,
             lifecycle: Vec::new(),
+            deadline_completion: None,
         }
     }
 
@@ -991,6 +1003,9 @@ impl TaskCompletionObserver {
     /// caught panic increments this runtime's callback-free atomic failure
     /// counter once for this dispatch without invoking another observer.
     pub fn dispatch(mut self) {
+        if let Some(completion) = self.deadline_completion.take() {
+            completion.publish();
+        }
         // Completion has already retired the task, resolved its obligations,
         // advanced its regions, and published waiter work. Each independent
         // observation gets its own unwind boundary so an obligation hook
@@ -1624,6 +1639,7 @@ struct NativeCompletionProgress {
     cancel_targets: SmallVec<[Arc<CancelWaker>; 4]>,
     watch_effects: SmallVec<[crate::monitor::WatchEffects; 1]>,
     retired: bool,
+    deadline_completion: Option<Box<super::deadline_monitor::DeadlineCompletionObservation>>,
 }
 
 impl NativeCompletionProgress {
@@ -1698,6 +1714,9 @@ impl NativeCompletionProgress {
     fn dispatch(mut self) {
         if !self.retired {
             return;
+        }
+        if let Some(completion) = self.deadline_completion.take() {
+            completion.publish();
         }
         for effects in std::mem::take(&mut self.watch_effects) {
             // Include final slot/gateway destruction in the boundary, beyond
@@ -2684,6 +2703,9 @@ pub struct RuntimeState {
     /// resource sampling runs (`RuntimeBuilder::resource_sampling`). `None`
     /// otherwise, and then `Cx::pressure()` stays `None`.
     task_pressure: Option<Arc<crate::types::pressure::SystemPressure>>,
+    /// Native completion diagnostics are opt-in. The queue owns no callbacks;
+    /// samples travel with the existing post-lock completion effects.
+    deadline_completions: Option<Arc<super::deadline_monitor::DeadlineCompletionQueue>>,
     /// Regions that need state advancement deferred until leak handling completes.
     ///
     /// During obligation leak handling, `abort_obligation` calls can trigger
@@ -2889,6 +2911,7 @@ impl RuntimeState {
             resource_monitor,
             swarm_pressure_governor,
             task_pressure: None,
+            deadline_completions: None,
             deferred_region_advancements: BTreeSet::new(),
         }
     }
@@ -6398,7 +6421,7 @@ impl RuntimeState {
             TaskState::Completed(Outcome::Cancelled(reason)) if reason.kind == CancelKind::Deadline
         );
 
-        TaskCompletionObserver::completed(
+        let mut observer = TaskCompletionObserver::completed(
             Arc::clone(&self.metrics),
             task.id,
             task.owner,
@@ -6408,7 +6431,11 @@ impl RuntimeState {
             waiter_count,
             deadline_exceeded,
             &self.task_completion_observer_panics,
-        )
+        );
+        observer.deadline_completion = self.deadline_completions.as_ref().map(|queue| {
+            super::deadline_monitor::DeadlineCompletionObservation::capture(queue, task, now)
+        });
+        observer
     }
 
     fn capture_obligation_backtrace() -> Option<Arc<Backtrace>> {
@@ -9319,6 +9346,15 @@ impl RuntimeState {
         // audit, while the outcome is still borrowed (resolve_task_watches).
         // Their timestamp is read here, before any shard lock: the clock may
         // be user code.
+        if let Some(progress) = completion_progress.as_deref_mut() {
+            // A configured leak panic can interrupt the later region walk.
+            // Keep one sample on the native recovery carrier, so retrying
+            // completion neither loses it nor publishes a duplicate.
+            let sample = observer.deadline_completion.take();
+            if progress.deadline_completion.is_none() {
+                progress.deadline_completion = sample;
+            }
+        }
         let watch_now = (!self.task_watches.is_empty()).then(|| {
             self.timer_driver
                 .as_ref()
@@ -11779,6 +11815,19 @@ impl RuntimeState {
         self.task_pressure.clone()
     }
 
+    pub(crate) fn set_deadline_completions(
+        &mut self,
+        queue: Arc<super::deadline_monitor::DeadlineCompletionQueue>,
+    ) {
+        self.deadline_completions = Some(queue);
+    }
+
+    pub(crate) fn deadline_completions(
+        &self,
+    ) -> Option<Arc<super::deadline_monitor::DeadlineCompletionQueue>> {
+        self.deadline_completions.clone()
+    }
+
     /// `cx` with the runtime's task pressure handle, when sampling runs.
     fn with_task_pressure(&self, cx: crate::cx::Cx) -> crate::cx::Cx {
         match &self.task_pressure {
@@ -13077,6 +13126,11 @@ pub(crate) mod spawn_observer_test_support;
 /// Only for a suppression with no later unlock point; unwind paths carry these
 /// in their [`TaskCompletionRetirements`] instead.
 fn deliver_suppressed_lifecycle(mut observer: TaskCompletionObserver) {
+    // This exceptional path can still own a runtime lock. Publishing only
+    // runtime-owned facts is callback-free; the monitor dispatches them later.
+    if let Some(completion) = observer.deadline_completion.take() {
+        completion.publish();
+    }
     if let Some(TaskCompletionObserverPayload::Completed { metrics, .. }) =
         observer.payload.as_ref()
     {

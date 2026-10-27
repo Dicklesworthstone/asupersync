@@ -10,7 +10,7 @@
     use crate::record::TaskRecord;
     use crate::types::{Budget, CxInner, RegionId, TaskId};
     use parking_lot::{Mutex, RwLock};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, OnceLock};
 
     fn init_test(name: &str) {
@@ -800,6 +800,7 @@
         stuck: AtomicU64,
         remaining_samples: Mutex<Vec<Duration>>,
         checkpoint_intervals: Mutex<Vec<Duration>>,
+        panic_remaining: AtomicBool,
     }
 
     impl MetricsProvider for TestMetrics {
@@ -832,6 +833,10 @@
 
         fn deadline_remaining(&self, _: &str, remaining: Duration) {
             self.remaining_samples.lock().push(remaining);
+            assert!(
+                !self.panic_remaining.load(Ordering::Relaxed),
+                "injected deadline metric callback panic"
+            );
         }
 
         fn checkpoint_interval(&self, _: &str, interval: Duration) {
@@ -841,6 +846,183 @@
         fn task_stuck_detected(&self, _: &str) {
             self.stuck.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    fn completion_test_monitor() -> (DeadlineMonitor, Arc<DeadlineCompletionQueue>, Arc<TestMetrics>) {
+        let queue = Arc::new(DeadlineCompletionQueue::new());
+        let metrics = Arc::new(TestMetrics::default());
+        let mut monitor = DeadlineMonitor::new(MonitorConfig {
+            check_interval: Duration::ZERO,
+            checkpoint_timeout: Duration::from_secs(60),
+            ..MonitorConfig::default()
+        });
+        monitor.attach_native_completions(Arc::clone(&queue));
+        monitor.set_metrics_provider(metrics.clone());
+        (monitor, queue, metrics)
+    }
+
+    fn completion_test_task(index: u32, generation: u32) -> TaskRecord {
+        make_task(
+            TaskId::new_for_test(index, generation),
+            RegionId::new_for_test(0, 1),
+            Time::ZERO,
+            Time::from_secs(10),
+            None,
+            None,
+            Some("native.sample"),
+        )
+    }
+
+    #[test]
+    fn native_completion_queue_bounds_loss_and_seals_before_final_drain() {
+        let queue = Arc::new(DeadlineCompletionQueue::with_capacity(2));
+        let mut monitor = DeadlineMonitor::new(MonitorConfig::default());
+        monitor.attach_native_completions(Arc::clone(&queue));
+        for index in 0..3 {
+            DeadlineCompletionObservation::capture(
+                &queue,
+                &completion_test_task(index, 1),
+                Time::from_secs(2),
+            )
+            .publish();
+        }
+        let before = queue.stats();
+        assert_eq!(before.accepted_completions, 2);
+        assert_eq!(before.queued_completions, 2);
+        assert_eq!(before.dropped_completions, 1);
+        monitor.drain_native_completions(true);
+        DeadlineCompletionObservation::capture(
+            &queue,
+            &completion_test_task(3, 1),
+            Time::from_secs(2),
+        )
+        .publish();
+        let after = queue.stats();
+        assert!(after.closed);
+        assert_eq!(after.processed_completions, 2);
+        assert_eq!(after.queued_completions, 0);
+        assert_eq!(after.rejected_after_shutdown, 1);
+        assert_eq!(after.dropped_completions, 1);
+    }
+
+    #[test]
+    fn native_completion_after_snapshot_cannot_emit_a_duplicate_violation() {
+        let (mut monitor, queue, metrics) = completion_test_monitor();
+        let task = completion_test_task(0, 1);
+        let snapshot = DeadlineTaskSnapshot::for_native_monitor(&task, &queue).unwrap();
+        DeadlineCompletionObservation::capture(&queue, &task, Time::from_secs(12)).publish();
+        monitor.drain_native_completions(false);
+        monitor.check_snapshots(Time::from_secs(13), [snapshot]);
+        assert_eq!(metrics.violations.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.warnings.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.remaining_samples.lock().as_slice(), &[Duration::ZERO]);
+    }
+
+    #[test]
+    fn captured_on_time_completion_rejects_stale_scan_before_publication() {
+        let (mut monitor, queue, metrics) = completion_test_monitor();
+        let task = completion_test_task(0, 1);
+        let snapshot = DeadlineTaskSnapshot::for_native_monitor(&task, &queue).unwrap();
+        let delayed = DeadlineCompletionObservation::capture(&queue, &task, Time::from_secs(5));
+        monitor.check_snapshots(Time::from_secs(20), [snapshot]);
+        assert_eq!(metrics.violations.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.warnings.load(Ordering::Relaxed), 0);
+        assert_eq!(queue.stats().accepted_completions, 0);
+        delayed.publish();
+        monitor.drain_native_completions(false);
+        assert_eq!(metrics.violations.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            metrics.remaining_samples.lock().as_slice(),
+            &[Duration::from_secs(5)],
+        );
+    }
+
+    #[test]
+    fn native_violation_receipt_survives_pruning_and_task_slot_reuse() {
+        let (mut monitor, queue, metrics) = completion_test_monitor();
+        let first = completion_test_task(0, 1);
+        let next = completion_test_task(0, 2);
+        monitor.check_snapshots(
+            Time::from_secs(11),
+            [DeadlineTaskSnapshot::for_native_monitor(&first, &queue).unwrap()],
+        );
+        monitor.check_snapshots(Time::from_secs(12), std::iter::empty());
+        monitor.check_snapshots(
+            Time::from_secs(13),
+            [DeadlineTaskSnapshot::for_native_monitor(&next, &queue).unwrap()],
+        );
+        assert_eq!(metrics.violations.load(Ordering::Relaxed), 2);
+        DeadlineCompletionObservation::capture(&queue, &first, Time::from_secs(12)).publish();
+        DeadlineCompletionObservation::capture(&queue, &next, Time::from_secs(14)).publish();
+        monitor.drain_native_completions(false);
+        assert_eq!(metrics.violations.load(Ordering::Relaxed), 2);
+        assert_eq!(queue.stats().processed_completions, 2);
+    }
+
+    #[test]
+    fn native_completion_keeps_admitted_deadline_after_cleanup_budget_replacement() {
+        let (mut monitor, queue, metrics) = completion_test_monitor();
+        let task = completion_test_task(0, 1);
+        task.cx_inner.as_ref().unwrap().write().budget = Budget::INFINITE;
+        DeadlineCompletionObservation::capture(&queue, &task, Time::from_secs(12)).publish();
+        monitor.drain_native_completions(false);
+        assert_eq!(metrics.violations.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.remaining_samples.lock().as_slice(), &[Duration::ZERO]);
+    }
+
+    #[test]
+    fn native_metric_panic_cannot_discard_other_metrics_or_accepted_completions() {
+        let (mut monitor, queue, metrics) = completion_test_monitor();
+        metrics.panic_remaining.store(true, Ordering::Relaxed);
+        for index in 0..3 {
+            DeadlineCompletionObservation::capture(
+                &queue,
+                &completion_test_task(index, 1),
+                Time::from_secs(12),
+            )
+            .publish();
+        }
+        monitor.drain_native_completions(true);
+        assert_eq!(metrics.violations.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.remaining_samples.lock().len(), 3);
+        assert_eq!(queue.stats().processed_completions, 3);
+        assert_eq!(queue.stats().callback_panics, 3);
+    }
+
+    #[test]
+    fn adaptive_history_bounds_labels_and_allocates_samples_lazily() {
+        let mut monitor = DeadlineMonitor::new(MonitorConfig {
+            adaptive: AdaptiveDeadlineConfig {
+                adaptive_enabled: true,
+                min_samples: 1,
+                max_history: usize::MAX,
+                ..AdaptiveDeadlineConfig::default()
+            },
+            ..MonitorConfig::default()
+        });
+        for index in 0..=MAX_ADAPTIVE_TASK_TYPES {
+            monitor.record_completion(
+                TaskId::new_for_test(0, 1),
+                &format!("type{index}"),
+                Duration::from_millis(1),
+                None,
+                Time::ZERO,
+            );
+        }
+        assert_eq!(monitor.history.len(), MAX_ADAPTIVE_TASK_TYPES);
+        assert_eq!(monitor.history_order.len(), MAX_ADAPTIVE_TASK_TYPES);
+        assert!(!monitor.history.contains_key("type0"));
+        assert!(monitor.history.contains_key(&format!("type{MAX_ADAPTIVE_TASK_TYPES}")));
+        assert!(monitor.history.values().all(|history| history.len() == 1));
+        let mut disabled = DeadlineMonitor::new(MonitorConfig::default());
+        disabled.record_completion(
+            TaskId::new_for_test(0, 1),
+            "unused",
+            Duration::from_secs(1),
+            None,
+            Time::ZERO,
+        );
+        assert!(disabled.history.is_empty());
     }
 
     #[test]
