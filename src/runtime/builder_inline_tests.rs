@@ -8,7 +8,7 @@
     use crate::test_utils::init_test_logging;
     use crate::time::sleep;
     use crate::trace::{TraceEvent, TraceEventKind};
-    use crate::types::{Budget, CancelReason, CxInner, Time};
+    use crate::types::{Budget, CancelReason, CxInner, RegionId, TaskId, Time};
     use parking_lot::RwLock;
     #[cfg(unix)]
     use std::collections::HashSet;
@@ -2079,6 +2079,215 @@
             reacquired,
             "warning callback must run after dropping the runtime-state lock"
         );
+    }
+
+    #[derive(Clone)]
+    struct NativeDeadlineMetrics {
+        completions: std::sync::mpsc::Sender<(String, Duration)>,
+        state: Arc<Mutex<Option<std::sync::Weak<crate::sync::ContendedMutex<RuntimeState>>>>>,
+        panic_remaining: bool,
+    }
+
+    impl MetricsProvider for NativeDeadlineMetrics {
+        fn task_spawned(&self, _: RegionId, _: TaskId) {}
+        fn task_completed(
+            &self,
+            _: TaskId,
+            _: crate::observability::metrics::OutcomeKind,
+            _: Duration,
+        ) {
+        }
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+        fn region_closed(&self, _: RegionId, _: Duration) {}
+        fn cancellation_requested(&self, _: RegionId, _: crate::types::CancelKind) {}
+        fn drain_completed(&self, _: RegionId, _: Duration) {}
+        fn deadline_set(&self, _: RegionId, _: Duration) {}
+        fn deadline_exceeded(&self, _: RegionId) {}
+        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+        fn deadline_violation(&self, _: &str, _: Duration) {}
+        fn checkpoint_interval(&self, _: &str, _: Duration) {}
+        fn task_stuck_detected(&self, _: &str) {}
+        fn obligation_created(&self, _: RegionId) {}
+        fn obligation_discharged(&self, _: RegionId) {}
+        fn obligation_leaked(&self, _: RegionId) {}
+        fn scheduler_tick(&self, _: usize, _: Duration) {}
+
+        fn deadline_remaining(&self, task_type: &str, remaining: Duration) {
+            let state = self.state.lock().as_ref().and_then(std::sync::Weak::upgrade);
+            if let Some(state) = state {
+                // A real re-entry: this would deadlock if native delivery kept
+                // the runtime-state lock from snapshot or task completion.
+                drop(state.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            }
+            self.completions
+                .send((task_type.to_string(), remaining))
+                .expect("completion observation receiver remains alive");
+            assert!(!self.panic_remaining, "injected native deadline metric panic");
+        }
+    }
+
+    fn native_deadline_metrics(
+        panic_remaining: bool,
+    ) -> (
+        NativeDeadlineMetrics,
+        std::sync::mpsc::Receiver<(String, Duration)>,
+    ) {
+        let (completions, receiver) = std::sync::mpsc::channel();
+        (
+            NativeDeadlineMetrics {
+                completions,
+                state: Arc::new(Mutex::new(None)),
+                panic_remaining,
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn native_task_completions_teach_adaptive_deadline_warnings() {
+        use crate::channel::oneshot;
+
+        for sharded in [false, true] {
+            let (metrics, completions) = native_deadline_metrics(false);
+            let (warnings_tx, warnings_rx) = std::sync::mpsc::channel();
+            let builder = if sharded {
+                RuntimeBuilder::new().worker_threads(2).with_sharded_state(true)
+            } else {
+                RuntimeBuilder::current_thread()
+            };
+            let runtime = builder
+                .metrics(metrics.clone())
+                .deadline_monitoring(|monitor| {
+                    monitor
+                        .check_interval(Duration::from_millis(5))
+                        .checkpoint_timeout(Duration::from_secs(60))
+                        .adaptive_enabled(true)
+                        .adaptive_min_samples(1)
+                        .adaptive_fallback_threshold(Duration::from_secs(60))
+                        .on_warning(move |warning| {
+                            warnings_tx.send(warning.task_id).expect("warning receiver");
+                        })
+                })
+                .build()
+                .unwrap();
+            *metrics.state.lock() = Some(Arc::downgrade(&runtime.inner.state));
+            let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+            let scope = cx.scope_with_budget(cx.budget_for_timeout(Duration::from_secs(60)));
+            let mut training = cx
+                .spawn_in(&scope, |child| async move {
+                    child.set_task_type("native.learn");
+                    42usize
+                })
+                .unwrap();
+            assert_eq!(runtime.block_on(training.join(&cx)), Ok(42));
+            assert_eq!(
+                completions.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                "native.learn",
+            );
+
+            let (parked_tx, mut parked_rx) = oneshot::channel();
+            let (release_tx, mut release_rx) = oneshot::channel::<()>();
+            let mut waiting = cx
+                .spawn_in(&scope, move |child| async move {
+                    child.set_task_type("native.learn");
+                    let mut receive = Box::pin(release_rx.recv(&child));
+                    std::future::poll_fn(|task_cx| {
+                        assert!(receive.as_mut().poll(task_cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    parked_tx.send_blocking(()).expect("parked witness");
+                    receive.await.expect("release the monitored child");
+                })
+                .unwrap();
+            runtime.block_on(parked_rx.recv(&cx)).unwrap();
+            assert_eq!(release_tx.telemetry_snapshot(0).recv_waiter_count, 1);
+            let warning = warnings_rx.recv_timeout(Duration::from_secs(2));
+            // Release and drain even when the warning is missing, so failure
+            // does not leave a parked child behind the assertion.
+            release_tx.send_blocking(()).unwrap();
+            runtime.block_on(waiting.join(&cx)).unwrap();
+            assert_eq!(warning.unwrap(), waiting.task_id());
+            assert_eq!(
+                completions.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                "native.learn",
+            );
+            assert_eq!(runtime.deadline_monitor_stats().unwrap().dropped_completions, 0);
+            assert_eq!(
+                runtime.shutdown_drained(Duration::from_secs(2)).outcome,
+                RootDrainOutcome::Quiescent,
+            );
+        }
+    }
+
+    #[test]
+    fn native_deadline_monitor_shutdown_drains_unscanned_completions_despite_callback_panics() {
+        for sharded in [false, true] {
+            for panic_remaining in [false, true] {
+                let (metrics, completions) = native_deadline_metrics(panic_remaining);
+                let builder = if sharded {
+                    RuntimeBuilder::new().worker_threads(2).with_sharded_state(true)
+                } else {
+                    RuntimeBuilder::current_thread()
+                };
+                let runtime = builder
+                    .metrics(metrics.clone())
+                    .deadline_monitoring(|monitor| monitor.check_interval(Duration::from_secs(60)))
+                    .build()
+                    .unwrap();
+                *metrics.state.lock() = Some(Arc::downgrade(&runtime.inner.state));
+                let queue = runtime
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .deadline_completions()
+                    .unwrap();
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let scope = cx.scope_with_budget(cx.budget_for_timeout(Duration::from_secs(30)));
+                let handles = cx
+                    .spawn_batch_in(&scope, (0..4usize).map(|value| {
+                        move |child: Cx| async move {
+                            child.set_task_type("native.shutdown");
+                            value
+                        }
+                    }))
+                    .unwrap();
+                runtime.block_on(async {
+                    for (expected, mut handle) in handles.into_iter().enumerate() {
+                        assert_eq!(handle.join(&cx).await.unwrap(), expected);
+                    }
+                });
+                assert_eq!(
+                    runtime.shutdown_drained(Duration::from_secs(2)).outcome,
+                    RootDrainOutcome::Quiescent,
+                );
+                drop(runtime);
+                let final_stats = queue.stats();
+                assert!(final_stats.closed);
+                assert_eq!(final_stats.accepted_completions, 4);
+                assert_eq!(final_stats.processed_completions, 4);
+                assert_eq!(final_stats.queued_completions, 0);
+                assert_eq!(final_stats.dropped_completions, 0);
+                assert_eq!(final_stats.rejected_after_shutdown, 0);
+                assert_eq!(final_stats.callback_panics, if panic_remaining { 4 } else { 0 });
+                let observed: Vec<_> = completions.try_iter().collect();
+                assert_eq!(observed.len(), 4);
+                assert!(observed.iter().all(|(label, _)| label == "native.shutdown"));
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_native_deadline_monitor_does_not_install_a_completion_queue() {
+        let runtime = RuntimeBuilder::current_thread()
+            .deadline_monitoring(|monitor| monitor.enabled(false))
+            .build()
+            .unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let mut handle = cx.spawn(|_| std::future::ready(17usize)).unwrap();
+        assert_eq!(runtime.block_on(handle.join(&cx)), Ok(17));
+        assert!(runtime.deadline_monitor_stats().is_none());
     }
 
     /// E1.2 step 4 (parent AC 4 / bead AC 3,
