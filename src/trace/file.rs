@@ -121,11 +121,10 @@ pub const AUTO_COMPRESSION_THRESHOLD: usize = 1024 * 1024;
 /// Prevents OOM from a malicious or corrupt `meta_len` header field.
 pub const MAX_META_LEN: usize = 1024 * 1024;
 
-/// Maximum allowed event count for pre-allocation (10 million).
+/// Legacy event-count pre-allocation limit (10 million).
 ///
-/// Prevents OOM from a malicious or corrupt `event_count` header field.
-/// The reader can still iterate beyond this; only the initial
-/// `Vec::with_capacity` call in `load_all` is bounded.
+/// Retained for API compatibility. Readers now grow collections from decoded
+/// events rather than allocating from an untrusted declared event count.
 pub const MAX_EVENT_PREALLOC: usize = 10_000_000;
 
 /// Maximum allowed single-event byte size (16 MiB).
@@ -164,11 +163,15 @@ fn is_disk_full_os_error(code: Option<i32>) -> bool {
 }
 
 fn validate_event_len(len: usize) -> TraceFileResult<()> {
-    if len > MAX_EVENT_LEN {
+    validate_event_len_with_limit(len, MAX_EVENT_LEN)
+}
+
+fn validate_event_len_with_limit(len: usize, max: usize) -> TraceFileResult<()> {
+    if len > max {
         return Err(TraceFileError::OversizedField {
             field: "event_len",
             actual: len as u64,
-            max: MAX_EVENT_LEN as u64,
+            max: max as u64,
         });
     }
 
@@ -540,6 +543,7 @@ pub struct TraceWriter {
     buffered_bytes: u64,
     stopped: bool,
     halted: bool,
+    write_failure: Option<io::Error>,
     #[cfg(feature = "trace-compression")]
     lz4_codec: Lz4Codec,
     /// Buffer for uncompressed event data (used in chunked compression).
@@ -592,6 +596,7 @@ impl TraceWriter {
             buffered_bytes: 0,
             stopped: false,
             halted: false,
+            write_failure: None,
             #[cfg(feature = "trace-compression")]
             lz4_codec,
             #[cfg(feature = "trace-compression")]
@@ -662,23 +667,39 @@ impl TraceWriter {
         is_disk_full_os_error(err.raw_os_error())
     }
 
-    fn handle_disk_full(&mut self, err: io::Error) -> TraceFileError {
-        warn!("trace write halted: disk full (ENOSPC). Free space and retry recording.");
+    fn handle_write_failure(&mut self, err: io::Error) -> TraceFileError {
+        if Self::is_disk_full(&err) {
+            warn!("trace write halted: disk full (ENOSPC). Free space and retry recording.");
+        }
         self.halted = true;
+        self.write_failure = Some(Self::copy_io_error(&err));
         TraceFileError::Io(err)
+    }
+
+    fn copy_io_error(err: &io::Error) -> io::Error {
+        err.raw_os_error().map_or_else(
+            || io::Error::new(err.kind(), err.to_string()),
+            io::Error::from_raw_os_error,
+        )
+    }
+
+    fn prior_write_failure(&self) -> TraceFileError {
+        TraceFileError::Io(self.write_failure.as_ref().map_or_else(
+            || io::Error::other("trace writer halted after an incomplete write"),
+            Self::copy_io_error,
+        ))
     }
 
     fn write_bytes(&mut self, bytes: &[u8]) -> TraceFileResult<()> {
         if self.halted {
-            return Ok(());
+            return Err(self.prior_write_failure());
         }
         match self.writer.write_all(bytes) {
             Ok(()) => {
                 self.bytes_written = self.bytes_written.saturating_add(bytes.len() as u64);
                 Ok(())
             }
-            Err(err) if Self::is_disk_full(&err) => Err(self.handle_disk_full(err)),
-            Err(err) => Err(TraceFileError::Io(err)),
+            Err(err) => Err(self.handle_write_failure(err)),
         }
     }
 
@@ -799,6 +820,9 @@ impl TraceWriter {
         if self.finished {
             return Err(TraceFileError::AlreadyFinished);
         }
+        if self.halted {
+            return Err(self.prior_write_failure());
+        }
         self.ensure_metadata_written()?;
         if !self.should_write() {
             return Ok(());
@@ -851,14 +875,13 @@ impl TraceWriter {
             }
         }
 
-        self.event_hasher.update(len.to_le_bytes());
-        self.event_hasher.update(&event_bytes);
-
         #[cfg(feature = "trace-compression")]
         if self.config.compression.is_compressed() {
             // Buffer the event for chunk compression
             self.event_buffer.extend_from_slice(&len.to_le_bytes());
             self.event_buffer.extend_from_slice(&event_bytes);
+            self.event_hasher.update(len.to_le_bytes());
+            self.event_hasher.update(&event_bytes);
             self.buffered_bytes = self.buffered_bytes.saturating_add(estimated_bytes);
             self.event_count += 1;
 
@@ -872,6 +895,8 @@ impl TraceWriter {
         // Uncompressed: write directly
         self.write_bytes(&len.to_le_bytes())?;
         self.write_bytes(&event_bytes)?;
+        self.event_hasher.update(len.to_le_bytes());
+        self.event_hasher.update(&event_bytes);
         self.event_count += 1;
         Ok(())
     }
@@ -912,21 +937,19 @@ impl TraceWriter {
     ///
     /// # Errors
     ///
-    /// Returns an error if flushing or seeking fails.
+    /// Returns an error if flushing or seeking fails, or if any earlier write
+    /// failed. A halted writer never publishes a successful integrity header.
     pub fn finish(mut self) -> TraceFileResult<()> {
-        self.ensure_metadata_written()?;
         self.finished = true;
+        if self.halted {
+            return Err(self.prior_write_failure());
+        }
+        self.ensure_metadata_written()?;
 
         // Flush any remaining compressed data
         #[cfg(feature = "trace-compression")]
         if self.config.compression.is_compressed() {
             self.flush_compressed_chunk()?;
-        }
-
-        if self.halted {
-            let _ = self.writer.flush();
-            self.update_integrity_header_best_effort();
-            return Ok(());
         }
 
         // Flush buffered data
@@ -947,14 +970,18 @@ impl TraceWriter {
 
 impl Drop for TraceWriter {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.finished && !self.halted {
             #[cfg(feature = "trace-compression")]
-            if self.config.compression.is_compressed() {
-                let _ = self.flush_compressed_chunk();
+            if self.config.compression.is_compressed() && self.flush_compressed_chunk().is_err() {
+                return;
             }
 
-            // Best-effort: try to flush but don't panic
-            let _ = self.writer.flush();
+            // Best-effort flushing must not turn a partial stream into an
+            // apparently complete trace by backpatching its integrity header.
+            if let Err(err) = self.writer.flush() {
+                let _ = self.handle_write_failure(err);
+                return;
+            }
             if self.metadata_state == TraceWriterMetadataState::Written {
                 self.update_integrity_header_best_effort();
             }
@@ -991,6 +1018,8 @@ pub struct TraceReader {
     metadata: TraceMetadata,
     event_count: u64,
     events_read: u64,
+    max_event_len: usize,
+    failed: bool,
     events_start_pos: u64,
     compression: CompressionMode,
     expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
@@ -1163,6 +1192,8 @@ impl TraceReader {
             metadata,
             event_count,
             events_read: 0,
+            max_event_len: MAX_EVENT_LEN,
+            failed: false,
             events_start_pos,
             compression,
             expected_event_digest,
@@ -1212,24 +1243,43 @@ impl TraceReader {
         self.events_read
     }
 
+    /// Bounds each encoded event before allocating its payload or decoding it.
+    ///
+    /// The effective limit never exceeds [`MAX_EVENT_LEN`]. It applies to raw
+    /// MessagePack frame bytes, which can exceed the canonical serialized size.
+    /// Metadata and LZ4 chunk buffers retain their separate format limits; this
+    /// is not an overall heap bound. A zero limit admits only an empty stream.
+    #[must_use]
+    pub fn with_max_event_len(mut self, max_event_len: usize) -> Self {
+        self.max_event_len = max_event_len.min(MAX_EVENT_LEN);
+        self
+    }
+
     /// Returns an iterator over the events in the trace.
     ///
     /// Events are read incrementally from the file.
     /// Automatically handles decompression for compressed files.
+    ///
+    /// This legacy iterator retains its header-based [`ExactSizeIterator`]
+    /// interface for compatibility. Its size hint is not a validated count and
+    /// must not be used to allocate from untrusted files. Use [`Self::try_events`]
+    /// for conservative allocation hints and terminal-error semantics.
     #[must_use]
     pub fn events(self) -> TraceEventIterator {
-        TraceEventIterator {
-            reader: self.reader,
-            remaining: self.event_count,
-            compression: self.compression,
-            expected_event_digest: self.expected_event_digest,
-            event_hasher: self.event_hasher,
-            #[cfg(feature = "trace-compression")]
-            lz4_codec: self.lz4_codec,
-            #[cfg(feature = "trace-compression")]
-            decompressed_buffer: self.decompressed_buffer,
-            #[cfg(feature = "trace-compression")]
-            buffer_pos: self.buffer_pos,
+        TraceEventIterator { reader: self }
+    }
+
+    /// Streams the unread suffix without trusting its declared event count.
+    ///
+    /// The lower size hint is always zero. The first read, decode, limit, or
+    /// checksum error is returned once and permanently ends the iterator.
+    /// Previously consumed events are not read again, and the complete stream
+    /// checksum still includes them. Use [`Self::with_max_event_len`] to bound
+    /// encoded payloads before allocation or deserialization.
+    #[must_use]
+    pub fn try_events(self) -> TraceEventStream {
+        TraceEventStream {
+            inner: self.events(),
         }
     }
 
@@ -1240,8 +1290,24 @@ impl TraceReader {
     ///
     /// # Errors
     ///
-    /// Returns an error if reading or deserialization fails.
+    /// Returns an error if reading or deserialization fails. After an error,
+    /// further reads are refused until [`Self::rewind`] succeeds; a malformed
+    /// frame cannot be skipped and mistaken for a valid subsequent event.
     pub fn read_event(&mut self) -> TraceFileResult<Option<ReplayEvent>> {
+        if self.failed {
+            return Err(TraceFileError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "trace reader is terminal after a prior read failure; rewind before retrying",
+            )));
+        }
+        let result = self.read_next_event();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    fn read_next_event(&mut self) -> TraceFileResult<Option<ReplayEvent>> {
         if self.events_read >= self.event_count {
             return Ok(None);
         }
@@ -1265,7 +1331,7 @@ impl TraceReader {
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         // Guard against oversized event length (DoS mitigation — issues #8, #10)
-        validate_event_len(len)?;
+        validate_event_len_with_limit(len, self.max_event_len)?;
 
         // Read event data
         let mut event_bytes = vec![0u8; len];
@@ -1300,7 +1366,7 @@ impl TraceReader {
             .try_into()
             .map_err(|_| TraceFileError::Truncated)?;
         let len = u32::from_le_bytes(len_bytes) as usize;
-        validate_event_len(len)?;
+        validate_event_len_with_limit(len, self.max_event_len)?;
         self.buffer_pos += 4;
 
         // Read event data from buffer
@@ -1386,6 +1452,7 @@ impl TraceReader {
     pub fn rewind(&mut self) -> TraceFileResult<()> {
         self.reader.seek(SeekFrom::Start(self.events_start_pos))?;
         self.events_read = 0;
+        self.failed = false;
         self.event_hasher = Sha256::new();
 
         #[cfg(feature = "trace-compression")]
@@ -1400,23 +1467,13 @@ impl TraceReader {
     /// Loads all events into memory.
     ///
     /// This is convenient for small traces but may use significant memory
-    /// for large traces. Use [`events()`][Self::events] for streaming.
+    /// for large traces. Use [`try_events()`][Self::try_events] for streaming.
     ///
     /// # Errors
     ///
     /// Returns an error if reading fails.
-    pub fn load_all(mut self) -> TraceFileResult<Vec<ReplayEvent>> {
-        // Cap pre-allocation to prevent OOM from a malicious event_count header
-        // (DoS mitigation — issues #8, #10). The vec will grow naturally if the
-        // file legitimately contains more events.
-        let prealloc = usize::try_from(self.event_count)
-            .unwrap_or(usize::MAX)
-            .min(MAX_EVENT_PREALLOC);
-        let mut events = Vec::with_capacity(prealloc);
-        while let Some(event) = self.read_event()? {
-            events.push(event);
-        }
-        Ok(events)
+    pub fn load_all(self) -> TraceFileResult<Vec<ReplayEvent>> {
+        self.try_events().collect()
     }
 }
 
@@ -1425,178 +1482,68 @@ impl TraceReader {
 // =============================================================================
 
 /// Iterator over trace events.
+///
+/// The legacy exact-size hint comes from the unverified header. For untrusted
+/// files, prefer [`TraceReader::try_events`], whose lower hint is zero.
 pub struct TraceEventIterator {
-    reader: BufReader<File>,
-    remaining: u64,
-    #[cfg_attr(not(feature = "trace-compression"), allow(dead_code))]
-    compression: CompressionMode,
-    expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
-    event_hasher: Sha256,
-    #[cfg(feature = "trace-compression")]
-    lz4_codec: Lz4Codec,
-    /// Buffer for decompressed event data.
-    #[cfg(feature = "trace-compression")]
-    decompressed_buffer: Vec<u8>,
-    /// Position in decompressed buffer.
-    #[cfg(feature = "trace-compression")]
-    buffer_pos: usize,
+    reader: TraceReader,
 }
 
 impl Iterator for TraceEventIterator {
     type Item = TraceFileResult<ReplayEvent>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
+        if self.reader.failed {
             return None;
         }
-
-        #[cfg(feature = "trace-compression")]
-        if self.compression.is_compressed() {
-            return Some(self.next_compressed());
-        }
-
-        Some(self.next_uncompressed())
+        self.reader.read_event().transpose()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = usize::try_from(self.remaining).unwrap_or(usize::MAX);
+        let remaining = usize::try_from(self.remaining()).unwrap_or(usize::MAX);
         (remaining, Some(remaining))
     }
 }
 
 impl TraceEventIterator {
-    /// Reads the next uncompressed event.
-    fn next_uncompressed(&mut self) -> TraceFileResult<ReplayEvent> {
-        // Read event length
-        let mut len_bytes = [0u8; 4];
-        if let Err(e) = self.reader.read_exact(&mut len_bytes) {
-            return Err(truncated_or_io(e));
+    fn remaining(&self) -> u64 {
+        if self.reader.failed {
+            0
+        } else {
+            self.reader
+                .event_count
+                .saturating_sub(self.reader.events_read)
         }
-        let len = u32::from_le_bytes(len_bytes) as usize;
-
-        // Guard against oversized event length (DoS mitigation — issues #8, #10)
-        validate_event_len(len)?;
-
-        // Read event data
-        let mut event_bytes = vec![0u8; len];
-        if let Err(e) = self.reader.read_exact(&mut event_bytes) {
-            return Err(truncated_or_io(e));
-        }
-
-        match rmp_serde::from_slice(&event_bytes) {
-            Ok(event) => {
-                self.event_hasher.update(len_bytes);
-                self.event_hasher.update(&event_bytes);
-                self.verify_final_checksum()?;
-                self.remaining -= 1;
-                Ok(event)
-            }
-            Err(e) => Err(TraceFileError::from(e)),
-        }
-    }
-
-    /// Reads the next compressed event.
-    #[cfg(feature = "trace-compression")]
-    fn next_compressed(&mut self) -> TraceFileResult<ReplayEvent> {
-        // Refill buffer if needed
-        if self.buffer_pos >= self.decompressed_buffer.len() {
-            self.refill_buffer()?;
-        }
-
-        // Read event length from buffer
-        if self.buffer_pos + 4 > self.decompressed_buffer.len() {
-            return Err(TraceFileError::Truncated);
-        }
-        let len_bytes: [u8; 4] =
-            match self.decompressed_buffer[self.buffer_pos..self.buffer_pos + 4].try_into() {
-                Ok(b) => b,
-                Err(_) => return Err(TraceFileError::Truncated),
-            };
-        let len = u32::from_le_bytes(len_bytes) as usize;
-        validate_event_len(len)?;
-        self.buffer_pos += 4;
-
-        // Read event data from buffer
-        if self.buffer_pos + len > self.decompressed_buffer.len() {
-            return Err(TraceFileError::Truncated);
-        }
-        let event_bytes = &self.decompressed_buffer[self.buffer_pos..self.buffer_pos + len];
-
-        match rmp_serde::from_slice(event_bytes) {
-            Ok(event) => {
-                self.event_hasher.update(len_bytes);
-                self.event_hasher.update(event_bytes);
-                self.verify_final_checksum()?;
-                self.buffer_pos += len;
-                self.remaining -= 1;
-                Ok(event)
-            }
-            Err(e) => Err(TraceFileError::from(e)),
-        }
-    }
-
-    fn verify_final_checksum(&self) -> TraceFileResult<()> {
-        if self.remaining == 1 {
-            if let Some(expected) = self.expected_event_digest {
-                let actual: [u8; TRACE_CHECKSUM_LEN] = self.event_hasher.clone().finalize().into();
-                verify_checksum("event stream", &expected, &actual)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Refills the decompressed buffer from the next compressed chunk.
-    #[cfg(feature = "trace-compression")]
-    fn refill_buffer(&mut self) -> TraceFileResult<()> {
-        // Read chunk length
-        let mut chunk_len_bytes = [0u8; 4];
-        self.reader
-            .read_exact(&mut chunk_len_bytes)
-            .map_err(truncated_or_io)?;
-        let chunk_len = u32::from_le_bytes(chunk_len_bytes) as usize;
-
-        if chunk_len == 0 {
-            return Err(TraceFileError::Truncated);
-        }
-
-        // Guard against oversized compressed chunks (DoS mitigation — issues #8, #10)
-        if chunk_len > MAX_COMPRESSED_CHUNK_LEN {
-            return Err(TraceFileError::OversizedField {
-                field: "compressed_chunk_len",
-                actual: chunk_len as u64,
-                max: MAX_COMPRESSED_CHUNK_LEN as u64,
-            });
-        }
-
-        // Read compressed chunk
-        let mut compressed = vec![0u8; chunk_len];
-        self.reader
-            .read_exact(&mut compressed)
-            .map_err(truncated_or_io)?;
-
-        // Guard against decompression bombs (OOM mitigation)
-        if compressed.len() >= 4 {
-            let mut len_bytes = [0u8; 4];
-            len_bytes.copy_from_slice(&compressed[0..4]);
-            let uncompressed_len = u32::from_le_bytes(len_bytes) as usize;
-            if uncompressed_len > MAX_COMPRESSED_CHUNK_LEN {
-                return Err(TraceFileError::OversizedField {
-                    field: "decompressed_chunk_len",
-                    actual: uncompressed_len as u64,
-                    max: MAX_COMPRESSED_CHUNK_LEN as u64,
-                });
-            }
-        }
-
-        // Decompress through the selected integration backend.
-        self.decompressed_buffer = self.lz4_codec.decode(&compressed)?;
-        self.buffer_pos = 0;
-
-        Ok(())
     }
 }
 
 impl ExactSizeIterator for TraceEventIterator {}
+
+impl std::iter::FusedIterator for TraceEventIterator {}
+
+/// Fallible event stream with conservative allocation hints.
+///
+/// Unlike the legacy [`TraceEventIterator`], this intentionally does not
+/// implement [`ExactSizeIterator`]: a declared event count does not establish
+/// how many frames can be decoded before an error. Obtain this stream with
+/// [`TraceReader::try_events`].
+pub struct TraceEventStream {
+    inner: TraceEventIterator,
+}
+
+impl Iterator for TraceEventStream {
+    type Item = TraceFileResult<ReplayEvent>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, usize::try_from(self.inner.remaining()).ok())
+    }
+}
+
+impl std::iter::FusedIterator for TraceEventStream {}
 
 // =============================================================================
 // Convenience Functions

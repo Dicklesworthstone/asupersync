@@ -10,7 +10,7 @@
 //! OS snapshot. Replay checks the content fingerprint again at its end, but that
 //! cannot retract events already returned if another process rewrites the file.
 
-use super::file::{TraceFileError, TraceReader};
+use super::file::{MAX_EVENT_LEN, TraceFileError, TraceReader};
 use super::replay::{ReplayEvent, TraceMetadata};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -28,7 +28,9 @@ const HASH_DOMAIN: &[u8] = b"asupersync-verified-replay-content-v1\0";
 /// payload size, not exact heap usage or raw input bytes. The underlying reader
 /// additionally bounds metadata, individual input frames and LZ4 chunks. One
 /// decoded event and codec buffers are needed even when its cumulative admission
-/// fails. No collection is preallocated from the untrusted declared event count.
+/// fails. Use [`VerifiedTraceReader::open_with_frame_limit`] to additionally
+/// reject large raw event frames before allocation or deserialization. No
+/// collection is preallocated from the untrusted declared event count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TraceReadLimits {
     /// Maximum declared events admitted to verification.
@@ -285,7 +287,26 @@ impl VerifiedTraceReader {
         path: impl AsRef<Path>,
         limits: TraceReadLimits,
     ) -> Result<Self, VerifiedTraceError> {
-        let mut reader = TraceReader::open(path)?;
+        Self::open_with_frame_limit(path, limits, MAX_EVENT_LEN)
+    }
+
+    /// Verify with an additional bound on each raw MessagePack event frame.
+    ///
+    /// This limit is checked before allocating an uncompressed payload or
+    /// deserializing a compressed payload, on both verification and replay.
+    /// Metadata and compressed chunk buffers retain their separate container
+    /// limits. Raw encodings can be larger than canonical encodings, so this
+    /// additive admission policy is separate from [`TraceReadLimits`].
+    ///
+    /// # Errors
+    /// Returns the usual verification errors and [`TraceFileError::OversizedField`]
+    /// when an encoded event exceeds `max_frame_bytes` or [`MAX_EVENT_LEN`].
+    pub fn open_with_frame_limit(
+        path: impl AsRef<Path>,
+        limits: TraceReadLimits,
+        max_frame_bytes: usize,
+    ) -> Result<Self, VerifiedTraceError> {
+        let mut reader = TraceReader::open(path)?.with_max_event_len(max_frame_bytes);
         if reader.event_count() > limits.max_events {
             return Err(VerifiedTraceError::EventLimit {
                 declared: reader.event_count(),
@@ -323,7 +344,21 @@ impl VerifiedTraceReader {
         checkpoint: VerifiedReplayCheckpoint,
         limits: TraceReadLimits,
     ) -> Result<Self, VerifiedTraceError> {
-        let mut reader = Self::open(path, limits)?;
+        Self::resume_with_frame_limit(path, checkpoint, limits, MAX_EVENT_LEN)
+    }
+
+    /// Resume with a raw-frame limit enforced while re-verifying and skipping.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::open_with_frame_limit`] and
+    /// [`Self::resume`]. A checkpoint cannot bypass the caller's current limit.
+    pub fn resume_with_frame_limit(
+        path: impl AsRef<Path>,
+        checkpoint: VerifiedReplayCheckpoint,
+        limits: TraceReadLimits,
+        max_frame_bytes: usize,
+    ) -> Result<Self, VerifiedTraceError> {
+        let mut reader = Self::open_with_frame_limit(path, limits, max_frame_bytes)?;
         if reader.total_events() != checkpoint.total_events
             || reader.content_digest != checkpoint.content_digest
             || checkpoint.position > checkpoint.total_events
