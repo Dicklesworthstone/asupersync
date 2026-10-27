@@ -7684,3 +7684,7 @@ mod request_deadline_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "builder_spawn_authorization_tests.rs"]
 mod spawn_authorization_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "builder_app_authority_tests.rs"]
+mod app_authority_tests;

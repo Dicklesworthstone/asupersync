@@ -3216,15 +3216,25 @@ impl CompiledApp {
             timer_driver,
             Some(parent_cx.child_entropy(task_id)),
         )
-        .with_logical_clock(logical_clock)
-        .with_registry_handle(registry_override.or_else(|| parent_cx.registry_handle()))
-        .with_remote_cap_handle(parent_cx.remote_cap_handle())
-        .with_blocking_pool_handle(parent_cx.blocking_pool_handle())
-        .with_evidence_sink(parent_cx.evidence_sink_handle())
-        .with_macaroon_handle(parent_cx.macaroon_handle());
-        if let Some(pressure) = parent_cx.pressure_handle() {
-            root_cx = root_cx.with_pressure(pressure);
+        .with_logical_clock(logical_clock);
+        // Bootstrap changes the task/region identity, not the caller's
+        // authority. Use the same handle inheritance as ordinary task
+        // admission, including an explicitly detached blocking pool.
+        root_cx.adopt_inherited_handles(parent_cx.inherited_handles());
+        if let Some(registry) = registry_override {
+            root_cx = root_cx.with_registry_handle(Some(registry));
         }
+        root_cx.runtime_mask = parent_cx.runtime_mask;
+        let capability_budget = state
+            .region(root_region)
+            .expect("application root was admitted before building its context")
+            .capability_budget();
+        root_cx
+            .apply_child_capability_budget(
+                capability_budget,
+                crate::types::CapabilityBudgetRequirements::NONE,
+            )
+            .expect("admitted application root has a valid capability envelope");
         root_cx.set_trace_buffer(
             parent_cx
                 .trace_buffer()
@@ -3249,6 +3259,12 @@ impl CompiledApp {
 
     /// Allocate a root region and spawn the compiled application.
     ///
+    /// The application budget is met with the caller's current budget and
+    /// the owning parent region's budget. Caller capabilities and resource
+    /// envelopes are inherited by the application and its child scopes.
+    /// Poll quotas remain per-task limits, rather than a shared application
+    /// consumption counter.
+    ///
     /// If a registry handle was configured (via [`AppSpec::with_registry`]),
     /// it is injected into the `Cx` passed to the supervisor so all child
     /// contexts inherit the registry capability.
@@ -3258,9 +3274,17 @@ impl CompiledApp {
         cx: &Cx,
         parent_region: RegionId,
     ) -> Result<AppHandle, AppSpawnError> {
-        let parent_budget = self.budget.unwrap_or(Budget::INFINITE);
+        // Context-only attenuation can be stricter than the parent region's
+        // record. Carry it into admission; the region table then meets it
+        // with the current authoritative parent envelopes.
+        let parent_budget = cx.budget().meet(self.budget.unwrap_or(Budget::INFINITE));
         let root_region = state
-            .create_child_region(parent_region, parent_budget)
+            .create_child_region_with_capability_budget(
+                parent_region,
+                parent_budget,
+                cx.capability_budget(),
+                crate::types::CapabilityBudgetRequirements::NONE,
+            )
             .map_err(AppSpawnError::RegionCreate)?;
 
         let effective_budget = state
@@ -3348,7 +3372,7 @@ impl AppSpec {
         }
     }
 
-    /// Override the root region's budget (defaults to parent budget if unset).
+    /// Tighten the root region's budget (inherits caller and parent limits if unset).
     #[must_use]
     pub fn with_budget(mut self, budget: Budget) -> Self {
         self.budget = Some(budget);
@@ -3802,3 +3826,7 @@ impl std::error::Error for AppStopError {}
 #[cfg(test)]
 #[path = "app_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "app_authority_tests.rs"]
+pub(crate) mod authority_tests;
