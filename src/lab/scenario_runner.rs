@@ -190,6 +190,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
+mod cancellation;
+pub use cancellation::{
+    ScenarioCancellationError, ScenarioCancellationInjection, ScenarioCancellationLimits,
+    ScenarioCancellationReport, ScenarioCancellationTermination, ScenarioCancellationTrial,
+};
+
 const REPLAY_DIVERGENCE_CODE: &str = "ASUP-E401";
 const LAB_SCENARIO_RUNNER_ADAPTER: &str = "lab.scenario_runner";
 
@@ -4971,14 +4977,25 @@ impl ScenarioRunner {
         let plan = Self::workload_plan(scenario)?;
 
         // 2. Build runtime and spawn the bound participants
-        let effective_seed = seed_override.unwrap_or(scenario.lab.seed);
         let config = Self::lab_config_for(scenario, seed_override);
         let mut runtime = LabRuntime::new(config);
-        let workload = ParticipantWorkload::spawn(&mut runtime, &plan, &scenario.network);
+        Ok(Self::run_prepared(scenario, seed_override, &plan, &mut runtime))
+    }
+
+    /// Shared execution path for an ordinary run and a bounded campaign trial.
+    /// Validation and runtime configuration are supplied by the caller.
+    fn run_prepared(
+        scenario: &Scenario,
+        seed_override: Option<u64>,
+        plan: &WorkloadPlan,
+        runtime: &mut LabRuntime,
+    ) -> (ScenarioRunResult, Vec<BoundTask>) {
+        let effective_seed = runtime.config().seed;
+        let workload = ParticipantWorkload::spawn(runtime, plan, &scenario.network);
 
         // 3-4. Inject timed faults, running between them, then run to
         // quiescence
-        let (fault_log, fault_effect_summary) = Self::drive(&mut runtime, scenario, &workload);
+        let (fault_log, fault_effect_summary) = Self::drive(runtime, scenario, &workload);
         let faults_injected = fault_log.len();
         let minimized_counterexample =
             Self::minimized_counterexample_for(scenario, &fault_log, &fault_effect_summary);
@@ -5016,7 +5033,7 @@ impl ScenarioRunner {
             replay_metadata,
             seed_lineage,
         };
-        Ok((result, tasks))
+        (result, tasks)
     }
 
     /// Explore a scenario across a range of seeds.

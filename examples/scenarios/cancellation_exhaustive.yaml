@@ -1,11 +1,13 @@
-# FrankenLab Scenario: Exhaustive cancellation injection
-# Tests every await point for correct cancellation handling.
+# FrankenLab Scenario: All-point cancellation campaign
+# Run with: frankenlab cancel examples/scenarios/cancellation_exhaustive.yaml
 schema_version: 1
 id: cancellation-exhaustive
 description: >
-  Run the target protocol once to discover await points, then
-  re-run with cancellation injected at every point (N+1 runs).
-  Verifies all cancellation paths release obligations.
+  Record a real sender/receiver baseline, then request cooperative
+  cancellation at each recorded scheduler poll opportunity in a fresh run.
+  The sender yields while holding a reserve permit, exercising obligation
+  cleanup as well as peer drain. Campaign limits report incomplete coverage;
+  these boundaries do not enumerate every source-level await expression.
 
 lab:
   seed: 42
@@ -19,6 +21,16 @@ chaos:
 
 network:
   preset: ideal
+
+participants:
+  - name: sender
+    role: sender
+    properties:
+      messages: 3
+  - name: receiver
+    role: receiver
+    properties:
+      capacity: 1
 
 cancellation:
   strategy: all_points
