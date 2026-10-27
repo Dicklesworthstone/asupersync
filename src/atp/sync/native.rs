@@ -18,7 +18,7 @@ use super::{
     DirectoryPath, DirectorySyncError, PathNormalizationRules, plan_bidirectional_sync,
 };
 use crate::cx::Cx;
-use crate::fs::ScopedFsError;
+use crate::fs::scoped::ScopedFsError;
 use nix::dir::Dir;
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag, open, openat};
@@ -29,6 +29,11 @@ use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+
+mod apply;
+pub use apply::{
+    NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectorySyncReport,
+};
 
 /// Resource limits for each root inventory and each copied file.
 ///

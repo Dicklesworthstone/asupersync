@@ -228,10 +228,20 @@ impl OwnedMembershipController {
     // Native routes inspect the same serialized policy as owned lease grants.
     // Closing remains terminal even though stamp() preserves the last decision.
     // This performs no callback, obligation admission, or remote side effect.
-    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
     pub(crate) fn permits_native_route(&self, node: &NodeId, incarnation: u64) -> bool {
         let state = self.shared.state.lock();
         !state.closed && alive(&state, node, incarnation)
+    }
+
+    // Existing global-name observations survive suspicion with an explicit
+    // uncertainty flag. Dead/Left, replacement incarnations and owner closure
+    // still revoke them. This grants no new route, lease or invocation authority.
+    pub(crate) fn permits_name_observation(&self, node: &NodeId, incarnation: u64) -> bool {
+        let state = self.shared.state.lock();
+        !state.closed && state.policy.stamp(node).is_some_and(|stamp| {
+            stamp.incarnation == incarnation
+                && matches!(stamp.kind, MembershipKind::Alive | MembershipKind::Suspect)
+        })
     }
 
     /// Live guards plus registrations currently crossing runtime admission.

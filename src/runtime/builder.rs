@@ -7618,10 +7618,12 @@ impl Runtime {
     /// latches in [`Self::obligation_conservation_report`]; a pending arena
     /// record prevents close even if the region's cached counters claim zero.
     /// Queued checked Reserve/Handoff projections explicitly defer equality.
-    /// This checks current projection consistency, not a lifetime conservation
-    /// ledger or unprojected legacy posts. Inspection scans live regions and
-    /// retained records. It is disabled by default and adds no producer-side
-    /// credit registry.
+    /// An arena lifetime ledger also counts reservations, terminal outcomes and
+    /// cross-region transfers after enablement, retaining totals when resolved
+    /// records are reaped. Existing pending records form an explicit baseline.
+    /// Unprojected legacy posts remain outside its coverage. Inspection scans
+    /// live regions and retained records. It is disabled by default and adds no
+    /// producer-side credit registry.
     /// Calling this again preserves the first detected fault.
     pub fn enable_obligation_conservation_checks(&self) {
         self.inner

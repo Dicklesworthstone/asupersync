@@ -4,10 +4,368 @@ use crate::lab::{LabConfig, LabRuntime};
 use crate::record::region::RegionState;
 use crate::record::{ObligationAbortReason, SourceLocation};
 use crate::runtime::config::ObligationLeakResponse;
-use crate::runtime::obligation_table::ObligationCreateArgs;
+use crate::runtime::obligation_table::{ObligationCreateArgs, ObligationTable};
 use crate::runtime::state::RuntimeState;
 use crate::types::{Budget, Time};
 use crate::util::ArenaIndex;
+
+fn lifetime_args(region: RegionId, kind: ObligationKind) -> ObligationCreateArgs {
+    ObligationCreateArgs {
+        kind,
+        holder: TaskId::from_arena(ArenaIndex::new(7, 3)),
+        region,
+        now: Time::ZERO,
+        description: None,
+        acquired_at: SourceLocation::unknown(),
+        acquire_backtrace: None,
+    }
+}
+
+fn lifetime_counts(table: &ObligationTable, kind: ObligationKind) -> ObligationLifetimeCounts {
+    let (report, fault) = table
+        .inspect_lifetime(ObligationConservationCheckpoint::Inspection)
+        .unwrap();
+    assert!(fault.is_none(), "{fault:?}");
+    report
+        .by_kind
+        .iter()
+        .find(|entry| entry.kind == kind)
+        .unwrap()
+        .counts
+}
+
+#[test]
+fn lifetime_history_survives_retention_and_finalized_region_retirement() {
+    let mut table = ObligationTable::new();
+    table.enable_lifetime_checks();
+    let region = RegionId::from_arena(ArenaIndex::new(2, 5));
+    let kind = ObligationKind::SendPermit;
+    let first = table.create(lifetime_args(region, kind));
+    table.commit(first, Time::ZERO).unwrap();
+    for _ in 1..5000 {
+        let id = table.create(lifetime_args(region, kind));
+        table.commit(id, Time::ZERO).unwrap();
+    }
+    assert!(
+        table.get(first.arena_index()).is_none(),
+        "the regression must cross the resolved-record retention boundary"
+    );
+    let aborted = table.create(lifetime_args(region, kind));
+    table
+        .abort(aborted, Time::ZERO, ObligationAbortReason::Explicit)
+        .unwrap();
+    let leaked = table.create(lifetime_args(region, kind));
+    table.mark_leaked(leaked, Time::ZERO).unwrap();
+    let counts = lifetime_counts(&table, kind);
+    assert_eq!(counts.reserved, 5002);
+    assert_eq!(counts.committed, 5000);
+    assert_eq!(counts.aborted, 1);
+    assert_eq!(counts.leaked, 1);
+    assert_eq!(counts.live, 0);
+    assert!(counts.is_balanced());
+    table.mark_region_finalized(region);
+    let (retired, fault) = table
+        .inspect_lifetime(ObligationConservationCheckpoint::Inspection)
+        .unwrap();
+    assert!(fault.is_none());
+    assert_eq!(retired.retained_region_kinds, 0);
+    assert_eq!(lifetime_counts(&table, kind), counts);
+}
+
+#[test]
+fn lifetime_enablement_uses_a_baseline_and_never_resets_the_epoch() {
+    let mut table = ObligationTable::new();
+    let region = RegionId::from_arena(ArenaIndex::new(2, 5));
+    let kind = ObligationKind::Ack;
+    let historical = table.create(lifetime_args(region, kind));
+    table.commit(historical, Time::ZERO).unwrap();
+    let existing = table.create(lifetime_args(region, kind));
+    assert!(
+        table
+            .inspect_lifetime(ObligationConservationCheckpoint::Inspection)
+            .is_none()
+    );
+    table.enable_lifetime_checks();
+    let created = table.create(lifetime_args(region, kind));
+    table.commit(created, Time::ZERO).unwrap();
+    assert!(table.commit(created, Time::ZERO).is_err());
+    table.enable_lifetime_checks();
+    let counts = lifetime_counts(&table, kind);
+    assert_eq!(counts.baseline_live, 1);
+    assert_eq!(counts.reserved, 1);
+    assert_eq!(counts.committed, 1);
+    assert_eq!(counts.live, 1);
+    table
+        .abort(existing, Time::ZERO, ObligationAbortReason::Explicit)
+        .unwrap();
+    assert!(lifetime_counts(&table, kind).is_balanced());
+}
+
+#[test]
+fn lifetime_transfer_distinguishes_reused_region_generations() {
+    let mut table = ObligationTable::new();
+    table.enable_lifetime_checks();
+    let source = RegionId::from_arena(ArenaIndex::new(3, 4));
+    let destination = RegionId::from_arena(ArenaIndex::new(3, 5));
+    let holder = TaskId::from_arena(ArenaIndex::new(7, 3));
+    let kind = ObligationKind::Lease;
+    let id = table.create(lifetime_args(source, kind));
+    table.rebind_pending(id, holder, source).unwrap();
+    assert_eq!(lifetime_counts(&table, kind).transferred_in, 0);
+    table.rebind_pending(id, holder, destination).unwrap();
+    assert!(table.lifetime_violation_at_close(source).is_none());
+    table.mark_region_finalized(source);
+    let counts = lifetime_counts(&table, kind);
+    assert_eq!(counts.reserved, 1);
+    assert_eq!(counts.transferred_out, 1);
+    assert_eq!(counts.transferred_in, 1);
+    assert_eq!(counts.live, 1);
+    table.commit(id, Time::ZERO).unwrap();
+    table.mark_region_finalized(destination);
+    assert!(lifetime_counts(&table, kind).is_balanced());
+}
+
+#[test]
+fn erased_record_and_erased_region_credit_cannot_jointly_hide_a_lost_obligation() {
+    let mut state = RuntimeState::new();
+    state.enable_obligation_conservation_checks();
+    let region = state.create_root_region(Budget::INFINITE);
+    state
+        .region(region)
+        .unwrap()
+        .try_reserve_obligation()
+        .unwrap();
+    let id = state
+        .obligations
+        .create(lifetime_args(region, ObligationKind::IoOp));
+    assert!(state.check_obligation_conservation().is_verified());
+    // Both current projections now claim empty. Only independent historical
+    // reservation accounting can distinguish this from a legitimate terminal.
+    state.obligations.remove(id.arena_index()).unwrap();
+    state.region(region).unwrap().resolve_obligation();
+    let fault = state.check_obligation_conservation().violation.unwrap();
+    assert_eq!(fault.region, region);
+    assert_eq!(fault.obligation, Some(id));
+    assert_eq!(fault.kind, Some(ObligationKind::IoOp));
+    let ObligationConservationIssue::LifetimeCountMismatch {
+        counts,
+        last_transition,
+    } = fault.issue
+    else {
+        panic!("expected lifetime disagreement");
+    };
+    assert_eq!(counts.reserved, 1);
+    assert_eq!(counts.live, 0);
+    assert_eq!(
+        last_transition,
+        Some(ObligationLifetimeTransition::RemovePending)
+    );
+    let record = state.region(region).unwrap();
+    assert!(record.begin_close(None));
+    assert!(record.begin_finalize());
+    state.advance_region_state(region);
+    assert_eq!(
+        state.region(region).unwrap().state(),
+        RegionState::Finalizing
+    );
+    assert!(!state.region_was_closed(region));
+}
+
+#[test]
+fn lifetime_arithmetic_overflow_is_never_a_verified_balance() {
+    let counts = ObligationLifetimeCounts {
+        baseline_live: u128::MAX,
+        reserved: 1,
+        ..ObligationLifetimeCounts::default()
+    };
+    assert!(!counts.is_balanced());
+    let region = RegionId::from_arena(ArenaIndex::new(2, 5));
+    let id = ObligationId::from_arena(ArenaIndex::new(1, 1));
+    let kind = ObligationKind::Transaction;
+    let mut ledger = ObligationLifetimeLedger::default();
+    ledger
+        .by_region
+        .entry((region, kind))
+        .or_default()
+        .counts
+        .reserved = u128::MAX;
+    ledger.note(id, region, kind, ObligationLifetimeTransition::Reserve);
+    let fault = ledger
+        .check(
+            &BTreeMap::new(),
+            ObligationConservationCheckpoint::Inspection,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        fault.issue,
+        ObligationConservationIssue::LifetimeCounterOverflow {
+            transition: ObligationLifetimeTransition::Reserve
+        }
+    );
+}
+
+#[test]
+fn aggregate_sum_overflow_stays_latched_and_prevents_other_regions_closing() {
+    let first = RegionId::from_arena(ArenaIndex::new(2, 5));
+    let second = RegionId::from_arena(ArenaIndex::new(3, 5));
+    let unrelated = RegionId::from_arena(ArenaIndex::new(4, 5));
+    let id = ObligationId::from_arena(ArenaIndex::new(1, 1));
+    let kind = ObligationKind::Ack;
+    let mut ledger = ObligationLifetimeLedger::default();
+    let historic = ObligationLifetimeCounts {
+        baseline_live: u128::MAX,
+        aborted: u128::MAX,
+        ..ObligationLifetimeCounts::default()
+    };
+    assert!(historic.is_balanced());
+    ledger.by_region.entry((first, kind)).or_default().counts = historic;
+    ledger.totals.insert(kind, historic);
+    // No individual counter overflows. The aggregate baseline + new reserve
+    // sum does, while each region can still balance independently.
+    ledger.note(id, second, kind, ObligationLifetimeTransition::Reserve);
+    ledger.note(id, second, kind, ObligationLifetimeTransition::Commit);
+    assert!(
+        ledger
+            .by_region
+            .get(&(first, kind))
+            .unwrap()
+            .counts
+            .is_balanced()
+    );
+    assert!(
+        ledger
+            .by_region
+            .get(&(second, kind))
+            .unwrap()
+            .counts
+            .is_balanced()
+    );
+    let fault = ledger
+        .check(
+            &BTreeMap::new(),
+            ObligationConservationCheckpoint::RegionClose,
+            Some(unrelated),
+        )
+        .unwrap();
+    assert_eq!(fault.region, second);
+    assert_eq!(
+        fault.issue,
+        ObligationConservationIssue::LifetimeCounterOverflow {
+            transition: ObligationLifetimeTransition::Reserve
+        }
+    );
+}
+
+#[test]
+fn lifetime_counts_low_level_reserved_insertions() {
+    let mut table = ObligationTable::new();
+    table.enable_lifetime_checks();
+    let region = RegionId::from_arena(ArenaIndex::new(8, 2));
+    let holder = TaskId::from_arena(ArenaIndex::new(7, 3));
+    let kind = ObligationKind::IoOp;
+    let first = table.insert(ObligationRecord::new(
+        ObligationId::from_arena(ArenaIndex::new(99, 1)),
+        kind,
+        holder,
+        region,
+        Time::ZERO,
+    ));
+    let second = table.insert_with(|index| {
+        ObligationRecord::new(
+            ObligationId::from_arena(index),
+            kind,
+            holder,
+            region,
+            Time::ZERO,
+        )
+    });
+    let counts = lifetime_counts(&table, kind);
+    assert_eq!(counts.reserved, 2);
+    assert_eq!(counts.live, 2);
+    table
+        .commit(ObligationId::from_arena(first), Time::ZERO)
+        .unwrap();
+    table
+        .abort(
+            ObligationId::from_arena(second),
+            Time::ZERO,
+            ObligationAbortReason::Explicit,
+        )
+        .unwrap();
+    assert!(lifetime_counts(&table, kind).is_balanced());
+}
+
+#[test]
+fn lifetime_conservation_holds_across_thousands_of_mixed_transitions() {
+    let mut table = ObligationTable::new();
+    table.enable_lifetime_checks();
+    let regions = [
+        RegionId::from_arena(ArenaIndex::new(1, 2)),
+        RegionId::from_arena(ArenaIndex::new(1, 3)),
+        RegionId::from_arena(ArenaIndex::new(2, 1)),
+    ];
+    let kinds = [
+        ObligationKind::SendPermit,
+        ObligationKind::Ack,
+        ObligationKind::Lease,
+        ObligationKind::IoOp,
+        ObligationKind::SemaphorePermit,
+        ObligationKind::Transaction,
+    ];
+    let holder = TaskId::from_arena(ArenaIndex::new(7, 3));
+    let mut live = Vec::new();
+    let mut seed = 0xD152_u64;
+    for step in 0..4096 {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        if live.is_empty() || seed & 3 == 0 {
+            let region = regions[step % regions.len()];
+            live.push(table.create(lifetime_args(region, kinds[step % kinds.len()])));
+        } else {
+            let index = usize::try_from(seed % u64::try_from(live.len()).unwrap()).unwrap();
+            let id = live[index];
+            match (seed >> 32) % 4 {
+                0 => {
+                    table
+                        .rebind_pending(id, holder, regions[step % regions.len()])
+                        .unwrap();
+                }
+                1 => {
+                    table.commit(id, Time::ZERO).unwrap();
+                    live.swap_remove(index);
+                }
+                2 => {
+                    table
+                        .abort(id, Time::ZERO, ObligationAbortReason::Explicit)
+                        .unwrap();
+                    live.swap_remove(index);
+                }
+                _ => {
+                    table.mark_leaked(id, Time::ZERO).unwrap();
+                    live.swap_remove(index);
+                }
+            }
+        }
+        let (report, fault) = table
+            .inspect_lifetime(ObligationConservationCheckpoint::Inspection)
+            .unwrap();
+        assert!(fault.is_none(), "step={step}: {fault:?}");
+        assert!(
+            report
+                .by_kind
+                .iter()
+                .all(|entry| entry.counts.is_balanced())
+        );
+        assert_eq!(
+            report
+                .by_kind
+                .iter()
+                .map(|entry| entry.counts.live)
+                .sum::<u128>(),
+            u128::try_from(live.len()).unwrap()
+        );
+    }
+}
 
 fn holder(runtime: &mut LabRuntime, region: RegionId) -> (TaskId, Cx) {
     let (task, _join) = runtime
@@ -323,63 +681,74 @@ fn sharded_inspection_and_close_use_the_authoritative_obligation_arena() {
     use crate::runtime::sharded_state::{ShardedConfig, ShardedState};
     use crate::trace::distributed::LogicalClockMode;
 
-    let mut state = RuntimeState::new();
-    let shards = Arc::new(ShardedState::new(
-        state.trace_handle(),
-        Arc::clone(&state.metrics),
-        ShardedConfig {
-            io_driver: None,
-            timer_driver: None,
-            logical_clock_mode: LogicalClockMode::Lamport,
-            cancel_attribution: Default::default(),
-            entropy_source: state.entropy_source(),
-            blocking_pool: None,
-            obligation_leak_response: ObligationLeakResponse::Silent,
-            leak_escalation: None,
-            observability: None,
-        },
-    ));
-    state.install_shard_tables(Arc::clone(&shards));
-    state.enable_obligation_conservation_checks();
-    let region = state.create_root_region(Budget::INFINITE);
-    state
-        .region(region)
-        .unwrap()
-        .try_reserve_obligation()
-        .unwrap();
-    let id = shards
-        .obligations
-        .lock()
-        .unwrap()
-        .create(ObligationCreateArgs {
-            kind: ObligationKind::Lease,
-            holder: TaskId::from_arena(ArenaIndex::new(4, 2)),
-            region,
-            now: Time::ZERO,
-            description: None,
-            acquired_at: SourceLocation::unknown(),
-            acquire_backtrace: None,
-        });
-    assert!(
-        state.obligations.is_empty(),
-        "the embedded table is intentionally empty"
-    );
-    assert!(state.check_obligation_conservation().is_verified());
+    for enable_before_install in [false, true] {
+        let mut state = RuntimeState::new();
+        if enable_before_install {
+            state.enable_obligation_conservation_checks();
+        }
+        let shards = Arc::new(ShardedState::new(
+            state.trace_handle(),
+            Arc::clone(&state.metrics),
+            ShardedConfig {
+                io_driver: None,
+                timer_driver: None,
+                logical_clock_mode: LogicalClockMode::Lamport,
+                cancel_attribution: Default::default(),
+                entropy_source: state.entropy_source(),
+                blocking_pool: None,
+                obligation_leak_response: ObligationLeakResponse::Silent,
+                leak_escalation: None,
+                observability: None,
+            },
+        ));
+        state.install_shard_tables(Arc::clone(&shards));
+        if !enable_before_install {
+            state.enable_obligation_conservation_checks();
+        }
+        let region = state.create_root_region(Budget::INFINITE);
+        state
+            .region(region)
+            .unwrap()
+            .try_reserve_obligation()
+            .unwrap();
+        let id = shards
+            .obligations
+            .lock()
+            .unwrap()
+            .create(ObligationCreateArgs {
+                kind: ObligationKind::Lease,
+                holder: TaskId::from_arena(ArenaIndex::new(4, 2)),
+                region,
+                now: Time::ZERO,
+                description: None,
+                acquired_at: SourceLocation::unknown(),
+                acquire_backtrace: None,
+            });
+        assert!(
+            state.obligations.is_empty(),
+            "the embedded table is intentionally empty"
+        );
+        let report = state.check_obligation_conservation();
+        assert!(report.is_verified());
+        let counts = report.lifetime.unwrap().by_kind[0].counts;
+        assert_eq!(counts.reserved, 1);
+        assert_eq!(counts.live, 1);
 
-    let record = state.region(region).unwrap();
-    record.resolve_obligation();
-    assert!(record.begin_close(None));
-    assert!(record.begin_finalize());
-    state.advance_region_state(region);
-    assert_eq!(
-        state.region(region).unwrap().state(),
-        RegionState::Finalizing
-    );
-    let fault = state
-        .obligation_conservation_report()
-        .unwrap()
-        .violation
-        .unwrap();
-    assert_eq!(fault.obligation, Some(id));
-    assert_eq!(fault.issue, ObligationConservationIssue::PendingAtClose);
+        let record = state.region(region).unwrap();
+        record.resolve_obligation();
+        assert!(record.begin_close(None));
+        assert!(record.begin_finalize());
+        state.advance_region_state(region);
+        assert_eq!(
+            state.region(region).unwrap().state(),
+            RegionState::Finalizing
+        );
+        let fault = state
+            .obligation_conservation_report()
+            .unwrap()
+            .violation
+            .unwrap();
+        assert_eq!(fault.obligation, Some(id));
+        assert_eq!(fault.issue, ObligationConservationIssue::PendingAtClose);
+    }
 }

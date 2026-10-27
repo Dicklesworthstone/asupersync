@@ -6,6 +6,7 @@ use crate::grpc::service::{
     ServiceHandlerFuture, ServiceStreamingFuture,
 };
 use crate::grpc::streaming::{MetadataValue, Request, Response, Streaming};
+use crate::grpc::web::{Base64StreamDecoder, WebFrame, WebFrameCodec};
 use crate::http::h1::{
     BodyKind, Http1Config, Http1Listener, Http1ListenerConfig, IncomingRequestBody, RequestHead,
 };
@@ -718,6 +719,7 @@ struct WebStreamPeer {
     binary: Vec<u8>,
     quartet: Vec<u8>,
     padded_quartets: usize,
+    captured_text_chunks: Option<Vec<Vec<u8>>>,
     ended: bool,
 }
 
@@ -750,6 +752,7 @@ impl WebStreamPeer {
             binary: Vec::new(),
             quartet: Vec::new(),
             padded_quartets: 0,
+            captured_text_chunks: None,
             ended: false,
         };
         assert_eq!(peer.line(), "HTTP/1.1 200 OK\r\n");
@@ -817,6 +820,9 @@ impl WebStreamPeer {
             .unwrap();
         assert_eq!(crlf, *b"\r\n");
         if self.mode.is_text_mode() {
+            if let Some(chunks) = self.captured_text_chunks.as_mut() {
+                chunks.push(data.clone());
+            }
             for byte in data {
                 self.quartet.push(byte);
                 if self.quartet.len() == 4 {
@@ -833,6 +839,25 @@ impl WebStreamPeer {
             self.binary.extend(data);
         }
         true
+    }
+
+    fn feed_captured_text(&mut self, decoder: &mut Base64StreamDecoder, binary: &mut BytesMut) {
+        for chunk in self
+            .captured_text_chunks
+            .as_mut()
+            .expect("text capture enabled")
+            .drain(..)
+        {
+            // Further fragment the real wire bytes through every quartet and
+            // padding boundary; the independent peer remains the wire oracle.
+            for byte in chunk.chunks(1) {
+                binary.extend_from_slice(
+                    &decoder
+                        .push(byte)
+                        .expect("decode native gRPC-Web text incrementally"),
+                );
+            }
+        }
     }
 
     fn frame(&mut self) -> (u8, Vec<u8>) {
@@ -947,6 +972,90 @@ fn native_web_stream_delivers_before_source_eof_in_binary_and_padded_text() {
             },
         );
     }
+}
+
+#[test]
+fn native_web_text_stream_reaches_public_chunked_decoder_before_source_eof() {
+    use crate::grpc::status::Code;
+
+    crate::test_utils::init_test_logging();
+    crate::test_phase!("native_web_text_stream_reaches_public_chunked_decoder_before_source_eof");
+    for (mode, code) in [
+        (WebStreamMode::Values, Code::Ok),
+        (WebStreamMode::Error, Code::InvalidArgument),
+    ] {
+        web_native_case(
+            mode,
+            ContentType::GrpcWebText,
+            GrpcWebConfig::default(),
+            None,
+            move |peer, parks, retirements, probe| {
+                peer.captured_text_chunks = Some(Vec::new());
+                let mut decoder = Base64StreamDecoder::new_chunked();
+                let codec = WebFrameCodec::new();
+                let mut binary = BytesMut::new();
+
+                assert_eq!(peer.frame(), (0, b"first".to_vec()));
+                parks
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("native source parked after first message");
+                assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
+                peer.feed_captured_text(&mut decoder, &mut binary);
+                match codec
+                    .decode(&mut binary)
+                    .expect("decode first native message")
+                {
+                    Some(WebFrame::Data { compressed, data }) => {
+                        assert!(!compressed);
+                        assert_eq!(data.as_ref(), b"first");
+                    }
+                    other => panic!("expected first native DATA frame, got {other:?}"),
+                }
+                assert!(codec.decode(&mut binary).unwrap().is_none());
+                assert!(!decoder.is_sealed(), "first padded segment is not RPC EOF");
+
+                probe.release();
+                if code == Code::Ok {
+                    assert_eq!(peer.frame(), (0, b"second".to_vec()));
+                }
+                peer.terminal(&code.as_i32().to_string());
+                assert!(
+                    peer.padded_quartets >= 2,
+                    "multiple padded wire segments observed"
+                );
+                peer.feed_captured_text(&mut decoder, &mut binary);
+                binary.extend_from_slice(&decoder.finish().expect("complete native text body"));
+                if code == Code::Ok {
+                    match codec
+                        .decode(&mut binary)
+                        .expect("decode second native message")
+                    {
+                        Some(WebFrame::Data { compressed, data }) => {
+                            assert!(!compressed);
+                            assert_eq!(data.as_ref(), b"second");
+                        }
+                        other => panic!("expected second native DATA frame, got {other:?}"),
+                    }
+                }
+                match codec
+                    .decode(&mut binary)
+                    .expect("decode native terminal trailer")
+                {
+                    Some(WebFrame::Trailers(trailers)) => assert_eq!(trailers.status.code(), code),
+                    other => panic!("expected native terminal trailer, got {other:?}"),
+                }
+                assert!(binary.is_empty());
+                assert!(codec.decode(&mut binary).unwrap().is_none());
+                assert!(decoder.is_sealed());
+                retirements
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("native response source retired");
+            },
+        );
+    }
+    crate::test_complete!(
+        "native_web_text_stream_reaches_public_chunked_decoder_before_source_eof"
+    );
 }
 
 #[test]

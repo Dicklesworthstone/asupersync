@@ -259,7 +259,7 @@ impl WaitHub {
     }
 }
 #[derive(Default)]
-struct Signal { wake: WakeSlot, stopping: AtomicBool }
+struct Signal { wake: WakeSlot, stopping: AtomicBool, abort_leases: AtomicBool, abort_on_down: AtomicBool }
 impl Signal {
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
@@ -875,6 +875,26 @@ impl<M> ManagedProcessGroup<M> {
         self.request_shutdown();
         self.join().await
     }
+
+    // Configure before publishing clients: actual member DOWN then aborts the
+    // tracked name obligation at the controller's original retirement boundary.
+    pub(crate) fn abort_on_member_down(&self) {
+        self.shared.signal.abort_on_down.store(true, Ordering::Release);
+    }
+
+    // Opt-in revocation for global-name ownership. Ordinary process-group
+    // shutdown retains its existing successful-release settlement semantics.
+    pub(crate) fn request_abort(&self) {
+        self.shared.signal.abort_leases.store(true, Ordering::Release);
+        self.request_shutdown();
+    }
+
+    // The controller still reports its actual settlement and region closure.
+    // This does not bypass cleanup by aborting its task handle.
+    pub(crate) async fn abort(self) -> ManagedProcessGroupExit {
+        self.request_abort();
+        self.join().await
+    }
 }
 impl<M> Drop for ManagedProcessGroup<M> {
     fn drop(&mut self) {
@@ -1035,7 +1055,7 @@ impl<M> Controller<M> {
         if request.disposition().0 || monitor.try_down().is_some()
             || cx.checkpoint().is_err() || self.shared.signal.stopping.load(Ordering::Acquire)
         {
-            let _ = self.settle(lease);
+            let _ = self.settle(lease, false);
             callback(|| drop(monitor));
             callback(|| request.finish(Err(ManagedGroupError::Closed)));
             return;
@@ -1043,7 +1063,7 @@ impl<M> Controller<M> {
         let event = match self.state.join(request.member.clone(), cx.now()) {
             Ok(event) => event,
             Err(error) => {
-                let _ = self.settle(lease);
+                let _ = self.settle(lease, false);
                 self.report.state_error = Some(error.clone());
                 self.shared.signal.stop();
                 callback(|| drop(monitor));
@@ -1076,8 +1096,12 @@ impl<M> Controller<M> {
         callback(|| request.finish(Ok(Joined { member, event, receiver, terminal })));
     }
 
-    fn settle(&mut self, lease: TrackedNameLease) -> Result<(), TrackedNameError> {
-        let result = match catch_unwind(AssertUnwindSafe(|| lease.release())) {
+    fn settle(&mut self, lease: TrackedNameLease, down: bool) -> Result<(), TrackedNameError> {
+        let abort = self.shared.signal.abort_leases.load(Ordering::Acquire)
+            || (down && self.shared.signal.abort_on_down.load(Ordering::Acquire));
+        let result = match catch_unwind(AssertUnwindSafe(|| {
+            if abort { lease.abort() } else { lease.release() }
+        })) {
             Ok(result) => result,
             Err(payload) => {
                 std::mem::forget(payload);
@@ -1105,7 +1129,7 @@ impl<M> Controller<M> {
         // Snapshot senders may outlive this record and a forgotten receiver.
         // Seal the channel itself, waking all pending checked reservations.
         if let Some(route) = &route { callback(|| route.sender.close_receiver()); }
-        let settlement = record.lease.take().map_or(Ok(()), |lease| self.settle(lease));
+        let settlement = record.lease.take().map_or(Ok(()), |lease| self.settle(lease, reason.is_some()));
         let result = if let Err(error) = settlement {
             Err(ManagedGroupError::Lease(error))
         } else {

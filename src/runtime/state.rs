@@ -3671,9 +3671,20 @@ impl RuntimeState {
     /// Checks reconcile actual arena records, checked-credit decisions, ticket
     /// bindings, and region accounting. Queued checked Reserve/Handoff receipts
     /// explicitly defer equality; terminal receipts can be checked before they
-    /// apply. This is not a lifetime ledger or a proof of unprojected legacy
-    /// posts. The native runtime defaults to disabled; the lab enables it.
+    /// apply. A lifetime arena ledger starts with the current pending marking
+    /// and preserves subsequent terminal counts across record reaping. Queued
+    /// and unprojected legacy posts remain outside its coverage. The native
+    /// runtime defaults to disabled; the lab enables it.
     pub fn enable_obligation_conservation_checks(&mut self) {
+        if let Some(shards) = self.shard_tables.as_ref() {
+            shards
+                .obligations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .enable_lifetime_checks();
+        } else {
+            self.obligations.enable_lifetime_checks();
+        }
         self.obligation_conservation.get_or_insert_with(
             crate::runtime::obligation_conservation::ObligationConservationMonitor::new,
         );
@@ -4267,6 +4278,13 @@ impl RuntimeState {
             self.obligations.is_empty(),
             "shard tables must install before any obligation mints embedded"
         );
+        if self.obligation_conservation.is_some() {
+            shards
+                .obligations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .enable_lifetime_checks();
+        }
         self.shard_tables = Some(shards);
     }
 

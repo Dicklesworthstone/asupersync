@@ -32,6 +32,7 @@ pub mod consensus;
 pub mod consistent_hash;
 pub mod distribution;
 pub mod encoding;
+pub mod global_names;
 pub mod membership;
 pub mod recovery;
 pub mod snapshot;
