@@ -10465,11 +10465,19 @@ async fn commit_staged_entries(
     let committed = sha_ok && merkle_ok && metadata_ok;
     let mut committed_paths = Vec::new();
     if committed {
-        super::prepare_quic_destination_root(dest_dir).await?;
+        keep_peer_alive_while(
+            cx,
+            link,
+            control,
+            super::prepare_quic_destination_root(dest_dir),
+        )
+        .await?;
         let base = super::quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+        let mut parent_syncs =
+            crate::net::atp::transport_common::metadata::DeferredParentSyncs::default();
         if manifest.is_directory && manifest.entries.is_empty() {
             super::reject_quic_destination_symlink_prefix(&base, &base).await?;
-            crate::fs::create_dir_all(&base).await?;
+            parent_syncs.create_dir_all(&base).await?;
             super::reject_quic_destination_symlink_prefix(&base, &base).await?;
             committed_paths.push(base.clone());
             send_and_flush_native_keep_alive(cx, link, control).await?;
@@ -10477,8 +10485,6 @@ async fn commit_staged_entries(
         let mut commit_clock = Instant::now();
         // Each committed file's directory is fsynced once, after the loop and
         // before the receipt, instead of after every rename (r02ssd).
-        let mut parent_syncs =
-            crate::net::atp::transport_common::metadata::DeferredParentSyncs::default();
         for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter_mut()) {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             quic_rqtrace!(
@@ -10556,7 +10562,7 @@ async fn commit_staged_entries(
                         trace_blocking_roundtrip_probe("commit_member").await;
                     }
                     if let Some(parent) = write.out_path.parent() {
-                        crate::fs::create_dir_all(parent).await?;
+                        parent_syncs.create_dir_all(parent).await?;
                     }
                     super::reject_quic_destination_symlink_prefix(&base, &write.out_path).await?;
                     parent_syncs
@@ -10576,7 +10582,11 @@ async fn commit_staged_entries(
             } else {
                 base.clone()
             };
-            match super::commit_quic_metadata_entry(cx, &base, &out_path, entry, config).await? {
+            match super::commit_quic_metadata_entry(
+                cx, &base, &out_path, entry, config, &mut parent_syncs,
+            )
+            .await?
+            {
                 super::QuicMetadataCommit::Committed => {
                     committed_paths.push(out_path);
                     send_and_flush_native_keep_alive(cx, link, control).await?;
@@ -10587,7 +10597,7 @@ async fn commit_staged_entries(
             }
             super::reject_quic_destination_symlink_prefix(&base, &out_path).await?;
             if let Some(parent) = out_path.parent() {
-                crate::fs::create_dir_all(parent).await?;
+                parent_syncs.create_dir_all(parent).await?;
             }
             let sync = StagedFileSync::open(&staged_entry.staging_path).await?;
             let metadata_deferred = entry
@@ -10615,7 +10625,13 @@ async fn commit_staged_entries(
             parent_syncs.sync().await.map_err(QuicTransportError::from)
         })
         .await?;
-        super::apply_quic_directory_metadata(cx, &base, manifest).await?;
+        keep_peer_alive_while(
+            cx,
+            link,
+            control,
+            super::apply_quic_directory_metadata(cx, &base, manifest),
+        )
+        .await?;
         send_and_flush_native_keep_alive(cx, link, control).await?;
     }
 

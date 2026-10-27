@@ -57,7 +57,8 @@ use crate::net::atp::transport_common::codec::{
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
-    commit_symlink_transactionally, path_is_link_or_reparse, path_is_link_or_reparse_sync,
+    commit_symlink_transactionally, create_directory_tree_durably, path_is_link_or_reparse,
+    path_is_link_or_reparse_sync,
     validate_entry_metadata_for_receive, validate_symlink_metadata_for_receive,
     write_sparse_zero_runs,
 };
@@ -2794,13 +2795,14 @@ where
 async fn create_directory_metadata_paths(
     base: &Path,
     manifest: &TransferManifest,
+    parent_syncs: &mut DeferredParentSyncs,
 ) -> Result<(), TransportError> {
     let Some(directory_metadata) = &manifest.directory_metadata else {
         return Ok(());
     };
 
     reject_entry_destination_link_prefixes(base, base, None, false).await?;
-    crate::fs::create_dir_all(base).await?;
+    parent_syncs.create_dir_all(base).await?;
     reject_entry_destination_link_prefixes(base, base, None, false).await?;
 
     let mut directories = directory_metadata.entries.iter().collect::<Vec<_>>();
@@ -2814,7 +2816,7 @@ async fn create_directory_metadata_paths(
     for directory in directories {
         let out_path = join_relative(base, &directory.rel_path)?;
         reject_entry_destination_link_prefixes(base, &out_path, None, false).await?;
-        crate::fs::create_dir_all(&out_path).await?;
+        parent_syncs.create_dir_all(&out_path).await?;
         reject_entry_destination_link_prefixes(base, &out_path, None, false).await?;
     }
     Ok(())
@@ -2890,16 +2892,16 @@ async fn commit_verified_staging(
     let mut committed_paths = Vec::new();
     let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
     reject_manifest_destination_link_prefixes(dest_dir, &base, manifest).await?;
-    create_directory_metadata_paths(&base, manifest).await?;
+    let mut parent_syncs = DeferredParentSyncs::default();
+    create_directory_metadata_paths(&base, manifest, &mut parent_syncs).await?;
     if manifest.is_directory && manifest.entries.is_empty() {
         reject_entry_destination_link_prefixes(&base, &base, None, false).await?;
-        crate::fs::create_dir_all(&base).await?;
+        parent_syncs.create_dir_all(&base).await?;
         reject_entry_destination_link_prefixes(&base, &base, None, false).await?;
         committed_paths.push(base.clone());
     }
     // Each committed file's directory is fsynced once, after the loop and
     // before the receipt, instead of after every rename (r02ssd).
-    let mut parent_syncs = DeferredParentSyncs::default();
     // Plain regular files commit in batches, one blocking call each (dfdwyt).
     #[cfg(not(windows))]
     let mut regular_batch = Vec::new();
@@ -2958,7 +2960,7 @@ async fn commit_verified_staging(
                 #[cfg(unix)]
                 if matches!(meta.file_kind, FileKind::Fifo) && config.allow_special_files {
                     if let Some(parent) = out_path.parent() {
-                        crate::fs::create_dir_all(parent).await?;
+                        parent_syncs.create_dir_all(parent).await?;
                     }
                     reject_entry_destination_link_prefixes(&base, &out_path, None, false).await?;
                     let mode = meta.unix_mode.unwrap_or(0o644);
@@ -2982,7 +2984,7 @@ async fn commit_verified_staging(
         }
 
         if let Some(parent) = out_path.parent() {
-            crate::fs::create_dir_all(parent).await?;
+            parent_syncs.create_dir_all(parent).await?;
         }
         reject_entry_destination_link_prefixes(
             &base,
@@ -3000,7 +3002,7 @@ async fn commit_verified_staging(
 
         if let Some(meta) = &entry.metadata {
             if matches!(meta.file_kind, FileKind::Directory) {
-                crate::fs::create_dir_all(&out_path).await?;
+                parent_syncs.create_dir_all(&out_path).await?;
                 committed_paths.push(out_path);
                 continue;
             }
@@ -4587,7 +4589,9 @@ where
             }
             let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
             reject_manifest_destination_link_prefixes(dest_dir, &base, &manifest).await?;
-            create_directory_metadata_paths(&base, &manifest).await?;
+            let mut parent_syncs = DeferredParentSyncs::default();
+            create_directory_metadata_paths(&base, &manifest, &mut parent_syncs).await?;
+            parent_syncs.sync().await?;
             mirror_committed_manifest(cx, dest_dir, &manifest, config.mirror_policy).await?;
             apply_directory_metadata_best_effort(cx, &base, &manifest).await?;
             let receipt = ReceiveReceipt {
@@ -4846,16 +4850,16 @@ where
         let commit: Result<(), TransportError> = async {
             let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
             reject_manifest_destination_link_prefixes(dest_dir, &base, &manifest).await?;
-            create_directory_metadata_paths(&base, &manifest).await?;
+            let mut parent_syncs = DeferredParentSyncs::default();
+            create_directory_metadata_paths(&base, &manifest, &mut parent_syncs).await?;
             if manifest.is_directory && manifest.entries.is_empty() {
                 reject_entry_destination_link_prefixes(&base, &base, None, false).await?;
-                crate::fs::create_dir_all(&base).await?;
+                parent_syncs.create_dir_all(&base).await?;
                 reject_entry_destination_link_prefixes(&base, &base, None, false).await?;
                 committed_paths.push(base.clone());
             }
             // Each committed file's directory is fsynced once, after the loop
             // and before the receipt, instead of after every rename (r02ssd).
-            let mut parent_syncs = DeferredParentSyncs::default();
             // Plain regular files commit in batches, one blocking call each
             // (dfdwyt).
             #[cfg(not(windows))]
@@ -4919,7 +4923,7 @@ where
                         #[cfg(unix)]
                         if matches!(meta.file_kind, FileKind::Fifo) && config.allow_special_files {
                             if let Some(parent) = out_path.parent() {
-                                crate::fs::create_dir_all(parent).await?;
+                                parent_syncs.create_dir_all(parent).await?;
                             }
                             reject_entry_destination_link_prefixes(&base, &out_path, None, false)
                                 .await?;
@@ -4946,7 +4950,7 @@ where
                 }
 
                 if let Some(parent) = out_path.parent() {
-                    crate::fs::create_dir_all(parent).await?;
+                    parent_syncs.create_dir_all(parent).await?;
                 }
                 reject_entry_destination_link_prefixes(
                     &base,
@@ -4966,7 +4970,7 @@ where
                 // recorded mode) rather than renaming the (empty) staged file.
                 if let Some(meta) = &entry.metadata {
                     if matches!(meta.file_kind, FileKind::Directory) {
-                        crate::fs::create_dir_all(&out_path).await?;
+                        parent_syncs.create_dir_all(&out_path).await?;
                         committed_paths.push(out_path);
                         continue;
                     }
@@ -5137,7 +5141,7 @@ async fn create_owned_staging_dir(
     transfer_id: &str,
 ) -> Result<StagingDirGuard, TransportError> {
     reject_existing_destination_ancestors(dest_dir).await?;
-    crate::fs::create_dir_all(dest_dir).await?;
+    create_directory_tree_durably(dest_dir).await?;
     reject_existing_destination_ancestors(dest_dir).await?;
 
     for _ in 0..32 {
@@ -5331,10 +5335,11 @@ struct RegularCommit {
 fn commit_regular_entry_sync(
     base: &Path,
     file: &RegularCommit,
+    parent_syncs: &mut DeferredParentSyncs,
 ) -> Result<Option<Result<MetadataApplyReport, StreamingError>>, TransportError> {
     reject_regular_destination_link_prefixes_sync(base, &file.out_path)?;
     if let Some(parent) = file.out_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        parent_syncs.create_dir_all_sync(parent)?;
     }
     reject_regular_destination_link_prefixes_sync(base, &file.out_path)?;
     install_staged_regular_file_sync(&file.staging_path, &file.out_path)?;
@@ -5363,17 +5368,19 @@ async fn commit_regular_entries(
         return Ok(());
     }
     let base_path = base.to_path_buf();
-    let (committed, failure) = crate::runtime::spawn_blocking(move || {
+    let (committed, created_directories, failure) = crate::runtime::spawn_blocking(move || {
         let mut committed = Vec::with_capacity(files.len());
+        let mut created_directories = DeferredParentSyncs::default();
         for file in files {
-            match commit_regular_entry_sync(&base_path, &file) {
+            match commit_regular_entry_sync(&base_path, &file, &mut created_directories) {
                 Ok(applied) => committed.push((file.out_path, applied)),
-                Err(error) => return (committed, Some(error)),
+                Err(error) => return (committed, created_directories, Some(error)),
             }
         }
-        (committed, None)
+        (committed, created_directories, None)
     })
     .await;
+    parent_syncs.merge(created_directories);
     for (out_path, applied) in committed {
         parent_syncs.record(&out_path);
         if let Some(applied) = applied {

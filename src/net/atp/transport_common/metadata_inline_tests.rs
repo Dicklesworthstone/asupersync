@@ -222,11 +222,121 @@
             );
         }
         assert_eq!(
-            batch.parents.keys().cloned().collect::<Vec<_>>(),
+            batch.parents.iter().cloned().collect::<Vec<_>>(),
             vec![first_dir.clone(), second_dir.clone()],
             "each distinct parent is recorded once and synced later, not per file"
         );
         futures_lite::future::block_on(batch.sync()).expect("sync recorded parents");
+    }
+
+    #[test]
+    fn directory_creation_syncs_the_complete_chain_once_deepest_first() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical root");
+        let first = root.join("new/deep");
+        let second = root.join("new/sibling");
+        let mut batch = DeferredParentSyncs::default();
+        futures_lite::future::block_on(async {
+            batch.create_dir_all(&first).await?;
+            batch.create_dir_all(&second).await?;
+            batch.create_dir_all(&first).await
+        })
+        .expect("create and re-ensure overlapping trees");
+        batch.record(&first.join("one"));
+        batch.record(&first.join("two"));
+        let expected: BTreeSet<_> = first
+            .ancestors()
+            .chain(second.ancestors())
+            .map(Path::to_path_buf)
+            .collect();
+        let mut synced = Vec::new();
+        batch
+            .sync_with(|path| {
+                synced.push(path.to_path_buf());
+                sync_directory_sync(path)
+            })
+            .expect("sync each directory and its parent entries");
+        assert_eq!(synced.iter().cloned().collect::<BTreeSet<_>>(), expected);
+        assert_eq!(synced.len(), expected.len(), "shared parents sync once");
+        for (index, directory) in synced.iter().enumerate() {
+            if let Some(parent) = directory.parent()
+                && let Some(parent_index) = synced.iter().position(|path| path == parent)
+            {
+                assert!(index < parent_index, "child must sync before its parent");
+            }
+        }
+    }
+
+    #[test]
+    fn directory_retry_resyncs_existing_ancestors_after_drop_and_sync_failure() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical root");
+        let destination = root.join("new/empty");
+        let mut abandoned = DeferredParentSyncs::default();
+        futures_lite::future::block_on(abandoned.create_dir_all(&destination)).unwrap();
+        drop(abandoned); // Simulate a receive dropped before its final sync.
+
+        let mut failed = DeferredParentSyncs::default();
+        futures_lite::future::block_on(failed.create_dir_all(&destination)).unwrap();
+        let expected = failed.parents.clone();
+        let failure_at = destination.parent().unwrap();
+        let mut attempted = Vec::new();
+        let error = failed
+            .sync_with(|path| {
+                attempted.push(path.to_path_buf());
+                if path == failure_at {
+                    Err(io::Error::other("planted ancestor-sync refusal"))
+                } else {
+                    sync_directory_sync(path)
+                }
+            })
+            .expect_err("an ancestor failure must fail the whole durability pass");
+        assert!(error.to_string().contains("planted ancestor-sync refusal"));
+        assert_eq!(attempted, vec![destination.clone(), failure_at.to_path_buf()]);
+        assert!(destination.is_dir(), "failure leaves the existing tree intact");
+
+        let mut retry = DeferredParentSyncs::default();
+        futures_lite::future::block_on(retry.create_dir_all(&destination)).unwrap();
+        assert_eq!(retry.parents, expected, "existence must not skip uncertain ancestors");
+        let mut synced = BTreeSet::new();
+        retry
+            .sync_with(|path| {
+                synced.insert(path.to_path_buf());
+                sync_directory_sync(path)
+            })
+            .expect("retry syncs the complete chain");
+        assert_eq!(synced, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_durability_preserves_allowed_ancestor_aliases() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical root");
+        let target = root.join("physical");
+        std::fs::create_dir(&target).unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let destination = alias.join("new/empty");
+        futures_lite::future::block_on(create_directory_tree_durably(&destination))
+            .expect("directory sync follows an allowed ancestor alias");
+        assert!(target.join("new/empty").is_dir());
+        assert!(std::fs::symlink_metadata(alias).unwrap().file_type().is_symlink());
+    }
+
+    /// Procfs refuses actual directory fsync. This regression fails if the
+    /// production sync syscall is replaced with a no-op, even on a retry where
+    /// every directory already exists.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_durability_propagates_real_sync_failure_on_existing_paths() {
+        let destination = Path::new("/proc/sys");
+        assert!(destination.is_dir());
+        for _ in 0..2 {
+            let error = futures_lite::future::block_on(create_directory_tree_durably(destination))
+                .expect_err("procfs does not support durable directory publication");
+            assert!(error.to_string().contains("/proc/sys: sync committed directory"));
+        }
     }
 
     #[test]

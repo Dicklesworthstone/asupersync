@@ -2071,6 +2071,118 @@
         futures_lite::future::block_on(parent_syncs.sync()).expect("sync the recorded parent");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn empty_root_and_topology_only_trees_sync_before_restrictive_directory_metadata() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for topology_only in [false, true] {
+            let temp = tempfile::tempdir().expect("temporary directory");
+            let root = temp.path().canonicalize().expect("canonical root");
+            let destination = root.join("new/receive");
+            let directory_metadata = EntryMetadata {
+                file_kind: FileKind::Directory,
+                unix_mode: Some(0),
+                ..EntryMetadata::default()
+            };
+            let entries = if topology_only {
+                let mut empty = named_entry(0, "a/b/empty");
+                empty.metadata = Some(directory_metadata.clone());
+                vec![empty]
+            } else {
+                Vec::new()
+            };
+            let mut manifest = manifest_with(entries, 0);
+            manifest.directory_metadata = Some(DirectoryMetadataManifest {
+                root: Some(directory_metadata.clone()),
+                entries: if topology_only {
+                    ["a", "a/b"]
+                        .into_iter()
+                        .map(|rel_path| DirectoryMetadataEntry {
+                            rel_path: rel_path.to_string(),
+                            metadata: directory_metadata.clone(),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            });
+            let staged = if topology_only {
+                vec![root.join("unused-topology-staging")]
+            } else {
+                Vec::new()
+            };
+            let committed = futures_lite::future::block_on(commit_verified_staging(
+                &Cx::for_testing(),
+                &destination,
+                &manifest,
+                &TransferConfig::default(),
+                &staged,
+            ))
+            .expect("empty-directory commit syncs before restrictive metadata");
+            let base = destination.join("r");
+            let leaf = if topology_only { base.join("a/b/empty") } else { base.clone() };
+            assert_eq!(committed, vec![leaf.clone()]);
+            let paths = if topology_only {
+                vec![base.clone(), base.join("a"), base.join("a/b"), leaf.clone()]
+            } else {
+                vec![base]
+            };
+            // Restore parents before inspecting descendants, so this also
+            // exercises the non-root case where mode 000 blocks traversal.
+            for path in paths {
+                assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0);
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            assert_eq!(std::fs::read_dir(leaf).unwrap().count(), 0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_directory_commit_paths_refuse_success_when_directory_sync_fails() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        for topology in 0..3 {
+            let directory_metadata = EntryMetadata {
+                file_kind: FileKind::Directory,
+                ..EntryMetadata::default()
+            };
+            let mut manifest = manifest_with(Vec::new(), 0);
+            manifest.root_name = "sys".to_string();
+            if topology == 1 {
+                manifest.directory_metadata = Some(DirectoryMetadataManifest {
+                    root: None,
+                    entries: vec![DirectoryMetadataEntry {
+                        rel_path: "net".to_string(),
+                        metadata: directory_metadata.clone(),
+                    }],
+                });
+            } else if topology == 2 {
+                let mut entry = named_entry(0, "net");
+                entry.metadata = Some(directory_metadata);
+                manifest.entries.push(entry);
+            }
+            let staged = if topology == 2 {
+                vec![temp.path().join("unused-topology-staging")]
+            } else {
+                Vec::new()
+            };
+            // These directories already exist. No procfs files or metadata
+            // are changed; its unsupported fsync must prevent success first.
+            let error = futures_lite::future::block_on(commit_verified_staging(
+                &Cx::for_testing(),
+                Path::new("/proc"),
+                &manifest,
+                &TransferConfig::default(),
+                &staged,
+            ))
+            .expect_err("an empty-directory transfer cannot acknowledge an unsynced name");
+            let expected = if topology == 0 { "/proc/sys:" } else { "/proc/sys/net:" };
+            assert!(error.to_string().contains(expected), "case {topology}: {error}");
+            assert!(error.to_string().contains("sync committed directory"));
+        }
+    }
+
     fn directory_metadata_entry(rel_path: &str) -> DirectoryMetadataEntry {
         DirectoryMetadataEntry {
             rel_path: rel_path.to_string(),

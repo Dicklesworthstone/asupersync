@@ -109,8 +109,9 @@ use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 #[cfg(any(feature = "tls", test))]
 use crate::net::atp::transport_common::metadata::read_entry_metadata;
 use crate::net::atp::transport_common::metadata::{
-    HardlinkIdentity, commit_hardlink_transactionally, commit_symlink_transactionally,
-    path_is_link_or_reparse, validate_entry_metadata_for_receive,
+    DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
+    commit_symlink_transactionally, create_directory_tree_durably, path_is_link_or_reparse,
+    validate_entry_metadata_for_receive,
     validate_symlink_metadata_for_receive,
 };
 #[cfg(test)]
@@ -10007,7 +10008,7 @@ async fn prepare_quic_destination_root(dest_dir: &Path) -> Result<(), QuicTransp
             Err(error) => return Err(error.into()),
         }
     }
-    crate::fs::create_dir_all(dest_dir).await?;
+    create_directory_tree_durably(dest_dir).await?;
     for candidate in dest_dir
         .ancestors()
         .filter(|path| !path.as_os_str().is_empty())
@@ -10248,26 +10249,84 @@ async fn apply_quic_directory_metadata(
             .cmp(&left.0.split('/').count())
             .then_with(|| right.0.cmp(left.0))
     });
-    for (rel_path, metadata) in entries {
+    // Sync every created directory and its ancestors while access is still
+    // available, then preserve the existing deepest-first metadata replay.
+    let root_metadata = manifest
+        .directory_metadata
+        .as_ref()
+        .and_then(|directories| directories.root.as_ref());
+    let mut directory_syncs = DeferredParentSyncs::default();
+    for (rel_path, _) in &entries {
         let path = quic_join_relative(base, rel_path)?;
         reject_quic_destination_symlink_prefix(base, &path).await?;
-        crate::fs::create_dir_all(&path).await?;
+        directory_syncs.create_dir_all(&path).await?;
+        reject_quic_destination_symlink_prefix(base, &path).await?;
+    }
+    if root_metadata.is_some() {
+        reject_quic_destination_symlink_prefix(base, base).await?;
+        directory_syncs.create_dir_all(base).await?;
+        reject_quic_destination_symlink_prefix(base, base).await?;
+    }
+    directory_syncs.sync().await?;
+    for (rel_path, metadata) in entries {
+        let path = quic_join_relative(base, rel_path)?;
         reject_quic_destination_symlink_prefix(base, &path).await?;
         let report = apply_quic_metadata_verified(&path, metadata).await?;
         trace_quic_metadata_skips(cx, &path, &report);
     }
-    if let Some(root) = manifest
-        .directory_metadata
-        .as_ref()
-        .and_then(|directories| directories.root.as_ref())
-    {
-        reject_quic_destination_symlink_prefix(base, base).await?;
-        crate::fs::create_dir_all(base).await?;
+    if let Some(root) = root_metadata {
         reject_quic_destination_symlink_prefix(base, base).await?;
         let report = apply_quic_metadata_verified(base, root).await?;
         trace_quic_metadata_skips(cx, base, &report);
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn quic_directory_metadata_syncs_the_tree_before_applying_mode_zero() {
+    use crate::net::atp::transport_common::metadata::{
+        DirectoryMetadataEntry, DirectoryMetadataManifest,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical root");
+    let base = root.join("new/payload");
+    let metadata = EntryMetadata {
+        file_kind: FileKind::Directory,
+        unix_mode: Some(0),
+        ..EntryMetadata::default()
+    };
+    let manifest = TransferManifest {
+        transfer_id: "directory-durability".to_string(),
+        root_name: "payload".to_string(),
+        is_directory: true,
+        total_bytes: 0,
+        merkle_root_hex: String::new(),
+        metadata_root_hex: None,
+        directory_metadata: Some(DirectoryMetadataManifest {
+            root: Some(metadata.clone()),
+            entries: ["nested", "nested/deep"]
+                .into_iter()
+                .map(|rel_path| DirectoryMetadataEntry {
+                    rel_path: rel_path.to_string(),
+                    metadata: metadata.clone(),
+                })
+                .collect(),
+        }),
+        entries: Vec::new(),
+        delta_manifest: None,
+    };
+    futures_lite::future::block_on(apply_quic_directory_metadata(
+        &Cx::for_testing(), &base, &manifest,
+    ))
+    .expect("sync all directory names before restrictive replay");
+    for path in [base.clone(), base.join("nested"), base.join("nested/deep")] {
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    assert_eq!(std::fs::read_dir(base.join("nested/deep")).unwrap().count(), 0);
 }
 
 #[cfg(feature = "tls")]
@@ -10308,6 +10367,7 @@ async fn commit_quic_metadata_entry(
     out_path: &Path,
     entry: &ManifestEntry,
     config: &QuicConfig,
+    parent_syncs: &mut DeferredParentSyncs,
 ) -> Result<QuicMetadataCommit, QuicTransportError> {
     let Some(metadata) = &entry.metadata else {
         return Ok(QuicMetadataCommit::Regular);
@@ -10323,7 +10383,7 @@ async fn commit_quic_metadata_entry(
             #[cfg(unix)]
             {
                 if let Some(parent) = out_path.parent() {
-                    crate::fs::create_dir_all(parent).await?;
+                    parent_syncs.create_dir_all(parent).await?;
                 }
                 reject_quic_destination_symlink_prefix(base, out_path).await?;
                 let mode = metadata.unix_mode.unwrap_or(0o644);
@@ -10339,7 +10399,7 @@ async fn commit_quic_metadata_entry(
     }
 
     if let Some(parent) = out_path.parent() {
-        crate::fs::create_dir_all(parent).await?;
+        parent_syncs.create_dir_all(parent).await?;
     }
 
     // Parent creation may have materialized prefixes that were absent during
@@ -10352,7 +10412,7 @@ async fn commit_quic_metadata_entry(
     }
 
     if matches!(metadata.file_kind, FileKind::Directory) {
-        crate::fs::create_dir_all(out_path).await?;
+        parent_syncs.create_dir_all(out_path).await?;
         reject_quic_destination_symlink_prefix(base, out_path).await?;
         return Ok(QuicMetadataCommit::Committed);
     }
@@ -10421,9 +10481,10 @@ async fn commit_decoded_entries_with_options(
     let base = quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
     reject_quic_existing_symlink(dest_dir).await?;
     let mut committed_paths = Vec::with_capacity(manifest.entries.len().saturating_add(1));
+    let mut parent_syncs = DeferredParentSyncs::default();
     if manifest.is_directory && manifest.entries.is_empty() {
         reject_quic_destination_symlink_prefix(&base, &base).await?;
-        crate::fs::create_dir_all(&base).await?;
+        parent_syncs.create_dir_all(&base).await?;
         reject_quic_destination_symlink_prefix(&base, &base).await?;
         committed_paths.push(base.clone());
     }
@@ -10444,7 +10505,7 @@ async fn commit_decoded_entries_with_options(
                 let member_path = quic_join_relative(&base, &member.rel_path)?;
                 reject_quic_destination_symlink_prefix(&base, &member_path).await?;
                 if let Some(parent) = member_path.parent() {
-                    crate::fs::create_dir_all(parent).await?;
+                    parent_syncs.create_dir_all(parent).await?;
                 }
                 reject_quic_destination_symlink_prefix(&base, &member_path).await?;
                 let slice = packed_member_slice(&decoder.data, member).ok_or_else(|| {
@@ -10471,7 +10532,11 @@ async fn commit_decoded_entries_with_options(
         } else {
             base.clone()
         };
-        match commit_quic_metadata_entry(cx, &base, &out_path, entry, config).await? {
+        match commit_quic_metadata_entry(
+            cx, &base, &out_path, entry, config, &mut parent_syncs,
+        )
+        .await?
+        {
             QuicMetadataCommit::Committed => {
                 committed_paths.push(out_path);
                 continue;
@@ -10481,7 +10546,7 @@ async fn commit_decoded_entries_with_options(
         }
         reject_quic_destination_symlink_prefix(&base, &out_path).await?;
         if let Some(parent) = out_path.parent() {
-            crate::fs::create_dir_all(parent).await?;
+            parent_syncs.create_dir_all(parent).await?;
         }
         reject_quic_destination_symlink_prefix(&base, &out_path).await?;
         let report = crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_verified_transactionally(
@@ -10496,6 +10561,7 @@ async fn commit_decoded_entries_with_options(
         committed_paths.push(out_path);
     }
 
+    parent_syncs.sync().await?;
     apply_quic_directory_metadata(cx, &base, manifest).await?;
 
     receipt.committed_paths = committed_paths
