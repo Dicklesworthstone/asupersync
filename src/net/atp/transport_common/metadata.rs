@@ -1133,13 +1133,51 @@ impl SyncedStagedFile {
 /// readers see the old or the new file. A crash before `sync` returns can
 /// lose renames that nothing has acknowledged yet, which is what the per-file
 /// sync also allows between its rename and its fsync.
+///
+/// Directory creation records the entire ancestor chain, even if the directory
+/// already exists. A previous failed or cancelled receive may have created it
+/// without completing its sync. Children are synced before their parents, once
+/// per distinct directory, before restrictive directory metadata is applied.
+/// On Unix, inability to open or sync any required ancestor fails the commit;
+/// other platforms retain the existing best-effort directory durability.
 #[derive(Debug, Default)]
 pub(crate) struct DeferredParentSyncs {
-    /// Each distinct parent, with one committed path inside it.
-    parents: BTreeMap<PathBuf, PathBuf>,
+    parents: BTreeSet<PathBuf>,
 }
 
 impl DeferredParentSyncs {
+    /// Creates a destination directory tree and records its durability work.
+    /// Existing directories are recorded too, so retrying after an uncertain
+    /// sync never treats their existence as proof of persistence.
+    pub(crate) async fn create_dir_all(&mut self, path: &Path) -> io::Result<()> {
+        let path = std::path::absolute(path)?;
+        crate::fs::create_dir_all(&path).await?;
+        self.record_directory_tree(&path);
+        Ok(())
+    }
+
+    /// The same creation/accounting operation for an existing blocking batch.
+    #[cfg(not(windows))]
+    pub(crate) fn create_dir_all_sync(&mut self, path: &Path) -> io::Result<()> {
+        let path = std::path::absolute(path)?;
+        std::fs::create_dir_all(&path)?;
+        self.record_directory_tree(&path);
+        Ok(())
+    }
+
+    fn record_directory_tree(&mut self, path: &Path) {
+        self.parents.extend(
+            path.ancestors()
+                .filter(|ancestor| !ancestor.as_os_str().is_empty())
+                .map(Path::to_path_buf),
+        );
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn merge(&mut self, mut other: Self) {
+        self.parents.append(&mut other.parents);
+    }
+
     /// [`commit_staged_regular_file_transactionally`], with the parent fsync
     /// deferred to [`Self::sync`].
     pub(crate) async fn commit_staged_regular_file(
@@ -1161,24 +1199,52 @@ impl DeferredParentSyncs {
         staged.install(out_path, Some(self)).await
     }
 
-    /// Fsyncs every recorded parent directory once.
+    /// Fsyncs every recorded directory once, deepest first. The submitted
+    /// blocking job owns the entire pass even if its async waiter is dropped.
     pub(crate) async fn sync(self) -> Result<(), StreamingError> {
-        for (parent, committed) in self.parents {
-            sync_committed_parent(&committed).await.map_err(|error| {
-                StreamingError::new(format!(
-                    "{}: sync committed directory: {error}",
-                    parent.display()
-                ))
+        crate::runtime::spawn_blocking_io(move || self.sync_with(sync_directory_sync))
+            .await
+            .map_err(|error| StreamingError::new(error.to_string()))
+    }
+
+    fn sync_with(self, mut sync: impl FnMut(&Path) -> io::Result<()>) -> io::Result<()> {
+        // A relative committed path and an absolute creation path can name the
+        // same directory. Normalize before deduplication and depth ordering.
+        let parents = self
+            .parents
+            .into_iter()
+            .map(std::path::absolute)
+            .collect::<io::Result<BTreeSet<_>>>()?;
+        let mut parents: Vec<_> = parents.into_iter().collect();
+        parents.sort_by(|left, right| {
+            right
+                .components()
+                .count()
+                .cmp(&left.components().count())
+                .then_with(|| left.cmp(right))
+        });
+        for parent in parents {
+            sync(&parent).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("{}: sync committed directory: {error}", parent.display()),
+                )
             })?;
         }
         Ok(())
     }
 
     pub(crate) fn record(&mut self, committed: &Path) {
-        self.parents
-            .entry(committed_parent(committed))
-            .or_insert_with(|| committed.to_path_buf());
+        self.parents.insert(committed_parent(committed));
     }
+}
+
+/// Creates a destination root and persists its directory chain before staging
+/// starts. Transfer commit loops use [`DeferredParentSyncs`] to batch this work.
+pub(crate) async fn create_directory_tree_durably(path: &Path) -> io::Result<()> {
+    let mut directories = DeferredParentSyncs::default();
+    directories.create_dir_all(path).await?;
+    crate::runtime::spawn_blocking_io(move || directories.sync_with(sync_directory_sync)).await
 }
 
 /// Write bytes to a unique sibling and atomically replace a regular-file
@@ -1436,11 +1502,30 @@ fn committed_parent(path: &Path) -> PathBuf {
 #[cfg(unix)]
 async fn sync_committed_parent(path: &Path) -> io::Result<()> {
     let parent = committed_parent(path);
-    crate::runtime::spawn_blocking_io(move || std::fs::File::open(parent)?.sync_all()).await
+    crate::runtime::spawn_blocking_io(move || sync_directory_sync(&parent)).await
 }
 
 #[cfg(not(unix))]
 async fn sync_committed_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory_sync(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    // Ancestors outside the protected destination may be aliases, such as
+    // macOS /var -> /private/var. Preserve those aliases; transport-specific
+    // destination-prefix guards remain responsible for traversal policy.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(path)?
+        .sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory_sync(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 

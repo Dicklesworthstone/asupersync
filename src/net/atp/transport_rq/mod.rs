@@ -110,7 +110,8 @@ use crate::net::atp::transport_common::metadata::{
     FileKind, HardlinkIdentity, MetadataApplyReport, PathLinkKind, StagedFileSync, SyncedStagedFile,
     capture_directory_metadata_manifest, classify_path_link, classify_path_link_sync,
     commit_hardlink_transactionally, commit_symlink_transactionally, inode_key_if_regular_sync,
-    metadata_commitment, path_is_link_or_reparse, read_entry_metadata_sync,
+    create_directory_tree_durably, metadata_commitment, path_is_link_or_reparse,
+    read_entry_metadata_sync,
     validate_entry_metadata_for_receive, write_sparse_zero_runs, write_sparse_zero_runs_sync,
 };
 use crate::net::atp::transport_common::{
@@ -13674,7 +13675,7 @@ async fn create_receive_staging_guard(
     transfer_id: &str,
 ) -> Result<RqStagingDirGuard, RqError> {
     reject_rq_destination_ancestors(dest_dir).await?;
-    crate::fs::create_dir_all(dest_dir).await?;
+    create_directory_tree_durably(dest_dir).await?;
     reject_rq_destination_ancestors(dest_dir).await?;
     let dest_dir = dest_dir.to_path_buf();
     let transfer_id = transfer_id.to_string();
@@ -14360,20 +14361,66 @@ async fn apply_rq_directory_metadata(
             .cmp(&left.rel_path.split('/').count())
             .then_with(|| left.rel_path.cmp(&right.rel_path))
     });
-    for entry in entries {
+    // Publish directory names durably before restrictive modes or ownership
+    // can make their handles inaccessible. Metadata remains deepest-first.
+    let mut directory_syncs = DeferredParentSyncs::default();
+    for entry in &entries {
         let out_path = join_relative(base, &entry.rel_path)?;
         reject_destination_symlink_prefix(base, &out_path).await?;
-        crate::fs::create_dir_all(&out_path).await?;
+        directory_syncs.create_dir_all(&out_path).await?;
+        reject_destination_symlink_prefix(base, &out_path).await?;
+    }
+    if directories.root.is_some() {
+        reject_destination_symlink_prefix(base, base).await?;
+        directory_syncs.create_dir_all(base).await?;
+        reject_destination_symlink_prefix(base, base).await?;
+    }
+    directory_syncs
+        .sync()
+        .await
+        .map_err(|error| RqError::Source(error.into_message()))?;
+    for entry in entries {
+        let out_path = join_relative(base, &entry.rel_path)?;
         reject_destination_symlink_prefix(base, &out_path).await?;
         apply_rq_entry_metadata(&out_path, &entry.metadata).await?;
     }
     if let Some(root) = &directories.root {
         reject_destination_symlink_prefix(base, base).await?;
-        crate::fs::create_dir_all(base).await?;
-        reject_destination_symlink_prefix(base, base).await?;
         apply_rq_entry_metadata(base, root).await?;
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn rq_directory_metadata_syncs_the_tree_before_applying_mode_zero() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical root");
+    let base = root.join("new/payload");
+    let metadata = EntryMetadata {
+        file_kind: FileKind::Directory,
+        unix_mode: Some(0),
+        ..EntryMetadata::default()
+    };
+    let directories = DirectoryMetadataManifest {
+        root: Some(metadata.clone()),
+        entries: ["nested", "nested/deep"]
+            .into_iter()
+            .map(|rel_path| DirectoryMetadataEntry {
+                rel_path: rel_path.to_string(),
+                metadata: metadata.clone(),
+            })
+            .collect(),
+    };
+    futures_lite::future::block_on(apply_rq_directory_metadata(&base, &directories))
+        .expect("sync all directory names before restrictive replay");
+    for path in [base.clone(), base.join("nested"), base.join("nested/deep")] {
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    assert_eq!(std::fs::read_dir(base.join("nested/deep")).unwrap().count(), 0);
 }
 
 async fn hash_packed_members_streaming(
@@ -15247,15 +15294,15 @@ async fn verify_and_commit_with_options(
             symlink_guard_micros.saturating_add(elapsed_micros_since(symlink_started));
 
         let write_started = trace_commit.then(Instant::now);
+        let mut parent_syncs = DeferredParentSyncs::default();
         if create_empty_directory_root {
             reject_destination_symlink_prefix(&base, &base).await?;
-            crate::fs::create_dir_all(&base).await?;
+            parent_syncs.create_dir_all(&base).await?;
             reject_destination_symlink_prefix(&base, &base).await?;
             committed_paths.push(base.display().to_string());
         }
         // Each committed file's directory is fsynced once, after the loop and
         // before the receipt, instead of after every rename (r02ssd).
-        let mut parent_syncs = DeferredParentSyncs::default();
         for write in writes {
             match write {
                 CommitWrite::Rename {
@@ -15275,7 +15322,7 @@ async fn verify_and_commit_with_options(
                         prepare_rq_entry_metadata_for_commit(&staging_path, &metadata).await?;
                     reject_destination_symlink_prefix(&base, &out_path).await?;
                     if let Some(parent) = out_path.parent() {
-                        crate::fs::create_dir_all(parent).await?;
+                        parent_syncs.create_dir_all(parent).await?;
                     }
                     reject_destination_symlink_prefix(&base, &out_path).await?;
                     parent_syncs
@@ -15316,7 +15363,7 @@ async fn verify_and_commit_with_options(
                     for (member, synced) in members.iter().zip(synced_members) {
                         reject_destination_symlink_prefix(&base, &member.out_path).await?;
                         if let Some(parent) = member.out_path.parent() {
-                            crate::fs::create_dir_all(parent).await?;
+                            parent_syncs.create_dir_all(parent).await?;
                         }
                         reject_destination_symlink_prefix(&base, &member.out_path).await?;
                         parent_syncs
@@ -15347,7 +15394,7 @@ async fn verify_and_commit_with_options(
                         {
                             reject_destination_symlink_prefix(&base, &out_path).await?;
                             if let Some(parent) = out_path.parent() {
-                                crate::fs::create_dir_all(parent).await?;
+                                parent_syncs.create_dir_all(parent).await?;
                             }
                             reject_destination_symlink_prefix(&base, &out_path).await?;
                             let report = crate::net::atp::transport_common::metadata::commit_fifo_transactionally(
@@ -15376,7 +15423,7 @@ async fn verify_and_commit_with_options(
                     if matches!(metadata.file_kind, FileKind::Symlink) {
                         reject_destination_symlink_ancestors(&base, &out_path).await?;
                         if let Some(parent) = out_path.parent() {
-                            crate::fs::create_dir_all(parent).await?;
+                            parent_syncs.create_dir_all(parent).await?;
                         }
                         reject_destination_symlink_ancestors(&base, &out_path).await?;
                         commit_symlink_transactionally(&rel_path, &out_path, &metadata)
@@ -15385,7 +15432,7 @@ async fn verify_and_commit_with_options(
                     } else if let Some(primary_rel) = &metadata.hardlink_target {
                         reject_destination_symlink_prefix(&base, &out_path).await?;
                         if let Some(parent) = out_path.parent() {
-                            crate::fs::create_dir_all(parent).await?;
+                            parent_syncs.create_dir_all(parent).await?;
                         }
                         reject_destination_symlink_prefix(&base, &out_path).await?;
                         let primary_path = join_relative(&base, primary_rel)?;
@@ -15420,7 +15467,7 @@ async fn verify_and_commit_with_options(
                         prepare_rq_entry_metadata_for_commit(&staging_path, &metadata).await?;
                     reject_destination_symlink_prefix(&base, &out_path).await?;
                     if let Some(parent) = out_path.parent() {
-                        crate::fs::create_dir_all(parent).await?;
+                        parent_syncs.create_dir_all(parent).await?;
                     }
                     reject_destination_symlink_prefix(&base, &out_path).await?;
                     parent_syncs
