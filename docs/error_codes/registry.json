@@ -218,6 +218,24 @@
       "source_refs": ["src/cx/io_gate.rs"]
     },
     {
+      "code": "ASUP-E010",
+      "name": "spawn-batch-too-large",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "A structured spawn batch exceeded the producer-side task limit before publishing any members.",
+      "probable_causes": [
+        "A spawn_batch, spawn_batch_in, or JoinSet::spawn_all call supplied more than MAX_SPAWN_BATCH_SIZE factories.",
+        "The input iterator was unbounded or contained more work than one publication should perform."
+      ],
+      "remediation": [
+        "Split the input into batches no larger than MAX_SPAWN_BATCH_SIZE.",
+        "Collect existing results before admitting more batches to bound the total live workload."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E010.md",
+      "since": "0.6.0",
+      "source_refs": ["src/cx/cx.rs"]
+    },
+    {
       "code": "ASUP-E101",
       "name": "obligation-leaked",
       "area": "obligations",

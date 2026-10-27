@@ -4853,6 +4853,84 @@ fn take_spawn_result_sender<T>(
         .take()
 }
 
+/// Maximum number of factories accepted by one structured spawn batch.
+///
+/// This bounds producer-side work and temporary storage. Region admission
+/// limits still apply independently to each member when the scheduler admits it.
+pub const MAX_SPAWN_BATCH_SIZE: usize = 1024;
+
+/// A structured spawn batch was refused before publishing any of its members.
+///
+/// Region closure and admission quotas are asynchronous, per-member outcomes;
+/// they are reported through the returned task handles, not through this error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SpawnBatchError {
+    /// The input contained more factories than a single batch accepts.
+    TooManyTasks {
+        /// Maximum accepted number of factories.
+        limit: usize,
+    },
+    /// The context or target lacks a live, authorized spawn path.
+    Spawn(crate::runtime::state::SpawnError),
+}
+
+impl SpawnBatchError {
+    /// Stable diagnostic code; setup errors retain the underlying spawn code.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::TooManyTasks { .. } => "ASUP-E010",
+            Self::Spawn(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for SpawnBatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyTasks { limit } => {
+                write!(
+                    f,
+                    "[ASUP-E010] spawn batch exceeds the {limit}-task limit; \
+                     submit bounded batches and collect their results before admitting more work"
+                )
+            }
+            Self::Spawn(error) => std::fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl std::error::Error for SpawnBatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn(error) => Some(error),
+            Self::TooManyTasks { .. } => None,
+        }
+    }
+}
+
+impl From<crate::runtime::state::SpawnError> for SpawnBatchError {
+    fn from(error: crate::runtime::state::SpawnError) -> Self {
+        Self::Spawn(error)
+    }
+}
+
+/// Read only a bounded prefix, even when an iterator reports an incorrect size
+/// hint or produces an infinite sequence. No task identities or credits exist yet.
+fn collect_spawn_batch<I>(factories: I) -> Result<Vec<I::Item>, SpawnBatchError>
+where
+    I: IntoIterator,
+{
+    let factories: Vec<_> = factories.into_iter().take(MAX_SPAWN_BATCH_SIZE + 1).collect();
+    if factories.len() > MAX_SPAWN_BATCH_SIZE {
+        return Err(SpawnBatchError::TooManyTasks {
+            limit: MAX_SPAWN_BATCH_SIZE,
+        });
+    }
+    Ok(factories)
+}
+
 impl<Caps> Cx<Caps>
 where
     Caps: cap::HasSpawn + Send + Sync + 'static,
@@ -4923,6 +5001,87 @@ where
             &pending,
             crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
             f,
+        )
+    }
+
+    /// Spawns a bounded batch of tasks into this context's own region.
+    ///
+    /// Requests and returned handles retain input order; task execution order
+    /// remains the scheduler's decision. Each member has its own identity,
+    /// inherited child context, pending-spawn reservation, enqueue trace event,
+    /// and admission result, exactly as with [`Cx::spawn`]. Factories run only
+    /// after the scheduler admits their individual requests. An empty batch
+    /// succeeds without requiring a runtime or issuing a notification.
+    ///
+    /// The producer prepares the entire batch before publishing its requests,
+    /// then performs one queue insertion per member and one scheduler notification.
+    /// Concurrent consumers may admit a prefix before publication finishes;
+    /// this is not atomic all-or-nothing admission and does not change scheduler
+    /// fairness or dispatch policy. A region's quota can admit some members and
+    /// deny others. Denials resolve through the corresponding handle as
+    /// [`JoinError::Cancelled`], preserving the result of every other member.
+    ///
+    /// Dropping a handle does not detach its work from the owning region. As
+    /// with [`Cx::spawn`], explicit abort or dropping a pending join future
+    /// requests cancellation. Cancellation-result classification also matches
+    /// `spawn`, including typed results after cancellation acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnBatchError::TooManyTasks`] for more than
+    /// [`MAX_SPAWN_BATCH_SIZE`] factories, or [`SpawnBatchError::Spawn`] when the
+    /// context has no live, authorized spawn gateway or region counter. Neither
+    /// error publishes any member or invokes a factory. At most
+    /// `MAX_SPAWN_BATCH_SIZE + 1` iterator elements are consumed; remaining
+    /// elements are dropped with the iterator. User iterator panics propagate
+    /// before any task is published.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::{Cx, main};
+    ///
+    /// #[main]
+    /// async fn main(cx: &Cx) {
+    ///     let members = cx.spawn_batch((0..3).map(|value| {
+    ///         move |child: Cx| async move {
+    ///             child.checkpoint().expect("child remains active");
+    ///             value * 2
+    ///         }
+    ///     })).expect("batch setup");
+    ///     for (index, mut member) in members.into_iter().enumerate() {
+    ///         assert_eq!(member.join(cx).await.expect("child completes"), index * 2);
+    ///     }
+    /// }
+    /// ```
+    pub fn spawn_batch<I, F, Fut>(
+        &self,
+        factories: I,
+    ) -> Result<Vec<crate::runtime::TaskHandle<Fut::Output>>, SpawnBatchError>
+    where
+        I: IntoIterator<Item = F>,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let factories = collect_spawn_batch(factories)?;
+        if factories.is_empty() {
+            return Ok(Vec::new());
+        }
+        let gateway = self
+            .spawn_gateway_handle()
+            .ok_or(crate::runtime::state::SpawnError::RuntimeUnavailable)?;
+        let pending = self
+            .pending_spawn_counter_handle()
+            .ok_or(crate::runtime::state::SpawnError::RuntimeUnavailable)?;
+        self.spawn_batch_via_gateway(
+            self.region_id(),
+            self.inherited_budget(),
+            self.capability_budget(),
+            &gateway,
+            &pending,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            factories,
         )
     }
 
@@ -5063,6 +5222,144 @@ where
             crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
             f,
         )
+    }
+
+    /// Spawns a bounded batch into `scope`'s region.
+    ///
+    /// This combines [`Cx::spawn_batch`]'s bounded, ordered publication with
+    /// [`Cx::spawn_in`]'s explicit ownership and scope-budget inheritance. The
+    /// scope's pending-spawn counter keeps region close from overlooking the
+    /// requests while they await admission. Every returned handle represents
+    /// exactly one member, including members denied by a closing region or quota.
+    ///
+    /// # Errors
+    ///
+    /// Returns the batch-size and setup errors described by [`Cx::spawn_batch`].
+    /// A scope without its own pending-spawn counter may use this context's
+    /// counter only when both name the same region. Empty input succeeds without
+    /// inspecting either runtime or scope wiring.
+    pub fn spawn_batch_in<I, F, Fut, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        factories: I,
+    ) -> Result<Vec<crate::runtime::TaskHandle<Fut::Output>>, SpawnBatchError>
+    where
+        P: crate::types::Policy,
+        I: IntoIterator<Item = F>,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        self.spawn_batch_in_with_policy(
+            scope,
+            factories,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+        )
+    }
+
+    /// Structured collection keeps cancellation as the member's outer outcome,
+    /// just as repeated `spawn_in_cancellation_dominant` calls do.
+    pub(crate) fn spawn_batch_in_cancellation_dominant<I, F, Fut, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        factories: I,
+    ) -> Result<Vec<crate::runtime::TaskHandle<Fut::Output>>, SpawnBatchError>
+    where
+        P: crate::types::Policy,
+        I: IntoIterator<Item = F>,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        self.spawn_batch_in_with_policy(
+            scope,
+            factories,
+            crate::runtime::task_handle::SpawnCompletionPolicy::CancellationDominant,
+        )
+    }
+
+    fn spawn_batch_in_with_policy<I, F, Fut, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        factories: I,
+        completion_policy: crate::runtime::task_handle::SpawnCompletionPolicy,
+    ) -> Result<Vec<crate::runtime::TaskHandle<Fut::Output>>, SpawnBatchError>
+    where
+        P: crate::types::Policy,
+        I: IntoIterator<Item = F>,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let factories = collect_spawn_batch(factories)?;
+        if factories.is_empty() {
+            return Ok(Vec::new());
+        }
+        let gateway = self
+            .spawn_gateway_handle()
+            .ok_or(crate::runtime::state::SpawnError::RuntimeUnavailable)?;
+        let pending = scope
+            .pending_spawn_counter_handle()
+            .or_else(|| {
+                (scope.region_id() == self.region_id())
+                    .then(|| self.pending_spawn_counter_handle())
+                    .flatten()
+            })
+            .ok_or(crate::runtime::state::SpawnError::RuntimeUnavailable)?;
+        self.spawn_batch_via_gateway(
+            scope.region_id(),
+            scope.budget(),
+            scope.capability_budget(),
+            &gateway,
+            &pending,
+            completion_policy,
+            factories,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_batch_via_gateway<F, Fut>(
+        &self,
+        region: RegionId,
+        budget: Budget,
+        capability_budget: crate::types::CapabilityBudget,
+        gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
+        pending: &Arc<crate::record::region::PendingSpawnCounter>,
+        completion_policy: crate::runtime::task_handle::SpawnCompletionPolicy,
+        factories: Vec<F>,
+    ) -> Result<Vec<crate::runtime::TaskHandle<Fut::Output>>, SpawnBatchError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        if !self.runtime_mask.has(cap::CapMask::SPAWN) {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable.into());
+        }
+        // Pin the publication window once for the entire batch, including the
+        // period when a consumer could already be admitting its first member.
+        let _liveness_guard = gateway
+            .liveness_guard()
+            .ok_or(crate::runtime::state::SpawnError::RuntimeUnavailable)?;
+        let mut requests = Vec::with_capacity(factories.len());
+        let mut handles = Vec::with_capacity(factories.len());
+        for factory in factories {
+            let (request, handle) = self.prepare_spawn_request(
+                region,
+                budget,
+                capability_budget,
+                gateway,
+                pending,
+                completion_policy,
+                None,
+                factory,
+                crate::runtime::task_handle::NoopSpawnTerminalObserver,
+            );
+            requests.push(request);
+            handles.push(handle);
+        }
+        gateway.enqueue_batch_and_notify(requests)?;
+        Ok(handles)
     }
 
     /// Internal structured-member variant of [`Self::spawn_in`].
@@ -5740,9 +6037,6 @@ where
         Fut::Output: Send + 'static,
         Observer: crate::runtime::task_handle::SpawnTerminalObserver<Fut::Output>,
     {
-        use crate::runtime::spawn_mailbox::{AdmittedTaskSlot, SpawnFactoryFn, SpawnRequest};
-        use crate::runtime::task_handle::JoinError;
-
         // Ambient lookup returns a FullCx carrying the narrowed runtime mask.
         // The HasSpawn type bound alone cannot enforce that restriction. Check
         // before allocating a task identity or reserving region admission.
@@ -5753,6 +6047,49 @@ where
         let Some(_liveness_guard) = gateway.liveness_guard() else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
+
+        let (request, handle) = self.prepare_spawn_request(
+            region,
+            budget,
+            capability_budget,
+            gateway,
+            pending,
+            completion_policy,
+            branch_region,
+            f,
+            observer,
+        );
+        gateway.enqueue_and_notify(request)?;
+        Ok(handle)
+    }
+
+    /// Prepares a single member without publishing it or invoking its factory.
+    /// The caller validates capability and runtime liveness, and retains its
+    /// liveness guard until all prepared requests have been published.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_spawn_request<F, Fut, Observer>(
+        &self,
+        region: RegionId,
+        budget: Budget,
+        capability_budget: crate::types::CapabilityBudget,
+        gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
+        pending: &Arc<crate::record::region::PendingSpawnCounter>,
+        completion_policy: crate::runtime::task_handle::SpawnCompletionPolicy,
+        branch_region: Option<Arc<crate::runtime::spawn_mailbox::BranchRegionSlot>>,
+        f: F,
+        observer: Observer,
+    ) -> (
+        crate::runtime::spawn_mailbox::SpawnRequest,
+        crate::runtime::TaskHandle<Fut::Output>,
+    )
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+        Observer: crate::runtime::task_handle::SpawnTerminalObserver<Fut::Output>,
+    {
+        use crate::runtime::spawn_mailbox::{AdmittedTaskSlot, SpawnFactoryFn, SpawnRequest};
+        use crate::runtime::task_handle::JoinError;
 
         let provisional = gateway.mailbox().allocate_task_id();
         // Retirement barrier shared by this task's join handle (via the slot),
@@ -5873,8 +6210,7 @@ where
                 }
             }));
 
-        gateway.enqueue_and_notify(request)?;
-        Ok(handle)
+        (request, handle)
     }
 
     /// The region that admits a spawn into this context's own region once

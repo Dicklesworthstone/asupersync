@@ -2020,6 +2020,410 @@
     }
 
     #[test]
+    fn cx_spawn_batch_publishes_ordered_members_with_one_notification() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let original_gateway = parent_cx.spawn_gateway_handle().unwrap();
+        let liveness = original_gateway.liveness_guard().unwrap();
+        let mailbox = Arc::clone(original_gateway.mailbox());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let notices = Arc::clone(&notifications);
+        let at_notify = Arc::clone(&mailbox);
+        let gateway = Arc::new(SpawnGateway::new(
+            Arc::clone(&mailbox),
+            Arc::new(move || {
+                assert_eq!(at_notify.len(), 4, "all members precede the notification");
+                notices.fetch_add(1, Ordering::SeqCst);
+            }),
+            lab.state.timer_driver_handle(),
+            Arc::downgrade(&liveness),
+        ));
+        let batch_cx = parent_cx.clone().with_spawn_gateway(Some(gateway));
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let factories = (0..4usize).map(|value| {
+            let invoked = Arc::clone(&invoked);
+            move |child: crate::cx::Cx| {
+                invoked.fetch_add(1, Ordering::SeqCst);
+                async move { (value, child.task_id(), child.region_id()) }
+            }
+        });
+        let mut handles = batch_cx.spawn_batch(factories).unwrap();
+        assert_eq!(invoked.load(Ordering::SeqCst), 0, "factories remain lazy");
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        assert_eq!(lab.state.region(root).unwrap().pending_spawn_count(), 4);
+
+        let provisional: Vec<_> = handles.iter().map(|handle| handle.task_id()).collect();
+        assert_eq!(provisional.iter().copied().collect::<HashSet<_>>().len(), 4);
+        assert!(provisional.iter().copied().all(is_spawn_mailbox_id));
+        let traced: Vec<_> = lab
+            .state
+            .trace_handle()
+            .snapshot()
+            .iter()
+            .filter_map(|event| {
+                if event.kind != TraceEventKind::TaskSpawnEnqueued {
+                    return None;
+                }
+                match &event.data {
+                    TraceData::Task { task, region } if *region == root => Some(*task),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(
+            traced, provisional,
+            "one enqueue trace per member, in input order"
+        );
+
+        lab.run_until_quiescent();
+        for (index, handle) in handles.iter_mut().enumerate() {
+            let (value, task_id, region) = poll_join_with_lab(&mut lab, &parent_cx, handle).unwrap();
+            assert_eq!(value, index);
+            assert_eq!(task_id, handle.task_id());
+            assert_eq!(region, root);
+            assert!(!is_spawn_mailbox_id(task_id));
+        }
+        assert_eq!(invoked.load(Ordering::SeqCst), 4);
+        assert_eq!(lab.state.region(root).unwrap().pending_spawn_count(), 0);
+        assert!(mailbox.spawn_requests_are_empty());
+        assert!(batch_cx
+            .spawn_batch(std::iter::empty::<fn(crate::cx::Cx) -> std::future::Ready<()>>())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            notifications.load(Ordering::SeqCst),
+            1,
+            "empty publication never wakes"
+        );
+    }
+
+    #[test]
+    fn cx_spawn_batch_accepts_exact_limit_and_retains_every_result() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let mut handles = parent_cx
+            .spawn_batch((0..crate::cx::MAX_SPAWN_BATCH_SIZE).map(|value| {
+                move |_child| std::future::ready(value)
+            }))
+            .expect("the documented maximum is inclusive");
+        assert_eq!(handles.len(), crate::cx::MAX_SPAWN_BATCH_SIZE);
+        assert_eq!(
+            lab.state.region(root).unwrap().pending_spawn_count() as usize,
+            crate::cx::MAX_SPAWN_BATCH_SIZE,
+        );
+        lab.run_until_quiescent();
+        for (index, handle) in handles.iter_mut().enumerate() {
+            assert_eq!(
+                poll_join_with_lab(&mut lab, &parent_cx, handle).unwrap(),
+                index
+            );
+        }
+        assert_eq!(lab.state.region(root).unwrap().pending_spawn_count(), 0);
+    }
+
+    #[test]
+    fn cx_spawn_batch_in_preserves_scope_ownership_and_capability_budget() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let budget = Budget::new().with_poll_quota(200).with_priority(11);
+        let child_region = lab.state.create_child_region(root, budget).unwrap();
+        let planned = crate::types::CapabilityBudget::new()
+            .with_memory_bytes(2_048)
+            .with_cpu_units(64);
+        let scope: crate::cx::Scope<'static> =
+            crate::cx::Scope::new_with_capability_budget(child_region, budget, planned)
+                .with_pending_spawn_counter(
+                    lab.state
+                        .region(child_region)
+                        .map(crate::record::RegionRecord::pending_spawn_handle),
+                );
+        let mut handles = parent_cx
+            .spawn_batch_in(&scope, (0..3usize).map(|index| {
+                move |child: crate::cx::Cx| async move {
+                    (
+                        index,
+                        child.region_id(),
+                        child.budget().priority,
+                        child.capability_budget(),
+                    )
+                }
+            }))
+            .unwrap();
+        assert_eq!(
+            lab.state.region(child_region).unwrap().pending_spawn_count(),
+            3
+        );
+        assert_eq!(lab.state.region(root).unwrap().pending_spawn_count(), 0);
+        lab.run_until_quiescent();
+        for (index, handle) in handles.iter_mut().enumerate() {
+            assert_eq!(
+                poll_join_with_lab(&mut lab, &parent_cx, handle).unwrap(),
+                (index, child_region, budget.priority, planned),
+            );
+        }
+        assert_eq!(
+            lab.state.region(child_region).unwrap().pending_spawn_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn cx_spawn_batch_quota_denials_are_per_member_and_release_every_credit() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .unwrap();
+        lab.state.region(region).unwrap().set_limits(
+            crate::record::region::RegionLimits {
+                max_tasks: Some(1),
+                ..crate::record::region::RegionLimits::UNLIMITED
+            },
+        );
+        let pending = lab.state.region(region).unwrap().pending_spawn_handle();
+        let scope: crate::cx::Scope<'static> = crate::cx::Scope::new(region, Budget::INFINITE)
+            .with_pending_spawn_counter(Some(Arc::clone(&pending)));
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let mut handles = parent_cx
+            .spawn_batch_in(&scope, (0..3usize).map(|value| {
+                let invoked = Arc::clone(&invoked);
+                move |_child| {
+                    invoked.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(value)
+                }
+            }))
+            .unwrap();
+        assert_eq!(pending.count(), 3);
+        // Lab admission drains the queued requests before any child is polled,
+        // so the first member occupies the single task slot during both denials.
+        lab.run_until_quiescent();
+        assert_eq!(
+            poll_join_with_lab(&mut lab, &parent_cx, &mut handles[0]).unwrap(),
+            0
+        );
+        for handle in &mut handles[1..] {
+            match poll_join_with_lab(&mut lab, &parent_cx, handle) {
+                Err(crate::runtime::JoinError::Cancelled(reason)) => {
+                    assert!(reason
+                        .message
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("ASUP-E006"));
+                }
+                other => panic!("quota denial must resolve only its member: {other:?}"),
+            }
+        }
+        assert_eq!(invoked.load(Ordering::SeqCst), 1, "denied factories never run");
+        assert_eq!(pending.count(), 0);
+        assert_eq!(lab.state.region(region).unwrap().task_count(), 0);
+    }
+
+    #[test]
+    fn cx_spawn_batch_pre_admission_abort_is_individual_and_attributed() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let mut handles = parent_cx
+            .spawn_batch((0..3usize).map(|value| move |_child| std::future::ready(value)))
+            .unwrap();
+        let reason = CancelReason::user("one batch member stopped");
+        handles[1].abort_with_reason(reason.clone());
+        lab.run_until_quiescent();
+        assert_eq!(
+            poll_join_with_lab(&mut lab, &parent_cx, &mut handles[0]).unwrap(),
+            0
+        );
+        match poll_join_with_lab(&mut lab, &parent_cx, &mut handles[1]) {
+            Err(crate::runtime::JoinError::Cancelled(observed)) => {
+                assert_eq!(observed.kind, reason.kind);
+                assert_eq!(observed.message, reason.message);
+            }
+            other => panic!("the aborted member retains task-level cancellation: {other:?}"),
+        }
+        assert_eq!(
+            poll_join_with_lab(&mut lab, &parent_cx, &mut handles[2]).unwrap(),
+            2
+        );
+        assert_eq!(lab.state.region(root).unwrap().pending_spawn_count(), 0);
+    }
+
+    #[test]
+    fn cx_spawn_batch_closing_scope_denies_every_member_without_running_factories() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .unwrap();
+        let pending = lab.state.region(region).unwrap().pending_spawn_handle();
+        let scope: crate::cx::Scope<'static> = crate::cx::Scope::new(region, Budget::INFINITE)
+            .with_pending_spawn_counter(Some(Arc::clone(&pending)));
+        lab.state.region(region).unwrap().begin_close(None);
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let mut handles = parent_cx
+            .spawn_batch_in(&scope, (0..3).map(|_| {
+                let invoked = Arc::clone(&invoked);
+                move |_child| {
+                    invoked.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(())
+                }
+            }))
+            .unwrap();
+        assert_eq!(pending.count(), 3);
+        for handle in &mut handles {
+            match poll_join_with_lab(&mut lab, &parent_cx, handle) {
+                Err(crate::runtime::JoinError::Cancelled(reason)) => {
+                    assert_eq!(reason.kind, CancelKind::ParentCancelled);
+                }
+                other => panic!("closed scope must deny every batch member: {other:?}"),
+            }
+        }
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+        assert_eq!(pending.count(), 0);
+    }
+
+    #[test]
+    fn gateway_batch_runtime_loss_resolves_all_requests_without_notification() {
+        let mailbox = Arc::new(SpawnMailbox::new());
+        let notices = Arc::new(AtomicUsize::new(0));
+        let count_notices = Arc::clone(&notices);
+        let gateway = SpawnGateway::new(
+            Arc::clone(&mailbox),
+            Arc::new(move || {
+                count_notices.fetch_add(1, Ordering::SeqCst);
+            }),
+            None,
+            Weak::new(),
+        );
+        let pending = Arc::new(PendingSpawnCounter::new());
+        let refused = Arc::new(AtomicUsize::new(0));
+        let requests = (0..3)
+            .map(|_| {
+                let id = mailbox.allocate_task_id();
+                let refused = Arc::clone(&refused);
+                SpawnRequest::new(id, test_region(), Budget::INFINITE, noop_task(id))
+                    .with_pending_reservation(pending.reserve())
+                    .with_admission_error_slot(Box::new(move |error| {
+                        assert_eq!(error, SpawnError::RuntimeUnavailable);
+                        refused.fetch_add(1, Ordering::SeqCst);
+                    }))
+            })
+            .collect();
+        assert_eq!(pending.count(), 3);
+        assert_eq!(
+            gateway.enqueue_batch_and_notify(requests),
+            Err(SpawnError::RuntimeUnavailable)
+        );
+        assert_eq!(refused.load(Ordering::SeqCst), 3);
+        assert_eq!(pending.count(), 0);
+        assert_eq!(mailbox.total_enqueued(), 0);
+        assert_eq!(notices.load(Ordering::SeqCst), 0);
+        assert_eq!(gateway.enqueue_batch_and_notify(Vec::new()), Ok(()));
+    }
+
+    #[test]
+    fn cx_spawn_batch_native_round_trip_and_expired_context_refusal() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let retained_cx = runtime.block_on(runtime.handle().spawn(async {
+            let cx = crate::cx::Cx::current().expect("runtime task context");
+            let handles = cx
+                .spawn_batch((0..8usize).map(|index| {
+                    move |child: crate::cx::Cx| async move {
+                        child.checkpoint().expect("child is active");
+                        index * 3
+                    }
+                }))
+                .unwrap();
+            for (index, mut handle) in handles.into_iter().enumerate() {
+                assert_eq!(handle.join(&cx).await.unwrap(), index * 3);
+            }
+            cx
+        }));
+        let mailbox = Arc::clone(retained_cx.spawn_gateway_handle().unwrap().mailbox());
+        let before = mailbox.total_enqueued();
+        drop(runtime);
+        assert!(matches!(
+            retained_cx.spawn_batch((0..3).map(|_| |_child| std::future::ready(()))),
+            Err(crate::cx::SpawnBatchError::Spawn(
+                SpawnError::RuntimeUnavailable
+            ))
+        ));
+        assert_eq!(mailbox.total_enqueued(), before);
+        assert_eq!(retained_cx.pending_spawn_counter_handle().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cx_spawn_batch_native_cancellation_preserves_typed_results_after_async_cleanup() {
+        use crate::channel::oneshot;
+
+        for workers in [1, 2] {
+            let builder = if workers == 1 {
+                crate::runtime::RuntimeBuilder::current_thread()
+            } else {
+                crate::runtime::RuntimeBuilder::new().worker_threads(workers)
+            };
+            let runtime = builder.build().unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = crate::cx::Cx::current().expect("runtime task context");
+                let cleaned = Arc::new(AtomicUsize::new(0));
+                let mut parked_receivers = Vec::new();
+                let mut held_senders = Vec::new();
+                let factories = (0..3).map(|_| {
+                    let (parked_sender, parked_receiver) = oneshot::channel();
+                    let (held_sender, mut held_receiver) = oneshot::channel::<()>();
+                    parked_receivers.push(parked_receiver);
+                    held_senders.push(held_sender);
+                    let cleaned = Arc::clone(&cleaned);
+                    move |child: crate::cx::Cx| async move {
+                        let mut waiting = Box::pin(held_receiver.recv(&child));
+                        std::future::poll_fn(|task_cx| {
+                            assert!(waiting.as_mut().poll(task_cx).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        parked_sender.send_blocking(()).expect("parked witness");
+                        let result = waiting.await;
+                        assert_eq!(result, Err(oneshot::RecvError::Cancelled));
+                        // Ordinary Cx spawning preserves an acknowledged typed
+                        // cancellation result even when cleanup crosses Pending.
+                        crate::runtime::yield_now().await;
+                        cleaned.fetch_add(1, Ordering::SeqCst);
+                        result
+                    }
+                });
+                let mut handles = cx.spawn_batch(factories).unwrap();
+                for mut receiver in parked_receivers {
+                    receiver.recv(&cx).await.expect("member reached Pending");
+                }
+                assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+                for (index, sender) in held_senders.iter().enumerate() {
+                    assert_eq!(sender.telemetry_snapshot(index as u64).recv_waiter_count, 1);
+                }
+                for handle in &handles {
+                    handle.abort_with_reason(CancelReason::user("cancel batch member"));
+                }
+                for handle in &mut handles {
+                    assert_eq!(
+                        handle.join(&cx).await,
+                        Ok(Err(oneshot::RecvError::Cancelled)),
+                        "ordinary batch members retain typed operation cancellation",
+                    );
+                }
+                assert_eq!(cleaned.load(Ordering::SeqCst), 3);
+                for (index, sender) in held_senders.iter().enumerate() {
+                    let snapshot = sender.telemetry_snapshot(index as u64);
+                    assert!(sender.is_closed(), "receiver retired before join completed");
+                    assert_eq!(snapshot.recv_waiter_count, 0);
+                    assert_eq!(snapshot.send_waiter_count, 0);
+                    assert_eq!(snapshot.reserved_uncommitted_obligations, 0);
+                    assert!(snapshot.cancellation_count > 0);
+                }
+            }));
+            let drained = runtime.shutdown_drained(std::time::Duration::from_secs(2));
+            assert_eq!(drained.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+            assert_eq!(drained.live_tasks, 0);
+            assert_eq!(drained.pending_spawns, 0);
+            assert_eq!(drained.pending_obligations, 0);
+        }
+    }
+
+    #[test]
     fn cx_spawn_synchronous_factory_panic_resolves_join_panicked() {
         let (mut lab, parent_cx, _root) = lab_with_parent_cx();
         let mut handle = parent_cx

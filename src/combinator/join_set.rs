@@ -27,7 +27,8 @@
 //!
 //! The API covers the common server patterns: [`JoinSet::in_cx`] for the
 //! current region, [`JoinSet::new`] for an explicit scope, [`JoinSet::spawn`]
-//! and [`JoinSet::spawn_local`] for member admission, [`JoinSet::join_next`]
+//! and [`JoinSet::spawn_all`] for member admission, [`JoinSet::spawn_local`]
+//! for thread-pinned members, [`JoinSet::join_next`]
 //! for completion-order collection, [`JoinSet::join_all`] for spawn-order
 //! collection, [`JoinSet::cancel_all`] for explicit drain after cancellation,
 //! [`JoinSet::summary`] for severity aggregation, structured
@@ -203,6 +204,51 @@ where
         let handle = cx.spawn_in_cancellation_dominant(&self.scope, f)?;
         let (member_index, task_id) = self.insert_member(handle);
         self.trace_member_spawn(cx, member_index, task_id, "send");
+        Ok(())
+    }
+
+    /// Spawns a bounded batch of members into the set's region.
+    ///
+    /// Factories are submitted in input order, with one gateway notification
+    /// for a non-empty batch. Each member keeps its own task identity,
+    /// admission result, cancellation state, and pending-spawn reservation.
+    /// This does not change scheduler fairness or make admission atomic:
+    /// workers can admit a prefix while later requests are being queued.
+    ///
+    /// The set takes ownership of every returned handle in input order, after
+    /// any existing members. [`Self::join_all`] preserves that order, while
+    /// [`Self::join_next`] retains its ordinary completion-order behavior.
+    /// Each factory receives its own child [`Cx`]. As with [`Self::spawn`],
+    /// cancellation remains the member's outer outcome even if its future
+    /// returns a value after acknowledging cancellation during cleanup.
+    ///
+    /// An empty iterator succeeds without requiring runtime wiring. At most
+    /// [`crate::cx::MAX_SPAWN_BATCH_SIZE`] factories may be submitted in one
+    /// call; use several calls for larger inputs. The iterator is consumed only
+    /// through the first excess member when checking that limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::cx::SpawnBatchError`] if the batch is too large or the
+    /// spawn gateway is unavailable. A setup error publishes no requests and
+    /// leaves the set's existing members unchanged. Subsequent region or quota
+    /// denials are per-member [`Outcome::Cancelled`] results, collected and
+    /// drained through the same methods as individually spawned members.
+    pub fn spawn_all<I, F, Fut>(
+        &mut self,
+        cx: &Cx,
+        factories: I,
+    ) -> Result<(), crate::cx::SpawnBatchError>
+    where
+        I: IntoIterator<Item = F>,
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        let handles = cx.spawn_batch_in_cancellation_dominant(&self.scope, factories)?;
+        for handle in handles {
+            let (member_index, task_id) = self.insert_member(handle);
+            self.trace_member_spawn(cx, member_index, task_id, "send");
+        }
         Ok(())
     }
 
