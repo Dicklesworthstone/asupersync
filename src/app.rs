@@ -42,6 +42,12 @@ pub use managed_execution::{
     ManagedAppTree, ManagedAppTreeHandle, ManagedAppTreeReport, ManagedAppWorkError,
 };
 
+mod resources;
+pub use resources::{
+    ManagedAppResourceBinding, ManagedAppResourceError, ManagedAppResourceRequirement,
+    ManagedAppResources,
+};
+
 /// Executing bindings for the declarative manifest, separate from the legacy
 /// state-threaded lowering so existing application contracts remain intact.
 mod managed_execution {
@@ -50,6 +56,11 @@ mod managed_execution {
         AppRequiredCapabilitiesV1, AppRouteMethodV1, AppSpecV1, AppSpecV1CompileError,
         AppSpecV1WorkUnitKind, BTreeMap, BTreeSet, Budget, CancelKind, CancelReason, ChildSpec, Cx,
         RegistryHandle, RuntimeState, SupervisorBuilder, runtime_restart_policy,
+    };
+    use super::resources::ResourceCatalog;
+    use super::{
+        ManagedAppResourceBinding, ManagedAppResourceError, ManagedAppResourceRequirement,
+        ManagedAppResources,
     };
     use crate::channel::mpsc;
     use crate::cx::{ChildRegion, ChildRegionSpec, cap};
@@ -136,6 +147,63 @@ mod managed_execution {
             Arc<dyn ManagedChildFactory<E>>,
             Option<SignalBinding>,
         ),
+        ResourceRoute {
+            requirements: Vec<ManagedAppResourceRequirement>,
+            handler: Arc<ResourceRouteFn>,
+        },
+        ResourceWorker {
+            mode: ManagedRestartMode,
+            requirements: Vec<ManagedAppResourceRequirement>,
+            factory: Arc<ResourceWorkerFn<E>>,
+            signal: Option<SignalBinding>,
+        },
+    }
+
+    type ResourceRouteFn = dyn Fn(Cx, Request, ManagedAppResources)
+        -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> + Send + Sync;
+    type ResourceWorkerFn<E> = dyn Fn(Cx, ManagedGeneration, ManagedAppResources)
+        -> crate::supervision::ManagedChildFuture<E> + Send + Sync;
+
+    struct ResourceRoute {
+        handler: Arc<ResourceRouteFn>,
+        resources: ManagedAppResources,
+    }
+
+    impl Handler for ResourceRoute {
+        fn call(
+            &self,
+            cx: &Cx,
+            request: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            (self.handler)(cx.clone(), request, self.resources.clone())
+        }
+    }
+
+    impl<E: Send + 'static> BindingKind<E> {
+        fn resource_requirements(&self) -> &[ManagedAppResourceRequirement] {
+            match self {
+                Self::ResourceRoute { requirements, .. }
+                | Self::ResourceWorker { requirements, .. } => requirements,
+                Self::Route(_) | Self::Worker(..) => &[],
+            }
+        }
+
+        fn bind_resources(self, resources: ManagedAppResources) -> Self {
+            match self {
+                Self::ResourceRoute { handler, .. } => Self::Route(Arc::new(ResourceRoute {
+                    handler,
+                    resources,
+                })),
+                Self::ResourceWorker { mode, factory, signal, .. } => Self::Worker(
+                    mode,
+                    Arc::new(move |cx, generation| {
+                        factory(cx, generation, resources.clone())
+                    }),
+                    signal,
+                ),
+                plain => plain,
+            }
+        }
     }
 
     /// Explicit Rust implementation of one manifest work-unit name.
@@ -168,6 +236,94 @@ mod managed_execution {
             Self {
                 name: name.into(),
                 kind: BindingKind::Worker(mode, Arc::new(factory), None),
+            }
+        }
+
+        /// Bind a route to its manifest-scoped typed resource view.
+        ///
+        /// Supply one type requirement for every resource named by the route
+        /// or its service. Binding checks the complete view before any work is
+        /// admitted. The handler receives the same restricted invocation `Cx`
+        /// as ordinary managed routes; handles do not grant missing drivers.
+        #[must_use]
+        pub fn route_with_resources<F, Fut>(
+            name: impl Into<String>,
+            requirements: Vec<ManagedAppResourceRequirement>,
+            handler: F,
+        ) -> Self
+        where
+            F: Fn(Cx, Request, ManagedAppResources) -> Fut + Send + Sync + 'static,
+            Fut: Future<Output = Response> + Send + 'static,
+        {
+            Self {
+                name: name.into(),
+                kind: BindingKind::ResourceRoute {
+                    requirements,
+                    handler: Arc::new(move |cx, request, resources| {
+                        Box::pin(handler(cx, request, resources))
+                    }),
+                },
+            }
+        }
+
+        /// Bind an actor or startup/interval job to real named resources.
+        ///
+        /// The view is physically limited to the service/entry-point resource
+        /// union. Its handles remain shared across supervised generations.
+        /// Per-invocation budgets, authority and drain behavior are unchanged.
+        #[must_use]
+        pub fn worker_with_resources<F, Fut>(
+            name: impl Into<String>,
+            mode: ManagedRestartMode,
+            requirements: Vec<ManagedAppResourceRequirement>,
+            factory: F,
+        ) -> Self
+        where
+            F: Fn(Cx, ManagedGeneration, ManagedAppResources) -> Fut + Send + Sync + 'static,
+            Fut: Future<Output = Outcome<(), E>> + Send + 'static,
+        {
+            Self {
+                name: name.into(),
+                kind: BindingKind::ResourceWorker {
+                    mode,
+                    requirements,
+                    factory: Arc::new(move |cx, generation, resources| {
+                        Box::pin(factory(cx, generation, resources))
+                    }),
+                    signal: None,
+                },
+            }
+        }
+
+        /// Bind a serial signalled job to both a bounded signal channel and
+        /// its manifest-scoped typed resources. Signal consumption and drain
+        /// semantics match [`Self::signal_worker`].
+        #[must_use]
+        pub fn signal_worker_with_resources<F, Fut>(
+            name: impl Into<String>,
+            source: impl Into<String>,
+            receiver: mpsc::Receiver<()>,
+            mode: ManagedRestartMode,
+            requirements: Vec<ManagedAppResourceRequirement>,
+            factory: F,
+        ) -> Self
+        where
+            F: Fn(Cx, ManagedGeneration, ManagedAppResources) -> Fut + Send + Sync + 'static,
+            Fut: Future<Output = Outcome<(), E>> + Send + 'static,
+        {
+            Self {
+                name: name.into(),
+                kind: BindingKind::ResourceWorker {
+                    mode,
+                    requirements,
+                    factory: Arc::new(move |cx, generation, resources| {
+                        Box::pin(factory(cx, generation, resources))
+                    }),
+                    signal: Some(SignalBinding {
+                        source: source.into(),
+                        receiver: Arc::new(Mutex::new(Some(receiver))),
+                    }),
+                },
             }
         }
 
@@ -228,6 +384,8 @@ mod managed_execution {
         Unexpected(String),
         /// A route received a worker binding, or a worker received a handler.
         KindMismatch(String),
+        /// A named resource, typed requirement, or scoped view is invalid.
+        Resource(ManagedAppResourceError),
         /// A declared group has no explicit supervision configuration.
         MissingGroupConfig(String),
         /// A supervision configuration names no declared group.
@@ -434,6 +592,7 @@ mod managed_execution {
         interval: Option<Duration>,
         signal: Option<SignalReceiver>,
         cleanup: WorkCleanup,
+        resource_capabilities: Vec<AppCxCapabilityV1>,
     }
 
     impl WorkPolicy {
@@ -453,13 +612,16 @@ mod managed_execution {
                     AppCxCapabilityV1::Blocking => {
                         caps.spawn && cx.blocking_pool_handle().is_some()
                     }
-                    // These families need resource-specific binding adapters;
-                    // accepting their metadata alone would grant no resource.
+                    // These families have no generic Cx driver bit. Only an
+                    // explicitly supplied, kind-matched named handle admits
+                    // them. Independent Io/Time/Spawn/etc checks still apply.
                     AppCxCapabilityV1::Database
                     | AppCxCapabilityV1::Messaging
                     | AppCxCapabilityV1::Tls
                     | AppCxCapabilityV1::Quic
-                    | AppCxCapabilityV1::BrowserHost => false,
+                    | AppCxCapabilityV1::BrowserHost => {
+                        self.resource_capabilities.contains(capability)
+                    }
                 };
                 if !present {
                     return Err(ManagedAppBindError::Capability {
@@ -833,8 +995,8 @@ mod managed_execution {
     /// ungated diagnostic capability, as on other restricted Cx values.
     ///
     /// Signal jobs require `ManagedAppBinding::signal_worker` with the exact
-    /// declared source name. External named resources, SLO adapters, and
-    /// observability sink adapters still require further bindings.
+    /// declared source name. Named resources require the explicit typed
+    /// resource entry point; SLO and observability adapters remain unsupported.
     /// The legacy `compile_with_child_specs` and `CompiledApp::start` are unchanged.
     pub struct ManagedApp<E> {
         template: AppGroupTemplate<E>,
@@ -973,8 +1135,9 @@ mod managed_execution {
     /// old generations fully drain before replacement publishes those routes.
     /// Budgets and capabilities are checked for every work unit before start.
     ///
-    /// Named resources, SLO and observability adapters retain their existing
-    /// explicit refusals. Use [`AppSpecV1::bind_managed_groups`] to prepare it.
+    /// Named resources require [`AppSpecV1::bind_managed_groups_with_resources`].
+    /// SLO and observability adapters retain their explicit refusals.
+    /// Use [`AppSpecV1::bind_managed_groups`] for groups without resources.
     pub struct ManagedAppTree<E> {
         app: ManagedApp<E>,
         reports: GroupReports<E>,
@@ -1093,7 +1256,32 @@ mod managed_execution {
             config: SupervisionConfig,
         ) -> Result<ManagedApp<E>, ManagedAppBindError> {
             let configs = BTreeMap::from([(self.supervision.root_group.clone(), config)]);
-            Ok(self.bind_managed_impl(bindings, configs, false)?.app)
+            Ok(self.bind_managed_impl(bindings, configs, false, None)?.app)
+        }
+
+        /// Bind a single group with explicit typed, caller-owned resources.
+        ///
+        /// Supply exactly one resource binding per manifest declaration. Each
+        /// resource-aware work binding must list the Rust types for the union
+        /// of its service-level and entry-point resource names. Each resource's
+        /// capability must also be explicitly declared by that entry point;
+        /// service resource inheritance never grants additional Cx authority.
+        /// Missing handles, wrong types and incompatible declarations fail
+        /// before any factory runs. Resource feature flags are checked too.
+        ///
+        /// Values are shared handles, not automatically initialized or shut
+        /// down pools. Retained routers, factories and cloned resource views
+        /// can keep those handles alive after application join.
+        pub fn bind_managed_with_resources<E: Send + 'static>(
+            self,
+            bindings: Vec<ManagedAppBinding<E>>,
+            resources: Vec<ManagedAppResourceBinding>,
+            config: SupervisionConfig,
+        ) -> Result<ManagedApp<E>, ManagedAppBindError> {
+            let configs = BTreeMap::from([(self.supervision.root_group.clone(), config)]);
+            Ok(self
+                .bind_managed_impl(bindings, configs, false, Some(resources))?
+                .app)
         }
 
         /// Bind every manifest group through the explicit hierarchy documented
@@ -1107,7 +1295,21 @@ mod managed_execution {
             bindings: Vec<ManagedAppBinding<E>>,
             configs: BTreeMap<String, SupervisionConfig>,
         ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
-            self.bind_managed_impl(bindings, configs, true)
+            self.bind_managed_impl(bindings, configs, true, None)
+        }
+
+        /// Bind every group with the typed resource contract of
+        /// [`Self::bind_managed_with_resources`]. Handles remain shared across
+        /// supervised replacements; views contain only each work unit's
+        /// physically selected allowlist. All preflight checks finish before
+        /// admitting the root controller.
+        pub fn bind_managed_groups_with_resources<E: Send + 'static>(
+            self,
+            bindings: Vec<ManagedAppBinding<E>>,
+            resources: Vec<ManagedAppResourceBinding>,
+            configs: BTreeMap<String, SupervisionConfig>,
+        ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
+            self.bind_managed_impl(bindings, configs, true, Some(resources))
         }
 
         #[allow(clippy::too_many_lines)]
@@ -1116,8 +1318,30 @@ mod managed_execution {
             bindings: Vec<ManagedAppBinding<E>>,
             mut configs: BTreeMap<String, SupervisionConfig>,
             grouped: bool,
+            resources: Option<Vec<ManagedAppResourceBinding>>,
         ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
             let plan = self.compiler_plan().map_err(ManagedAppBindError::Compile)?;
+            let resource_catalog = resources
+                .map(|bindings| ResourceCatalog::bind(&self.resources, bindings))
+                .transpose()
+                .map_err(ManagedAppBindError::Resource)?;
+            if resource_catalog.is_some() {
+                for resource in &self.resources {
+                    if let Some(feature) = &resource.feature_flag
+                        && !feature_enabled(feature)
+                    {
+                        return Err(ManagedAppBindError::Feature {
+                            unit: format!("resource:{}", resource.name),
+                            feature: feature.clone(),
+                        });
+                    }
+                }
+            }
+            let service_resources: BTreeMap<_, _> = self
+                .services
+                .iter()
+                .map(|service| (service.name.clone(), service.resources.clone()))
+                .collect();
             if (!grouped && plan.service_groups.len() != 1)
                 || !plan.observability_sinks.is_empty()
             {
@@ -1194,12 +1418,39 @@ mod managed_execution {
                 let kind = supplied
                     .remove(&child.name)
                     .ok_or_else(|| ManagedAppBindError::Missing(child.name.clone()))?;
-                if child.slo_hook.is_some() || !child.required_capabilities.resources.is_empty() {
+                if child.slo_hook.is_some() {
                     return Err(ManagedAppBindError::Unsupported {
                         unit: child.name,
-                        reason: "SLO hooks and external resource names need explicit runtime adapters",
+                        reason: "SLO hooks need an explicit runtime adapter",
                     });
                 }
+                let resource_view = if let Some(catalog) = &resource_catalog {
+                    let mut names: BTreeSet<_> =
+                        child.required_capabilities.resources.iter().cloned().collect();
+                    if let Some(inherited) = service_resources.get(&child.service) {
+                        names.extend(inherited.iter().cloned());
+                    }
+                    catalog
+                        .for_work(
+                            &child.name,
+                            &names,
+                            kind.resource_requirements(),
+                            &child.required_capabilities.cx_capabilities,
+                        )
+                        .map_err(ManagedAppBindError::Resource)?
+                } else {
+                    if !child.required_capabilities.resources.is_empty()
+                        || !kind.resource_requirements().is_empty()
+                    {
+                        return Err(ManagedAppBindError::Unsupported {
+                            unit: child.name,
+                            reason: "named resources require an explicit typed resource binding",
+                        });
+                    }
+                    ManagedAppResources::default()
+                };
+                let resource_capabilities = resource_view.capabilities();
+                let kind = kind.bind_resources(resource_view);
                 for feature in &child.required_capabilities.feature_flags {
                     if !feature_enabled(feature) {
                         return Err(ManagedAppBindError::Feature {
@@ -1211,6 +1462,9 @@ mod managed_execution {
                 let supplied_signal = match &kind {
                     BindingKind::Worker(_, _, signal) => signal.as_ref(),
                     BindingKind::Route(_) => None,
+                    BindingKind::ResourceRoute { .. } | BindingKind::ResourceWorker { .. } => {
+                        unreachable!("typed resource adapters have been bound")
+                    }
                 };
                 let interval = match &child.trigger {
                     None | Some(AppJobTriggerV1::Startup) => None,
@@ -1271,6 +1525,7 @@ mod managed_execution {
                     interval,
                     signal,
                     cleanup: Arc::new(Mutex::new(None)),
+                    resource_capabilities,
                 });
                 let template = templates
                     .get_mut(&child.group)
