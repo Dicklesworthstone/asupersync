@@ -2637,6 +2637,7 @@ impl BrowserRuntimeBuilder {
 #[derive(Clone)]
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
+    required_spawn_authorization: Option<crate::security::key::AuthKey>,
     scoped_cpu_worker_limit: Option<usize>,
     reactor: Option<Arc<dyn Reactor>>,
     io_driver: Option<IoDriverHandle>,
@@ -2678,6 +2679,7 @@ impl RuntimeBuilder {
         config.blocking.max_threads = DEFAULT_BLOCKING_MAX_THREADS;
         Self {
             config,
+            required_spawn_authorization: None,
             scoped_cpu_worker_limit: None,
             reactor: None,
             io_driver: None,
@@ -3075,12 +3077,53 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Require a valid capability macaroon for caller-originated task spawns.
+    ///
+    /// This opt-in policy checks `Cx::spawn*`, structured scope spawns, local
+    /// spawns and batches before reserving or publishing work, then checks
+    /// again when queued work is admitted. An attached token must have the
+    /// identifier `spawn:region_{id}`, where `id` is the requested region's
+    /// `as_u64()`. Children inherit that token; entering a different region
+    /// requires authority for that region. A race's private branch region,
+    /// including nested work, retains its nearest unsealed parent's authority
+    /// target; it is not a new user-visible permission boundary.
+    ///
+    /// Caveats observe the runtime clock, authority target and submitting task
+    /// identity. `ResourceScope` sees `regions/{id}/spawn`; custom predicates
+    /// can bind `operation=spawn`, `poll_quota`, `priority`, `cost_quota`
+    /// (`unlimited` if absent), and `deadline_ms` when finite. Max-use, rate,
+    /// unknown custom and third-party caveats lack authority here and fail
+    /// closed. This is admission authorization, not token-use accounting or
+    /// revocation of tasks already admitted.
+    /// Times use runtime-clock milliseconds, not Unix time. Region and task
+    /// IDs are runtime-local: use distinct keys for independent runtime
+    /// authority domains.
+    ///
+    /// Runtime/handle task-spawn methods have no caller token and are refused
+    /// in this mode; use an authorized request `Cx` instead. The unchecked
+    /// handle methods keep their documented panic-on-refusal behavior.
+    /// `block_on` root accounting and actual finalizers remain internal
+    /// infrastructure. Raw `RuntimeState`, directly held blocking-pool handles
+    /// and legacy unstructured blocking APIs remain host authority, outside
+    /// this task-admission policy. Cx-owned blocking tasks pass this check
+    /// before their job can execute.
+    ///
+    /// The legacy [`Self::with_spawn_authorization_key`] setting is independent
+    /// and keeps its existing scope. [`Self::disable_spawn_authorization`]
+    /// clears both settings; the last call to this method selects the strict key.
+    #[must_use]
+    pub fn require_spawn_authorization(mut self, key: crate::security::key::AuthKey) -> Self {
+        self.required_spawn_authorization = Some(key);
+        self
+    }
+
     /// Disable spawn authorization (fail-open for testing).
     ///
     /// This explicitly disables spawn authorization even if it was previously enabled.
     #[must_use]
     pub fn disable_spawn_authorization(mut self) -> Self {
         self.config.security.spawn_authorization_key = None;
+        self.required_spawn_authorization = None;
         self
     }
 
@@ -3396,6 +3439,7 @@ impl RuntimeBuilder {
     pub fn build(self) -> Result<Runtime, Error> {
         let Self {
             config,
+            required_spawn_authorization,
             scoped_cpu_worker_limit,
             reactor,
             io_driver,
@@ -3469,6 +3513,7 @@ impl RuntimeBuilder {
             host_services.as_ref(),
             current_thread,
             scheduler_evidence_sink,
+            required_spawn_authorization,
         )?;
         if capture_schedules {
             let trace = runtime
@@ -4086,6 +4131,7 @@ impl Runtime {
             host_services,
             false,
             None,
+            None,
         )
     }
 
@@ -4103,6 +4149,7 @@ impl Runtime {
         host_services: &dyn RuntimeHostServices,
         current_thread: bool,
         scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
+        required_spawn_authorization: Option<crate::security::key::AuthKey>,
     ) -> Result<Self, Error> {
         config.normalize();
         if let Some(monitor) = config.deadline_monitor.as_mut()
@@ -4143,6 +4190,7 @@ impl Runtime {
                 host_services,
                 scheduler_evidence_sink,
             );
+            inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
             if let Some(pump) = host_services.browser_pump() {
                 let _ = inner.browser_pump.set(pump);
@@ -4165,6 +4213,7 @@ impl Runtime {
                 host_services,
                 scheduler_evidence_sink,
             );
+            inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
             if let Some(pump) = host_services.browser_pump() {
                 let _ = inner.browser_pump.set(pump);
@@ -5651,6 +5700,8 @@ impl RuntimeShutdownCompletion {
 
 struct RuntimeInner {
     config: RuntimeConfig,
+    /// Refuses tokenless runtime-handle task producers in explicit strict mode.
+    required_spawn_authorization: std::sync::OnceLock<()>,
     state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
     /// Sharded backing whose Arc-shared shard A the scheduler dispatches
     /// against when `RuntimeStateShape::Sharded` is selected (E1.2
@@ -5960,6 +6011,31 @@ impl Drop for CallerTaskRegistration {
 }
 
 impl RuntimeInner {
+    /// Must run before creating any RuntimeHandle or starting host workers:
+    /// on_thread_start callbacks receive an ambient handle immediately.
+    fn install_required_spawn_authorization(&self, key: Option<crate::security::key::AuthKey>) {
+        if let Some(key) = key {
+            let gateway = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .spawn_gateway()
+                .expect("constructed runtime has a spawn gateway");
+            gateway.require_spawn_authorization(key);
+            assert!(self.required_spawn_authorization.set(()).is_ok());
+        }
+    }
+
+    fn check_unscoped_spawn_authority(&self) -> Result<(), SpawnError> {
+        if self.required_spawn_authorization.get().is_some() {
+            return Err(SpawnError::AuthorizationDenied {
+                region: self.root_region,
+                cx_id: "runtime handle without caller capability".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Starts the resource sampler; from then on every task context the
     /// runtime builds carries its pressure (asupersync-1ir2em). A sampler that
     /// cannot start leaves `Cx::pressure()` unset instead of frozen.
@@ -6355,6 +6431,7 @@ impl RuntimeInner {
         (
             Self {
                 config,
+                required_spawn_authorization: std::sync::OnceLock::new(),
                 state,
                 sharded_state,
                 scheduler,
@@ -6429,6 +6506,7 @@ impl RuntimeInner {
         F: Future + 'static,
         F::Output: 'static,
     {
+        self.check_unscoped_spawn_authority()?;
         let spawn_guard = self.spawn_liveness_guard()?;
         // A `!Send` request parks on the calling thread's lane and is only
         // admitted by a worker driving that thread. The browser pump drives
@@ -6507,6 +6585,7 @@ impl RuntimeInner {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        self.check_unscoped_spawn_authority()?;
         let spawn_guard = self.spawn_liveness_guard()?;
         let join_state = Arc::new(Mutex::new(JoinState::new()));
         let task_producer = JoinProducer::new(Arc::clone(&join_state));
@@ -6621,6 +6700,7 @@ impl RuntimeInner {
         use crate::runtime::StoredTask;
         use crate::types::Outcome;
 
+        self.check_unscoped_spawn_authority()?;
         let spawn_guard = self.spawn_liveness_guard()?;
         let dispatch_table = self.scheduler.dispatch_task_table();
         let (task_id, spawn_effects) = {
@@ -7600,3 +7680,7 @@ mod root_budget_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "builder_request_deadline_tests.rs"]
 mod request_deadline_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "builder_spawn_authorization_tests.rs"]
+mod spawn_authorization_tests;

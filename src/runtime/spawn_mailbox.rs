@@ -302,6 +302,9 @@ pub struct AdmittedTaskSlot {
     /// carries them. Private for the same reason as `runtime_mask`
     /// (br-asupersync-93zkbz).
     inherited: Mutex<Option<crate::cx::cx::InheritedHandles>>,
+    /// Immutable submitting identity and token, checked again at admission.
+    /// Public callers cannot forge an internal root/finalizer exemption.
+    spawn_authority: Option<SpawnAuthority>,
 }
 
 struct SpawnEffectHandoff {
@@ -334,6 +337,7 @@ impl AdmittedTaskSlot {
             spawn_fallback: None,
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
             inherited: Mutex::new(None),
+            spawn_authority: None,
         }
     }
 
@@ -352,6 +356,7 @@ impl AdmittedTaskSlot {
             spawn_fallback: None,
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
             inherited: Mutex::new(None),
+            spawn_authority: None,
         }
     }
 
@@ -369,6 +374,15 @@ impl AdmittedTaskSlot {
 
     pub(crate) fn caller_owned_poll_quota(&self) -> bool {
         self.caller_owned_poll_quota
+    }
+
+    pub(crate) fn with_spawn_authority(mut self, authority: Option<SpawnAuthority>) -> Self {
+        self.spawn_authority = authority;
+        self
+    }
+
+    pub(crate) fn spawn_authority(&self) -> Option<&SpawnAuthority> {
+        self.spawn_authority.as_ref()
     }
 
     /// Requests that admission run this task in a fresh sealed child region
@@ -2208,6 +2222,23 @@ pub struct SpawnGateway {
     /// GenServer replies record their resolution here for the lab's
     /// reply-linearity oracle (br-asupersync-52hxjz). Only the lab sets it.
     reply_history: Option<crate::runtime::state::ReplyHistoryHandle>,
+    /// Installed once by the explicit strict builder, before exposing runtime.
+    required_spawn_key: OnceLock<crate::security::key::AuthKey>,
+}
+
+/// Only crate-owned spawn producers can attach this immutable caller proof.
+pub(crate) struct SpawnAuthority {
+    caller: TaskId,
+    token: Option<Arc<crate::cx::macaroon::MacaroonToken>>,
+}
+
+impl SpawnAuthority {
+    pub(crate) fn new(
+        caller: TaskId,
+        token: Option<Arc<crate::cx::macaroon::MacaroonToken>>,
+    ) -> Self {
+        Self { caller, token }
+    }
 }
 
 impl SpawnGateway {
@@ -2231,7 +2262,87 @@ impl SpawnGateway {
             )),
             supervision_history: None,
             reply_history: None,
+            required_spawn_key: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn require_spawn_authorization(&self, key: crate::security::key::AuthKey) {
+        assert!(
+            self.required_spawn_key.set(key).is_ok(),
+            "spawn authorization must be installed only once before runtime exposure"
+        );
+    }
+
+    pub(crate) fn spawn_authorization_required(&self) -> bool {
+        self.required_spawn_key.get().is_some()
+    }
+
+    pub(crate) fn capture_spawn_authority<Caps>(
+        &self,
+        cx: &crate::cx::Cx<Caps>,
+    ) -> Option<SpawnAuthority> {
+        self.required_spawn_key
+            .get()
+            .map(|_| cx.spawn_authority_snapshot())
+    }
+
+    pub(crate) fn verify_spawn_cx<Caps>(
+        &self,
+        cx: &crate::cx::Cx<Caps>,
+        region: RegionId,
+        budget: Budget,
+    ) -> Result<(), SpawnError> {
+        if !self.spawn_authorization_required() {
+            return Ok(());
+        }
+        let authority = self.capture_spawn_authority(cx);
+        // Sealed race regions are private ownership machinery. They retain
+        // their nearest unsealed authority target, never widening an ordinary
+        // user-created child region. Admission re-derives this from its table.
+        let authority_region = cx.spawn_fallback_for(region).unwrap_or(region);
+        self.verify_spawn_authority(authority.as_ref(), authority_region, budget)
+    }
+
+    /// Verification performs no user callbacks and is safe at the admission
+    /// lock boundary. Time is sampled again here, never trusted from enqueue.
+    pub(crate) fn verify_spawn_authority(
+        &self,
+        authority: Option<&SpawnAuthority>,
+        region: RegionId,
+        budget: Budget,
+    ) -> Result<(), SpawnError> {
+        let Some(key) = self.required_spawn_key.get() else {
+            return Ok(());
+        };
+        let denied = || SpawnError::AuthorizationDenied {
+            region,
+            cx_id: authority.map_or_else(
+                || "missing caller capability".to_owned(),
+                |authority| format!("{:?}", authority.caller),
+            ),
+        };
+        let authority = authority.ok_or_else(denied)?;
+        let token = authority.token.as_ref().ok_or_else(denied)?;
+        let mut context = crate::cx::macaroon::VerificationContext::new()
+            .with_region(region.as_u64())
+            .with_task(authority.caller.as_u64())
+            .with_resource(format!("regions/{}/spawn", region.as_u64()))
+            .with_custom("operation", "spawn")
+            .with_custom("poll_quota", budget.poll_quota.to_string())
+            .with_custom("priority", budget.priority.to_string())
+            .with_custom(
+                "cost_quota",
+                budget
+                    .cost_quota
+                    .map_or_else(|| "unlimited".to_owned(), |cost| cost.to_string()),
+            );
+        context.current_time_ms = self.clock.as_ref().map(|clock| clock.now().as_millis());
+        if let Some(deadline) = budget.deadline {
+            context = context.with_custom("deadline_ms", deadline.as_millis().to_string());
+        }
+        token
+            .verify_for_identifier(key, &format!("spawn:region_{}", region.as_u64()), &context)
+            .map_err(|_| denied())
     }
 
     /// Hands managed supervisors a history for the lab's supervision oracle

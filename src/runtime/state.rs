@@ -4853,6 +4853,20 @@ impl RuntimeState {
         format!("spawn:region_{}", region.as_u64())
     }
 
+    /// Strict native policy is independent of the legacy state-owned key.
+    /// A raw RuntimeState remains a host-authority API; only an explicitly
+    /// configured runtime gateway enables this additional admission check.
+    pub(crate) fn verify_required_spawn_authorization<Caps>(
+        &self,
+        caller: &crate::cx::Cx<Caps>,
+        region: RegionId,
+        budget: Budget,
+    ) -> Result<(), SpawnError> {
+        self.spawn_gateway.as_ref().map_or(Ok(()), |gateway| {
+            gateway.verify_spawn_cx(caller, region, budget)
+        })
+    }
+
     fn verify_spawn_authorization(
         &self,
         caller_cx: &crate::cx::Cx,
@@ -5346,6 +5360,19 @@ impl RuntimeState {
         }
         parts.region =
             self.spawn_target_region(parts.region, parts.admitted_slot.as_deref(), regions);
+        if let Some(gateway) = self.spawn_gateway.as_ref()
+            && gateway.spawn_authorization_required()
+            && let Err(error) = gateway.verify_spawn_authority(
+                parts
+                    .admitted_slot
+                    .as_deref()
+                    .and_then(crate::runtime::spawn_mailbox::AdmittedTaskSlot::spawn_authority),
+                self.spawn_authorization_region(parts.region, regions),
+                parts.budget,
+            )
+        {
+            return SpawnAdmission::Denied { parts, error };
+        }
         let budget = parts.budget;
         let branch = self.mint_branch_region_in(&parts, regions);
         if let Some((child, _)) = &branch {
@@ -5402,6 +5429,20 @@ impl RuntimeState {
             .get(requested.arena_index())
             .is_none_or(|record| record.state() == crate::record::region::RegionState::Closed);
         if closed { fallback } else { requested }
+    }
+
+    /// Only the runtime's sealed race regions share their unsealed parent's
+    /// authorization target. Read the authoritative record, not token input.
+    fn spawn_authorization_region(
+        &self,
+        requested: RegionId,
+        regions: &AdmissionRegionTarget<'_>,
+    ) -> RegionId {
+        regions
+            .resolve_ref(&self.regions)
+            .get(requested.arena_index())
+            .and_then(RegionRecord::spawn_fallback)
+            .unwrap_or(requested)
     }
 
     /// Mints the sealed child region a race-branch spawn requested, under the
@@ -6122,6 +6163,26 @@ impl RuntimeState {
         }
         request.region =
             self.spawn_target_region(request.region, request.admitted_slot.as_deref(), regions);
+        // Only the private current-thread root accounting producer can set
+        // this flag. It represents the already-running caller, not new work.
+        let caller_root = request
+            .admitted_slot
+            .as_deref()
+            .is_some_and(crate::runtime::spawn_mailbox::AdmittedTaskSlot::caller_owned_poll_quota);
+        if !caller_root
+            && let Some(gateway) = self.spawn_gateway.as_ref()
+            && gateway.spawn_authorization_required()
+            && let Err(error) = gateway.verify_spawn_authority(
+                request
+                    .admitted_slot
+                    .as_deref()
+                    .and_then(crate::runtime::spawn_mailbox::AdmittedTaskSlot::spawn_authority),
+                self.spawn_authorization_region(request.region, regions),
+                request.budget,
+            )
+        {
+            return LocalSpawnAdmission::Denied { request, error };
+        }
         let region = request.region;
         let budget = request.budget;
         let (task_id, cx, now) = match self.admit_spawn_record_in(
