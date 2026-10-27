@@ -355,7 +355,7 @@ mod keepalive {
         let mut task = Context::from_waker(Waker::noop());
         clock.advance_to(Time::from_secs(22));
         state.poll(&mut task).unwrap();
-        assert!(state.take_probe().is_some());
+        assert!(state.take_probe(&mut task).is_some());
         // A transport poll may consume the remaining time before returning.
         clock.advance_to(Time::from_secs(23));
         assert_eq!(state.observe(&Frame::Ping(PingFrame::ack(1_u64.to_be_bytes())))
@@ -549,6 +549,7 @@ fn gzip_stream_uses_the_existing_codec_and_enforces_decompressed_limit() {
 
 mod native;
 mod keepalive_backoff;
+mod progress_keepalive;
 
 #[test]
 fn immediately_ready_message_batches_yield_without_losing_the_next_item() {

@@ -331,6 +331,9 @@ pub struct ChannelBuilder {
     /// Whether peer keepalive rejections increase intervals for future connections.
     #[cfg(not(target_arch = "wasm32"))]
     keepalive_backoff: bool,
+    /// Whether native streaming probes recover already-readable acknowledgements.
+    #[cfg(not(target_arch = "wasm32"))]
+    progress_aware_keepalive: bool,
 }
 
 impl ChannelBuilder {
@@ -356,6 +359,8 @@ impl ChannelBuilder {
             reuse_connections: 0,
             #[cfg(not(target_arch = "wasm32"))]
             keepalive_backoff: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            progress_aware_keepalive: false,
         }
     }
 
@@ -437,6 +442,21 @@ impl ChannelBuilder {
     #[must_use]
     pub fn keepalive_timeout(mut self, timeout: Duration) -> Self {
         self.config.keepalive_timeout = Some(timeout);
+        self
+    }
+
+    /// Use progress-aware timeouts for native streaming keepalive.
+    ///
+    /// A buffered-message consumer may pause without timing out a PING that
+    /// has not entered the outbound cursor. An expired probe gets one bounded
+    /// read pass for an already-available matching ACK or terminal response.
+    /// See [`NativeStreamKeepalive::with_progress_aware_timeout`] for the write
+    /// stall and receive-bound limits. This does not enable keepalive without
+    /// a configured interval, alter unary calls, or retry a failed call.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn progress_aware_keepalive(mut self) -> Self {
+        self.progress_aware_keepalive = true;
         self
     }
 
@@ -567,6 +587,7 @@ impl ChannelBuilder {
         #[cfg(not(target_arch = "wasm32"))]
         {
             channel.connect_policy = self.connect_policy;
+            channel.progress_aware_keepalive = self.progress_aware_keepalive;
             if self.keepalive_backoff {
                 channel = channel.with_keepalive_backoff();
             }
@@ -615,6 +636,9 @@ pub struct Channel {
     /// Future connection intervals, shared only by clones of an opted-in channel.
     #[cfg(not(target_arch = "wasm32"))]
     keepalive_backoff: Option<Arc<KeepaliveBackoff>>,
+    /// Timeout policy copied into each subsequently created native stream owner.
+    #[cfg(not(target_arch = "wasm32"))]
+    progress_aware_keepalive: bool,
 }
 
 impl Channel {
@@ -698,6 +722,8 @@ impl Channel {
             unary_pool: None,
             #[cfg(not(target_arch = "wasm32"))]
             keepalive_backoff: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            progress_aware_keepalive: false,
         })
     }
 
@@ -730,6 +756,19 @@ impl Channel {
             self.keepalive_backoff = self.config.keepalive_interval
                 .map(|interval| Arc::new(KeepaliveBackoff::new(interval)));
         }
+        self
+    }
+
+    /// Let future native streaming owners resume with progress-aware keepalive.
+    ///
+    /// This selects [`NativeStreamKeepalive::with_progress_aware_timeout`] for
+    /// subsequent calls on this channel and its later clones. Existing stream
+    /// owners and earlier channel clones retain their own timeout policy.
+    /// Keepalive remains disabled without a configured interval.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_progress_aware_keepalive(mut self) -> Self {
+        self.progress_aware_keepalive = true;
         self
     }
 
@@ -1169,6 +1208,11 @@ impl<C: Codec> GrpcClient<C> {
                 let policy = NativeStreamKeepalive::new(
                     interval, timeout.unwrap_or(Duration::from_secs(20)),
                 )?;
+                let policy = if self.channel.progress_aware_keepalive {
+                    policy.with_progress_aware_timeout()
+                } else {
+                    policy
+                };
                 if cx.timer_driver().is_none() {
                     return Err(Status::failed_precondition(
                         "native gRPC keepalive requires an explicit timer",

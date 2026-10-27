@@ -185,6 +185,9 @@ impl NativeStreamConfig {
 /// is outstanding; its absolute `timeout` includes local write stalls and the
 /// matching ACK. Other traffic cannot extend that deadline. An unanswered
 /// probe closes the dedicated connection and returns `UNAVAILABLE`.
+/// [`with_progress_aware_timeout`](Self::with_progress_aware_timeout) opts into
+/// starting that allowance at outbound admission and checking already-readable
+/// acknowledgements before declaring a resumed owner timed out.
 ///
 /// No background task is created. Pending `message`, initial `headers`, and
 /// `next_event` waits drive probes; an unpolled owner sends nothing. Calling
@@ -194,6 +197,7 @@ impl NativeStreamConfig {
 pub struct NativeStreamKeepalive {
     interval: Duration,
     timeout: Duration,
+    progress_aware: bool,
 }
 
 impl NativeStreamKeepalive {
@@ -204,14 +208,46 @@ impl NativeStreamKeepalive {
                 "native gRPC keepalive intervals must be positive",
             ));
         }
-        Ok(Self { interval, timeout })
+        Ok(Self { interval, timeout, progress_aware: false })
     }
+
+    /// Let a demand-driven owner resume after its consumer paused.
+    ///
+    /// The timeout starts when the PING enters the owner's outbound frame
+    /// cursor, rather than when a buffered-message poll queues it. This is
+    /// admission, not proof of delivery: partial writes and flush stalls after
+    /// admission consume the same timeout. A queued probe behind earlier
+    /// blocked writes has no acknowledgement deadline yet; configure a call
+    /// deadline to bound that earlier work.
+    ///
+    /// At expiry, one bounded, nonblocking read pass may find the matching ACK
+    /// or terminal response that arrived while the owner was unpolled. The
+    /// pass processes at most 32 frames and respects the receive-body bound.
+    /// A matching ACK is accepted even though its arrival time cannot be
+    /// recovered from the transport. Other traffic never extends the expired
+    /// deadline. A silent peer, parked write, exhausted read budget or full
+    /// body without the ACK/terminal response still fails with `UNAVAILABLE`.
+    ///
+    /// No task or background I/O is created. [`new`](Self::new) retains the
+    /// original strict timeout policy until this method is called.
+    #[must_use]
+    pub const fn with_progress_aware_timeout(mut self) -> Self {
+        self.progress_aware = true;
+        self
+    }
+
+    /// Whether outbound admission and bounded ready-input recovery govern timeouts.
+    #[must_use]
+    pub const fn is_progress_aware(self) -> bool { self.progress_aware }
 
     /// Idle duration before the next probe is admitted.
     #[must_use]
     pub fn interval(self) -> Duration { self.interval }
 
     /// Absolute allowance from probe admission through its matching ACK.
+    ///
+    /// The strict policy admits when queuing the probe; the progress-aware
+    /// policy admits when the PING enters the outbound frame cursor.
     #[must_use]
     pub fn timeout(self) -> Duration { self.timeout }
 }
@@ -271,6 +307,11 @@ impl Keepalive {
     }
 
     fn poll(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+        if self.config.progress_aware && matches!(self.state, ProbeState::Queued(_)) {
+            // An owner returning buffered messages need not touch its transport.
+            // Its completed idle timer is retired when take_probe admits I/O.
+            return Ok(());
+        }
         if self.clock.now() < self.at && self.timer.as_mut().poll_deadline(task).is_pending() {
             return Ok(());
         }
@@ -280,10 +321,12 @@ impl Keepalive {
                     Status::unavailable("native gRPC keepalive probe identifiers exhausted")
                 })?;
                 self.state = ProbeState::Queued(self.sequence.to_be_bytes());
-                self.arm(self.config.timeout);
-                // Register the new ACK deadline before a transport write/read
-                // can park this outer poll. Rearming alone registers no waker.
-                let _ = self.timer.as_mut().poll_deadline(task);
+                if !self.config.progress_aware {
+                    self.arm(self.config.timeout);
+                    // Register the new ACK deadline before a transport write/read
+                    // can park this outer poll. Rearming alone registers no waker.
+                    let _ = self.timer.as_mut().poll_deadline(task);
+                }
                 Ok(())
             }
             ProbeState::Queued(_) | ProbeState::AwaitingAck(_) => {
@@ -292,9 +335,15 @@ impl Keepalive {
         }
     }
 
-    fn take_probe(&mut self) -> Option<Frame> {
+    fn take_probe(&mut self, task: &mut Context<'_>) -> Option<Frame> {
         if let ProbeState::Queued(data) = self.state {
             self.state = ProbeState::AwaitingAck(data);
+            if self.config.progress_aware {
+                self.arm(self.config.timeout);
+                // gate ran before this timer existed. Register here so a
+                // never-waking partial write/flush still has a deadline wake.
+                let _ = self.timer.as_mut().poll_deadline(task);
+            }
             Some(Frame::Ping(PingFrame::new(data)))
         } else {
             None
@@ -302,7 +351,12 @@ impl Keepalive {
     }
 
     fn observe(&mut self, frame: &Frame) -> Result<(), Status> {
-        if !matches!(self.state, ProbeState::Idle) && self.clock.now() >= self.at {
+        // Progress-aware expiry belongs to gate's bounded ready-input pass.
+        // A transport poll may cross the deadline after gate checked it; do
+        // not discard its matching ACK or terminal frame before that pass.
+        if !self.config.progress_aware
+            && !matches!(self.state, ProbeState::Idle) && self.clock.now() >= self.at
+        {
             return Err(Status::unavailable("native gRPC keepalive acknowledgement timed out"));
         }
         match self.state {
@@ -700,9 +754,15 @@ where
             // while the owner consumed buffered messages. A finished call needs
             // no liveness verdict, and UNAVAILABLE would invite a retry of a
             // completed call. Read what has already arrived (without blocking,
-            // and only while the body can take another frame), and fail only
-            // if the response is still open.
-            self.keepalive = None;
+            // and only while the body can take another frame). Progress-aware
+            // probes also admit a matching ACK within this one bounded pass;
+            // unrelated frames cannot restart an expired probe's allowance.
+            let recover_ack = self.keepalive.as_ref()
+                .is_some_and(|keepalive| keepalive.config.progress_aware
+                    && matches!(keepalive.state, ProbeState::AwaitingAck(_)));
+            if !recover_ack {
+                self.keepalive = None;
+            }
             for _ in 0..POLL_STEPS {
                 if self.response.ended
                     || self.body.len().saturating_add(FRAME_BYTES) > self.body_limit
@@ -714,8 +774,16 @@ where
                     Poll::Ready(Err(read)) => return Err(read),
                     Poll::Pending => break,
                 }
+                if recover_ack {
+                    self.gate_deadline(task)?;
+                    let keepalive = self.keepalive.as_ref().expect("recovering probe");
+                    if matches!(keepalive.state, ProbeState::Idle) {
+                        return Ok(());
+                    }
+                }
             }
             if !self.response.ended { return Err(error); }
+            self.keepalive = None;
         }
         Ok(())
     }
@@ -910,7 +978,7 @@ where
                 // not split a HEADERS/CONTINUATION block. The previous encoded
                 // frame has completely left our byte cursor before this point.
                 let probe = if self.outbound_allows_probe {
-                    self.keepalive.as_mut().and_then(Keepalive::take_probe)
+                    self.keepalive.as_mut().and_then(|keepalive| keepalive.take_probe(task))
                 } else {
                     None
                 };
