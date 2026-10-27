@@ -21,6 +21,13 @@ use super::config::LabConfig;
 use super::runtime::{ForcedDispatch, ForcedSchedule, ForcedScheduleError, LabRunReport, LabRuntime};
 use std::collections::VecDeque;
 
+mod checkpoint;
+pub use checkpoint::{
+    ExactScheduleCheckpoint, ExactScheduleCheckpointError, ExactScheduleCheckpointLimits,
+    ExactScheduleProgress,
+};
+pub use super::schedule_minimizer::reproducer::WorkloadKey as ExactScheduleWorkloadKey;
+
 /// Explicit resource bounds for exact-prefix exploration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExactScheduleLimits {
@@ -80,10 +87,13 @@ impl ExactScheduleDecision {
     }
 }
 
-/// An in-memory replay prefix derived from a witnessed execution.
+/// A replay prefix containing the complete witnessed enabled sets.
 ///
-/// Prefixes can only be obtained from an execution or its admitted
-/// alternatives. Complete portable receipts use [`ForcedSchedule`] instead.
+/// Prefixes come from an execution, its admitted alternatives, or an explicitly
+/// unverified loaded [`ExactScheduleCheckpoint`]. Resumption validates the full
+/// enabled sets against the fresh runtime before each poll; loading bytes alone
+/// does not verify the historical execution. Complete portable execution
+/// receipts use [`ForcedSchedule`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExactSchedulePrefix {
     pub(crate) seed: u64,
@@ -182,6 +192,46 @@ pub enum ExactScheduleSearchTermination {
     PrefixQueueLimit,
     /// At least one run failed to reach supported, replayable quiescence.
     IncompleteRun,
+    /// A campaign's caller requested a stop after the last reported run.
+    ///
+    /// The checkpoint retains every queued alternative, including alternatives
+    /// discovered by that run. This says nothing about search exhaustion.
+    Stopped,
+}
+
+/// Executions produced by one resumable campaign invocation.
+///
+/// Completed run reports are returned to the caller rather than accumulated in
+/// the checkpoint. Thus another invocation does not retain old traces or
+/// receipts. Progress counters and unfinished prefixes survive independently.
+#[derive(Debug, Clone)]
+pub struct ExactScheduleBatch {
+    /// Why this invocation stopped, including sticky coverage limitations.
+    pub termination: ExactScheduleSearchTermination,
+    /// Fresh executions attempted by this invocation, in breadth-first order.
+    pub runs: Vec<ExactScheduleRun>,
+    /// Cumulative campaign progress after this invocation.
+    pub progress: ExactScheduleProgress,
+}
+
+/// A campaign checkpoint incompatible with the requested execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExactScheduleResumeError {
+    /// The explorer configuration is outside the admitted model.
+    Configuration(ExactScheduleConfigError),
+    /// The caller supplied a different workload identity.
+    WorkloadMismatch,
+    /// The seed or execution configuration changed.
+    ExecutionMismatch,
+    /// The retained queue exceeds this invocation's queue bound.
+    FrontierLimit,
+    /// A retained prefix exceeds this invocation's dispatch bound.
+    PrefixLimit,
+    /// A retained enabled set exceeds this invocation's inventory bound.
+    InventoryLimit,
+    /// Historical counters cannot represent this invocation's bounded work.
+    CounterOverflow,
 }
 
 /// Bounded exploration results with unfinished work made explicit.
@@ -259,6 +309,211 @@ impl ExactScheduleExplorer {
             return Err(ExactScheduleConfigError::ChaosEnabled);
         }
         Ok(())
+    }
+
+    /// Starts an empty, portable exploration campaign without invoking a workload.
+    ///
+    /// The workload key identifies the caller's code, fixture inputs and schema.
+    /// It cannot prove equivalence of arbitrary closures: callers must change it
+    /// when those inputs change. Every resumed prefix also rechecks the complete
+    /// enabled sets against a freshly constructed runtime before each poll.
+    ///
+    /// # Errors
+    /// Rejects invalid resource limits, multiple workers or enabled chaos.
+    pub fn new_checkpoint(
+        &self,
+        workload: ExactScheduleWorkloadKey,
+    ) -> Result<ExactScheduleCheckpoint, ExactScheduleConfigError> {
+        self.validate()?;
+        let runtime = LabRuntime::new_with_task_causality(self.config.clone());
+        let initial = runtime.exact_schedule_empty_prefix();
+        Ok(ExactScheduleCheckpoint {
+            workload,
+            seed: initial.seed,
+            config_hash: initial.config_hash,
+            pending: VecDeque::from([initial]),
+            progress: ExactScheduleProgress::default(),
+        })
+    }
+
+    /// Continues a campaign for at most this explorer's `max_runs` fresh runs.
+    ///
+    /// The execution configuration and workload must match; exploration limits
+    /// may change. A smaller queue, dispatch or inventory limit must still admit
+    /// every saved prefix. Run reports belong to this batch only, while the
+    /// checkpoint retains the cumulative counts and exact remaining queue.
+    ///
+    /// An omitted branch or incomplete run permanently prevents this campaign
+    /// from claiming search exhaustion. Raising later limits cannot restore work
+    /// already omitted; start a new campaign to explore that work.
+    ///
+    /// # Errors
+    /// Rejects incompatibility before invoking the factory or changing the
+    /// checkpoint. Enabled-set divergence during execution is an incomplete run.
+    pub fn resume<F>(
+        &self,
+        checkpoint: &mut ExactScheduleCheckpoint,
+        workload: ExactScheduleWorkloadKey,
+        factory: F,
+    ) -> Result<ExactScheduleBatch, ExactScheduleResumeError>
+    where
+        F: Fn(&mut LabRuntime),
+    {
+        self.resume_until(checkpoint, workload, factory, |_| false)
+    }
+
+    /// Continues until the first run fails the lab test contract or the budget ends.
+    ///
+    /// A failing oracle, invariant violation or non-quiescent run stops the
+    /// batch. Its complete report is retained as the last run, and its queued
+    /// alternatives remain resumable. Use [`Self::resume_until`] for an
+    /// application-specific failure predicate.
+    ///
+    /// # Errors
+    /// Uses the same pre-execution admission as [`Self::resume`].
+    pub fn resume_until_failure<F>(
+        &self,
+        checkpoint: &mut ExactScheduleCheckpoint,
+        workload: ExactScheduleWorkloadKey,
+        factory: F,
+    ) -> Result<ExactScheduleBatch, ExactScheduleResumeError>
+    where
+        F: Fn(&mut LabRuntime),
+    {
+        self.resume_until(checkpoint, workload, factory, |run| !run.lab.lab_test_passed())
+    }
+
+    /// Continues until a caller predicate requests a stop after an execution.
+    ///
+    /// Alternatives from the stopping run are queued before returning, so
+    /// stopping and resuming does not change deterministic breadth-first order.
+    /// The predicate and fresh-workload factory must return; budgets cannot
+    /// preempt arbitrary Rust code. A factory or execution panic leaves the
+    /// current prefix queued. The predicate runs after progress and alternatives
+    /// are committed, so its panic preserves a coherent completed execution.
+    /// Stored counters are historical claims, not independently verified evidence
+    /// that earlier executions occurred.
+    ///
+    /// # Errors
+    /// Rejects invalid configuration, identity mismatch, an over-budget saved
+    /// frontier or insufficient counter headroom before calling either callback
+    /// or mutating the checkpoint.
+    pub fn resume_until<F, P>(
+        &self,
+        checkpoint: &mut ExactScheduleCheckpoint,
+        workload: ExactScheduleWorkloadKey,
+        factory: F,
+        mut should_stop: P,
+    ) -> Result<ExactScheduleBatch, ExactScheduleResumeError>
+    where
+        F: Fn(&mut LabRuntime),
+        P: FnMut(&ExactScheduleRun) -> bool,
+    {
+        self.validate().map_err(ExactScheduleResumeError::Configuration)?;
+        if checkpoint.workload != workload {
+            return Err(ExactScheduleResumeError::WorkloadMismatch);
+        }
+        let first = LabRuntime::new_with_task_causality(self.config.clone());
+        let identity = first.exact_schedule_empty_prefix();
+        if checkpoint.seed != identity.seed || checkpoint.config_hash != identity.config_hash {
+            return Err(ExactScheduleResumeError::ExecutionMismatch);
+        }
+        if checkpoint.pending.len() > self.limits.max_pending_prefixes {
+            return Err(ExactScheduleResumeError::FrontierLimit);
+        }
+        for prefix in &checkpoint.pending {
+            if prefix.seed != identity.seed || prefix.config_hash != identity.config_hash {
+                return Err(ExactScheduleResumeError::ExecutionMismatch);
+            }
+            if prefix.decisions.len() > self.limits.max_dispatches_per_run {
+                return Err(ExactScheduleResumeError::PrefixLimit);
+            }
+            if prefix.decisions.iter().any(|decision| {
+                decision.enabled.len() > self.limits.max_inventory_entries
+            }) {
+                return Err(ExactScheduleResumeError::InventoryLimit);
+            }
+        }
+        // Reserve counter headroom for the whole batch before any callback.
+        // Each decision can omit at most (inventory - 1) alternatives. This
+        // conservative admission keeps even hostile decoded historical counts
+        // exact, without saturating into a false exhaustion claim.
+        if !checkpoint.pending.is_empty() {
+            let count = |value| {
+                u64::try_from(value).map_err(|_| ExactScheduleResumeError::CounterOverflow)
+            };
+            let runs = count(self.limits.max_runs)?;
+            let omitted = runs
+                .checked_mul(count(self.limits.max_dispatches_per_run)?)
+                .and_then(|n| {
+                    n.checked_mul(count(self.limits.max_inventory_entries - 1).ok()?)
+                })
+                .ok_or(ExactScheduleResumeError::CounterOverflow)?;
+            if checkpoint.progress.runs.checked_add(runs).is_none()
+                || checkpoint.progress.omitted.checked_add(omitted).is_none()
+            {
+                return Err(ExactScheduleResumeError::CounterOverflow);
+            }
+        }
+
+        let mut first_runtime = Some(first);
+        let mut runs = Vec::new();
+        let mut stopped = false;
+        while runs.len() < self.limits.max_runs {
+            let Some(prefix) = checkpoint.pending.front().cloned() else {
+                break;
+            };
+            let mut runtime = first_runtime.take().unwrap_or_else(|| {
+                LabRuntime::new_with_task_causality(self.config.clone())
+            });
+            factory(&mut runtime);
+            let run = runtime.run_exact_schedule_prefix(&prefix, self.limits);
+            checkpoint.pending.pop_front();
+            checkpoint.progress.runs += 1;
+            if run.termination == ExactScheduleTermination::Quiescent {
+                checkpoint.progress.completed += 1;
+            } else {
+                checkpoint.progress.incomplete += 1;
+            }
+            if !run.lab.lab_test_passed() {
+                checkpoint.progress.failed += 1;
+            }
+            for decision in prefix.decisions.len()..run.execution.decisions.len() {
+                let witnessed = &run.execution.decisions[decision];
+                for alternative in 0..witnessed.enabled.len() {
+                    if alternative == witnessed.selected {
+                        continue;
+                    }
+                    if checkpoint.pending.len() == self.limits.max_pending_prefixes {
+                        checkpoint.progress.omitted += 1;
+                    } else if let Some(branch) = run.alternative_prefix(decision, alternative) {
+                        checkpoint.pending.push_back(branch);
+                    }
+                }
+            }
+            stopped = should_stop(&run);
+            runs.push(run);
+            if stopped {
+                break;
+            }
+        }
+
+        let termination = if stopped {
+            ExactScheduleSearchTermination::Stopped
+        } else if checkpoint.progress.incomplete != 0 {
+            ExactScheduleSearchTermination::IncompleteRun
+        } else if checkpoint.progress.omitted != 0 {
+            ExactScheduleSearchTermination::PrefixQueueLimit
+        } else if checkpoint.pending.is_empty() {
+            ExactScheduleSearchTermination::SearchExhausted
+        } else {
+            ExactScheduleSearchTermination::RunLimit
+        };
+        Ok(ExactScheduleBatch {
+            termination,
+            runs,
+            progress: checkpoint.progress,
+        })
     }
 
     /// Replays one prefix and deterministically completes its remaining choices.

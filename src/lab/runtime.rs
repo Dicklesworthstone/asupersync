@@ -141,6 +141,24 @@ pub struct ForcedDispatch {
 }
 
 impl ForcedDispatch {
+    /// Reconstructs a bounded checkpoint choice; execution still validates it
+    /// against the complete live scheduler inventory before polling.
+    pub(crate) const fn from_checkpoint_parts(
+        task: CompactTaskId,
+        worker: u32,
+        lane: DispatchLane,
+        at_step: u64,
+        at_nanos: u64,
+    ) -> Self {
+        Self {
+            task,
+            worker,
+            lane,
+            at_step,
+            at_nanos,
+        }
+    }
+
     /// Full arena identity (slot plus generation) of the selected task.
     #[must_use]
     pub const fn task(&self) -> CompactTaskId {
