@@ -292,3 +292,72 @@ fn grpc_compression_flag_compliance_summary() {
     println!("STATUS: GRPC COMPRESSION FLAG VALIDATION IS NOW COMPLIANT ✅");
     println!("SECURITY: Protocol violations rejected, data corruption prevented");
 }
+
+/// The transport-facing API follows the per-message flag: advertising gzip
+/// does not require every message in the RPC to be compressed. Keep the
+/// historical strict-entry-point assertions above unchanged.
+#[cfg(feature = "compression")]
+#[test]
+fn negotiated_gzip_decodes_fragmented_plain_compressed_and_empty_messages() {
+    let expected = [
+        Bytes::from_static(b"plain-first"),
+        Bytes::from_static(b"compressed-second"),
+        Bytes::new(),
+        Bytes::new(),
+        Bytes::from_static(b"plain-last"),
+    ];
+    let mut plain = FramedCodec::new(IdentityCodec);
+    let mut compressed = FramedCodec::new(IdentityCodec).with_gzip_frame_codec();
+    let mut wire = BytesMut::new();
+    for (index, message) in expected.iter().enumerate() {
+        if matches!(index, 1 | 3) {
+            compressed.encode_message(message, &mut wire).unwrap();
+        } else {
+            plain.encode_message(message, &mut wire).unwrap();
+        }
+    }
+
+    let mut decoder = FramedCodec::new(IdentityCodec).with_gzip_frame_codec();
+    let mut buffered = BytesMut::new();
+    let mut received = Vec::new();
+    // Split gRPC prefixes and gzip headers/trailers as well as payloads.
+    for chunk in wire.chunks(3) {
+        buffered.extend_from_slice(chunk);
+        while let Some(message) = decoder
+            .decode_message_with_negotiated_encoding(&mut buffered, Some("gzip"))
+            .unwrap()
+        {
+            received.push(message);
+        }
+    }
+    assert_eq!(received, expected);
+    assert!(buffered.is_empty());
+    assert!(!decoder.is_poisoned());
+}
+
+#[test]
+fn negotiated_decode_requires_encoding_even_when_a_decompressor_is_installed() {
+    for encoding in [None, Some("identity"), Some("deflate"), Some("snappy")] {
+        let mut decoder = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
+        let mut wire = BytesMut::new();
+        wire.put_u8(1);
+        wire.put_u32(6);
+        wire.extend_from_slice(b"secret");
+        wire.extend_from_slice(&[0, 0, 0, 0, 0]);
+        assert!(matches!(
+            decoder.decode_message_with_negotiated_encoding(&mut wire, encoding),
+            Err(GrpcError::Protocol(_))
+        ));
+        assert!(decoder.is_poisoned());
+        assert!(
+            wire.is_empty(),
+            "a refused frame must retire its buffered tail"
+        );
+        wire.extend_from_slice(&[0, 0, 0, 0, 0]);
+        assert!(matches!(
+            decoder.decode_message_with_negotiated_encoding(&mut wire, None),
+            Err(GrpcError::Protocol(_))
+        ));
+        assert!(wire.is_empty());
+    }
+}

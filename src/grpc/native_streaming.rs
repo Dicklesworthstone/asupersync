@@ -420,7 +420,7 @@ where
         for _ in 0..POLL_STEPS {
             let result = (|| {
                 this.check_stop(task)?;
-                match this.codec.decode_message_with_encoding(&mut this.body, this.response.encoding.as_deref())
+                match this.codec.decode_message_with_negotiated_encoding(&mut this.body, this.response.encoding.as_deref())
                     .map_err(GrpcError::into_status)?
                 {
                     Some(message) => return Ok(Some(message)),

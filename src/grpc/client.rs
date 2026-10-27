@@ -1340,10 +1340,20 @@ impl<C: Codec> GrpcClient<C> {
             let wire_response =
                 native_h2_unary(&self.channel, path, metadata, framed_request.freeze()).await?;
 
+            if let Some(encoding) = wire_response.grpc_encoding.as_deref() {
+                let selected = CompressionEncoding::from_header_value(encoding)
+                    .ok_or_else(|| Status::internal("unsupported gRPC response encoding"))?;
+                if selected != CompressionEncoding::Identity
+                    && !effective_accept_compressions(&self.channel.config).contains(&selected)
+                {
+                    return Err(Status::internal("gRPC response encoding was not accepted"));
+                }
+            }
+
             let mut framed_response = BytesMut::from(wire_response.body.as_ref());
             let decoded = self
                 .codec
-                .decode_message_with_encoding(
+                .decode_message_with_negotiated_encoding(
                     &mut framed_response,
                     wire_response.grpc_encoding.as_deref(),
                 )

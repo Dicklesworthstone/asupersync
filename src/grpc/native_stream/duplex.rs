@@ -322,7 +322,7 @@ where
             }
             if inner.response.initial.is_some() {
                 let buffered = inner.body.len();
-                match inner.codec.decode_message_with_encoding(
+                match inner.codec.decode_message_with_negotiated_encoding(
                     &mut inner.body,
                     inner.response.encoding.as_deref(),
                 ) {
