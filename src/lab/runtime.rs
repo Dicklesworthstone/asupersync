@@ -53,6 +53,9 @@ use std::{fmt, future::Future};
 /// Fail-closed, bounded execution of a production dispatch projection.
 pub mod production_strict;
 
+pub(super) mod poll_cancellation;
+use poll_cancellation::PollCancellationControl;
+
 use production_strict::{
     ProductionReplayMode, StrictProductionReplayError, StrictProductionReplayTermination,
 };
@@ -2443,6 +2446,8 @@ pub struct LabRuntime {
     replay_recorder: TraceRecorder,
     /// Optional bounded recorder for exact lab dispatch choices.
     forced_schedule_recorder: Option<ForcedScheduleRecorder>,
+    /// Optional single-request cancellation campaign at a checked poll boundary.
+    poll_cancellation: Option<PollCancellationControl>,
     /// Optional production-schedule oracle (br-asupersync-bi2462.7).
     production_replay: Option<ProductionReplayState>,
     /// Optional deadline monitor for warning callbacks.
@@ -2551,6 +2556,7 @@ impl LabRuntime {
             seen_reactor_chaos_stats: ChaosStats::new(),
             replay_recorder,
             forced_schedule_recorder: None,
+            poll_cancellation: None,
             production_replay: None,
             deadline_monitor: None,
             oracles: OracleSuite::new(),
@@ -4968,6 +4974,22 @@ impl LabRuntime {
             }
         }
 
+        // A campaign requests cancellation only after reproducing the complete
+        // baseline dispatch prefix. As with chaos cancellation, publish the
+        // cancel lane before waking and let the next turn drive the protocol.
+        if self.poll_cancellation.is_some()
+            && self.inject_poll_cancellation(ForcedDispatch {
+                task: task_id.into(),
+                worker: u32::try_from(dispatch_worker)
+                    .expect("lab worker index is bounded by LabConfig::worker_count"),
+                lane: dispatch_lane,
+                at_step: self.steps,
+                at_nanos: now.as_nanos(),
+            })
+        {
+            return Ok(true);
+        }
+
         // 2. Pre-poll chaos injection
         if self.inject_pre_poll_chaos(task_id) {
             // Chaos caused the task to be skipped (e.g., cancelled, budget exhausted)
@@ -5355,6 +5377,12 @@ impl LabRuntime {
                             );
                         monitor.record_completion(task_id, &task_type, duration, deadline, now);
                     }
+                }
+
+                // Observe committed terminal state before task_completed
+                // recycles the generation named by a cancellation campaign.
+                if self.poll_cancellation.is_some() {
+                    self.observe_poll_cancellation_completion(task_id);
                 }
 
                 // Capture this task's retirement barrier BEFORE task_completed

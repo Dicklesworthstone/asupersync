@@ -515,6 +515,11 @@ pub struct Participant {
 // ---------------------------------------------------------------------------
 
 /// Cancellation injection configuration.
+///
+/// Consumed by
+/// [ScenarioRunner::run_cancellation_campaign](super::scenario_runner::ScenarioRunner::run_cancellation_campaign).
+/// A campaign selects real scheduler poll opportunities from a baseline and
+/// requests cooperative cancellation in one fresh execution per selected point.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CancellationSection {
     /// The injection strategy.
@@ -535,15 +540,15 @@ pub struct CancellationSection {
 pub enum CancellationStrategy {
     /// No cancellation injection (recording only).
     Never,
-    /// Test all await points (N+1 runs).
+    /// Test all recorded scheduler poll opportunities (N+1 runs).
     AllPoints,
-    /// Random sample of await points.
+    /// Deterministic random sample of recorded poll opportunities.
     RandomSample,
-    /// First N await points.
+    /// First N recorded poll opportunities.
     FirstN,
-    /// Last N await points.
+    /// Last N recorded poll opportunities.
     LastN,
-    /// Every Nth await point.
+    /// Every Nth recorded poll opportunity, using one-based indices.
     EveryNth,
     /// Probabilistic per-point injection.
     Probabilistic,

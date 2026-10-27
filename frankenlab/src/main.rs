@@ -18,8 +18,8 @@ use asupersync::lab::ldfi_trace::{
 };
 use asupersync::lab::scenario::Scenario;
 use asupersync::lab::scenario_runner::{
-    ParticipantBindings, ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner,
-    ScenarioRunnerError,
+    ParticipantBindings, ScenarioCancellationLimits, ScenarioCancellationReport,
+    ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner, ScenarioRunnerError,
 };
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::trace::minimizer::LogicalMinimizerClock;
@@ -72,6 +72,9 @@ enum Command {
     /// Explore multiple seeds to find invariant violations
     Explore(ExploreArgs),
 
+    /// Test scenario cancellation at recorded scheduler poll boundaries
+    Cancel(CancelArgs),
+
     /// Minimize a failing scenario by shrinking its fault list
     Minimize(MinimizeArgs),
 
@@ -119,6 +122,32 @@ struct ExploreArgs {
     /// Starting seed for exploration
     #[arg(long, default_value_t = 0)]
     start_seed: u64,
+}
+
+#[derive(Args, Debug)]
+struct CancelArgs {
+    /// Path to a scenario YAML file containing a cancellation strategy
+    scenario: PathBuf,
+
+    /// Override the seed from the scenario file
+    #[arg(long)]
+    seed: Option<u64>,
+
+    /// Maximum cancellation trials, in addition to the baseline run
+    #[arg(long, default_value_t = 64)]
+    max_runs: usize,
+
+    /// Maximum scheduler poll boundaries to record from the baseline
+    #[arg(long = "max-polls", default_value_t = 4096)]
+    max_poll_points: usize,
+
+    /// Maximum scheduler steps for each baseline or cancellation run
+    #[arg(long, default_value_t = 100_000)]
+    max_steps: u64,
+
+    /// Continue testing selected boundaries after a failed cancellation trial
+    #[arg(long, action = ArgAction::SetTrue)]
+    keep_going: bool,
 }
 
 #[derive(Args, Debug)]
@@ -441,6 +470,94 @@ fn cmd_explore(args: ExploreArgs, json: bool) -> Result<(), String> {
             result.failed, result.seeds_explored
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation campaigns
+// ---------------------------------------------------------------------------
+
+fn append_cancellation_failures(lines: &mut Vec<String>, run: &ScenarioRunResult) {
+    lines.extend(
+        run.lab_report
+            .invariant_violations
+            .iter()
+            .map(|violation| format!("  Invariant: {violation}")),
+    );
+    lines.extend(
+        run.oracle_report
+            .entries
+            .iter()
+            .filter(|entry| !entry.passed)
+            .map(|entry| {
+                format!(
+                    "  Oracle {}: {}",
+                    entry.invariant,
+                    entry.violation.as_deref().unwrap_or("failed")
+                )
+            }),
+    );
+}
+
+fn format_cancel_result(report: &ScenarioCancellationReport, json: bool) -> String {
+    if json {
+        return pretty_json_or(&report.to_json(), "{}");
+    }
+    let status = if report.passed() { "PASS" } else { "FAIL" };
+    let baseline_status = if report.baseline.passed() { "PASS" } else { "FAIL" };
+    let recorded = report.baseline_schedule.as_ref().map_or_else(
+        || "unavailable".to_string(),
+        |schedule| schedule.dispatches().len().to_string(),
+    );
+    let passed_trials = report.trials.iter().filter(|trial| trial.passed()).count();
+    let mut lines = vec![
+        format!("Cancellation campaign: {} [{status}]", report.baseline.scenario_id),
+        format!("Seed: {}", report.baseline.seed),
+        format!("Termination: {}", report.termination.as_str()),
+        format!("Baseline: {baseline_status}; quiescent={}", report.baseline.lab_report.quiescent),
+        format!("Recorded scheduler poll boundaries: {recorded}"),
+        format!("Selected trials: {}", report.selected_polls.len()),
+        format!("Executed trials: {}", report.trials.len()),
+        format!("Trials passed: {passed_trials}/{}", report.trials.len()),
+        format!("Untested selected boundaries: {}", report.remaining_trials()),
+    ];
+    if !report.baseline.passed() {
+        append_cancellation_failures(&mut lines, &report.baseline);
+    }
+    for trial in report.trials.iter().filter(|trial| !trial.passed()) {
+        lines.push(format!(
+            "  Poll {}: {:?}; target terminal={}, quiescent={}",
+            trial.poll_index, trial.injection, trial.target_terminal, trial.run.lab_report.quiescent
+        ));
+        append_cancellation_failures(&mut lines, &trial.run);
+    }
+    lines.join("\n")
+}
+
+fn cancellation_command_result(report: &ScenarioCancellationReport) -> Result<(), String> {
+    if report.passed() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Cancellation campaign did not pass: {} ({} selected boundaries untested)",
+            report.termination.as_str(),
+            report.remaining_trials()
+        ))
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn cmd_cancel(args: CancelArgs, json: bool) -> Result<(), String> {
+    let scenario = load_scenario(&args.scenario)?;
+    let limits = ScenarioCancellationLimits {
+        max_runs: args.max_runs,
+        max_poll_points: args.max_poll_points,
+        max_steps_per_run: args.max_steps,
+        stop_on_failure: !args.keep_going,
+    };
+    let report = ScenarioRunner::run_cancellation_campaign(&scenario, args.seed, limits)
+        .map_err(|error| format!("Cancellation campaign: {error}"))?;
+    println!("{}", format_cancel_result(&report, json));
+    cancellation_command_result(&report)
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,6 +1400,7 @@ fn main() -> ExitCode {
         Command::Validate(args) => cmd_validate(args, cli.json),
         Command::Replay(args) => cmd_replay(args, cli.json),
         Command::Explore(args) => cmd_explore(args, cli.json),
+        Command::Cancel(args) => cmd_cancel(args, cli.json),
         Command::Minimize(args) => cmd_minimize(args, cli.json),
         Command::Demo(args) => cmd_demo(args, cli.json),
         Command::TraceRecover(args) => cmd_trace_recover(args, cli.json),
@@ -1309,6 +1427,128 @@ mod tests {
         IncidentSourceKind,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn cancellation_command_parses_campaign_bounds_and_json() {
+        let cli = Cli::try_parse_from([
+            "frankenlab", "cancel", "scenario.yaml", "--seed", "17",
+            "--max-runs", "8", "--max-polls", "128", "--max-steps", "500",
+            "--keep-going", "--json",
+        ])
+        .expect("parse cancellation campaign");
+        assert!(cli.json);
+        let Command::Cancel(args) = cli.command else {
+            panic!("expected cancellation command");
+        };
+        assert_eq!(args.scenario, PathBuf::from("scenario.yaml"));
+        assert_eq!(args.seed, Some(17));
+        assert_eq!(args.max_runs, 8);
+        assert_eq!(args.max_poll_points, 128);
+        assert_eq!(args.max_steps, 500);
+        assert!(args.keep_going);
+    }
+
+    fn cancellation_fixture() -> Scenario {
+        parse_scenario(
+            Path::new("cancellation.yaml"),
+            r#"id: cancellation-cli
+lab:
+  seed: 17
+  worker_count: 2
+chaos:
+  preset: "off"
+participants:
+  - name: swarm
+    role: swarm
+    properties:
+      tasks: 2
+cancellation:
+  strategy: all_points
+"#,
+        )
+        .expect("parse cancellation fixture")
+    }
+
+    #[test]
+    fn cancellation_command_reports_real_completed_coverage() {
+        let report = ScenarioRunner::run_cancellation_campaign(
+            &cancellation_fixture(), None, ScenarioCancellationLimits::default(),
+        )
+        .expect("execute cancellation campaign");
+        assert!(report.passed(), "{}", format_cancel_result(&report, false));
+        assert!(report.trials.len() > 1, "must execute actual cancellation trials");
+        assert!(cancellation_command_result(&report).is_ok());
+        let text = format_cancel_result(&report, false);
+        assert!(text.contains("Cancellation campaign: cancellation-cli [PASS]"), "{text}");
+        assert!(text.contains("Untested selected boundaries: 0"), "{text}");
+        let json: serde_json::Value =
+            serde_json::from_str(&format_cancel_result(&report, true)).expect("JSON report");
+        assert_eq!(json["schema"], "asupersync.scenario-cancellation.v1");
+        assert_eq!(json["boundary"], "scheduler_poll_opportunity");
+        assert_eq!(json["passed"], true);
+        assert_eq!(json["remaining_trials"], 0);
+        assert_eq!(json["replay_traces_retained"], false);
+    }
+
+    #[test]
+    fn cancellation_command_fails_when_selected_boundaries_remain_untested() {
+        let limits = ScenarioCancellationLimits {
+            max_runs: 1,
+            ..ScenarioCancellationLimits::default()
+        };
+        let report =
+            ScenarioRunner::run_cancellation_campaign(&cancellation_fixture(), None, limits)
+                .expect("execute bounded cancellation campaign");
+        assert_eq!(report.trials.len(), 1);
+        assert!(report.remaining_trials() > 0);
+        assert!(cancellation_command_result(&report).is_err());
+        let text = format_cancel_result(&report, false);
+        assert!(text.contains("[FAIL]"), "{text}");
+        assert!(text.contains("Termination: run_limit"), "{text}");
+        let json: serde_json::Value =
+            serde_json::from_str(&format_cancel_result(&report, true)).expect("JSON report");
+        assert_eq!(json["passed"], false);
+        assert_eq!(json["attempted_trials"], 1);
+        assert_eq!(json["remaining_trials"], report.remaining_trials());
+    }
+
+    #[test]
+    fn cancellation_command_does_not_pass_empty_or_record_only_campaigns() {
+        let empty = parse_scenario(
+            Path::new("empty.yaml"),
+            "id: empty-cancellation\ncancellation:\n  strategy: all_points\n",
+        )
+        .unwrap();
+        let mut record_only = cancellation_fixture();
+        record_only.cancellation.as_mut().unwrap().strategy =
+            asupersync::lab::scenario::CancellationStrategy::Never;
+        for scenario in [empty, record_only] {
+            let report = ScenarioRunner::run_cancellation_campaign(
+                &scenario, None, ScenarioCancellationLimits::default(),
+            )
+            .expect("record baseline");
+            assert!(report.trials.is_empty());
+            assert!(cancellation_command_result(&report).is_err());
+            assert!(format_cancel_result(&report, false).contains("[FAIL]"));
+        }
+    }
+
+    #[test]
+    fn cancellation_command_fails_when_baseline_capture_is_truncated() {
+        let limits = ScenarioCancellationLimits {
+            max_poll_points: 1,
+            ..ScenarioCancellationLimits::default()
+        };
+        let report =
+            ScenarioRunner::run_cancellation_campaign(&cancellation_fixture(), None, limits)
+                .expect("run bounded baseline");
+        assert!(report.trials.is_empty());
+        assert!(cancellation_command_result(&report).is_err());
+        let json: serde_json::Value =
+            serde_json::from_str(&format_cancel_result(&report, true)).expect("JSON report");
+        assert_eq!(json["termination"], "capture_limit");
+        assert_eq!(json["passed"], false);
+    }
 
     #[test]
     fn runner_error_message_replay_divergence_preserves_stable_code() {
