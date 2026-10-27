@@ -5,6 +5,9 @@
 //! outcome; an unresolved reservation remains in doubt indefinitely. Arbitrary
 //! handler effects cannot be atomically committed with this journal, so this is
 //! not an exactly-once execution protocol or automatic retry of uncertain work.
+//! An explicit reconciliation permit lets a trusted application persist an
+//! independently established terminal result for a pending request. It never
+//! authorizes another execution or discovers external effects automatically.
 //!
 //! The caller supplies a regular read/write file, its access policy and durable
 //! directory linkage. This module retains an exclusive lock and never opens a
@@ -83,7 +86,8 @@ pub enum DurableRemoteJournalStatus {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DurableRemoteError {
-    /// The runtime adapter's only journal owner is already in use.
+    /// An invocation or a live reservation/reconciliation permit still owns
+    /// this journal instance.
     #[error("durable remote computation is busy")]
     Busy,
     /// The caller lacks a required runtime or blocking-pool capability.
@@ -168,6 +172,36 @@ pub enum DurableRemoteAdmission {
     Execute(DurableRemoteReservation),
     /// Exact input matched an unexpired terminal outcome; no execution is needed.
     Replay(RemoteOutcome),
+}
+
+/// A pending request may be reconciled, or its already saved result replayed.
+/// This decision never grants permission to execute the original handler.
+#[derive(Debug)]
+pub enum DurableRemoteReconciliation {
+    /// Persist only a terminal result independently established by the caller.
+    Pending(DurableRemoteReconciliationPermit),
+    /// The exact request already has a retained terminal outcome.
+    Replay(RemoteOutcome),
+}
+
+/// Single-use permission to record a known outcome for an uncertain request.
+///
+/// Binds the current journal instance, application version, schemas, peer, key,
+/// input digest and reservation sequence. It is distinct from execution
+/// authority. Dropping it changes no durable state and leaves the original
+/// request in doubt. Reopening the journal invalidates outstanding permits.
+pub struct DurableRemoteReconciliationPermit {
+    reservation: DurableRemoteReservation,
+    input_len: u64,
+    digest: [u8; 32],
+    schema: ComputationRegistryFingerprint,
+    application_version: [u8; 32],
+}
+
+impl fmt::Debug for DurableRemoteReconciliationPermit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DurableRemoteReconciliationPermit").finish_non_exhaustive()
+    }
 }
 
 /// Exclusive journal for a single registered computation, schema and application version.
@@ -259,6 +293,39 @@ impl DurableRemoteJournal {
         &mut self, reservation: DurableRemoteReservation, outcome: RemoteOutcome, now_millis: u64,
     ) -> Result<RemoteOutcome, DurableRemoteError> {
         self.core.complete(reservation, outcome, now_millis)
+    }
+
+    /// Inspect an exact uncertain request before application-led reconciliation.
+    ///
+    /// Missing or expired entries refuse `InvalidReservation`; this never creates
+    /// a reservation. A matching terminal result is returned unchanged. A pending
+    /// request requires a writable journal and no live reservation or reconciliation
+    /// permits from this journal instance. `Busy` is conservative across all keys.
+    ///
+    /// The caller must fence or drain the original external operation, then
+    /// establish its actual result from authoritative application state. Dropping
+    /// an execution token alone does not prove that external work has stopped.
+    /// This API does not retry the operation, infer its result, or establish
+    /// cross-system exactly-once effects. `peer` is trusted local authority,
+    /// subject to the same authentication requirement as [`Self::admit`].
+    pub fn prepare_reconciliation(
+        &mut self, peer: &NodeId, key: IdempotencyKey, input: &[u8], now_millis: u64,
+    ) -> Result<DurableRemoteReconciliation, DurableRemoteError> {
+        self.core.prepare_reconciliation(peer, key, input, now_millis)
+    }
+
+    /// Sync an independently established result without running the original work.
+    ///
+    /// The permit is consumed even on refusal. A write/sync failure keeps the
+    /// journal's existing poison/reopen rules; an oversized or invalid outcome
+    /// leaves the original pending fence intact. This uses the unchanged terminal
+    /// record format, so ordinary admission replays the reconciled result after
+    /// restart. The retention window begins at this durable completion.
+    pub fn complete_reconciliation(
+        &mut self, permit: DurableRemoteReconciliationPermit,
+        outcome: RemoteOutcome, now_millis: u64,
+    ) -> Result<RemoteOutcome, DurableRemoteError> {
+        self.core.complete_reconciliation(permit, outcome, now_millis)
     }
 }
 
@@ -594,6 +661,58 @@ impl<F: JournalIo> Journal<F> {
         Ok(DurableRemoteAdmission::Execute(DurableRemoteReservation {
             instance: Arc::clone(&self.instance), peer: peer.clone(), key, sequence,
         }))
+    }
+
+    fn prepare_reconciliation(&mut self, peer: &NodeId, key: IdempotencyKey, input: &[u8], now: u64)
+        -> Result<DurableRemoteReconciliation, DurableRemoteError>
+    {
+        if self.status == DurableRemoteJournalStatus::Poisoned {
+            return Err(DurableRemoteError::NotWritable(self.status));
+        }
+        self.observe(now)?;
+        if !valid_label(peer.as_str()) { return Err(DurableRemoteError::Configuration); }
+        if input.len() > self.config.limits.max_input_bytes { return Err(DurableRemoteError::Limit); }
+        let (input_len, digest) = input_digest(input)?;
+        let entry = self.entries.get(&(peer.clone(), key.raw()))
+            .ok_or(DurableRemoteError::InvalidReservation)?;
+        if entry.input_len != input_len || entry.digest != digest {
+            return Err(DurableRemoteError::Conflict);
+        }
+        if let EntryState::Terminal { outcome, .. } = &entry.state {
+            return Ok(DurableRemoteReconciliation::Replay(decode_outcome(outcome)?));
+        }
+        if self.status != DurableRemoteJournalStatus::Writable {
+            return Err(DurableRemoteError::NotWritable(self.status));
+        }
+        // Only this owner can mint an instance reference; permits are not Clone.
+        // Once the count reaches one, no outstanding token can reappear while
+        // this mutable borrow excludes admission. Refuse live original owners
+        // and competing resolvers instead of racing their terminal publication.
+        if Arc::strong_count(&self.instance) != 1 { return Err(DurableRemoteError::Busy); }
+        let _ = add64(now, self.config.limits.retention_ms)?;
+        Ok(DurableRemoteReconciliation::Pending(DurableRemoteReconciliationPermit {
+            reservation: DurableRemoteReservation {
+                instance: Arc::clone(&self.instance), peer: peer.clone(), key,
+                sequence: entry.reservation_sequence,
+            },
+            input_len, digest, schema: self.config.schema,
+            application_version: self.config.application_version,
+        }))
+    }
+
+    fn complete_reconciliation(&mut self, permit: DurableRemoteReconciliationPermit,
+        outcome: RemoteOutcome, now: u64) -> Result<RemoteOutcome, DurableRemoteError>
+    {
+        if !Arc::ptr_eq(&permit.reservation.instance, &self.instance)
+            || permit.schema != self.config.schema
+            || permit.application_version != self.config.application_version
+        { return Err(DurableRemoteError::InvalidReservation); }
+        let entry = self.entries.get(&(permit.reservation.peer.clone(), permit.reservation.key.raw()))
+            .ok_or(DurableRemoteError::InvalidReservation)?;
+        if entry.input_len != permit.input_len || entry.digest != permit.digest {
+            return Err(DurableRemoteError::InvalidReservation);
+        }
+        self.complete(permit.reservation, outcome, now)
     }
 
     fn complete(&mut self, reservation: DurableRemoteReservation, outcome: RemoteOutcome, now: u64)
