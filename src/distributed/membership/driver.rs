@@ -267,7 +267,8 @@ impl UdpSwimDriver {
         let observation = Arc::new(ObservationState::new(config.retained_events));
         let mut engine = Engine::new(swim, peers, transport.mtu(), config);
         observation.publish(
-            engine.swim.drain_events(), SwimDriverStatus::Prepared, engine.stats,
+            engine.swim.drain_events(), engine.contacts.drain(..),
+            SwimDriverStatus::Prepared, engine.stats,
         )?;
         Ok(Self { engine, transport: Some(transport), observation })
     }
@@ -338,7 +339,7 @@ impl UdpSwimDriver {
         let observation = &self.observation;
         let engine = &mut self.engine;
         let transport = self.transport.as_mut().expect("owned transport before terminal");
-        if let Err(error) = observation.publish(Vec::new(), SwimDriverStatus::Running, engine.stats) {
+        if let Err(error) = observation.publish(Vec::new(), std::iter::empty(), SwimDriverStatus::Running, engine.stats) {
             return Outcome::Err(error);
         }
         poll_fn(|task| {
@@ -364,7 +365,7 @@ impl UdpSwimDriver {
             let tick = std::mem::take(&mut first_tick) || timer_due;
             let turn = engine.turn(transport, task, now_ms, tick);
             let status = if engine.is_leaving() { SwimDriverStatus::Leaving } else { SwimDriverStatus::Running };
-            if let Err(error) = observation.publish(engine.swim.drain_events(), status, engine.stats) {
+            if let Err(error) = observation.publish(engine.swim.drain_events(), engine.contacts.drain(..), status, engine.stats) {
                 return Poll::Ready(Outcome::Err(error));
             }
             match turn {

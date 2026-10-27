@@ -322,7 +322,7 @@ fn observer_bounds_history_exposes_lag_and_wakes_on_terminal_owner_drop() {
     let shared = Arc::new(ObservationState::new(2));
     let observer = SwimObserver { shared: Arc::clone(&shared) };
     for kind in [MembershipKind::Alive, MembershipKind::Suspect, MembershipKind::Dead] {
-        shared.publish(vec![MembershipEvent { node: node("b"), kind, incarnation: 0 }], SwimDriverStatus::Running, SwimDriverStats::default()).unwrap();
+        shared.publish(vec![MembershipEvent { node: node("b"), kind, incarnation: 0 }], std::iter::empty(), SwimDriverStatus::Running, SwimDriverStats::default()).unwrap();
     }
     let snapshot = observer.snapshot();
     assert_eq!(snapshot.membership.event_count(), 3);
@@ -334,6 +334,77 @@ fn observer_bounds_history_exposes_lag_and_wakes_on_terminal_owner_drop() {
     assert!(changed.as_mut().poll(&mut task).is_pending());
     shared.finish_if_active(SwimDriverStatus::Dropped, SwimDriverStats::default());
     assert!(matches!(changed.as_mut().poll(&mut task), Poll::Ready(SwimObservation { status: SwimDriverStatus::Dropped, .. })));
+}
+
+#[test]
+fn live_contact_requires_direct_input_and_recovers_without_trusting_gossip() {
+    let shared = Arc::new(ObservationState::new(1));
+    let observer = SwimObserver { shared: Arc::clone(&shared) };
+    let event = |kind| MembershipEvent { node: node("b"), kind, incarnation: 0 };
+    let stats = SwimDriverStats::default();
+    shared.publish(vec![event(MembershipKind::Alive)], std::iter::empty(), SwimDriverStatus::Prepared, stats).unwrap();
+    assert!(!observer.has_live_contact(&node("b")), "a seed is not a live peer");
+    shared.publish(Vec::new(), std::iter::empty(), SwimDriverStatus::Running, stats).unwrap();
+    assert!(!observer.has_live_contact(&node("b")), "starting a driver is not a probe response");
+    assert!(!observer.has_live_contact(&node("unknown")));
+
+    shared.publish(Vec::new(), [node("b"), node("unknown")], SwimDriverStatus::Running, stats).unwrap();
+    assert!(observer.has_live_contact(&node("b")));
+    assert!(!observer.has_live_contact(&node("unknown")), "only known members have contact state");
+    shared.publish(vec![event(MembershipKind::Suspect)], std::iter::empty(), SwimDriverStatus::Running, stats).unwrap();
+    assert!(!observer.has_live_contact(&node("b")));
+    shared.publish(vec![event(MembershipKind::Alive)], std::iter::empty(), SwimDriverStatus::Running, stats).unwrap();
+    assert!(!observer.has_live_contact(&node("b")), "a rumor cannot reuse pre-suspicion contact");
+    assert!(observer.snapshot().membership.compact_base() > 0);
+    shared.publish(Vec::new(), [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    assert!(observer.has_live_contact(&node("b")));
+
+    shared.publish(
+        vec![event(MembershipKind::Dead), event(MembershipKind::Alive)],
+        [node("b")], SwimDriverStatus::Running, stats,
+    ).unwrap();
+    assert!(!observer.has_live_contact(&node("b")), "same-batch contact cannot precede a departure");
+    shared.publish(Vec::new(), [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    assert!(observer.has_live_contact(&node("b")));
+    shared.publish(Vec::new(), std::iter::empty(), SwimDriverStatus::Leaving, stats).unwrap();
+    assert!(!observer.has_live_contact(&node("b")));
+}
+
+#[test]
+fn terminal_detectors_never_offer_stale_alive_contacts() {
+    for terminal in [SwimDriverStatus::Left, SwimDriverStatus::Cancelled,
+        SwimDriverStatus::Failed, SwimDriverStatus::Dropped]
+    {
+        let shared = Arc::new(ObservationState::new(1));
+        let observer = SwimObserver { shared: Arc::clone(&shared) };
+        shared.publish(
+            vec![MembershipEvent { node: node("b"), kind: MembershipKind::Alive, incarnation: 0 }],
+            [node("b")], SwimDriverStatus::Running, SwimDriverStats::default(),
+        ).unwrap();
+        assert!(observer.has_live_contact(&node("b")));
+        shared.finish(terminal, SwimDriverStats::default());
+        assert_eq!(observer.snapshot().membership.kind_of(&node("b")), Some(MembershipKind::Alive));
+        assert!(!observer.has_live_contact(&node("b")), "terminal {terminal:?}");
+    }
+}
+
+#[test]
+fn only_accepted_direct_datagrams_create_contact_evidence() {
+    let mut engine = make_engine("a", &[("b", 2), ("c", 3)]);
+    engine.receive(0, address(99), &bytes(Packet::new(Payload::Ping { seq: 1 }))).unwrap();
+    engine.receive(0, address(2), b"malformed").unwrap();
+    engine.receive(0, address(2), &bytes(Packet {
+        payload: Payload::Ping { seq: 2 },
+        gossip: vec![Rumor::alive(node("unknown"), 0)],
+    })).unwrap();
+    assert!(engine.contacts.is_empty());
+    engine.receive(0, address(2), &bytes(Packet {
+        payload: Payload::Ping { seq: 3 },
+        gossip: vec![Rumor::alive(node("c"), 1)],
+    })).unwrap();
+    assert_eq!(engine.contacts, vec![node("b")], "a rumor does not prove contact with its subject");
+    engine.receive(0, address(2), &bytes(Packet::new(Payload::Ping { seq: 4 }))).unwrap();
+    assert_eq!(engine.contacts, vec![node("b")], "one pending identity per configured peer");
 }
 
 #[test]
