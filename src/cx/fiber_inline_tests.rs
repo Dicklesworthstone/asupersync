@@ -355,6 +355,295 @@
         assert_eq!(block_on(future), 6);
     }
 
+    // --- Borrowing !Send fibers (br-asupersync-issue65-criticisms-kpmoy5.3) ---
+
+    #[test]
+    fn local_scope_borrows_rc_across_await_and_returns_non_send_values() {
+        let words = [String::from("local"), String::from("fibers")];
+        let log = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (words_ref, log_ref) = (&words, &log);
+        let owner = std::thread::current().id();
+        let returned = block_on(scope_local(|s| async move {
+            let mut handles = Vec::new();
+            for index in 0..words_ref.len() {
+                handles.push(s.spawn(async move {
+                    let local = Rc::clone(log_ref);
+                    assert_eq!(std::thread::current().id(), owner);
+                    local.borrow_mut().push((index, 0));
+                    crate::runtime::yield_now().await;
+                    assert_eq!(std::thread::current().id(), owner);
+                    local.borrow_mut().push((index, words_ref[index].len()));
+                    local
+                }));
+            }
+            let mut results = Vec::new();
+            for handle in handles {
+                results.push(handle.await.expect("local fiber"));
+            }
+            results
+        }));
+        assert_eq!(*log.borrow(), [(0, 0), (1, 0), (0, 5), (1, 6)]);
+        assert!(returned.iter().all(|value| Rc::ptr_eq(value, &log)));
+    }
+
+    #[test]
+    fn local_scope_drains_siblings_started_after_its_body_returns() {
+        let finished = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&finished);
+        block_on(scope_local(|s| async move {
+            let siblings = s.clone();
+            drop(s.spawn(async move {
+                crate::runtime::yield_now().await;
+                for _ in 0..4 {
+                    let finished = Rc::clone(&finished);
+                    drop(siblings.spawn(async move {
+                        crate::runtime::yield_now().await;
+                        finished.set(finished.get() + 1);
+                    }));
+                }
+            }));
+        }));
+        assert_eq!(observed.get(), 4, "all unjoined local fibers were drained");
+        assert_eq!(Rc::strong_count(&observed), 1, "fiber captures were retired");
+    }
+
+    #[test]
+    fn dropping_local_scope_retires_non_send_values_and_wakes_escaped_handles() {
+        struct LocalDrop(Rc<Cell<bool>>);
+        impl Drop for LocalDrop {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let dropped = Rc::new(Cell::new(false));
+        let escaped = std::cell::RefCell::new(None);
+        let escaped_ref = &escaped;
+        let wakes = Arc::new(CountingWake::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let (scope_handle, mut started, mut unstarted) = {
+            let guard = LocalDrop(Rc::clone(&dropped));
+            let mut owner = pin!(scope_local(|s| async move {
+                let started = s.spawn(async move {
+                    let _guard = guard;
+                    std::future::pending::<Rc<()>>().await
+                });
+                *escaped_ref.borrow_mut() = Some((s, started));
+                std::future::pending::<()>().await;
+            }));
+            assert!(owner.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            let (scope_handle, mut started) = escaped.borrow_mut().take().expect("escaped handles");
+            assert!(Pin::new(&mut started).poll(&mut Context::from_waker(&waker)).is_pending());
+            assert!(!dropped.get(), "the local fiber reached its parked state");
+            let unstarted = scope_handle.spawn(async { Rc::new(()) });
+            (scope_handle, started, unstarted)
+        };
+
+        assert!(dropped.get(), "dropping the scope retired its !Send future in place");
+        assert_eq!(scope_handle.live(), 0);
+        assert_eq!(wakes.count(), 1, "the waiting result handle was woken");
+        for handle in [&mut started, &mut unstarted] {
+            assert!(matches!(
+                Pin::new(handle).poll(&mut Context::from_waker(&waker)),
+                Poll::Ready(Err(JoinError::Cancelled(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn local_scope_reuses_slots_and_refuses_spawns_after_completion() {
+        let escaped = block_on(scope_local(|s| async move {
+            for value in 0..64 {
+                let local = Rc::new(value);
+                let result = s.spawn(async move {
+                    crate::runtime::yield_now().await;
+                    local
+                }).await.expect("local result");
+                assert_eq!(*result, value);
+            }
+            assert_eq!(s.state.set.lock().slots.len(), 1);
+            s
+        }));
+        assert_eq!(escaped.live(), 0);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(escaped.spawn(async { Rc::new(()) }));
+        }));
+        assert!(panic.is_err(), "closed local scopes reject new work");
+        assert_eq!(escaped.live(), 0, "refusal did not admit a fiber");
+    }
+
+    #[test]
+    fn local_scope_panic_cancels_and_drains_a_non_send_sibling() {
+        let (kind, cleaned, task_cancelled) = within_watchdog(|| {
+            block_on(async {
+                let task = Cx::current().expect("native root context");
+                let cleanup = Rc::new(Cell::new(false));
+                let local = Rc::clone(&cleanup);
+                let kind = scope_local(|s| async move {
+                    let sibling = s.spawn(async move {
+                        let reason = until_cancelled().await;
+                        crate::runtime::yield_now().await;
+                        local.set(true);
+                        reason.kind
+                    });
+                    let failed = s.spawn(async {
+                        crate::runtime::yield_now().await;
+                        panic!("local fiber failed");
+                    });
+                    assert!(matches!(failed.await, Err(JoinError::Panicked(_))));
+                    sibling.await.expect("cancelled sibling completed its cleanup")
+                }).await;
+                (kind, cleanup.get(), task.is_cancel_requested())
+            })
+        });
+        assert_eq!(kind, CancelKind::FailFast);
+        assert!(cleaned, "scope return follows asynchronous sibling cleanup");
+        assert!(!task_cancelled, "fiber failure does not cancel its owner");
+    }
+
+    #[test]
+    fn local_scope_unobserved_panic_surfaces_after_non_send_cleanup() {
+        let (panicked, cleaned) = within_watchdog(|| {
+            let cleanup = Rc::new(Cell::new(false));
+            let local = Rc::clone(&cleanup);
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                block_on(scope_local(|s| async move {
+                    drop(s.spawn(async move {
+                        let reason = until_cancelled().await;
+                        assert_eq!(reason.kind, CancelKind::FailFast);
+                        crate::runtime::yield_now().await;
+                        local.set(true);
+                    }));
+                    drop(s.spawn(async {
+                        panic!("unobserved local fiber failure");
+                    }));
+                }));
+            }));
+            (panic.is_err(), cleanup.get())
+        });
+        assert!(panicked);
+        assert!(cleaned, "unobserved panic was raised only after drain");
+    }
+
+    #[test]
+    fn local_fiber_handle_cancels_only_its_non_send_fiber() {
+        let (kinds, task_cancelled) = within_watchdog(|| {
+            block_on(async {
+                let task = Cx::current().expect("native root context");
+                let local = Rc::new(Cell::new(0));
+                let kinds = scope_local(|s| async move {
+                    let first_local = Rc::clone(&local);
+                    let first = s.spawn(async move {
+                        let reason = until_cancelled().await;
+                        first_local.set(first_local.get() + 1);
+                        reason.kind
+                    });
+                    let second = s.spawn(async move {
+                        let reason = until_cancelled().await;
+                        local.set(local.get() + 1);
+                        assert_eq!(local.get(), 2);
+                        reason.kind
+                    });
+                    first.cancel();
+                    let first_kind = first.await.expect("first local fiber");
+                    assert_eq!(s.live(), 1, "the sibling remains parked");
+                    second.cancel();
+                    [first_kind, second.await.expect("second local fiber")]
+                }).await;
+                (kinds, task.is_cancel_requested())
+            })
+        });
+        assert_eq!(kinds, [CancelKind::User; 2]);
+        assert!(!task_cancelled);
+    }
+
+    #[test]
+    fn local_fiber_cross_thread_wake_resumes_on_the_owner_thread() {
+        within_watchdog(|| {
+            block_on(scope_local(|s| async move {
+                let owner = std::thread::current().id();
+                let local = Rc::new(Cell::new(0));
+                let ready = Arc::new(AtomicBool::new(false));
+                let (parked, wake_receiver) = std::sync::mpsc::sync_channel::<Waker>(1);
+                let remote_ready = Arc::clone(&ready);
+                let remote = std::thread::spawn(move || {
+                    let waker = wake_receiver.recv().expect("fiber published its parked waker");
+                    remote_ready.store(true, Ordering::Release);
+                    waker.wake();
+                });
+                let fiber = s.spawn(async move {
+                    let mut parked = Some(parked);
+                    poll_fn(|cx| {
+                        assert_eq!(std::thread::current().id(), owner);
+                        if ready.load(Ordering::Acquire) {
+                            local.set(7);
+                            Poll::Ready(())
+                        } else {
+                            if let Some(parked) = parked.take() {
+                                parked.send(cx.waker().clone()).expect("wake thread");
+                            }
+                            Poll::Pending
+                        }
+                    }).await;
+                    local
+                });
+                assert_eq!(fiber.await.expect("externally woken local fiber").get(), 7);
+                remote.join().expect("wake thread completed");
+            }));
+        });
+    }
+
+    #[test]
+    fn aborting_spawn_local_owner_drains_parked_non_send_fibers() {
+        let (seen, retired) = within_watchdog(|| {
+            let runtime = RuntimeBuilder::new().worker_threads(2).build().expect("runtime");
+            let parent = runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native worker context");
+                let parked = Arc::new(AtomicUsize::new(0));
+                let seen = Arc::new(Mutex::new(Vec::new()));
+                let retired = Arc::new(AtomicUsize::new(0));
+                let task_parked = Arc::clone(&parked);
+                let task_seen = Arc::clone(&seen);
+                let task_retired = Arc::clone(&retired);
+                let mut local = cx.spawn_local(move |local_cx| async move {
+                    let owner = std::thread::current().id();
+                    let local_state = Rc::new(Cell::new(0));
+                    scope_local(|s| async move {
+                        for _ in 0..2 {
+                            let state = Rc::clone(&local_state);
+                            let parked = Arc::clone(&task_parked);
+                            let seen = Arc::clone(&task_seen);
+                            let retired = Arc::clone(&task_retired);
+                            drop(s.spawn(async move {
+                                assert_eq!(std::thread::current().id(), owner);
+                                parked_until_cancelled(parked, seen).await;
+                                crate::runtime::yield_now().await;
+                                assert_eq!(std::thread::current().id(), owner);
+                                state.set(state.get() + 1);
+                                retired.fetch_add(1, Ordering::SeqCst);
+                            }));
+                        }
+                    }).await;
+                    assert!(local_cx.checkpoint().is_err(), "owner cancellation acknowledged after drain");
+                    crate::types::Outcome::<(), ()>::Cancelled(
+                        local_cx.cancel_reason().expect("owner cancellation reason"),
+                    )
+                }).expect("spawn local scope owner");
+                while parked.load(Ordering::SeqCst) != 2 {
+                    crate::runtime::yield_now().await;
+                }
+                local.abort_with_reason(CancelReason::new(CancelKind::Shutdown));
+                assert!(matches!(local.join(&cx).await, Ok(crate::types::Outcome::Cancelled(reason))
+                    if reason.kind == CancelKind::Shutdown));
+                let reasons = seen.lock().clone();
+                (reasons, retired.load(Ordering::SeqCst))
+            });
+            runtime.block_on(parent)
+        });
+        assert_eq!(seen, [CancelKind::Shutdown; 2]);
+        assert_eq!(retired, 2, "local owner terminal follows both cleanup completions");
+    }
+
     #[test]
     fn scope_runs_inside_a_send_static_task_over_task_local_borrows() {
         // The shape of a spawned task: the future owns its data, is `Send +

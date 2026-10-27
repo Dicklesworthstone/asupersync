@@ -109,7 +109,7 @@ pub use dynamic_supervisor::{
     DynamicRegionOutcome, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
     DynamicSupervisorReport, DynamicWorkerConfig, SharedRestartConfig, SharedRestartStatus,
 };
-pub use fiber::{FiberHandle, FiberScope};
+pub use fiber::{FiberHandle, FiberScope, LocalFiberScope};
 pub use io_gate::{IoCapabilityDenied, WithAmbient};
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,
