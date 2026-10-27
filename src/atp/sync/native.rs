@@ -18,7 +18,7 @@ use super::{
     DirectoryPath, DirectorySyncError, PathNormalizationRules, plan_bidirectional_sync,
 };
 use crate::cx::Cx;
-use crate::fs::ScopedFsError;
+use crate::fs::scoped::ScopedFsError;
 use nix::dir::Dir;
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag, open, openat};
