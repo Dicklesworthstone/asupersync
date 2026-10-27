@@ -9780,6 +9780,13 @@ impl RuntimeState {
     // Async Finalizer Scheduling
     // =========================================================================
 
+    /// Identifies runtime-owned cleanup tasks without running user code.
+    /// Both synchronous and asynchronous finalizers use this task boundary.
+    #[must_use]
+    pub(crate) fn is_finalizer_task(&self, task_id: TaskId) -> bool {
+        self.async_finalizer_tasks.contains_key(&task_id)
+    }
+
     /// Drains finalizers for regions that are ready to run them.
     ///
     /// Both sync and async finalizers cross the task-publication boundary. In

@@ -30,7 +30,9 @@ pub struct PanicIsolationConfig {
     pub capture_backtraces: bool,
     /// Whether to log panic details to the observability system
     pub enable_panic_logging: bool,
-    /// Maximum number of panics per region before escalating
+    /// Maximum number of panics per region before refusing further task polls.
+    /// Finalizers, region cleanup, and obligation resolution still run under
+    /// their isolation boundaries so escalation cannot abandon cleanup.
     pub panic_threshold_per_region: Option<u32>,
     /// Whether to enable panic recovery for finalizers
     pub isolate_finalizer_panics: bool,
@@ -144,7 +146,7 @@ pub enum PanicIsolationResult<T> {
     Success(T),
     /// Operation invocation or retirement of a skipped operation panicked and was isolated.
     Panicked(PanicContext),
-    /// Operation invocation was skipped due to the region's panic threshold.
+    /// Task invocation was skipped due to the region's panic threshold.
     ///
     /// Captured values were dropped inside the isolation boundary. If that
     /// retirement unwinds, the result is `Panicked` rather than `Skipped`.
@@ -407,6 +409,14 @@ impl PanicIsolator {
         &self,
         location: &PanicLocation,
     ) -> Option<(String, PanicContext)> {
+        // Escalation stops ordinary work, never the work needed to release its
+        // resources. In particular, skipping a finalizer here used to discard
+        // its closure while the scheduler still recorded it as having run
+        // (br-asupersync-bzonpu). Cleanup panics remain isolated and counted;
+        // they do not prevent the next independent cleanup attempt.
+        if !matches!(location, PanicLocation::TaskExecution { .. }) {
+            return None;
+        }
         let threshold = self.config.panic_threshold_per_region?;
         let region_id = self.location_region(location)?;
         let panic_count = {

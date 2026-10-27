@@ -1243,6 +1243,113 @@
     }
 
     #[test]
+    fn exhausted_region_panic_threshold_does_not_skip_scheduled_finalizers() {
+        use crate::observability::metrics::NoOpMetrics;
+        use crate::runtime::state::FinalizerHistoryEvent;
+        use crate::types::{Budget, Outcome};
+
+        for threshold in [0, 1, 3] {
+            let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+            let global = Arc::new(GlobalQueue::new());
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let polls = Arc::new(AtomicUsize::new(0));
+            let region = {
+                let mut runtime = state.lock().unwrap();
+                let region = runtime.create_root_region(Budget::INFINITE);
+                let sync_events = Arc::clone(&events);
+                let sync_state = Arc::clone(&state);
+                assert!(runtime.register_sync_finalizer(region, move || {
+                    assert!(sync_state.try_lock().is_ok(), "cleanup runs outside state lock");
+                    sync_events.lock().unwrap().push("sync");
+                }));
+                let async_events = Arc::clone(&events);
+                assert!(runtime.register_async_finalizer(region, async move {
+                    async_events.lock().unwrap().push("async");
+                }));
+                let panic_events = Arc::clone(&events);
+                assert!(runtime.register_sync_finalizer(region, move || {
+                    panic_events.lock().unwrap().push("panicking");
+                    panic!("independent finalizer failure");
+                }));
+                let pending_events = Arc::clone(&events);
+                let pending_polls = Arc::clone(&polls);
+                assert!(runtime.register_async_finalizer(
+                    region,
+                    std::future::poll_fn(move |cx| {
+                        if pending_polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            pending_events.lock().unwrap().push("pending");
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        } else {
+                            pending_events.lock().unwrap().push("resumed");
+                            Poll::Ready(())
+                        }
+                    }),
+                ));
+                assert!(runtime.region(region).unwrap().begin_close(None));
+                runtime.advance_region_state(region);
+                region
+            };
+
+            let mut worker = Worker::new(
+                0,
+                Vec::new(),
+                Arc::clone(&global),
+                Arc::clone(&state),
+                Arc::new(AtomicBool::new(false)),
+            );
+            worker.panic_isolator = PanicIsolator::new(
+                PanicIsolationConfig {
+                    capture_backtraces: false,
+                    enable_panic_logging: false,
+                    panic_threshold_per_region: Some(threshold),
+                    ..PanicIsolationConfig::default()
+                },
+                Arc::new(NoOpMetrics),
+            );
+            for poll in 0..threshold {
+                assert!(
+                    worker
+                        .panic_isolator
+                        .isolate_task_execution(TaskId::new_for_test(99, 0), region, poll, || {
+                            panic!("exhaust region threshold");
+                        })
+                        .is_panicked()
+                );
+            }
+            assert!(worker.schedule_ready_finalizers());
+            for _ in 0..16 {
+                let Some(task) = global.pop() else {
+                    break;
+                };
+                worker.execute(task);
+            }
+
+            assert_eq!(
+                *events.lock().unwrap(),
+                vec!["pending", "resumed", "panicking", "async", "sync"],
+                "threshold {threshold}: every finalizer must run in LIFO order"
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), 2);
+            let runtime = state.lock().unwrap();
+            assert!(runtime.region(region).is_none(), "cleanup reaches quiescence");
+            assert_eq!(runtime.live_task_count(), 0);
+            assert!(matches!(
+                runtime.region_close_outcome(region),
+                Some(Outcome::Panicked(ref payload))
+                    if payload.message() == "independent finalizer failure"
+            ));
+            assert_eq!(
+                runtime.finalizer_history().iter().filter(|event| {
+                    matches!(event, FinalizerHistoryEvent::Ran { .. })
+                }).count(),
+                4,
+                "completed-finalizer history must match actual executions"
+            );
+        }
+    }
+
+    #[test]
     fn test_execute_ready_with_foreign_local_waiter_does_not_panic() {
         use crate::record::task::TaskRecord;
         use crate::runtime::RuntimeState;
