@@ -49,6 +49,12 @@ use super::streaming::{
 #[cfg(not(target_arch = "wasm32"))]
 mod legacy_native;
 #[cfg(not(target_arch = "wasm32"))]
+mod unary_admission;
+#[cfg(not(target_arch = "wasm32"))]
+pub use unary_admission::UnaryAdmissionLimits;
+#[cfg(not(target_arch = "wasm32"))]
+use unary_admission::{AdmittedUnary, UnaryAdmission};
+#[cfg(not(target_arch = "wasm32"))]
 use legacy_native::{
     LegacyNativeCall, LegacyResponseHandle, LegacyShape, downcast_native_response,
 };
@@ -328,6 +334,9 @@ pub struct ChannelBuilder {
     /// Idle unary connections to keep for reuse; 0 keeps none.
     #[cfg(not(target_arch = "wasm32"))]
     reuse_connections: usize,
+    /// Optional finite native unary active and waiting budgets.
+    #[cfg(not(target_arch = "wasm32"))]
+    unary_admission: Option<UnaryAdmissionLimits>,
     /// Whether peer keepalive rejections increase intervals for future connections.
     #[cfg(not(target_arch = "wasm32"))]
     keepalive_backoff: bool,
@@ -357,6 +366,8 @@ impl ChannelBuilder {
             connect_policy: ConnectPolicy::default(),
             #[cfg(not(target_arch = "wasm32"))]
             reuse_connections: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            unary_admission: None,
             #[cfg(not(target_arch = "wasm32"))]
             keepalive_backoff: false,
             #[cfg(not(target_arch = "wasm32"))]
@@ -572,6 +583,41 @@ impl ChannelBuilder {
         self
     }
 
+    /// Bound native unary exchanges and their FIFO waiting queue.
+    ///
+    /// Clones share these limits. Excess calls fail with `RESOURCE_EXHAUSTED`;
+    /// queued calls remain cancellation-aware and spend their existing RPC
+    /// deadline while waiting. DNS, TCP/TLS setup and pool checkout happen
+    /// only after admission. An active slot is held through connection return
+    /// or close, including cancellation, timeout and dropping the call.
+    ///
+    /// This opt-in limit applies to native unary calls. Streaming and
+    /// deterministic loopback calls are unaffected. Interceptors and codec
+    /// encoding still precede admission; caller allocations are not bounded.
+    ///
+    /// ```no_run
+    /// # #[cfg(not(target_arch = "wasm32"))]
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::num::NonZeroUsize;
+    /// use asupersync::grpc::{Channel, UnaryAdmissionLimits};
+    ///
+    /// let channel = Channel::builder("http://127.0.0.1:50051")
+    ///     .unary_admission(UnaryAdmissionLimits::new(
+    ///         NonZeroUsize::new(16).unwrap(), 64,
+    ///     )?)
+    ///     .reuse_connections(16)
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn unary_admission(mut self, limits: UnaryAdmissionLimits) -> Self {
+        self.unary_admission = Some(limits);
+        self
+    }
+
     /// Build the channel.
     pub async fn connect(self) -> Result<Channel, GrpcError> {
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
@@ -588,6 +634,9 @@ impl ChannelBuilder {
         {
             channel.connect_policy = self.connect_policy;
             channel.progress_aware_keepalive = self.progress_aware_keepalive;
+            channel.unary_admission = self
+                .unary_admission
+                .map(|limits| Arc::new(UnaryAdmission::new(limits)));
             if self.keepalive_backoff {
                 channel = channel.with_keepalive_backoff();
             }
@@ -633,6 +682,9 @@ pub struct Channel {
     /// ([`ChannelBuilder::reuse_connections`]).
     #[cfg(not(target_arch = "wasm32"))]
     unary_pool: Option<Arc<UnaryConnectionPool>>,
+    /// Active native unary exchanges and FIFO waiters, shared by clones.
+    #[cfg(not(target_arch = "wasm32"))]
+    unary_admission: Option<Arc<UnaryAdmission>>,
     /// Future connection intervals, shared only by clones of an opted-in channel.
     #[cfg(not(target_arch = "wasm32"))]
     keepalive_backoff: Option<Arc<KeepaliveBackoff>>,
@@ -721,6 +773,8 @@ impl Channel {
             #[cfg(not(target_arch = "wasm32"))]
             unary_pool: None,
             #[cfg(not(target_arch = "wasm32"))]
+            unary_admission: None,
+            #[cfg(not(target_arch = "wasm32"))]
             keepalive_backoff: None,
             #[cfg(not(target_arch = "wasm32"))]
             progress_aware_keepalive: false,
@@ -737,6 +791,15 @@ impl Channel {
     #[must_use]
     pub fn config(&self) -> &ChannelConfig {
         &self.config
+    }
+
+    /// Native unary admission limits shared by this channel's clones.
+    ///
+    /// `None` preserves the default unbounded active unary concurrency.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn unary_admission_limits(&self) -> Option<UnaryAdmissionLimits> {
+        self.unary_admission.as_ref().map(|admission| admission.limits())
     }
 
     /// Opt into peer-directed backoff for future native streaming connections.
@@ -1909,13 +1972,39 @@ async fn native_h2_unary(
     let config = channel.config().clone();
     let tls_connector = channel.tls_connector().cloned();
     let pool = channel.unary_pool.clone();
-    let io = native_h2_unary_io(target, config, tls_connector, pool, path, &metadata, body);
-    let Some(timeout) = effective_native_call_timeout(&metadata) else {
-        return io.await;
-    };
+    let admission = channel.unary_admission.as_deref();
+    let timeout = effective_native_call_timeout(&metadata);
     let now = cx
         .timer_driver()
         .map_or_else(crate::time::wall_now, |timer| timer.now());
+    let io = async move {
+        if let Some(admission) = admission {
+            let permit = admission.acquire(&cx).await?;
+            // The outer timeout includes the queue. Refresh the wire budget
+            // after admission so a server does not receive the time spent
+            // waiting as additional execution time.
+            let mut metadata = metadata;
+            if let Some(timeout) = timeout {
+                let elapsed = Duration::from_nanos(native_now().duration_since(now));
+                let remaining = timeout.saturating_sub(elapsed);
+                if remaining.is_zero() {
+                    return Err(Status::deadline_exceeded(
+                        "native HTTP/2 gRPC deadline elapsed during unary admission",
+                    ));
+                }
+                let _ = metadata.insert("grpc-timeout", encode_grpc_timeout(remaining));
+            }
+            let io = native_h2_unary_io(
+                target, config, tls_connector, pool, path, &metadata, body,
+            );
+            AdmittedUnary::new(io, permit).await
+        } else {
+            native_h2_unary_io(target, config, tls_connector, pool, path, &metadata, body).await
+        }
+    };
+    let Some(timeout) = timeout else {
+        return io.await;
+    };
     match crate::time::timeout(now, timeout, io).await {
         Ok(result) => result,
         Err(_) => Err(Status::deadline_exceeded(format!(
