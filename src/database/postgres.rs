@@ -59,6 +59,10 @@ use std::task::{Context, Poll, Waker};
 mod tls_options;
 pub use tls_options::{PgTlsOptions, PgTlsVerification};
 
+#[path = "postgres/cursor.rs"]
+mod cursor;
+pub use cursor::{PgCursor, PgCursorComplete, PgCursorConfig};
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -7756,6 +7760,16 @@ impl PgConnection {
     /// conn.close_statement(cx, &stmt).await?;
     /// ```
     pub async fn prepare(&mut self, cx: &Cx, sql: &str) -> Outcome<PgStatement, PgError> {
+        self.prepare_with_body_limit(cx, sql, MAX_BACKEND_MESSAGE_LEN as usize - 4)
+            .await
+    }
+
+    async fn prepare_with_body_limit(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        max_message_bytes: usize,
+    ) -> Outcome<PgStatement, PgError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -7841,7 +7855,10 @@ impl PgConnection {
                 return self.cancel_in_flight(cx).await;
             }
 
-            let (msg_type, data) = match self.read_message(cx).await {
+            let (msg_type, data) = match self
+                .read_message_with_body_limit(cx, max_message_bytes, "prepared statement")
+                .await
+            {
                 Ok(m) => m,
                 Err(e) => return self.fail_in_flight(e),
             };
@@ -7872,7 +7889,10 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return outcome_from_error(self.parse_error_and_drain(cx, &data).await);
+                    return outcome_from_error(
+                        self.parse_error_and_drain_with_body_limit(cx, &data, max_message_bytes)
+                            .await,
+                    );
                 }
                 _ => {
                     match self.handle_async_backend_message(msg_type, &data) {
@@ -9159,8 +9179,18 @@ impl PgConnection {
     /// returns a protocol error that includes both the server error details and
     /// the drain failure so re-synchronization failures are never swallowed.
     async fn parse_error_and_drain(&mut self, cx: &Cx, data: &[u8]) -> PgError {
+        self.parse_error_and_drain_with_body_limit(cx, data, MAX_BACKEND_MESSAGE_LEN as usize - 4)
+            .await
+    }
+
+    async fn parse_error_and_drain_with_body_limit(
+        &mut self,
+        cx: &Cx,
+        data: &[u8],
+        max_message_bytes: usize,
+    ) -> PgError {
         let server_err = self.parse_error_response(data).unwrap_or_else(|e| e);
-        match self.drain_to_ready(cx).await {
+        match self.drain_to_ready_with_body_limit(cx, max_message_bytes).await {
             Ok(()) => server_err,
             Err(PgError::Cancelled(reason)) => {
                 self.abort_in_flight_exchange();
@@ -9420,11 +9450,22 @@ impl PgConnection {
     /// Returns `Ok(())` when `ReadyForQuery` is received, or `Err` if the
     /// connection hit an I/O error before reaching synchronization.
     async fn drain_to_ready(&mut self, cx: &Cx) -> Result<(), PgError> {
+        self.drain_to_ready_with_body_limit(cx, MAX_BACKEND_MESSAGE_LEN as usize - 4)
+            .await
+    }
+
+    async fn drain_to_ready_with_body_limit(
+        &mut self,
+        cx: &Cx,
+        max_message_bytes: usize,
+    ) -> Result<(), PgError> {
         loop {
             if cx.checkpoint().is_err() {
                 return self.finish_io_result(cx, Err(cancelled_error(cx))).await;
             }
-            let (msg_type, data) = self.read_message(cx).await?;
+            let (msg_type, data) = self
+                .read_message_with_body_limit(cx, max_message_bytes, "backend")
+                .await?;
             if msg_type == b'Z' {
                 self.inner.closed = false;
                 self.handle_ready_for_query(&data)?;

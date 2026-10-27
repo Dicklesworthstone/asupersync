@@ -59,7 +59,8 @@ pub use sqlite::{SqliteConnection, SqliteError, SqliteRow, SqliteTransaction, Sq
 #[cfg(feature = "postgres")]
 pub use postgres::{
     DEFAULT_NOTIFICATION_CAPACITY, Format as PgFormat, FromSql as PgFromSql, IsNull as PgIsNull,
-    PgArrayElement, PgColumn, PgConnectOptions, PgConnection, PgError, PgNotification,
+    PgArrayElement, PgColumn, PgConnectOptions, PgConnection, PgCursor, PgCursorComplete,
+    PgCursorConfig, PgError, PgNotification,
     PgNotificationError, PgNotifications, PgRow, PgStatement, PgTransaction, PgValue,
     PreparedCacheStats, SslMode, ToSql as PgToSql, Untyped as PgUntyped, oid as pg_oid,
 };
