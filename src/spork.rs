@@ -106,6 +106,10 @@
 #[path = "spork/managed_process_group.rs"]
 mod managed_process_group;
 
+/// Bounded event fan-out with independently supervised handler lifecycles.
+#[path = "spork/event_manager.rs"]
+pub mod event_manager;
+
 /// Application lifecycle: build, compile, start, stop.
 ///
 /// Re-exports from [`crate::app`].
@@ -2001,3 +2005,4 @@ pub mod error {
 #[allow(clippy::no_effect_underscore_binding)]
 #[path = "spork_inline_tests.rs"]
 mod tests;
+
