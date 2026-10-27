@@ -16,7 +16,7 @@ use asupersync::lab::ldfi::HittingSetBudget;
 use asupersync::lab::ldfi_trace::{
     LdfiReport, TraceLineageConfig, blind_chaos_single_fault_count, ldfi_report, support_graph_for,
 };
-use asupersync::lab::scenario::Scenario;
+use asupersync::lab::scenario::{Scenario, ScenarioLoadLimits};
 use asupersync::lab::scenario_runner::{
     ParticipantBindings, ScenarioCancellationLimits, ScenarioCancellationReport,
     ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner, ScenarioRunnerError,
@@ -93,6 +93,12 @@ struct RunArgs {
     /// Path to the scenario YAML file
     scenario: PathBuf,
 
+    /// Resolve and merge includes within the scenario's directory
+    ///
+    /// Quote numeric, boolean and null values used as strings in resolved mode.
+    #[arg(long, action = ArgAction::SetTrue)]
+    resolve_includes: bool,
+
     /// Override the seed from the scenario file
     #[arg(long)]
     seed: Option<u64>,
@@ -102,18 +108,36 @@ struct RunArgs {
 struct ValidateArgs {
     /// Path to the scenario YAML file
     scenario: PathBuf,
+
+    /// Resolve and merge includes within the scenario's directory
+    ///
+    /// Quote numeric, boolean and null values used as strings in resolved mode.
+    #[arg(long, action = ArgAction::SetTrue)]
+    resolve_includes: bool,
 }
 
 #[derive(Args, Debug)]
 struct ReplayArgs {
     /// Path to the scenario YAML file
     scenario: PathBuf,
+
+    /// Resolve and merge includes within the scenario's directory
+    ///
+    /// Quote numeric, boolean and null values used as strings in resolved mode.
+    #[arg(long, action = ArgAction::SetTrue)]
+    resolve_includes: bool,
 }
 
 #[derive(Args, Debug)]
 struct ExploreArgs {
     /// Path to the scenario YAML file
     scenario: PathBuf,
+
+    /// Resolve and merge includes within the scenario's directory
+    ///
+    /// Quote numeric, boolean and null values used as strings in resolved mode.
+    #[arg(long, action = ArgAction::SetTrue)]
+    resolve_includes: bool,
 
     /// Number of seeds to explore
     #[arg(long, default_value_t = 100)]
@@ -128,6 +152,12 @@ struct ExploreArgs {
 struct CancelArgs {
     /// Path to a scenario YAML file containing a cancellation strategy
     scenario: PathBuf,
+
+    /// Resolve and merge includes within the scenario's directory
+    ///
+    /// Quote numeric, boolean and null values used as strings in resolved mode.
+    #[arg(long, action = ArgAction::SetTrue)]
+    resolve_includes: bool,
 
     /// Override the seed from the scenario file
     #[arg(long)]
@@ -154,6 +184,12 @@ struct CancelArgs {
 struct MinimizeArgs {
     /// Path to a failing scenario YAML file or incident replay package JSON
     scenario: PathBuf,
+
+    /// Resolve YAML scenario includes (not incident replay packages)
+    ///
+    /// Quote numeric, boolean and null values used as strings in resolved mode.
+    #[arg(long, action = ArgAction::SetTrue)]
+    resolve_includes: bool,
 
     /// Maximum scenario reruns or incident shrink steps; 0 means unlimited
     #[arg(long, default_value_t = 128)]
@@ -243,7 +279,11 @@ fn parse_scenario(path: &Path, yaml: &str) -> Result<asupersync::lab::scenario::
     })
 }
 
-fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, String> {
+fn load_scenario(path: &Path, resolve_includes: bool) -> Result<Scenario, String> {
+    if resolve_includes {
+        return Scenario::load_resolved(path, ScenarioLoadLimits::default())
+            .map_err(|error| error.to_string());
+    }
     let yaml =
         fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     parse_scenario(path, &yaml)
@@ -350,7 +390,7 @@ fn format_run_result(
 
 #[allow(clippy::needless_pass_by_value)]
 fn cmd_run(args: RunArgs, json: bool) -> Result<(), String> {
-    let scenario = load_scenario(&args.scenario)?;
+    let scenario = load_scenario(&args.scenario, args.resolve_includes)?;
     let result =
         ScenarioRunner::run_with_seed(&scenario, args.seed).map_err(runner_error_message)?;
     let bindings = ScenarioRunner::participant_bindings(&scenario);
@@ -371,7 +411,7 @@ fn cmd_run(args: RunArgs, json: bool) -> Result<(), String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn cmd_validate(args: ValidateArgs, json: bool) -> Result<(), String> {
-    let scenario = load_scenario(&args.scenario)?;
+    let scenario = load_scenario(&args.scenario, args.resolve_includes)?;
     let errors = scenario.validate();
 
     if json {
@@ -405,7 +445,7 @@ fn cmd_validate(args: ValidateArgs, json: bool) -> Result<(), String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn cmd_replay(args: ReplayArgs, json: bool) -> Result<(), String> {
-    let scenario = load_scenario(&args.scenario)?;
+    let scenario = load_scenario(&args.scenario, args.resolve_includes)?;
     let result = ScenarioRunner::validate_replay(&scenario).map_err(runner_error_message)?;
 
     if json {
@@ -455,7 +495,7 @@ fn format_explore_result(result: &ScenarioExplorationResult, json: bool) -> Stri
 
 #[allow(clippy::cast_possible_truncation, clippy::needless_pass_by_value)]
 fn cmd_explore(args: ExploreArgs, json: bool) -> Result<(), String> {
-    let scenario = load_scenario(&args.scenario)?;
+    let scenario = load_scenario(&args.scenario, args.resolve_includes)?;
     let result = ScenarioRunner::explore_seeds(&scenario, args.start_seed, args.seeds as usize)
         .map_err(runner_error_message)?;
 
@@ -547,7 +587,7 @@ fn cancellation_command_result(report: &ScenarioCancellationReport) -> Result<()
 
 #[allow(clippy::needless_pass_by_value)]
 fn cmd_cancel(args: CancelArgs, json: bool) -> Result<(), String> {
-    let scenario = load_scenario(&args.scenario)?;
+    let scenario = load_scenario(&args.scenario, args.resolve_includes)?;
     let limits = ScenarioCancellationLimits {
         max_runs: args.max_runs,
         max_poll_points: args.max_poll_points,
@@ -641,7 +681,12 @@ fn parse_minimize_input(path: &Path, raw: &str) -> Result<MinimizeInput, String>
     parse_scenario(path, raw).map(MinimizeInput::ScenarioYaml)
 }
 
-fn load_minimize_input(path: &Path) -> Result<MinimizeInput, String> {
+fn load_minimize_input(path: &Path, resolve_includes: bool) -> Result<MinimizeInput, String> {
+    if resolve_includes {
+        // Expand once, before the minimizer starts evaluating candidates. The
+        // returned scenario and emitted minimum contain no include directives.
+        return load_scenario(path, true).map(MinimizeInput::ScenarioYaml);
+    }
     let raw =
         fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     parse_minimize_input(path, &raw)
@@ -968,7 +1013,7 @@ fn format_incident_minimize_result(report: &MinimizeIncidentReplayPackageReport)
 
 #[allow(clippy::needless_pass_by_value)]
 fn cmd_minimize(args: MinimizeArgs, json: bool) -> Result<(), String> {
-    let input = load_minimize_input(&args.scenario)?;
+    let input = load_minimize_input(&args.scenario, args.resolve_includes)?;
     match input {
         MinimizeInput::ScenarioYaml(scenario) => cmd_minimize_scenario(&args, json, &scenario),
         MinimizeInput::IncidentReplayPackageJson(package) => {
@@ -1129,6 +1174,7 @@ fn demo_validate_all(dir: &Path, json: bool) -> Result<(), String> {
         let result = cmd_validate(
             ValidateArgs {
                 scenario: path.clone(),
+                resolve_includes: false,
             },
             json,
         );
@@ -1159,6 +1205,7 @@ fn demo_run_scenarios(dir: &Path, json: bool) -> Result<(), String> {
         let result = cmd_run(
             RunArgs {
                 scenario: path.clone(),
+                resolve_includes: false,
                 seed: None,
             },
             json,
@@ -1187,6 +1234,7 @@ fn demo_explore(dir: &Path, json: bool) -> Result<(), String> {
             return cmd_explore(
                 ExploreArgs {
                     scenario: first.clone(),
+                    resolve_includes: false,
                     seeds: 50,
                     start_seed: 0,
                 },
@@ -1200,6 +1248,7 @@ fn demo_explore(dir: &Path, json: bool) -> Result<(), String> {
     cmd_explore(
         ExploreArgs {
             scenario: scenario_path,
+            resolve_includes: false,
             seeds: 50,
             start_seed: 0,
         },
@@ -1427,6 +1476,29 @@ mod tests {
         IncidentSourceKind,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn include_resolution_is_an_explicit_option_on_every_scenario_command() {
+        for command in ["run", "validate", "replay", "explore", "cancel", "minimize"] {
+            for resolve in [false, true] {
+                let mut arguments = vec!["frankenlab", command, "scenario.yaml"];
+                if resolve {
+                    arguments.push("--resolve-includes");
+                }
+                let cli = Cli::try_parse_from(arguments).expect("parse scenario command");
+                let actual = match cli.command {
+                    Command::Run(args) => args.resolve_includes,
+                    Command::Validate(args) => args.resolve_includes,
+                    Command::Replay(args) => args.resolve_includes,
+                    Command::Explore(args) => args.resolve_includes,
+                    Command::Cancel(args) => args.resolve_includes,
+                    Command::Minimize(args) => args.resolve_includes,
+                    _ => panic!("expected scenario command"),
+                };
+                assert_eq!(actual, resolve, "{command}");
+            }
+        }
+    }
 
     #[test]
     fn cancellation_command_parses_campaign_bounds_and_json() {

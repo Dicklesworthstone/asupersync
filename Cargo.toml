@@ -247,6 +247,8 @@ trace-compression = ["dep:lz4_flex"]
 debug-server = []
 # Enable TOML config file loading for RuntimeBuilder.
 config-file = ["dep:toml"]
+# Enable explicitly requested, bounded scenario include loading from YAML files.
+scenario-files = ["dep:serde_yaml"]
 # Enable the Cargo-built dependency marginal-ledger generator. This reuses the
 # already-approved optional TOML parser and does not enter production graphs.
 dependency-ledger = ["dep:toml"]
@@ -280,7 +282,7 @@ cli = [
     "dep:clap",
     "dep:time",
     "trace-compression",
-    "dep:serde_yaml",
+    "scenario-files",
     "dep:chrono",
     "config-file",
     "tracing-integration",

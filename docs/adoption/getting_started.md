@@ -316,9 +316,9 @@ Current field-consumption boundaries:
 | `faults` | Produces timed trace entries; only a subset affects the synthetic effect summary; `partition`/`heal` between two participants cut and restore saga, replication, lease and hub links; `clock_skew`/`clock_reset` move a lease role's clock |
 | `resource_caps` | Partially consumed for post-parse/runtime artifact limits |
 | `minimization` | Partially consumed by minimization/report paths |
-| `include` | Paths are validated only; referenced files are not read or merged |
+| `include` | Paths are validated; scenario commands such as `frankenlab run ... --resolve-includes` explicitly read and compose referenced files |
 | `network` | The preset and per-link `latency`/`packet_loss` shape saga, replication, lease and hub messages between participants; other link fields are not modeled |
-| `cancellation` | Validated only; not consumed by `ScenarioRunner` |
+| `cancellation` | `frankenlab cancel` executes the declared strategy at recorded scheduler poll boundaries |
 | `participants` | Names validate fault references; `sender`/`receiver` (`messages`/`capacity`), `swarm` (`tasks`), `supervisor` (`max_restarts`), `worker` (`fail_times`), `saga-coordinator` (`step_ms`), `saga-participant`, `primary` (`writes`/`write_ms`), `replica`, `lease-grantor` (`initial_lease_ms`), `lease-holder` (`renewals`/`renew_ms`/`margin_ms`/`start_ms`), `hub` (`rounds`/`interval_ms`/`timeout_ms`) and `peer` roles run as lab tasks; other roles are unused |
 | `expected_invariants` | Validated only; does not select or enforce runner checks |
 | `golden_projection` | `format` is unused; `canonicalized` and `redacted` do not transform output |
@@ -326,6 +326,97 @@ Current field-consumption boundaries:
 The exact typed corpus is the ten files under `examples/scenarios/` and the
 three files under `frankenlab/examples/scenarios/`. Use them as syntax and
 validation examples, not as proof of the behavior named in a filename.
+
+## Compose reusable scenarios
+
+FrankenLab can load shared configuration and workloads when a scenario command
+explicitly supplies `--resolve-includes`. The default single-file behavior is
+unchanged: declaring `include` alone does not open other files. The root
+`asupersync lab` commands retain that default behavior.
+
+For example, put a partial document in `base.yaml`:
+
+```yaml
+lab:
+  seed: 17
+  worker_count: 2
+participants:
+  - name: producer
+    role: sender
+    properties: {messages: 4}
+  - name: consumer
+    role: receiver
+    properties: {capacity: 1}
+cancellation:
+  strategy: all_points
+metadata:
+  revision: "123"
+```
+
+Create `scenario.yaml` in the same directory:
+
+```yaml
+id: shared-channel-workload
+include:
+  - path: base.yaml
+lab:
+  seed: 23
+```
+
+The root's seed overrides the base's seed while the worker count, workload and
+cancellation strategy are inherited. Each command resolves the files once and
+then operates on that standalone scenario:
+
+```bash
+frankenlab validate scenario.yaml --resolve-includes
+frankenlab run scenario.yaml --resolve-includes
+frankenlab replay scenario.yaml --resolve-includes
+frankenlab explore scenario.yaml --resolve-includes --seeds 20
+frankenlab cancel scenario.yaml --resolve-includes
+```
+
+`frankenlab minimize failing.yaml --resolve-includes` also composes once before
+evaluating candidates. Its emitted minimum contains the effective configuration
+and an empty `include` list, so replay does not depend on the included files.
+The flag applies to YAML scenarios, not incident replay package JSON inputs.
+
+Composition follows these rules:
+
+- Includes are applied in declaration order; later includes override earlier
+  ones, then fields explicitly present in the local document override them.
+  Nested mappings merge by key. Typed defaults apply only after all composition.
+- Sequences replace the whole inherited sequence. Participants, faults,
+  oracles and expected invariants are never appended or matched by name.
+  An explicit empty sequence clears the inherited list.
+- An explicit null replaces an inherited value. For example,
+  `cancellation: null` disables an inherited cancellation strategy and
+  `lab: {max_steps: null}` clears an inherited step cap. A null in a field whose
+  type does not accept null produces a typed parse error.
+- The root must declare its own `id`. Included partial documents may omit it;
+  ids in included full scenarios are ignored.
+- Each include is relative to its containing document. All canonical targets
+  must stay within the canonical directory containing the root. Existing path
+  validation still applies: `.yaml`/`.yml` extensions, no `..`, and the existing
+  length and character restrictions. Cycles, symlink escapes and non-regular
+  files are rejected. Keep the source tree stable during loading; these path
+  checks do not isolate reads from concurrent filesystem replacement.
+- Resolved mode preserves YAML scalar types. Quote numeric, boolean and null
+  values used as string fields, such as `metadata: {revision: "123"}`. Direct
+  single-file loading keeps its existing scalar-to-string coercions. Anchors,
+  aliases and string tags remain usable; YAML `<<` merge keys are not applied.
+
+The default expansion limits are 16 include edges, 64 document reads, 1 MiB per
+document and 8 MiB of total input. Repeated references, including shared bases
+in a diamond, count each time. These are filesystem and include-expansion
+limits, not a separate memory or work limit for YAML parsing and alias
+expansion; the retained parser supplies its existing protections.
+
+Library callers can enable the `scenario-files` feature and use
+`Scenario::load_resolved(path, ScenarioLoadLimits::default())`, or set the limits
+explicitly. The loader performs synchronous configuration I/O and returns a
+typed `Scenario`; call `validate()` or a `ScenarioRunner` entry point to apply
+the usual semantic checks. Ordinary serde parsing and `Scenario::from_json`
+continue to have no filesystem effects.
 
 ## YAML authoring boundaries
 
@@ -336,10 +427,11 @@ validation examples, not as proof of the behavior named in a filename.
 - Anchors and aliases are resolved by the incumbent parser. A `<<` merge key is
   not applied by either production loader; it is treated as an ignored unknown
   field in the target struct.
-- Include path extension, length, and character rules are validated, but no
-  include file is opened or merged.
-- The loaders read the whole document before parsing and define no application
-  byte, scalar, collection, nesting, or total-work budget.
+- Include path extension, length, and character rules are validated. Include
+  files are opened and merged only by the explicit resolved loading mode above.
+- Default single-file loaders read the whole document before parsing and define
+  no application byte, scalar, collection, nesting, or total-work budget.
+  Resolved loading adds the filesystem and include-expansion limits above.
 
 Parser errors identify the input path and include parser text plus a line and
 column when the parser supplies them. Semantic validation aggregates field-like
