@@ -6374,6 +6374,9 @@ where
         (request, handle)
     }
 
+}
+
+impl<Caps> Cx<Caps> {
     /// The region that admits a spawn into this context's own region once
     /// that sealed (race-branch) region has closed (br-asupersync-k27oxe).
     /// `None` for a spawn that names any other region: a closed scope or
@@ -6387,6 +6390,12 @@ where
         }
     }
 
+}
+
+impl<Caps> Cx<Caps>
+where
+    Caps: cap::HasSpawn + Send + Sync + 'static,
+{
     /// Records the fallback [`Self::spawn_fallback_for`] returns; admission
     /// sets it when it admits a task into a sealed region.
     pub(crate) fn set_spawn_fallback_region(&self, region: Option<RegionId>) {
