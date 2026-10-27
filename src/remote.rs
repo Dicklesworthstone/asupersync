@@ -1874,10 +1874,11 @@ pub type StepIndex = usize;
 /// A recorded compensation for a saga step.
 ///
 /// Compensations are stored as boxed closures that take the step output
-/// and undo the effect. In Phase 0, compensations are synchronous functions
+/// and undo the effect. This compatibility API keeps synchronous functions
 /// that return a description of what was undone.
 ///
-/// In Phase 1+, compensations will be async and budget-constrained.
+/// Runtime-owned asynchronous compensation is available through
+/// [`Cx::spawn_saga`](crate::cx::Cx::spawn_saga).
 struct CompensationEntry {
     /// Index of the step this compensation belongs to.
     step: StepIndex,
@@ -1960,14 +1961,18 @@ pub struct CompensationResult {
 /// all previously-completed compensations run in reverse order. This is
 /// the distributed equivalent of structured finalizers.
 ///
+/// This API remains synchronous. For asynchronous actions/compensations, child
+/// quiescence before commit, and an explicit cancellation-mask allowance, use
+/// [`Cx::spawn_saga`](crate::cx::Cx::spawn_saga).
+///
 /// # Design Principles
 ///
 /// - **Compensations are deterministic**: Given the same inputs, compensations
 ///   produce the same effects. This enables lab testing of failure scenarios.
 /// - **Reverse order**: Compensations run last-to-first, ensuring that
 ///   later steps' effects are undone before earlier steps'.
-/// - **Budget-aware**: In Phase 1+, compensations will be budget-constrained
-///   (they are finalizers, which run under masked cancellation).
+/// - **Synchronous cleanup**: Compensation runs inline, including on Drop.
+///   The separate async saga API retains runtime ownership while cleanup waits.
 /// - **Trace-aware**: Each step and compensation emits trace events.
 ///
 /// # API Pattern
