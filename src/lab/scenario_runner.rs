@@ -9,7 +9,13 @@
 //! - Timed fault injection based on scenario fault events
 //! - Oracle filtering (only check oracles listed in the scenario)
 //! - Seed exploration (run the same scenario across multiple seeds)
+//! - Bounded exact schedule exploration with resumable frontiers and replay receipts
 //! - Replay validation (run twice, verify identical trace certificates)
+//!
+//! [`ScenarioRunner::explore_schedules`] executes witnessed scheduling alternatives
+//! for fully bound, single-worker scenarios without chaos, timed faults or a
+//! cancellation campaign. It includes the same application checks as ordinary
+//! runs. Search exhaustion is scoped to this deterministic schedule tree.
 //!
 //! # Participant workloads
 //!
@@ -175,9 +181,17 @@
 
 use super::config::LabConfig;
 use super::dual_run::{DualRunScenarioIdentity, ReplayMetadata, SeedLineageRecord};
+use super::exact_explorer::{
+    ExactScheduleCheckpoint, ExactScheduleCheckpointError, ExactScheduleCheckpointLimits,
+    ExactScheduleConfigError, ExactScheduleExplorer, ExactScheduleLimits, ExactScheduleProgress,
+    ExactScheduleResumeError, ExactScheduleRun, ExactScheduleSearchTermination,
+    ExactScheduleTermination, ExactScheduleWorkloadKey,
+};
 use super::network::{LatencyModel, NetworkConditions};
 use super::oracle::{OracleRegistry, OracleRegistryError, OracleReport};
-use super::runtime::{LabRunReport, LabRuntime};
+use super::runtime::{
+    ForcedScheduleError, ForcedScheduleLimits, ForcedScheduleReport, LabRunReport, LabRuntime,
+};
 use super::scenario::{
     FaultAction, FaultEvent, LatencySpec, NetworkPreset, NetworkSection, Participant, Scenario,
     ValidationError,
@@ -197,6 +211,8 @@ use crate::trace::replay::ReplayTrace;
 use crate::types::{Budget, CancelReason, Outcome, RegionId, Time};
 use crate::util::DetRng;
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
@@ -865,6 +881,346 @@ impl ExplorationRunSummary {
             "steps": self.steps,
             "fingerprint": self.fingerprint,
             "failures": self.failures,
+        })
+    }
+}
+
+/// Errors admitting or replaying exact scenario schedules.
+///
+/// Exploration failures are returned in [`ScenarioScheduleReport`], including
+/// a partial search. Replay divergence is an error; a faithfully reproduced
+/// workload failure remains an inspectable [`ScenarioScheduleReplayReport`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ScenarioScheduleError {
+    /// The ordinary scenario or workload contract is invalid.
+    #[error(transparent)]
+    Scenario(#[from] ScenarioRunnerError),
+    /// A scenario effect is outside the exact scheduling model.
+    #[error("exact scenario exploration does not support {reason}")]
+    Unsupported {
+        /// The unsupported input, never silently discarded.
+        reason: &'static str,
+    },
+    /// The explorer configuration or its bounds are inadmissible.
+    #[error("invalid exact scenario exploration configuration: {0:?}")]
+    Configuration(ExactScheduleConfigError),
+    /// The saved frontier cannot resume against this workload and configuration.
+    #[error("exact scenario exploration cannot resume: {0:?}")]
+    Resume(ExactScheduleResumeError),
+    /// The source belongs to another effective scenario or implementation.
+    #[error("exact scenario replay workload identity mismatch")]
+    ReplayWorkloadMismatch,
+    /// An incomplete exploration execution cannot serve as an exact receipt.
+    #[error("exact scenario replay requires a complete schedule receipt")]
+    MissingReplayReceipt,
+    /// Forced execution rejected the receipt, exhausted limits, or diverged.
+    #[error("exact scenario replay failed: {0}")]
+    Replay(#[from] ForcedScheduleError),
+    /// The scenario could not be serialized for its content identity.
+    #[error("cannot identify exact scenario workload: {0}")]
+    Identity(#[from] serde_json::Error),
+}
+
+const SCENARIO_CHECKPOINT_MAGIC: &[u8; 8] = b"ASUPSCN\0";
+const SCENARIO_CHECKPOINT_HEADER: usize = 20;
+const SCENARIO_CHECKPOINT_OVERHEAD: usize = SCENARIO_CHECKPOINT_HEADER + 32;
+
+/// A scenario's exact frontier and its cumulative application-level failures.
+///
+/// The inner explorer counts kernel failures; this wrapper also remembers
+/// failures detected by the scenario's real channel, supervision, saga, lease,
+/// replication and peer workloads. A later passing batch cannot erase them.
+/// Loading bytes validates integrity and bounds, not earlier execution claims.
+/// A loaded checkpoint with prior runs therefore cannot prove whole-campaign
+/// success, although its remaining branches can still execute and be inspected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioScheduleCheckpoint {
+    inner: ExactScheduleCheckpoint,
+    scenario_failed: u64,
+    historical_progress_verified: bool,
+}
+
+impl ScenarioScheduleCheckpoint {
+    /// Cumulative kernel progress, distinct from the scenario failure count.
+    #[must_use]
+    pub const fn progress(&self) -> ExactScheduleProgress {
+        self.inner.progress()
+    }
+
+    /// Number of exact alternatives awaiting execution.
+    #[must_use]
+    pub fn pending_prefix_count(&self) -> usize {
+        self.inner.pending_prefix_count()
+    }
+
+    /// All scenario failures observed by this campaign, across every batch.
+    #[must_use]
+    pub const fn scenario_failed(&self) -> u64 {
+        self.scenario_failed
+    }
+
+    /// Whether earlier runs were observed by this process rather than decoded.
+    #[must_use]
+    pub const fn historical_progress_verified(&self) -> bool {
+        self.historical_progress_verified
+    }
+
+    fn checksum(bytes: &[u8]) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"asupersync.lab.scenario-schedule-checkpoint.v1\0");
+        hash.update(bytes);
+        hash.finalize().into()
+    }
+
+    fn inner_limits(
+        mut limits: ExactScheduleCheckpointLimits,
+    ) -> Result<ExactScheduleCheckpointLimits, ExactScheduleCheckpointError> {
+        limits.max_encoded_bytes = limits
+            .max_encoded_bytes
+            .checked_sub(SCENARIO_CHECKPOINT_OVERHEAD)
+            .ok_or(ExactScheduleCheckpointError::ByteLimit)?;
+        Ok(limits)
+    }
+
+    /// Encodes a bounded frontier without any completed trace or live future.
+    ///
+    /// The encoded-byte limit covers this wrapper and the nested checkpoint.
+    /// Nested vector limits keep their original meaning. The integrity checksum
+    /// is not an authentication mechanism or evidence that prior runs occurred.
+    ///
+    /// # Errors
+    /// Rejects invalid counters, insufficient admission, or allocation failure.
+    pub fn to_canonical_bytes(
+        &self,
+        limits: ExactScheduleCheckpointLimits,
+    ) -> Result<Vec<u8>, ExactScheduleCheckpointError> {
+        if self.scenario_failed > self.inner.progress().runs {
+            return Err(ExactScheduleCheckpointError::Shape);
+        }
+        let inner = self.inner.to_canonical_bytes(Self::inner_limits(limits)?)?;
+        let len = inner
+            .len()
+            .checked_add(SCENARIO_CHECKPOINT_OVERHEAD)
+            .ok_or(ExactScheduleCheckpointError::Overflow)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| ExactScheduleCheckpointError::Allocation)?;
+        bytes.extend_from_slice(SCENARIO_CHECKPOINT_MAGIC);
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&self.scenario_failed.to_le_bytes());
+        bytes.extend_from_slice(&inner);
+        let checksum = Self::checksum(&bytes);
+        bytes.extend_from_slice(&checksum);
+        Ok(bytes)
+    }
+
+    /// Loads an unverified frontier, retaining every prior scenario failure.
+    ///
+    /// The full byte limit, wrapper format and checksum are checked before
+    /// decoding nested vectors. The nested codec checks their shape and
+    /// aggregate storage limits before allocation. Fresh execution still checks
+    /// the complete scenario identity, configuration and every enabled set.
+    ///
+    /// # Errors
+    /// Rejects malformed, corrupted, unsupported, or over-budget checkpoints.
+    pub fn from_canonical_bytes(
+        bytes: &[u8],
+        limits: ExactScheduleCheckpointLimits,
+    ) -> Result<Self, ExactScheduleCheckpointError> {
+        if bytes.len() > limits.max_encoded_bytes {
+            return Err(ExactScheduleCheckpointError::ByteLimit);
+        }
+        if bytes.len() < SCENARIO_CHECKPOINT_OVERHEAD {
+            return Err(ExactScheduleCheckpointError::Length);
+        }
+        if bytes[..8] != *SCENARIO_CHECKPOINT_MAGIC || bytes[8..12] != 1_u32.to_le_bytes() {
+            return Err(ExactScheduleCheckpointError::Format);
+        }
+        let end = bytes.len() - 32;
+        if bytes[end..] != Self::checksum(&bytes[..end]) {
+            return Err(ExactScheduleCheckpointError::Checksum);
+        }
+        let mut count = [0; 8];
+        count.copy_from_slice(&bytes[12..SCENARIO_CHECKPOINT_HEADER]);
+        let scenario_failed = u64::from_le_bytes(count);
+        let inner = ExactScheduleCheckpoint::try_from_canonical_bytes(
+            &bytes[SCENARIO_CHECKPOINT_HEADER..end],
+            Self::inner_limits(limits)?,
+        )?;
+        if scenario_failed > inner.progress().runs {
+            return Err(ExactScheduleCheckpointError::Shape);
+        }
+        let historical_progress_verified = inner.progress().runs == 0;
+        Ok(Self {
+            inner,
+            scenario_failed,
+            historical_progress_verified,
+        })
+    }
+}
+
+/// One exact execution with the same workload checks as an ordinary scenario.
+#[derive(Debug, Clone)]
+pub struct ScenarioScheduleRun {
+    workload: ExactScheduleWorkloadKey,
+    /// Actual enabled choices, termination, and optional complete replay receipt.
+    /// Its invariant violations also include the scenario workload checks.
+    pub execution: ExactScheduleRun,
+    /// Only the oracles selected by the scenario and runtime configuration.
+    pub oracle_report: FilteredOracleReport,
+}
+
+impl ScenarioScheduleRun {
+    /// Whether real work completed with a replay receipt and no selected failure.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.execution.termination == ExactScheduleTermination::Quiescent
+            && self.execution.schedule.is_some()
+            && self.execution.lab.steps_total > 0
+            && self.execution.lab.quiescent
+            && self.execution.lab.invariant_violations.is_empty()
+            && self.oracle_report.all_passed
+    }
+
+    /// A summary of the fresh execution, not a substitute for its replay receipt.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        let termination = match &self.execution.termination {
+            ExactScheduleTermination::Quiescent => "quiescent",
+            ExactScheduleTermination::WorkLimit => "work_limit",
+            ExactScheduleTermination::DispatchLimit => "dispatch_limit",
+            ExactScheduleTermination::Stalled => "stalled",
+            ExactScheduleTermination::Unsupported { .. } => "unsupported",
+            ExactScheduleTermination::PrefixDiverged { .. } => "prefix_diverged",
+            ExactScheduleTermination::ReplayRejected(_) => "replay_rejected",
+        };
+        serde_json::json!({
+            "passed": self.passed(),
+            "termination": termination,
+            "termination_detail": format!("{:?}", self.execution.termination),
+            "steps": self.execution.lab.steps_total,
+            "work_units": self.execution.work_units,
+            "dispatches": self.execution.execution.decisions().len(),
+            "requested_prefix": self.execution.requested_prefix.decisions().len(),
+            "quiescent": self.execution.lab.quiescent,
+            "complete_receipt": self.execution.schedule.is_some(),
+            "schedule_hash": self.execution.schedule.as_ref().map(|s| s.terminal_schedule_hash()),
+            "oracle_report": self.oracle_report.to_json(),
+            "invariant_violations": self.execution.lab.invariant_violations,
+        })
+    }
+}
+
+/// A fresh exact replay and its independently evaluated scenario verdict.
+///
+/// Constructing this report means the complete forced schedule executed and
+/// matched its terminal certificate. The workload can still fail: replaying a
+/// counterexample successfully returns a report whose [`Self::passed`] is false.
+#[derive(Debug, Clone)]
+pub struct ScenarioScheduleReplayReport {
+    /// Complete exact replay receipt, including the terminal schedule hash.
+    pub execution: ForcedScheduleReport,
+    /// Fresh runtime observations, including the scenario's workload violations.
+    pub lab: LabRunReport,
+    /// Only the oracles selected by the scenario and runtime configuration.
+    pub oracle_report: FilteredOracleReport,
+}
+
+impl ScenarioScheduleReplayReport {
+    /// Whether replayed real work completed without a selected scenario failure.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.execution.quiescent
+            && self.execution.steps > 0
+            && self.lab.quiescent
+            && self.lab.steps_total > 0
+            && self.lab.invariant_violations.is_empty()
+            && self.oracle_report.all_passed
+    }
+
+    /// Fresh replay observations, independent of the source execution's verdict.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "scenario-schedule-replay-v1",
+            "passed": self.passed(),
+            "dispatches": self.execution.dispatches,
+            "steps": self.execution.steps,
+            "terminal_nanos": self.execution.terminal_nanos,
+            "schedule_hash": self.execution.schedule_hash,
+            "lab": self.lab.to_json(),
+            "oracle_report": self.oracle_report.to_json(),
+        })
+    }
+}
+
+/// Fresh scenario executions and cumulative exact-search progress.
+///
+/// Search exhaustion covers only the admitted deterministic schedule tree. It
+/// is not optimal DPOR, a claim of one representative per equivalence class, or
+/// coverage of external concurrency and fault choices (br-asupersync-bi2462.44).
+#[derive(Debug, Clone)]
+pub struct ScenarioScheduleReport {
+    /// Identity of the scenario whose workload was executed.
+    pub scenario_id: String,
+    /// Fixed lab seed; exact alternatives vary choices rather than seeds.
+    pub seed: u64,
+    /// Why this batch stopped, including sticky incomplete-search conditions.
+    pub termination: ExactScheduleSearchTermination,
+    /// Cumulative kernel observations from all batches.
+    pub progress: ExactScheduleProgress,
+    /// Cumulative failures under the scenario's workload and oracle contract.
+    pub scenario_failed: u64,
+    /// Exact alternatives still pending after this batch.
+    pub pending_prefixes: usize,
+    /// Whether historical progress was observed, rather than loaded as claims.
+    pub historical_progress_verified: bool,
+    /// Complete observations for this batch only.
+    pub runs: Vec<ScenarioScheduleRun>,
+}
+
+impl ScenarioScheduleReport {
+    /// Requires exhausted search, real work, verified history and no failures.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.termination == ExactScheduleSearchTermination::SearchExhausted
+            && self.progress.runs > 0
+            && self.scenario_failed == 0
+            && self.pending_prefixes == 0
+            && self.historical_progress_verified
+            && self.runs.iter().all(ScenarioScheduleRun::passed)
+    }
+
+    /// Stable command-line projection of search scope, coverage and failures.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        let termination = match self.termination {
+            ExactScheduleSearchTermination::SearchExhausted => "search_exhausted",
+            ExactScheduleSearchTermination::RunLimit => "run_limit",
+            ExactScheduleSearchTermination::PrefixQueueLimit => "prefix_queue_limit",
+            ExactScheduleSearchTermination::IncompleteRun => "incomplete_run",
+            ExactScheduleSearchTermination::Stopped => "stopped",
+        };
+        serde_json::json!({
+            "schema": "scenario-schedule-exploration-v1",
+            "model": "single_worker_deterministic_schedule_tree",
+            "scenario_id": self.scenario_id,
+            "seed": self.seed,
+            "passed": self.passed(),
+            "termination": termination,
+            "historical_progress_verified": self.historical_progress_verified,
+            "scenario_failed": self.scenario_failed,
+            "pending_prefixes": self.pending_prefixes,
+            "progress": {
+                "runs": self.progress.runs,
+                "completed": self.progress.completed,
+                "incomplete": self.progress.incomplete,
+                "failed": self.progress.failed,
+                "omitted": self.progress.omitted,
+            },
+            "runs": self.runs.iter().map(ScenarioScheduleRun::to_json).collect::<Vec<_>>(),
         })
     }
 }
@@ -5121,6 +5477,271 @@ impl ScenarioRunner {
             seed_lineage,
         };
         (result, tasks)
+    }
+
+    fn exact_workload(
+        scenario: &Scenario,
+        seed_override: Option<u64>,
+    ) -> Result<(LabConfig, WorkloadPlan, ExactScheduleWorkloadKey), ScenarioScheduleError> {
+        let errors = scenario.validate();
+        if !errors.is_empty() {
+            return Err(Self::validation_error(scenario, errors).into());
+        }
+        Self::validate_oracle_names(scenario)?;
+        let plan = Self::workload_plan(scenario)?;
+        let unsupported = |reason| ScenarioScheduleError::Unsupported { reason };
+        if !scenario.include.is_empty() {
+            return Err(unsupported(
+                "unresolved includes; load the composed scenario first",
+            ));
+        }
+        if !scenario.faults.is_empty() {
+            return Err(unsupported("timed scenario faults"));
+        }
+        if scenario.cancellation.is_some() {
+            return Err(unsupported(
+                "cancellation campaigns; use run_cancellation_campaign",
+            ));
+        }
+        let bindings = Self::participant_bindings(scenario);
+        if bindings.bound.is_empty() {
+            return Err(unsupported("scenarios without executable participants"));
+        }
+        if !bindings.unbound.is_empty() {
+            return Err(unsupported("unbound participant roles"));
+        }
+
+        let config = Self::lab_config_for(scenario, seed_override);
+        // The engine checks these too; reject before constructing a checkpoint
+        // or spawning any real workload, without silently reducing its scope.
+        if config.worker_count != 1 {
+            return Err(ScenarioScheduleError::Configuration(
+                ExactScheduleConfigError::MultipleWorkers,
+            ));
+        }
+        if config.has_chaos() {
+            return Err(ScenarioScheduleError::Configuration(
+                ExactScheduleConfigError::ChaosEnabled,
+            ));
+        }
+
+        // A scenario ID alone does not identify its program. Bind all effective
+        // inputs and the workload implementation. The source hashes also cover
+        // dirty/API builds whose package version and build revision are equal.
+        let mut effective = scenario.clone();
+        effective.lab.seed = config.seed;
+        let encoded = serde_json::to_vec(&effective)?;
+        let mut hash = Sha256::new();
+        hash.update(b"asupersync.lab.scenario-exact-workload.v1\0");
+        for part in [
+            env!("CARGO_PKG_VERSION").as_bytes(),
+            option_env!("ASUPERSYNC_BUILD_GIT_COMMIT")
+                .unwrap_or("unknown-revision")
+                .as_bytes(),
+            include_bytes!("scenario_runner.rs").as_slice(),
+            include_bytes!("scenario_runner/lifecycle.rs").as_slice(),
+            include_bytes!("exact_explorer.rs").as_slice(),
+            include_bytes!("runtime.rs").as_slice(),
+            encoded.as_slice(),
+        ] {
+            hash.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+            hash.update(part);
+        }
+        Ok((
+            config,
+            plan,
+            ExactScheduleWorkloadKey(hash.finalize().into()),
+        ))
+    }
+
+    /// Creates a fresh, bounded exact-schedule campaign without running tasks.
+    ///
+    /// The checkpoint binds the complete effective scenario and implementation.
+    /// Limits may change between batches; inputs, seed and configuration may not.
+    ///
+    /// # Errors
+    /// Rejects invalid scenarios or bounds, unbound participants, unresolved
+    /// includes, timed faults, cancellation campaigns, chaos or multiple workers.
+    pub fn new_schedule_checkpoint(
+        scenario: &Scenario,
+        seed_override: Option<u64>,
+        limits: ExactScheduleLimits,
+    ) -> Result<ScenarioScheduleCheckpoint, ScenarioScheduleError> {
+        let (config, _plan, key) = Self::exact_workload(scenario, seed_override)?;
+        let inner = ExactScheduleExplorer::new(config, limits)
+            .new_checkpoint(key)
+            .map_err(ScenarioScheduleError::Configuration)?;
+        Ok(ScenarioScheduleCheckpoint {
+            inner,
+            scenario_failed: 0,
+            historical_progress_verified: true,
+        })
+    }
+
+    /// Executes the next bounded batch of exact scenario schedules.
+    ///
+    /// Each alternative gets fresh real participant tasks, channels and owned
+    /// protocol state. It runs through the existing exact-prefix scheduler,
+    /// which advances virtual time when idle and verifies every enabled set.
+    /// The ordinary workload checks and selected oracles determine each verdict;
+    /// their failures remain in the checkpoint across batches. Stopping on a
+    /// failure preserves that run's unexplored alternatives.
+    ///
+    /// This enumerates the admitted single-worker deterministic schedule tree,
+    /// not fault choices or Mazurkiewicz classes. Configured leak/futurelock
+    /// panics retain the same behavior as ordinary scenario execution.
+    ///
+    /// # Errors
+    /// Uses the admission of [`Self::new_schedule_checkpoint`] and rejects any
+    /// checkpoint identity, configuration, frontier-bound or counter mismatch
+    /// before invoking the workload factory or changing the checkpoint.
+    pub fn resume_schedules(
+        scenario: &Scenario,
+        seed_override: Option<u64>,
+        limits: ExactScheduleLimits,
+        checkpoint: &mut ScenarioScheduleCheckpoint,
+        stop_on_failure: bool,
+    ) -> Result<ScenarioScheduleReport, ScenarioScheduleError> {
+        let (config, plan, key) = Self::exact_workload(scenario, seed_override)?;
+        let seed = config.seed;
+        let selection = config.oracle_selection.clone();
+        let explorer = ExactScheduleExplorer::new(config, limits);
+        let active = RefCell::new(None);
+        let mut observations = Vec::new();
+        let scenario_failed = &mut checkpoint.scenario_failed;
+        let batch = explorer
+            .resume_until(
+                &mut checkpoint.inner,
+                key,
+                |runtime| {
+                    *active.borrow_mut() = Some(ParticipantWorkload::spawn(
+                        runtime,
+                        &plan,
+                        &scenario.network,
+                    ));
+                },
+                |run| {
+                    let mut violations = run.lab.invariant_violations.clone();
+                    if let Some(workload) = active.borrow_mut().take() {
+                        workload.finish(&mut violations);
+                    } else {
+                        violations.push("workload: missing exact-run participant state".to_owned());
+                    }
+                    let oracles = FilteredOracleReport::from_full(
+                        run.lab.oracle_report.clone(),
+                        &scenario.oracles,
+                        &selection,
+                    );
+                    let passed = run.termination == ExactScheduleTermination::Quiescent
+                        && run.schedule.is_some()
+                        && run.lab.steps_total > 0
+                        && run.lab.quiescent
+                        && violations.is_empty()
+                        && oracles.all_passed;
+                    if !passed {
+                        // Core admission reserves headroom for every run. This
+                        // counter is bounded by its cumulative run count.
+                        *scenario_failed += 1;
+                    }
+                    observations.push((oracles, violations));
+                    stop_on_failure && !passed
+                },
+            )
+            .map_err(ScenarioScheduleError::Resume)?;
+        let runs = batch
+            .runs
+            .into_iter()
+            .zip(observations)
+            .map(|(mut execution, (oracle_report, violations))| {
+                execution.lab.invariant_violations = violations;
+                ScenarioScheduleRun {
+                    workload: key,
+                    execution,
+                    oracle_report,
+                }
+            })
+            .collect();
+        Ok(ScenarioScheduleReport {
+            scenario_id: scenario.id.clone(),
+            seed,
+            termination: batch.termination,
+            progress: batch.progress,
+            scenario_failed: checkpoint.scenario_failed,
+            pending_prefixes: checkpoint.inner.pending_prefix_count(),
+            historical_progress_verified: checkpoint.historical_progress_verified,
+            runs,
+        })
+    }
+
+    /// Replays one complete exact scenario receipt on fresh real participants.
+    ///
+    /// The effective scenario, seed and implementation must match the source
+    /// run's private workload identity. The runtime forces every recorded
+    /// dispatch and checks its terminal certificate without scheduler fallback.
+    /// Workload invariants and selected oracles are then evaluated afresh; no
+    /// source verdict is trusted. A reproduced workload failure returns `Ok`
+    /// with [`ScenarioScheduleReplayReport::passed`] false.
+    ///
+    /// # Errors
+    /// Rejects unsupported scenarios, changed workload identity or a missing
+    /// complete receipt before spawning participants. Forced execution returns
+    /// an error for admission limits or any divergence, never a partial success.
+    pub fn replay_schedule(
+        scenario: &Scenario,
+        seed_override: Option<u64>,
+        source: &ScenarioScheduleRun,
+        limits: ForcedScheduleLimits,
+    ) -> Result<ScenarioScheduleReplayReport, ScenarioScheduleError> {
+        let (config, plan, key) = Self::exact_workload(scenario, seed_override)?;
+        if source.workload != key {
+            return Err(ScenarioScheduleError::ReplayWorkloadMismatch);
+        }
+        let schedule = source
+            .execution
+            .schedule
+            .as_ref()
+            .ok_or(ScenarioScheduleError::MissingReplayReceipt)?;
+        let selection = config.oracle_selection.clone();
+        let mut runtime = LabRuntime::new_with_task_causality(config);
+        let workload = ParticipantWorkload::spawn(&mut runtime, &plan, &scenario.network);
+        let execution = runtime.run_forced_schedule(schedule, limits)?;
+        let mut lab = runtime.report();
+        lab.steps_delta = execution.steps;
+        workload.finish(&mut lab.invariant_violations);
+        let oracle_report = FilteredOracleReport::from_full(
+            lab.oracle_report.clone(),
+            &scenario.oracles,
+            &selection,
+        );
+        Ok(ScenarioScheduleReplayReport {
+            execution,
+            lab,
+            oracle_report,
+        })
+    }
+
+    /// Starts and executes one bounded exact-schedule batch.
+    ///
+    /// Use [`Self::new_schedule_checkpoint`] and [`Self::resume_schedules`] to
+    /// retain the frontier when the batch reaches a limit or finds a failure.
+    /// Seeded exploration remains separately available as [`Self::explore_seeds`].
+    ///
+    /// # Errors
+    /// Returns the same admission errors as [`Self::resume_schedules`].
+    pub fn explore_schedules(
+        scenario: &Scenario,
+        seed_override: Option<u64>,
+        limits: ExactScheduleLimits,
+        stop_on_failure: bool,
+    ) -> Result<ScenarioScheduleReport, ScenarioScheduleError> {
+        let mut checkpoint = Self::new_schedule_checkpoint(scenario, seed_override, limits)?;
+        Self::resume_schedules(
+            scenario,
+            seed_override,
+            limits,
+            &mut checkpoint,
+            stop_on_failure,
+        )
     }
 
     /// Explore a scenario across a range of seeds.
