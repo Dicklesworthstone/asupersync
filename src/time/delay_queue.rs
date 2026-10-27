@@ -7,15 +7,19 @@
 //! timeouts, retry schedules and per-request deadlines, with one timer for the
 //! whole queue instead of one task per entry.
 //!
-//! Deadlines use the same clock as [`Sleep`]: the runtime's timer driver
-//! (virtual time under the lab runtime), or the wall clock outside one.
+//! The stream API uses the same clock as [`Sleep`]: the runtime's timer driver
+//! (virtual time under the lab runtime), or the wall clock outside one. For
+//! explicit time authority and cancellation that retains unconsumed values,
+//! use [`DelayQueue::next_expired`] with deadlines from the supplied context.
 
+use crate::cx::{Cx, cap::HasTime};
 use crate::stream::Stream;
 use crate::time::{Sleep, wall_now};
-use crate::types::Time;
+use crate::types::{CancelReason, Time};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::task::{Context, Poll, Waker};
@@ -67,6 +71,38 @@ impl<T> Expired<T> {
     #[must_use]
     pub const fn key(&self) -> Key {
         self.key
+    }
+}
+
+/// A context-driven expiry wait could not complete.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum DelayQueueNextError {
+    /// Cancellation was acknowledged without removing a queued value.
+    Cancelled(CancelReason),
+    /// A nonempty queue requires the supplied context's authorized timer.
+    TimerUnavailable,
+}
+
+impl fmt::Display for DelayQueueNextError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled(reason) => write!(f, "delay queue wait cancelled: {reason:?}"),
+            Self::TimerUnavailable => {
+                f.write_str("delay queue wait requires time capability and a timer driver")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DelayQueueNextError {}
+
+impl DelayQueueNextError {
+    fn cancelled<Caps>(cx: &Cx<Caps>) -> Self {
+        Self::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("delay queue wait cancelled")),
+        )
     }
 }
 
@@ -253,6 +289,100 @@ impl<T> DelayQueue<T> {
         self.armed_for = None;
     }
 
+    /// Waits for and removes the earliest expired value using `cx`'s timer.
+    ///
+    /// Returns `Ok(None)` immediately for an empty queue. The mutable borrow
+    /// prevents concurrent insertion during this wait; after it returns or is
+    /// dropped, entries may be inserted, removed, or reset normally. Equal
+    /// deadlines retain the queue's existing scheduling order.
+    ///
+    /// Deadlines must belong to the supplied context's clock domain. Use
+    /// [`Self::insert_at`] and [`Self::reset_at`] with that clock when the
+    /// context differs from the ambient runtime. This API captures the
+    /// authorized driver and never falls back to a wall clock or timer thread.
+    ///
+    /// Cancellation, including the context's deadline, is checked before a
+    /// value is removed and respects cancellation masks. Dropping a pending
+    /// future unregisters its timer and retains every value and key, including
+    /// an expiry whose timer fired but whose value was not yet returned. One
+    /// timer covers the whole queue. Starting this wait retires any timer and
+    /// waker retained by an earlier [`Self::poll_expired`] call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DelayQueueNextError::Cancelled`] when cancellation is
+    /// acknowledged, even if an entry is already due or the queue is empty.
+    /// A nonempty queue without an authorized timer returns
+    /// [`DelayQueueNextError::TimerUnavailable`] without removing a value.
+    /// The existing stream and polling APIs retain their cancellation-blind
+    /// behavior.
+    pub async fn next_expired<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+    ) -> Result<Option<Expired<T>>, DelayQueueNextError>
+    where
+        Caps: HasTime,
+    {
+        // No previous stream poll remains live while this method holds &mut
+        // self. Detach its registrations before any early refusal, and clear
+        // the metadata before dropping a user-owned waker. New registrations
+        // belong to this future rather than the queue, so dropping the wait
+        // releases them without removing data.
+        let previous_timer = self.timer.take();
+        self.armed_for = None;
+        let previous_waker = self.waker.take();
+        drop((previous_timer, previous_waker));
+        cx.checkpoint()
+            .map_err(|_| DelayQueueNextError::cancelled(cx))?;
+        if self.entries.is_empty() {
+            return Ok(None);
+        }
+        let driver = cx
+            .timer_driver()
+            .ok_or(DelayQueueNextError::TimerUnavailable)?;
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+
+        loop {
+            let now = driver.now();
+            cx.checkpoint()
+                .map_err(|_| DelayQueueNextError::cancelled(cx))?;
+            let Some((deadline, _, index)) = self.next_live_entry() else {
+                return Ok(None);
+            };
+            if deadline <= now {
+                self.heap.pop();
+                let entry = self.entries.remove(index);
+                return Ok(Some(Expired {
+                    data: entry.data,
+                    deadline,
+                    key: Key {
+                        index,
+                        generation: entry.generation,
+                    },
+                }));
+            }
+
+            // Expired masked deadlines must not become permanently ready
+            // timers. The still-future entry deadline remains a wake source.
+            let wake_at = cx
+                .budget()
+                .deadline
+                .filter(|owner| *owner > now)
+                .map_or(deadline, |owner| deadline.min(owner));
+            let mut timer = std::pin::pin!(Sleep::with_timer_driver(wake_at, driver.clone()));
+            poll_fn(|task| {
+                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                    return Poll::Ready(());
+                }
+                if timer.as_mut().poll_deadline(task).is_ready() {
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            })
+            .await;
+        }
+    }
+
     /// Yields the next entry whose deadline has passed, earliest first.
     ///
     /// Returns `Ready(None)` when the queue is empty and `Pending` until the
@@ -262,25 +392,17 @@ impl<T> DelayQueue<T> {
     ///
     /// Waiting here is not a cancellation point: a cancelled task stays
     /// parked until an entry comes due, then can observe the cancellation
-    /// with [`Cx::checkpoint`](crate::Cx::checkpoint). To stop sooner, bound
-    /// the wait with a timeout.
+    /// with [`Cx::checkpoint`](crate::Cx::checkpoint). Use [`Self::next_expired`]
+    /// to stop sooner while retaining every unconsumed value.
     pub fn poll_expired(&mut self, cx: &mut Context<'_>) -> Poll<Option<Expired<T>>> {
         loop {
-            let Some(&Reverse((deadline, schedule, index))) = self.heap.peek() else {
+            let Some((deadline, _, index)) = self.next_live_entry() else {
                 self.timer = None;
                 self.armed_for = None;
                 // A later insert wakes the task that saw the queue empty.
                 store_waker(&mut self.waker, cx);
                 return Poll::Ready(None);
             };
-            let live = self
-                .entries
-                .get(index)
-                .is_some_and(|entry| entry.schedule == schedule);
-            if !live {
-                self.heap.pop();
-                continue;
-            }
             if deadline <= wall_now() {
                 self.heap.pop();
                 let entry = self.entries.remove(index);
@@ -312,6 +434,20 @@ impl<T> DelayQueue<T> {
             // The timer fired; the loop re-checks the clock before yielding.
             self.timer = None;
             self.armed_for = None;
+        }
+    }
+
+    fn next_live_entry(&mut self) -> Option<(Time, u64, usize)> {
+        loop {
+            let &Reverse((deadline, schedule, index)) = self.heap.peek()?;
+            if self
+                .entries
+                .get(index)
+                .is_some_and(|entry| entry.schedule == schedule)
+            {
+                return Some((deadline, schedule, index));
+            }
+            self.heap.pop();
         }
     }
 
@@ -391,3 +527,4 @@ impl<T: fmt::Debug> fmt::Debug for DelayQueue<T> {
             .finish_non_exhaustive()
     }
 }
+

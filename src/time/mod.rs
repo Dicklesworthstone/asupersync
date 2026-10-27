@@ -66,7 +66,7 @@ pub use budget_ext::{BudgetTimeExt, budget_sleep, budget_timeout};
 pub use deadline::{
     DeadlineJitterDecision, DeadlineJitterPolicy, DeadlineJitterScope, with_deadline, with_timeout,
 };
-pub use delay_queue::DelayQueue;
+pub use delay_queue::{DelayQueue, DelayQueueNextError};
 pub use driver::{
     BrowserClockConfig, BrowserMonotonicClock, TimeSource, TimerDriver, TimerDriverApi,
     TimerDriverHandle, TimerHandle, VirtualClock, WallClock,
