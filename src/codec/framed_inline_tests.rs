@@ -610,6 +610,82 @@
         assert_eq!(framed.max_buffer_len(), 8 * 1024 * 1024 + 4);
     }
 
+    fn next_with_bounded_polls<S: Stream + Unpin>(stream: &mut S) -> Option<S::Item> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..64 {
+            if let Poll::Ready(item) = Pin::new(&mut *stream).poll_next(&mut cx) {
+                return item;
+            }
+        }
+        panic!("ready transport did not produce its frame within the poll budget");
+    }
+
+    #[test]
+    fn framed_accepts_eight_byte_prefix_and_reconfigured_large_frames() {
+        for payload_len in [8 * 1024 * 1024, 9 * 1024 * 1024] {
+            let mut wire = (payload_len as u64).to_be_bytes().to_vec();
+            wire.resize(8 + payload_len, b'z');
+            wire.extend_from_slice(&2_u64.to_be_bytes());
+            wire.extend_from_slice(b"ok");
+            let transport = DuplexBuf {
+                read_data: wire,
+                read_pos: 0,
+                written: Vec::new(),
+            };
+            let mut framed = Framed::new(transport, LengthDelimitedCodec::new());
+            *framed.codec_mut() = LengthDelimitedCodec::builder()
+                .length_field_length(8)
+                .max_frame_length(payload_len)
+                .new_codec();
+            assert_eq!(framed.effective_max_buffer_len(), payload_len + 8);
+
+            let frame = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+            assert_eq!(frame.len(), payload_len);
+            assert!(frame.iter().all(|byte| *byte == b'z'));
+            let next = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+            assert_eq!(&next[..], b"ok");
+            assert!(next_with_bounded_polls(&mut framed).is_none());
+        }
+    }
+
+    #[test]
+    fn framed_explicit_limit_overrides_hint_and_zero_still_disables_limit() {
+        let wire = vec![b'x'; 128];
+        for limit in [0, 64] {
+            let mut framed = Framed::new(DuplexBuf::new(&wire), LinesCodec::new())
+                .with_max_buffer_len(limit);
+            *framed.codec_mut() = LinesCodec::new_with_max_length(16 * 1024 * 1024);
+            assert_eq!(framed.effective_max_buffer_len(), limit);
+            let result = next_with_bounded_polls(&mut framed).unwrap();
+            if limit == 0 {
+                assert_eq!(result.unwrap().as_bytes(), wire.as_slice());
+            } else {
+                assert_eq!(
+                    result.unwrap_err().io_kind(),
+                    Some(io::ErrorKind::InvalidData)
+                );
+                assert_eq!(framed.read_buffer().len(), limit);
+            }
+            assert!(next_with_bounded_polls(&mut framed).is_none());
+        }
+    }
+
+    #[test]
+    fn framed_unknown_and_unrepresentable_hints_keep_default_limit() {
+        let default_limit = crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN;
+        let foreign = Framed::new(DuplexBuf::new(b""), GateCodec { ready: false });
+        assert_eq!(foreign.codec().max_buffered_frame_len(), None);
+        assert_eq!(foreign.effective_max_buffer_len(), default_limit);
+        let unbounded = Framed::new(DuplexBuf::new(b""), LinesCodec::with_unbounded());
+        assert_eq!(unbounded.effective_max_buffer_len(), default_limit);
+        let invalid_geometry = LengthDelimitedCodec::builder()
+            .num_skip(usize::MAX)
+            .new_codec();
+        let framed = Framed::new(DuplexBuf::new(b""), invalid_geometry);
+        assert_eq!(framed.effective_max_buffer_len(), default_limit);
+    }
+
     #[test]
     fn framed_rejects_buffer_growth_past_max_buffer_len_then_poisons() {
         // br-asupersync-bj427s + br-asupersync-3asq77: 256 bytes of 'A' with

@@ -52,11 +52,11 @@ pub struct Framed<T, U> {
     read_state: ReadState,
     /// Upper bound on the read buffer before a frame completes.
     ///
-    /// Mirrors [`FramedRead`](crate::codec::FramedRead)'s cap (default
-    /// [`DEFAULT_MAX_BUFFER_LEN`](crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN)
-    /// = an 8 MiB payload plus four-byte length prefix); `0` disables
-    /// enforcement (br-asupersync-bj427s).
+    /// Mirrors [`FramedRead`](crate::codec::FramedRead)'s configured cap.
+    /// Without an explicit override a finite decoder hint can enlarge it.
+    /// Explicit `0` disables enforcement (br-asupersync-bj427s).
     max_buffer_len: usize,
+    max_buffer_len_explicit: bool,
     /// Set once the read half surfaces an `Err` (decode, `decode_eof`, or IO).
     ///
     /// Subsequent `poll_next` calls return `Ready(None)` instead of re-running
@@ -87,6 +87,7 @@ impl<T, U> Framed<T, U> {
             eof: false,
             read_state: ReadState::NeedsRead,
             max_buffer_len: crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN,
+            max_buffer_len_explicit: false,
             poisoned: false,
         }
     }
@@ -95,20 +96,46 @@ impl<T, U> Framed<T, U> {
     ///
     /// A peer that streams bytes without ever closing a frame would otherwise
     /// grow this buffer without bound (slowloris-style). A value of `0`
-    /// disables enforcement. Mirrors
+    /// disables enforcement. This explicit limit overrides the decoder hint;
+    /// without an override, the automatic limit is the larger of the default
+    /// and a finite [`Decoder::max_buffered_frame_len`] hint. Mirrors
     /// [`FramedRead::with_max_buffer_len`](crate::codec::FramedRead::with_max_buffer_len).
     #[inline]
     #[must_use]
     pub fn with_max_buffer_len(mut self, max: usize) -> Self {
         self.max_buffer_len = max;
+        self.max_buffer_len_explicit = true;
         self
     }
 
     /// Returns the configured maximum read-buffer length.
+    ///
+    /// With no explicit override this is the default; a finite decoder hint
+    /// may raise the automatic limit. Use [`Self::effective_max_buffer_len`]
+    /// to include the current codec configuration. An explicit `0` disables
+    /// enforcement.
     #[inline]
     #[must_use]
     pub fn max_buffer_len(&self) -> usize {
         self.max_buffer_len
+    }
+
+    /// Returns the read-buffer limit used for the current codec configuration.
+    ///
+    /// Explicit limits, including `0` for no cap, take precedence over hints.
+    #[inline]
+    #[must_use]
+    pub fn effective_max_buffer_len(&self) -> usize
+    where
+        U: Decoder,
+    {
+        if self.max_buffer_len_explicit {
+            self.max_buffer_len
+        } else {
+            self.codec
+                .max_buffered_frame_len()
+                .map_or(self.max_buffer_len, |hint| self.max_buffer_len.max(hint))
+        }
     }
 
     /// Returns a reference to the underlying transport.
@@ -273,10 +300,11 @@ where
             // exact capacity, a one-byte probe distinguishes EOF and IO
             // errors from actual over-cap growth without using a zero-length
             // ReadBuf (which would report zero progress even with data ready).
-            let read_len = if this.max_buffer_len == 0 {
+            let max_buffer_len = this.effective_max_buffer_len();
+            let read_len = if max_buffer_len == 0 {
                 READ_BUF_SIZE
             } else {
-                this.max_buffer_len
+                max_buffer_len
                     .saturating_sub(this.read_buf.len())
                     .clamp(1, READ_BUF_SIZE)
             };
@@ -300,10 +328,10 @@ where
                         // frame cannot drive unbounded per-connection memory
                         // growth. PRE-append so the buffer never crosses the
                         // cap; `0` disables enforcement.
-                        if this.max_buffer_len > 0 {
+                        if max_buffer_len > 0 {
                             let projected = this.read_buf.len().saturating_add(filled.len());
-                            if projected > this.max_buffer_len {
-                                let cap = this.max_buffer_len;
+                            if projected > max_buffer_len {
+                                let cap = max_buffer_len;
                                 let buffered = this.read_buf.len();
                                 let added = filled.len();
                                 let err = io::Error::new(

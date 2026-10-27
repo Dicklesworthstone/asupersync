@@ -10,6 +10,51 @@
     use crate::bytes::BytesMut;
 
     #[test]
+    fn buffered_frame_hint_covers_complete_wire_geometry() {
+        for (offset, width, skip, adjustment, payload_len) in [
+            (0, 8, None, 0, 32),
+            (3, 2, Some(0), 2, 7),
+            (3, 2, Some(9), -2, 7),
+            (0, 1, Some(4), 3, 3),
+        ] {
+            let mut builder = LengthDelimitedCodec::builder()
+                .length_field_offset(offset)
+                .length_field_length(width)
+                .length_adjustment(adjustment)
+                .max_frame_length(payload_len);
+            if let Some(skip) = skip {
+                builder = builder.num_skip(skip);
+            }
+            let mut codec = builder.new_codec();
+            let header_len = offset + width;
+            let skip = skip.unwrap_or(header_len);
+            let wire_prefix_len = header_len.max(skip);
+            let raw_len = (payload_len as i64 - adjustment as i64) as u64;
+            let mut wire = BytesMut::new();
+            wire.extend_from_slice(&vec![0xaa; offset]);
+            wire.extend_from_slice(&raw_len.to_be_bytes()[8 - width..]);
+            wire.extend_from_slice(&vec![0xbb; wire_prefix_len - header_len]);
+            wire.extend_from_slice(&vec![b'x'; payload_len]);
+            let expected = wire[skip..].to_vec();
+            assert_eq!(codec.max_buffered_frame_len(), Some(wire.len()));
+            let frame = codec.decode(&mut wire).unwrap().unwrap();
+            assert_eq!(&frame[..], expected.as_slice());
+            assert!(wire.is_empty());
+        }
+    }
+
+    #[test]
+    fn buffered_frame_hint_overflow_never_disables_transport_bound() {
+        for builder in [
+            LengthDelimitedCodec::builder().length_field_offset(usize::MAX),
+            LengthDelimitedCodec::builder().num_skip(usize::MAX),
+            LengthDelimitedCodec::builder().max_frame_length(usize::MAX),
+        ] {
+            assert_eq!(builder.new_codec().max_buffered_frame_len(), None);
+        }
+    }
+
+    #[test]
     fn test_length_delimited_decode() {
         let mut codec = LengthDelimitedCodec::new();
         let mut buf = BytesMut::new();

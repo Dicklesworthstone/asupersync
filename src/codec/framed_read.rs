@@ -56,9 +56,11 @@ pub const DEFAULT_MAX_BUFFER_LEN: usize = 8 * 1024 * 1024 + 4;
 ///
 /// # Memory bound (security)
 ///
-/// Each instance carries a `max_buffer_len` cap (default
-/// [`DEFAULT_MAX_BUFFER_LEN`] = an 8 MiB payload plus four-byte length
-/// prefix). When inbound bytes would push the partial-frame buffer past
+/// Each instance carries a partial-frame buffer cap. The automatic limit is
+/// the larger of [`DEFAULT_MAX_BUFFER_LEN`] (an 8 MiB payload plus four-byte
+/// length prefix) and the decoder's finite
+/// [`Decoder::max_buffered_frame_len`] hint. Unknown or unbounded hints keep
+/// the bounded default. When inbound bytes would push the buffer past
 /// this cap, `poll_next` yields
 /// `Err(InvalidData)` rather than appending — the caller MUST treat
 /// the FramedRead as terminated. Without this bound, a peer that
@@ -66,9 +68,10 @@ pub const DEFAULT_MAX_BUFFER_LEN: usize = 8 * 1024 * 1024 + 4;
 /// per-connection memory growth (canonical slowloris-on-framing
 /// attack — see asupersync-bj427s).
 ///
-/// Configure with [`Self::with_max_buffer_len`]; a value of `0`
-/// disables enforcement (matches the no-cap convention used elsewhere
-/// in this crate).
+/// Configure an absolute override with [`Self::with_max_buffer_len`]; a value
+/// of `0` disables enforcement (matches the no-cap convention used elsewhere
+/// in this crate). [`Self::effective_max_buffer_len`] reports the current
+/// limit, including decoder configuration changes.
 pub struct FramedRead<R, D> {
     inner: R,
     decoder: D,
@@ -76,6 +79,7 @@ pub struct FramedRead<R, D> {
     eof: bool,
     read_state: ReadState,
     max_buffer_len: usize,
+    max_buffer_len_explicit: bool,
     /// br-asupersync-3asq77: once the decoder (or the read path) has
     /// surfaced an `Err`, the stream is poisoned. Subsequent
     /// `poll_next` calls return `Poll::Ready(None)` rather than
@@ -105,6 +109,7 @@ impl<R, D> FramedRead<R, D> {
             eof: false,
             read_state: ReadState::NeedsRead,
             max_buffer_len: DEFAULT_MAX_BUFFER_LEN,
+            max_buffer_len_explicit: false,
             poisoned: false,
         }
     }
@@ -113,22 +118,45 @@ impl<R, D> FramedRead<R, D> {
     /// inbound bytes would push the buffer past this cap, `poll_next`
     /// yields `Err(InvalidData)` rather than appending. A value of `0`
     /// disables enforcement entirely (matches the no-cap convention
-    /// used elsewhere in this crate). Defaults to
-    /// [`DEFAULT_MAX_BUFFER_LEN`] = an 8 MiB payload plus four-byte
-    /// length prefix.
+    /// used elsewhere in this crate). This explicit limit overrides the
+    /// decoder's hint. Without an override, the automatic limit is the larger
+    /// of [`DEFAULT_MAX_BUFFER_LEN`] and a finite decoder hint.
     /// (br-asupersync-bj427s.)
     #[must_use]
     pub fn with_max_buffer_len(mut self, max: usize) -> Self {
         self.max_buffer_len = max;
+        self.max_buffer_len_explicit = true;
         self
     }
 
-    /// Returns the configured maximum partial-frame buffer length in
-    /// bytes. `0` indicates no cap.
+    /// Returns the configured partial-frame buffer limit in bytes.
+    ///
+    /// With no explicit override this is [`DEFAULT_MAX_BUFFER_LEN`]; a finite
+    /// decoder hint may raise the automatic limit. Use
+    /// [`Self::effective_max_buffer_len`] to include the current decoder hint.
+    /// An explicit `0` indicates no cap.
     #[inline]
     #[must_use]
     pub fn max_buffer_len(&self) -> usize {
         self.max_buffer_len
+    }
+
+    /// Returns the read-buffer limit used for the current decoder configuration.
+    ///
+    /// Explicit limits, including `0` for no cap, take precedence over hints.
+    #[inline]
+    #[must_use]
+    pub fn effective_max_buffer_len(&self) -> usize
+    where
+        D: Decoder,
+    {
+        if self.max_buffer_len_explicit {
+            self.max_buffer_len
+        } else {
+            self.decoder
+                .max_buffered_frame_len()
+                .map_or(self.max_buffer_len, |hint| self.max_buffer_len.max(hint))
+        }
     }
 
     /// Returns a reference to the underlying reader.
@@ -249,10 +277,11 @@ where
             // zero-length ReadBuf: EOF must still reach decode_eof, IO errors
             // retain precedence, and a real extra byte takes the existing
             // over-cap error path below.
-            let read_len = if this.max_buffer_len == 0 {
+            let max_buffer_len = this.effective_max_buffer_len();
+            let read_len = if max_buffer_len == 0 {
                 READ_BUF_SIZE
             } else {
-                this.max_buffer_len
+                max_buffer_len
                     .saturating_sub(this.buffer.len())
                     .clamp(1, READ_BUF_SIZE)
             };
@@ -282,10 +311,10 @@ where
                         // the error before any over-the-cap memory is
                         // ever allocated. A max_buffer_len of 0
                         // disables enforcement.
-                        if this.max_buffer_len > 0 {
+                        if max_buffer_len > 0 {
                             let projected = this.buffer.len().saturating_add(filled.len());
-                            if projected > this.max_buffer_len {
-                                let cap = this.max_buffer_len;
+                            if projected > max_buffer_len {
+                                let cap = max_buffer_len;
                                 let buffered = this.buffer.len();
                                 let added = filled.len();
                                 let err = io::Error::new(

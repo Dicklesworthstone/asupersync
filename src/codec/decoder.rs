@@ -18,6 +18,29 @@ pub trait Decoder {
     /// - `Err(e)` on decode errors
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error>;
 
+    /// Maximum input-buffer length needed for one permitted encoded frame.
+    ///
+    /// This includes any length prefix, offset bytes, retained headers, and
+    /// delimiter that must be buffered before [`Self::decode`] can emit the
+    /// frame. It is a bound derived from the decoder's local configuration,
+    /// not a minimum read size or a length supplied by an untrusted peer.
+    /// Implementations must not enlarge it in response to an incoming frame's
+    /// advertised length. Decoder-owned allocations are outside this bound.
+    ///
+    /// [`FramedRead`](crate::codec::FramedRead) and
+    /// [`Framed`](crate::codec::Framed) use a finite hint to enlarge their
+    /// default read-buffer limit when necessary. An explicit
+    /// `with_max_buffer_len` remains authoritative, even if it is smaller than
+    /// this hint. The hint is queried before reads, so changing a decoder's
+    /// configuration through its mutable accessor updates the automatic limit.
+    ///
+    /// `None` means unknown, unbounded, or unrepresentable; it preserves the
+    /// framed transport's bounded default rather than disabling enforcement.
+    /// The provided implementation preserves existing decoder implementations.
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        None
+    }
+
     /// Called when EOF is reached.
     ///
     /// Framed transports call this repeatedly after each `Ok(Some(item))`
