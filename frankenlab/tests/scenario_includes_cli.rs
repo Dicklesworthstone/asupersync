@@ -53,6 +53,122 @@ fn workload(root: &Path) {
     );
 }
 
+fn exact_workload(root: &Path) -> PathBuf {
+    write(
+        root,
+        "exact.yaml",
+        "id: exact-cli\nlab: {seed: 17, worker_count: 1}\nchaos: {preset: off}\nparticipants:\n  - name: first\n    role: sender\n    properties: {messages: 1}\n  - name: second\n    role: sender\n    properties: {messages: 1}\n  - name: sink\n    role: receiver\n    properties: {capacity: 1}\n",
+    )
+}
+
+#[test]
+fn exact_search_exhaustion_requires_real_work_and_preserves_seeded_mode() {
+    let dir = directory("exact_complete");
+    let path = write(
+        &dir,
+        "complete.yaml",
+        "id: exact-complete\nlab: {seed: 17, worker_count: 1}\nchaos: {preset: off}\nparticipants:\n  - name: sink\n    role: receiver\n",
+    );
+    let exact = successful_json(&run("explore", &path, false, &["--exact"]));
+    assert_eq!(exact["schema"], "scenario-schedule-exploration-v1");
+    assert_eq!(exact["passed"], true);
+    assert_eq!(exact["termination"], "search_exhausted");
+    assert_eq!(exact["pending_prefixes"], 0);
+    assert!(exact["progress"]["runs"].as_u64().unwrap() > 0);
+    assert!(exact["runs"][0]["steps"].as_u64().unwrap() > 0);
+    assert_eq!(exact["runs"][0]["complete_receipt"], true);
+
+    let seeded = successful_json(&run("explore", &path, false, &["--seeds", "2"]));
+    assert_eq!(seeded["seeds_explored"], 2);
+    assert_eq!(seeded["failed"], 0);
+    let conflicting = run("explore", &path, false, &["--exact", "--seeds", "2"]);
+    assert!(!conflicting.status.success(), "explicit search modes conflict");
+    let missing_mode = run("explore", &path, false, &["--max-runs", "2"]);
+    assert!(!missing_mode.status.success(), "exact limits require --exact");
+}
+
+#[test]
+fn exact_cli_checkpoint_resumes_remaining_work_without_claiming_verified_history() {
+    let dir = directory("exact_resume");
+    let path = exact_workload(&dir);
+    let first_checkpoint = dir.join("first.bin");
+    let first = run(
+        "explore", &path, false,
+        &["--exact", "--max-runs", "1", "--checkpoint-out", first_checkpoint.to_str().unwrap()],
+    );
+    assert!(!first.status.success(), "a limited search must not pass");
+    let first_report: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_report["progress"]["runs"], 1);
+    assert_eq!(first_report["termination"], "run_limit");
+    assert!(first_report["pending_prefixes"].as_u64().unwrap() > 0);
+    assert_eq!(first_report["scenario_failed"], 0);
+    let original_checkpoint = fs::read(&first_checkpoint).unwrap();
+
+    let second_checkpoint = dir.join("second.bin");
+    let second = run(
+        "explore", &path, false,
+        &["--exact", "--max-runs", "1", "--resume", first_checkpoint.to_str().unwrap(),
+          "--checkpoint-out", second_checkpoint.to_str().unwrap()],
+    );
+    assert!(!second.status.success(), "loaded historical observations remain unverified");
+    let second_report: Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second_report["progress"]["runs"], 2);
+    assert_eq!(second_report["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(second_report["historical_progress_verified"], false);
+    assert_eq!(second_report["passed"], false);
+    assert_ne!(fs::read(&second_checkpoint).unwrap(), original_checkpoint);
+
+    let overwrite = run(
+        "explore", &path, false,
+        &["--exact", "--checkpoint-out", first_checkpoint.to_str().unwrap()],
+    );
+    assert!(!overwrite.status.success());
+    assert!(String::from_utf8_lossy(&overwrite.stderr).contains("already exists"));
+    assert_eq!(fs::read(&first_checkpoint).unwrap(), original_checkpoint);
+
+    let too_large = run(
+        "explore", &path, false,
+        &["--exact", "--resume", first_checkpoint.to_str().unwrap(), "--checkpoint-max-bytes", "32"],
+    );
+    assert!(!too_large.status.success());
+    assert!(String::from_utf8_lossy(&too_large.stderr).contains("byte limit"));
+
+    let changed = fs::read_to_string(&path).unwrap().replace("messages: 1", "messages: 2");
+    let changed_path = write(&dir, "changed.yaml", &changed);
+    let mismatch = run(
+        "explore", &changed_path, false,
+        &["--exact", "--resume", first_checkpoint.to_str().unwrap()],
+    );
+    assert!(!mismatch.status.success());
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("WorkloadMismatch"));
+}
+
+#[test]
+fn exact_cli_refuses_unsupported_models_and_preserves_real_workload_failures() {
+    let dir = directory("exact_failure");
+    let unsupported = write(
+        &dir,
+        "multi.yaml",
+        "id: multi\nlab: {worker_count: 2}\nparticipants:\n  - name: sink\n    role: receiver\n",
+    );
+    let result = run("explore", &unsupported, false, &["--exact"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("MultipleWorkers"));
+
+    let failed = write(
+        &dir,
+        "failed.yaml",
+        "id: failed-worker\nlab: {worker_count: 1}\nchaos: {preset: off}\nparticipants:\n  - name: owner\n    role: supervisor\n    properties: {max_restarts: 0}\n  - name: child\n    role: worker\n    properties: {fail_times: 1}\n",
+    );
+    let result = run("explore", &failed, false, &["--exact"]);
+    assert!(!result.status.success());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["passed"], false);
+    assert_eq!(report["scenario_failed"], 1);
+    assert_eq!(report["termination"], "stopped");
+    assert!(!report["runs"][0]["invariant_violations"].as_array().unwrap().is_empty());
+}
+
 #[test]
 fn inherited_workload_runs_replays_explores_and_tests_cancellation() {
     let dir = directory("workflow");

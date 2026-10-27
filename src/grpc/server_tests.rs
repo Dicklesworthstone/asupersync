@@ -228,6 +228,57 @@ mod tests {
         assert_eq!(response.body[0], 1, "compressed frame");
     }
 
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http2_unary_adapter_accepts_plain_and_empty_messages_in_gzip_calls() {
+        let server = Arc::new(
+            Server::builder()
+                .accept_compression(CompressionEncoding::Gzip)
+                .max_recv_message_size(4)
+                .build(),
+        );
+        for payload in [Bytes::new(), Bytes::from_static(b"ping")] {
+            let mut request = unary_http2_request(&server, "/test.Echo/Unary", payload.clone());
+            assert_eq!(request.body[0], 0);
+            request.headers.push(("grpc-encoding".to_owned(), "gzip".to_owned()));
+            let expected = payload.clone();
+            let response = futures_lite::future::block_on(server.dispatch_http2_unary(
+                request,
+                Arc::new(move |transport: GrpcTransportRequest| {
+                    assert_eq!(transport.request().get_ref(), &expected);
+                    let payload = transport.request().get_ref().clone();
+                    async move { Ok(Response::new(payload)) }
+                }),
+            ));
+            assert_eq!(grpc_status_trailer(&response), Some("0"));
+            let mut wire = BytesMut::from(response.body.as_slice());
+            let decoded = server.framed_codec(super::super::codec::IdentityCodec)
+                .decode_message(&mut wire).unwrap().unwrap();
+            assert_eq!(decoded, payload);
+            assert!(wire.is_empty());
+        }
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http2_unary_plain_gzip_requests_keep_size_and_cardinality_guards() {
+        let server = Server::builder()
+            .accept_compression(CompressionEncoding::Gzip)
+            .max_recv_message_size(4)
+            .build();
+        let mut oversized = unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"large"));
+        oversized.headers.push(("grpc-encoding".to_owned(), "gzip".to_owned()));
+        let error = server.decode_http2_unary_request(oversized).unwrap_err();
+        assert_eq!(error.code(), crate::grpc::Code::ResourceExhausted);
+
+        let mut multiple = unary_http2_request(&server, "/test.Echo/Unary", Bytes::new());
+        multiple.headers.push(("grpc-encoding".to_owned(), "gzip".to_owned()));
+        multiple.body.extend_from_slice(b"\x00\x00\x00\x00\x00");
+        let error = server.decode_http2_unary_request(multiple).unwrap_err();
+        assert_eq!(error.code(), crate::grpc::Code::InvalidArgument);
+        assert!(error.message().contains("more than one message"));
+    }
+
     #[test]
     fn http2_status_response_preserves_percent_encoded_message_and_details() {
         let status = Status::with_details(

@@ -475,6 +475,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         if !cx.runtime_mask.has(cap::CapMask::SPAWN) {
             return Err(SpawnError::RuntimeUnavailable);
         }
+        state.verify_required_spawn_authorization(cx, self.region, self.budget)?;
         let task_id = self.create_task_record(state)?;
 
         let (child_cx, child_cx_full) = self.build_child_task_cx(state, cx, task_id);

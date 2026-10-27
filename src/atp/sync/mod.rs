@@ -8,6 +8,16 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+/// Owned native inventories and reviewable plans for the Linux/glibc content profile.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod native;
+
+mod reconcile;
+pub use reconcile::{
+    BidirectionalConflict, BidirectionalSyncAction, BidirectionalSyncDecision,
+    BidirectionalSyncError, BidirectionalSyncPlan, plan_bidirectional_sync,
+};
+
 /// Stable schema for directory sync proof summaries.
 pub const DIRECTORY_SYNC_PROOF_SCHEMA: &str = "asupersync.atp.directory-sync.proof.v1";
 

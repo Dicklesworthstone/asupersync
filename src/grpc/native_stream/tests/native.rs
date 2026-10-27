@@ -142,6 +142,351 @@ fn native_client_crosses_multiple_h2_windows_and_requires_success_trailers() {
     });
 }
 
+#[cfg(feature = "compression")]
+fn native_encoding_response_peer(
+    body: Vec<u8>,
+    encoding: &'static str,
+) -> (SocketAddr, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let mut socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < until, "gzip peer accept watchdog");
+                    std::thread::park_timeout(Duration::from_millis(1));
+                }
+                Err(error) => panic!("gzip peer accept: {error}"),
+            }
+        };
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket.write_all(&frame(4, 0, &[])).unwrap();
+        read_request(&mut socket);
+        let mut response = headers(
+            &[
+                (":status", "200"),
+                ("content-type", "application/grpc"),
+                ("grpc-encoding", encoding),
+            ],
+            false,
+        );
+        // Each gRPC prefix, including an empty message's prefix, crosses
+        // HTTP/2 DATA boundaries. TCP may coalesce writes without erasing
+        // this explicit framing witness.
+        for chunk in body.chunks(3) {
+            response.extend(frame(0, 0, chunk));
+        }
+        response.extend(headers(
+            &[("grpc-status", "0"), ("x-terminal", "mixed-gzip")],
+            true,
+        ));
+        socket.write_all(&response).unwrap();
+        // Do not reset a completed response by closing a socket with unread
+        // SETTINGS acknowledgements or receive-window updates.
+        let mut scratch = [0; 1024];
+        while socket.read(&mut scratch).expect("gzip client transport retirement") != 0 {}
+    });
+    (address, peer)
+}
+
+#[cfg(feature = "compression")]
+#[test]
+fn native_clients_accept_mixed_gzip_frames_and_reach_success_trailers() {
+    use crate::grpc::client::{Channel, CompressionEncoding};
+
+    for multithread in [false, true] {
+        for through_channel in [false, true] {
+            let expected = [
+                Bytes::from_static(b"plain-first"),
+                Bytes::from_static(b"compressed-second"),
+                Bytes::new(),
+                Bytes::new(),
+                Bytes::from_static(b"plain-last"),
+            ];
+            let mut body = BytesMut::new();
+            let mut plain = FramedCodec::new(IdentityCodec);
+            let mut gzip = FramedCodec::new(IdentityCodec).with_gzip_frame_codec();
+            for (index, value) in expected.iter().enumerate() {
+                if matches!(index, 1 | 3) {
+                    gzip.encode_message(value, &mut body).unwrap();
+                } else {
+                    plain.encode_message(value, &mut body).unwrap();
+                }
+            }
+            let (address, peer) = native_encoding_response_peer(body.to_vec(), "gzip");
+            let runtime = if multithread {
+                RuntimeBuilder::new().worker_threads(2).build().unwrap()
+            } else {
+                RuntimeBuilder::current_thread().build().unwrap()
+            };
+            let complete = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&complete);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let io = TcpStream::connect_timeout(address, Duration::from_secs(3)).await.unwrap();
+                let request = Request::new(Bytes::from_static(b"native-request"));
+                if through_channel {
+                    let channel = Channel::builder(format!("http://{address}"))
+                        .accept_compression(CompressionEncoding::Gzip)
+                        .max_recv_message_size(64)
+                        .timeout(Duration::from_secs(5))
+                        .connect()
+                        .await
+                        .unwrap();
+                    let mut stream = channel
+                        .server_streaming_on(&cx, io, "/test.Values/Watch", request, IdentityCodec)
+                        .await
+                        .unwrap();
+                    for value in &expected {
+                        assert_eq!(stream.message().await.unwrap().as_ref(), Some(value));
+                    }
+                    assert!(stream.message().await.unwrap().is_none());
+                    assert_eq!(stream.terminal_status().unwrap().code(), Code::Ok);
+                    assert!(matches!(
+                        stream.trailing_metadata().unwrap().get("x-terminal"),
+                        Some(MetadataValue::Ascii(value)) if value == "mixed-gzip"
+                    ));
+                    assert!(stream.message().await.unwrap().is_none());
+                } else {
+                    let mut stream = NativeServerStream::new(
+                        &cx,
+                        io,
+                        "localhost",
+                        "/test.Values/Watch",
+                        request,
+                        IdentityCodec,
+                        NativeStreamConfig {
+                            accept_gzip: true,
+                            max_recv_message_size: 64,
+                            timeout: Some(Duration::from_secs(5)),
+                            ..NativeStreamConfig::default()
+                        },
+                    )
+                    .unwrap();
+                    stream.headers().await.unwrap();
+                    for value in &expected {
+                        assert_eq!(stream.message().await.unwrap().as_ref(), Some(value));
+                    }
+                    assert!(stream.message().await.unwrap().is_none());
+                    assert_eq!(stream.status().unwrap().code(), Code::Ok);
+                    assert!(matches!(
+                        stream.trailers().unwrap().get("x-terminal"),
+                        Some(MetadataValue::Ascii(value)) if value == "mixed-gzip"
+                    ));
+                    assert!(stream.message().await.unwrap().is_none());
+                }
+                assert!(!cx.is_cancel_requested());
+                complete.store(true, Ordering::Release);
+            }));
+            peer.join().expect("gzip peer saw transport retirement");
+            assert!(observed.load(Ordering::Acquire), "mixed-message client assertions completed");
+        }
+    }
+}
+
+#[cfg(feature = "compression")]
+#[test]
+fn native_unary_plain_gzip_response_requires_channel_negotiation() {
+    use crate::grpc::client::{Channel, CompressionEncoding, GrpcClient};
+
+    for multithread in [false, true] {
+        for (encoding, accepted) in [("gzip", false), ("gzip", true), ("identity", true)] {
+            for value in [b"plain-unary".as_slice(), b"".as_slice()] {
+                let (address, peer) = native_encoding_response_peer(message(value), encoding);
+                let runtime = if multithread {
+                    RuntimeBuilder::new().worker_threads(2).build().unwrap()
+                } else {
+                    RuntimeBuilder::current_thread().build().unwrap()
+                };
+                let complete = Arc::new(AtomicBool::new(false));
+                let observed = Arc::clone(&complete);
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let mut builder = Channel::builder(format!("http://{address}"))
+                        .timeout(Duration::from_secs(5));
+                    if accepted {
+                        // Identity remains legal even when the advertised
+                        // compression-algorithm list contains only gzip.
+                        builder = builder.accept_compressions([CompressionEncoding::Gzip]);
+                    }
+                    let channel = builder.connect().await.unwrap();
+                    let mut client = GrpcClient::new(channel);
+                    let result = client
+                        .unary::<Bytes, Bytes>(
+                            "/test.Values/Get",
+                            Request::new(Bytes::from_static(b"native-request")),
+                        )
+                        .await;
+                    if accepted {
+                        let response = result.expect("accepted encoding permits an uncompressed message");
+                        assert_eq!(response.get_ref().as_ref(), value);
+                        assert!(matches!(
+                            response.metadata().get("x-terminal"),
+                            Some(MetadataValue::Ascii(value)) if value == "mixed-gzip"
+                        ));
+                    } else {
+                        assert_eq!(result.unwrap_err().code(), Code::Internal);
+                    }
+                    complete.store(true, Ordering::Release);
+                }));
+                peer.join().expect("unary gzip peer saw transport retirement");
+                assert!(observed.load(Ordering::Acquire), "unary compression assertions completed");
+            }
+        }
+    }
+}
+
+#[test]
+fn native_unary_rejects_encoding_rewrites_and_retires_the_pooled_transport() {
+    use crate::grpc::client::{Channel, GrpcClient};
+
+    fn accept_peer(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < until, "encoding peer accept watchdog");
+                    std::thread::park_timeout(Duration::from_millis(1));
+                }
+                Err(error) => panic!("encoding peer accept: {error}"),
+            }
+        };
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket
+    }
+
+    fn assert_retired(socket: &mut std::net::TcpStream) {
+        let mut scratch = [0; 1024];
+        loop {
+            match socket.read(&mut scratch) {
+                Ok(0) => return,
+                Ok(_) => {}
+                // Refusing initial headers can close with unread DATA, which
+                // TCP is allowed to report as reset rather than graceful EOF.
+                Err(error) if error.kind() == io::ErrorKind::ConnectionReset => return,
+                Err(error) => panic!("encoding peer did not observe transport retirement: {error}"),
+            }
+        }
+    }
+
+    for multithread in [false, true] {
+        for initial_encoding in ["gzip", "deflate", "identity"] {
+            for duplicate in [false, true] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let address = listener.local_addr().unwrap();
+                let peer = std::thread::spawn(move || {
+                    let mut first = accept_peer(&listener);
+                    first.write_all(&frame(4, 0, &[])).unwrap();
+                    read_request(&mut first);
+                    let mut initial = vec![
+                        (":status", "200"),
+                        ("content-type", "application/grpc"),
+                        ("grpc-encoding", initial_encoding),
+                    ];
+                    if duplicate {
+                        initial.push(("grpc-encoding", "identity"));
+                    }
+                    let mut response = headers(&initial, false);
+                    response.extend(frame(0, 0, &message(b"must-not-succeed")));
+                    let mut trailers = vec![("grpc-status", "0")];
+                    if !duplicate {
+                        trailers.push(("grpc-encoding", "identity"));
+                    }
+                    response.extend(headers(&trailers, true));
+                    if let Err(error) = first.write_all(&response) {
+                        // A duplicate can be refused before its following DATA
+                        // finishes writing. The client's exact error assertion
+                        // below distinguishes that refusal from an I/O failure.
+                        assert!(
+                            matches!(
+                                error.kind(),
+                                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                            ),
+                            "write malformed response: {error}"
+                        );
+                    }
+                    // Pooling is enabled: a second stream on this connection
+                    // would leave this read waiting and the regression red.
+                    assert_retired(&mut first);
+
+                    // The same client must recover on a fresh socket. Seeing a
+                    // new client preface proves the malformed connection
+                    // was discarded, not merely retried or left in the pool.
+                    let mut second = accept_peer(&listener);
+                    second.write_all(&frame(4, 0, &[])).unwrap();
+                    read_request(&mut second);
+                    let mut response = headers(
+                        &[
+                            (":status", "200"),
+                            ("content-type", "application/grpc"),
+                            ("grpc-encoding", "identity"),
+                        ],
+                        false,
+                    );
+                    response.extend(frame(0, 0, &message(b"recovered")));
+                    response.extend(headers(&[("grpc-status", "0"), ("x-terminal", "fresh")], true));
+                    second.write_all(&response).unwrap();
+                    assert_retired(&mut second);
+                });
+                let runtime = if multithread {
+                    RuntimeBuilder::new().worker_threads(2).build().unwrap()
+                } else {
+                    RuntimeBuilder::current_thread().build().unwrap()
+                };
+                let complete = Arc::new(AtomicBool::new(false));
+                let observed = Arc::clone(&complete);
+                runtime.block_on(runtime.handle().spawn(async move {
+                    // Identity-only admission makes gzip unaccepted and
+                    // deflate unsupported. Rewriting either to identity used
+                    // to bypass the check and incorrectly return success.
+                    let channel = Channel::builder(format!("http://{address}"))
+                        .reuse_connections(1)
+                        .timeout(Duration::from_secs(5))
+                        .connect()
+                        .await
+                        .unwrap();
+                    let mut client = GrpcClient::new(channel);
+                    let error = client
+                        .unary::<Bytes, Bytes>(
+                            "/test.Values/Get",
+                            Request::new(Bytes::from_static(b"native-request")),
+                        )
+                        .await
+                        .expect_err("a response cannot rewrite its negotiated encoding");
+                    assert_eq!(error.code(), Code::Internal);
+                    assert!(error.message().contains(if duplicate {
+                        "duplicate grpc-encoding"
+                    } else {
+                        "grpc-encoding in trailers"
+                    }));
+                    let response = client
+                        .unary::<Bytes, Bytes>(
+                            "/test.Values/Get",
+                            Request::new(Bytes::from_static(b"native-request")),
+                        )
+                        .await
+                        .expect("a valid subsequent call must recover on a fresh transport");
+                    assert_eq!(response.get_ref().as_ref(), b"recovered");
+                    assert!(matches!(
+                        response.metadata().get("x-terminal"),
+                        Some(MetadataValue::Ascii(value)) if value == "fresh"
+                    ));
+                    drop(client);
+                    complete.store(true, Ordering::Release);
+                }));
+                peer.join().expect("both native unary transports retired");
+                assert!(observed.load(Ordering::Acquire), "encoding refusal and recovery completed");
+            }
+        }
+    }
+}
+
 #[test]
 fn native_client_assembles_one_message_larger_than_the_initial_flow_window() {
     run_server(false, Values { count: 1, size: 128 * 1024 }, |cx, address| async move {

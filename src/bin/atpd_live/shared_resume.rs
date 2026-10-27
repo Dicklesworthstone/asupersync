@@ -525,6 +525,9 @@ fn observe(
             if service.is_client_revoked(&key.client) {
                 return Some((key, "client_revoked"));
             }
+            if service.is_session_revoked(&key) {
+                return Some((key, "session_revoked"));
+            }
             if snapshot.failed {
                 return Some((key, "local_failure"));
             }
@@ -561,6 +564,8 @@ fn expire(
             if service.session_status(key) == Some(ResumeSessionStatus::Idle) {
                 if service.is_client_revoked(&key.client) {
                     Some((*key, "client_revoked"))
+                } else if service.is_session_revoked(key) {
+                    Some((*key, "session_revoked"))
                 } else {
                     retained.expired(now).map(|reason| (*key, reason))
                 }
@@ -612,6 +617,7 @@ fn rejection_status(rejection: &ResumeServiceRejection) -> &'static str {
         ResumeServiceRejection::Busy => "session_busy",
         ResumeServiceRejection::Retired => "session_retired",
         ResumeServiceRejection::Revoked => "client_revoked",
+        ResumeServiceRejection::SessionRevoked => "session_revoked",
         ResumeServiceRejection::Capacity(_) => "session_capacity_refused",
         ResumeServiceRejection::AttemptsExhausted => "attempts_exhausted",
         ResumeServiceRejection::Stopping => "stopping",

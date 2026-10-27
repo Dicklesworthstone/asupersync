@@ -1874,10 +1874,11 @@ pub type StepIndex = usize;
 /// A recorded compensation for a saga step.
 ///
 /// Compensations are stored as boxed closures that take the step output
-/// and undo the effect. In Phase 0, compensations are synchronous functions
+/// and undo the effect. This compatibility API keeps synchronous functions
 /// that return a description of what was undone.
 ///
-/// In Phase 1+, compensations will be async and budget-constrained.
+/// Runtime-owned asynchronous compensation is available through
+/// [`Cx::spawn_saga`](crate::cx::Cx::spawn_saga).
 struct CompensationEntry {
     /// Index of the step this compensation belongs to.
     step: StepIndex,
@@ -1960,14 +1961,18 @@ pub struct CompensationResult {
 /// all previously-completed compensations run in reverse order. This is
 /// the distributed equivalent of structured finalizers.
 ///
+/// This API remains synchronous. For asynchronous actions/compensations, child
+/// quiescence before commit, and an explicit cancellation-mask allowance, use
+/// [`Cx::spawn_saga`](crate::cx::Cx::spawn_saga).
+///
 /// # Design Principles
 ///
 /// - **Compensations are deterministic**: Given the same inputs, compensations
 ///   produce the same effects. This enables lab testing of failure scenarios.
 /// - **Reverse order**: Compensations run last-to-first, ensuring that
 ///   later steps' effects are undone before earlier steps'.
-/// - **Budget-aware**: In Phase 1+, compensations will be budget-constrained
-///   (they are finalizers, which run under masked cancellation).
+/// - **Synchronous cleanup**: Compensation runs inline, including on Drop.
+///   The separate async saga API retains runtime ownership while cleanup waits.
 /// - **Trace-aware**: Each step and compensation emits trace events.
 ///
 /// # API Pattern
@@ -6551,6 +6556,7 @@ pub struct NativeRemoteRoute {
         crate::distributed::membership::owned::OwnedMembershipController,
         u64,
     )>,
+    swim_liveness: Option<crate::distributed::membership::driver::SwimObserver>,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -6567,6 +6573,7 @@ impl NativeRemoteRoute {
             hello,
             client,
             membership: None,
+            swim_liveness: None,
         }
     }
 
@@ -6626,6 +6633,42 @@ impl NativeRemoteRoute {
         Ok(self)
     }
 
+    /// Tighten authenticated admission with a runtime-driven SWIM liveness veto.
+    ///
+    /// Call [`Self::with_membership`] first. The separately provisioned authority,
+    /// exact incarnation and enforcing TLS pin remain mandatory. Gossip cannot
+    /// grant permission, replace endpoints or pins, or revive a revoked generation.
+    /// The observer must see the same logical destination as this route.
+    ///
+    /// New submissions require both current authenticated permission and direct
+    /// contact with an Alive peer from a running detector. Merely configuring a
+    /// seed is insufficient. Unknown, suspect, departed and stopped observations
+    /// refuse new work. An Alive rumor after suspicion needs renewed direct
+    /// contact before it removes the veto. Discovery endpoint refresh retains
+    /// this binding; bounded admission reservations recheck it at dispatch.
+    ///
+    /// SWIM remains unauthenticated failure detection on a trusted network, not
+    /// identity evidence or a wall-clock availability guarantee. It can deny
+    /// service but cannot create authority. This gate does not cancel existing
+    /// operations: their original client and control capacity remain available
+    /// for drain. Use membership-owned work and authenticated controller updates
+    /// when actual lease revocation and subtree cleanup are required.
+    ///
+    /// The caller owns and runs the detector task; this method starts no work.
+    /// Routes without this opt-in preserve their existing behavior.
+    pub fn with_swim_liveness(
+        mut self,
+        observer: crate::distributed::membership::driver::SwimObserver,
+    ) -> Result<Self, RemoteComputationClientError> {
+        if self.membership.is_none() {
+            return Err(RemoteComputationClientError::InvalidConfig(
+                "SWIM route liveness requires authenticated membership",
+            ));
+        }
+        self.swim_liveness = Some(observer);
+        Ok(self)
+    }
+
     /// Clones this route with a replacement ordered bootstrap endpoint set.
     ///
     /// The logical destination and V3 hello are retained exactly, while the
@@ -6639,6 +6682,7 @@ impl NativeRemoteRoute {
             hello: self.hello.clone(),
             client: self.client.with_bootstrap_endpoints(endpoints)?,
             membership: self.membership.clone(),
+            swim_liveness: self.swim_liveness.clone(),
         })
     }
 
@@ -6658,6 +6702,7 @@ impl NativeRemoteRoute {
             hello: self.hello.clone(),
             client: self.client.with_discovered_endpoints(discovery)?,
             membership: self.membership.clone(),
+            swim_liveness: self.swim_liveness.clone(),
         })
     }
 }
@@ -8126,6 +8171,8 @@ impl NativeRemoteRuntime {
     /// authenticated state. Withdrawal takes effect even when discovery retains
     /// an older endpoint snapshot. This observation reserves no permission;
     /// actual native submission checks the binding again through this method.
+    /// An opted-in SWIM detector supplies an additional liveness veto; it never
+    /// substitutes for authenticated membership or the route's TLS identity.
     #[must_use]
     pub fn effective_route(&self, destination: &NodeId) -> Option<NativeRemoteRoute> {
         // Release the route lock before inspecting membership. Neither policy
@@ -8136,12 +8183,19 @@ impl NativeRemoteRuntime {
         {
             return None;
         }
+        if route
+            .swim_liveness
+            .as_ref()
+            .is_some_and(|observer| !observer.has_live_contact(destination))
+        {
+            return None;
+        }
         Some(route)
     }
 
     /// Generation of the validated route catalog.
     ///
-    /// Authenticated membership may independently change route eligibility
+    /// Authenticated membership and opt-in SWIM liveness may change eligibility
     /// without publishing another catalog or advancing this generation.
     #[must_use]
     pub fn route_generation(&self) -> u64 {

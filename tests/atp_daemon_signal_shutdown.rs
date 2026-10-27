@@ -24,7 +24,7 @@ use asupersync::runtime::RuntimeBuilder;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -1219,6 +1219,147 @@ fn atpd_failed_reload_mid_transfer_drains_before_failing() {
         root.display(),
         stop.log
     );
+}
+
+/// Hold a later startup step at a real certificate-file read while the TCP
+/// listener receives a transfer. Releasing that read fails either QUIC setup
+/// or diagnostics binding, both of which used to bypass the listener drain.
+fn assert_atpd_startup_failure_drains_receive(fail_diagnostics: bool) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let label = if fail_diagnostics {
+        "atpd-startup-diagnostics"
+    } else {
+        "atpd-startup-quic"
+    };
+    let root = scratch_root(label);
+    let data = init_atpd(&root);
+    let inbox = data.join("inbox");
+    let source = write_payload(&root, ENTRY_BYTES);
+    let tls = write_tls_files(&root);
+    let cert_pipe = root.join("startup-certificate.pipe");
+    nix::unistd::mkfifo(&cert_pipe, nix::sys::stat::Mode::from_bits_truncate(0o600))
+        .expect("create controlled certificate read");
+    let diagnostics =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("reserve the diagnostics failure port");
+    let diagnostics_addr = if fail_diagnostics {
+        diagnostics.local_addr().expect("diagnostics port")
+    } else {
+        "127.0.0.1:0"
+            .parse()
+            .expect("ephemeral diagnostics address")
+    };
+    let mut daemon = Process::spawn(
+        "atpd start",
+        atpd_command(&root)
+            .args(["start", "--bind", "127.0.0.1:0", "--data-dir"])
+            .arg(&data)
+            .arg("--diagnostics-bind")
+            .arg(diagnostics_addr.to_string())
+            .args(["--enable-quic", "--quic-server-cert"])
+            .arg(&cert_pipe)
+            .arg("--quic-server-key")
+            .arg(&tls.key),
+    );
+    let listen = daemon
+        .wait_for(Pipe::Stdout, READY_LIMIT, |line| {
+            tracing_bind_addr(line, "ATP transfer listener bound and accepting")
+        })
+        .expect("TCP must accept before the later startup failure");
+
+    // A nonblocking writer opens only when the daemon has reached the FIFO's
+    // read. Keeping it open with no bytes holds startup without timing guesses.
+    let deadline = Instant::now() + READY_LIMIT;
+    let mut cert_writer = loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&cert_pipe)
+        {
+            Ok(writer) => break writer,
+            Err(error)
+                if error.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("daemon did not reach its controlled certificate read: {error}"),
+        }
+    };
+    let sender = ParkedSender::start(listen, source);
+    let (sent, total) = sender.wait_parked();
+    assert!(
+        0 < sent && sent < total,
+        "sender must be parked mid-transfer"
+    );
+    let staging_before = wait_for_entry(&inbox, TCP_STAGING_PREFIX, IN_FLIGHT_LIMIT);
+    assert!(
+        !staging_before.is_empty(),
+        "a receive must own staging before startup fails"
+    );
+    assert!(
+        daemon.is_running(),
+        "the certificate read must hold startup"
+    );
+    let certificate = if fail_diagnostics {
+        LEAF_CERT_PEM.as_bytes()
+    } else {
+        b"no certificate sections in this file".as_slice()
+    };
+    cert_writer
+        .write_all(certificate)
+        .expect("release the later startup step");
+    drop(cert_writer);
+
+    let status = daemon.wait_exit(EXIT_LIMIT);
+    let mut log = daemon.all_lines(Pipe::Stdout);
+    log.extend(daemon.all_lines(Pipe::Stderr));
+    let sender_outcome = sender.finish();
+    let error_marker = if fail_diagnostics {
+        "kind: AddrInUse"
+    } else {
+        "ATP QUIC transfer listener is enabled but misconfigured"
+    };
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(1),
+        "startup must preserve its nonzero error: {log:#?}"
+    );
+    assert!(
+        log.iter().any(|line| line.contains(error_marker)),
+        "the original startup error must survive cleanup: {log:#?}"
+    );
+    assert_eq!(count_containing(&log, ATPD_LISTENER_DRAINED), 1, "{log:#?}");
+    assert_eq!(
+        count_containing(&log, ATPD_LISTENERS_DRAINED),
+        1,
+        "{log:#?}"
+    );
+    assert_eq!(count_containing(&log, ATPD_FAILED), 1, "{log:#?}");
+    assert_eq!(count_containing(&log, ATPD_COMMITTED), 0, "{log:#?}");
+    assert!(
+        log.iter().any(|line| {
+            line.contains(ATPD_LISTENERS_DRAINED) && line.contains("aborted_receives=1")
+        }),
+        "the cleanup must report the aborted receive: {log:#?}"
+    );
+    assert!(dir_entries(&inbox).is_empty(), "{log:#?}");
+    assert!(!root.join("atpd.pid").exists(), "PID ownership must retire");
+    assert!(
+        matches!(&sender_outcome, Err(error) if !error.contains("sender did not finish")),
+        "sender must promptly observe the failed transfer: {sender_outcome:?}"
+    );
+    let rebound = std::net::TcpListener::bind(listen).expect("TCP listener port was released");
+    drop(rebound);
+}
+
+#[test]
+fn atpd_quic_startup_failure_mid_transfer_drains_before_failing() {
+    assert_atpd_startup_failure_drains_receive(false);
+}
+
+#[test]
+fn atpd_diagnostics_startup_failure_mid_transfer_drains_before_failing() {
+    assert_atpd_startup_failure_drains_receive(true);
 }
 
 /// An idle atpd with its QUIC listener stops on SIGTERM.

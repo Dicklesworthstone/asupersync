@@ -17,6 +17,12 @@ pub use super::DEFAULT_MAX_MESSAGE_SIZE;
 /// gRPC message header size (1 byte flag + 4 bytes length).
 pub const MESSAGE_HEADER_SIZE: usize = 5;
 
+#[derive(Clone, Copy)]
+enum EncodingValidation {
+    Legacy,
+    Negotiated,
+}
+
 /// A decoded gRPC message.
 #[derive(Debug, Clone)]
 pub struct GrpcMessage {
@@ -648,17 +654,50 @@ impl<C: Codec> FramedCodec<C> {
         self.decode_message_with_encoding(src, None)
     }
 
-    /// Decode a message with framing and validate compression flag consistency.
+    /// Decode a message with the legacy strict compression-flag policy.
     ///
-    /// Per gRPC specification, the compressed flag must be consistent with the
-    /// grpc-encoding header:
-    /// - If grpc_encoding is "identity", compressed flag must be 0
-    /// - If grpc_encoding is "gzip", compressed flag must be 1
-    /// - Mismatches are protocol errors
+    /// This compatibility entry point requires flag 0 for `identity` and flag 1
+    /// for a named compression algorithm. With no header it uses the configured
+    /// frame hook, including for compressed frames. These historical rules are
+    /// preserved for existing callers.
+    ///
+    /// Native gRPC transports use [`Self::decode_message_with_negotiated_encoding`]
+    /// instead: the wire protocol permits individual uncompressed messages even
+    /// when a compression algorithm was negotiated for the call.
     pub fn decode_message_with_encoding(
         &mut self,
         src: &mut BytesMut,
         grpc_encoding: Option<&str>,
+    ) -> Result<Option<C::Decode>, GrpcError> {
+        self.decode_message_with_validation(src, grpc_encoding, EncodingValidation::Legacy)
+    }
+
+    /// Decode a message using the call's negotiated wire encoding.
+    ///
+    /// Flag 0 always denotes an uncompressed message, including an empty message
+    /// or a message in a `gzip` call. Flag 1 requires `grpc-encoding: gzip` and a
+    /// configured gzip decompressor. Missing or `identity` encoding cannot
+    /// authorize compressed bytes; unsupported algorithm names are rejected.
+    /// The caller must first validate that the peer selected an accepted
+    /// encoding and install its matching frame hook.
+    ///
+    /// A framing, encoding, decompression, message, or aggregate-body-limit
+    /// error poisons the codec and discards the buffered tail, just as with
+    /// [`Self::decode_message_with_encoding`]. An incomplete frame remains
+    /// buffered without invoking the decompressor or charging the body meter.
+    pub fn decode_message_with_negotiated_encoding(
+        &mut self,
+        src: &mut BytesMut,
+        grpc_encoding: Option<&str>,
+    ) -> Result<Option<C::Decode>, GrpcError> {
+        self.decode_message_with_validation(src, grpc_encoding, EncodingValidation::Negotiated)
+    }
+
+    fn decode_message_with_validation(
+        &mut self,
+        src: &mut BytesMut,
+        grpc_encoding: Option<&str>,
+        validation: EncodingValidation,
     ) -> Result<Option<C::Decode>, GrpcError> {
         if self.poisoned {
             src.clear();
@@ -674,8 +713,30 @@ impl<C: Codec> FramedCodec<C> {
             Err(error) => return self.poison_decode_stream(src, error),
         };
 
-        // SECURITY FIX: Validate compression flag consistency with grpc-encoding header
-        if let Some(encoding) = grpc_encoding {
+        // Keep the strict public entry point compatible while the native wire
+        // path treats compression as a per-message decision (gRPC HTTP/2).
+        if matches!(validation, EncodingValidation::Negotiated) {
+            match grpc_encoding {
+                Some("gzip") => {}
+                None | Some("identity") if !message.compressed => {}
+                None | Some("identity") => {
+                    return self.poison_decode_stream(
+                        src,
+                        GrpcError::protocol(
+                            "compressed gRPC message requires a non-identity grpc-encoding",
+                        ),
+                    );
+                }
+                Some(unknown) => {
+                    return self.poison_decode_stream(
+                        src,
+                        GrpcError::protocol(format!(
+                            "unsupported grpc-encoding: '{unknown}'. Supported: identity, gzip"
+                        )),
+                    );
+                }
+            }
+        } else if let Some(encoding) = grpc_encoding {
             let expected_compressed = match encoding {
                 "identity" => false,
                 "gzip" | "deflate" | "snappy" => true,

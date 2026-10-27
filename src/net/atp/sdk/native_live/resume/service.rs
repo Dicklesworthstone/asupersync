@@ -45,7 +45,10 @@ use restoration::{ServiceInit, ServiceReceiver};
 
 #[path = "revocation.rs"]
 mod revocation;
-pub use revocation::{MAX_REVOKED_RESUME_CLIENTS, ResumeClientRevocation, ResumeRevokeError};
+pub use revocation::{
+    MAX_REVOKED_RESUME_CLIENTS, MAX_REVOKED_RESUME_SESSIONS, ResumeClientRevocation,
+    ResumeRevocationReport, ResumeRevokeError, ResumeSessionRevocation,
+};
 
 /// Exact client identity plus stream continuity identifier. A nonce is not authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -135,6 +138,9 @@ pub enum ResumeServiceRejection {
     /// This service has permanently revoked the authenticated client certificate.
     #[error("resume client authority has been revoked")]
     Revoked,
+    /// This exact authenticated certificate/nonce pair has been denied.
+    #[error("resume session authority has been revoked")]
+    SessionRevoked,
     /// Resident, per-client, or lifetime key admission was refused.
     #[error("shared resume {0} capacity exhausted")]
     Capacity(&'static str),
@@ -262,6 +268,7 @@ impl<W> fmt::Debug for ResumableService<W> {
             .field("resident_sessions", &self.residents)
             .field("retained_keys", &self.entries.len())
             .field("revoked_clients", &self.revoked_clients())
+            .field("revoked_sessions", &self.revoked_sessions())
             .finish_non_exhaustive()
     }
 }
@@ -766,6 +773,9 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
         // Neither a new nonce nor a saved receipt bypasses this service policy.
         if self.is_client_revoked(&key.client) {
             return Err(ResumeServiceRejection::Revoked);
+        }
+        if self.is_session_revoked(&key) {
+            return Err(ResumeServiceRejection::SessionRevoked);
         }
         let existing = if let Some(entry) = self.entries.get_mut(&key) {
             match entry.status {

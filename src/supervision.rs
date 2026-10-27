@@ -1628,6 +1628,10 @@ impl CompiledSupervisor {
     /// topology to runtime child factories and a [`ManagedSupervisor`] controller. Calling
     /// `spawn` directly establishes the initial tree without an active restart supervisor loop.
     ///
+    /// The supplied parent budget, configured budget, caller's current budget,
+    /// and owning region's budget are met before child admission. The child
+    /// scope also inherits the caller and owning region's capability envelopes.
+    ///
     /// # Why this keeps `&mut RuntimeState` (br-asupersync-c6uw5y)
     ///
     /// Supervisor boot is deliberately **not** routed through the v2 spawn
@@ -1648,14 +1652,29 @@ impl CompiledSupervisor {
         parent_region: RegionId,
         parent_budget: Budget,
     ) -> Result<SupervisorHandle, SupervisorSpawnError> {
-        let budget = self.budget.unwrap_or(parent_budget);
-        let region = state.create_child_region(parent_region, budget)?;
+        let budget = parent_budget
+            .meet(cx.budget())
+            .meet(self.budget.unwrap_or(Budget::INFINITE));
+        let region = state.create_child_region_with_capability_budget(
+            parent_region,
+            budget,
+            cx.capability_budget(),
+            crate::types::CapabilityBudgetRequirements::NONE,
+        )?;
         let effective_budget = state
             .region(region)
             .map_or(budget, crate::record::RegionRecord::budget);
+        let effective_capability_budget = state
+            .region(region)
+            .expect("supervisor region was admitted above")
+            .capability_budget();
 
         let scope: crate::cx::Scope<'static, crate::types::policy::FailFast> =
-            crate::cx::Scope::<crate::types::policy::FailFast>::new(region, effective_budget);
+            crate::cx::Scope::<crate::types::policy::FailFast>::new_with_capability_budget(
+                region,
+                effective_budget,
+                effective_capability_budget,
+            );
 
         #[derive(Clone)]
         enum BootState {

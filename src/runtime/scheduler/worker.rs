@@ -612,19 +612,21 @@ impl Worker {
             .as_ref()
             .map_or_else(crate::time::wall_now, TimerDriverHandle::now);
 
-        // Get region ID for panic isolation context
-        let region_id = {
+        // Scheduled finalizers share task storage with ordinary work, but
+        // cleanup must remain runnable after the region's panic threshold.
+        let (region_id, is_finalizer) = {
             let state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.task(task_id).map_or_else(
+            let region_id = state.task(task_id).map_or_else(
                 || {
                     // Fallback region ID - this shouldn't happen in normal operation
                     crate::types::RegionId::from_arena(crate::util::ArenaIndex::new(0, 0))
                 },
                 |record| record.owner,
-            )
+            );
+            (region_id, state.is_finalizer_task(task_id))
         };
 
         let poll_attempt = guard
@@ -635,16 +637,25 @@ impl Worker {
             .saturating_add(1);
         let poll_attempt = u32::try_from(poll_attempt).unwrap_or(u32::MAX);
 
-        // Isolate the potentially panicking task poll operation
-        let poll_result =
+        // The cleanup path still isolates each panic, but it cannot be skipped
+        // by a threshold intended to stop ordinary task execution.
+        let poll_operation = || {
+            guard
+                .stored
+                .as_mut()
+                .expect("executing task storage")
+                .poll(&mut cx)
+        };
+        let poll_result = if is_finalizer {
+            self.panic_isolator.isolate_finalizer_execution(
+                region_id,
+                crate::runtime::panic_isolation::FinalizerType::Async,
+                poll_operation,
+            )
+        } else {
             self.panic_isolator
-                .isolate_task_execution(task_id, region_id, poll_attempt, || {
-                    guard
-                        .stored
-                        .as_mut()
-                        .expect("executing task storage")
-                        .poll(&mut cx)
-                });
+                .isolate_task_execution(task_id, region_id, poll_attempt, poll_operation)
+        };
 
         match poll_result {
             PanicIsolationResult::Success(Poll::Ready(outcome)) => {

@@ -363,6 +363,100 @@
         assert!(matches!(other_region, PanicIsolationResult::Success(7)));
     }
 
+    #[test]
+    fn exhausted_panic_threshold_still_runs_cleanup_and_resolves_obligations() {
+        use crate::obligation::ledger::ObligationLedger;
+        use crate::record::{ObligationAbortReason, ObligationKind};
+        use crate::types::Time;
+
+        for threshold in [0, 1, 3] {
+            let metrics = Arc::new(CapturingMetrics::default());
+            let isolator = PanicIsolator::new(
+                PanicIsolationConfig {
+                    capture_backtraces: false,
+                    enable_panic_logging: false,
+                    panic_threshold_per_region: Some(threshold),
+                    ..Default::default()
+                },
+                metrics.clone(),
+            );
+            let task = TaskId::from_arena(ArenaIndex::new(28, 0));
+            let region = RegionId::from_arena(ArenaIndex::new(29, 0));
+            for poll in 0..threshold {
+                assert!(
+                    isolator
+                        .isolate_task_execution(task, region, poll, || panic!("task failure"))
+                        .is_panicked()
+                );
+            }
+            let task_invoked = std::cell::Cell::new(false);
+            assert!(matches!(
+                isolator.isolate_task_execution(task, region, threshold, || {
+                    task_invoked.set(true);
+                }),
+                PanicIsolationResult::Skipped { .. }
+            ));
+            assert!(!task_invoked.get(), "threshold still fences ordinary work");
+
+            let cleanup_count = std::cell::Cell::new(0);
+            for finalizer_type in [
+                FinalizerType::Sync,
+                FinalizerType::Async,
+                FinalizerType::Custom("release resource".into()),
+            ] {
+                let failed = isolator.isolate_finalizer_execution(
+                    region,
+                    finalizer_type.clone(),
+                    || panic!("finalizer failure"),
+                );
+                assert!(failed.is_panicked(), "finalizer must be attempted");
+                assert_eq!(
+                    failed.panic_context().unwrap().panic_message.as_deref(),
+                    Some("finalizer failure")
+                );
+                let completed = isolator.isolate_finalizer_execution(region, finalizer_type, || {
+                    cleanup_count.set(cleanup_count.get() + 1);
+                });
+                assert!(completed.is_success(), "later finalizer must still run");
+            }
+            for phase in [
+                CleanupPhase::Finalizers,
+                CleanupPhase::ObligationResolution,
+                CleanupPhase::ResourceCleanup,
+                CleanupPhase::StateTransition,
+            ] {
+                assert!(
+                    isolator
+                        .isolate_region_cleanup(region, phase, || {
+                            cleanup_count.set(cleanup_count.get() + 1);
+                        })
+                        .is_success()
+                );
+            }
+            assert_eq!(cleanup_count.get(), 7);
+
+            let mut ledger = ObligationLedger::new();
+            let token = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+            let obligation = token.id();
+            assert_eq!(ledger.pending_count(), 1, "fixture owns a real obligation");
+            assert!(
+                isolator
+                    .isolate_obligation_handling(obligation, region, || {
+                        ledger.abort(token, Time::ZERO, ObligationAbortReason::Cancel);
+                    })
+                    .is_success()
+            );
+            assert_eq!(ledger.pending_count(), 0, "cleanup discharges the obligation");
+            assert_eq!(ledger.stats().total_aborted, 1);
+            assert_eq!(
+                isolator.region_panic_counts.lock().get(&region),
+                Some(&(threshold + 3)),
+                "cleanup still records every original panic"
+            );
+            assert_eq!(metrics.panics_captured().len(), threshold as usize + 3);
+        }
+    }
+
     /// br-asupersync-zcu3c4 — verifies that the previously inert
     /// `MetricsProviderPanicExt::record_panic` now actually delegates to
     /// `MetricsProvider::record_panic`, with the canonical location tag.
@@ -913,7 +1007,7 @@
     }
 
     #[test]
-    fn threshold_skip_contains_capture_drop_panics_at_each_region_entrypoint() {
+    fn threshold_contains_capture_drop_panics_at_each_region_entrypoint() {
         let task_id = TaskId::from_arena(ArenaIndex::new(18, 0));
         let region_id = RegionId::from_arena(ArenaIndex::new(19, 0));
         let obligation_id = ObligationId::from_arena(ArenaIndex::new(20, 0));
@@ -986,7 +1080,11 @@
                 context.panic_message.as_deref(),
                 Some("payload destructor panic")
             );
-            assert!(!invoked.load(Ordering::SeqCst));
+            assert_eq!(
+                invoked.load(Ordering::SeqCst),
+                !matches!(location, PanicLocation::TaskExecution { .. }),
+                "only task polling may be skipped; cleanup must be attempted"
+            );
             assert_eq!(drops.load(Ordering::SeqCst), 1);
             assert_eq!(metrics.panics_captured(), vec![tag]);
             assert_eq!(isolator.region_panic_counts.lock().get(&region_id), Some(&1));
@@ -1017,7 +1115,7 @@
             drop(capture);
         });
         assert!(result.is_panicked());
-        assert!(!invoked.load(Ordering::SeqCst));
+        assert!(invoked.load(Ordering::SeqCst));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(isolator.region_panic_counts.lock().get(&region), Some(&2));
         assert_eq!(
@@ -1034,7 +1132,7 @@
     }
 
     #[test]
-    fn skipped_capture_cleanup_contains_compound_payload_and_observer_failures() {
+    fn threshold_cleanup_contains_compound_payload_and_observer_failures() {
         struct Capture {
             drops: Arc<std::sync::atomic::AtomicUsize>,
             payload_drops: Arc<std::sync::atomic::AtomicUsize>,
@@ -1065,7 +1163,7 @@
             drop(capture);
         });
         assert!(result.is_panicked());
-        assert!(!invoked.load(Ordering::SeqCst));
+        assert!(invoked.load(Ordering::SeqCst));
         assert_eq!(
             result.panic_context().unwrap().panic_message.as_deref(),
             Some("Non-string panic payload")
@@ -1079,7 +1177,7 @@
     }
 
     #[test]
-    fn skipped_capture_can_reenter_without_region_counter_lock() {
+    fn threshold_cleanup_can_reenter_without_region_counter_lock() {
         struct Capture {
             isolator: Arc<PanicIsolator>,
             drops: Arc<std::sync::atomic::AtomicUsize>,
@@ -1117,7 +1215,7 @@
             || drop(capture),
         );
         // A swallowed assertion in the capture destructor must fail this test.
-        assert!(matches!(result, PanicIsolationResult::Skipped { .. }));
+        assert!(matches!(result, PanicIsolationResult::Success(())));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(isolator.region_panic_counts.lock().is_empty());
     }

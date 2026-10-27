@@ -805,15 +805,20 @@ fn spawn_quic_transfer_listener(
     let inbox_dir = config.storage.data_dir.join("inbox");
     let peer_label = identity.peer_id_hex();
     let (bind_tx, bind_rx) = mpsc::channel::<std::result::Result<SocketAddr, String>>();
-
+    let listening = transfer_stats.shutdown.reserve();
     let _quic_transfer_listener = runtime_handle.spawn(async move {
+        let listener_registration = listening;
         let Some(cx) = asupersync::cx::Cx::current() else {
             let _ = bind_tx.send(Err(
                 "no capability context available for the QUIC transfer listener".to_string(),
             ));
             return;
         };
-        let _listening = transfer_stats.shutdown.attach(&cx);
+        listener_registration.attach(&cx);
+        if transfer_stats.shutdown.requested() {
+            let _ = bind_tx.send(Err("daemon stopped before QUIC listener startup".into()));
+            return;
+        }
         let first_endpoint = match bind_server_endpoint(&cx, bind_addr).await {
             Ok(endpoint) => endpoint,
             Err(err) => {
@@ -926,7 +931,7 @@ struct TransferStats {
     committed: std::sync::atomic::AtomicU64,
     failed: std::sync::atomic::AtomicU64,
     bytes_received: std::sync::atomic::AtomicU64,
-    shutdown: ListenerShutdown,
+    shutdown: Arc<ListenerShutdown>,
 }
 
 impl TransferStats {
@@ -1367,7 +1372,7 @@ fn directory_stats(path: &Path) -> Result<DirectoryStats> {
     Ok(stats)
 }
 
-fn install_signal_listener() -> Result<mpsc::Receiver<DaemonSignal>> {
+fn install_signal_listener(shutdown: Arc<ListenerShutdown>) -> Result<mpsc::Receiver<DaemonSignal>> {
     let (sender, receiver) = mpsc::channel();
 
     #[cfg(unix)]
@@ -1380,7 +1385,12 @@ fn install_signal_listener() -> Result<mpsc::Receiver<DaemonSignal>> {
             let mut stopping = false;
             for signal in signals.forever() {
                 let event = match signal {
-                    SIGINT | SIGTERM if stopping => end_by_default_signal_action(signal),
+                    // Startup and reload failures also start a drain. Its
+                    // first stop signal must force exit even though this
+                    // reader has not previously seen INT or TERM.
+                    SIGINT | SIGTERM if stopping || shutdown.requested() => {
+                        end_by_default_signal_action(signal)
+                    }
                     SIGINT => DaemonSignal::Interrupt,
                     SIGTERM => DaemonSignal::Terminate,
                     SIGHUP => DaemonSignal::Reload,
@@ -1396,6 +1406,7 @@ fn install_signal_listener() -> Result<mpsc::Receiver<DaemonSignal>> {
 
     #[cfg(not(unix))]
     {
+        let _ = shutdown;
         use signal_hook::consts::signal::{SIGBREAK, SIGINT, SIGTERM};
         use signal_hook::flag;
 
@@ -1692,8 +1703,14 @@ async fn run_daemon_service(
     // Before any listener accepts: a SIGINT/SIGTERM during startup is queued
     // for the drain below instead of killing an in-flight receive by the
     // default action and leaving its staging behind (asupersync-fas2rq).
-    let signal_rx = install_signal_listener()?;
     let transfer_stats = Arc::new(TransferStats::default());
+    let signal_rx = install_signal_listener(Arc::clone(&transfer_stats.shutdown))?;
+    // All later startup failures must retire accepted receives before the
+    // runtime is dropped, including a failed QUIC or diagnostics bind.
+    let mut listener_drain = ListenerDrain::new(
+        Arc::clone(&transfer_stats),
+        config.service.shutdown_timeout_secs,
+    );
     let transfer_listener_addr = {
         use asupersync::net::TcpListener as AsupTcpListener;
         use asupersync::net::atp::transport_tcp::{TransferConfig, serve};
@@ -1704,15 +1721,21 @@ async fn run_daemon_service(
         let peer_label = identity.peer_id_hex();
         let stats = Arc::clone(&transfer_stats);
         let (bind_tx, bind_rx) = mpsc::channel::<std::result::Result<SocketAddr, String>>();
-        // Detached; the daemon's stop request cancels it (`ListenerShutdown`).
+        // Count the task before spawn so even an unpolled listener is drained.
+        let listening = stats.shutdown.reserve();
         let _transfer_listener = runtime_handle.spawn(async move {
+            let listener_registration = listening;
             let Some(cx) = asupersync::cx::Cx::current() else {
                 let _ = bind_tx.send(Err(
                     "no capability context available for the transfer listener".to_string(),
                 ));
                 return;
             };
-            let _listening = stats.shutdown.attach(&cx);
+            listener_registration.attach(&cx);
+            if stats.shutdown.requested() {
+                let _ = bind_tx.send(Err("daemon stopped before TCP listener startup".into()));
+                return;
+            }
             let listener = match AsupTcpListener::bind(bind_addr).await {
                 Ok(listener) => listener,
                 Err(err) => {
@@ -1880,6 +1903,7 @@ async fn run_daemon_service(
                 }
                 config = reloaded;
                 daemon_state.config = config.clone();
+                listener_drain.timeout_secs = config.service.shutdown_timeout_secs;
                 reload_count = reload_count.saturating_add(1);
                 let Ok(mut snapshot) = health_snapshot.lock() else {
                     reload_failure = Some(cli_error("diagnostics snapshot mutex poisoned"));
@@ -1923,7 +1947,7 @@ async fn run_daemon_service(
     } else {
         info!("Received shutdown signal, stopping daemon...");
     }
-    let drained = transfer_stats.stop_and_drain(daemon_state.config.service.shutdown_timeout_secs);
+    let drained = listener_drain.finish();
     for event in compiled_app.shutdown_events() {
         match event.role {
             Some(role) => info!(
@@ -1951,9 +1975,7 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
 
     let pid = read_pid_file(&cli.pid_file)?;
     if !pid_is_atpd(pid) {
-        println!(
-            "ATP daemon is not running (stale PID file: process {pid} is not an ATP daemon)"
-        );
+        println!("ATP daemon is not running (stale PID file: process {pid} is not an ATP daemon)");
         if let Err(err) = std::fs::remove_file(&cli.pid_file) {
             warn!("Failed to remove stale PID file: {}", err);
         }
@@ -2136,7 +2158,10 @@ fn show_status(cli: AtpdCli) -> Result<()> {
         println!("Config file: {}", cli.config.display());
     } else {
         println!("ATP daemon: STOPPED (stale PID file)");
-        warn!("PID file exists but process {} is not a running ATP daemon", pid);
+        warn!(
+            "PID file exists but process {} is not a running ATP daemon",
+            pid
+        );
     }
 
     Ok(())
@@ -2550,12 +2575,13 @@ fn stop_wait_bound(config_path: &PathBuf) -> Duration {
 
 /// Stops the daemon's transfer listeners and lets them drain.
 ///
-/// Each listener task attaches its context when it starts. The first SIGINT or
+/// Each listener reserves its live slot before spawn and attaches its context
+/// when it starts. The first SIGINT or
 /// SIGTERM ends the daemon's main loop, which then requests the stop: every
 /// attached context is cancelled, the TCP accept loop aborts and drains its
 /// in-flight receives (their staging directories are removed and each failure
 /// is reported), and the QUIC loop ends its current receive. The daemon waits
-/// for every attached listener to return before it exits, instead of dropping
+/// for every reserved listener to return before it exits, instead of dropping
 /// in-flight receives with the runtime (br-asupersync-vlf155).
 #[derive(Default)]
 struct ListenerShutdown {
@@ -2590,21 +2616,14 @@ impl std::fmt::Debug for ListenerShutdown {
 }
 
 impl ListenerShutdown {
-    /// Counts a listener task as running until the returned guard is dropped.
+    /// Counts a listener before it is submitted to the runtime.
     ///
-    /// Its context is cancelled at once if the stop came first.
+    /// The owned guard retires the slot even when the runtime drops the future
+    /// without polling it. Drain cannot mistake queued work for quiescence.
     #[must_use = "the listener counts as running only while the guard lives"]
-    fn attach(&self, cx: &asupersync::cx::Cx) -> ListenerAttached<'_> {
-        let requested = {
-            let mut state = self.lock();
-            state.contexts.push(cx.clone());
-            state.live += 1;
-            state.requested
-        };
-        if requested {
-            cancel_listener(cx);
-        }
-        ListenerAttached(self)
+    fn reserve(self: &Arc<Self>) -> ListenerAttached {
+        self.lock().live += 1;
+        ListenerAttached(Arc::clone(self))
     }
 
     fn requested(&self) -> bool {
@@ -2635,15 +2654,14 @@ impl ListenerShutdown {
         self.lock().aborted
     }
 
-    /// Waits up to `bound` for every attached listener to return.
+    /// Waits up to `bound` for every reserved listener to return.
     fn wait_until_returned(&self, bound: Duration) -> bool {
         let state = self.lock();
-        let (state, waited) = self
+        let (state, _) = self
             .returned
             .wait_timeout_while(state, bound, |state| state.live > 0)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        drop(state);
-        !waited.timed_out()
+        state.live == 0
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ListenerShutdownState> {
@@ -2654,15 +2672,66 @@ impl ListenerShutdown {
 }
 
 /// Counts a listener task as running until it returns.
-struct ListenerAttached<'a>(&'a ListenerShutdown);
+struct ListenerAttached(Arc<ListenerShutdown>);
 
-impl Drop for ListenerAttached<'_> {
+impl ListenerAttached {
+    /// Registers the running task's context without admitting another slot.
+    fn attach(&self, cx: &asupersync::cx::Cx) {
+        let requested = {
+            let mut state = self.0.lock();
+            state.contexts.push(cx.clone());
+            state.requested
+        };
+        if requested {
+            cancel_listener(cx);
+        }
+    }
+}
+
+impl Drop for ListenerAttached {
     fn drop(&mut self) {
         {
             let mut state = self.0.lock();
             state.live = state.live.saturating_sub(1);
         }
         self.0.returned.notify_all();
+    }
+}
+
+/// Keeps listener cleanup armed across every fallible startup step.
+///
+/// Normal shutdown reports a drain error to its caller. An earlier startup
+/// error keeps its identity while this guard reports any additional drain
+/// failure, and both paths use the same bounded cleanup exactly once.
+struct ListenerDrain {
+    stats: Arc<TransferStats>,
+    timeout_secs: u64,
+    armed: bool,
+}
+
+impl ListenerDrain {
+    fn new(stats: Arc<TransferStats>, timeout_secs: u64) -> Self {
+        Self {
+            stats,
+            timeout_secs,
+            armed: true,
+        }
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        self.armed = false;
+        self.stats.stop_and_drain(self.timeout_secs)
+    }
+}
+
+impl Drop for ListenerDrain {
+    fn drop(&mut self) {
+        if self.armed {
+            warn!("ATP daemon service exited before normal shutdown; draining listeners");
+            if let Err(error) = self.finish() {
+                warn!(%error, "ATP daemon listener cleanup failed during service exit");
+            }
+        }
     }
 }
 
@@ -3284,13 +3353,15 @@ mod tests {
     fn listener_shutdown_cancels_attached_and_late_listeners() {
         let (_runtime, early) = listener_task_cx();
         let (_late_runtime, late) = listener_task_cx();
-        let shutdown = ListenerShutdown::default();
-        let early_guard = shutdown.attach(&early);
+        let shutdown = Arc::new(ListenerShutdown::default());
+        let early_guard = shutdown.reserve();
+        early_guard.attach(&early);
         assert!(!early.is_cancel_requested());
 
         shutdown.request();
         assert!(early.is_cancel_requested(), "the stop cancels the listener");
-        let late_guard = shutdown.attach(&late);
+        let late_guard = shutdown.reserve();
+        late_guard.attach(&late);
         assert!(late.is_cancel_requested(), "a late listener is cancelled");
         drop((early_guard, late_guard));
         assert!(shutdown.wait_until_returned(Duration::from_secs(1)));
@@ -3306,8 +3377,10 @@ mod tests {
         stats.record_failed_receive("ATP transfer failed", &"probe closed early");
         let listener_stats = Arc::clone(&stats);
         let (attached_tx, attached_rx) = mpsc::channel();
+        let registration = listener_stats.shutdown.reserve();
         let listener = thread::spawn(move || {
-            let _listening = listener_stats.shutdown.attach(&cx);
+            let listening = registration;
+            listening.attach(&cx);
             let _ = attached_tx.send(());
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             while !cx.is_cancel_requested() && std::time::Instant::now() < deadline {
@@ -3331,11 +3404,206 @@ mod tests {
     fn stop_and_drain_reports_a_listener_that_does_not_return() {
         let (_runtime, cx) = listener_task_cx();
         let stats = TransferStats::default();
-        let _stuck = stats.shutdown.attach(&cx);
+        let stuck = stats.shutdown.reserve();
+        stuck.attach(&cx);
         let drained = stats.stop_and_drain(1);
         assert!(cx.is_cancel_requested());
         let error = drained.expect_err("the drain times out");
         assert!(error.to_string().contains("did not drain"), "{error}");
+    }
+
+    #[test]
+    fn listener_shutdown_counts_queued_work_and_retires_an_unpolled_future() {
+        let shutdown = Arc::new(ListenerShutdown::default());
+        let registration = shutdown.reserve();
+        let queued = async move {
+            let _listening = registration;
+            std::future::pending::<()>().await;
+        };
+        assert_eq!(shutdown.lock().live, 1);
+        shutdown.request();
+        assert!(shutdown.requested());
+        assert!(
+            !shutdown.wait_until_returned(Duration::ZERO),
+            "a listener queued before its first poll is still live"
+        );
+        drop(queued);
+        assert_eq!(shutdown.lock().live, 0);
+        assert!(shutdown.wait_until_returned(Duration::ZERO));
+    }
+
+    #[test]
+    fn listener_startup_error_drains_native_accept_before_returning() {
+        for workers in [1, 2] {
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .expect("listener startup-error runtime");
+            let stats = Arc::new(TransferStats::default());
+            let cleaned = Arc::new(AtomicBool::new(false));
+            let task_cleaned = Arc::clone(&cleaned);
+            let registration = stats.shutdown.reserve();
+            let (parked_tx, parked_rx) = mpsc::channel();
+            let listener = runtime.handle().spawn(async move {
+                let listener_registration = registration;
+                let cx = asupersync::cx::Cx::current().expect("listener context");
+                listener_registration.attach(&cx);
+                let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind native listener");
+                let address = listener.local_addr().expect("native listener address");
+                let mut parked_tx = Some(parked_tx);
+                let accepted = std::future::poll_fn(|task| {
+                    let result = listener.poll_accept(task);
+                    if result.is_pending()
+                        && let Some(parked_tx) = parked_tx.take()
+                    {
+                        parked_tx.send(address).expect("publish parked accept");
+                    }
+                    result
+                })
+                .await;
+                let error = accepted.expect_err("shutdown must cancel native accept");
+                assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+                assert!(cx.is_cancel_requested());
+                drop(listener);
+                task_cleaned.store(true, Ordering::Release);
+                drop(listener_registration);
+            });
+            let address = parked_rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("accept must be parked before startup fails");
+            let startup: Result<()> = (|| {
+                let _drain = ListenerDrain::new(Arc::clone(&stats), 20);
+                Err(cli_error("later startup step failed"))
+            })();
+            assert_eq!(
+                startup
+                    .expect_err("preserve the startup failure")
+                    .to_string(),
+                "later startup step failed"
+            );
+            assert!(cleaned.load(Ordering::Acquire));
+            assert!(stats.shutdown.requested());
+            assert_eq!(stats.shutdown.lock().live, 0);
+            let rebound = TcpListener::bind(address).expect("cleanup released the listener port");
+            drop(rebound);
+            runtime.block_on(listener);
+        }
+    }
+
+    #[test]
+    fn listener_explicit_finish_does_not_repeat_cleanup_on_drop() {
+        let stats = Arc::new(TransferStats::default());
+        let mut drain = ListenerDrain::new(Arc::clone(&stats), 1);
+        drain.finish().expect("empty listener set drains");
+        assert!(!drain.armed);
+        // A second request would cancel this context. No production listener
+        // is admitted after shutdown; this is a direct duplicate-call witness.
+        let (_runtime, cx) = listener_task_cx();
+        stats.shutdown.lock().contexts.push(cx.clone());
+        drop(drain);
+        assert!(!cx.is_cancel_requested());
+    }
+
+    /// Error-triggered cleanup can start before any termination signal. Test
+    /// real default signal actions in child processes after the shared stop
+    /// request is witnessed, with a reservation keeping the drain pending.
+    #[cfg(unix)]
+    #[test]
+    fn first_termination_signal_during_error_drain_forces_exit() {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        use std::io::{BufRead as _, BufReader};
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::{Command, Stdio};
+
+        const CHILD_ENV: &str = "ASUPERSYNC_ATPD_ERROR_DRAIN_SIGNAL_CHILD";
+        const READY: &str = "ATPD_ERROR_DRAIN_SIGNAL_READY";
+        if let Some(mode) = std::env::var_os(CHILD_ENV) {
+            let stats = Arc::new(TransferStats::default());
+            let signal_rx = install_signal_listener(Arc::clone(&stats.shutdown))
+                .expect("child signal listener");
+            let shutdown = Arc::clone(&stats.shutdown);
+            let listener = shutdown.reserve();
+            thread::spawn(move || {
+                while !shutdown.requested() {
+                    thread::yield_now();
+                }
+                // libtest can leave its test-name prefix on this line.
+                println!("\n{READY}");
+                std::io::stdout().flush().expect("flush child readiness");
+            });
+            let mut drain = ListenerDrain::new(stats, 60);
+            match mode.to_str() {
+                Some("startup") => drop(drain),
+                Some("reload") => {
+                    let _ = drain.finish();
+                }
+                _ => panic!("unknown child cleanup mode: {mode:?}"),
+            }
+            drop((listener, signal_rx));
+            panic!("a stop signal during error cleanup must end this child by default action");
+        }
+
+        for mode in ["startup", "reload"] {
+            for signal in [Signal::SIGINT, Signal::SIGTERM] {
+                let mut child = Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::first_termination_signal_during_error_drain_forces_exit",
+                        "--nocapture",
+                    ])
+                    .env(CHILD_ENV, mode)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("signal-isolated child");
+                let stdout = child.stdout.take().expect("child stdout");
+                let (ready_tx, ready_rx) = mpsc::channel();
+                let reader = thread::spawn(move || {
+                    for line in BufReader::new(stdout).lines() {
+                        if line.is_ok_and(|line| line == READY) {
+                            let _ = ready_tx.send(());
+                            return;
+                        }
+                    }
+                });
+                if ready_rx.recv_timeout(Duration::from_secs(20)).is_err() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    reader.join().expect("child stdout reader");
+                    panic!("child did not witness the {mode}-error drain");
+                }
+                let pid = Pid::from_raw(i32::try_from(child.id()).expect("child PID"));
+                if let Err(error) = kill(pid, signal) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    reader.join().expect("child stdout reader");
+                    panic!("signal {mode} child: {error}");
+                }
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let status = loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break status,
+                        Ok(None) if std::time::Instant::now() < deadline => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        result => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            reader.join().expect("child stdout reader");
+                            panic!(
+                                "the first {signal} was swallowed during {mode} cleanup: {result:?}"
+                            );
+                        }
+                    }
+                };
+                reader.join().expect("child stdout reader");
+                assert_eq!(status.signal(), Some(signal as i32), "{mode}: {status}");
+            }
+        }
     }
 
     /// br-asupersync-vlf155: a stopped QUIC accept with no datagram is idle.

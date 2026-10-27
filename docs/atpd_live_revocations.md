@@ -1,9 +1,9 @@
-# Revoke active shared-receiver clients with a protected policy file
+# Revoke shared-receiver clients or individual sessions with a protected policy file
 
 `serve-resumable` and `serve-durable` accept an optional `--revocations` path.
 They load this policy before readiness and reload it on SIGHUP. Each valid
-update tightens both the shared TLS allowlist and the running service's client
-denials. It cancels matching routed workers without stopping unrelated clients
+update tightens the running service's authority; certificate denials also tighten
+the shared TLS allowlist. It cancels matching routed workers without stopping unrelated clients
 or replacing the listening socket. The transfer protocols and JSON receiver
 settings remain unchanged; the flag is not enabled by other commands.
 
@@ -61,6 +61,62 @@ live owner. This feature does not install a file watcher: file changes take effe
 only at startup or after a successful requested reload. Without `--revocations`,
 these commands do not install a new SIGHUP handler.
 
+## Select one authenticated transfer with a version 2 policy
+
+To stop only one resumable transfer, identify its exact pair from the receiver's
+`session` record: the complete client certificate SHA-256 and the 32-byte
+`stream_nonce`. A nonce on its own does not identify an authenticated owner.
+Use a version 2 snapshot with an explicit `revoked_sessions` array:
+
+```json
+{
+  "schema_version": 2,
+  "generation": 2,
+  "revoked_certificates": [],
+  "revoked_sessions": [
+    {
+      "certificate_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "stream_nonce": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ]
+}
+```
+
+Use actual session identities instead of these example values. Retain every
+certificate denial from the previous snapshot when upgrading from version 1.
+Other nonces from the same certificate keep their existing authority, and a
+different authenticated certificate with the same nonce owns a different key.
+The selected transfer cannot reconnect, recover a historical Proof, or recreate
+its sink after retirement. A session denial does not remove its certificate from
+TLS admission.
+
+Version 2 permits at most 1,024 exact session denials, independently of the
+1,024-certificate budget; the entire document must still fit within 128 KiB.
+Both arrays are required. Duplicate keys, including hexadecimal case aliases,
+invalid nonces, removed session denials, and a downgrade to version 1 are refused.
+Reapplying the same logical snapshot is idempotent. Version 1 retains its strict
+original shape and rejects `revoked_sessions`, including a null field. Older
+executables reject the version 2 document rather than silently ignoring its
+session denials.
+
+For a version 2 update, `revocation_policy_applied` uses `schema_version: 2`
+and adds `revoked_sessions` and `newly_revoked_sessions`. Existing
+`newly_revoked` counts certificate denials. A version 1 update keeps the original
+event shape. Affected idle sessions retire with reason `session_revoked`.
+The journaled receiver retains that exact-key retirement in its catalog; older
+catalog readers refuse the new retirement code instead of restoring the key.
+Admission to both denial sets is checked before TLS changes or any worker is
+signalled. A policy exceeding either remaining lifetime budget changes neither
+set.
+
+SDK owners can use `ResumableService::revoke_session(key, reason)` for one key,
+or `check_revocations` followed by `apply_revocations` for one bounded
+certificate/session policy. Hold exclusive service access between those calls.
+The resulting counters report policy admission and signalled workers; continue
+collecting `next` or `drain_next` results for actual completion. Both SDK denial
+sets last for that service's lifetime; persist and reapply the protected policy
+when restarting the process.
+
 ## Applied authority is not completed cancellation
 
 The read uses the blocking pool, bounds the bytes, checks file/directory identity,
@@ -68,9 +124,9 @@ and synchronizes the file and its parent before application. No manager admissio
 is driven while awaiting that read. Existing workers still run; revocation is not
 instantaneous at the moment a file changes or a signal is sent.
 
-After validation, the manager replaces the TLS allowlist with the configured
-clients minus all denials, then installs service denials without an intervening
-await. A handshake that passed earlier verification still faces the service's
+After validation and complete service-capacity preflight, the manager replaces
+the TLS allowlist with the configured clients minus certificate denials, then
+installs both service denial sets without an intervening await. A handshake that passed earlier verification still faces the service's
 routing check before any new sink, storage claim, or historical receipt factory.
 Every new nonce for the revoked certificate is denied. Current authorization
 also applies to restored final Proofs, not only uploads.
@@ -109,7 +165,7 @@ Selecting another file, omitting the flag, or restoring older backups invalidate
 the policy's continuity. The session ledger is not a revocation-generation ledger.
 Protect and retain both when using durable receipt recovery.
 
-This is an operator-controlled certificate denial policy, not issuer CRL/OCSP,
+This is an operator-controlled certificate and session denial policy, not issuer CRL/OCSP,
 signed distributed revocation, hot reload of trust roots, or an API for restoring
 a revoked certificate. It adds no global authority across unrelated service
 processes. Permission and identity checks are not a hostile same-user filesystem
@@ -118,12 +174,17 @@ failure or malicious local rollback.
 
 ## Validation boundary
 
-Four parser/real-file unit tests accompany four executable integration tests.
+Seven parser/real-file unit tests accompany seven executable integration tests.
 The latter use independent synchronous mTLS peers, real epoch ACKs and staged
 bytes before signalling, two client inboxes, unchanged published inode/history,
 receiver restart, monotonic-policy refusals, and startup failure cases. The
-active-client isolation scenario targets current-thread and sharded runtimes.
-Test-created files and old policy snapshots are retained, not deleted.
+active-client and same-certificate session isolation scenarios target current-thread
+and sharded runtimes. Session tests also cover exact-key historical-Proof refusal
+after restart, version downgrade/removal refusal, and a healthy sibling's payload
+and hash. Native service tests witness parked writes, factory initialization,
+started commits, and uncollected success for both denial scopes, including atomic
+capacity refusal. A catalog reopen test checks a retained session tombstone and
+its unaffected sibling. Test-created files and old policy snapshots are retained, not deleted.
 
 These tests have not been compiled or executed in the authoring environment.
 Successful Git publication, source preservation, and file hashes are not Rust,

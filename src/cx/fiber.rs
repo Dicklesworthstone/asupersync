@@ -99,9 +99,32 @@
 //! }));
 //! ```
 //!
-//! A fiber's future must be `Send`, so that a scope can run inside a spawned
-//! task. A `!Send` value such as an `Rc` may be used between awaits, but not
-//! held across one:
+//! [`scope`] requires `Send` fibers so it can run inside a spawned task.
+//! [`scope_local`] provides the same ownership and cancellation semantics on
+//! one thread, accepting futures and results that hold `Rc`, `RefCell`, or
+//! other `!Send` values across awaits. Run it inside a current-thread
+//! runtime's `block_on` or a task started with [`Cx::spawn_local`]. Its
+//! [`LocalFiberScope`] and scope future cannot move to another thread.
+//!
+//! ```
+//! use asupersync::cx::fiber;
+//! use std::rc::Rc;
+//!
+//! # asupersync::runtime::RuntimeBuilder::current_thread().build().unwrap().block_on(async {
+//! let local = Rc::new(String::from("borrowed on one thread"));
+//! let borrowed = &local;
+//! let result = fiber::scope_local(|scope| async move {
+//!     scope.spawn(async move {
+//!         asupersync::runtime::yield_now().await;
+//!         Rc::clone(borrowed)
+//!     }).await.unwrap()
+//! }).await;
+//! assert!(Rc::ptr_eq(&result, &local));
+//! # });
+//! ```
+//!
+//! The existing [`scope`] continues to reject a `!Send` value held across an
+//! await:
 //!
 //! ```compile_fail
 //! use asupersync::cx::fiber;
@@ -144,11 +167,13 @@ use parking_lot::Mutex;
 use std::cell::Cell;
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
-use std::sync::{Arc, OnceLock};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 
 type FiberFuture<'env> = Pin<Box<dyn Future<Output = ()> + Send + 'env>>;
+type LocalFiberFuture<'env> = Pin<Box<dyn Future<Output = ()> + 'env>>;
 
 std::thread_local! {
     /// Address of the [`ReadyQueue`] of the scope this thread is polling
@@ -382,9 +407,9 @@ impl LazyCurrentCx for FiberCtx {
     }
 }
 
-struct FiberSlot<'env> {
+struct FiberSlot<F> {
     /// The fiber, or `None` while it is being polled or the slot is free.
-    future: Option<FiberFuture<'env>>,
+    future: Option<F>,
     /// `None` only while the fiber is being polled.
     waker: Option<Waker>,
     wake: Arc<FiberWake>,
@@ -394,19 +419,29 @@ struct FiberSlot<'env> {
     ctx: Option<Arc<FiberCtx>>,
 }
 
-#[derive(Default)]
-struct FiberSet<'env> {
-    slots: Vec<FiberSlot<'env>>,
+struct FiberSet<F> {
+    slots: Vec<FiberSlot<F>>,
     free: Vec<usize>,
     live: usize,
     /// No fiber may start any more.
     closed: bool,
 }
 
+impl<F> Default for FiberSet<F> {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+            live: 0,
+            closed: false,
+        }
+    }
+}
+
 /// One fiber taken out of its slot for the duration of a poll pass.
-struct Running<'env> {
+struct Running<F> {
     index: usize,
-    future: Option<FiberFuture<'env>>,
+    future: Option<F>,
     waker: Option<Waker>,
     ctx: Option<Arc<FiberCtx>>,
     finished: bool,
@@ -417,8 +452,8 @@ struct Running<'env> {
 type UnobservedPanics = Arc<Mutex<Vec<(u64, PanicPayload)>>>;
 
 /// State shared by every handle to one scope.
-struct ScopeState<'env> {
-    set: Mutex<FiberSet<'env>>,
+struct ScopeState<F> {
+    set: Mutex<FiberSet<F>>,
     queue: Arc<ReadyQueue>,
     next_fiber_id: AtomicU64,
     unobserved_panics: UnobservedPanics,
@@ -438,7 +473,51 @@ struct ScopeState<'env> {
 /// fiber so that the fiber can start siblings; they belong to the same scope.
 #[derive(Clone)]
 pub struct FiberScope<'env> {
-    state: Arc<ScopeState<'env>>,
+    state: Arc<ScopeState<FiberFuture<'env>>>,
+}
+
+/// Handle to the borrowing, thread-local fibers of one [`scope_local`].
+///
+/// Clones may start siblings in the same scope. Both the scope and its owner
+/// future remain on one thread; fiber wakeups may still arrive from any
+/// thread. Unlike [`FiberScope`], neither futures nor their results need to
+/// implement `Send`. Dropping a fiber handle does not detach its work.
+///
+/// Even an empty local scope is not `Send`:
+///
+/// ```compile_fail
+/// use asupersync::cx::fiber;
+/// fn require_send<T: Send>(_: T) {}
+/// require_send(fiber::scope_local(|_| async {}));
+/// ```
+///
+/// Borrowing is still enforced by Rust:
+///
+/// ```compile_fail,E0597
+/// use asupersync::cx::fiber;
+/// let pending = {
+///     let local = std::rc::Rc::new(7);
+///     let borrowed = &local;
+///     fiber::scope_local(move |scope| async move {
+///         scope.spawn(async move {
+///             asupersync::runtime::yield_now().await;
+///             **borrowed
+///         }).await.unwrap()
+///     })
+/// };
+/// drop(pending);
+/// ```
+#[derive(Clone)]
+pub struct LocalFiberScope<'env> {
+    state: Rc<ScopeState<LocalFiberFuture<'env>>>,
+}
+
+impl std::fmt::Debug for LocalFiberScope<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalFiberScope")
+            .field("live", &self.live())
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for FiberScope<'_> {
@@ -619,15 +698,7 @@ async fn run_fiber<F: Future>(
 impl<'env> FiberScope<'env> {
     fn new() -> Self {
         Self {
-            state: Arc::new(ScopeState {
-                set: Mutex::new(FiberSet::default()),
-                queue: Arc::new(ReadyQueue::default()),
-                next_fiber_id: AtomicU64::new(0),
-                unobserved_panics: Arc::new(Mutex::new(Vec::new())),
-                task_cx: Cx::current().map(Arc::new),
-                fiber_panicked: Arc::new(AtomicBool::new(false)),
-                task_cancel_passed: AtomicBool::new(false),
-            }),
+            state: Arc::new(ScopeState::new()),
         }
     }
 
@@ -646,18 +717,85 @@ impl<'env> FiberScope<'env> {
         F: Future + Send + 'env,
         F::Output: Send + 'env,
     {
+        self.state
+            .spawn(|completion, panicked| -> FiberFuture<'env> {
+                Box::pin(run_fiber(future, completion, panicked))
+            })
+    }
+
+    /// Number of fibers started in this scope that have not finished.
+    #[must_use]
+    pub fn live(&self) -> usize {
+        self.state.set.lock().live
+    }
+}
+
+impl<'env> LocalFiberScope<'env> {
+    fn new() -> Self {
+        Self {
+            state: Rc::new(ScopeState::new()),
+        }
+    }
+
+    /// Starts a borrowing future on this scope's thread.
+    ///
+    /// The future and its result may hold `!Send` values across awaits. The
+    /// scope drains every admitted fiber, including fibers whose handles are
+    /// dropped and siblings started by another fiber. Cancellation and panic
+    /// reporting use the same machinery as [`FiberScope::spawn`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if this scope already finished, because the fiber could never run.
+    pub fn spawn<F>(&self, future: F) -> FiberHandle<F::Output>
+    where
+        F: Future + 'env,
+        F::Output: 'env,
+    {
+        self.state
+            .spawn(|completion, panicked| -> LocalFiberFuture<'env> {
+                Box::pin(run_fiber(future, completion, panicked))
+            })
+    }
+
+    /// Number of this scope's fibers that have not finished.
+    #[must_use]
+    pub fn live(&self) -> usize {
+        self.state.set.lock().live
+    }
+}
+
+// Only the erased future type differs between the Send and local scopes.
+// Scheduling, cancellation, completion, panic propagation and close therefore
+// have one implementation; no local future enters a thread-safe wake handle.
+impl<F: Future<Output = ()> + Unpin> ScopeState<F> {
+    fn new() -> Self {
+        Self {
+            set: Mutex::new(FiberSet::default()),
+            queue: Arc::new(ReadyQueue::default()),
+            next_fiber_id: AtomicU64::new(0),
+            unobserved_panics: Arc::new(Mutex::new(Vec::new())),
+            task_cx: Cx::current().map(Arc::new),
+            fiber_panicked: Arc::new(AtomicBool::new(false)),
+            task_cancel_passed: AtomicBool::new(false),
+        }
+    }
+
+    fn spawn<T>(
+        &self,
+        make_future: impl FnOnce(FiberCompletion<T>, Arc<AtomicBool>) -> F,
+    ) -> FiberHandle<T> {
         let completion = Arc::new(Completion {
-            id: self.state.next_fiber_id.fetch_add(1, Ordering::Relaxed),
+            id: self.next_fiber_id.fetch_add(1, Ordering::Relaxed),
             state: Mutex::new(HandleState::Running(None)),
-            unobserved_panics: Arc::clone(&self.state.unobserved_panics),
+            unobserved_panics: Arc::clone(&self.unobserved_panics),
         });
-        let fiber: FiberFuture<'env> = Box::pin(run_fiber(
-            future,
+        let fiber = make_future(
             FiberCompletion(Arc::clone(&completion)),
-            Arc::clone(&self.state.fiber_panicked),
-        ));
+            Arc::clone(&self.fiber_panicked),
+        );
         let (index, fiber_ctx) = {
-            let mut guard = self.state.set.lock();
+            let mut guard = self.set.lock();
             let set = &mut *guard;
             assert!(
                 !set.closed,
@@ -673,7 +811,7 @@ impl<'env> FiberScope<'env> {
                 let wake = Arc::new(FiberWake {
                     index,
                     queued: AtomicBool::new(true),
-                    queue: Arc::clone(&self.state.queue),
+                    queue: Arc::clone(&self.queue),
                 });
                 set.slots.push(FiberSlot {
                     future: Some(fiber),
@@ -685,7 +823,7 @@ impl<'env> FiberScope<'env> {
             };
             // The fiber's context wakes the fiber through its slot's waker.
             let slot = &mut set.slots[index];
-            let fiber_ctx = self.state.task_cx.as_ref().map(|task_cx| {
+            let fiber_ctx = self.task_cx.as_ref().map(|task_cx| {
                 Arc::new(FiberCtx::new(
                     Arc::clone(task_cx),
                     Waker::from(Arc::clone(&slot.wake)),
@@ -697,27 +835,19 @@ impl<'env> FiberScope<'env> {
         };
         // The task's cancellation was passed only to the fibers live then
         // (`ScopeState::propagate_cancellation`); this one gets it now.
-        if self.state.task_cancel_passed.load(Ordering::Acquire)
-            && let (Some(ctx), Some(task_cx)) = (&fiber_ctx, &self.state.task_cx)
+        if self.task_cancel_passed.load(Ordering::Acquire)
+            && let (Some(ctx), Some(task_cx)) = (&fiber_ctx, &self.task_cx)
             && let Some(reason) = task_cx.observable_cancel_reason()
         {
             ctx.inherit_cancel(&reason);
         }
-        self.state.queue.schedule(index);
+        self.queue.schedule(index);
         FiberHandle {
             completion,
             ctx: fiber_ctx,
         }
     }
 
-    /// Number of fibers started in this scope that have not finished.
-    #[must_use]
-    pub fn live(&self) -> usize {
-        self.state.set.lock().live
-    }
-}
-
-impl ScopeState<'_> {
     /// Records the polling task's waker and marks this thread as polling the
     /// scope until the returned guard drops.
     fn enter_poll(&self, cx: &Context<'_>) -> PollingHere {
@@ -822,8 +952,7 @@ impl ScopeState<'_> {
                     let mask = ctx.task_cx.runtime_mask;
                     Cx::set_current_lazy(Arc::clone(ctx) as Arc<dyn LazyCurrentCx>, mask)
                 });
-                fiber.finished = future
-                    .as_mut()
+                fiber.finished = Pin::new(future)
                     .poll(&mut Context::from_waker(waker))
                     .is_ready();
                 drop(current);
@@ -883,9 +1012,9 @@ impl ScopeState<'_> {
 /// Drops the scope's remaining fibers when the [`scope`] future is dropped
 /// before it finishes, so that a handle that escaped the body cannot keep
 /// them (or a reference cycle through them) alive.
-struct CloseOnDrop<'a, 'env>(&'a ScopeState<'env>);
+struct CloseOnDrop<'a, F: Future<Output = ()> + Unpin>(&'a ScopeState<F>);
 
-impl Drop for CloseOnDrop<'_, '_> {
+impl<F: Future<Output = ()> + Unpin> Drop for CloseOnDrop<'_, F> {
     fn drop(&mut self) {
         self.0.close_and_drop_fibers();
     }
@@ -908,10 +1037,43 @@ where
     Fut: Future,
 {
     let scope = FiberScope::new();
-    let close_on_drop = CloseOnDrop(&scope.state);
+    drive_scope(&scope.state, || body(scope.clone())).await
+}
+
+/// Runs `body` and all its borrowing `!Send` fibers on the polling thread.
+///
+/// The owner future is `!Send`, even when all fibers happen to be `Send`.
+/// Use a current-thread runtime's `block_on`, or [`Cx::spawn_local`] on an
+/// owner-pinned runtime lane. Results may also be `!Send`; they are observed
+/// through the ordinary [`FiberHandle`] without crossing a runtime mailbox.
+///
+/// Completion, per-fiber cancellation, parent cancellation, fail-fast after a
+/// fiber panic, and dropping the scope follow [`scope`]'s contract. The scope
+/// drains children before returning; dropping its future drops them in place.
+///
+/// # Panics
+///
+/// Re-raises an unobserved fiber panic after every fiber has finished.
+#[allow(clippy::future_not_send)] // local scope and its futures are thread-confined
+pub async fn scope_local<'env, B, Fut>(body: B) -> Fut::Output
+where
+    B: FnOnce(LocalFiberScope<'env>) -> Fut,
+    Fut: Future,
+{
+    let scope = LocalFiberScope::new();
+    drive_scope(&scope.state, || body(scope.clone())).await
+}
+
+async fn drive_scope<F, B, Fut>(state: &ScopeState<F>, body: B) -> Fut::Output
+where
+    F: Future<Output = ()> + Unpin,
+    B: FnOnce() -> Fut,
+    Fut: Future,
+{
+    let close_on_drop = CloseOnDrop(state);
     let state = close_on_drop.0;
     let result = {
-        let mut body = pin!(body(scope.clone()));
+        let mut body = pin!(body());
         poll_fn(|cx| {
             let polling = state.enter_poll(cx);
             // Poll the body first so fibers it starts run in this same pass.

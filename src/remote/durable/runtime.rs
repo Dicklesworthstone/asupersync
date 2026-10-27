@@ -2,7 +2,7 @@
 
 use super::{
     DurableRemoteAdmission, DurableRemoteError, DurableRemoteJournal,
-    DurableRemoteJournalStatus, DurableRemoteLimits,
+    DurableRemoteJournalStatus, DurableRemoteLimits, DurableRemoteReconciliation,
 };
 use crate::cx::Cx;
 use crate::distributed::{ComputationRegistryFingerprint, ComputationSchemaRegistry, HasSchema};
@@ -37,6 +37,9 @@ use std::sync::Arc;
 /// fence never expires automatically: arbitrary application side effects cannot
 /// be committed atomically with this journal. Reconcile them at the application
 /// boundary; do not change the key to turn uncertainty into an automatic retry.
+/// [`Self::reconcile`] can persist a result independently established by an
+/// application after fencing the original external operation. It never executes
+/// the original handler or treats an unknown effect as a successful rollback.
 /// This adapter does not restore futures or promise cross-system exactly-once
 /// effects. Existing remote clients retain their conservative retry policy.
 pub struct DurableRemoteComputation {
@@ -211,6 +214,98 @@ impl DurableRemoteComputation {
             .spawn_blocking_drained(move |_worker| {
                 let now = (job.owner.clock)();
                 job.journal_mut().complete(reservation, outcome, now)
+            })
+            .map_err(|_| DurableRemoteError::Unavailable)?;
+        let result = completion
+            .join()
+            .await
+            .map_err(|_| DurableRemoteError::Unavailable)?;
+        if cx.is_cancel_requested() {
+            let _ = cx.checkpoint();
+        }
+        result
+    }
+
+    /// Resolve an uncertain request from authoritative application state.
+    ///
+    /// This is an explicit local recovery operation, not part of automatic
+    /// execution or the remote retry protocol. The invocation must have passed
+    /// the same authenticated registry boundary as [`Self::call`]. A matching
+    /// saved outcome replays without calling `resolve`. Missing, expired,
+    /// conflicting or actively owned reservations refuse before that callback.
+    ///
+    /// Before returning `Some(outcome)`, the callback must fence or drain the
+    /// original external operation and independently establish its actual
+    /// terminal result. Return `None` when it cannot do so; the original durable
+    /// reservation remains in doubt. This API provides neither automatic effect
+    /// discovery nor permission to execute the original handler again.
+    ///
+    /// The resolver is awaited inline with the journal exclusively owned. Before
+    /// it supplies `Some(outcome)`, cancellation, panic or abandonment leaves the
+    /// pending fence unchanged. Failed terminal-job admission or cancellation
+    /// before the pool claims that job also leaves the fence intact. After claim,
+    /// the terminal write has no cancellation checkpoint and may persist despite
+    /// later cancellation. The job retains the owner through actual retirement,
+    /// and a successfully persisted result wins over late cancellation just as
+    /// in [`Self::call`].
+    pub async fn reconcile<F, Fut>(
+        self: &Arc<Self>,
+        cx: &Cx,
+        invocation: RemoteComputationInvocation,
+        resolve: F,
+    ) -> Result<RemoteOutcome, DurableRemoteError>
+    where
+        F: FnOnce(Cx, RemoteComputationInvocation) -> Fut + Send + 'static,
+        Fut: Future<Output = Option<RemoteOutcome>> + Send + 'static,
+    {
+        if cx.checkpoint().is_err() || cx.blocking_pool_handle().is_none() {
+            return Err(DurableRemoteError::Unavailable);
+        }
+        if invocation.request().computation.as_str() != self.computation {
+            return Err(DurableRemoteError::Configuration);
+        }
+        if invocation.request().input.len() > self.limits.max_input_bytes {
+            return Err(DurableRemoteError::Limit);
+        }
+        let mut job = self.take_journal()?;
+        let mut preparation = cx
+            .spawn_blocking_drained(move |worker| {
+                if worker.checkpoint().is_err() {
+                    return Err(DurableRemoteError::Unavailable);
+                }
+                let now = (job.owner.clock)();
+                let decision = job.journal_mut().prepare_reconciliation(
+                    invocation.peer_node(),
+                    invocation.request().idempotency_key,
+                    invocation.request().input.data(),
+                    now,
+                )?;
+                Ok((job, invocation, decision))
+            })
+            .map_err(|_| DurableRemoteError::Unavailable)?;
+        let (mut job, invocation, decision) = preparation
+            .join()
+            .await
+            .map_err(|_| DurableRemoteError::Unavailable)??;
+        let permit = match decision {
+            DurableRemoteReconciliation::Replay(outcome) => {
+                if cx.is_cancel_requested() {
+                    let _ = cx.checkpoint();
+                }
+                return Ok(outcome);
+            }
+            DurableRemoteReconciliation::Pending(permit) => permit,
+        };
+        if cx.checkpoint().is_err() {
+            return Err(DurableRemoteError::Unavailable);
+        }
+        let Some(outcome) = resolve(cx.clone(), invocation).await else {
+            return Err(DurableRemoteError::InDoubt);
+        };
+        let mut completion = cx
+            .spawn_blocking_drained(move |_worker| {
+                let now = (job.owner.clock)();
+                job.journal_mut().complete_reconciliation(permit, outcome, now)
             })
             .map_err(|_| DurableRemoteError::Unavailable)?;
         let result = completion

@@ -57,6 +57,8 @@ pub(super) enum Retirement {
     ProofWindow = 4,
     Revoked = 5,
     Initialization = 6,
+    // New optional session policy: older catalog readers reject this value.
+    SessionRevoked = 7,
 }
 impl Retirement {
     fn decode(value: u8) -> io::Result<Option<Self>> {
@@ -68,6 +70,7 @@ impl Retirement {
             4 => Some(Self::ProofWindow),
             5 => Some(Self::Revoked),
             6 => Some(Self::Initialization),
+            7 => Some(Self::SessionRevoked),
             _ => return Err(invalid("invalid receiver catalog retirement")),
         })
     }
@@ -79,6 +82,7 @@ impl Retirement {
             Self::ProofWindow => "proof_recovery_expired",
             Self::Revoked => "client_revoked",
             Self::Initialization => "initialization_failed",
+            Self::SessionRevoked => "session_revoked",
         }
     }
 }

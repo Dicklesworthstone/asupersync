@@ -18,6 +18,119 @@
         crate::test_phase!(name);
     }
 
+    #[test]
+    fn negotiated_plain_gzip_frame_retains_every_incomplete_prefix() {
+        let payload = Bytes::from_static(b"plain in a gzip call");
+        let mut wire = BytesMut::new();
+        GrpcCodec::new()
+            .encode(GrpcMessage::new(payload.clone()), &mut wire)
+            .unwrap();
+
+        for split in 0..wire.len() {
+            let mut codec = FramedCodec::new(IdentityCodec)
+                .with_request_body_limit(Some(payload.len()));
+            let mut partial = BytesMut::from(&wire[..split]);
+            assert!(codec
+                .decode_message_with_negotiated_encoding(&mut partial, Some("gzip"))
+                .unwrap()
+                .is_none());
+            assert_eq!(&partial[..], &wire[..split]);
+            assert!(!codec.is_poisoned());
+            assert_eq!(codec.request_body_meter().bytes_accumulated(), 0);
+
+            partial.extend_from_slice(&wire[split..]);
+            let decoded = codec
+                .decode_message_with_negotiated_encoding(&mut partial, Some("gzip"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(decoded, payload);
+            assert!(partial.is_empty());
+            assert_eq!(codec.request_body_meter().bytes_accumulated(), payload.len());
+        }
+    }
+
+    #[test]
+    fn negotiated_plain_gzip_frame_rejects_oversized_length_before_body() {
+        let mut codec = FramedCodec::with_max_size(IdentityCodec, 16);
+        let mut wire = BytesMut::from(&b"\x00\x00\x00\x00\x11"[..]);
+        assert!(matches!(
+            codec.decode_message_with_negotiated_encoding(&mut wire, Some("gzip")),
+            Err(GrpcError::MessageTooLarge)
+        ));
+        assert!(codec.is_poisoned());
+        assert!(wire.is_empty());
+        assert_eq!(codec.request_body_meter().bytes_accumulated(), 0);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn negotiated_mixed_gzip_frames_share_the_decoded_body_limit() {
+        let mut wire = BytesMut::new();
+        let mut framing = GrpcCodec::new();
+        framing.encode(GrpcMessage::new(Bytes::from_static(b"ab")), &mut wire).unwrap();
+        framing.encode(GrpcMessage::compressed(
+            gzip_frame_compress(Bytes::from_static(b"cde")).unwrap(),
+        ), &mut wire).unwrap();
+        framing.encode(GrpcMessage::new(Bytes::from_static(b"x")), &mut wire).unwrap();
+        framing.encode(GrpcMessage::new(Bytes::new()), &mut wire).unwrap();
+
+        let mut codec = FramedCodec::with_max_size(IdentityCodec, 64)
+            .with_frame_hooks(None, Some(gzip_frame_decompress))
+            .with_request_body_limit(Some(5));
+        for expected in [&b"ab"[..], &b"cde"[..]] {
+            let decoded = codec
+                .decode_message_with_negotiated_encoding(&mut wire, Some("gzip"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(&decoded[..], expected);
+        }
+        assert_eq!(codec.request_body_meter().bytes_accumulated(), 5);
+        assert!(matches!(
+            codec.decode_message_with_negotiated_encoding(&mut wire, Some("gzip")),
+            Err(GrpcError::Status(status))
+                if status.code() == crate::grpc::Code::ResourceExhausted
+        ));
+        assert!(codec.is_poisoned());
+        assert!(wire.is_empty(), "limit failure must discard the buffered tail");
+
+        framing.encode(GrpcMessage::new(Bytes::new()), &mut wire).unwrap();
+        assert!(matches!(
+            codec.decode_message_with_negotiated_encoding(&mut wire, Some("gzip")),
+            Err(GrpcError::Protocol(_))
+        ));
+        assert!(wire.is_empty(), "poison must persist across later input");
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn negotiated_gzip_decode_errors_poison_later_plain_messages() {
+        for oversized in [false, true] {
+            let compressed = if oversized {
+                gzip_frame_compress(Bytes::from(vec![b'x'; 1024])).unwrap()
+            } else {
+                Bytes::from_static(b"invalid gzip member")
+            };
+            assert!(compressed.len() < 64);
+            let mut wire = BytesMut::new();
+            let mut framing = GrpcCodec::new();
+            framing.encode(GrpcMessage::compressed(compressed), &mut wire).unwrap();
+            framing.encode(GrpcMessage::new(Bytes::new()), &mut wire).unwrap();
+            let mut codec = FramedCodec::with_max_size(IdentityCodec, 64)
+                .with_frame_hooks(None, Some(gzip_frame_decompress));
+            let error = codec
+                .decode_message_with_negotiated_encoding(&mut wire, Some("gzip"))
+                .unwrap_err();
+            if oversized {
+                assert!(matches!(error, GrpcError::MessageTooLarge));
+            } else {
+                assert!(matches!(error, GrpcError::Compression(_)));
+            }
+            assert!(codec.is_poisoned());
+            assert!(wire.is_empty());
+            assert_eq!(codec.request_body_meter().bytes_accumulated(), 0);
+        }
+    }
+
     fn format_hex(bytes: &[u8]) -> String {
         bytes
             .iter()

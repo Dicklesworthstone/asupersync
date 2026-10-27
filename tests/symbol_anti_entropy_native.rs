@@ -5,7 +5,9 @@
 
 use asupersync::distributed::{HasSchema, SchemaDescriptor};
 use asupersync::distributed::anti_entropy::catalog::{Catalog, CatalogEntry, CatalogError, CatalogLimits};
-use asupersync::distributed::anti_entropy::native::{SymbolRepairClient, SymbolRepairError, SymbolRepairLimits};
+use asupersync::distributed::anti_entropy::native::{SymbolRepairClient, SymbolRepairError,
+    SymbolRepairLimits, SymbolRepairRequest, SymbolRepairRoundError, SymbolRepairRoundTrigger,
+    SymbolRepairWorker, SymbolRepairWorkerConfig, SymbolRepairWorkerError, SymbolRepairWorkerStatus};
 use asupersync::distributed::anti_entropy::symbols::{SYMBOL_CATALOG_COMPUTATION, SymbolCatalogService,
     capture_symbol_catalog, register_symbol_catalog_service};
 use asupersync::distributed::symbol_service::{EncodedSymbolBatch, RemoteSymbolTransport,
@@ -21,7 +23,7 @@ use asupersync::security::{AuthKey, SecurityContext};
 use asupersync::sync::Notify;
 use asupersync::tls::{Certificate, CertificateChain, CertificatePin, CertificatePinSet,
     ClientAuth, PrivateKey, RootCertStore, TlsAcceptorBuilder, TlsConnectorBuilder};
-use asupersync::types::{CancelReason, symbol::Symbol};
+use asupersync::types::{Budget, CancelReason, Outcome, Time, symbol::Symbol};
 use asupersync::Cx;
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
@@ -64,6 +66,7 @@ fn batch(object: u64) -> EncodedSymbolBatch {
 struct Gate {
     armed: AtomicBool, entered: AtomicBool, released: AtomicBool,
     retired: AtomicBool, calls: AtomicUsize, changed: Notify,
+    allow_release: AtomicBool, failures_remaining: AtomicUsize,
 }
 impl Gate {
     async fn entered(&self) { self.changed.wait_until(|| self.entered.load(Ordering::Acquire)).await; }
@@ -118,6 +121,11 @@ fn gated_registry<I: HasSchema, O: HasSchema>(inner: RemoteComputationRegistry,
             async move {
                 let session = session.ok_or_else(|| RemoteError::TransportError("unknown fixture peer".into()))?;
                 gate.calls.fetch_add(1, Ordering::AcqRel);
+                if gate.failures_remaining.fetch_update(Ordering::AcqRel, Ordering::Acquire,
+                    |remaining| remaining.checked_sub(1)).is_ok()
+                {
+                    return Ok(RemoteOutcome::Failed("transient fixture read failure".into()));
+                }
                 let mut retirement = None;
                 if gate.armed.swap(false, Ordering::AcqRel) {
                     retirement = Some(Retired(Arc::clone(&gate)));
@@ -125,7 +133,8 @@ fn gated_registry<I: HasSchema, O: HasSchema>(inner: RemoteComputationRegistry,
                     let mut cancelled = std::pin::pin!(cx.cancelled());
                     poll_fn(|task| {
                         if cancelled.as_mut().poll(task).is_ready() { return Poll::Ready(()); }
-                        if !await_cancel && release.as_mut().poll(task).is_ready() { return Poll::Ready(()); }
+                        if (!await_cancel || gate.allow_release.load(Ordering::Acquire))
+                            && release.as_mut().poll(task).is_ready() { return Poll::Ready(()); }
                         // Signal only after the admitted handler's real wait
                         // registered its waker and returned Pending.
                         if !gate.entered.swap(true, Ordering::AcqRel) { gate.changed.notify_waiters(); }
@@ -160,7 +169,11 @@ impl Drop for Stop {
 }
 
 #[derive(Clone, Copy)]
-enum Case { RepairAndRefusals, CancelAndResume }
+enum Case {
+    RepairAndRefusals, CancelAndResume, WorkerManual, WorkerPeriodic,
+    WorkerStopDeadline, WorkerCancelMetadata, WorkerCancelData, WorkerRetries,
+    WorkerStepLimit, WorkerClockExhausted,
+}
 
 fn exercise(workers: usize, case: Case) {
     let builder = if workers == 1 { RuntimeBuilder::current_thread() }
@@ -256,6 +269,18 @@ fn exercise(workers: usize, case: Case) {
             let symbols = RemoteSymbolTransport::new_bounded(cx.clone(), data_hello.clone(),
                 [("source".to_owned(), data_client.clone())], Arc::new(AuthKey::from_seed(42)), batch_limits(), 1).unwrap();
             let repair = SymbolRepairClient::new(origin.clone(), NodeId::new("source"), Arc::clone(&destination), repair_limits()).unwrap();
+            if !matches!(case, Case::RepairAndRefusals | Case::CancelAndResume) {
+                exercise_worker(WorkerFixture {
+                    cx: &cx, repair: &repair, symbols: &symbols, origin: &origin,
+                    source: &source, destination: &destination, catalogs: &catalogs,
+                    metadata: &gate, values: &data_gate, remote: &remote,
+                }, case).await;
+                for batch in &batches {
+                    assert_eq!(destination.get(&origin, batch.key()).unwrap().as_ref().as_ref(), batch.as_ref());
+                }
+                assert!(destination.get(&origin, secret.key()).is_err());
+                assert!(destination.get(&NodeId::new("unrelated-origin"), secret.key()).is_err());
+            } else {
             let mut cursor = repair.start(&cx).await.unwrap();
             assert!(!cursor.progress().complete);
 
@@ -356,6 +381,9 @@ fn exercise(workers: usize, case: Case) {
                 assert_eq!(gate.calls.load(Ordering::Acquire), calls);
                 let wrong_symbols = RemoteSymbolTransport::new_bounded(cx.clone(), intruder_data.clone(),
                     [("source".to_owned(), intruder_data_client)], Arc::new(AuthKey::from_seed(42)), batch_limits(), 1).unwrap();
+                assert!(matches!(SymbolRepairWorker::new(repair.clone(), wrong_symbols.clone(),
+                    SymbolRepairWorkerConfig::new(Duration::from_secs(5), 32)),
+                    Err(SymbolRepairWorkerError::Authority)));
                 assert!(matches!(repair.step(&cx, &wrong_symbols, &mut cursor).await, Err(SymbolRepairError::Authority)));
                 assert_eq!(gate.calls.load(Ordering::Acquire), calls, "foreign origin refuses before metadata I/O");
                 let data_calls = data_gate.calls.load(Ordering::Acquire);
@@ -411,6 +439,7 @@ fn exercise(workers: usize, case: Case) {
                 assert!(refused);
                 assert_eq!(empty.stats().batches, 0);
             }
+            }
 
             assert_eq!(symbols.in_flight(), 0);
             assert!(remote.close(&cx).await);
@@ -436,6 +465,257 @@ fn exercise(workers: usize, case: Case) {
     // waits for every such owner, so release this fixture's own first.
     drop(handle);
     assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+}
+
+struct WorkerFixture<'a> {
+    cx: &'a Cx,
+    repair: &'a SymbolRepairClient,
+    symbols: &'a RemoteSymbolTransport,
+    origin: &'a NodeId,
+    source: &'a Arc<SymbolReplicaStore>,
+    destination: &'a Arc<SymbolReplicaStore>,
+    catalogs: &'a Arc<SymbolCatalogService>,
+    metadata: &'a Arc<Gate>,
+    values: &'a Arc<Gate>,
+    remote: &'a Arc<NativeRemoteRuntime>,
+}
+
+impl WorkerFixture<'_> {
+    fn publish(&self, revision: u64, objects: impl IntoIterator<Item = u64>) {
+        for object in objects {
+            self.source.put(self.origin, batch(object).as_ref()).unwrap();
+        }
+        self.catalogs.publish(Arc::new(capture_symbol_catalog(self.source,
+            self.origin.clone(), revision, catalog_limits()).unwrap())).unwrap();
+    }
+
+    async fn finish_repair(&self) {
+        let mut cursor = self.repair.start(self.cx).await.unwrap();
+        for _ in 0..64 {
+            if cursor.progress().complete { return; }
+            self.repair.step(self.cx, self.symbols, &mut cursor).await.unwrap();
+        }
+        assert!(cursor.progress().complete, "bounded healthy follow-up must converge");
+    }
+}
+
+async fn exercise_worker(fixture: WorkerFixture<'_>, case: Case) {
+    if matches!(case, Case::WorkerClockExhausted) {
+        let timers = asupersync::time::TimerDriverHandle::with_virtual_clock(Arc::new(
+            asupersync::time::VirtualClock::starting_at(Time::MAX)));
+        // No task admission or I/O is expected, so a distinct test context can
+        // expose the saturated clock without altering the live TLS services.
+        let exhausted = Cx::new_with_drivers(fixture.cx.region_id(), fixture.cx.task_id(),
+            Budget::INFINITE, None, None, None, Some(timers), None)
+            .with_remote_cap(RemoteCap::new().with_local_node(fixture.origin.clone())
+                .with_runtime(Arc::clone(fixture.remote) as Arc<dyn RemoteRuntime>));
+        for periodic in [false, true] {
+            let config = SymbolRepairWorkerConfig::new(Duration::from_nanos(1), 64);
+            let config = if periodic { config.with_interval(Duration::from_nanos(1)) } else { config };
+            let worker = SymbolRepairWorker::new(fixture.repair.clone(), fixture.symbols.clone(), config).unwrap();
+            let control = worker.handle();
+            let report = worker.run(&exhausted).await;
+            assert!(matches!(report.outcome, Outcome::Err(SymbolRepairWorkerError::ClockExhausted)));
+            assert_eq!(report.snapshot.status, SymbolRepairWorkerStatus::Failed);
+            assert_eq!(report.snapshot.rounds_finished, 0);
+            assert_eq!(control.request(), SymbolRepairRequest::Closed);
+            assert_eq!(fixture.metadata.calls.load(Ordering::Acquire), 0);
+            assert_eq!(fixture.remote.active_operations(), 0);
+        }
+        fixture.finish_repair().await;
+        return;
+    }
+
+    let config = match case {
+        Case::WorkerManual => SymbolRepairWorkerConfig::new(Duration::from_secs(10), 64)
+            .with_initial_repair(false),
+        Case::WorkerPeriodic => SymbolRepairWorkerConfig::new(Duration::from_secs(10), 64)
+            .with_initial_repair(false).with_interval(Duration::from_millis(30)),
+        Case::WorkerRetries => SymbolRepairWorkerConfig::new(Duration::from_secs(15), 64)
+            .with_retry_policy(2, Duration::from_millis(10)),
+        Case::WorkerStepLimit => SymbolRepairWorkerConfig::new(Duration::from_secs(10), 1)
+            .with_retry_policy(2, Duration::from_millis(10)),
+        Case::WorkerStopDeadline => SymbolRepairWorkerConfig::new(Duration::from_secs(2), 64),
+        _ => SymbolRepairWorkerConfig::new(Duration::from_secs(10), 64),
+    };
+    let worker = SymbolRepairWorker::new(fixture.repair.clone(), fixture.symbols.clone(), config).unwrap();
+    let control = worker.handle();
+    assert_eq!(control.snapshot().status, SymbolRepairWorkerStatus::Prepared);
+    assert_eq!(fixture.metadata.calls.load(Ordering::Acquire), 0, "construction cannot dispatch");
+    match case {
+        Case::WorkerManual => {
+            assert_eq!(control.request(), SymbolRepairRequest::Scheduled);
+            assert_eq!(control.request(), SymbolRepairRequest::Coalesced);
+            fixture.metadata.allow_release.store(true, Ordering::Release);
+            fixture.metadata.armed.store(true, Ordering::Release);
+        }
+        Case::WorkerStopDeadline | Case::WorkerCancelMetadata => {
+            fixture.metadata.armed.store(true, Ordering::Release);
+        }
+        Case::WorkerCancelData => fixture.values.armed.store(true, Ordering::Release),
+        Case::WorkerRetries => fixture.metadata.failures_remaining.store(1, Ordering::Release),
+        _ => {}
+    }
+    let mut owned = fixture.cx.spawn(move |body| async move { worker.run(&body).await }).unwrap();
+    let cancellation = CancelReason::user("cancel native retained-symbol repair worker");
+    match case {
+        Case::WorkerManual => {
+            fixture.metadata.entered().await;
+            assert_eq!(control.snapshot().rounds_started, 1);
+            assert_eq!(control.request(), SymbolRepairRequest::Scheduled);
+            for _ in 0..64 { assert_eq!(control.request(), SymbolRepairRequest::Coalesced); }
+            assert!(control.snapshot().pending);
+            fixture.metadata.release();
+            let second = control.changed(1).await;
+            assert_eq!(second.rounds_started, 2);
+            assert_eq!(second.rounds_finished, 2);
+            assert_eq!(second.successful_rounds, 2);
+            assert!(second.last_round.as_ref().unwrap().is_success());
+            assert_eq!(fixture.destination.stats().batches, 3);
+
+            fixture.publish(2, [4]);
+            assert_eq!(control.request(), SymbolRepairRequest::Scheduled);
+            let third = control.changed(2).await;
+            assert_eq!(third.rounds_finished, 3);
+            let report = third.last_round.as_ref().unwrap();
+            assert!(report.is_success());
+            assert_eq!(report.progress.unwrap().repaired_batches, 1);
+            assert_eq!(fixture.destination.stats().batches, 4);
+            control.stop();
+        }
+        Case::WorkerPeriodic => {
+            let mut observed = control.changed(0).await;
+            assert!(observed.last_round.as_ref().unwrap().is_success());
+            fixture.publish(2, [4]);
+            let mut repaired = false;
+            for _ in 0..8 {
+                observed = control.changed(observed.rounds_finished).await;
+                let report = observed.last_round.as_ref().unwrap();
+                // A worker may already have started its next round before the
+                // observer publishes revision 2. That old cut can legitimately
+                // change; the following periodic round must still converge.
+                if !report.is_success() {
+                    assert!(matches!(&report.outcome,
+                        Outcome::Err(SymbolRepairRoundError::Repair(
+                            SymbolRepairError::Catalog(CatalogError::SnapshotChanged)))));
+                    continue;
+                }
+                if fixture.destination.stats().batches == 4 { repaired = true; break; }
+            }
+            assert!(repaired, "periodic repair discovers a newly published source cut");
+            assert!(observed.rounds_finished >= 2);
+            control.stop();
+        }
+        Case::WorkerStopDeadline => {
+            fixture.metadata.entered().await;
+            assert_eq!(fixture.remote.active_operations(), 1);
+            control.stop();
+            assert_eq!(control.snapshot().status, SymbolRepairWorkerStatus::Stopping);
+            assert_eq!(control.request(), SymbolRepairRequest::Closed);
+        }
+        Case::WorkerCancelMetadata => {
+            fixture.metadata.entered().await;
+            assert_eq!(fixture.remote.active_operations(), 1);
+            owned.abort_with_reason(cancellation.clone());
+        }
+        Case::WorkerCancelData => {
+            fixture.values.entered().await;
+            assert_eq!(fixture.symbols.in_flight(), 1);
+            owned.abort_with_reason(cancellation.clone());
+        }
+        Case::WorkerRetries => {
+            let first = control.changed(0).await;
+            let report = first.last_round.as_ref().unwrap();
+            assert!(report.is_success());
+            assert_eq!(report.attempts, 2, "a failed authenticated ROOT read gets a fresh cursor");
+
+            // Change the source after a real old-cut GET is already pending.
+            // Its verified immutable put survives, and the next ROOT refresh
+            // must force the worker to acquire a fresh cursor within this round.
+            fixture.publish(2, [4, 5]);
+            fixture.values.armed.store(true, Ordering::Release);
+            assert_eq!(control.request(), SymbolRepairRequest::Scheduled);
+            fixture.values.entered().await;
+            fixture.publish(3, [6]);
+            fixture.values.release();
+            let changed = control.changed(1).await;
+            let report = changed.last_round.as_ref().unwrap();
+            assert!(report.is_success());
+            assert_eq!(report.attempts, 2);
+            assert_eq!(fixture.destination.stats().batches, 6);
+
+            let calls = fixture.metadata.calls.load(Ordering::Acquire);
+            fixture.metadata.failures_remaining.store(3, Ordering::Release);
+            assert_eq!(control.request(), SymbolRepairRequest::Scheduled);
+            let exhausted = control.changed(2).await;
+            let report = exhausted.last_round.as_ref().unwrap();
+            assert!(!report.is_success());
+            assert_eq!(report.attempts, 2);
+            assert_eq!(fixture.metadata.calls.load(Ordering::Acquire) - calls, 2);
+            assert!(matches!(&report.outcome,
+                Outcome::Err(SymbolRepairRoundError::Repair(SymbolRepairError::Remote))));
+            assert_eq!(exhausted.successful_rounds, 2);
+
+            assert_eq!(control.request(), SymbolRepairRequest::Scheduled);
+            let recovered = control.changed(3).await;
+            assert!(recovered.last_round.as_ref().unwrap().is_success());
+            assert_eq!(recovered.last_round.as_ref().unwrap().attempts, 2);
+            assert_eq!(recovered.successful_rounds, 3);
+            control.stop();
+        }
+        Case::WorkerStepLimit => {
+            let limited = control.changed(0).await;
+            let report = limited.last_round.as_ref().unwrap();
+            assert!(matches!(&report.outcome, Outcome::Err(SymbolRepairRoundError::StepLimit)));
+            assert!(!report.is_success());
+            assert_eq!(report.steps, 1);
+            assert_eq!(report.attempts, 1, "step exhaustion cannot reset the work allowance by retrying");
+            assert!(!report.progress.unwrap().complete);
+            control.stop();
+        }
+        _ => unreachable!("manual cursor cases and exhausted clocks run elsewhere"),
+    }
+    let report = owned.join(fixture.cx).await.expect("worker acknowledges cancellation and returns its terminal receipt");
+    assert_eq!(control.request(), SymbolRepairRequest::Closed);
+    assert!(!control.snapshot().pending);
+    assert_eq!(fixture.remote.active_operations(), 0);
+    assert_eq!(fixture.symbols.in_flight(), 0);
+    assert!(!fixture.cx.is_cancel_requested(), "the transport's original owner stays healthy");
+    match case {
+        Case::WorkerCancelMetadata | Case::WorkerCancelData => {
+            assert!(matches!(&report.outcome, Outcome::Cancelled(reason) if reason == &cancellation));
+            assert_eq!(report.snapshot.status, SymbolRepairWorkerStatus::Cancelled);
+            let round = report.snapshot.last_round.as_ref().unwrap();
+            assert_eq!(round.trigger, SymbolRepairRoundTrigger::ParentCancelled(cancellation));
+            assert!(!round.is_success());
+            if matches!(case, Case::WorkerCancelMetadata) {
+                assert!(fixture.metadata.retired.load(Ordering::Acquire));
+            } else {
+                assert_eq!(round.progress.unwrap().repaired_batches, 0);
+                // A V1 GET's local connection retirement is not remote server
+                // quiescence. Explicitly release and observe that fixture owner.
+                fixture.values.release();
+                fixture.values.changed.wait_until(|| fixture.values.retired.load(Ordering::Acquire)).await;
+            }
+            fixture.finish_repair().await;
+        }
+        Case::WorkerStopDeadline => {
+            assert!(matches!(report.outcome, Outcome::Ok(())));
+            assert_eq!(report.snapshot.status, SymbolRepairWorkerStatus::Stopped);
+            let round = report.snapshot.last_round.as_ref().unwrap();
+            assert_eq!(round.trigger, SymbolRepairRoundTrigger::Deadline);
+            assert!(!round.is_success());
+            assert!(fixture.metadata.retired.load(Ordering::Acquire));
+            fixture.finish_repair().await;
+        }
+        _ => {
+            assert!(matches!(report.outcome, Outcome::Ok(())));
+            assert_eq!(report.snapshot.status, SymbolRepairWorkerStatus::Stopped);
+            if matches!(case, Case::WorkerStepLimit) { fixture.finish_repair().await; }
+        }
+    }
+    let terminal = control.changed(report.snapshot.rounds_finished).await;
+    assert!(terminal.status.is_terminal(), "terminal observation never waits for an impossible new round");
 }
 
 // The fixture is one large future; a debug build's poll frames for it
@@ -466,4 +746,42 @@ fn native_symbol_anti_entropy_cancels_after_real_handler_admission_and_resumes_t
     for workers in [1, 2] {
         exercise_on_large_stack(workers, Case::CancelAndResume);
     }
+}
+
+#[test]
+fn native_symbol_repair_worker_coalesces_hints_and_repairs_new_published_cuts() {
+    for workers in [1, 2] { exercise_on_large_stack(workers, Case::WorkerManual); }
+}
+
+#[test]
+fn native_symbol_repair_worker_periodically_discovers_retained_values() {
+    for workers in [1, 2] { exercise_on_large_stack(workers, Case::WorkerPeriodic); }
+}
+
+#[test]
+fn native_symbol_repair_worker_stop_waits_for_deadline_cancellation_and_real_metadata_retirement() {
+    for workers in [1, 2] { exercise_on_large_stack(workers, Case::WorkerStopDeadline); }
+}
+
+#[test]
+fn native_symbol_repair_worker_cancellation_reaches_parked_metadata_and_value_operations() {
+    for workers in [1, 2] {
+        exercise_on_large_stack(workers, Case::WorkerCancelMetadata);
+        exercise_on_large_stack(workers, Case::WorkerCancelData);
+    }
+}
+
+#[test]
+fn native_symbol_repair_worker_retries_changed_cuts_and_transient_reads_with_finite_attempts() {
+    for workers in [1, 2] { exercise_on_large_stack(workers, Case::WorkerRetries); }
+}
+
+#[test]
+fn native_symbol_repair_worker_step_exhaustion_is_a_typed_incomplete_round() {
+    for workers in [1, 2] { exercise_on_large_stack(workers, Case::WorkerStepLimit); }
+}
+
+#[test]
+fn native_symbol_repair_worker_saturated_clock_refuses_without_dispatch_or_spin() {
+    for workers in [1, 2] { exercise_on_large_stack(workers, Case::WorkerClockExhausted); }
 }

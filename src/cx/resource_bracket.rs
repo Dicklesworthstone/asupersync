@@ -223,6 +223,24 @@ impl Cx {
         F: FnOnce(Cx, R) -> FF + Send + 'static,
         FF: Future<Output = Outcome<(), C>> + Send + 'static,
     {
+        self.spawn_bracket_with_exit(config, acquire, use_resource, move |cx, resource, _| {
+            release(cx, resource)
+        })
+    }
+
+    // The exit decision is private: existing bracket users always release, while
+    // a saga must decide whether to commit only AFTER actual child quiescence.
+    fn spawn_bracket_with_exit<R, T, E, C, A, AF, U, F, FF>(
+        &self, config: BracketConfig, acquire: A, use_resource: U, release: F,
+    ) -> Result<BracketHandle<R, T, E, C>, SpawnError>
+    where
+        R: Send + 'static, T: Send + 'static, E: Send + 'static, C: Send + 'static,
+        A: FnOnce(Cx) -> AF + Send + 'static,
+        AF: Future<Output = Outcome<R, E>> + Send + 'static,
+        U: for<'a> FnOnce(Cx, &'a mut R) -> BracketUseFuture<'a, T, E> + Send + 'static,
+        F: FnOnce(Cx, R, BracketExit) -> FF + Send + 'static,
+        FF: Future<Output = Outcome<(), C>> + Send + 'static,
+    {
         let report = Arc::new(Mutex::new(None));
         let publication = Arc::clone(&report);
         let task = self.spawn(move |cx| async move {
@@ -369,6 +387,14 @@ impl Drop for BodyTask {
     fn drop(&mut self) { if !self.joined { self.task.abort(); } }
 }
 
+struct BracketExit {
+    // Stronger than BracketReport::is_success: a cancelled work task is not a
+    // clean transaction, even when ordinary bracket cleanup succeeded.
+    clean: bool,
+    // Nested-region task panics propagate separately from the ordinary outcome.
+    descendant_panic: Option<PanicPayload>,
+}
+
 async fn drive<R, T, E, C, A, AF, U, F, FF>(
     cx: Cx, config: BracketConfig, acquire: A, use_resource: U, release: F,
 ) -> BracketReport<R, T, E, C>
@@ -377,7 +403,7 @@ where
     A: FnOnce(Cx) -> AF + Send + 'static,
     AF: Future<Output = Outcome<R, E>> + Send + 'static,
     U: for<'a> FnOnce(Cx, &'a mut R) -> BracketUseFuture<'a, T, E> + Send + 'static,
-    F: FnOnce(Cx, R) -> FF + Send + 'static,
+    F: FnOnce(Cx, R, BracketExit) -> FF + Send + 'static,
     FF: Future<Output = Outcome<(), C>> + Send + 'static,
 {
     let mut report = BracketReport::empty();
@@ -431,14 +457,27 @@ where
             report.unreleased = resource;
         }
         Ok(close) => {
+            let descendant_panic = close.descendant_panic;
             report.close = Some(Ok(BracketRegionOutcome {
                 outcome: close.outcome, cleanup_outcome: close.cleanup_outcome,
             }));
             if let Some(resource) = resource {
                 // Acknowledge before masking; preserve an independently observed reason.
                 if cx.checkpoint().is_err() { report.cancellation = Some(cancel_reason(&cx)); }
+                let exit = BracketExit {
+                    clean: report.acquisition.as_ref().is_some_and(BracketPhase::is_success)
+                        && report.usage.as_ref().is_some_and(BracketPhase::is_success)
+                        && matches!(&report.body_task, Some(Ok(())))
+                        && matches!(&report.close, Some(Ok(close))
+                            if close.outcome.is_ok()
+                                && close.cleanup_outcome.as_ref().is_none_or(Outcome::is_ok))
+                        && report.infrastructure.is_empty()
+                        && report.cancellation.is_none()
+                        && descendant_panic.is_none(),
+                    descendant_panic,
+                };
                 report.release = Some(evaluate(
-                    || release(cx.clone(), resource), Some((&cx, config.release_masked_polls)),
+                    || release(cx.clone(), resource, exit), Some((&cx, config.release_masked_polls)),
                 ).await);
             }
         }
@@ -452,3 +491,6 @@ mod tests;
 
 /// Bounded heterogeneous resources with typed access and asynchronous LIFO release.
 pub mod stack;
+
+/// Owned asynchronous sagas that decide commit only after child quiescence.
+pub mod saga;

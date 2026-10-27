@@ -1785,11 +1785,11 @@ impl Server {
 
         let mut body = BytesMut::from(request.body.as_slice());
         let message = codec
-            .decode_message_with_encoding(&mut body, grpc_encoding)
+            .decode_message_with_negotiated_encoding(&mut body, grpc_encoding)
             .map_err(GrpcError::into_status)?
             .ok_or_else(|| Status::invalid_argument("incomplete gRPC message frame"))?;
         if !body.is_empty() {
-            match codec.decode_message_with_encoding(&mut body, grpc_encoding) {
+            match codec.decode_message_with_negotiated_encoding(&mut body, grpc_encoding) {
                 Ok(Some(_)) => {
                     return Err(Status::invalid_argument(
                         "unary gRPC request contains more than one message",

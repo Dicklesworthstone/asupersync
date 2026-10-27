@@ -361,3 +361,202 @@ fn invalid_policy_never_reaches_readiness_or_creates_an_inbox_sink() {
         }
     }
 }
+
+fn session_policy_bytes(generation: u64, client: &str, nonces: &[u8]) -> Vec<u8> {
+    let sessions: Vec<_> = nonces.iter().map(|nonce| json!({
+        "certificate_sha256": client, "stream_nonce": hex::encode([*nonce; 32]),
+    })).collect();
+    serde_json::to_vec(&json!({
+        "schema_version": 2, "generation": generation,
+        "revoked_certificates": [], "revoked_sessions": sessions,
+    })).unwrap()
+}
+
+fn assert_session_refused(
+    fixture: &Fixture,
+    process: &mut Process,
+    address: SocketAddr,
+    nonce: u8,
+) {
+    let mut denied = Peer::connect(fixture, address, "allowed");
+    assert!(denied.hello(nonce).is_err());
+    let refused = completion(process);
+    assert_eq!(refused["outcome_kind"], "rejected");
+    assert_eq!(refused["transfer"]["status"], "session_revoked");
+    assert!(refused["publication"].is_null());
+}
+
+#[test]
+fn sighup_revokes_one_acknowledged_session_while_its_same_certificate_sibling_finishes() {
+    for workers in [1, 2] {
+        let fixture = Fixture::new();
+        let policy = fixture.unique("session-revocations");
+        provision_policy(&policy, &policy_bytes(1, &[]));
+        let mut config = fixture.receiver_config(workers, 64, 65536);
+        config["operation_timeout_secs"] = json!(10);
+        let (mut process, address) = start_revoking(&fixture, config, &policy, None, 1, 0);
+        let mut target = Peer::connect(&fixture, address, "allowed");
+        let target_state = target.hello(71).unwrap();
+        target.epoch(&target_state, b"abc");
+        let mut sibling = Peer::connect(&fixture, address, "allowed");
+        let sibling_state = sibling.hello(72).unwrap();
+        let sibling_prefix = sibling.epoch(&sibling_state, b"xyz");
+        let mut bytes = staged_bytes(&fixture.inbox);
+        bytes.sort();
+        assert_eq!(bytes, vec![b"abc".to_vec(), b"xyz".to_vec()]);
+        let retained = fixture.entries();
+        replace_policy(&fixture, &policy, &session_policy_bytes(2, &fixture.allowed, &[71]));
+        reload(&process);
+        let applied = process.event("revocation_policy_applied");
+        assert_eq!(applied["schema_version"], 2);
+        assert_eq!(applied["revoked_clients"], 0);
+        assert_eq!(applied["newly_revoked"], 0);
+        assert_eq!(applied["revoked_sessions"], 1);
+        assert_eq!(applied["newly_revoked_sessions"], 1);
+        assert_eq!(applied["signalled_connections"], 1);
+        assert_eq!(applied["retained_sessions"], 1);
+        assert_eq!(applied["drained"], false);
+        let cancelled = completion(&mut process);
+        assert_eq!(cancelled["session"]["client_certificate_sha256"], fixture.allowed);
+        assert_eq!(cancelled["session"]["stream_nonce"], hex::encode([71; 32]));
+        assert_eq!(cancelled["transfer"]["status"], "cancelled");
+        assert_eq!(cancelled["transfer"]["flushed_prefix_bytes"], 3);
+        assert_eq!(cancelled["transfer"]["sink_written_bytes"], 3);
+        assert!(cancelled["transfer"]["completed_receipt"].is_null());
+        assert_eq!(cancelled["publication"]["state"], "staged");
+        assert!(target.receive().is_err());
+        let retired = process.event("session_retired");
+        assert_eq!(retired["reason"], "session_revoked");
+        assert_eq!(retired["tombstone_retained"], true);
+        assert_eq!(fixture.entries(), retained);
+        drop(target);
+
+        // This denial passes TLS and is rejected by exact authenticated key.
+        // The other connection remains alive throughout the refusal.
+        assert_session_refused(&fixture, &mut process, address, 71);
+        assert_eq!(fixture.entries(), retained);
+        sibling.finish(&sibling_prefix, b"xyz");
+        let complete = completion(&mut process);
+        assert_eq!(complete["session"]["stream_nonce"], hex::encode([72; 32]));
+        assert_eq!(complete["transfer"]["status"], "complete");
+        assert_eq!(complete["publication"]["state"], "durable");
+        assert_eq!(complete["transfer"]["receipt"]["sha256"], hex::encode(Sha256::digest(b"xyz")));
+        let published = fixture.inbox.join(complete["publication"]["filename"].as_str().unwrap());
+        assert_eq!(std::fs::read(&published).unwrap(), b"xyz");
+        drop(sibling);
+
+        // A new nonce on that certificate is still permitted after the reload.
+        let mut next = Peer::connect(&fixture, address, "allowed");
+        let state = next.hello(73).unwrap();
+        let prefix = next.epoch(&state, b"new");
+        next.finish(&prefix, b"new");
+        let complete = completion(&mut process);
+        assert_eq!(complete["transfer"]["status"], "complete");
+        assert_eq!(complete["transfer"]["receipt"]["sha256"], hex::encode(Sha256::digest(b"new")));
+        let published = fixture.inbox.join(complete["publication"]["filename"].as_str().unwrap());
+        assert_eq!(std::fs::read(published).unwrap(), b"new");
+        reload(&process);
+        let same = process.event("revocation_policy_applied");
+        assert_eq!(same["generation"], 2);
+        assert_eq!(same["newly_revoked_sessions"], 0);
+        assert_eq!(same["signalled_connections"], 0);
+        drop(next);
+        stop(&mut process);
+    }
+}
+
+#[test]
+fn persisted_session_denial_blocks_its_historical_proof_but_allows_a_sibling_after_restart() {
+    let fixture = Fixture::new();
+    let ledger = initialize(&fixture, 3);
+    let policy = fixture.unique("session-revocations");
+    provision_policy(&policy, &policy_bytes(1, &[]));
+    let config = fixture.receiver_config(2, 64, 65536);
+    let (mut process, address) =
+        start_revoking(&fixture, config.clone(), &policy, Some(&ledger), 1, 0);
+    let mut peer = Peer::connect(&fixture, address, "allowed");
+    let state = peer.hello(91).unwrap();
+    let prefix = peer.epoch(&state, b"abc");
+    peer.finish(&prefix, b"abc");
+    let complete = completion(&mut process);
+    assert_eq!(complete["transfer"]["status"], "complete");
+    let receipt = complete["transfer"]["receipt"].clone();
+    let published = fixture.inbox.join(complete["publication"]["filename"].as_str().unwrap());
+    assert_eq!(std::fs::read(&published).unwrap(), b"abc");
+    let inode = std::fs::metadata(&published).unwrap();
+    let history = std::fs::read(&ledger).unwrap();
+    let retained = fixture.entries();
+    assert_eq!(records(&ledger).len(), 2);
+    replace_policy(&fixture, &policy, &session_policy_bytes(2, &fixture.allowed, &[91]));
+    reload(&process);
+    assert_eq!(process.event("revocation_policy_applied")["signalled_connections"], 0);
+    let retired = process.event("session_retired");
+    assert_eq!(retired["reason"], "session_revoked");
+    assert_eq!(retired["snapshot"]["completed_receipt"], receipt);
+    assert_eq!(retired["publication"]["state"], "durable");
+    assert_session_refused(&fixture, &mut process, address, 91);
+    drop(peer);
+    stop(&mut process);
+
+    let (mut restarted, address) = start_revoking(&fixture, config, &policy, Some(&ledger), 2, 0);
+    assert_session_refused(&fixture, &mut restarted, address, 91);
+    assert_eq!(std::fs::read(&ledger).unwrap(), history);
+    assert_eq!(fixture.entries(), retained);
+    let now = std::fs::metadata(&published).unwrap();
+    assert_eq!((now.dev(), now.ino()), (inode.dev(), inode.ino()));
+    assert_eq!(std::fs::read(&published).unwrap(), b"abc");
+    let mut sibling = Peer::connect(&fixture, address, "allowed");
+    let state = sibling.hello(92).unwrap();
+    let prefix = sibling.epoch(&state, b"xyz");
+    sibling.finish(&prefix, b"xyz");
+    let complete = completion(&mut restarted);
+    assert_eq!(complete["transfer"]["status"], "complete");
+    assert_eq!(complete["transfer"]["receipt"]["sha256"], hex::encode(Sha256::digest(b"xyz")));
+    let new_path = fixture.inbox.join(complete["publication"]["filename"].as_str().unwrap());
+    assert_eq!(std::fs::read(new_path).unwrap(), b"xyz");
+    let extended = std::fs::read(&ledger).unwrap();
+    assert!(extended.starts_with(&history));
+    assert_eq!(records(&ledger).len(), 4);
+    assert_eq!(std::fs::read(&published).unwrap(), b"abc");
+    drop(sibling);
+    stop(&mut restarted);
+}
+
+#[test]
+fn removing_a_session_denial_or_downgrading_v2_fails_closed_after_owned_work_drains() {
+    for downgrade in [false, true] {
+        let fixture = Fixture::new();
+        let policy = fixture.unique("session-revocations");
+        provision_policy(&policy, &session_policy_bytes(2, &fixture.allowed, &[79]));
+        let mut config = fixture.receiver_config(2, 64, 65536);
+        config["operation_timeout_secs"] = json!(10);
+        let (mut process, address) = start_revoking(&fixture, config, &policy, None, 2, 0);
+        let mut peer = Peer::connect(&fixture, address, "allowed");
+        let state = peer.hello(81).unwrap();
+        peer.epoch(&state, b"abc");
+        let retained = fixture.entries();
+        assert_eq!(staged_bytes(&fixture.inbox), vec![b"abc".to_vec()]);
+        let replacement = if downgrade {
+            policy_bytes(3, &[])
+        } else {
+            session_policy_bytes(3, &fixture.allowed, &[])
+        };
+        replace_policy(&fixture, &policy, &replacement);
+        reload(&process);
+        let rejected = process.event("revocation_policy_rejected");
+        assert_eq!(rejected["generation"], 2);
+        assert_eq!(rejected["admission_closed"], true);
+        assert_eq!(rejected["drained"], false);
+        let cancelled = completion(&mut process);
+        assert_eq!(cancelled["transfer"]["status"], "cancelled");
+        assert_eq!(cancelled["transfer"]["sink_written_bytes"], 3);
+        assert_eq!(cancelled["publication"]["state"], "staged");
+        assert!(cancelled["transfer"]["completed_receipt"].is_null());
+        assert!(peer.receive().is_err());
+        drop(peer);
+        assert!(!process.exit().success());
+        assert!(std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_err());
+        assert_eq!(fixture.entries(), retained);
+        assert_eq!(staged_bytes(&fixture.inbox), vec![b"abc".to_vec()]);
+    }
+}

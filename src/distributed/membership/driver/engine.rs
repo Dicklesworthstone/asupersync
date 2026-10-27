@@ -22,6 +22,9 @@ pub(super) struct Engine {
     mtu: usize,
     pub(super) outbox: VecDeque<Queued>,
     pub(super) stats: SwimDriverStats,
+    /// Accepted direct source identities since the last observation publication.
+    /// A configured seed or a rumor about another node is not direct contact.
+    pub(super) contacts: Vec<NodeId>,
     leaving: Option<u64>,
 }
 
@@ -30,7 +33,8 @@ impl Engine {
         let by_address = peers.iter().map(|(node, addr)| (*addr, node.clone())).collect();
         Self {
             swim, peers, by_address, config, mtu,
-            outbox: VecDeque::new(), stats: SwimDriverStats::default(), leaving: None,
+            outbox: VecDeque::new(), stats: SwimDriverStats::default(),
+            contacts: Vec::new(), leaving: None,
         }
     }
 
@@ -101,6 +105,10 @@ impl Engine {
         if !self.authorized_packet(&packet) {
             self.stats.unauthorized_packets = self.stats.unauthorized_packets.saturating_add(1);
             return Ok(());
+        }
+        if !self.contacts.contains(&node) {
+            self.contacts.try_reserve(1).map_err(|_| SwimDriverError::Allocation)?;
+            self.contacts.push(node.clone());
         }
         self.stats.accepted_packets = self.stats.accepted_packets.saturating_add(1);
         if matches!(&packet.payload, Payload::Ack { .. }) {

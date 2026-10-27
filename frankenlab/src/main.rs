@@ -12,6 +12,7 @@
 //! ```
 
 use asupersync::config::EncodingConfig;
+use asupersync::lab::exact_explorer::{ExactScheduleCheckpointLimits, ExactScheduleLimits};
 use asupersync::lab::ldfi::HittingSetBudget;
 use asupersync::lab::ldfi_trace::{
     LdfiReport, TraceLineageConfig, blind_chaos_single_fault_count, ldfi_report, support_graph_for,
@@ -20,6 +21,7 @@ use asupersync::lab::scenario::{Scenario, ScenarioLoadLimits};
 use asupersync::lab::scenario_runner::{
     ParticipantBindings, ScenarioCancellationLimits, ScenarioCancellationReport,
     ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner, ScenarioRunnerError,
+    ScenarioScheduleCheckpoint, ScenarioScheduleReport,
 };
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::trace::minimizer::LogicalMinimizerClock;
@@ -36,7 +38,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use serde::Serialize;
 use std::cell::{Cell, RefCell};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -69,7 +71,7 @@ enum Command {
     /// Replay a scenario twice and verify determinism
     Replay(ReplayArgs),
 
-    /// Explore multiple seeds to find invariant violations
+    /// Explore seeds or exact scheduler choices to find invariant violations
     Explore(ExploreArgs),
 
     /// Test scenario cancellation at recorded scheduler poll boundaries
@@ -140,12 +142,66 @@ struct ExploreArgs {
     resolve_includes: bool,
 
     /// Number of seeds to explore
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100, conflicts_with = "exact")]
     seeds: u64,
 
     /// Starting seed for exploration
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, conflicts_with = "exact")]
     start_seed: u64,
+
+    #[command(flatten)]
+    exact_options: ExactExploreArgs,
+}
+
+#[derive(Args, Debug, Default)]
+struct ExactExploreArgs {
+    /// Explore witnessed scheduler alternatives with one worker and chaos off
+    ///
+    /// Timed faults and cancellation campaigns are refused in this mode.
+    #[arg(long, action = ArgAction::SetTrue)]
+    exact: bool,
+
+    /// Override the fixed scenario seed used by every exact execution
+    #[arg(long, requires = "exact")]
+    seed: Option<u64>,
+
+    /// Maximum fresh exact executions in this invocation (default: 100)
+    #[arg(long, requires = "exact")]
+    max_runs: Option<usize>,
+
+    /// Maximum scheduler steps plus time advances per execution (default: 100000)
+    #[arg(long, requires = "exact")]
+    max_steps: Option<u64>,
+
+    /// Maximum task polls per exact execution (default: 4096)
+    #[arg(long, requires = "exact")]
+    max_dispatches: Option<usize>,
+
+    /// Maximum retained alternative prefixes (default: 1024)
+    #[arg(long, requires = "exact")]
+    max_pending_prefixes: Option<usize>,
+
+    /// Maximum scheduler entries inspected per choice (default: 4096)
+    #[arg(long, requires = "exact")]
+    max_inventory_entries: Option<usize>,
+
+    /// Continue exact exploration after a scenario failure
+    #[arg(long, requires = "exact", action = ArgAction::SetTrue)]
+    keep_going: bool,
+
+    /// Resume a saved frontier for the same scenario, seed and implementation
+    #[arg(long = "resume", requires = "exact", value_name = "FILE")]
+    resume_checkpoint: Option<PathBuf>,
+
+    /// Save the remaining frontier and cumulative verdict to a new file
+    ///
+    /// An existing file is never overwritten, including the resume input.
+    #[arg(long, requires = "exact", value_name = "FILE")]
+    checkpoint_out: Option<PathBuf>,
+
+    /// Maximum encoded and decoded checkpoint bytes (default: 67108864)
+    #[arg(long, requires = "exact", value_name = "BYTES")]
+    checkpoint_max_bytes: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -496,6 +552,9 @@ fn format_explore_result(result: &ScenarioExplorationResult, json: bool) -> Stri
 #[allow(clippy::cast_possible_truncation, clippy::needless_pass_by_value)]
 fn cmd_explore(args: ExploreArgs, json: bool) -> Result<(), String> {
     let scenario = load_scenario(&args.scenario, args.resolve_includes)?;
+    if args.exact_options.exact {
+        return cmd_explore_exact(&scenario, &args.exact_options, json);
+    }
     let result = ScenarioRunner::explore_seeds(&scenario, args.start_seed, args.seeds as usize)
         .map_err(runner_error_message)?;
 
@@ -510,6 +569,228 @@ fn cmd_explore(args: ExploreArgs, json: bool) -> Result<(), String> {
             result.failed, result.seeds_explored
         ))
     }
+}
+
+impl ExactExploreArgs {
+    fn limits(&self) -> ExactScheduleLimits {
+        ExactScheduleLimits::new(
+            self.max_runs.unwrap_or(100),
+            self.max_steps.unwrap_or(100_000),
+            self.max_dispatches.unwrap_or(4096),
+            self.max_pending_prefixes.unwrap_or(1024),
+            self.max_inventory_entries.unwrap_or(4096),
+        )
+    }
+
+    fn checkpoint_limits(&self) -> Result<ExactScheduleCheckpointLimits, String> {
+        let bytes = self.checkpoint_max_bytes.unwrap_or(64 * 1024 * 1024);
+        if bytes == 0 {
+            return Err("--checkpoint-max-bytes must be positive".to_string());
+        }
+        // The codec checks encoded and decoded storage before allocating.
+        // Aggregate element bounds also fit inside the caller's byte budget;
+        // they are intentionally independent of one execution's poll bound.
+        Ok(ExactScheduleCheckpointLimits {
+            max_encoded_bytes: bytes,
+            max_decoded_bytes: bytes,
+            max_prefixes: self.limits().max_pending_prefixes,
+            max_decisions: bytes,
+            max_dispatches: bytes,
+        })
+    }
+}
+
+fn read_schedule_checkpoint(
+    path: &Path,
+    limits: ExactScheduleCheckpointLimits,
+) -> Result<ScenarioScheduleCheckpoint, String> {
+    if !fs::metadata(path)
+        .map_err(|error| format!("Cannot inspect checkpoint {}: {error}", path.display()))?
+        .is_file()
+    {
+        return Err(format!(
+            "Checkpoint {} must be a regular file",
+            path.display()
+        ));
+    }
+    let file = fs::File::open(path)
+        .map_err(|error| format!("Cannot open checkpoint {}: {error}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Cannot inspect checkpoint {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Checkpoint {} must be a regular file",
+            path.display()
+        ));
+    }
+    let byte_limit = u64::try_from(limits.max_encoded_bytes)
+        .map_err(|_| "Checkpoint byte limit is not representable".to_string())?;
+    let read_limit = byte_limit
+        .checked_add(1)
+        .ok_or_else(|| "Checkpoint byte limit is too large".to_string())?;
+    if metadata.len() > byte_limit {
+        return Err(format!(
+            "Checkpoint {} exceeds its byte limit",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Cannot read checkpoint {}: {error}", path.display()))?;
+    if bytes.len() > limits.max_encoded_bytes {
+        return Err(format!(
+            "Checkpoint {} exceeds its byte limit",
+            path.display()
+        ));
+    }
+    ScenarioScheduleCheckpoint::from_canonical_bytes(&bytes, limits)
+        .map_err(|error| format!("Invalid checkpoint {}: {error}", path.display()))
+}
+
+fn write_schedule_checkpoint(
+    path: &Path,
+    checkpoint: &ScenarioScheduleCheckpoint,
+    limits: ExactScheduleCheckpointLimits,
+) -> Result<(), String> {
+    let bytes = checkpoint
+        .to_canonical_bytes(limits)
+        .map_err(|error| format!("Cannot encode checkpoint: {error}"))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "Cannot create checkpoint {}: {error}. Choose a new output path",
+                path.display()
+            )
+        })?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("Cannot finish checkpoint {}: {error}", path.display()))
+}
+
+fn format_schedule_result(report: &ScenarioScheduleReport, json: bool) -> String {
+    if json {
+        return pretty_json_or(&report.to_json(), "{}");
+    }
+    let status = if report.passed() {
+        "PASS"
+    } else {
+        "INCOMPLETE OR FAILED"
+    };
+    let mut lines = vec![
+        format!(
+            "Exact schedule exploration: {} [{status}]",
+            report.scenario_id
+        ),
+        format!("Seed: {}", report.seed),
+        format!("Termination: {:?}", report.termination),
+        format!("Fresh executions: {}", report.runs.len()),
+        format!("Cumulative executions: {}", report.progress.runs),
+        format!("Pending prefixes: {}", report.pending_prefixes),
+        format!("Omitted alternatives: {}", report.progress.omitted),
+        format!("Scenario failures: {}", report.scenario_failed),
+    ];
+    for (index, run) in report.runs.iter().enumerate().filter(|(_, run)| !run.passed()) {
+        lines.push(format!(
+            "Execution {}: {:?} ({} steps)",
+            index + 1,
+            run.execution.termination,
+            run.execution.lab.steps_total
+        ));
+        lines.extend(
+            run.execution
+                .lab
+                .invariant_violations
+                .iter()
+                .map(|violation| format!("  Invariant: {violation}")),
+        );
+        lines.extend(
+            run.oracle_report
+                .entries
+                .iter()
+                .filter(|entry| !entry.passed)
+                .map(|entry| {
+                    format!(
+                        "  Oracle {}: {}",
+                        entry.invariant,
+                        entry.violation.as_deref().unwrap_or("failed")
+                    )
+                }),
+        );
+    }
+    if !report.historical_progress_verified {
+        lines.push(
+            "Checkpoint history is unverified; this invocation verifies only fresh executions"
+                .to_string(),
+        );
+    }
+    lines.push(
+        "Coverage: schedule-tree exploration for this admitted model, including equivalent schedules"
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn schedule_command_result(report: &ScenarioScheduleReport) -> Result<(), String> {
+    if report.passed() {
+        return Ok(());
+    }
+    if report.scenario_failed > 0 {
+        return Err(format!(
+            "Exact exploration recorded {} scenario failures",
+            report.scenario_failed
+        ));
+    }
+    if !report.historical_progress_verified {
+        return Err(
+            "Checkpoint history remains unverified; fresh execution results are in the report"
+                .to_string(),
+        );
+    }
+    Err(format!(
+        "Exact exploration is incomplete: {:?} ({} prefixes remain, {} alternatives omitted)",
+        report.termination, report.pending_prefixes, report.progress.omitted
+    ))
+}
+
+fn cmd_explore_exact(scenario: &Scenario, args: &ExactExploreArgs, json: bool) -> Result<(), String> {
+    let checkpoint_limits = args.checkpoint_limits()?;
+    if let Some(path) = &args.checkpoint_out {
+        if path.try_exists().map_err(|error| {
+            format!("Cannot inspect checkpoint output {}: {error}", path.display())
+        })? {
+            return Err(format!(
+                "Checkpoint output {} already exists; choose a new output path",
+                path.display()
+            ));
+        }
+    }
+    let mut checkpoint = if let Some(path) = &args.resume_checkpoint {
+        read_schedule_checkpoint(path, checkpoint_limits)?
+    } else {
+        ScenarioRunner::new_schedule_checkpoint(scenario, args.seed, args.limits())
+            .map_err(|error| error.to_string())?
+    };
+    let report = ScenarioRunner::resume_schedules(
+        scenario,
+        args.seed,
+        args.limits(),
+        &mut checkpoint,
+        !args.keep_going,
+    )
+    .map_err(|error| error.to_string())?;
+    println!("{}", format_schedule_result(&report, json));
+    if let Some(path) = &args.checkpoint_out {
+        write_schedule_checkpoint(path, &checkpoint, checkpoint_limits)?;
+        if !json {
+            println!("Checkpoint: {}", path.display());
+        }
+    }
+    schedule_command_result(&report)
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,6 +1518,7 @@ fn demo_explore(dir: &Path, json: bool) -> Result<(), String> {
                     resolve_includes: false,
                     seeds: 50,
                     start_seed: 0,
+                    exact_options: ExactExploreArgs::default(),
                 },
                 json,
             );
@@ -1251,6 +1533,7 @@ fn demo_explore(dir: &Path, json: bool) -> Result<(), String> {
             resolve_includes: false,
             seeds: 50,
             start_seed: 0,
+            exact_options: ExactExploreArgs::default(),
         },
         json,
     )

@@ -17,15 +17,16 @@
 
 use super::{
     BracketConfig, BracketHandle, BracketPhase, BracketReport, BracketUseFuture,
-    Cx, Outcome, cancel_reason, evaluate,
+    Cx, Outcome, cancel_reason, evaluate, panic_payload,
 };
 use crate::runtime::{JoinError, SpawnError};
-use crate::types::TaskId;
+use crate::types::{PanicPayload, TaskId};
 use parking_lot::Mutex;
 use std::any::Any;
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -108,6 +109,7 @@ trait OwnedResource<C>: Send {
     fn resource(&self) -> &dyn Any;
     fn resource_mut(&mut self) -> &mut dyn Any;
     fn release(self: Box<Self>, cx: Cx) -> ReleaseFuture<C>;
+    fn discard(self: Box<Self>) -> (Option<PanicPayload>, Option<PanicPayload>);
 }
 
 struct Entry<T, F> { resource: T, release: F }
@@ -122,6 +124,17 @@ where
     fn release(self: Box<Self>, cx: Cx) -> ReleaseFuture<C> {
         let Self { resource, release } = *self;
         Box::pin(release(cx, resource))
+    }
+
+    fn discard(self: Box<Self>) -> (Option<PanicPayload>, Option<PanicPayload>) {
+        let Self { resource, release } = *self;
+        // Isolate the two owners independently: a resource destructor must not
+        // cause a second captured-factory destructor to unwind during its panic.
+        let resource_panic = catch_unwind(AssertUnwindSafe(|| drop(resource)))
+            .err().map(panic_payload);
+        let release_panic = catch_unwind(AssertUnwindSafe(|| drop(release)))
+            .err().map(panic_payload);
+        (resource_panic, release_panic)
     }
 }
 
@@ -291,6 +304,37 @@ impl<C: Send + 'static> ResourceStack<C> {
             Poll::Pending
         }
     }
+
+    // Only the saga controller may disarm compensations, after its commit
+    // decision. The recorder uses storage reserved before forward effects.
+    // Yield between batches and isolate every owner's destructor; never invoke
+    // an application compensation or destroy its captures under a lock.
+    pub(super) async fn discard(
+        &mut self,
+        mut record: impl FnMut(usize, Option<PanicPayload>, Option<PanicPayload>),
+    ) {
+        debug_assert!(!self.closing, "a closing stack cannot commit");
+        self.closing = true;
+        self.next = self.entries.len();
+        poll_fn(|task| {
+            for _ in 0..RELEASES_PER_POLL {
+                if self.next == 0 { return Poll::Ready(()); }
+                self.next -= 1;
+                let index = self.next;
+                let entry = self.entries[index].take().expect("undiscarded resource slot");
+                let (resource_panic, release_panic) = entry.discard();
+                record(index, resource_panic, release_panic);
+            }
+            if self.next == 0 {
+                Poll::Ready(())
+            } else {
+                task.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }).await;
+    }
+
+    pub(super) fn into_cleanup_report(self) -> ResourceCleanupReport<C> { self.report }
 }
 
 /// Exclusively reserved stack slot. No resource is owned until insertion.

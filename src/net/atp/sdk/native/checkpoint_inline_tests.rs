@@ -12,6 +12,7 @@
             state: NativeCheckpointState::Prepared,
             attempt: 0,
             receipt: None,
+            cancelled: false,
         }
     }
 
@@ -121,6 +122,13 @@
         record.attempt = 2;
         record.receipt = Some(StoredReceipt::capture(&report));
         record.validate().unwrap();
+        let mut revoked_success = record.clone();
+        revoked_success.version = CANCELLED_JOURNAL_VERSION;
+        revoked_success.cancelled = true;
+        assert!(matches!(
+            revoked_success.validate(),
+            Err(NativeCheckpointError::Invalid("acknowledged delivery cannot be cancelled"))
+        ));
         let restored: Journal =
             serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
         restored.validate().unwrap();
@@ -140,4 +148,151 @@
             }
             assert!(wrong.validate().is_err(), "kind={kind}");
         }
+    }
+
+    // The pre-cancellation decoder's exact field inventory and version check.
+    // It must retain compatibility for live v1 journals and refuse a terminal
+    // v2 rather than silently treating retained payload bytes as sendable.
+    #[derive(Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct VersionOneJournal {
+        version: u32,
+        file_name: String,
+        source_bytes: u64,
+        source_sha256: [u8; 32],
+        remote: SocketAddr,
+        server_name: String,
+        local_peer_label: String,
+        state: NativeCheckpointState,
+        attempt: u64,
+        receipt: Option<StoredReceipt>,
+    }
+
+    fn read_version_one(bytes: &[u8]) -> Result<VersionOneJournal, &'static str> {
+        let record: VersionOneJournal =
+            serde_json::from_slice(bytes).map_err(|_| "old decoder refused")?;
+        if record.version != JOURNAL_VERSION {
+            return Err("old version check refused");
+        }
+        Ok(record)
+    }
+
+    #[test]
+    fn cancellation_tombstones_preserve_live_v1_bytes_and_old_readers_fail_closed() {
+        for sending in [false, true] {
+            let mut record = journal();
+            if sending {
+                record.state = NativeCheckpointState::Sending;
+                record.attempt = 3;
+            }
+            let original = serde_json::to_vec(&record).unwrap();
+            let old = read_version_one(&original).unwrap();
+            assert_eq!(serde_json::to_vec(&old).unwrap(), original);
+            assert!(!String::from_utf8(original).unwrap().contains("cancelled"));
+
+            record.cancelled = true;
+            record.version = CANCELLED_JOURNAL_VERSION;
+            record.validate().unwrap();
+            let bytes = serde_json::to_vec(&record).unwrap();
+            assert!(read_version_one(&bytes).is_err());
+            let mut version_only: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            version_only.as_object_mut().unwrap().remove("cancelled");
+            assert_eq!(
+                read_version_one(&serde_json::to_vec(&version_only).unwrap())
+                    .err()
+                    .unwrap(),
+                "old version check refused"
+            );
+
+            let restored: Journal = serde_json::from_slice(&bytes).unwrap();
+            restored.validate().unwrap();
+            for retry in [
+                NativeCheckpointRetry::Never,
+                NativeCheckpointRetry::AcknowledgeUncertain {
+                    attempt: restored.attempt,
+                },
+            ] {
+                assert!(matches!(
+                    restored.next_attempt(retry),
+                    Err(NativeCheckpointError::Cancelled { attempt, delivery_uncertain })
+                        if attempt == restored.attempt && delivery_uncertain == sending
+                ));
+            }
+            let status = restored.status(PathBuf::from("/retained/checkpoint"));
+            assert!(status.cancelled);
+            assert_eq!(status.delivery_uncertain(), sending);
+            assert!(status.receipt.is_none());
+        }
+    }
+
+    #[test]
+    fn cancellation_tombstones_reject_incoherent_versions_lifecycles_and_duplicate_flags() {
+        let mut record = journal();
+        record.version = CANCELLED_JOURNAL_VERSION;
+        record.cancelled = true;
+        record.validate().unwrap();
+        for mutation in 0..6 {
+            let mut changed = record.clone();
+            match mutation {
+                0 => changed.version = JOURNAL_VERSION,
+                1 => changed.version += 1,
+                2 => changed.cancelled = false,
+                3 => changed.state = NativeCheckpointState::Acknowledged,
+                4 => changed.attempt = 1,
+                5 => changed.state = NativeCheckpointState::Sending,
+                _ => unreachable!(),
+            }
+            assert!(changed.validate().is_err(), "mutation={mutation}");
+        }
+        let bytes = serde_json::to_string(&record).unwrap();
+        for malformed in [
+            bytes.replacen('{', "{\"cancelled\":true,", 1),
+            bytes.replacen("\"cancelled\":true", "\"cancelled\":null", 1),
+            bytes.replacen("\"cancelled\":true", "\"cancelled\":\"true\"", 1),
+        ] {
+            assert!(serde_json::from_str::<Journal>(&malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn cancellation_snapshot_binds_source_destination_and_exact_attempt() {
+        let directory = PathBuf::from("/retained/checkpoint");
+        let original = journal();
+        let expected = original.info(directory.clone());
+        original
+            .check_cancellation_snapshot(&directory, &expected)
+            .unwrap();
+        for mutation in 0..7 {
+            let mut wrong = expected.clone();
+            match mutation {
+                0 => wrong.directory.push("other"),
+                1 => wrong.remote.set_port(1235),
+                2 => wrong.file_name.push('x'),
+                3 => wrong.source_bytes += 1,
+                4 => wrong.source_sha256[0] ^= 1,
+                5 => wrong.attempt += 1,
+                6 => wrong.state = NativeCheckpointState::Sending,
+                _ => unreachable!(),
+            }
+            let result = original.check_cancellation_snapshot(&directory, &wrong);
+            if mutation < 5 {
+                assert!(matches!(result, Err(NativeCheckpointError::SnapshotMismatch)));
+            } else {
+                assert!(matches!(result, Err(NativeCheckpointError::StaleAttempt)));
+            }
+        }
+        let mut sending = original;
+        sending.state = NativeCheckpointState::Sending;
+        sending.attempt = 1;
+        assert!(matches!(
+            sending.check_cancellation_snapshot(&directory, &expected),
+            Err(NativeCheckpointError::StaleAttempt)
+        ));
+        let expected = sending.info(directory.clone());
+        sending.cancelled = true;
+        sending.version = CANCELLED_JOURNAL_VERSION;
+        sending.validate().unwrap();
+        sending
+            .check_cancellation_snapshot(&directory, &expected)
+            .unwrap();
     }

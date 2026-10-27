@@ -1695,6 +1695,13 @@ impl<Caps> Cx<Caps> {
         self
     }
 
+    pub(crate) fn spawn_authority_snapshot(&self) -> crate::runtime::spawn_mailbox::SpawnAuthority {
+        crate::runtime::spawn_mailbox::SpawnAuthority::new(
+            self.task_id(),
+            self.handles.macaroon.clone(),
+        )
+    }
+
     /// Attaches the producer-side spawn gateway
     /// (br-asupersync-hwjqyo / A2.2).
     #[must_use]
@@ -5452,6 +5459,7 @@ where
         let _liveness_guard = gateway
             .liveness_guard()
             .ok_or(crate::runtime::state::SpawnError::RuntimeUnavailable)?;
+        gateway.verify_spawn_cx(self, region, budget)?;
         let mut requests = Vec::with_capacity(factories.len());
         let mut handles = Vec::with_capacity(factories.len());
         for factory in factories {
@@ -5921,6 +5929,9 @@ where
         if !crate::runtime::spawn_mailbox::local_spawn_lane_is_owned_by(gateway) {
             return Err(crate::runtime::state::SpawnError::LocalSchedulerUnavailable);
         }
+        if !caller_owned_poll_quota {
+            gateway.verify_spawn_cx(self, region, budget)?;
+        }
 
         let provisional = gateway.mailbox().allocate_task_id();
         // Retirement barrier shared by this task's join handle (via the slot),
@@ -5933,6 +5944,7 @@ where
             AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
                 .with_runtime_mask(self.runtime_mask)
                 .with_caller_owned_poll_quota(caller_owned_poll_quota)
+                .with_spawn_authority(gateway.capture_spawn_authority(self))
                 .with_retirement_barrier(Arc::clone(&barrier))
                 // Admission builds the task's one context with these, so
                 // `Cx::current()` in the task carries them (br-asupersync-93zkbz).
@@ -6195,6 +6207,7 @@ where
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
 
+        gateway.verify_spawn_cx(self, region, budget)?;
         let (request, handle) = self.prepare_spawn_request(
             region,
             budget,
@@ -6247,6 +6260,7 @@ where
         let barrier = crate::runtime::task_handle::RetirementBarrier::pending();
         let mut admitted_slot = AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
             .with_runtime_mask(self.runtime_mask)
+            .with_spawn_authority(gateway.capture_spawn_authority(self))
             .with_retirement_barrier(Arc::clone(&barrier))
             // Admission builds the task's one context with these, so
             // `Cx::current()` in the task carries them (br-asupersync-93zkbz).
@@ -6360,6 +6374,9 @@ where
         (request, handle)
     }
 
+}
+
+impl<Caps> Cx<Caps> {
     /// The region that admits a spawn into this context's own region once
     /// that sealed (race-branch) region has closed (br-asupersync-k27oxe).
     /// `None` for a spawn that names any other region: a closed scope or
@@ -6373,6 +6390,12 @@ where
         }
     }
 
+}
+
+impl<Caps> Cx<Caps>
+where
+    Caps: cap::HasSpawn + Send + Sync + 'static,
+{
     /// Records the fallback [`Self::spawn_fallback_for`] returns; admission
     /// sets it when it admits a task into a sealed region.
     pub(crate) fn set_spawn_fallback_region(&self, region: Option<RegionId>) {

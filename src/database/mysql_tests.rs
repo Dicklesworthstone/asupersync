@@ -4779,26 +4779,653 @@ mod tests {
 
         fn finish_poisoned(listener: &std::net::TcpListener, peer: &mut std::net::TcpStream) {
             pool_reset_peer_eof(peer);
+            finish_kill(listener);
+        }
+
+        fn finish_kill(listener: &std::net::TcpListener) {
+            let mut killer = receive_kill(listener);
+            write_response_packet(&mut killer, 1, ok_packet_payload(0, 2));
+            pool_reset_peer_eof(&mut killer);
+        }
+
+        fn receive_kill(listener: &std::net::TcpListener) -> std::net::TcpStream {
             // Observe this connection's separate KILL exchange, including its
-            // final EOF. Do not depend on a process-global cleanup counter.
+            // command. Do not depend on a process-global cleanup counter.
             listener.set_nonblocking(true).unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             let mut killer = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(std::time::Instant::now() < deadline, "owned KILL connection");
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "owned KILL connection"
+                        );
                         std::thread::park_timeout(Duration::from_millis(1));
                     }
                     Err(error) => panic!("accept owned KILL: {error}"),
                 }
             };
-            killer.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-            killer.set_write_timeout(Some(Duration::from_secs(30))).unwrap();
+            killer
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            killer
+                .set_write_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
             authenticate(&mut killer, false);
             pool_reset_peer_command(&mut killer, command::COM_QUERY, b"KILL QUERY 1");
-            write_response_packet(&mut killer, 1, ok_packet_payload(0, 2));
-            pool_reset_peer_eof(&mut killer);
+            killer
+        }
+
+        fn cursor_execute(peer: &mut std::net::TcpStream, id: u32) {
+            let mut body = id.to_le_bytes().to_vec();
+            body.extend_from_slice(&[1, 1, 0, 0, 0, 0, 1, 3, 0x80, 42, 0, 0, 0]);
+            pool_reset_peer_command(peer, command::COM_STMT_EXECUTE, &body);
+        }
+
+        fn cursor_end(peer: &mut std::net::TcpStream, sequence: u8, status: u16, modern: bool) {
+            let payload = if modern {
+                // Deliberately short: its status offset differs from legacy
+                // EOF despite the same 0xfe marker and fewer than nine bytes.
+                deprecate_eof_ok_packet_payload(status, &[])
+            } else {
+                eof_packet_payload(status)
+            };
+            write_response_packet(peer, sequence, payload);
+        }
+
+        fn cursor_header(peer: &mut std::net::TcpStream, status: u16, modern: bool) {
+            write_response_packet(peer, 1, vec![1]);
+            write_response_packet(
+                peer,
+                2,
+                column("value", column_type::MYSQL_TYPE_LONGLONG, 0x20),
+            );
+            cursor_end(peer, 3, status, modern);
+        }
+
+        fn cursor_fetch(peer: &mut std::net::TcpStream, id: u32, rows: u32) {
+            let mut body = id.to_le_bytes().to_vec();
+            body.extend_from_slice(&rows.to_le_bytes());
+            pool_reset_peer_command(peer, command::COM_STMT_FETCH, &body);
+        }
+
+        #[test]
+        fn prepared_cursor_native_batches_are_demand_driven_and_connection_is_reusable() {
+            for workers in [1, 2] {
+                for modern in [false, true] {
+                    let (opened, allow_fetch) = mpsc::channel();
+                    let (first_row, allow_remainder) = mpsc::channel();
+                    let peer = PoolResetPeer::start(move |peer| {
+                        authenticate(peer, modern);
+                        prepare(peer, 7, modern);
+                        cursor_execute(peer, 7);
+                        cursor_header(peer, 0x42, modern);
+                        allow_fetch
+                            .recv_timeout(Duration::from_secs(30))
+                            .expect("cursor returned without fetching rows");
+                        cursor_fetch(peer, 7, 2);
+                        write_response_packet(peer, 1, integer_row(u64::MAX));
+                        allow_remainder
+                            .recv_timeout(Duration::from_secs(30))
+                            .expect("first row returned without collecting the batch");
+                        write_response_packet(peer, 2, vec![0, 4]);
+                        cursor_end(peer, 3, 0x42, modern);
+                        cursor_fetch(peer, 7, 2);
+                        write_response_packet(peer, 1, integer_row(7));
+                        cursor_end(peer, 2, 0x82, modern);
+                        // Exact batch boundaries can require a further fetch
+                        // that returns only LAST_ROW_SENT. Cover empty results
+                        // through the same terminal shape and cache entry.
+                        cursor_execute(peer, 7);
+                        cursor_header(peer, 0x42, modern);
+                        cursor_fetch(peer, 7, 2);
+                        cursor_end(peer, 1, 0x82, modern);
+                        execute(peer, 7);
+                        let sequence = header(peer, column_type::MYSQL_TYPE_LONGLONG, modern);
+                        write_response_packet(peer, sequence, integer_row(9));
+                        end(peer, sequence + 1, modern);
+                        finish_clean(peer);
+                    });
+                    let options = peer.options(None);
+                    let runtime = prepared_stream_runtime(workers);
+                    runtime.block_on(runtime.handle().spawn(async move {
+                        let cx = Cx::current().unwrap();
+                        crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                            let mut connection =
+                                MySqlConnection::connect_with_options(&cx, options)
+                                    .await
+                                    .unwrap();
+                            // The public handshake retains legacy EOF. This
+                            // internal seam also exercises a negotiated modern
+                            // decoder against real native socket I/O.
+                            if modern {
+                                connection.inner.capabilities |= capability::CLIENT_DEPRECATE_EOF;
+                            }
+                            let statement = connection.prepare(&cx, SQL).await.unwrap();
+                            connection.set_max_result_rows(1);
+                            let mut cursor = connection
+                                .query_cursor_prepared(&cx, &statement, &[&42_u32], 2)
+                                .await
+                                .unwrap();
+                            assert_eq!(cursor.fetch_rows(), 2);
+                            assert_eq!(cursor.columns()[0].name, "value");
+                            opened.send(()).unwrap();
+                            assert_eq!(
+                                cursor
+                                    .next(&cx)
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                                    .get("value")
+                                    .unwrap(),
+                                &MySqlValue::Text(u64::MAX.to_string())
+                            );
+                            first_row.send(()).unwrap();
+                            assert!(
+                                cursor
+                                    .next(&cx)
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                                    .get_idx(0)
+                                    .unwrap()
+                                    .is_null()
+                            );
+                            assert_eq!(
+                                cursor
+                                    .next(&cx)
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                                    .get_idx(0)
+                                    .unwrap()
+                                    .as_i64(),
+                                Some(7)
+                            );
+                            assert!(cursor.next(&cx).await.unwrap().is_none());
+                            assert_eq!(cursor.row_count(), 3);
+                            let cancelled = Cx::for_testing();
+                            cancelled.cancel_with_reason(CancelReason::user("after cursor EOF"));
+                            // Exercise the loop's terminal branch directly:
+                            // cancellation after LAST_ROW_SENT cannot start
+                            // a KILL on an already reusable connection.
+                            assert!(cursor.next_inner(&cancelled).await.unwrap().is_none());
+                            cursor.close(&cancelled).await.unwrap();
+                            drop(cursor);
+                            assert!(!connection.inner.closed);
+                            assert!(!connection.inner.query_in_flight.load(Ordering::Acquire));
+                            let mut empty = connection
+                                .query_cursor_params(&cx, SQL, &[&42_u32], 2)
+                                .await
+                                .unwrap();
+                            assert!(empty.next(&cx).await.unwrap().is_none());
+                            assert!(empty.next(&cx).await.unwrap().is_none());
+                            assert_eq!(empty.row_count(), 0);
+                            drop(empty);
+                            assert_eq!(connection.prepared_cache_stats().hits, 1);
+                            let rows = connection
+                                .query_prepared(&cx, &statement, &[&42_u32])
+                                .await
+                                .unwrap();
+                            assert_eq!(rows[0].get_idx(0).unwrap().as_i64(), Some(9));
+                            assert!(matches!(connection.ping(&cx).await, Outcome::Ok(())));
+                            connection.close().await.unwrap();
+                        })
+                        .await
+                        .expect("bounded cursor batch journey");
+                    }));
+                    peer.finish();
+                    assert_pool_reset_drained(&runtime);
+                }
+            }
+        }
+
+        #[test]
+        fn prepared_cursor_native_close_drains_current_batch_without_fetching_more() {
+            for workers in [1, 2] {
+                for start_fetch in [false, true] {
+                    let peer = PoolResetPeer::start(move |peer| {
+                        authenticate(peer, false);
+                        prepare(peer, 7, false);
+                        cursor_execute(peer, 7);
+                        cursor_header(peer, 0x42, false);
+                        if start_fetch {
+                            cursor_fetch(peer, 7, 2);
+                            write_response_packet(peer, 1, integer_row(10));
+                            write_response_packet(peer, 2, integer_row(11));
+                            cursor_end(peer, 3, 0x42, false);
+                        }
+                        pool_reset_peer_command(
+                            peer,
+                            command::COM_STMT_RESET,
+                            &7_u32.to_le_bytes(),
+                        );
+                        write_response_packet(peer, 1, ok_packet_payload(0, 2));
+                        // Reset closes only the cursor, not the statement.
+                        execute(peer, 7);
+                        let sequence = header(peer, column_type::MYSQL_TYPE_LONGLONG, false);
+                        write_response_packet(peer, sequence, integer_row(12));
+                        end(peer, sequence + 1, false);
+                        finish_clean(peer);
+                    });
+                    let options = peer.options(None);
+                    let runtime = prepared_stream_runtime(workers);
+                    runtime.block_on(runtime.handle().spawn(async move {
+                        let cx = Cx::current().unwrap();
+                        crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                            let mut connection =
+                                MySqlConnection::connect_with_options(&cx, options)
+                                    .await
+                                    .unwrap();
+                            let statement = connection.prepare(&cx, SQL).await.unwrap();
+                            let mut cursor = connection
+                                .query_cursor_prepared(&cx, &statement, &[&42_u32], 2)
+                                .await
+                                .unwrap();
+                            if start_fetch {
+                                assert_eq!(
+                                    cursor
+                                        .next(&cx)
+                                        .await
+                                        .unwrap()
+                                        .unwrap()
+                                        .get_idx(0)
+                                        .unwrap()
+                                        .as_i64(),
+                                    Some(10)
+                                );
+                            }
+                            cursor.close(&cx).await.unwrap();
+                            assert_eq!(cursor.row_count(), u64::from(start_fetch));
+                            assert!(cursor.next(&cx).await.unwrap().is_none());
+                            cursor.close(&cx).await.unwrap();
+                            drop(cursor);
+                            assert!(!connection.inner.closed);
+                            assert!(!connection.inner.query_in_flight.load(Ordering::Acquire));
+                            let rows = connection
+                                .query_prepared(&cx, &statement, &[&42_u32])
+                                .await
+                                .unwrap();
+                            assert_eq!(rows[0].get_idx(0).unwrap().as_i64(), Some(12));
+                            assert!(matches!(connection.ping(&cx).await, Outcome::Ok(())));
+                            connection.close().await.unwrap();
+                        })
+                        .await
+                        .expect("bounded explicit cursor close journey");
+                    }));
+                    peer.finish();
+                    assert_pool_reset_drained(&runtime);
+                }
+            }
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum CursorFailure {
+            Refused,
+            ExtraRows,
+            EmptyNonterminal,
+            MissingStatus,
+            MoreResults,
+            ServerError,
+            MalformedRow,
+            ResetError,
+        }
+
+        #[test]
+        fn prepared_cursor_native_refusal_and_failed_fetches_never_restore_reuse() {
+            for workers in [1, 2] {
+                for failure in [
+                    CursorFailure::Refused,
+                    CursorFailure::ExtraRows,
+                    CursorFailure::EmptyNonterminal,
+                    CursorFailure::MissingStatus,
+                    CursorFailure::MoreResults,
+                    CursorFailure::ServerError,
+                    CursorFailure::MalformedRow,
+                    CursorFailure::ResetError,
+                ] {
+                    let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
+                        authenticate(peer, false);
+                        prepare(peer, 7, false);
+                        cursor_execute(peer, 7);
+                        cursor_header(
+                            peer,
+                            if matches!(failure, CursorFailure::Refused) {
+                                2
+                            } else {
+                                0x42
+                            },
+                            false,
+                        );
+                        if !matches!(failure, CursorFailure::Refused) {
+                            if matches!(failure, CursorFailure::ResetError) {
+                                pool_reset_peer_command(
+                                    peer,
+                                    command::COM_STMT_RESET,
+                                    &7_u32.to_le_bytes(),
+                                );
+                                write_response_packet(
+                                    peer,
+                                    1,
+                                    error_packet_payload(1243, "HY000", "unknown statement"),
+                                );
+                            } else {
+                                cursor_fetch(peer, 7, 1);
+                                match failure {
+                                    CursorFailure::ExtraRows => {
+                                        write_response_packet(peer, 1, integer_row(1));
+                                        write_response_packet(peer, 2, integer_row(2));
+                                    }
+                                    CursorFailure::EmptyNonterminal => {
+                                        cursor_end(peer, 1, 0x42, false)
+                                    }
+                                    CursorFailure::MissingStatus => cursor_end(peer, 1, 2, false),
+                                    CursorFailure::MoreResults => cursor_end(peer, 1, 0x8a, false),
+                                    CursorFailure::ServerError => write_response_packet(
+                                        peer,
+                                        1,
+                                        error_packet_payload(1317, "70100", "interrupted"),
+                                    ),
+                                    CursorFailure::MalformedRow => {
+                                        write_response_packet(peer, 1, vec![0, 1])
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            }
+                        }
+                        finish_poisoned(listener, peer);
+                    });
+                    let options = peer.options(None);
+                    let runtime = prepared_stream_runtime(workers);
+                    runtime.block_on(runtime.handle().spawn(async move {
+                        let cx = Cx::current().unwrap();
+                        crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                            let mut connection =
+                                MySqlConnection::connect_with_options(&cx, options)
+                                    .await
+                                    .unwrap();
+                            match connection
+                                .query_cursor_params(&cx, SQL, &[&42_u32], 1)
+                                .await
+                            {
+                                Outcome::Ok(mut cursor) => {
+                                    assert!(!matches!(failure, CursorFailure::Refused));
+                                    if matches!(failure, CursorFailure::ExtraRows) {
+                                        assert!(cursor.next(&cx).await.unwrap().is_some());
+                                    }
+                                    let result = if matches!(failure, CursorFailure::ResetError) {
+                                        cursor.close(&cx).await.map(|()| None)
+                                    } else {
+                                        cursor.next(&cx).await
+                                    };
+                                    assert!(
+                                        matches!(
+                                            result,
+                                            Outcome::Err(
+                                                MySqlError::Protocol(_)
+                                                    | MySqlError::InvalidPacket(_)
+                                                    | MySqlError::Server { .. }
+                                            )
+                                        ),
+                                        "{failure:?}: {result:?}"
+                                    );
+                                    assert!(matches!(
+                                        cursor.next(&cx).await,
+                                        Outcome::Err(MySqlError::ConnectionClosed)
+                                    ));
+                                    assert!(matches!(
+                                        cursor.close(&cx).await,
+                                        Outcome::Err(MySqlError::ConnectionClosed)
+                                    ));
+                                }
+                                Outcome::Err(MySqlError::Protocol(message)) => {
+                                    assert!(
+                                        matches!(failure, CursorFailure::Refused),
+                                        "{failure:?}: {message}"
+                                    );
+                                    assert!(message.contains("did not open"));
+                                }
+                                other => panic!("{failure:?}: {other:?}"),
+                            }
+                            assert!(connection.inner.closed);
+                            assert!(connection.inner.query_in_flight.load(Ordering::Acquire));
+                            assert!(matches!(
+                                connection.ping(&cx).await,
+                                Outcome::Err(MySqlError::ConnectionClosed)
+                            ));
+                            drop(connection);
+                        })
+                        .await
+                        .expect("bounded cursor refusal journey");
+                    }));
+                    peer.finish();
+                    assert_pool_reset_drained(&runtime);
+                }
+            }
+        }
+
+        #[test]
+        fn prepared_cursor_native_cancelled_parked_fetch_sends_kill_and_preserves_reason() {
+            for workers in [1, 2] {
+                let fetched = Arc::new(crate::sync::Notify::new());
+                let peer_fetched = Arc::clone(&fetched);
+                let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
+                    authenticate(peer, false);
+                    prepare(peer, 7, false);
+                    cursor_execute(peer, 7);
+                    cursor_header(peer, 0x42, false);
+                    cursor_fetch(peer, 7, 2);
+                    peer_fetched.notify_one();
+                    // No row or EOF is sent. Cancellation must wake the
+                    // pending native read and finish its separate KILL first.
+                    finish_kill(listener);
+                    pool_reset_peer_eof(peer);
+                });
+                let options = peer.options(None);
+                let runtime = prepared_stream_runtime(workers);
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().unwrap();
+                    crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                        let mut connection = MySqlConnection::connect_with_options(&cx, options)
+                            .await
+                            .unwrap();
+                        let mut cursor = connection
+                            .query_cursor_params(&cx, SQL, &[&42_u32], 2)
+                            .await
+                            .unwrap();
+                        let caller = Cx::for_testing();
+                        let reason = CancelReason::user("stop cursor fetch")
+                            .with_cause(CancelReason::shutdown());
+                        let mut pending = Box::pin(cursor.next(&caller));
+                        let mut observed = Box::pin(fetched.notified());
+                        std::future::poll_fn(|task_cx| {
+                            assert!(
+                                pending.as_mut().poll(task_cx).is_pending(),
+                                "peer withheld all fetch response bytes"
+                            );
+                            observed.as_mut().poll(task_cx)
+                        })
+                        .await;
+                        caller.cancel_with_reason(reason.clone());
+                        assert!(
+                            matches!(pending.await, Outcome::Cancelled(actual) if actual == reason)
+                        );
+                        assert!(matches!(
+                            cursor.next(&cx).await,
+                            Outcome::Err(MySqlError::ConnectionClosed)
+                        ));
+                        drop(cursor);
+                        assert!(connection.inner.closed);
+                        assert!(!connection.inner.query_in_flight.load(Ordering::Acquire));
+                        drop(connection);
+                    })
+                    .await
+                    .expect("bounded parked cursor cancellation journey");
+                }));
+                peer.finish();
+                assert_pool_reset_drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn prepared_cursor_native_abandoned_cancel_cleanup_retains_kill_ownership() {
+            for workers in [1, 2] {
+                let killing = Arc::new(crate::sync::Notify::new());
+                let peer_killing = Arc::clone(&killing);
+                let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
+                    authenticate(peer, false);
+                    prepare(peer, 7, false);
+                    cursor_execute(peer, 7);
+                    cursor_header(peer, 0x42, false);
+                    let mut killer = receive_kill(listener);
+                    // Withhold the KILL response so its drain future must
+                    // remain pending when the caller abandons cancellation.
+                    peer_killing.notify_one();
+                    pool_reset_peer_eof(&mut killer);
+                    // Dropping the poisoned original connection still owns
+                    // a separate bounded KILL attempt after abandonment.
+                    finish_poisoned(listener, peer);
+                });
+                let options = peer.options(None);
+                let runtime = prepared_stream_runtime(workers);
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().unwrap();
+                    crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                        let mut connection = MySqlConnection::connect_with_options(&cx, options)
+                            .await
+                            .unwrap();
+                        let mut cursor = connection
+                            .query_cursor_params(&cx, SQL, &[&42_u32], 2)
+                            .await
+                            .unwrap();
+                        let caller = Cx::for_testing();
+                        caller.cancel_with_reason(CancelReason::user("cancel before fetch"));
+                        let mut pending = Box::pin(cursor.next(&caller));
+                        let mut observed = Box::pin(killing.notified());
+                        std::future::poll_fn(|task_cx| {
+                            assert!(pending.as_mut().poll(task_cx).is_pending());
+                            observed.as_mut().poll(task_cx)
+                        })
+                        .await;
+                        drop(pending);
+                        assert_eq!(cursor.state, MySqlCursorState::Failed);
+                        assert!(cursor.io_in_progress);
+                        assert!(cursor.connection.inner.closed);
+                        assert!(cursor.connection.inner.query_in_flight.load(Ordering::Acquire));
+                        assert!(matches!(
+                            cursor.next(&cx).await,
+                            Outcome::Err(MySqlError::ConnectionClosed)
+                        ));
+                        assert!(matches!(
+                            cursor.close(&cx).await,
+                            Outcome::Err(MySqlError::ConnectionClosed)
+                        ));
+                        drop(cursor);
+                        assert!(connection.inner.query_in_flight.load(Ordering::Acquire));
+                        assert!(matches!(
+                            connection.ping(&cx).await,
+                            Outcome::Err(MySqlError::ConnectionClosed)
+                        ));
+                        drop(connection);
+                    })
+                    .await
+                    .expect("bounded abandoned cursor cancellation cleanup");
+                }));
+                peer.finish();
+                assert_pool_reset_drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn prepared_cursor_native_abandoned_wait_cannot_consume_later_packets() {
+            for workers in [1, 2] {
+                for closing in [false, true] {
+                    let requested = Arc::new(crate::sync::Notify::new());
+                    let peer_requested = Arc::clone(&requested);
+                    let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
+                        authenticate(peer, false);
+                        prepare(peer, 7, false);
+                        cursor_execute(peer, 7);
+                        cursor_header(peer, 0x42, false);
+                        if closing {
+                            pool_reset_peer_command(
+                                peer,
+                                command::COM_STMT_RESET,
+                                &7_u32.to_le_bytes(),
+                            );
+                        } else {
+                            cursor_fetch(peer, 7, 2);
+                            // A partial binary row must never be read as a
+                            // fresh frame after the pending future is dropped.
+                            peer.write_all(&[10, 0, 0, 1, 0, 0, 7]).unwrap();
+                        }
+                        peer_requested.notify_one();
+                        finish_poisoned(listener, peer);
+                    });
+                    let options = peer.options(None);
+                    let runtime = prepared_stream_runtime(workers);
+                    runtime.block_on(runtime.handle().spawn(async move {
+                        let cx = Cx::current().unwrap();
+                        crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                            let mut connection = MySqlConnection::connect_with_options(&cx, options).await.unwrap();
+                            let mut cursor = connection.query_cursor_params(&cx, SQL, &[&42_u32], 2).await.unwrap();
+                            let mut pending = Box::pin(async {
+                                if closing { cursor.close(&cx).await.map(|()| None) }
+                                else { cursor.next(&cx).await }
+                            });
+                            let mut observed = Box::pin(requested.notified());
+                            std::future::poll_fn(|task_cx| {
+                                assert!(pending.as_mut().poll(task_cx).is_pending());
+                                observed.as_mut().poll(task_cx)
+                            }).await;
+                            drop(pending);
+                            assert!(cursor.io_in_progress);
+                            assert!(matches!(cursor.next(&cx).await, Outcome::Err(MySqlError::Protocol(message)) if message.contains("abandoned")));
+                            assert!(matches!(cursor.close(&cx).await, Outcome::Err(MySqlError::ConnectionClosed)));
+                            drop(cursor);
+                            assert!(connection.inner.closed);
+                            assert!(connection.inner.query_in_flight.load(Ordering::Acquire));
+                            drop(connection);
+                        }).await.expect("bounded abandoned cursor wait journey");
+                    }));
+                    peer.finish();
+                    assert_pool_reset_drained(&runtime);
+                }
+            }
+        }
+
+        #[test]
+        fn prepared_cursor_native_zero_batch_is_refused_before_preparation() {
+            let peer = PoolResetPeer::start(|peer| {
+                authenticate(peer, false);
+                finish_clean(peer);
+            });
+            let options = peer.options(None);
+            let runtime = prepared_stream_runtime(1);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                    let mut connection = MySqlConnection::connect_with_options(&cx, options)
+                        .await
+                        .unwrap();
+                    assert!(matches!(
+                        connection
+                            .query_cursor_params(&cx, SQL, &[&42_u32], 0)
+                            .await,
+                        Outcome::Err(MySqlError::InvalidParameter(_))
+                    ));
+                    assert_eq!(connection.prepared_cache_stats().misses, 0);
+                    assert!(!connection.inner.closed);
+                    assert!(!connection.inner.query_in_flight.load(Ordering::Acquire));
+                    assert!(matches!(connection.ping(&cx).await, Outcome::Ok(())));
+                    connection.close().await.unwrap();
+                })
+                .await
+                .expect("bounded zero cursor batch refusal");
+            }));
+            peer.finish();
+            assert_pool_reset_drained(&runtime);
         }
 
         #[test]

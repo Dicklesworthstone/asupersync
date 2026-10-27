@@ -30,6 +30,307 @@
         }
     }
 
+    fn exact_scenario_limits() -> ExactScheduleLimits {
+        ExactScheduleLimits::new(256, 256, 64, 1024, 128)
+    }
+
+    fn exact_scenario_checkpoint_limits() -> ExactScheduleCheckpointLimits {
+        ExactScheduleCheckpointLimits {
+            max_encoded_bytes: 1 << 20,
+            max_prefixes: 1024,
+            max_decisions: 8192,
+            max_dispatches: 16384,
+            max_decoded_bytes: 1 << 20,
+        }
+    }
+
+    fn exact_channel_scenario() -> Scenario {
+        let mut scenario = minimal_scenario();
+        scenario.id = "exact-channel-handoff".to_owned();
+        scenario.participants = vec![
+            participant_with("sender", "sender", "messages", serde_json::json!(1)),
+            participant_with("receiver", "receiver", "capacity", serde_json::json!(1)),
+        ];
+        scenario
+    }
+
+    #[test]
+    fn exact_scenario_explores_real_channel_choices_and_replays_receipts() {
+        init_test("exact_scenario_explores_real_channel_choices_and_replays_receipts");
+        let scenario = exact_channel_scenario();
+        let report = ScenarioRunner::explore_schedules(
+            &scenario, None, exact_scenario_limits(), false,
+        ).unwrap();
+        assert!(report.passed(), "{}", report.to_json());
+        assert!(report.runs.len() > 1, "both initially runnable tasks must be explored");
+        let choices: BTreeSet<_> = report.runs.iter().map(|run| {
+            run.execution.execution.decisions()[0].selected().task().0
+        }).collect();
+        assert_eq!(choices.len(), 2, "sender-first and receiver-first are real choices");
+        assert!(report.runs.iter().any(|run| {
+            run.execution.execution.decisions().iter().any(|d| d.enabled().len() == 1)
+        }), "the channel dependency must constrain later choices");
+        for run in &report.runs {
+            let schedule = run.execution.schedule.as_ref().expect("complete receipt");
+            let replay = ScenarioRunner::replay_schedule(
+                &scenario, Some(scenario.lab.seed), run, ForcedScheduleLimits::new(64, 256),
+            ).expect("each exact scenario receipt executes independently");
+            assert!(replay.passed(), "{}", replay.to_json());
+            assert_eq!(replay.execution.schedule_hash, schedule.terminal_schedule_hash());
+            assert_eq!(replay.lab.steps_total, run.execution.lab.steps_total);
+            assert_eq!(replay.oracle_report.to_json(), run.oracle_report.to_json());
+        }
+        assert!(matches!(ScenarioRunner::replay_schedule(
+            &scenario, None, &report.runs[0], ForcedScheduleLimits::new(0, 256),
+        ), Err(ScenarioScheduleError::Replay(ForcedScheduleError::DispatchLimitExceeded { .. }))));
+        assert!(matches!(ScenarioRunner::replay_schedule(
+            &scenario, None, &report.runs[0], ForcedScheduleLimits::new(64, 0),
+        ), Err(ScenarioScheduleError::Replay(ForcedScheduleError::WorkLimitExceeded { .. }))));
+        crate::test_complete!("exact_scenario_explores_real_channel_choices_and_replays_receipts");
+    }
+
+    #[test]
+    fn exact_scenario_batches_resume_in_the_same_order_without_repeating_work() {
+        init_test("exact_scenario_batches_resume_in_the_same_order_without_repeating_work");
+        let scenario = exact_channel_scenario();
+        let full = ScenarioRunner::explore_schedules(
+            &scenario, None, exact_scenario_limits(), false,
+        ).unwrap();
+        assert!(full.passed(), "{}", full.to_json());
+        let mut limits = exact_scenario_limits();
+        limits.max_runs = 1;
+        let mut checkpoint = ScenarioRunner::new_schedule_checkpoint(&scenario, None, limits).unwrap();
+        let mut actual = Vec::new();
+        for _ in 0..full.runs.len() {
+            let batch = ScenarioRunner::resume_schedules(
+                &scenario, None, limits, &mut checkpoint, false,
+            ).unwrap();
+            assert_eq!(batch.runs.len(), 1);
+            actual.push(batch.runs[0].execution.execution.clone());
+            if checkpoint.pending_prefix_count() == 0 {
+                assert!(batch.passed(), "{}", batch.to_json());
+            } else {
+                assert_eq!(batch.termination, ExactScheduleSearchTermination::RunLimit);
+                assert!(!batch.passed());
+            }
+        }
+        assert_eq!(checkpoint.pending_prefix_count(), 0);
+        assert_eq!(actual, full.runs.iter().map(|run| run.execution.execution.clone()).collect::<Vec<_>>());
+        assert_eq!(checkpoint.progress(), full.progress);
+        let done = ScenarioRunner::resume_schedules(
+            &scenario, None, limits, &mut checkpoint, false,
+        ).unwrap();
+        assert!(done.runs.is_empty());
+        assert!(done.passed());
+        crate::test_complete!("exact_scenario_batches_resume_in_the_same_order_without_repeating_work");
+    }
+
+    #[test]
+    fn exact_scenario_checkpoint_roundtrip_preserves_frontier_and_unverified_history() {
+        init_test("exact_scenario_checkpoint_roundtrip_preserves_frontier_and_unverified_history");
+        let scenario = exact_channel_scenario();
+        let mut limits = exact_scenario_limits();
+        limits.max_runs = 1;
+        let mut checkpoint = ScenarioRunner::new_schedule_checkpoint(&scenario, None, limits).unwrap();
+        let bytes = checkpoint.to_canonical_bytes(exact_scenario_checkpoint_limits()).unwrap();
+        assert_eq!(ScenarioScheduleCheckpoint::from_canonical_bytes(
+            &bytes, exact_scenario_checkpoint_limits(),
+        ).unwrap(), checkpoint, "an empty history needs no historical evidence");
+        let first = ScenarioRunner::resume_schedules(
+            &scenario, None, limits, &mut checkpoint, false,
+        ).unwrap();
+        assert_eq!(first.progress.runs, 1);
+        let bytes = checkpoint.to_canonical_bytes(exact_scenario_checkpoint_limits()).unwrap();
+        let mut decoded = ScenarioScheduleCheckpoint::from_canonical_bytes(
+            &bytes, exact_scenario_checkpoint_limits(),
+        ).unwrap();
+        assert_eq!(decoded.to_canonical_bytes(exact_scenario_checkpoint_limits()).unwrap(), bytes);
+        assert!(!decoded.historical_progress_verified());
+        let observed = ScenarioRunner::resume_schedules(
+            &scenario, None, exact_scenario_limits(), &mut checkpoint, false,
+        ).unwrap();
+        let resumed = ScenarioRunner::resume_schedules(
+            &scenario, None, exact_scenario_limits(), &mut decoded, false,
+        ).unwrap();
+        assert!(observed.passed(), "{}", observed.to_json());
+        assert_eq!(resumed.termination, ExactScheduleSearchTermination::SearchExhausted);
+        assert!(resumed.runs.iter().all(ScenarioScheduleRun::passed));
+        assert!(!resumed.passed(), "loaded counters must not become proof of unseen runs");
+        assert_eq!(resumed.progress, observed.progress);
+        assert_eq!(resumed.runs.iter().map(|r| &r.execution.execution).collect::<Vec<_>>(),
+            observed.runs.iter().map(|r| &r.execution.execution).collect::<Vec<_>>());
+        crate::test_complete!("exact_scenario_checkpoint_roundtrip_preserves_frontier_and_unverified_history");
+    }
+
+    #[test]
+    fn exact_scenario_remembers_real_workload_failures_after_resume() {
+        init_test("exact_scenario_remembers_real_workload_failures_after_resume");
+        let mut scenario = minimal_scenario();
+        scenario.id = "exact-restart-budget-failure".to_owned();
+        scenario.oracles = vec!["quiescence".to_owned()];
+        scenario.participants = vec![
+            participant_with("supervisor", "supervisor", "max_restarts", serde_json::json!(0)),
+            participant_with("worker", "worker", "fail_times", serde_json::json!(1)),
+            participant("receiver", "receiver"),
+        ];
+        let mut checkpoint = ScenarioRunner::new_schedule_checkpoint(
+            &scenario, None, exact_scenario_limits(),
+        ).unwrap();
+        let first = ScenarioRunner::resume_schedules(
+            &scenario, None, exact_scenario_limits(), &mut checkpoint, true,
+        ).unwrap();
+        assert_eq!(first.termination, ExactScheduleSearchTermination::Stopped);
+        assert_eq!(first.runs.len(), 1);
+        assert_eq!(first.scenario_failed, 1);
+        assert!(first.runs[0].execution.lab.quiescent);
+        assert!(first.runs[0].execution.lab.invariant_violations.iter().any(|v| v.starts_with("workload:")),
+            "{}", first.to_json());
+        let replay = ScenarioRunner::replay_schedule(
+            &scenario, None, &first.runs[0], ForcedScheduleLimits::new(64, 256),
+        ).expect("the failing workload still has an exact executable receipt");
+        assert!(!replay.passed());
+        assert_eq!(replay.lab.invariant_violations, first.runs[0].execution.lab.invariant_violations);
+        assert_eq!(replay.oracle_report.to_json(), first.runs[0].oracle_report.to_json());
+        assert!(checkpoint.pending_prefix_count() > 0);
+        let bytes = checkpoint.to_canonical_bytes(exact_scenario_checkpoint_limits()).unwrap();
+        let mut restored = ScenarioScheduleCheckpoint::from_canonical_bytes(
+            &bytes, exact_scenario_checkpoint_limits(),
+        ).unwrap();
+        assert_eq!(restored.scenario_failed(), 1);
+        let later = ScenarioRunner::resume_schedules(
+            &scenario, None, exact_scenario_limits(), &mut restored, false,
+        ).unwrap();
+        assert!(!later.passed());
+        assert!(later.scenario_failed >= 1);
+        assert_eq!(later.to_json()["scenario_failed"], later.scenario_failed);
+        crate::test_complete!("exact_scenario_remembers_real_workload_failures_after_resume");
+    }
+
+    #[test]
+    fn exact_scenario_limits_never_claim_exhausted_success() {
+        init_test("exact_scenario_limits_never_claim_exhausted_success");
+        let scenario = exact_channel_scenario();
+        let mut limits = exact_scenario_limits();
+        limits.max_runs = 1;
+        let run_limited = ScenarioRunner::explore_schedules(&scenario, None, limits, false).unwrap();
+        assert_eq!(run_limited.termination, ExactScheduleSearchTermination::RunLimit);
+        assert!(run_limited.pending_prefixes > 0);
+        assert!(!run_limited.passed());
+        limits = exact_scenario_limits();
+        limits.max_work_per_run = 1;
+        let work_limited = ScenarioRunner::explore_schedules(&scenario, None, limits, false).unwrap();
+        assert_eq!(work_limited.termination, ExactScheduleSearchTermination::IncompleteRun);
+        assert!(work_limited.progress.incomplete > 0);
+        assert!(!work_limited.passed());
+        assert!(work_limited.runs.iter().all(|run| run.execution.schedule.is_none()));
+        assert!(matches!(ScenarioRunner::replay_schedule(
+            &scenario, None, &work_limited.runs[0], ForcedScheduleLimits::new(64, 256),
+        ), Err(ScenarioScheduleError::MissingReplayReceipt)));
+        limits = exact_scenario_limits();
+        limits.max_runs = 0;
+        assert!(matches!(ScenarioRunner::new_schedule_checkpoint(&scenario, None, limits),
+            Err(ScenarioScheduleError::Configuration(ExactScheduleConfigError::ZeroLimit))));
+        crate::test_complete!("exact_scenario_limits_never_claim_exhausted_success");
+    }
+
+    #[test]
+    fn exact_scenario_rejects_changed_inputs_before_consuming_the_frontier() {
+        init_test("exact_scenario_rejects_changed_inputs_before_consuming_the_frontier");
+        let scenario = exact_channel_scenario();
+        let original = ScenarioRunner::new_schedule_checkpoint(&scenario, None, exact_scenario_limits()).unwrap();
+        let source = ScenarioRunner::explore_schedules(
+            &scenario, None, exact_scenario_limits(), false,
+        ).unwrap();
+        for change in 0..4 {
+            let mut changed = scenario.clone();
+            match change {
+                0 => { changed.participants[0].properties.insert("messages".to_owned(), serde_json::json!(2)); }
+                1 => changed.oracles = vec!["quiescence".to_owned()],
+                2 => changed.lab.entropy_seed = Some(99),
+                _ => changed.lab.seed += 1,
+            }
+            let mut checkpoint = original.clone();
+            assert!(matches!(ScenarioRunner::resume_schedules(
+                &changed, None, exact_scenario_limits(), &mut checkpoint, false,
+            ), Err(ScenarioScheduleError::Resume(ExactScheduleResumeError::WorkloadMismatch))));
+            assert_eq!(checkpoint, original);
+            assert!(matches!(ScenarioRunner::replay_schedule(
+                &changed, None, &source.runs[0], ForcedScheduleLimits::new(64, 256),
+            ), Err(ScenarioScheduleError::ReplayWorkloadMismatch)));
+        }
+        assert!(matches!(ScenarioRunner::replay_schedule(
+            &scenario, Some(scenario.lab.seed + 1), &source.runs[0], ForcedScheduleLimits::new(64, 256),
+        ), Err(ScenarioScheduleError::ReplayWorkloadMismatch)));
+        crate::test_complete!("exact_scenario_rejects_changed_inputs_before_consuming_the_frontier");
+    }
+
+    #[test]
+    fn exact_scenario_refuses_unexecuted_effects_and_empty_or_partial_workloads() {
+        init_test("exact_scenario_refuses_unexecuted_effects_and_empty_or_partial_workloads");
+        let scenario = exact_channel_scenario();
+        let mut cases = Vec::new();
+        let mut changed = scenario.clone();
+        changed.faults.push(FaultEvent {
+            at_ms: 1, action: FaultAction::HostCrash,
+            args: BTreeMap::from([("host".to_owned(), serde_json::json!("sender"))]),
+        });
+        cases.push(changed);
+        let mut changed = scenario.clone();
+        changed.cancellation = Some(crate::lab::scenario::CancellationSection {
+            strategy: crate::lab::scenario::CancellationStrategy::Never,
+            count: None, probability: None,
+        });
+        cases.push(changed);
+        let mut changed = scenario.clone();
+        changed.participants.push(participant("unbound", "external-service"));
+        cases.push(changed);
+        cases.push(minimal_scenario());
+        for changed in cases {
+            assert!(matches!(ScenarioRunner::new_schedule_checkpoint(&changed, None, exact_scenario_limits()),
+                Err(ScenarioScheduleError::Unsupported { .. })), "{}", changed.id);
+        }
+        let mut changed = scenario.clone();
+        changed.lab.worker_count = 2;
+        assert!(matches!(ScenarioRunner::new_schedule_checkpoint(&changed, None, exact_scenario_limits()),
+            Err(ScenarioScheduleError::Configuration(ExactScheduleConfigError::MultipleWorkers))));
+        changed = scenario;
+        changed.chaos = ChaosSection::Light;
+        assert!(matches!(ScenarioRunner::new_schedule_checkpoint(&changed, None, exact_scenario_limits()),
+            Err(ScenarioScheduleError::Configuration(ExactScheduleConfigError::ChaosEnabled))));
+        crate::test_complete!("exact_scenario_refuses_unexecuted_effects_and_empty_or_partial_workloads");
+    }
+
+    #[test]
+    fn exact_scenario_checkpoint_rejects_corruption_counts_and_excess_storage() {
+        init_test("exact_scenario_checkpoint_rejects_corruption_counts_and_excess_storage");
+        let scenario = exact_channel_scenario();
+        let checkpoint = ScenarioRunner::new_schedule_checkpoint(&scenario, None, exact_scenario_limits()).unwrap();
+        let limits = exact_scenario_checkpoint_limits();
+        let bytes = checkpoint.to_canonical_bytes(limits).unwrap();
+        for end in 0..bytes.len() {
+            assert!(ScenarioScheduleCheckpoint::from_canonical_bytes(&bytes[..end], limits).is_err());
+        }
+        let mut corrupt = bytes.clone();
+        corrupt[12] ^= 1;
+        assert_eq!(ScenarioScheduleCheckpoint::from_canonical_bytes(&corrupt, limits).unwrap_err(),
+            ExactScheduleCheckpointError::Checksum);
+        let end = corrupt.len() - 32;
+        let digest = ScenarioScheduleCheckpoint::checksum(&corrupt[..end]);
+        corrupt[end..].copy_from_slice(&digest);
+        assert_eq!(ScenarioScheduleCheckpoint::from_canonical_bytes(&corrupt, limits).unwrap_err(),
+            ExactScheduleCheckpointError::Shape, "one failed run cannot fit an empty history");
+        let mut tiny = limits;
+        tiny.max_encoded_bytes = bytes.len() - 1;
+        assert_eq!(ScenarioScheduleCheckpoint::from_canonical_bytes(&bytes, tiny).unwrap_err(),
+            ExactScheduleCheckpointError::ByteLimit);
+        assert_eq!(checkpoint.to_canonical_bytes(tiny).unwrap_err(), ExactScheduleCheckpointError::ByteLimit);
+        tiny = limits;
+        tiny.max_prefixes = 0;
+        assert_eq!(ScenarioScheduleCheckpoint::from_canonical_bytes(&bytes, tiny).unwrap_err(),
+            ExactScheduleCheckpointError::PrefixLimit);
+        crate::test_complete!("exact_scenario_checkpoint_rejects_corruption_counts_and_excess_storage");
+    }
+
     #[test]
     fn run_minimal_scenario() {
         init_test("run_minimal_scenario");
@@ -1437,6 +1738,288 @@
             "a 10% per-dispatch cancel rate must stop some worker across eight seeds"
         );
         crate::test_complete!("supervised_workers_stopped_by_chaos_are_counted_not_failed");
+    }
+
+    fn lifecycle_scenario() -> Scenario {
+        let mut scenario = minimal_scenario();
+        scenario.id = "test-worker-lifecycle".to_owned();
+        let mut worker = participant_with("worker", "worker", "fail_times", serde_json::json!(0));
+        worker.properties.insert("lifecycle".to_owned(), serde_json::json!({"work_ms": 500}));
+        scenario.participants = vec![participant("sup", "supervisor"), worker];
+        scenario
+    }
+
+    fn lifecycle_fault(at_ms: u64, action: FaultAction, host: &str) -> FaultEvent {
+        let mut args = BTreeMap::from([("host".to_owned(), serde_json::json!(host))]);
+        if action == FaultAction::ProcessStall {
+            args.insert("duration_ms".to_owned(), serde_json::json!(200));
+        }
+        FaultEvent { at_ms, action, args }
+    }
+
+    #[test]
+    fn lifecycle_crash_replaces_the_actual_worker_and_replay_repeats_its_work() {
+        init_test("lifecycle_crash_replaces_the_actual_worker_and_replay_repeats_its_work");
+        let mut scenario = lifecycle_scenario();
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(400, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert!(result.lab_report.quiescent);
+        assert_eq!(result.lab_report.now_nanos, 900_000_000);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 1);
+        assert_eq!(summary.children[0].generations, 2);
+        assert_eq!(summary.children[0].exit, ChildExit::Succeeded);
+        let worker = &supervisor_state(&tasks, "sup").workers[0];
+        assert_eq!(count(&worker.state.attempts), 2);
+        assert_eq!(count(&worker.state.crashes), 1);
+        assert_eq!(count(&worker.state.failures), 1);
+        assert_eq!(count(&worker.state.cancelled), 0);
+
+        // Legacy control: the same faults remain records when the worker has
+        // not opted in. It finishes once, before either timed fault.
+        let mut legacy = scenario.clone();
+        legacy.participants[1].properties.remove("lifecycle");
+        let (legacy_result, legacy_tasks) = ScenarioRunner::run_seeded(&legacy, None).unwrap();
+        assert!(legacy_result.passed());
+        assert_eq!(legacy_result.lab_report.now_nanos, 400_000_000);
+        assert_eq!(supervisor_summary(&legacy_tasks, "sup").children[0].generations, 1);
+        assert_ne!(result.certificate.event_hash, legacy_result.certificate.event_hash);
+
+        let replay = ScenarioRunner::validate_replay(&scenario).unwrap();
+        assert!(replay.passed());
+        assert_eq!(replay.certificate, result.certificate);
+        let identity = ScenarioRunner::scenario_identity(&scenario, None);
+        let identified = ScenarioRunner::run_with_identity(&scenario, &identity).unwrap();
+        assert!(identified.passed());
+        assert_eq!(identified.lab_report.now_nanos, 900_000_000);
+        assert!(ScenarioRunner::explore_seeds(&scenario, 1, 3).unwrap().all_passed());
+        crate::test_complete!("lifecycle_crash_replaces_the_actual_worker_and_replay_repeats_its_work");
+    }
+
+    #[test]
+    fn lifecycle_stalls_pause_active_work_and_resume_by_timer_or_explicit_fault() {
+        init_test("lifecycle_stalls_pause_active_work_and_resume_by_timer_or_explicit_fault");
+        for (resume, expected_ms) in [(None, 700), (Some(150), 550), (Some(400), 700)] {
+            let mut scenario = lifecycle_scenario();
+            scenario.faults.push(lifecycle_fault(100, FaultAction::ProcessStall, "worker"));
+            if let Some(at) = resume {
+                scenario.faults.push(lifecycle_fault(at, FaultAction::ProcessResume, "worker"));
+            }
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+            assert!(result.passed(), "resume={resume:?}: {}", failure_detail(&result));
+            assert_eq!(result.lab_report.now_nanos, expected_ms * 1_000_000);
+            let summary = supervisor_summary(&tasks, "sup");
+            assert_eq!(summary.children[0].generations, 1);
+            assert_eq!(summary.restart_batches, 0);
+            assert_eq!(count(&supervisor_state(&tasks, "sup").workers[0].state.crashes), 0);
+        }
+        crate::test_complete!("lifecycle_stalls_pause_active_work_and_resume_by_timer_or_explicit_fault");
+    }
+
+    #[test]
+    fn lifecycle_fault_at_the_completion_instant_precedes_the_due_timer() {
+        init_test("lifecycle_fault_at_the_completion_instant_precedes_the_due_timer");
+        for action in [FaultAction::HostCrash, FaultAction::ProcessStall] {
+            let mut scenario = lifecycle_scenario();
+            scenario.faults.push(lifecycle_fault(500, action.clone(), "worker"));
+            let expected_ms = if action == FaultAction::HostCrash {
+                scenario.faults.push(lifecycle_fault(700, FaultAction::HostRestart, "worker"));
+                1200
+            } else {
+                700
+            };
+            let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+            assert!(result.passed(), "{action:?}: {}", failure_detail(&result));
+            assert_eq!(result.lab_report.now_nanos, expected_ms * 1_000_000);
+            assert_eq!(supervisor_summary(&tasks, "sup").children[0].generations,
+                if action == FaultAction::HostCrash { 2 } else { 1 });
+        }
+        crate::test_complete!("lifecycle_fault_at_the_completion_instant_precedes_the_due_timer");
+    }
+
+    #[test]
+    fn lifecycle_repeated_crash_while_down_is_one_failure_and_each_recovery_resets_work() {
+        init_test("lifecycle_repeated_crash_while_down_is_one_failure_and_each_recovery_resets_work");
+        let mut scenario = lifecycle_scenario();
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(200, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(300, FaultAction::HostRestart, "worker"),
+            lifecycle_fault(500, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(600, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert_eq!(result.lab_report.now_nanos, 1_100_000_000);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 2);
+        assert_eq!(summary.children[0].generations, 3);
+        assert_eq!(count(&supervisor_state(&tasks, "sup").workers[0].state.crashes), 2);
+        crate::test_complete!("lifecycle_repeated_crash_while_down_is_one_failure_and_each_recovery_resets_work");
+    }
+
+    #[test]
+    fn lifecycle_crashes_do_not_consume_the_workers_configured_failures() {
+        init_test("lifecycle_crashes_do_not_consume_the_workers_configured_failures");
+        let mut scenario = lifecycle_scenario();
+        scenario.participants[1].properties.insert("fail_times".to_owned(), serde_json::json!(2));
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(400, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert_eq!(result.lab_report.now_nanos, 1_900_000_000);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 3);
+        assert_eq!(summary.children[0].generations, 4);
+        let worker = &supervisor_state(&tasks, "sup").workers[0];
+        assert_eq!(count(&worker.state.failures), 3);
+        assert_eq!(count(&worker.state.crashes), 1);
+        crate::test_complete!("lifecycle_crashes_do_not_consume_the_workers_configured_failures");
+    }
+
+    #[test]
+    fn lifecycle_crashes_do_not_override_an_explicit_restart_budget() {
+        init_test("lifecycle_crashes_do_not_override_an_explicit_restart_budget");
+        let mut scenario = lifecycle_scenario();
+        scenario.participants[0].properties.insert("max_restarts".to_owned(), serde_json::json!(0));
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(400, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(!result.passed());
+        assert!(result.lab_report.quiescent);
+        assert_eq!(result.lab_report.now_nanos, 400_000_000);
+        assert_eq!(tasks[0].planned, 0);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 0);
+        assert_eq!(summary.children[0].generations, 1);
+        assert_eq!(summary.children[0].exit, ChildExit::Failed(1));
+        assert!(result.lab_report.invariant_violations.iter().any(|v|
+            v.starts_with("workload:worker:worker:never_succeeded:")));
+        crate::test_complete!("lifecycle_crashes_do_not_override_an_explicit_restart_budget");
+    }
+
+    #[test]
+    fn lifecycle_missing_restart_returns_an_incomplete_run_without_spinning() {
+        init_test("lifecycle_missing_restart_returns_an_incomplete_run_without_spinning");
+        let mut scenario = lifecycle_scenario();
+        scenario.faults = vec![lifecycle_fault(150, FaultAction::HostCrash, "worker")];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(!result.passed());
+        assert!(!result.lab_report.quiescent);
+        assert_eq!(result.lab_report.now_nanos, 150_000_000);
+        assert!(result.lab_report.steps_total < 10_000);
+        let worker = &supervisor_state(&tasks, "sup").workers[0];
+        assert_eq!(count(&worker.state.attempts), 2);
+        assert_eq!(count(&worker.state.crashes), 1);
+        assert!(result.lab_report.invariant_violations.iter().any(|v|
+            v.starts_with("workload:supervisor:sup:no_report:")));
+        crate::test_complete!("lifecycle_missing_restart_returns_an_incomplete_run_without_spinning");
+    }
+
+    #[test]
+    fn lifecycle_offline_and_stalled_workers_are_still_cancellable_and_drained() {
+        init_test("lifecycle_offline_and_stalled_workers_are_still_cancellable_and_drained");
+        for action in [FaultAction::HostCrash, FaultAction::ProcessStall] {
+            let mut scenario = lifecycle_scenario();
+            scenario.faults = vec![lifecycle_fault(100, action.clone(), "worker")];
+            let plan = ScenarioRunner::workload_plan(&scenario).unwrap();
+            let mut runtime = LabRuntime::new(ScenarioRunner::lab_config_for(&scenario, None));
+            let workload = ParticipantWorkload::spawn(&mut runtime, &plan, &scenario.network);
+            ScenarioRunner::inject_faults(&mut runtime, &scenario, &workload);
+            runtime.run_until_idle();
+            let state = supervisor_state(&workload.tasks, "sup");
+            let worker = &state.workers[0];
+            assert_eq!(count(&worker.state.attempts), if action == FaultAction::HostCrash { 2 } else { 1 });
+            assert!(state.summary.lock().is_none(), "controller is parked on its child");
+            assert!(!runtime.is_quiescent());
+
+            workload.handles[0].1.abort();
+            runtime.run_until_idle();
+            assert!(runtime.is_quiescent(), "{action:?}: cancellation must drain the child");
+            assert_eq!(runtime.now(), Time::from_millis(100));
+            assert_eq!(runtime.state.timer_driver_handle().unwrap().pending_count(), 0);
+            let mut violations = Vec::new();
+            let tasks = workload.finish(&mut violations);
+            assert!(violations.is_empty(), "{action:?}: {violations:?}");
+            assert_eq!(count(&supervisor_state(&tasks, "sup").workers[0].state.cancelled), 1);
+        }
+        crate::test_complete!("lifecycle_offline_and_stalled_workers_are_still_cancellable_and_drained");
+    }
+
+    #[test]
+    fn lifecycle_shared_host_crashes_each_bound_worker_but_leaves_other_hosts_running() {
+        init_test("lifecycle_shared_host_crashes_each_bound_worker_but_leaves_other_hosts_running");
+        let mut scenario = lifecycle_scenario();
+        scenario.participants[1].properties.insert("lifecycle".to_owned(), serde_json::json!({"work_ms": 500, "host": "sup"}));
+        let mut second = scenario.participants[1].clone();
+        second.name = "second".to_owned();
+        let mut independent = scenario.participants[1].clone();
+        independent.name = "independent".to_owned();
+        independent.properties.insert("lifecycle".to_owned(), serde_json::json!({"work_ms": 500}));
+        scenario.participants.extend([second, independent]);
+        scenario.faults = vec![
+            lifecycle_fault(150, FaultAction::HostCrash, "sup"),
+            lifecycle_fault(400, FaultAction::HostRestart, "sup"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(result.passed(), "{}", failure_detail(&result));
+        assert_eq!(result.lab_report.now_nanos, 900_000_000);
+        let state = supervisor_state(&tasks, "sup");
+        assert_eq!(state.workers.iter().map(|w| count(&w.state.crashes)).collect::<Vec<_>>(), [1, 1, 0]);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 2);
+        assert_eq!(summary.children.iter().map(|c| c.generations).collect::<Vec<_>>(), [2, 2, 1]);
+        crate::test_complete!("lifecycle_shared_host_crashes_each_bound_worker_but_leaves_other_hosts_running");
+    }
+
+    #[test]
+    fn lifecycle_plan_refuses_malformed_or_unbounded_properties_before_running() {
+        init_test("lifecycle_plan_refuses_malformed_or_unbounded_properties_before_running");
+        for value in [
+            serde_json::json!(true), serde_json::json!({}),
+            serde_json::json!({"work_ms": 0}), serde_json::json!({"work_ms": 60_001}),
+            serde_json::json!({"work_ms": 1.5}), serde_json::json!({"work_ms": 1, "host": "missing"}),
+            serde_json::json!({"work_ms": 1, "typo": true}),
+        ] {
+            let mut scenario = lifecycle_scenario();
+            scenario.participants[1].properties.insert("lifecycle".to_owned(), value.clone());
+            let error = ScenarioRunner::run(&scenario).unwrap_err();
+            assert!(error.to_string().contains("properties.lifecycle"), "{value}: {error}");
+        }
+        let mut scenario = lifecycle_scenario();
+        let mut fault = lifecycle_fault(1, FaultAction::ProcessStall, "worker");
+        fault.args.insert("duration_ms".to_owned(), serde_json::json!(60_001));
+        scenario.faults = vec![fault];
+        assert!(ScenarioRunner::run(&scenario).unwrap_err().to_string().contains("duration_ms"));
+        crate::test_complete!("lifecycle_plan_refuses_malformed_or_unbounded_properties_before_running");
+    }
+
+    #[test]
+    fn lifecycle_exhausted_virtual_clock_fails_instead_of_spinning_inside_a_poll() {
+        init_test("lifecycle_exhausted_virtual_clock_fails_instead_of_spinning_inside_a_poll");
+        let mut scenario = lifecycle_scenario();
+        scenario.faults = vec![
+            lifecycle_fault(0, FaultAction::HostCrash, "worker"),
+            lifecycle_fault(u64::MAX, FaultAction::HostRestart, "worker"),
+        ];
+        let (result, tasks) = ScenarioRunner::run_seeded(&scenario, None).unwrap();
+        assert!(!result.passed());
+        assert!(result.lab_report.steps_total < 1000);
+        assert_eq!(result.lab_report.now_nanos, u64::MAX);
+        let worker = &supervisor_state(&tasks, "sup").workers[0];
+        assert_eq!(count(&worker.state.crashes), 1);
+        assert_eq!(count(&worker.state.unexpected), 1);
+        assert!(result.lab_report.invariant_violations.iter().any(|v|
+            v.starts_with("workload:worker:worker:unexpected_outcome:")));
+        crate::test_complete!("lifecycle_exhausted_virtual_clock_fails_instead_of_spinning_inside_a_poll");
     }
 
     fn saga_record<'a>(tasks: &'a [BoundTask], name: &str) -> &'a SagaRecord {

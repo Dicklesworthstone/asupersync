@@ -872,7 +872,7 @@ where
                 return Poll::Ready(Some(Err(self.finish(error))));
             }
             if self.response.initial.is_some() {
-                match self.codec.decode_message_with_encoding(&mut self.body, self.response.encoding.as_deref()) {
+                match self.codec.decode_message_with_negotiated_encoding(&mut self.body, self.response.encoding.as_deref()) {
                     Ok(Some(value)) => {
                         // User codecs can do synchronous work. Do not publish
                         // a late value after that work exhausts the deadline.

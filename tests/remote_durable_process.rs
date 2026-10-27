@@ -142,7 +142,7 @@ fn emit(event: &str) {
 }
 
 #[test]
-#[ignore = "child explicitly launched by the two process-restart acceptance tests"]
+#[ignore = "child explicitly launched by the process-restart acceptance tests"]
 fn durable_remote_process_worker() {
     let mode = std::env::var("ASUP_DURABLE_MODE").unwrap();
     let workers: usize = std::env::var("ASUP_DURABLE_WORKERS").unwrap().parse().unwrap();
@@ -150,10 +150,11 @@ fn durable_remote_process_worker() {
     let counter_path = PathBuf::from(std::env::var_os("ASUP_DURABLE_COUNTER").unwrap());
     let terminal_crash = mode == "terminal-crash";
     let effect_crash = mode == "effect-crash";
-    assert!(terminal_crash || effect_crash || mode == "replay" || mode == "after-retention");
+    let reconcile = mode == "reconcile";
+    assert!(terminal_crash || effect_crash || reconcile || mode == "replay" || mode == "after-retention");
     // This fixture supplies a trusted epoch explicitly. Restart never resets
     // it to the new runtime's relative clock; advancing it requires no sleep.
-    let now_ms = if mode == "after-retention" {
+    let now_ms = if mode == "after-retention" || reconcile {
         EPOCH_MS + RETENTION_MS + 1
     } else {
         EPOCH_MS
@@ -171,6 +172,29 @@ fn durable_remote_process_worker() {
             assert_eq!(invocation.peer_node(), &NodeId::new(PEER));
             assert_eq!(invocation.request().idempotency_key, IdempotencyKey::from_raw(KEY));
             assert_eq!(invocation.request().input.data(), INPUT);
+            if reconcile {
+                // The parent killed and reaped the original process before
+                // enabling this explicit recovery mode. No old writer remains.
+                // The private counter is authoritative for this fixture's one
+                // effect; uncertainty is never turned into another execution.
+                return owner.reconcile(&cx, invocation, move |lookup_cx, invocation| async move {
+                    let input = invocation.request().input.data().to_vec();
+                    let mut lookup = lookup_cx.spawn_blocking_drained(move |worker| {
+                        worker.checkpoint().map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "lookup cancelled"))?;
+                        let mut file = OpenOptions::new().read(true).open(counter_path)?;
+                        if file.metadata()?.len() != 1 { return Ok::<_, io::Error>(None); }
+                        let mut value = [0];
+                        file.read_exact(&mut value)?;
+                        Ok((value == [1]).then_some(1))
+                    }).ok()?;
+                    let count = match lookup.join().await {
+                        Ok(Ok(Some(count))) => count,
+                        _ => return None,
+                    };
+                    emit("RECONCILIATION_LOOKUP");
+                    Some(RemoteOutcome::Success(output(count, &input)))
+                }).await.map_err(|error| RemoteError::TransportError(error.to_string()));
+            }
             let outcome = owner.call(&cx, invocation, move |handler_cx, invocation| async move {
                 let input = invocation.request().input.data().to_vec();
                 let mut effect = handler_cx.spawn_blocking_drained(move |worker| {
@@ -519,5 +543,63 @@ fn unresolved_effect_stays_in_doubt_after_process_restart_and_retention() {
         assert_eq!(after.len(), before_retry, "pending retention must never admit another effect");
         assert_eq!((after.dev(), after.ino()), (original.dev(), original.ino()));
         assert_eq!(open_journal(&files.journal, false).records(), 1);
+    }
+}
+
+#[test]
+fn application_reconciliation_after_process_death_persists_known_effect_without_reexecution() {
+    for workers in [1, 2] {
+        let files = Files::new();
+        let original = std::fs::metadata(&files.journal).unwrap();
+        let mut first = Process::start(&files, "effect-crash", workers);
+        first.begin_call(workers);
+        first.wait_for("EFFECT");
+        first.assert_call_pending();
+        first.crash();
+        assert!(first.finish_call().is_err());
+        files.assert_one_effect();
+        assert_eq!(open_journal(&files.journal, false).records(), 1);
+        let pending_bytes = std::fs::metadata(&files.journal).unwrap().len();
+
+        let mut ordinary = Process::start(&files, "after-retention", workers);
+        let refused_task = ordinary.begin_call(workers);
+        match ordinary.finish_call().unwrap() {
+            RemoteServiceWireResponse::Rejected { remote_task_id, code, diagnostic } => {
+                assert_eq!(remote_task_id, refused_task.raw());
+                assert_eq!(code, RemoteServiceRejectionCode::ExecutionFailed);
+                assert!(diagnostic.contains(&DurableRemoteError::InDoubt.to_string()));
+            }
+            other @ RemoteServiceWireResponse::Outcome { .. } => panic!("ordinary retry must remain fenced: {other:?}"),
+        }
+        ordinary.finish();
+        assert_eq!(std::fs::metadata(&files.journal).unwrap().len(), pending_bytes);
+
+        // Explicit operator recovery, after the original owner was killed and
+        // reaped, reads the existing effect instead of appending another one.
+        let mut recovery = Process::start(&files, "reconcile", workers);
+        let recovery_task = recovery.begin_call(workers);
+        recovery.wait_for("RECONCILIATION_LOOKUP");
+        assert_eq!(recovery.finish_call().unwrap(), RemoteServiceWireResponse::Outcome {
+            remote_task_id: recovery_task.raw(),
+            outcome: RemoteServiceWireOutcome::Success(output(1, INPUT)),
+        });
+        recovery.finish();
+        files.assert_one_effect();
+        assert_eq!(open_journal(&files.journal, false).records(), 2);
+        let terminal_bytes = std::fs::metadata(&files.journal).unwrap().len();
+        assert!(terminal_bytes > pending_bytes);
+
+        let mut replay = Process::start(&files, "after-retention", workers);
+        let replay_task = replay.begin_call(workers);
+        assert_eq!(replay.finish_call().unwrap(), RemoteServiceWireResponse::Outcome {
+            remote_task_id: replay_task.raw(),
+            outcome: RemoteServiceWireOutcome::Success(output(1, INPUT)),
+        });
+        replay.finish();
+        files.assert_one_effect();
+        let after = std::fs::metadata(&files.journal).unwrap();
+        assert_eq!(after.len(), terminal_bytes);
+        assert_eq!((after.dev(), after.ino()), (original.dev(), original.ino()));
+        assert_eq!(open_journal(&files.journal, false).records(), 2);
     }
 }

@@ -132,3 +132,27 @@
         assert!(!fresh);
         assert_eq!(again.id, first.id);
     }
+
+    #[test]
+    fn selective_revocation_reopens_as_a_durable_tombstone_without_retiring_a_sibling() {
+        let (path, inbox) = fixture();
+        Catalog::initialize(&path, 4, 16384).unwrap();
+        let catalog = Catalog::open(&path).unwrap();
+        catalog.admit(key(1), &inbox, policy()).unwrap();
+        let (sibling, _) = catalog.admit(key(2), &inbox, policy()).unwrap();
+        assert!(catalog.retire(key(1), Retirement::SessionRevoked).unwrap());
+        let history = std::fs::read(&path).unwrap();
+        drop(catalog);
+        let reopened = Catalog::open(&path).unwrap();
+        assert_eq!(
+            reopened.admit(key(1), &inbox, policy()).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+        );
+        let (again, fresh) = reopened.admit(key(2), &inbox, policy()).unwrap();
+        assert!(!fresh);
+        assert_eq!(again, sibling);
+        let retired = reopened.entries().into_iter().find(|entry| entry.key == key(1)).unwrap();
+        assert_eq!(retired.retired, Some(Retirement::SessionRevoked));
+        assert_eq!(Retirement::SessionRevoked.label(), "session_revoked");
+        assert_eq!(std::fs::read(&path).unwrap(), history);
+    }

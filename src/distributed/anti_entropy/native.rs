@@ -13,6 +13,9 @@
 //! configured source. This adds application frames, not a new remote envelope.
 //! Start one cursor and call `step` until its progress is complete. A changed
 //! source snapshot requires a new cursor; completed immutable puts remain valid.
+//! For automatic rounds, drive [`SymbolRepairWorker::run`] in an owned task.
+//! Its handle accepts coalesced repair hints, and its finite policy optionally
+//! enables periodic rounds and retries without introducing another transport.
 //!
 //! A cursor retains one local catalog, one leaf page (each independently bounded
 //! by the catalog retained-byte ceiling), and at most `depth + 1` frontier nodes.
@@ -32,6 +35,13 @@ use crate::types::{Outcome, symbol::ObjectId};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+
+mod worker;
+pub use worker::{
+    SymbolRepairRequest, SymbolRepairRoundError, SymbolRepairRoundReport, SymbolRepairRoundTrigger,
+    SymbolRepairWorker, SymbolRepairWorkerConfig, SymbolRepairWorkerError, SymbolRepairWorkerHandle,
+    SymbolRepairWorkerReport, SymbolRepairWorkerSnapshot, SymbolRepairWorkerStatus,
+};
 
 /// Immutable per-cursor resource policy; no unbounded defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

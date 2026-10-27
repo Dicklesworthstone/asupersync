@@ -607,3 +607,298 @@ fn membership_withdrawal_rechecks_waiting_reservations_and_preserves_native_drai
 
 #[path = "membership_owned.rs"]
 mod owned;
+
+fn swim_socket() -> (
+    asupersync::distributed::membership::UdpMembershipTransport,
+    SocketAddr,
+) {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    (
+        asupersync::distributed::membership::UdpMembershipTransport::new(
+            asupersync::net::UdpSocket::from_std(socket).unwrap(),
+        ),
+        address,
+    )
+}
+
+fn swim_detector(
+    local: &str,
+    peer: &str,
+    address: SocketAddr,
+    transport: asupersync::distributed::membership::UdpMembershipTransport,
+) -> asupersync::distributed::membership::driver::UdpSwimDriver {
+    use asupersync::distributed::membership::SwimConfig;
+    use asupersync::distributed::membership::driver::{SwimDriverConfig, UdpSwimDriver};
+    UdpSwimDriver::new_trusted_network(
+        NodeId::new(local),
+        SwimConfig {
+            probe_interval_ms: 500,
+            probe_timeout_ms: 200,
+            awareness_max: 1,
+            suspicion_mult: 2,
+            suspicion_max_timeout_mult: 1,
+            max_members: 4,
+            ..SwimConfig::default()
+        },
+        0x5357_494d,
+        std::collections::BTreeMap::from([(NodeId::new(peer), address)]),
+        transport,
+        SwimDriverConfig {
+            max_peers: 4,
+            max_queued_datagrams: 16,
+            retained_events: 1,
+            io_batch: 8,
+            tick_ms: 10,
+            max_datagram_age_ms: 200,
+            leave_timeout_ms: 300,
+        },
+    )
+    .unwrap()
+}
+
+async fn swim_observed(
+    cx: &Cx,
+    observer: &asupersync::distributed::membership::driver::SwimObserver,
+    predicate: impl Fn(&asupersync::distributed::membership::driver::SwimObservation) -> bool,
+) {
+    asupersync::time::timeout(cx.now(), Duration::from_secs(8), async {
+        loop {
+            let snapshot = observer.snapshot();
+            if predicate(&snapshot) {
+                return;
+            }
+            assert!(!snapshot.status.is_terminal(), "{snapshot:?}");
+            observer.changed(snapshot.revision).await;
+        }
+    })
+    .await
+    .expect("actual bounded UDP observation");
+}
+
+fn swim_route_journey(stop_observer: bool) {
+    native(move |cx, runtime| async move {
+        use asupersync::distributed::membership::driver::SwimDriverStatus;
+
+        struct StopDetectors(Arc<Notify>, Arc<Notify>);
+        impl Drop for StopDetectors {
+            fn drop(&mut self) {
+                self.0.notify_one();
+                self.1.notify_one();
+            }
+        }
+
+        let owner = authority(&cx);
+        let witness = Arc::new(Witness::default());
+        let mut service = start_service(
+            &cx,
+            "peer",
+            include_bytes!("../fixtures/tls/server.crt"),
+            include_bytes!("../fixtures/tls/server.key"),
+            Arc::clone(&witness),
+        )
+        .await;
+        let (local_socket, local_address) = swim_socket();
+        let (peer_socket, peer_address) = swim_socket();
+        let local_driver = swim_detector("origin", "peer", peer_address, local_socket);
+        let peer_driver = swim_detector("peer", "origin", local_address, peer_socket);
+        let observed = local_driver.observer();
+        let peer_observed = peer_driver.observer();
+        let peer = NodeId::new("peer");
+        assert!(matches!(
+            service.route.clone().with_swim_liveness(observed.clone()),
+            Err(RemoteComputationClientError::InvalidConfig(_))
+        ));
+        let bound = service
+            .route
+            .clone()
+            .with_membership(owner.clone(), 1)
+            .unwrap()
+            .with_swim_liveness(observed.clone())
+            .unwrap();
+        let native = Arc::new(
+            NativeRemoteRuntime::new(runtime.clone(), NodeId::new("origin"), [bound.clone()])
+                .unwrap(),
+        );
+        let legacy = Arc::new(
+            NativeRemoteRuntime::new(
+                runtime.clone(),
+                NodeId::new("origin"),
+                [service.route.clone()],
+            )
+            .unwrap(),
+        );
+        let admitted = domain(&runtime, bound.clone());
+        let _stop = Stop {
+            owner: owner.clone(),
+            native: vec![Arc::clone(&native), Arc::clone(&legacy)],
+            admitted: vec![admitted.clone()],
+            services: vec![service.operator.clone()],
+            witness: Arc::clone(&witness),
+        };
+        let remote = cx.with_remote_cap(
+            RemoteCap::new()
+                .with_local_node(NodeId::new("origin"))
+                .with_runtime(native.clone()),
+        );
+        let legacy_cx = cx.with_remote_cap(
+            RemoteCap::new()
+                .with_local_node(NodeId::new("origin"))
+                .with_runtime(legacy.clone()),
+        );
+        assert_eq!(observed.snapshot().status, SwimDriverStatus::Prepared);
+        assert_eq!(
+            observed.snapshot().membership.kind_of(&peer),
+            Some(MembershipKind::Alive)
+        );
+        assert!(
+            !observed.has_live_contact(&peer),
+            "seed is not observed traffic"
+        );
+        refused(&remote);
+
+        let stop_local = Arc::new(Notify::new());
+        let stop_peer = Arc::new(Notify::new());
+        let _stop_detectors = StopDetectors(Arc::clone(&stop_local), Arc::clone(&stop_peer));
+        let stop = Arc::clone(&stop_local);
+        let mut local_task = cx
+            .spawn(move |cx| async move { local_driver.run_until(&cx, stop.notified()).await })
+            .unwrap();
+        let stop = Arc::clone(&stop_peer);
+        let mut peer_task = cx
+            .spawn(move |cx| async move { peer_driver.run_until(&cx, stop.notified()).await })
+            .unwrap();
+        swim_observed(&cx, &observed, |s| s.stats.received_acks >= 2).await;
+        swim_observed(&cx, &peer_observed, |s| s.stats.received_acks >= 2).await;
+        assert!(observed.has_live_contact(&peer));
+        assert!(
+            native.effective_route(&peer).is_none(),
+            "gossip grants no membership authority"
+        );
+        refused(&remote);
+
+        apply(&owner, 1, 1, MembershipKind::Alive);
+        echo(&remote, b"authenticated and contacted").await;
+        apply(&owner, 1, 2, MembershipKind::Suspect);
+        assert!(observed.has_live_contact(&peer), "detector remains healthy");
+        refused(&remote);
+        apply(&owner, 1, 3, MembershipKind::Alive);
+        echo(&remote, b"authority independently recovered").await;
+
+        // A reservation predates the liveness withdrawal, while a real remote
+        // handler is already parked. Neither can silently acquire new authority.
+        let issued = admitted.reserve(&cx, &peer, 0, WAIT).await.unwrap();
+        let mut active = spawn_remote(
+            &remote,
+            peer.clone(),
+            ComputationName::new("wait"),
+            RemoteInput::empty(),
+        )
+        .unwrap();
+        eventually(&cx, || {
+            witness.parked.load(Ordering::Acquire) && active.state() == RemoteTaskState::Running
+        })
+        .await;
+        if stop_observer {
+            stop_local.notify_one();
+            let report = local_task.join(&cx).await.unwrap();
+            assert!(matches!(report.outcome, Outcome::Ok(())));
+            assert_eq!(report.observation.status, SwimDriverStatus::Left);
+            assert_eq!(
+                report.observation.membership.kind_of(&peer),
+                Some(MembershipKind::Alive)
+            );
+        } else {
+            stop_peer.notify_one();
+            let report = peer_task.join(&cx).await.unwrap();
+            assert!(matches!(report.outcome, Outcome::Ok(())));
+            swim_observed(&cx, &observed, |s| {
+                s.membership.kind_of(&peer) == Some(MembershipKind::Left)
+            })
+            .await;
+            assert!(observed.snapshot().membership.compact_base() > 0);
+        }
+        assert!(!observed.has_live_contact(&peer));
+        assert_eq!(owner.stamp(&peer).unwrap().kind, MembershipKind::Alive);
+        assert!(native.effective_route(&peer).is_none());
+        refused(&remote);
+        let refreshed = bound
+            .with_discovered_endpoints(&StaticList::new(
+                service.route.client().bootstrap_endpoints().to_vec(),
+            ))
+            .unwrap();
+        native.replace_routes([refreshed]).unwrap();
+        refused(&remote);
+        assert!(matches!(
+            issued.commit(
+                &cx,
+                &ComputationName::new("echo"),
+                &[],
+                Duration::from_secs(3)
+            ),
+            Err(NativeRemoteAdmissionError::Remote(
+                RemoteError::NodeUnreachable(_)
+            ))
+        ));
+        assert_eq!(admitted.usage().in_flight, 0);
+        assert_eq!(admitted.usage().buffer_bytes, 0);
+        assert!(
+            !witness.cancelled.load(Ordering::Acquire),
+            "liveness veto does not revoke owned work"
+        );
+        echo(
+            &legacy_cx,
+            b"legacy route still reaches the live TLS service",
+        )
+        .await;
+
+        let reason = CancelReason::user("drain after SWIM admission withdrawal");
+        let mut closing = Box::pin(active.close(&remote, &reason));
+        poll_fn(|task| {
+            assert!(closing.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        eventually(&cx, || witness.cancelled.load(Ordering::Acquire)).await;
+        witness.release();
+        assert!(matches!(closing.await.unwrap(),
+            Outcome::Ok(RemoteOutcome::Cancelled(received)) if received == reason));
+        assert!(witness.retired.load(Ordering::Acquire));
+
+        if stop_observer {
+            stop_peer.notify_one();
+            assert!(matches!(
+                peer_task.join(&cx).await.unwrap().outcome,
+                Outcome::Ok(())
+            ));
+        } else {
+            stop_local.notify_one();
+            assert!(matches!(
+                local_task.join(&cx).await.unwrap().outcome,
+                Outcome::Ok(())
+            ));
+        }
+        assert!(native.close(&cx).await);
+        assert!(legacy.close(&cx).await);
+        assert!(admitted.close(&cx).await.unwrap());
+        owner.close();
+        let _ = service.operator.begin_drain();
+        assert!(service.task.join(&cx).await.unwrap().is_ok());
+        assert_eq!(service.operator.active_connections(), 0);
+        assert_eq!(native.active_operations(), 0);
+        assert_eq!(owner.live_leases(), 0);
+        assert!(std::net::UdpSocket::bind(local_address).is_ok());
+        assert!(std::net::UdpSocket::bind(peer_address).is_ok());
+    });
+}
+
+#[test]
+fn real_swim_departure_vetoes_native_dispatch_without_granting_or_revoking_authority() {
+    swim_route_journey(false);
+}
+
+#[test]
+fn stopped_swim_detector_vetoes_retained_alive_routes_and_pending_reservations() {
+    swim_route_journey(true);
+}

@@ -16,7 +16,8 @@ use asupersync::net::TcpStream;
 use asupersync::net::atp::protocol::codec::AtpFrameCodec;
 use asupersync::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::service::{
-    MAX_REVOKED_RESUME_CLIENTS, ResumeRetireError, ResumeRevokeError, ResumeServiceConfig,
+    MAX_REVOKED_RESUME_CLIENTS, MAX_REVOKED_RESUME_SESSIONS, ResumableService,
+    ResumeClientRevocation, ResumeRetireError, ResumeRevokeError, ResumeServiceConfig,
     ResumeServiceOutcome, ResumeServiceRejection, ResumeSessionInit, ResumeSessionKey,
     ResumeSessionStatus,
 };
@@ -306,6 +307,14 @@ impl Store {
             }))
         }
     }
+    fn written(&self, bytes: &[u8]) -> Option<(ResumeSessionKey, Arc<Probe>)> {
+        self.probes
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, probe)| probe.bytes.lock().unwrap().as_slice() == bytes)
+            .map(|(key, probe)| (*key, Arc::clone(probe)))
+    }
     fn client(&self, client: NativeClientCertificateId) -> Option<(ResumeSessionKey, Arc<Probe>)> {
         self.probes
             .lock()
@@ -384,6 +393,50 @@ fn hello(nonce: [u8; 32]) -> Vec<u8> {
     bytes.extend_from_slice(&8_u32.to_be_bytes());
     bytes.extend_from_slice(&1024_u64.to_be_bytes());
     bytes
+}
+
+// Run the commit/result invariants against both authority scopes. The public
+// one-session operation must preserve the same owned-result contract.
+#[derive(Clone, Copy)]
+enum Denial {
+    Client,
+    Session,
+}
+impl Denial {
+    fn revoke(
+        self,
+        service: &mut ResumableService<Sink>,
+        key: ResumeSessionKey,
+        reason: CancelReason,
+    ) -> Result<ResumeClientRevocation, ResumeRevokeError> {
+        match self {
+            Self::Client => service.revoke_client(key.client, reason),
+            Self::Session => service.revoke_session(key, reason).map(|change| ResumeClientRevocation {
+                newly_revoked: change.newly_revoked,
+                signalled_connections: change.signalled_connections,
+                retained_sessions: change.retained_sessions,
+            }),
+        }
+    }
+    fn assert_denied(self, service: &ResumableService<Sink>, key: ResumeSessionKey) {
+        match self {
+            Self::Client => {
+                assert!(service.is_client_revoked(&key.client));
+                assert!(!service.is_session_revoked(&key));
+            }
+            Self::Session => {
+                assert!(!service.is_client_revoked(&key.client));
+                assert!(service.is_session_revoked(&key));
+            }
+        }
+    }
+    fn assert_rejected(self, outcome: ResumeServiceOutcome) {
+        assert!(matches!(
+            (self, outcome),
+            (Self::Client, ResumeServiceOutcome::Rejected(ResumeServiceRejection::Revoked))
+                | (Self::Session, ResumeServiceOutcome::Rejected(ResumeServiceRejection::SessionRevoked))
+        ));
+    }
 }
 
 #[test]
@@ -551,8 +604,13 @@ fn handshake_started_before_revocation_cannot_create_a_sink_or_consume_a_key() {
 
 #[test]
 fn revoking_a_started_commit_drains_and_retains_committed_without_proof() {
-    for workers in [1, 2] {
-        run(workers, async {
+    for (workers, denial) in [
+        (1, Denial::Client),
+        (2, Denial::Client),
+        (1, Denial::Session),
+        (2, Denial::Session),
+    ] {
+        run(workers, async move {
             let cx = Cx::current().unwrap();
             let scope = cx.scope();
             let receiver = receiver();
@@ -581,8 +639,8 @@ fn revoking_a_started_commit_drains_and_retains_committed_without_proof() {
             let (key, probe) = store.client(id("allowed")).unwrap();
             let reason = CancelReason::user("revoke during publication");
             assert_eq!(
-                service
-                    .revoke_client(key.client, reason.clone())
+                denial
+                    .revoke(&mut service, key, reason.clone())
                     .unwrap()
                     .signalled_connections,
                 1
@@ -640,201 +698,209 @@ fn revoking_a_started_commit_drains_and_retains_committed_without_proof() {
 
 #[test]
 fn revocation_preserves_completed_receipts_but_refuses_their_reconnects() {
-    run(1, async {
-        let cx = Cx::current().unwrap();
-        let scope = cx.scope();
-        let receiver = receiver();
-        let mut service = receiver
-            .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
-            .await
-            .unwrap();
-        let store = Store::default();
-        let mut sending = start(&cx, &scope, service.local_addr(), "allowed", b"completed");
-        let complete = service
-            .next(&cx, &scope, store.factory())
-            .await
-            .unwrap()
-            .unwrap();
-        let key = complete.session.unwrap();
-        let report = transfer(complete.outcome);
-        assert!(report.outcome.is_ok());
-        assert!(
-            poll_fn(|ctx| sending.poll_join(ctx))
+    for denial in [Denial::Client, Denial::Session] {
+        run(1, async move {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let receiver = receiver();
+            let mut service = receiver
+                .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
+                .await
+                .unwrap();
+            let store = Store::default();
+            let mut sending = start(&cx, &scope, service.local_addr(), "allowed", b"completed");
+            let complete = service
+                .next(&cx, &scope, store.factory())
                 .await
                 .unwrap()
-                .outcome
-                .is_ok()
-        );
-        let changed = service
-            .revoke_client(key.client, CancelReason::user("deny receipt access"))
-            .unwrap();
-        assert_eq!(
-            (changed.signalled_connections, changed.retained_sessions),
-            (0, 1)
-        );
-        assert_eq!(
-            service.session_snapshot(&key).unwrap().completed,
-            report.completed
-        );
-        let again = service
-            .revoke_client(
-                key.client,
-                CancelReason::user("must not change prior attribution"),
+                .unwrap();
+            let key = complete.session.unwrap();
+            let report = transfer(complete.outcome);
+            assert!(report.outcome.is_ok());
+            assert!(
+                poll_fn(|ctx| sending.poll_join(ctx))
+                    .await
+                    .unwrap()
+                    .outcome
+                    .is_ok()
+            );
+            let changed = denial
+                .revoke(&mut service, key, CancelReason::user("deny receipt access"))
+                .unwrap();
+            assert_eq!(
+                (changed.signalled_connections, changed.retained_sessions),
+                (0, 1)
+            );
+            assert_eq!(
+                service.session_snapshot(&key).unwrap().completed,
+                report.completed
+            );
+            let again = denial
+                .revoke(
+                    &mut service,
+                key,
+                    CancelReason::user("must not change prior attribution"),
+                )
+                .unwrap();
+            assert!(!again.newly_revoked);
+            assert_eq!(service.revoked_clients() + service.revoked_sessions(), 1);
+            let address = service.local_addr();
+            let (refused, completion) = zip(
+                async {
+                    Wire::connect(address, "allowed")
+                        .await
+                        .hello(key.nonce)
+                        .await
+                },
+                service.next(&cx, &scope, store.factory()),
             )
-            .unwrap();
-        assert!(!again.newly_revoked);
-        assert_eq!(service.revoked_clients(), 1);
-        let address = service.local_addr();
-        let (refused, completion) = zip(
-            async {
-                Wire::connect(address, "allowed")
-                    .await
-                    .hello(key.nonce)
-                    .await
-            },
-            service.next(&cx, &scope, store.factory()),
-        )
-        .await;
-        assert!(refused.is_err());
-        assert!(matches!(
-            completion.unwrap().unwrap().outcome,
-            ResumeServiceOutcome::Rejected(ResumeServiceRejection::Revoked)
-        ));
-        assert_eq!(store.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            service.retire(&key).unwrap().unwrap().completed,
-            report.completed
-        );
-        assert!(service.is_client_revoked(&key.client));
-        assert!(service.drain_next().await.is_none());
-        assert!(service.is_client_revoked(&key.client));
-        assert!(
-            !service
-                .revoke_client(key.client, CancelReason::user("duplicate after drain"))
-                .unwrap()
-                .newly_revoked
-        );
-        assert_eq!(
-            service
-                .revoke_client(id("unlisted"), CancelReason::user("already drained"))
-                .unwrap_err(),
-            ResumeRevokeError::Drained
-        );
-    });
+            .await;
+            assert!(refused.is_err());
+            denial.assert_rejected(completion.unwrap().unwrap().outcome);
+            assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                service.retire(&key).unwrap().unwrap().completed,
+                report.completed
+            );
+            denial.assert_denied(&service, key);
+            assert!(service.drain_next().await.is_none());
+            denial.assert_denied(&service, key);
+            assert!(
+                !denial
+                    .revoke(&mut service, key, CancelReason::user("duplicate after drain"))
+                    .unwrap()
+                    .newly_revoked
+            );
+            assert_eq!(
+                denial
+                    .revoke(
+                        &mut service,
+                        ResumeSessionKey { client: id("unlisted"), ..key },
+                        CancelReason::user("already drained"),
+                    )
+                    .unwrap_err(),
+                ResumeRevokeError::Drained
+            );
+        });
+    }
 }
 
 #[test]
 fn revoked_client_never_invokes_a_historical_receipt_restoration_factory() {
-    run(2, async {
-        let cx = Cx::current().unwrap();
-        let scope = cx.scope();
-        let receiver = receiver();
-        let mut service = receiver
-            .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
-            .await
-            .unwrap();
-        let client = id("allowed");
-        assert!(
-            service
-                .revoke_client(
-                    client,
-                    CancelReason::user("old receipts do not renew authority")
-                )
-                .unwrap()
-                .newly_revoked
-        );
-        let calls = Arc::new(AtomicUsize::new(0));
-        let count = Arc::clone(&calls);
-        let address = service.local_addr();
-        let (refused, completion) = zip(
-            async { Wire::connect(address, "allowed").await.hello([9; 32]).await },
-            service.next_restoring(&cx, &scope, move |_, key| {
-                count.fetch_add(1, Ordering::SeqCst);
-                let mut hash = Sha256::new();
-                hash.update(b"asupersync.atp.live.resume.hello.v1");
-                hash.update(hello(key.nonce));
-                ready(Ok(ResumeSessionInit::<Sink>::Committed(
-                    LiveStreamReceipt {
-                        prefix: LiveStreamPrefix {
-                            stream_nonce: key.nonce,
-                            epochs: 0,
-                            bytes: 0,
-                            chain: hash.finalize().into(),
+    for denial in [Denial::Client, Denial::Session] {
+        run(2, async move {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let receiver = receiver();
+            let mut service = receiver
+                .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
+                .await
+                .unwrap();
+            let key = ResumeSessionKey { client: id("allowed"), nonce: [9; 32] };
+            assert!(
+                denial
+                    .revoke(
+                        &mut service, key,
+                        CancelReason::user("old receipts do not renew authority")
+                    )
+                    .unwrap()
+                    .newly_revoked
+            );
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&calls);
+            let address = service.local_addr();
+            let (refused, completion) = zip(
+                async { Wire::connect(address, "allowed").await.hello([9; 32]).await },
+                service.next_restoring(&cx, &scope, move |_, key| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let mut hash = Sha256::new();
+                    hash.update(b"asupersync.atp.live.resume.hello.v1");
+                    hash.update(hello(key.nonce));
+                    ready(Ok(ResumeSessionInit::<Sink>::Committed(
+                        LiveStreamReceipt {
+                            prefix: LiveStreamPrefix {
+                                stream_nonce: key.nonce,
+                                epochs: 0,
+                                bytes: 0,
+                                chain: hash.finalize().into(),
+                            },
+                            source_sha256: Sha256::digest(b"").into(),
                         },
-                        source_sha256: Sha256::digest(b"").into(),
-                    },
-                )))
-            }),
-        )
-        .await;
-        assert!(refused.is_err());
-        assert!(matches!(
-            completion.unwrap().unwrap().outcome,
-            ResumeServiceOutcome::Rejected(ResumeServiceRejection::Revoked)
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(service.retained_keys(), 0);
-        assert!(service.drain_next().await.is_none());
-    });
+                    )))
+                }),
+            )
+            .await;
+            assert!(refused.is_err());
+            denial.assert_rejected(completion.unwrap().unwrap().outcome);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(service.retained_keys(), 0);
+            assert!(service.drain_next().await.is_none());
+        });
+    }
 }
 
 #[test]
 fn revocation_cancels_a_parked_factory_without_recreating_its_session() {
-    run(2, async {
-        let cx = Cx::current().unwrap();
-        let scope = cx.scope();
-        let receiver = receiver();
-        let mut service = receiver
-            .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
-            .await
-            .unwrap();
-        let entered = Arc::new(AtomicBool::new(false));
-        let marker = Arc::clone(&entered);
-        let factory = move |_: Cx, _: ResumeSessionKey| {
-            let marker = Arc::clone(&marker);
-            async move {
-                marker.store(true, Ordering::SeqCst);
-                std::future::pending::<io::Result<Sink>>().await
-            }
-        };
-        let mut sending = start(&cx, &scope, service.local_addr(), "allowed", b"not written");
-        or(
-            async {
-                let early = service.next(&cx, &scope, factory.clone()).await;
-                panic!("factory completed without revocation: {early:?}");
-            },
-            witness(&cx, || entered.load(Ordering::SeqCst)),
-        )
-        .await;
-        let reason = CancelReason::user("revoke during factory");
-        assert_eq!(
-            service
-                .revoke_client(id("allowed"), reason.clone())
-                .unwrap()
-                .signalled_connections,
-            1
-        );
-        let complete = service.next(&cx, &scope, factory).await.unwrap().unwrap();
-        let key = complete.session.unwrap();
-        assert!(matches!(complete.outcome,
-            ResumeServiceOutcome::Rejected(ResumeServiceRejection::Factory(LiveStreamError::Cancelled(Some(actual)))) if actual == reason));
-        assert_eq!(
-            service.session_status(&key),
-            Some(ResumeSessionStatus::Retired)
-        );
-        assert_eq!(
-            (service.resident_sessions(), service.retained_keys()),
-            (0, 1)
-        );
-        assert!(
-            poll_fn(|ctx| sending.poll_join(ctx))
+    for denial in [Denial::Client, Denial::Session] {
+        run(2, async move {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let receiver = receiver();
+            let mut service = receiver
+                .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
                 .await
-                .unwrap()
-                .outcome
-                .is_err()
-        );
-        assert!(service.drain_next().await.is_none());
-    });
+                .unwrap();
+            let entered = Arc::new(AtomicBool::new(false));
+            let marker = Arc::clone(&entered);
+            let observed = Arc::new(Mutex::new(None));
+            let recorded = Arc::clone(&observed);
+            let factory = move |_: Cx, key: ResumeSessionKey| {
+                *recorded.lock().unwrap() = Some(key);
+                let marker = Arc::clone(&marker);
+                async move {
+                    marker.store(true, Ordering::SeqCst);
+                    std::future::pending::<io::Result<Sink>>().await
+                }
+            };
+            let mut sending = start(&cx, &scope, service.local_addr(), "allowed", b"not written");
+            or(
+                async {
+                    let early = service.next(&cx, &scope, factory.clone()).await;
+                    panic!("factory completed without revocation: {early:?}");
+                },
+                witness(&cx, || entered.load(Ordering::SeqCst)),
+            )
+            .await;
+            let reason = CancelReason::user("revoke during factory");
+            assert_eq!(
+                denial
+                    .revoke(&mut service, observed.lock().unwrap().unwrap(), reason.clone())
+                    .unwrap()
+                    .signalled_connections,
+                1
+            );
+            let complete = service.next(&cx, &scope, factory).await.unwrap().unwrap();
+            let key = complete.session.unwrap();
+            assert!(matches!(complete.outcome,
+                ResumeServiceOutcome::Rejected(ResumeServiceRejection::Factory(LiveStreamError::Cancelled(Some(actual)))) if actual == reason));
+            assert_eq!(
+                service.session_status(&key),
+                Some(ResumeSessionStatus::Retired)
+            );
+            assert_eq!(
+                (service.resident_sessions(), service.retained_keys()),
+                (0, 1)
+            );
+            assert!(
+                poll_fn(|ctx| sending.poll_join(ctx))
+                    .await
+                    .unwrap()
+                    .outcome
+                    .is_err()
+            );
+            assert!(service.drain_next().await.is_none());
+        });
+    }
 }
 
 #[test]
@@ -896,6 +962,203 @@ fn revocation_capacity_is_independent_of_session_capacity_and_never_evicts_denia
 
 #[test]
 fn revocation_does_not_relabel_an_uncollected_success_as_cancellation() {
+    for denial in [Denial::Client, Denial::Session] {
+        run(2, async move {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let receiver = receiver();
+            let mut service = receiver
+                .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
+                .await
+                .unwrap();
+            let store = Store {
+                pause_commit: true,
+                ..Store::default()
+            };
+            let _release = ReleaseAll(store.clone());
+            let mut sending = start(
+                &cx,
+                &scope,
+                service.local_addr(),
+                "allowed",
+                b"already committed",
+            );
+            or(
+                async {
+                    let early = service.next(&cx, &scope, store.factory()).await;
+                    panic!("commit completed before test released it: {early:?}");
+                },
+                witness(&cx, || {
+                    store
+                        .client(id("allowed"))
+                        .is_some_and(|(_, probe)| probe.commit_parked.load(Ordering::SeqCst))
+                }),
+            )
+            .await;
+            let (key, probe) = store.client(id("allowed")).unwrap();
+            probe.release();
+            // Do not poll service.next while the worker finishes. The sender's
+            // verified Proof establishes completion, while the service still owns
+            // the uncollected server result and its admission reservation.
+            let sent = poll_fn(|ctx| sending.poll_join(ctx)).await.unwrap();
+            let receipt = sent.outcome.unwrap();
+            assert_eq!(
+                service.session_status(&key),
+                Some(ResumeSessionStatus::Active)
+            );
+            assert_eq!(service.in_flight(), 1);
+            assert_eq!(probe.commits.load(Ordering::SeqCst), 1);
+            let changed = denial
+                .revoke(&mut service, key, CancelReason::user("late revocation"))
+                .unwrap();
+            assert_eq!(changed.signalled_connections, 1);
+            let report = transfer(
+                service
+                    .next(&cx, &scope, store.factory())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .outcome,
+            );
+            assert_eq!(report.outcome.unwrap(), receipt);
+            assert_eq!(report.completed, Some(receipt.clone()));
+            assert_eq!(
+                service.retire(&key).unwrap().unwrap().completed,
+                Some(receipt)
+            );
+            assert!(probe.dropped.load(Ordering::SeqCst));
+            assert!(service.drain_next().await.is_none());
+        });
+    }
+}
+
+#[test]
+fn session_revocation_drains_only_one_parked_transfer_from_the_same_certificate() {
+    for workers in [1, 2] {
+        run(workers, async {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let receiver = receiver();
+            let mut service = receiver
+                .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
+                .await
+                .unwrap();
+            let store = Store {
+                pause_write: true,
+                ..Store::default()
+            };
+            let _release = ReleaseAll(store.clone());
+            let mut a = start(&cx, &scope, service.local_addr(), "allowed", b"abcdefgh");
+            let mut b = start(&cx, &scope, service.local_addr(), "allowed", b"12345678");
+            or(
+                async {
+                    let early = service.next(&cx, &scope, store.factory()).await;
+                    panic!("connection completed before the parked witness: {early:?}");
+                },
+                witness(&cx, || {
+                    [b"abc".as_slice(), b"123".as_slice()].iter().all(|bytes| {
+                        store
+                            .written(bytes)
+                            .is_some_and(|(_, probe)| probe.write_parked.load(Ordering::SeqCst))
+                    })
+                }),
+            )
+            .await;
+            let (key, probe) = store.written(b"abc").unwrap();
+            let (other_key, other_probe) = store.written(b"123").unwrap();
+            assert_eq!(key.client, other_key.client);
+            assert_ne!(key.nonce, other_key.nonce);
+            let reason = CancelReason::user("cancel just the requested transfer");
+            let changed = service.revoke_session(key, reason.clone()).unwrap();
+            assert!(changed.newly_revoked);
+            let duplicate = service.revoke_session(
+                key,
+                CancelReason::user("must not replace the first reason"),
+            ).unwrap();
+            assert!(!duplicate.newly_revoked);
+            assert_eq!(duplicate.signalled_connections, 0);
+            assert_eq!(service.revoked_clients(), 0);
+            assert_eq!(service.revoked_sessions(), 1);
+            assert!(!service.is_client_revoked(&key.client));
+            assert!(!service.is_session_revoked(&other_key));
+            assert_eq!(
+                (changed.signalled_connections, changed.retained_sessions),
+                (1, 1)
+            );
+            assert_eq!(service.retire(&key).unwrap_err(), ResumeRetireError::Active);
+            assert!(!probe.dropped.load(Ordering::SeqCst));
+            assert_eq!(receiver.active_streams(), 4);
+            let completion = service
+                .next(&cx, &scope, store.factory())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(completion.session, Some(key));
+            let report = transfer(completion.outcome);
+            match report.outcome {
+                Err(ResumeError::Transfer(LiveStreamError::Cancelled(Some(actual)))) => {
+                    assert_eq!(actual, reason)
+                }
+                other => panic!("revocation lost its cancellation attribution: {other:?}"),
+            }
+            assert_eq!(report.sink_written_bytes, 3);
+            assert_eq!(report.prefix.unwrap().bytes, 0);
+            assert!(report.completed.is_none());
+            assert!(!probe.dropped.load(Ordering::SeqCst));
+            assert_eq!(
+                service.session_status(&other_key),
+                Some(ResumeSessionStatus::Active)
+            );
+            assert!(!other_probe.cancel_seen.load(Ordering::SeqCst));
+            let snapshot = service.retire(&key).unwrap().unwrap();
+            assert_eq!(snapshot.sink_written_bytes, 3);
+            assert!(probe.dropped.load(Ordering::SeqCst));
+            assert!(
+                poll_fn(|ctx| a.poll_join(ctx))
+                    .await
+                    .unwrap()
+                    .outcome
+                    .is_err()
+            );
+            // The completed cancellation cannot be resurrected, while the
+            // same-certificate sibling remains genuinely parked and owned.
+            let address = service.local_addr();
+            let (refused, completion) = zip(
+                async { Wire::connect(address, "allowed").await.hello(key.nonce).await },
+                service.next(&cx, &scope, store.factory()),
+            ).await;
+            assert!(refused.is_err());
+            Denial::Session.assert_rejected(completion.unwrap().unwrap().outcome);
+            assert_eq!(store.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(service.session_status(&other_key), Some(ResumeSessionStatus::Active));
+            assert_eq!(&*probe.bytes.lock().unwrap(), b"abc");
+            assert_eq!(probe.commits.load(Ordering::SeqCst), 0);
+            other_probe.release();
+            let completion = service
+                .next(&cx, &scope, store.factory())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(completion.session, Some(other_key));
+            assert!(transfer(completion.outcome).outcome.is_ok());
+            assert!(
+                poll_fn(|ctx| b.poll_join(ctx))
+                    .await
+                    .unwrap()
+                    .outcome
+                    .is_ok()
+            );
+            assert_eq!(&*other_probe.bytes.lock().unwrap(), b"12345678");
+            assert_eq!(other_probe.commits.load(Ordering::SeqCst), 1);
+            assert!(service.drain_next().await.is_none());
+            assert_eq!(receiver.active_streams(), 0);
+            assert!(service.is_session_revoked(&key));
+        });
+    }
+}
+
+#[test]
+fn session_denial_rechecks_an_authenticated_pending_hello_and_keeps_other_identities_independent() {
     run(2, async {
         let cx = Cx::current().unwrap();
         let scope = cx.scope();
@@ -904,62 +1167,120 @@ fn revocation_does_not_relabel_an_uncollected_success_as_cancellation() {
             .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
             .await
             .unwrap();
-        let store = Store {
-            pause_commit: true,
-            ..Store::default()
-        };
-        let _release = ReleaseAll(store.clone());
-        let mut sending = start(
-            &cx,
-            &scope,
-            service.local_addr(),
-            "allowed",
-            b"already committed",
+        let store = Store::default();
+        let key = ResumeSessionKey { client: id("allowed"), nonce: [7; 32] };
+        let address = service.local_addr();
+        let mut wire = or(
+            async {
+                let early = service.next(&cx, &scope, store.factory()).await;
+                panic!("no authenticated hello exists yet: {early:?}");
+            },
+            Wire::connect(address, "allowed"),
+        ).await;
+        assert_eq!(
+            service.revoke_session(key, CancelReason::user("deny pending hello"))
+                .unwrap().signalled_connections,
+            0
         );
+        let (refused, completion) = zip(
+            wire.hello(key.nonce),
+            service.next(&cx, &scope, store.factory()),
+        ).await;
+        assert!(refused.is_err());
+        Denial::Session.assert_rejected(completion.unwrap().unwrap().outcome);
+        assert_eq!(store.calls.load(Ordering::SeqCst), 0);
+        assert_eq!((service.resident_sessions(), service.retained_keys()), (0, 0));
+        drop(wire);
+
+        // The nonce is not an authority: a distinct authenticated certificate
+        // with identical nonce bytes owns a distinct, still-admissible key.
+        let (accepted, completion) = zip(
+            async {
+                let mut wire = Wire::connect(address, "unlisted").await;
+                let reply = wire.hello(key.nonce).await;
+                drop(wire);
+                reply
+            },
+            service.next(&cx, &scope, store.factory()),
+        ).await;
+        assert!(accepted.is_ok());
+        let complete = completion.unwrap().unwrap();
+        let other = ResumeSessionKey { client: id("unlisted"), ..key };
+        assert_eq!(complete.session, Some(other));
+        let report = transfer(complete.outcome);
+        assert_eq!(report.sink_written_bytes, 0);
+        assert_eq!(report.prefix.unwrap().bytes, 0);
+        assert!(report.completed.is_none());
+        assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+        assert!(!service.is_session_revoked(&other));
+        assert!(!service.is_client_revoked(&key.client));
+        assert!(service.drain_next().await.is_none());
+    });
+}
+
+#[test]
+fn full_session_denial_budget_refuses_a_whole_policy_before_cancelling_any_owner() {
+    run(2, async {
+        let cx = Cx::current().unwrap();
+        let scope = cx.scope();
+        let receiver = receiver();
+        let mut service = receiver
+            .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
+            .await
+            .unwrap();
+        let store = Store { pause_write: true, ..Store::default() };
+        let _release = ReleaseAll(store.clone());
+        let mut sending = start(&cx, &scope, service.local_addr(), "allowed", b"abcdefgh");
         or(
             async {
                 let early = service.next(&cx, &scope, store.factory()).await;
-                panic!("commit completed before test released it: {early:?}");
+                panic!("sink must remain parked: {early:?}");
             },
-            witness(&cx, || {
-                store
-                    .client(id("allowed"))
-                    .is_some_and(|(_, probe)| probe.commit_parked.load(Ordering::SeqCst))
-            }),
-        )
-        .await;
-        let (key, probe) = store.client(id("allowed")).unwrap();
+            witness(&cx, || store.client(id("allowed"))
+                .is_some_and(|(_, probe)| probe.write_parked.load(Ordering::SeqCst))),
+        ).await;
+        let (active_key, probe) = store.client(id("allowed")).unwrap();
+        let absent_client = NativeClientCertificateId::from_sha256([0; 32]);
+        let denials: Vec<_> = (0..MAX_REVOKED_RESUME_SESSIONS as u32).map(|number| {
+            let mut nonce = [0; 32];
+            nonce[..4].copy_from_slice(&number.to_be_bytes());
+            ResumeSessionKey { client: absent_client, nonce }
+        }).collect();
+        let full = service.apply_revocations(
+            &[], &denials, CancelReason::user("bounded retained session policy"),
+        ).unwrap();
+        assert_eq!(full.newly_revoked_sessions, MAX_REVOKED_RESUME_SESSIONS);
+        assert_eq!(full.signalled_connections, 0);
+        assert_eq!(
+            service.check_revocations(&[active_key.client], &[active_key]).unwrap_err(),
+            ResumeRevokeError::Capacity
+        );
+        assert_eq!(
+            service.apply_revocations(
+                &[active_key.client], &[active_key], CancelReason::user("must be atomic"),
+            ).unwrap_err(),
+            ResumeRevokeError::Capacity
+        );
+        assert_eq!(service.revoked_clients(), 0);
+        assert_eq!(service.revoked_sessions(), MAX_REVOKED_RESUME_SESSIONS);
+        assert!(!service.is_session_revoked(&active_key));
+        assert!(!service.is_client_revoked(&active_key.client));
+        assert!(service.is_session_revoked(&denials[0]));
+        let duplicate = service.apply_revocations(
+            &[], &denials, CancelReason::user("idempotent at capacity"),
+        ).unwrap();
+        assert_eq!(duplicate.newly_revoked_sessions, 0);
+        assert_eq!(duplicate.signalled_connections, 0);
+        assert_eq!((service.resident_sessions(), service.retained_keys()), (1, 1));
+        assert_eq!(service.session_status(&active_key), Some(ResumeSessionStatus::Active));
         probe.release();
-        // Do not poll service.next while the worker finishes. The sender's
-        // verified Proof establishes completion, while the service still owns
-        // the uncollected server result and its admission reservation.
-        let sent = poll_fn(|ctx| sending.poll_join(ctx)).await.unwrap();
-        let receipt = sent.outcome.unwrap();
-        assert_eq!(
-            service.session_status(&key),
-            Some(ResumeSessionStatus::Active)
-        );
-        assert_eq!(service.in_flight(), 1);
+        let report = transfer(service.next(&cx, &scope, store.factory())
+            .await.unwrap().unwrap().outcome);
+        let receipt = report.outcome.unwrap();
+        assert_eq!(receipt.source_sha256.as_slice(), Sha256::digest(b"abcdefgh").as_slice());
+        assert_eq!(&*probe.bytes.lock().unwrap(), b"abcdefgh");
         assert_eq!(probe.commits.load(Ordering::SeqCst), 1);
-        let changed = service
-            .revoke_client(key.client, CancelReason::user("late revocation"))
-            .unwrap();
-        assert_eq!(changed.signalled_connections, 1);
-        let report = transfer(
-            service
-                .next(&cx, &scope, store.factory())
-                .await
-                .unwrap()
-                .unwrap()
-                .outcome,
-        );
-        assert_eq!(report.outcome.unwrap(), receipt);
-        assert_eq!(report.completed, Some(receipt.clone()));
-        assert_eq!(
-            service.retire(&key).unwrap().unwrap().completed,
-            Some(receipt)
-        );
-        assert!(probe.dropped.load(Ordering::SeqCst));
+        assert_eq!(poll_fn(|ctx| sending.poll_join(ctx)).await.unwrap().outcome.unwrap(), receipt);
         assert!(service.drain_next().await.is_none());
     });
 }
