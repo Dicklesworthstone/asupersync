@@ -112,6 +112,12 @@ impl PhaseBudgetGuard {
             phase_baseline.priority = original_budget.priority.max(phase_budget.priority);
             guard.budget = phase_baseline;
             guard.budget_baseline = phase_baseline;
+            if !restore_original {
+                // Drain + on_stop is terminal cleanup even after graceful
+                // stop. Its native poll quota remains advisory, as for
+                // cancellation cleanup; masking is not the exemption.
+                guard.cleanup_phase = true;
+            }
             drop(guard);
             (original_budget, original_baseline, phase_baseline)
         };
@@ -133,6 +139,13 @@ impl Drop for PhaseBudgetGuard {
 
         let mut guard = self.inner.write();
 
+        // A checkpoint can install (or leave a receipt to install) the
+        // cancellation cleanup budget while on_start is still draining.
+        // Restoring the running budget here would overwrite that envelope.
+        if guard.cleanup_phase || guard.cancel_acknowledged {
+            return;
+        }
+
         let phase_remaining = guard.budget;
         let polls_used = self
             .phase_baseline
@@ -151,7 +164,11 @@ impl Drop for PhaseBudgetGuard {
 
         guard.budget = Budget {
             deadline: self.original_budget.deadline,
-            poll_quota: self.original_budget.poll_quota.saturating_sub(polls_used),
+            poll_quota: if self.original_budget.poll_quota == u32::MAX {
+                u32::MAX
+            } else {
+                self.original_budget.poll_quota.saturating_sub(polls_used)
+            },
             cost_quota: restored_cost_quota,
             priority: self.original_budget.priority,
         };
@@ -577,7 +594,12 @@ pub trait GenServer: Send + 'static {
     ///
     /// This budget is met with the task/region budget and applied only for the
     /// duration of `on_start`. Budget consumption during `on_start` is preserved
-    /// when restoring the original budget for the message loop.
+    /// when restoring a finite original budget for the message loop. An
+    /// unlimited original poll quota stays unlimited. Native workers and the
+    /// lab charge finite quotas on subsequent task polls while init is pending;
+    /// the first poll enters the phase after its task dispatch was admitted.
+    /// Exhaustion requests cooperative cancellation, so the hook must observe
+    /// a checkpoint or cancellation-aware operation to finish its cleanup.
     fn on_start_budget(&self) -> Budget {
         Budget::INFINITE
     }
@@ -589,7 +611,9 @@ pub trait GenServer: Send + 'static {
 
     /// Returns the budget used for drain + stop (`on_stop`).
     ///
-    /// The default is [`Budget::MINIMAL`] for bounded cleanup.
+    /// The default cleanup envelope is [`Budget::MINIMAL`]. Native terminal
+    /// cleanup poll quotas stay advisory, including graceful stops; the lab
+    /// retains its stricter poll accounting.
     fn on_stop_budget(&self) -> Budget {
         Budget::MINIMAL
     }

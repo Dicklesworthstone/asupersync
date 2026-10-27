@@ -1021,9 +1021,10 @@ pub struct CxInner {
     pub(crate) budget_deadline_timer: Option<BudgetDeadlineTimer>,
     /// Current mask depth.
     pub mask_depth: u32,
-    /// The task runs its cancellation cleanup: `budget` is the cleanup budget,
-    /// whose poll quota bounds only this task's own drain, not work it starts
-    /// (br-asupersync-0fvvq9).
+    /// The task runs cancellation or terminal lifecycle cleanup, including a
+    /// GenServer's graceful drain/stop. Native poll quotas stay advisory here
+    /// and do not constrain work spawned by cleanup helpers. The lab retains
+    /// its stricter cleanup accounting (br-asupersync-0fvvq9).
     pub(crate) cleanup_phase: bool,
     /// Progress checkpoint state.
     pub checkpoint_state: CheckpointState,

@@ -1214,15 +1214,20 @@ impl TaskRecord {
     pub(crate) fn consume_checkpoint_cancel_ack(
         &mut self,
     ) -> CancellationEffects<Option<CheckpointCancelAck>> {
-        // Every pending poll lands here, and almost none carries an
-        // acknowledgement: answer that case from a shared read without
-        // cloning the Arc (br-asupersync-issue65-criticisms-kpmoy5.1.3). The
-        // flag is re-checked under the write lock below.
-        if !self
-            .cx_inner
-            .as_ref()
-            .is_some_and(|inner| inner.read().cancel_acknowledged)
-        {
+        // Every pending poll lands here. Refresh the cached quota in the same
+        // read already needed for acknowledgement: a GenServer phase can
+        // tighten or restore its budget during the poll (asupersync-0fvvq9).
+        // The next native dispatch then charges the live phase exactly once,
+        // without adding a lock to the unlimited pre-poll fast path.
+        // Almost no poll acknowledges cancellation; avoid cloning the Arc in
+        // that case (br-asupersync-issue65-criticisms-kpmoy5.1.3). The flag is
+        // re-checked under the write lock below.
+        let acknowledged = self.cx_inner.as_ref().is_some_and(|inner| {
+            let guard = inner.read();
+            self.polls_remaining = guard.budget.poll_quota;
+            guard.cancel_acknowledged
+        });
+        if !acknowledged {
             return CancellationEffects::ready(None);
         }
         let Some(inner) = self.cx_inner.clone() else {

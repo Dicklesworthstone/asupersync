@@ -1735,12 +1735,14 @@ pub(crate) fn scheduler_drives_current_task() -> bool {
 /// Spends one poll from a task's budget before a worker polls it, so a
 /// `Budget::with_poll_quota` bound holds on the production runtime as it does
 /// in the lab. `polls_remaining` mirrors the budget's quota; a task without a
-/// quota (`u32::MAX`) pays only this comparison. When the quota is already
-/// spent, cancellation is requested with a `PollQuota` reason, as the lab
-/// does, so the task's next checkpoint or cancel-aware await observes it.
+/// quota (`u32::MAX`) pays only this comparison. Post-poll reconciliation
+/// refreshes this cache when a lifecycle phase tightens or restores the live
+/// budget. When the quota is already spent, cancellation is requested with a
+/// `PollQuota` reason, as the lab does, so the task's next checkpoint or
+/// cancel-aware await observes it.
 ///
-/// A task in its cancellation cleanup phase is not charged here. Its cleanup
-/// budget stays advisory on the production runtime, as before: enforcing it
+/// A task in cancellation or terminal lifecycle cleanup is not charged here.
+/// Its cleanup budget stays advisory on the production runtime: enforcing it
 /// would rewrite the reason of a long graceful drain to `PollQuota`. The same
 /// holds once cancellation is requested on the task's `Cx` but the task record
 /// has not caught up yet (`TaskHandle::abort`, `Cx::cancel_with`): that
@@ -1754,7 +1756,12 @@ pub(crate) fn consume_budget_poll(record: &mut crate::record::TaskRecord) {
         return;
     };
     let mut guard = inner.write();
-    if guard.cancel_requested {
+    if guard.cancel_requested || guard.cleanup_phase {
+        return;
+    }
+    // An unlimited budget may have been restored since the cached snapshot.
+    if guard.budget.poll_quota == u32::MAX {
+        record.polls_remaining = u32::MAX;
         return;
     }
     if guard.budget.consume_poll().is_none() {
