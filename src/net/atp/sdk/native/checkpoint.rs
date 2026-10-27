@@ -6,6 +6,8 @@
 //! the persistence boundary; the underlying filesystem must honor those calls.
 //! A checkpoint becomes usable only after complete source EOF. This is not
 //! recovery of a partially consumed producer or remote byte-offset resumption.
+//! Durable cancellation revokes later local attempts. It retains the source
+//! and any uncertain delivery evidence; it cannot undo a remote publication.
 
 use super::{
     BufferReader, MAX_UPLOAD_BUFFER, NativeAdmission, NativeTransferClient, NativeTransferError,
@@ -29,6 +31,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 const JOURNAL_VERSION: u32 = 1;
+// Older readers must refuse a cancelled checkpoint, rather than silently
+// ignoring a sidecar and admitting another send from its retained payload.
+const CANCELLED_JOURNAL_VERSION: u32 = 2;
 const JOURNAL_LIMIT: u64 = 128 * 1024;
 /// Finite lifetime network-attempt ceiling for one durable checkpoint.
 pub const MAX_CHECKPOINT_ATTEMPTS: u64 = 32;
@@ -71,6 +76,17 @@ pub enum NativeCheckpointError {
     /// A stale retry decision cannot authorize another attempt.
     #[error("checkpoint retry decision names a different attempt")]
     StaleAttempt,
+    /// The caller's snapshot names different source or checkpoint facts.
+    #[error("checkpoint cancellation snapshot does not match the retained source")]
+    SnapshotMismatch,
+    /// A durable cancellation forbids every later network attempt.
+    #[error("checkpoint cancelled at attempt {attempt}; delivery uncertain: {delivery_uncertain}")]
+    Cancelled {
+        /// Last admitted attempt, or zero if no send was ever admitted.
+        attempt: u64,
+        /// An earlier attempt may already have published remotely.
+        delivery_uncertain: bool,
+    },
     /// This checkpoint used its finite lifetime attempt budget.
     #[error("checkpoint network-attempt budget exhausted")]
     AttemptsExhausted,
@@ -117,6 +133,31 @@ pub struct NativeUploadCheckpoint {
     pub state: NativeCheckpointState,
     /// Zero before any attempt; monotonically increases before each send.
     pub attempt: u64,
+}
+
+/// Durable checkpoint status, including local revocation and actual receipts.
+///
+/// The original lifecycle is retained in `checkpoint.state`: a cancelled
+/// `Sending` checkpoint still has uncertain remote delivery. Cancellation
+/// prevents later local sends; it neither erases that fact nor claims remote
+/// rollback. An acknowledged checkpoint is never changed into a cancellation.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct NativeCheckpointStatus {
+    /// Last durably recorded source, destination and network-attempt facts.
+    pub checkpoint: NativeUploadCheckpoint,
+    /// True only for a durable terminal cancellation journal.
+    pub cancelled: bool,
+    /// Retained actual native receipt, if delivery was durably acknowledged.
+    pub receipt: Option<SendReport>,
+}
+
+impl NativeCheckpointStatus {
+    /// Whether a prior attempt may have committed without a retained receipt.
+    #[must_use]
+    pub fn delivery_uncertain(&self) -> bool {
+        self.checkpoint.state == NativeCheckpointState::Sending
+    }
 }
 
 /// Successfully published checkpoint plus independent ephemeral-spool cleanup.
@@ -216,10 +257,17 @@ struct Journal {
     state: NativeCheckpointState,
     attempt: u64,
     receipt: Option<StoredReceipt>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    cancelled: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Journal {
     fn next_attempt(&self, retry: NativeCheckpointRetry) -> Result<u64, NativeCheckpointError> {
+        self.require_active()?;
         match (self.state, retry) {
             (NativeCheckpointState::Prepared, NativeCheckpointRetry::Never) => {}
             (NativeCheckpointState::Sending, NativeCheckpointRetry::Never) => {
@@ -240,8 +288,16 @@ impl Journal {
     }
 
     fn validate(&self) -> Result<(), NativeCheckpointError> {
-        if self.version != JOURNAL_VERSION {
+        if !matches!(
+            (self.version, self.cancelled),
+            (JOURNAL_VERSION, false) | (CANCELLED_JOURNAL_VERSION, true)
+        ) {
             return Err(NativeCheckpointError::Invalid("unsupported schema version"));
+        }
+        if self.cancelled && self.state == NativeCheckpointState::Acknowledged {
+            return Err(NativeCheckpointError::Invalid(
+                "acknowledged delivery cannot be cancelled",
+            ));
         }
         NativeUploadOptions::new("unused", &self.file_name).validate()?;
         if self.server_name.is_empty()
@@ -303,6 +359,48 @@ impl Journal {
             state: self.state,
             attempt: self.attempt,
         }
+    }
+
+    fn status(&self, directory: PathBuf) -> NativeCheckpointStatus {
+        NativeCheckpointStatus {
+            checkpoint: self.info(directory),
+            cancelled: self.cancelled,
+            receipt: self.receipt.as_ref().map(StoredReceipt::report),
+        }
+    }
+
+    fn require_active(&self) -> Result<(), NativeCheckpointError> {
+        if self.cancelled {
+            return Err(NativeCheckpointError::Cancelled {
+                attempt: self.attempt,
+                delivery_uncertain: self.state == NativeCheckpointState::Sending,
+            });
+        }
+        Ok(())
+    }
+
+    fn check_cancellation_snapshot(
+        &self,
+        directory: &Path,
+        expected: &NativeUploadCheckpoint,
+    ) -> Result<(), NativeCheckpointError> {
+        if directory != expected.directory.as_path()
+            || self.remote != expected.remote
+            || self.file_name != expected.file_name
+            || self.source_bytes != expected.source_bytes
+            || self.source_sha256 != expected.source_sha256
+        {
+            return Err(NativeCheckpointError::SnapshotMismatch);
+        }
+        // A committed winner is immutable and can be reported to a stale
+        // observer of this exact source/binding. It is never cancelled. Every
+        // nonterminal decision requires the exact observed attempt and phase.
+        if self.receipt.is_none()
+            && (self.attempt != expected.attempt || self.state != expected.state)
+        {
+            return Err(NativeCheckpointError::StaleAttempt);
+        }
+        Ok(())
     }
 
     fn check_binding(
@@ -511,6 +609,7 @@ impl NativeTransferClient {
             state: NativeCheckpointState::Prepared,
             attempt: 0,
             receipt: None,
+            cancelled: false,
         };
         record.validate()?;
         let mut created = None;
@@ -597,6 +696,8 @@ impl NativeTransferClient {
     /// diagnostic local identity, and current byte ceiling. These comparisons
     /// do not turn local metadata or a peer label into remote authorization.
     /// This is journal inspection, not a rehash of the retained source.
+    /// A cancelled checkpoint returns [`NativeCheckpointError::Cancelled`];
+    /// use [`Self::inspect_checkpoint_status`] to inspect its terminal facts.
     pub async fn inspect_checkpoint(
         &self,
         cx: &Cx,
@@ -609,7 +710,94 @@ impl NativeTransferClient {
         let (lease, record) =
             spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
         record.check_binding(&lease.admission, remote)?;
+        record.require_active()?;
         Ok(record.info(lease.directory.clone()))
+    }
+
+    /// Inspect active or durably cancelled state without sending or rehashing.
+    ///
+    /// Like [`Self::inspect_checkpoint`], this acquires the checkpoint's
+    /// exclusive, nonblocking OS lease and validates the current client,
+    /// endpoint and byte ceiling before exposing status or a saved receipt.
+    /// Corrupt, oversized or unsupported journals remain errors.
+    pub async fn inspect_checkpoint_status(
+        &self,
+        cx: &Cx,
+        directory: &Path,
+        remote: SocketAddr,
+    ) -> Result<NativeCheckpointStatus, NativeCheckpointError> {
+        authorize(cx)?;
+        let admission = self.admit_sender()?;
+        let directory = directory.to_path_buf();
+        let (lease, record) =
+            spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
+        record.check_binding(&lease.admission, remote)?;
+        if record.cancelled {
+            confirm_cancellation(&lease).await?;
+        }
+        Ok(record.status(lease.directory.clone()))
+    }
+
+    /// Durably forbid future sends from this exact checkpoint snapshot.
+    ///
+    /// Obtain `expected` from preparation or inspection. Its canonical path,
+    /// endpoint, filename, byte count and source digest must still match; a
+    /// non-acknowledged checkpoint also requires its exact attempt and phase.
+    /// The current client's TLS name, local identity and byte ceiling are
+    /// revalidated before returning any status, including a cached receipt.
+    ///
+    /// A never-sent source becomes locally cancelled with no network effects.
+    /// A `Sending` source becomes locally cancelled with delivery uncertainty
+    /// preserved: an earlier attempt may already have committed remotely.
+    /// An acknowledged winner is returned unchanged, even to an older snapshot
+    /// of the same source. Repeated cancellation of the same snapshot returns
+    /// the same durable state and does not replace the journal again.
+    ///
+    /// An active sender holds the same lease, so an admitted cancellation
+    /// returns `Busy` instead of racing its commit. The shared client capacity
+    /// can reject even earlier. Cancel and join that owning task before
+    /// retrying this operation with freshly inspected uncertain state. This
+    /// method does not abort a live task or send a remote rollback request.
+    ///
+    /// A version-2 terminal journal is fsynced and atomically published before
+    /// success. Older version-1 readers refuse it and cannot silently resend.
+    /// Payloads and journals are retained. Dropping this future during blocking
+    /// persistence leaves its lease and admission owned until the write ends;
+    /// inspect afterward to resolve whether cancellation became durable.
+    pub async fn cancel_checkpoint(
+        &self,
+        cx: &Cx,
+        expected: &NativeUploadCheckpoint,
+    ) -> Result<NativeCheckpointStatus, NativeCheckpointError> {
+        authorize(cx)?;
+        let admission = self.admit_sender()?;
+        let directory = expected.directory.clone();
+        let (lease, mut record) =
+            spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
+        record.check_binding(&lease.admission, expected.remote)?;
+        record.check_cancellation_snapshot(&lease.directory, expected)?;
+        if record.cancelled {
+            confirm_cancellation(&lease).await?;
+            return Ok(record.status(lease.directory.clone()));
+        }
+        if record.receipt.is_some() {
+            return Ok(record.status(lease.directory.clone()));
+        }
+        checkpoint(cx)?;
+        let mut nonce = [0; 16];
+        cx.random_bytes(&mut nonce);
+        record.version = CANCELLED_JOURNAL_VERSION;
+        record.cancelled = true;
+        record.validate()?;
+        persist_record(&lease, &record, nonce)
+            .await
+            .map_err(|error| NativeCheckpointError::Publication {
+                directory: lease.directory.clone(),
+                error,
+            })?;
+        // Once publication completed, report that durable fact even if the
+        // caller's cancellation arrived during the owned blocking operation.
+        Ok(record.status(lease.directory.clone()))
     }
 
     /// Send a fully prepared source, including after the producer/process exits.
@@ -621,6 +809,8 @@ impl NativeTransferClient {
     /// A crash or any failed send leaves delivery uncertain, requiring an exact
     /// `AcknowledgeUncertain` decision before another send. Attempts are bounded
     /// over the checkpoint's lifetime, not reset when a client restarts.
+    /// A durable cancellation refuses all retry policies before source access
+    /// or networking, including explicit acknowledgement of an earlier attempt.
     ///
     /// A saved success returns its historical receipt without another transfer.
     /// This resumes from retained local bytes, not a remote byte offset, and
@@ -680,6 +870,7 @@ impl NativeTransferClient {
         let (lease, mut record) =
             spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
         record.check_binding(&lease.admission, remote)?;
+        record.require_active()?;
         if let Some(receipt) = &record.receipt {
             return Ok(NativeCheckpointAttempt {
                 checkpoint: record.info(lease.directory.clone()),
@@ -748,6 +939,28 @@ async fn persist_record(lease: &Arc<Lease>, record: &Journal, nonce: [u8; 16]) -
     let owner = Arc::clone(lease);
     let record = record.clone();
     spawn_blocking_io(move || write_journal(&owner.directory, &record, &nonce)).await
+}
+
+async fn confirm_cancellation(lease: &Arc<Lease>) -> Result<(), NativeCheckpointError> {
+    let owner = Arc::clone(lease);
+    // A previous cancellation may have returned a publication error after
+    // rename but before directory fsync. Reconfirm that visible tombstone's
+    // durability on inspection/repetition without replacing its inode again.
+    spawn_blocking_io(move || {
+        let path = owner.directory.join("journal.json");
+        regular_file(&path)?;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?
+            .sync_all()?;
+        File::open(&owner.directory)?.sync_all()
+    })
+    .await
+    .map_err(|error| NativeCheckpointError::Publication {
+        directory: lease.directory.clone(),
+        error,
+    })
 }
 
 async fn verify_source(
