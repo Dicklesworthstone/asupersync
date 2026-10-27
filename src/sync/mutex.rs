@@ -1150,6 +1150,10 @@ struct MutexCausality {
 struct MutexCausalOwner {
     runtime: u64,
     clock: crate::trace::distributed::LogicalClockHandle,
+    /// An explicit off-task acquisition can also identify an off-task release.
+    /// An ambient task's handle cannot: a moved guard may outlive that task's
+    /// ownership while its clock continues advancing independently.
+    allow_host_fallback: bool,
 }
 
 impl MutexCausalOwner {
@@ -1157,6 +1161,7 @@ impl MutexCausalOwner {
         cx.task_causality_runtime().map(|runtime| Self {
             runtime,
             clock: cx.logical_clock_handle(),
+            allow_host_fallback: false,
         })
     }
 
@@ -1164,7 +1169,12 @@ impl MutexCausalOwner {
         // A future may be constructed with another task's cancellation
         // context. Clock attribution follows the actual successful poller;
         // an untracked current task must not fall back to a tracked argument.
-        Cx::with_current(Self::from_cx).unwrap_or_else(|| Self::from_cx(cx))
+        Cx::with_current(Self::from_cx).unwrap_or_else(|| {
+            Self::from_cx(cx).map(|mut owner| {
+                owner.allow_host_fallback = true;
+                owner
+            })
+        })
     }
 }
 
@@ -1192,6 +1202,7 @@ impl MutexState {
             self.causality
                 .as_mut()
                 .and_then(|causality| causality.owner.take())
+                .filter(|owner| owner.allow_host_fallback)
         });
         if let Some(causality) = &mut self.causality {
             causality.owner = None;

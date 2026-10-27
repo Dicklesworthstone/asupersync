@@ -4507,6 +4507,86 @@ mod tests {
     }
 
     #[test]
+    fn mutex_causality_off_task_owned_drop_does_not_sample_the_former_task() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        for try_lock in [false, true] {
+            for mapped in [false, true] {
+                let source = mutex_causality_context(97, "source");
+                let observer = mutex_causality_context(97, "observer");
+                let mutex = Arc::new(Mutex::new([1_u32, 2]));
+                let held = {
+                    let _current = Cx::set_current(Some(source.clone()));
+                    if try_lock {
+                        mutex.try_lock_owned().unwrap()
+                    } else {
+                        block_on(OwnedMutexGuard::lock(Arc::clone(&mutex), &source)).unwrap()
+                    }
+                };
+                // The task has transferred its guard to host code and can
+                // now advance independently. Its later event is not evidence
+                // of the host's release, even though the handle is retained.
+                let unrelated = source.logical_tick();
+                if mapped {
+                    drop(held.map(|value| &mut value[..]));
+                } else {
+                    drop(held);
+                }
+                assert!(!mutex.is_locked());
+                let before = observer.logical_tick();
+                let acquired = lock_blocking(&mutex, &observer);
+                assert_eq!(*acquired, [1, 2]);
+                let observed = observer.logical_now();
+                assert_eq!(observed, before, "try_lock={try_lock}, mapped={mapped}");
+                assert_eq!(
+                    unrelated.causal_order(&observed),
+                    CausalOrder::Concurrent,
+                    "try_lock={try_lock}, mapped={mapped}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mutex_causality_ambient_dropper_blocks_explicit_host_fallback() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        for foreign_runtime in [false, true] {
+            let source = mutex_causality_context(97, "source");
+            let observer = mutex_causality_context(97, "observer");
+            let dropper = if foreign_runtime {
+                mutex_causality_context(98, "dropper")
+            } else {
+                Cx::for_testing()
+            };
+            let mutex = Arc::new(Mutex::new([1_u32, 2]));
+            // This acquisition is eligible for explicit-context fallback,
+            // but a current task at release must always be authoritative.
+            let held = block_on(OwnedMutexGuard::lock(Arc::clone(&mutex), &source))
+                .unwrap()
+                .map(|value| &mut value[..]);
+            let unrelated = source.logical_tick();
+            let _ = dropper.logical_tick();
+            {
+                let _current = Cx::set_current(Some(dropper));
+                drop(held);
+            }
+            let before = observer.logical_tick();
+            let acquired = lock_blocking(&mutex, &observer);
+            assert_eq!(*acquired, [1, 2]);
+            let observed = observer.logical_now();
+            assert_eq!(observed, before, "foreign_runtime={foreign_runtime}");
+            assert_eq!(
+                unrelated.causal_order(&observed),
+                CausalOrder::Concurrent,
+                "foreign_runtime={foreign_runtime}"
+            );
+        }
+    }
+
+    #[test]
     fn mutex_causality_cancelled_or_abandoned_grantee_preserves_release_for_successor() {
         use crate::trace::distributed::CausalOrder;
 
