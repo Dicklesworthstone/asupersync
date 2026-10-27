@@ -1560,7 +1560,8 @@
       ],
       "features": [
         "cli",
-        "deterministic-mode"
+        "deterministic-mode",
+        "scenario-files"
       ],
       "input_semantics": "Entire accepted YAML corpus, anchors/tags/scalars as actually supported, additive JSON, scenario versions, faults, invariants, seeds, and authoring workflows.",
       "output_semantics": "Equivalent execute/explore/replay behavior and reversible migration without data loss.",
@@ -3854,6 +3855,16 @@
       "support_class": "production-opt-in",
       "platforms": [
         "all-supported"
+      ]
+    },
+    {
+      "feature_id": "scenario-files",
+      "capability_ids": [
+        "CAP-SCENARIO-YAML-JSON"
+      ],
+      "support_class": "production-opt-in",
+      "platforms": [
+        "native"
       ]
     },
     {

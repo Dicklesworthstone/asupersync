@@ -1024,6 +1024,10 @@ pub struct CxInner {
     pub(crate) cancel_waker_registry_closed: bool,
     /// Timer armed at the budget deadline (br-asupersync-pev2xi).
     pub(crate) budget_deadline_timer: Option<BudgetDeadlineTimer>,
+    /// Async-finalizer infrastructure keeps its legacy masked deadline
+    /// handling when its context enters a caller-driven adapter. This is
+    /// separate from cleanup_phase so poll-quota inheritance is unchanged.
+    pub(crate) budget_deadline_exempt: bool,
     /// Current mask depth.
     pub mask_depth: u32,
     /// The task runs cancellation or terminal lifecycle cleanup, including a
@@ -1096,6 +1100,7 @@ impl CxInner {
             next_cancel_waker_token: 0,
             cancel_waker_registry_closed: false,
             budget_deadline_timer: None,
+            budget_deadline_exempt: false,
             mask_depth: 0,
             cleanup_phase: false,
             checkpoint_state: CheckpointState::new(),

@@ -278,6 +278,25 @@ pub(crate) struct CancelWakerToken {
 struct BudgetDeadlineWake {
     inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
     deadline: Time,
+    /// A timer can fire between registration and publication of its handle.
+    /// Each registration owns its publication state: a losing concurrent arm
+    /// must not borrow the winner's timer slot. All state transitions hold the
+    /// same context lock, making the out-of-lock wake replay lossless.
+    publication: std::sync::atomic::AtomicU8,
+}
+
+impl BudgetDeadlineWake {
+    const UNPUBLISHED: u8 = 0;
+    const WAKE_OWED: u8 = 1;
+    const PUBLISHED: u8 = 2;
+
+    /// Called only while holding the context write lock, after its timer slot
+    /// has been installed or replaced.
+    fn publish(&self) -> bool {
+        self.publication
+            .swap(Self::PUBLISHED, std::sync::atomic::Ordering::AcqRel)
+            == Self::WAKE_OWED
+    }
 }
 
 impl std::task::Wake for BudgetDeadlineWake {
@@ -289,53 +308,74 @@ impl std::task::Wake for BudgetDeadlineWake {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
-        let mut guard = inner.write();
-        if guard.cancel_waker_registry_closed || guard.is_cancel_requested() {
-            return;
-        }
-        let Some(timer) = guard
-            .budget_deadline_timer
-            .as_ref()
-            .map(|armed| armed.timer.clone())
-        else {
-            return;
-        };
-        if timer.now() < self.deadline {
-            // A deadline past the wheel's horizon fires early at the horizon
-            // (and a coalescing wheel fires within its window): re-arm for the
-            // real deadline, as Sleep does.
-            drop(guard);
-            let handle = timer.register(self.deadline, Waker::from(Arc::clone(self)));
+        loop {
             let mut guard = inner.write();
-            if guard.cancel_waker_registry_closed {
-                drop(guard);
-                let _ = timer.cancel(&handle);
-            } else if let Some(armed) = guard.budget_deadline_timer.as_mut() {
-                armed.handle = handle;
+            if guard.cancel_waker_registry_closed || guard.is_cancel_requested() {
+                return;
             }
+            if self.publication.load(std::sync::atomic::Ordering::Acquire) != Self::PUBLISHED {
+                self.publication
+                    .store(Self::WAKE_OWED, std::sync::atomic::Ordering::Release);
+                return;
+            }
+            let Some(timer) = guard
+                .budget_deadline_timer
+                .as_ref()
+                .map(|armed| armed.timer.clone())
+            else {
+                return;
+            };
+            if timer.now() < self.deadline {
+                // A deadline past the wheel's horizon fires early at the
+                // horizon: re-arm for the real deadline, as Sleep does.
+                self.publication
+                    .store(Self::UNPUBLISHED, std::sync::atomic::Ordering::Release);
+                drop(guard);
+                let handle = timer.register(self.deadline, Waker::from(Arc::clone(self)));
+                let replacement = crate::types::task_context::BudgetDeadlineTimer { timer, handle };
+                let mut guard = inner.write();
+                if guard.cancel_waker_registry_closed
+                    || guard.is_cancel_requested()
+                    || guard.budget_deadline_timer.is_none()
+                {
+                    drop(guard);
+                    drop(replacement);
+                    return;
+                }
+                let retired = guard.budget_deadline_timer.replace(replacement);
+                let replay = self.publish();
+                drop(guard);
+                drop(retired);
+                if replay {
+                    // A replacement can also fire before publication. Keep
+                    // repeated horizon handoffs at constant stack depth.
+                    continue;
+                }
+                return;
+            }
+            // The budget may have been replaced since the timer was armed;
+            // only a deadline at or before this one has passed.
+            if guard
+                .budget
+                .deadline
+                .is_none_or(|deadline| deadline > self.deadline)
+            {
+                return;
+            }
+            let reason = CancelReason::with_origin(CancelKind::Deadline, guard.region, self.deadline)
+                .with_task(guard.task);
+            guard.set_cancel_requested(true);
+            if let Some(existing) = guard.cancel_reason.as_mut() {
+                existing.strengthen(&reason);
+            } else {
+                guard.cancel_reason = Some(reason);
+            }
+            let wakers = guard.cancel_waker_snapshot();
+            guard.cancel_wakers_pending = false;
+            drop(guard);
+            crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
             return;
         }
-        // The budget may have been replaced since the timer was armed; only a
-        // deadline at or before this one has passed.
-        if guard
-            .budget
-            .deadline
-            .is_none_or(|deadline| deadline > self.deadline)
-        {
-            return;
-        }
-        let reason = CancelReason::with_origin(CancelKind::Deadline, guard.region, self.deadline)
-            .with_task(guard.task);
-        guard.set_cancel_requested(true);
-        if let Some(existing) = guard.cancel_reason.as_mut() {
-            existing.strengthen(&reason);
-        } else {
-            guard.cancel_reason = Some(reason);
-        }
-        let wakers = guard.cancel_waker_snapshot();
-        guard.cancel_wakers_pending = false;
-        drop(guard);
-        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
     }
 }
 
@@ -3873,6 +3913,8 @@ impl<Caps> Cx<Caps> {
     /// its deadline instead of at its next checkpoint, which a parked task never
     /// reaches (br-asupersync-pev2xi). The runtime arms it once per task
     /// context; contexts without a deadline or a timer driver arm nothing.
+    /// Cancellation and terminal cleanup retain their existing deadline
+    /// handling, including the async-finalizer infrastructure exemption.
     pub(crate) fn arm_budget_deadline(&self) {
         let Some(timer) = self.handles.timer_driver.as_ref() else {
             return;
@@ -3883,7 +3925,10 @@ impl<Caps> Cx<Caps> {
                 Some(deadline)
                     if deadline < Time::MAX
                         && inner.budget_deadline_timer.is_none()
-                        && !inner.cancel_waker_registry_closed =>
+                        && !inner.cancel_waker_registry_closed
+                        && !inner.budget_deadline_exempt
+                        && !inner.cleanup_phase
+                        && !inner.is_cancel_requested() =>
                 {
                     deadline
                 }
@@ -3893,18 +3938,34 @@ impl<Caps> Cx<Caps> {
         let wake = Arc::new(BudgetDeadlineWake {
             inner: Arc::downgrade(&self.inner),
             deadline,
+            publication: std::sync::atomic::AtomicU8::new(BudgetDeadlineWake::UNPUBLISHED),
         });
-        let handle = timer.register(deadline, Waker::from(wake));
+        let handle = timer.register(deadline, Waker::from(Arc::clone(&wake)));
         let armed = crate::types::task_context::BudgetDeadlineTimer {
             timer: timer.clone(),
             handle,
         };
-        let mut inner = self.inner.write();
-        if inner.budget_deadline_timer.is_none() {
+        let replay = {
+            let mut inner = self.inner.write();
+            if inner.budget_deadline_timer.is_some()
+                || inner.cancel_waker_registry_closed
+                || inner.budget_deadline_exempt
+                || inner.cleanup_phase
+                || inner.is_cancel_requested()
+            {
+                // Registration may reenter the context or race retirement.
+                // Retire a refused timer only after releasing its owner lock.
+                drop(inner);
+                drop(armed);
+                return;
+            }
             inner.budget_deadline_timer = Some(armed);
-        } else {
-            drop(inner);
-            drop(armed);
+            wake.publish()
+        };
+        if replay {
+            // This also re-arms a horizon-clamped early wake, for which merely
+            // testing whether the real deadline has passed would lose it.
+            std::task::Wake::wake_by_ref(&wake);
         }
     }
 
@@ -4077,6 +4138,7 @@ impl<Caps> Cx<Caps> {
             let mut child = CxInner::new(parent.region, parent.task, parent.budget);
             child.task_type.clone_from(&parent.task_type);
             child.budget_baseline = parent.budget_baseline;
+            child.budget_deadline_exempt = parent.budget_deadline_exempt;
             child.capability_budget = parent.capability_budget;
             child.cleanup_phase = parent.cleanup_phase;
             child
@@ -6669,3 +6731,7 @@ impl<Caps> Cx<Caps> {
 #[cfg(test)]
 #[path = "cx_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "deadline_publication_tests.rs"]
+mod deadline_publication_tests;

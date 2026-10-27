@@ -4275,6 +4275,8 @@ impl Runtime {
     /// last unit. Admission and retirement of the current-thread root's
     /// accounting task do not consume quota. `Budget::INFINITE` preserves
     /// [`Self::block_on`]'s unlimited root budget.
+    /// Finite deadlines also wake parked cancel-aware roots through the
+    /// runtime's timer driver, including when root admission is refused.
     ///
     /// Cancellation is cooperative: this returns the future's own output,
     /// after its cleanup completes. It cannot preempt a poll that does not
@@ -4335,6 +4337,8 @@ impl Runtime {
     /// This is for execution paths that are polled directly by `block_on`
     /// rather than through the scheduler, but still need `Cx::current()` to
     /// reflect the active request/task context.
+    /// The driver charges this context's poll quota and arms its deadline
+    /// after installing the caller's cancellation wake.
     #[allow(dead_code)]
     // Exposed to native integration tests (which drive real runtime scenarios
     // with a caller-supplied Cx, the companion to the public
@@ -4359,6 +4363,7 @@ impl Runtime {
     /// required for framework adapter paths that are invoked from within an
     /// already-running runtime task and must not sever deadline/cancellation
     /// propagation by switching to a detached helper runtime.
+    /// It uses the same quota and deadline enforcement as `block_on_with_cx`.
     #[allow(dead_code)]
     pub(crate) fn block_on_current_with_cx<F: Future>(
         request_cx: crate::cx::Cx,
@@ -4381,6 +4386,8 @@ impl Runtime {
     /// consumer that must begin an operation with explicit runtime authority.
     /// The caller supplies the operation budget; the resulting context is
     /// bound to this runtime rather than manufacturing test-only authority.
+    /// Construction alone does not arm a deadline timer. Runtime admission
+    /// and direct adapter execution provide that boundary.
     #[must_use]
     pub fn request_cx_with_budget(&self, budget: Budget) -> crate::cx::Cx {
         build_request_cx_from_inner(&self.inner, budget)
@@ -7278,10 +7285,16 @@ pub(super) struct CallerCancelWake {
 
 impl CallerCancelWake {
     pub(super) fn new(cx: &crate::cx::Cx, waker: &Waker) -> Self {
-        Self {
+        let registration = Self {
             cx: cx.clone(),
             token: cx.refresh_cancel_waker(None, waker),
-        }
+        };
+        // Registered tasks arm their deadline at admission. Request adapters
+        // and admission-refused roots have no such boundary: arm their actual
+        // execution context after installing the wake that can unpark it.
+        // The helper preserves the cleanup-task exemption and is idempotent.
+        cx.arm_budget_deadline();
+        registration
     }
 }
 
@@ -7583,3 +7596,7 @@ mod close_wake_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "builder_root_budget_tests.rs"]
 mod root_budget_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "builder_request_deadline_tests.rs"]
+mod request_deadline_tests;
