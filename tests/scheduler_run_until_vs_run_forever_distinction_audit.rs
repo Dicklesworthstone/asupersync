@@ -249,19 +249,28 @@ fn runtime_block_on_drives_specific_future_to_completion() {
          get the future's result and must drive it manually.",
     );
 
-    // The body must use run_future_with_budget (the bounded
-    // poll-loop driver), not the unbounded run_loop.
+    // The default entry retains its unlimited budget, then delegates to the
+    // same future driver as the additive explicit-budget entry.
     let fn_marker = "pub fn block_on<F: Future>(&self, future: F) -> F::Output {";
     let start = source.find(fn_marker).expect("block_on fn");
     let body_end = source[start..].find("\n    }\n").expect("block_on close");
     let body = &source[start..start + body_end];
-    // Whitespace is ignored: the call takes the caller's cancel
-    // owner as a third argument, and rustfmt wraps it.
     let compact: String = body.split_whitespace().collect();
+    assert!(
+        compact.contains("self.block_on_with_budget(Budget::INFINITE,future)"),
+        "Runtime::block_on must retain its unlimited root budget",
+    );
+
+    let fn_marker = "pub fn block_on_with_budget<F: Future>";
+    let start = source.find(fn_marker).expect("budgeted block_on fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("budgeted block_on close");
+    let compact: String = source[start..start + body_end].split_whitespace().collect();
 
     assert!(
         compact.contains("run_future_with_budget(future,self.inner.config.poll_budget,"),
-        "REGRESSION: Runtime::block_on no longer uses \
+        "REGRESSION: shared Runtime::block_on driver no longer uses \
          run_future_with_budget. Either it uses run_loop \
          (would block on shutdown, defeating the future-\
          driven contract) or some other driver — \
@@ -441,20 +450,24 @@ fn block_on_does_not_block_on_run_loop_internally() {
     // when the specific future completes.
     let source = read("src/runtime/builder.rs");
 
-    let fn_marker = "pub fn block_on<F: Future>(&self, future: F) -> F::Output {";
-    let start = source.find(fn_marker).expect("block_on fn");
-    let body_end = source[start..].find("\n    }\n").expect("block_on close");
-    let body = &source[start..start + body_end];
+    for fn_marker in [
+        "pub fn block_on<F: Future>(&self, future: F) -> F::Output {",
+        "pub fn block_on_with_budget<F: Future>",
+    ] {
+        let start = source.find(fn_marker).expect("block_on entry");
+        let body_end = source[start..].find("\n    }\n").expect("block_on close");
+        let body = &source[start..start + body_end];
 
-    let suspect_run_loop_delegation = [".run_loop()", "run_loop(", "while !shutdown"];
-    for pat in &suspect_run_loop_delegation {
-        assert!(
-            !body.contains(pat),
-            "REGRESSION: block_on now delegates to a \
-             run_loop variant (`{pat}`). The future-driven \
-             semantics is broken — block_on would never \
-             return unless shutdown is signaled.",
-        );
+        let suspect_run_loop_delegation = [".run_loop()", "run_loop(", "while !shutdown"];
+        for pat in &suspect_run_loop_delegation {
+            assert!(
+                !body.contains(pat),
+                "REGRESSION: {fn_marker} now delegates to a \
+                 run_loop variant (`{pat}`). The future-driven \
+                 semantics is broken — block_on would never \
+                 return unless shutdown is signaled.",
+            );
+        }
     }
 }
 

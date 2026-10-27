@@ -2075,6 +2075,36 @@
         }
 
         #[test]
+        fn native_stream_progress_keepalive_is_opt_in_and_copied_into_call_setup() {
+            let (cx, _) = context();
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://service.invalid")
+                    .keepalive_interval(Duration::from_secs(30))
+                    .keepalive_timeout(Duration::from_secs(7)).connect(),
+            ).unwrap();
+            let strict = channel.clone();
+            let opted_in = channel.with_progress_aware_keepalive();
+            for (channel, expected) in [(strict, false), (opted_in.clone(), true), (opted_in, true)] {
+                let setup = GrpcClient::new(channel)
+                    .prepare_native_stream(&cx, "/svc/Upload", &Request::new(())).unwrap();
+                let policy = setup.keepalive.unwrap();
+                assert_eq!(policy.is_progress_aware(), expected);
+                assert_eq!(policy.interval(), Duration::from_secs(30));
+                assert_eq!(policy.timeout(), Duration::from_secs(7));
+            }
+            for enabled in [false, true] {
+                let mut builder = Channel::builder("http://service.invalid")
+                    .progress_aware_keepalive();
+                if enabled { builder = builder.keepalive_interval(Duration::from_secs(30)); }
+                let channel = futures_lite::future::block_on(builder.connect()).unwrap();
+                let setup = GrpcClient::new(channel)
+                    .prepare_native_stream(&cx, "/svc/Upload", &Request::new(())).unwrap();
+                assert_eq!(setup.keepalive.map(NativeStreamKeepalive::is_progress_aware),
+                    enabled.then_some(true));
+            }
+        }
+
+        #[test]
         fn native_stream_keepalive_defaults_and_invalid_configuration_refuse_before_dial() {
             let (cx, _) = context();
             let channel = futures_lite::future::block_on(Channel::connect("http://service.invalid")).unwrap();

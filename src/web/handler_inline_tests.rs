@@ -446,6 +446,78 @@
     }
 
     #[test]
+    fn async_cx_helper_deadline_wakes_a_parked_handler_and_preserves_its_response() {
+        use crate::channel::mpsc as async_mpsc;
+        use crate::types::CancelKind;
+        use std::time::Duration;
+
+        let (sender, receiver) = async_mpsc::channel::<u8>(1);
+        let (parked_tx, parked_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            // Initialize the actual thread-local helper before starting the
+            // relative request budget; runtime startup is outside the deadline.
+            let now = ASYNC_HANDLER_HELPER_RUNTIME.with(|runtime| {
+                runtime.request_cx_with_budget(Budget::INFINITE).now()
+            });
+            let caller = Cx::for_testing_with_budget(
+                Budget::INFINITE.with_timeout(now, Duration::from_secs(1)),
+            );
+            assert!(
+                caller.timer_driver().is_none(),
+                "exercise the helper fallback"
+            );
+            let receiver = Arc::new(Mutex::new(Some(receiver)));
+            let handler = AsyncCxFnHandler::new(move |cx: Cx| {
+                let mut receiver = receiver.lock().unwrap().take().expect("one request");
+                let parked_tx = parked_tx.clone();
+                async move {
+                    let mut parked_tx = Some(parked_tx);
+                    let result = std::future::poll_fn(|task_cx| {
+                        let result = receiver.poll_recv(&cx, task_cx);
+                        if result.is_pending()
+                            && let Some(tx) = parked_tx.take()
+                        {
+                            tx.send(()).unwrap();
+                        }
+                        result
+                    })
+                    .await;
+                    match (result, cx.cancel_reason().map(|reason| reason.kind)) {
+                        (Err(async_mpsc::RecvError::Cancelled), Some(CancelKind::Deadline)) => {
+                            (StatusCode::GATEWAY_TIMEOUT, "application deadline response")
+                        }
+                        _ => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "unexpected receive outcome",
+                        ),
+                    }
+                }
+            });
+            let response = futures_lite::future::block_on(
+                handler.call(&caller, Request::new("GET", "/parked-deadline")),
+            );
+            done_tx.send(response).unwrap();
+        });
+
+        let parked = parked_rx.recv_timeout(Duration::from_secs(2));
+        let completed = done_rx.recv_timeout(Duration::from_secs(2));
+        let deadline_woke_it = completed.is_ok();
+        // Rescue a missing deadline wake with a separate data wake so this
+        // regression reports a failure instead of leaving a thread parked.
+        drop(sender);
+        let response = completed
+            .or_else(|_| done_rx.recv_timeout(Duration::from_secs(2)))
+            .expect("handler finishes after rescue");
+        join.join().unwrap();
+
+        parked.expect("handler returned Pending before its deadline");
+        assert!(deadline_woke_it, "the helper must wake the parked request");
+        assert_eq!(response.status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(&response.body[..], b"application deadline response");
+    }
+
+    #[test]
     fn async_cx_handler_keeps_a_capability_restricted_caller_context() {
         // asupersync-bi2462.46: a TIME-masked caller has no timer driver, and
         // the handler used to swap in a fresh runtime request context. That
@@ -529,7 +601,8 @@
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let deadline_budget = Budget::with_deadline_at_secs(7);
+        let now = runtime.request_cx_with_budget(Budget::INFINITE).now();
+        let deadline_budget = Budget::INFINITE.with_timeout(now, std::time::Duration::from_secs(7));
         let request_cx = runtime.request_cx_with_budget(deadline_budget);
         let expected_task = request_cx.task_id();
         let expected_region = request_cx.region_id();
@@ -760,7 +833,10 @@
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let request_cx = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(7));
+        let now = runtime.request_cx_with_budget(Budget::INFINITE).now();
+        let request_cx = runtime.request_cx_with_budget(
+            Budget::INFINITE.with_timeout(now, std::time::Duration::from_secs(7)),
+        );
         let handler_cx = request_cx.clone();
 
         runtime.block_on_with_cx(request_cx, async move {

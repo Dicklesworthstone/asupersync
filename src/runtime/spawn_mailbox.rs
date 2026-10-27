@@ -270,6 +270,9 @@ pub struct AdmittedTaskSlot {
     // before admission publishes it. Keeping it private preserves the public
     // request structs' existing construction surface.
     runtime_mask: crate::cx::cap::CapMask,
+    /// Only the current-thread root's accounting task has its poll quota
+    /// charged by the caller that polls the actual root future.
+    caller_owned_poll_quota: bool,
     /// Retirement barrier shared with this task's join handle and, at
     /// admission, its `CxInner`, so the scheduler (which opens it after the
     /// record terminal commit) and the handle (which gates terminal-result
@@ -324,6 +327,7 @@ impl AdmittedTaskSlot {
             reserved: AtomicBool::new(false),
             cancel_gateway: None,
             runtime_mask: crate::cx::cap::CapMask::all(),
+            caller_owned_poll_quota: false,
             retirement_barrier: None,
             pending_cancel_reason: OnceLock::new(),
             branch_region: None,
@@ -341,6 +345,7 @@ impl AdmittedTaskSlot {
             reserved: AtomicBool::new(false),
             cancel_gateway: Some(Arc::downgrade(&cancel_gateway)),
             runtime_mask: crate::cx::cap::CapMask::all(),
+            caller_owned_poll_quota: false,
             retirement_barrier: None,
             pending_cancel_reason: OnceLock::new(),
             branch_region: None,
@@ -353,6 +358,17 @@ impl AdmittedTaskSlot {
     pub(crate) fn with_runtime_mask(mut self, mask: crate::cx::cap::CapMask) -> Self {
         self.runtime_mask = mask;
         self
+    }
+
+    /// Selects the quota owner before the first scheduler poll, including for
+    /// a zero-quota root. This does not widen the admitted task's budget.
+    pub(crate) fn with_caller_owned_poll_quota(mut self, caller_owned: bool) -> Self {
+        self.caller_owned_poll_quota = caller_owned;
+        self
+    }
+
+    pub(crate) fn caller_owned_poll_quota(&self) -> bool {
+        self.caller_owned_poll_quota
     }
 
     /// Requests that admission run this task in a fresh sealed child region

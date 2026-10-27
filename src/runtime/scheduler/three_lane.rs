@@ -1756,7 +1756,7 @@ pub(crate) fn consume_budget_poll(record: &mut crate::record::TaskRecord) {
         return;
     };
     let mut guard = inner.write();
-    if guard.cancel_requested || guard.cleanup_phase {
+    if guard.cancel_requested || guard.cleanup_phase || guard.caller_owned_poll_quota {
         return;
     }
     // An unlimited budget may have been restored since the cached snapshot.

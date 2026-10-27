@@ -278,6 +278,25 @@ pub(crate) struct CancelWakerToken {
 struct BudgetDeadlineWake {
     inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
     deadline: Time,
+    /// A timer can fire between registration and publication of its handle.
+    /// Each registration owns its publication state: a losing concurrent arm
+    /// must not borrow the winner's timer slot. All state transitions hold the
+    /// same context lock, making the out-of-lock wake replay lossless.
+    publication: std::sync::atomic::AtomicU8,
+}
+
+impl BudgetDeadlineWake {
+    const UNPUBLISHED: u8 = 0;
+    const WAKE_OWED: u8 = 1;
+    const PUBLISHED: u8 = 2;
+
+    /// Called only while holding the context write lock, after its timer slot
+    /// has been installed or replaced.
+    fn publish(&self) -> bool {
+        self.publication
+            .swap(Self::PUBLISHED, std::sync::atomic::Ordering::AcqRel)
+            == Self::WAKE_OWED
+    }
 }
 
 impl std::task::Wake for BudgetDeadlineWake {
@@ -289,53 +308,74 @@ impl std::task::Wake for BudgetDeadlineWake {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
-        let mut guard = inner.write();
-        if guard.cancel_waker_registry_closed || guard.is_cancel_requested() {
-            return;
-        }
-        let Some(timer) = guard
-            .budget_deadline_timer
-            .as_ref()
-            .map(|armed| armed.timer.clone())
-        else {
-            return;
-        };
-        if timer.now() < self.deadline {
-            // A deadline past the wheel's horizon fires early at the horizon
-            // (and a coalescing wheel fires within its window): re-arm for the
-            // real deadline, as Sleep does.
-            drop(guard);
-            let handle = timer.register(self.deadline, Waker::from(Arc::clone(self)));
+        loop {
             let mut guard = inner.write();
-            if guard.cancel_waker_registry_closed {
-                drop(guard);
-                let _ = timer.cancel(&handle);
-            } else if let Some(armed) = guard.budget_deadline_timer.as_mut() {
-                armed.handle = handle;
+            if guard.cancel_waker_registry_closed || guard.is_cancel_requested() {
+                return;
             }
+            if self.publication.load(std::sync::atomic::Ordering::Acquire) != Self::PUBLISHED {
+                self.publication
+                    .store(Self::WAKE_OWED, std::sync::atomic::Ordering::Release);
+                return;
+            }
+            let Some(timer) = guard
+                .budget_deadline_timer
+                .as_ref()
+                .map(|armed| armed.timer.clone())
+            else {
+                return;
+            };
+            if timer.now() < self.deadline {
+                // A deadline past the wheel's horizon fires early at the
+                // horizon: re-arm for the real deadline, as Sleep does.
+                self.publication
+                    .store(Self::UNPUBLISHED, std::sync::atomic::Ordering::Release);
+                drop(guard);
+                let handle = timer.register(self.deadline, Waker::from(Arc::clone(self)));
+                let replacement = crate::types::task_context::BudgetDeadlineTimer { timer, handle };
+                let mut guard = inner.write();
+                if guard.cancel_waker_registry_closed
+                    || guard.is_cancel_requested()
+                    || guard.budget_deadline_timer.is_none()
+                {
+                    drop(guard);
+                    drop(replacement);
+                    return;
+                }
+                let retired = guard.budget_deadline_timer.replace(replacement);
+                let replay = self.publish();
+                drop(guard);
+                drop(retired);
+                if replay {
+                    // A replacement can also fire before publication. Keep
+                    // repeated horizon handoffs at constant stack depth.
+                    continue;
+                }
+                return;
+            }
+            // The budget may have been replaced since the timer was armed;
+            // only a deadline at or before this one has passed.
+            if guard
+                .budget
+                .deadline
+                .is_none_or(|deadline| deadline > self.deadline)
+            {
+                return;
+            }
+            let reason = CancelReason::with_origin(CancelKind::Deadline, guard.region, self.deadline)
+                .with_task(guard.task);
+            guard.set_cancel_requested(true);
+            if let Some(existing) = guard.cancel_reason.as_mut() {
+                existing.strengthen(&reason);
+            } else {
+                guard.cancel_reason = Some(reason);
+            }
+            let wakers = guard.cancel_waker_snapshot();
+            guard.cancel_wakers_pending = false;
+            drop(guard);
+            crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
             return;
         }
-        // The budget may have been replaced since the timer was armed; only a
-        // deadline at or before this one has passed.
-        if guard
-            .budget
-            .deadline
-            .is_none_or(|deadline| deadline > self.deadline)
-        {
-            return;
-        }
-        let reason = CancelReason::with_origin(CancelKind::Deadline, guard.region, self.deadline)
-            .with_task(guard.task);
-        guard.set_cancel_requested(true);
-        if let Some(existing) = guard.cancel_reason.as_mut() {
-            existing.strengthen(&reason);
-        } else {
-            guard.cancel_reason = Some(reason);
-        }
-        let wakers = guard.cancel_waker_snapshot();
-        guard.cancel_wakers_pending = false;
-        drop(guard);
-        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
     }
 }
 
@@ -3873,6 +3913,8 @@ impl<Caps> Cx<Caps> {
     /// its deadline instead of at its next checkpoint, which a parked task never
     /// reaches (br-asupersync-pev2xi). The runtime arms it once per task
     /// context; contexts without a deadline or a timer driver arm nothing.
+    /// Cancellation and terminal cleanup retain their existing deadline
+    /// handling, including the async-finalizer infrastructure exemption.
     pub(crate) fn arm_budget_deadline(&self) {
         let Some(timer) = self.handles.timer_driver.as_ref() else {
             return;
@@ -3883,7 +3925,10 @@ impl<Caps> Cx<Caps> {
                 Some(deadline)
                     if deadline < Time::MAX
                         && inner.budget_deadline_timer.is_none()
-                        && !inner.cancel_waker_registry_closed =>
+                        && !inner.cancel_waker_registry_closed
+                        && !inner.budget_deadline_exempt
+                        && !inner.cleanup_phase
+                        && !inner.is_cancel_requested() =>
                 {
                     deadline
                 }
@@ -3893,18 +3938,34 @@ impl<Caps> Cx<Caps> {
         let wake = Arc::new(BudgetDeadlineWake {
             inner: Arc::downgrade(&self.inner),
             deadline,
+            publication: std::sync::atomic::AtomicU8::new(BudgetDeadlineWake::UNPUBLISHED),
         });
-        let handle = timer.register(deadline, Waker::from(wake));
+        let handle = timer.register(deadline, Waker::from(Arc::clone(&wake)));
         let armed = crate::types::task_context::BudgetDeadlineTimer {
             timer: timer.clone(),
             handle,
         };
-        let mut inner = self.inner.write();
-        if inner.budget_deadline_timer.is_none() {
+        let replay = {
+            let mut inner = self.inner.write();
+            if inner.budget_deadline_timer.is_some()
+                || inner.cancel_waker_registry_closed
+                || inner.budget_deadline_exempt
+                || inner.cleanup_phase
+                || inner.is_cancel_requested()
+            {
+                // Registration may reenter the context or race retirement.
+                // Retire a refused timer only after releasing its owner lock.
+                drop(inner);
+                drop(armed);
+                return;
+            }
             inner.budget_deadline_timer = Some(armed);
-        } else {
-            drop(inner);
-            drop(armed);
+            wake.publish()
+        };
+        if replay {
+            // This also re-arms a horizon-clamped early wake, for which merely
+            // testing whether the real deadline has passed would lose it.
+            std::task::Wake::wake_by_ref(&wake);
         }
     }
 
@@ -4009,6 +4070,55 @@ impl<Caps> Cx<Caps> {
         crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
     }
 
+    /// Charges one actual caller-polled root turn, using the native worker's
+    /// cooperative quota semantics. Cancellation and terminal cleanup remain
+    /// advisory: a pending user/deadline cancellation must keep its reason.
+    /// Publish exhaustion under the same lock as the charge, then wake outside
+    /// it so a callback may safely inspect or cancel this context.
+    pub(crate) fn consume_root_poll(&self) {
+        let wakers = {
+            let mut inner = self.inner.write();
+            if inner.is_cancel_requested()
+                || inner.cleanup_phase
+                || inner.budget.poll_quota == u32::MAX
+                || inner.budget.consume_poll().is_some()
+            {
+                return;
+            }
+            inner.set_cancel_requested(true);
+            let reason = CancelReason::poll_quota();
+            if let Some(existing) = inner.cancel_reason.as_mut() {
+                existing.strengthen(&reason);
+            } else {
+                inner.cancel_reason = Some(reason);
+            }
+            let wakers = inner.cancel_waker_snapshot();
+            inner.cancel_wakers_pending = false;
+            wakers
+        };
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
+    }
+
+    /// Publishes cancellation requested by a checkpoint during a root poll.
+    /// Workers do this while reconciling the task record; a caller-polled root
+    /// must discharge the same wake debt before parking or returning: an
+    /// unregistered adapter context has no task retirement to do it later.
+    pub(crate) fn flush_root_cancel_wakes(&self) {
+        if !self.has_published_cancellation() {
+            return;
+        }
+        let wakers = {
+            let mut inner = self.inner.write();
+            if !inner.cancel_wakers_pending {
+                return;
+            }
+            let wakers = inner.cancel_waker_snapshot();
+            inner.cancel_wakers_pending = false;
+            wakers
+        };
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
+    }
+
     /// Derives a cancellation scope inside this task: the context of one
     /// fiber (br-asupersync-issue65-criticisms-kpmoy5.3.1).
     ///
@@ -4028,6 +4138,7 @@ impl<Caps> Cx<Caps> {
             let mut child = CxInner::new(parent.region, parent.task, parent.budget);
             child.task_type.clone_from(&parent.task_type);
             child.budget_baseline = parent.budget_baseline;
+            child.budget_deadline_exempt = parent.budget_deadline_exempt;
             child.capability_budget = parent.capability_budget;
             child.cleanup_phase = parent.cleanup_phase;
             child
@@ -5651,6 +5762,38 @@ where
             &gateway,
             &pending,
             crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            false,
+            f,
+        )
+    }
+
+    /// Registers the current-thread driver's bookkeeping task with its exact
+    /// inherited budget. Admission marks the caller as the poll-quota owner
+    /// before any scheduler poll, so even a zero-quota root receives its task
+    /// identity before the actual root future is charged.
+    pub(crate) fn spawn_root_accounting<F, Fut>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let Some(pending) = self.pending_spawn_counter_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        self.spawn_local_via_lane(
+            self.region_id(),
+            self.inherited_budget(),
+            self.capability_budget(),
+            &gateway,
+            &pending,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            true,
             f,
         )
     }
@@ -5698,6 +5841,7 @@ where
             &gateway,
             &pending,
             crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            false,
             f,
         )
     }
@@ -5733,6 +5877,7 @@ where
             &gateway,
             &pending,
             crate::runtime::task_handle::SpawnCompletionPolicy::CancellationDominant,
+            false,
             f,
         )
     }
@@ -5751,6 +5896,7 @@ where
         gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
         pending: &Arc<crate::record::region::PendingSpawnCounter>,
         completion_policy: crate::runtime::task_handle::SpawnCompletionPolicy,
+        caller_owned_poll_quota: bool,
         f: F,
     ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
     where
@@ -5786,6 +5932,7 @@ where
         let admitted_slot = Arc::new(
             AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
                 .with_runtime_mask(self.runtime_mask)
+                .with_caller_owned_poll_quota(caller_owned_poll_quota)
                 .with_retirement_barrier(Arc::clone(&barrier))
                 // Admission builds the task's one context with these, so
                 // `Cx::current()` in the task carries them (br-asupersync-93zkbz).
@@ -6584,3 +6731,7 @@ impl<Caps> Cx<Caps> {
 #[cfg(test)]
 #[path = "cx_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "deadline_publication_tests.rs"]
+mod deadline_publication_tests;

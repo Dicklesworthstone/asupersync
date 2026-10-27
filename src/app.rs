@@ -38,7 +38,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use managed_execution::{
-    ManagedApp, ManagedAppBindError, ManagedAppBinding, ManagedAppHandle, ManagedAppWorkError,
+    ManagedApp, ManagedAppBindError, ManagedAppBinding, ManagedAppGroupReport, ManagedAppHandle,
+    ManagedAppTree, ManagedAppTreeHandle, ManagedAppTreeReport, ManagedAppWorkError,
 };
 
 /// Executing bindings for the declarative manifest, separate from the legacy
@@ -227,6 +228,10 @@ mod managed_execution {
         Unexpected(String),
         /// A route received a worker binding, or a worker received a handler.
         KindMismatch(String),
+        /// A declared group has no explicit supervision configuration.
+        MissingGroupConfig(String),
+        /// A supervision configuration names no declared group.
+        UnexpectedGroupConfig(String),
         /// A declaration needs an adapter this execution API does not provide.
         Unsupported { unit: String, reason: &'static str },
         /// A runtime effect or driver is absent from the caller's authority.
@@ -272,6 +277,154 @@ mod managed_execution {
         SignalReceiverUnavailable,
         /// Waiting for a signal failed before an invocation was admitted.
         SignalReceive(mpsc::RecvError),
+        /// A nested group stopped with a controller error. Its full terminal
+        /// report, including the original domain failures, is retained in the
+        /// corresponding [`ManagedAppGroupReport`].
+        GroupFailed(String),
+        /// A retained, already validated group could not be reconstructed.
+        GroupBinding(ManagedSupervisorBindError),
+    }
+
+    type AppFactory<E> = Arc<dyn ManagedChildFactory<ManagedAppWorkError<E>>>;
+    type CleanupObserver =
+        Arc<dyn Fn(ManagedGeneration) -> Option<crate::record::task::TaskOutcome> + Send + Sync>;
+    type WorkCleanup = Arc<Mutex<Option<(ManagedGeneration, crate::record::task::TaskOutcome)>>>;
+
+    struct AppFactoryRef<E>(AppFactory<E>);
+
+    impl<E: 'static> ManagedChildFactory<ManagedAppWorkError<E>> for AppFactoryRef<E> {
+        fn start(
+            &self,
+            cx: Cx,
+            generation: ManagedGeneration,
+        ) -> crate::supervision::ManagedChildFuture<ManagedAppWorkError<E>> {
+            self.0.start(cx, generation)
+        }
+
+        fn retired(&self) {
+            self.0.retired();
+        }
+    }
+
+    // AppSpec generates only plain child topology. Retain its real factories
+    // separately from legacy ChildStart callbacks so a parent can reconstruct
+    // a nested controller without moving or duplicating a live generation.
+    struct AppGroupTemplate<E> {
+        name: String,
+        restart: super::RestartPolicy,
+        stop_on_child_failure: bool,
+        config: SupervisionConfig,
+        children: Vec<AppChildTemplate<E>>,
+    }
+
+    struct AppChildTemplate<E> {
+        name: String,
+        mode: ManagedRestartMode,
+        factory: AppFactory<E>,
+        cleanup: Option<CleanupObserver>,
+    }
+
+    impl<E: 'static> AppGroupTemplate<E> {
+        fn push(
+            &mut self,
+            name: String,
+            mode: ManagedRestartMode,
+            factory: impl ManagedChildFactory<ManagedAppWorkError<E>>,
+            cleanup: Option<CleanupObserver>,
+        ) {
+            self.children.push(AppChildTemplate {
+                name,
+                mode,
+                factory: Arc::new(factory),
+                cleanup,
+            });
+        }
+
+        fn bind(
+            &self,
+        ) -> Result<ManagedSupervisor<ManagedAppWorkError<E>>, ManagedSupervisorBindError> {
+            let mut builder =
+                SupervisorBuilder::new(self.name.clone()).with_restart_policy(self.restart);
+            let mut bindings = Vec::with_capacity(self.children.len());
+            for child in &self.children {
+                builder = builder.child(ChildSpec::new(
+                    child.name.clone(),
+                    |_scope: &crate::cx::Scope<'static>, _state: &mut RuntimeState, _cx: &Cx| {
+                        Err(SpawnError::RuntimeUnavailable)
+                    },
+                ));
+                let binding = ManagedChildBinding::new(
+                    child.name.clone(),
+                    child.mode,
+                    AppFactoryRef(Arc::clone(&child.factory)),
+                );
+                bindings.push(match &child.cleanup {
+                    Some(observer) => binding.with_cleanup_observer(Arc::clone(observer)),
+                    None => binding,
+                });
+            }
+            let supervisor = builder
+                .compile()
+                .map_err(ManagedSupervisorBindError::Topology)?
+                .bind_managed(bindings, self.config.clone())?;
+            Ok(if self.stop_on_child_failure {
+                supervisor.with_stop_on_child_failure()
+            } else {
+                supervisor
+            })
+        }
+    }
+
+    type GroupReports<E> = Arc<Mutex<BTreeMap<String, ManagedAppGroupReport<E>>>>;
+
+    struct AppGroupFactory<E> {
+        group: String,
+        template: AppGroupTemplate<E>,
+        reports: GroupReports<E>,
+    }
+
+    impl<E: Send + 'static> ManagedChildFactory<ManagedAppWorkError<E>> for AppGroupFactory<E> {
+        fn start(
+            &self,
+            cx: Cx,
+            generation: ManagedGeneration,
+        ) -> crate::supervision::ManagedChildFuture<ManagedAppWorkError<E>> {
+            let supervisor = self.template.bind();
+            let group = self.group.clone();
+            let reports = Arc::clone(&self.reports);
+            Box::pin(async move {
+                let supervisor = match supervisor {
+                    Ok(supervisor) => supervisor,
+                    Err(error) => return Outcome::Err(ManagedAppWorkError::GroupBinding(error)),
+                };
+                let report = supervisor.run(&cx).await;
+                if report.escalations != 0 {
+                    // The nested close barrier has applied its parent-region
+                    // escalation. Acknowledge that request before returning the
+                    // typed failure to the root. The separate cleanup observer
+                    // still forbids replacement after any failed inner cleanup.
+                    let _ = cx.checkpoint();
+                }
+                let outcome = match &report.outcome {
+                    Outcome::Ok(()) => Outcome::Ok(()),
+                    Outcome::Err(_) => Outcome::Err(ManagedAppWorkError::GroupFailed(group.clone())),
+                    Outcome::Cancelled(reason) => Outcome::Cancelled(reason.clone()),
+                    Outcome::Panicked(payload) => Outcome::Panicked(payload.clone()),
+                };
+                let retired = reports.lock().insert(
+                    group.clone(),
+                    ManagedAppGroupReport {
+                        name: group,
+                        generation,
+                        report,
+                    },
+                );
+                // E can run arbitrary Drop code. Neither report replacement nor
+                // a destructor panic may run while the publication lock is held.
+                drop(retired);
+                outcome
+            })
+        }
     }
 
     struct WorkPolicy {
@@ -280,6 +433,7 @@ mod managed_execution {
         budget: Option<AppBudgetSpecV1>,
         interval: Option<Duration>,
         signal: Option<SignalReceiver>,
+        cleanup: WorkCleanup,
     }
 
     impl WorkPolicy {
@@ -604,6 +758,13 @@ mod managed_execution {
             match region.close_with_outcome().await {
                 Ok(closed) => {
                     if let Some(cleanup) = closed.cleanup_outcome {
+                        if !cleanup.is_ok() {
+                            let retired = policy
+                                .cleanup
+                                .lock()
+                                .replace((generation, cleanup.clone()));
+                            drop(retired);
+                        }
                         if !matches!(cleanup, Outcome::Ok(()))
                             && !matches!(outcome, Outcome::Panicked(_))
                         {
@@ -676,7 +837,7 @@ mod managed_execution {
     /// observability sink adapters still require further bindings.
     /// The legacy `compile_with_child_specs` and `CompiledApp::start` are unchanged.
     pub struct ManagedApp<E> {
-        supervisor: ManagedSupervisor<ManagedAppWorkError<E>>,
+        template: AppGroupTemplate<E>,
         router: Arc<Router>,
         policies: Vec<Arc<WorkPolicy>>,
         routes: Vec<RouteSlot>,
@@ -709,14 +870,20 @@ mod managed_execution {
             cx: &Cx,
         ) -> Result<ManagedSupervisorReport<ManagedAppWorkError<E>>, ManagedAppBindError> {
             self.validate_start(cx)?;
-            Ok(self.supervisor.run(cx).await)
+            let supervisor = self
+                .template
+                .bind()
+                .map_err(ManagedAppBindError::Supervisor)?;
+            Ok(supervisor.run(cx).await)
         }
 
         /// Start a region-owned controller after checking every declaration.
         pub fn start(self, cx: &Cx) -> Result<ManagedAppHandle<E>, ManagedAppBindError> {
             self.validate_start(cx)?;
             let controller = self
-                .supervisor
+                .template
+                .bind()
+                .map_err(ManagedAppBindError::Supervisor)?
                 .spawn(cx)
                 .map_err(ManagedAppBindError::Spawn)?;
             Ok(ManagedAppHandle {
@@ -764,6 +931,132 @@ mod managed_execution {
         }
     }
 
+    /// Latest fully drained execution of one nested AppSpec group.
+    #[derive(Debug)]
+    pub struct ManagedAppGroupReport<E> {
+        /// Manifest group name.
+        pub name: String,
+        /// The root controller's generation that owned this group execution.
+        /// Descendant generation numbers start afresh within each execution;
+        /// their task and region identities remain distinct.
+        pub generation: ManagedGeneration,
+        /// Actual nested controller result, with original worker domain errors.
+        pub report: ManagedSupervisorReport<ManagedAppWorkError<E>>,
+    }
+
+    /// Terminal application tree receipt, available after every region drains.
+    #[derive(Debug)]
+    pub struct ManagedAppTreeReport<E> {
+        /// Named root group's controller, including its direct work units and
+        /// the `group:<name>` children representing other manifest groups.
+        pub root: ManagedSupervisorReport<ManagedAppWorkError<E>>,
+        /// Latest completed execution per nested group, in manifest order.
+        /// Storage is bounded by the number of groups, not restart count. A
+        /// group cancelled before its factory runs has no new nested report;
+        /// the root receipt retains that exact failed admission/generation.
+        pub groups: Vec<ManagedAppGroupReport<E>>,
+    }
+
+    /// Explicit executable hierarchy for the flat AppSpec v1 group list.
+    ///
+    /// The named root group owns its declared work units and one Transient
+    /// managed child for every other group, in manifest order. Nested groups
+    /// apply their own restart policy and intensity configuration. Their normal
+    /// completion or voluntary cancellation does not restart the whole group;
+    /// a terminal controller error or panic is a failure seen by the root.
+    /// Root OneForAll replacement drains affected groups before reconstructing
+    /// them; root Stop drains the complete tree after the first child failure.
+    /// Existing supervisor escalation still targets the owning parent region.
+    ///
+    /// This additive mapping does not add parent edges to the v1 wire schema.
+    /// Route publication slots and signal receivers survive replacement, but
+    /// old generations fully drain before replacement publishes those routes.
+    /// Budgets and capabilities are checked for every work unit before start.
+    ///
+    /// Named resources, SLO and observability adapters retain their existing
+    /// explicit refusals. Use [`AppSpecV1::bind_managed_groups`] to prepare it.
+    pub struct ManagedAppTree<E> {
+        app: ManagedApp<E>,
+        reports: GroupReports<E>,
+        group_order: Vec<String>,
+    }
+
+    fn take_group_reports<E>(
+        reports: &GroupReports<E>,
+        order: &[String],
+    ) -> Vec<ManagedAppGroupReport<E>> {
+        let mut completed = {
+            let mut publication = reports.lock();
+            std::mem::take(&mut *publication)
+        };
+        order
+            .iter()
+            .filter_map(|name| completed.remove(name))
+            .collect()
+    }
+
+    impl<E: Send + 'static> ManagedAppTree<E> {
+        /// Router covering routes from every group; inactive routes return 503.
+        #[must_use]
+        pub fn router(&self) -> Arc<Router> {
+            self.app.router()
+        }
+
+        /// Run the root controller and collect the bounded nested receipts.
+        pub async fn run(self, cx: &Cx) -> Result<ManagedAppTreeReport<E>, ManagedAppBindError> {
+            let root = self.app.run(cx).await?;
+            Ok(ManagedAppTreeReport {
+                root,
+                groups: take_group_reports(&self.reports, &self.group_order),
+            })
+        }
+
+        /// Validate all work-unit authority before admitting the root task.
+        pub fn start(self, cx: &Cx) -> Result<ManagedAppTreeHandle<E>, ManagedAppBindError> {
+            Ok(ManagedAppTreeHandle {
+                app: self.app.start(cx)?,
+                reports: self.reports,
+                group_order: self.group_order,
+            })
+        }
+    }
+
+    /// Cancellation owner for a started application group tree.
+    /// Dropping it requests cancellation; joining observes actual tree drain.
+    pub struct ManagedAppTreeHandle<E> {
+        app: ManagedAppHandle<E>,
+        reports: GroupReports<E>,
+        group_order: Vec<String>,
+    }
+
+    impl<E> ManagedAppTreeHandle<E> {
+        /// Router shared by all current group generations.
+        #[must_use]
+        pub fn router(&self) -> Arc<Router> {
+            self.app.router()
+        }
+
+        /// Whether every declared route currently has an active generation.
+        #[must_use]
+        pub fn routes_ready(&self) -> bool {
+            self.app.routes_ready()
+        }
+
+        /// Request stop of the whole tree; cleanup remains joinable.
+        pub fn abort(&self) {
+            self.app.abort();
+        }
+
+        /// Await root quiescence, then transfer the complete bounded receipts.
+        pub async fn join(&mut self) -> Result<ManagedAppTreeReport<E>, JoinError> {
+            let root = self.app.join().await?;
+            Ok(ManagedAppTreeReport {
+                root,
+                groups: take_group_reports(&self.reports, &self.group_order),
+            })
+        }
+    }
+
     fn feature_enabled(feature: &AppFeatureFlagV1) -> bool {
         match feature {
             AppFeatureFlagV1::NativeRuntime => cfg!(feature = "native-runtime"),
@@ -799,29 +1092,85 @@ mod managed_execution {
             bindings: Vec<ManagedAppBinding<E>>,
             config: SupervisionConfig,
         ) -> Result<ManagedApp<E>, ManagedAppBindError> {
+            let configs = BTreeMap::from([(self.supervision.root_group.clone(), config)]);
+            Ok(self.bind_managed_impl(bindings, configs, false)?.app)
+        }
+
+        /// Bind every manifest group through the explicit hierarchy documented
+        /// by [`ManagedAppTree`]. Supply exactly one intensity/backoff config
+        /// per declared group; non-Stop restart policies must match the manifest.
+        /// No factory runs until all names, routes, features, budgets and group
+        /// configurations pass preflight. The legacy single-group entry point
+        /// remains unchanged, including its refusal of multiple groups.
+        pub fn bind_managed_groups<E: Send + 'static>(
+            self,
+            bindings: Vec<ManagedAppBinding<E>>,
+            configs: BTreeMap<String, SupervisionConfig>,
+        ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
+            self.bind_managed_impl(bindings, configs, true)
+        }
+
+        #[allow(clippy::too_many_lines)]
+        fn bind_managed_impl<E: Send + 'static>(
+            self,
+            bindings: Vec<ManagedAppBinding<E>>,
+            mut configs: BTreeMap<String, SupervisionConfig>,
+            grouped: bool,
+        ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
             let plan = self.compiler_plan().map_err(ManagedAppBindError::Compile)?;
-            if plan.service_groups.len() != 1 || !plan.observability_sinks.is_empty() {
+            if (!grouped && plan.service_groups.len() != 1)
+                || !plan.observability_sinks.is_empty()
+            {
                 return Err(ManagedAppBindError::Unsupported {
                     unit: plan.app_name,
-                    reason: "managed binding requires one group and explicit observability adapters are not yet supported",
+                    reason: if grouped {
+                        "explicit observability adapters are not yet supported"
+                    } else {
+                        "managed binding requires one group and explicit observability adapters are not yet supported"
+                    },
                 });
             }
-            let stop_on_child_failure =
-                matches!(&plan.root_restart_policy, super::AppRestartPolicyV1::Stop);
-            let restart = if stop_on_child_failure {
-                // The managed controller supplies group-stop semantics; its
-                // unused failure-restart topology must still match its config.
-                super::RestartPolicy::OneForOne
-            } else {
-                runtime_restart_policy(&plan.root_restart_policy)
-                    .map_err(ManagedAppBindError::Compile)?
-            };
-            let config = if stop_on_child_failure {
-                config.with_restart_policy(restart)
-            } else {
-                config
-            };
-            let mut builder = SupervisorBuilder::new(plan.app_name).with_restart_policy(restart);
+            let mut templates = BTreeMap::new();
+            let mut group_order = Vec::new();
+            for group in &plan.service_groups {
+                let config = configs.remove(&group.name).ok_or_else(|| {
+                    ManagedAppBindError::MissingGroupConfig(group.name.clone())
+                })?;
+                let stop_on_child_failure =
+                    matches!(&group.restart_policy, super::AppRestartPolicyV1::Stop);
+                let restart = if stop_on_child_failure {
+                    super::RestartPolicy::OneForOne
+                } else {
+                    runtime_restart_policy(&group.restart_policy)
+                        .map_err(ManagedAppBindError::Compile)?
+                };
+                let config = if stop_on_child_failure {
+                    config.with_restart_policy(restart)
+                } else {
+                    config
+                };
+                let is_root = group.name == plan.root_group;
+                if !is_root {
+                    group_order.push(group.name.clone());
+                }
+                templates.insert(
+                    group.name.clone(),
+                    AppGroupTemplate {
+                        name: if is_root {
+                            plan.app_name.clone()
+                        } else {
+                            group.name.clone()
+                        },
+                        restart,
+                        stop_on_child_failure,
+                        config,
+                        children: Vec::new(),
+                    },
+                );
+            }
+            if let Some((name, _)) = configs.into_iter().next() {
+                return Err(ManagedAppBindError::UnexpectedGroupConfig(name));
+            }
             let mut supplied = BTreeMap::new();
             for binding in bindings {
                 let name = binding.name.clone();
@@ -835,7 +1184,6 @@ mod managed_execution {
                 .map(|b| (b.name.clone(), b))
                 .collect();
             let mut policies = Vec::new();
-            let mut managed = Vec::new();
             // Keyed by route shape (see `route_shape`): one method router per
             // route the web router will match, registered under the first
             // path seen for it.
@@ -922,16 +1270,11 @@ mod managed_execution {
                     budget,
                     interval,
                     signal,
+                    cleanup: Arc::new(Mutex::new(None)),
                 });
-                // Managed binding consumes only ChildSpec's topology. Keep its
-                // legacy callback fail-closed; user factories run exclusively
-                // inside the actual managed generation and budget-region task.
-                builder = builder.child(ChildSpec::new(
-                    child.name.clone(),
-                    |_scope: &crate::cx::Scope<'static>, _state: &mut RuntimeState, _cx: &Cx| {
-                        Err(SpawnError::RuntimeUnavailable)
-                    },
-                ));
+                let template = templates
+                    .get_mut(&child.group)
+                    .expect("compiler assigns every child to a declared group");
                 match (child.kind, kind) {
                     (AppSpecV1WorkUnitKind::Route, BindingKind::Route(handler)) => {
                         let route = child.route.expect("compiler includes route binding");
@@ -960,7 +1303,7 @@ mod managed_execution {
                         };
                         methods.insert(shape, (path, method));
                         let publication = Arc::clone(&slot);
-                        managed.push(ManagedChildBinding::new(
+                        template.push(
                             child.name,
                             ManagedRestartMode::Permanent,
                             move |cx: Cx, _generation| {
@@ -975,7 +1318,8 @@ mod managed_execution {
                                     }))
                                 }
                             },
-                        ));
+                            None,
+                        );
                         routes.push(slot);
                     }
                     (
@@ -983,7 +1327,8 @@ mod managed_execution {
                         BindingKind::Worker(mode, factory, _),
                     ) => {
                         let work_policy = Arc::clone(&policy);
-                        managed.push(ManagedChildBinding::new(
+                        let cleanup = Arc::clone(&policy.cleanup);
+                        template.push(
                             child.name,
                             mode,
                             move |cx, generation| {
@@ -994,7 +1339,14 @@ mod managed_execution {
                                     Arc::clone(&factory),
                                 )
                             },
-                        ));
+                            Some(Arc::new(move |generation| {
+                                cleanup
+                                    .lock()
+                                    .as_ref()
+                                    .filter(|(observed, _)| *observed == generation)
+                                    .map(|(_, outcome)| outcome.clone())
+                            })),
+                        );
                     }
                     _ => return Err(ManagedAppBindError::KindMismatch(child.name)),
                 }
@@ -1003,27 +1355,60 @@ mod managed_execution {
             if let Some((name, _)) = supplied.into_iter().next() {
                 return Err(ManagedAppBindError::Unexpected(name));
             }
-            let supervisor = builder
-                .compile()
-                .map_err(|error| {
-                    ManagedAppBindError::Supervisor(ManagedSupervisorBindError::Topology(error))
-                })?
-                .bind_managed(managed, config)
-                .map_err(ManagedAppBindError::Supervisor)?;
-            let supervisor = if stop_on_child_failure {
-                supervisor.with_stop_on_child_failure()
-            } else {
-                supervisor
-            };
+            let mut template = templates
+                .remove(&plan.root_group)
+                .expect("validated root group exists");
+            let reports = Arc::new(Mutex::new(BTreeMap::new()));
+            for name in &group_order {
+                let nested = templates.remove(name).expect("declared group exists");
+                nested.bind().map_err(ManagedAppBindError::Supervisor)?;
+                let group_name = name.clone();
+                let cleanup_reports = Arc::clone(&reports);
+                template.push(
+                    format!("group:{name}"),
+                    ManagedRestartMode::Transient,
+                    AppGroupFactory {
+                        group: name.clone(),
+                        template: nested,
+                        reports: Arc::clone(&reports),
+                    },
+                    Some(Arc::new(move |generation| {
+                        let reports = cleanup_reports.lock();
+                        let completed = reports.get(&group_name)?;
+                        if completed.generation != generation {
+                            return None;
+                        }
+                        completed
+                            .report
+                            .cleanup_outcome
+                            .iter()
+                            .chain(
+                                completed
+                                    .report
+                                    .children
+                                    .iter()
+                                    .filter_map(|child| child.cleanup_outcome.as_ref()),
+                            )
+                            .filter(|outcome| !outcome.is_ok())
+                            .max_by_key(|outcome| outcome.severity())
+                            .cloned()
+                    })),
+                );
+            }
+            template.bind().map_err(ManagedAppBindError::Supervisor)?;
             let mut router = Router::new().without_default_trace();
             for (path, method) in methods.into_values() {
                 router = router.route(&path, method);
             }
-            Ok(ManagedApp {
-                supervisor,
-                router: Arc::new(router),
-                policies,
-                routes,
+            Ok(ManagedAppTree {
+                app: ManagedApp {
+                    template,
+                    router: Arc::new(router),
+                    policies,
+                    routes,
+                },
+                reports,
+                group_order,
             })
         }
     }

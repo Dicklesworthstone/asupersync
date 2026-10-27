@@ -158,11 +158,14 @@ where
 /// re-chunks every byte after an insertion, so all later content ids change and
 /// the inserted region gets no delta reuse; content-defined boundaries
 /// re-synchronize a few tens of bytes past an edit, so an insert costs ~one new
-/// chunk and the shifted tail keeps its content ids. Wired into the delta
-/// manifest builders in a later sizeku slice; landed as a standalone, unit-tested
-/// primitive first.
-#[allow(dead_code)] // wired into the delta manifest builders in a later sizeku slice
+/// chunk and the shifted tail keeps its content ids. RQ opts into these
+/// boundaries only after authenticating both peers' CDC capabilities; fixed
+/// manifests keep their existing wire meaning.
 pub(crate) mod cdc {
+    /// This schema is emitted only after an authenticated CDC capability
+    /// exchange. The existing fixed-chunk schema keeps its original meaning.
+    pub const MANIFEST_SCHEMA: &str = "asupersync.atp.rq.cdc-chunk-manifest.v1";
+
     /// Minimum content-defined chunk size.
     pub const MIN_CHUNK_BYTES: usize = 16 * 1024;
     /// Target average content-defined chunk size (tracks the mask bits).
@@ -190,6 +193,7 @@ pub(crate) mod cdc {
     /// across chunk boundaries by design — content-defined resync depends only
     /// on the last ~64 bytes, so the hash re-aligns a few tens of bytes past an
     /// edit (a per-chunk reset would defeat resynchronization).
+    #[derive(Debug)]
     struct Gear {
         hash: u64,
     }
@@ -226,6 +230,7 @@ pub(crate) mod cdc {
     /// always yield identical spans, so a sender and receiver chunking an
     /// identical file agree on boundaries (and thus content ids) with no shared
     /// state.
+    #[cfg(test)]
     pub fn chunk_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
         let mut spans: Vec<(usize, usize)> = Vec::new();
         if bytes.is_empty() {
@@ -259,6 +264,89 @@ pub(crate) mod cdc {
             }
         }
         spans
+    }
+
+    /// Streaming equivalent of `chunk_spans`, independent of read boundaries.
+    ///
+    /// A completed chunk is retained until the following boundary or EOF so
+    /// the final short tail can be merged exactly as in `chunk_spans`. The
+    /// reader retains at most three `MAX_CHUNK_BYTES` buffers, regardless of
+    /// the input size. Dropping it abandons its consumed prefix; it must not
+    /// be reconstructed over the already-advanced underlying reader.
+    #[derive(Debug)]
+    pub struct ChunkReader<R> {
+        reader: R,
+        gear: Gear,
+        input: Vec<u8>,
+        input_pos: usize,
+        input_len: usize,
+        pending: Vec<u8>,
+        current: Vec<u8>,
+        eof: bool,
+    }
+
+    impl<R: crate::io::AsyncRead + Unpin> ChunkReader<R> {
+        pub fn new(reader: R) -> Self {
+            Self {
+                reader,
+                gear: Gear::new(),
+                input: vec![0; MAX_CHUNK_BYTES],
+                input_pos: 0,
+                input_len: 0,
+                pending: Vec::new(),
+                current: Vec::with_capacity(MAX_CHUNK_BYTES),
+                eof: false,
+            }
+        }
+
+        /// Returns the next complete content-defined chunk.
+        ///
+        /// If this future is dropped before completion, discard the reader:
+        /// filling an input buffer may already have consumed a partial read.
+        pub async fn next_chunk(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+            loop {
+                if self.eof {
+                    if !self.pending.is_empty() {
+                        if self.current.len() < MIN_CHUNK_BYTES
+                            && self.pending.len() + self.current.len() <= MAX_CHUNK_BYTES
+                        {
+                            self.pending.append(&mut self.current);
+                        }
+                        return Ok(Some(std::mem::take(&mut self.pending)));
+                    }
+                    return Ok((!self.current.is_empty())
+                        .then(|| std::mem::take(&mut self.current)));
+                }
+                if self.input_pos == self.input_len {
+                    self.input_len =
+                        super::read_full_chunk(&mut self.reader, &mut self.input).await?;
+                    self.input_pos = 0;
+                    if self.input_len == 0 {
+                        self.eof = true;
+                        continue;
+                    }
+                }
+                while self.input_pos < self.input_len {
+                    let byte = self.input[self.input_pos];
+                    self.input_pos += 1;
+                    self.gear.update(byte);
+                    self.current.push(byte);
+                    let len = self.current.len();
+                    if len >= MIN_CHUNK_BYTES
+                        && (len == MAX_CHUNK_BYTES || self.gear.hash() & BOUNDARY_MASK == 0)
+                    {
+                        let complete = std::mem::replace(
+                            &mut self.current,
+                            Vec::with_capacity(MAX_CHUNK_BYTES),
+                        );
+                        let ready = std::mem::replace(&mut self.pending, complete);
+                        if !ready.is_empty() {
+                            return Ok(Some(ready));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

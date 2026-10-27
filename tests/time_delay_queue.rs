@@ -320,3 +320,510 @@ fn stream_map_labels_items_and_tracks_inserts_and_removals() {
         assert_eq!(first_six.iter().filter(|key| **key == 1).count(), 3);
     });
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod context_expiry {
+    use super::*;
+    use asupersync::cx::ChildRegionSpec;
+    use asupersync::time::{DelayQueueNextError, TimerDriverHandle, VirtualClock};
+    use asupersync::types::{CancelKind, CancelReason};
+    use std::future::Future;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+
+    fn virtual_scenario<F>(budget: Budget, scenario: F)
+    where
+        F: FnOnce(Cx, Arc<VirtualClock>, TimerDriverHandle) + Send + 'static,
+    {
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let runtime = RuntimeBuilder::current_thread()
+            .with_timer_driver(driver.clone())
+            .build()
+            .unwrap();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completion = Arc::clone(&completed);
+        let observed_driver = driver.clone();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let parent = Cx::current().unwrap();
+            let region = parent
+                .open_child_region(ChildRegionSpec::inherit().with_budget(budget))
+                .await
+                .unwrap();
+            let mut task = region
+                .cx()
+                .spawn(move |cx| async move { scenario(cx, clock, driver) })
+                .unwrap();
+            task.join(&parent).await.unwrap();
+            region.close().await.unwrap();
+            completion.store(true, Ordering::Release);
+        }));
+        assert!(completed.load(Ordering::Acquire));
+        assert!(observed_driver.is_empty(), "no expiry registration outlives its owner");
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn empty_queues_need_no_timer_but_nonempty_queues_require_time_authority() {
+        virtual_scenario(Budget::INFINITE, |cx, _, driver| {
+            let mut queue = DelayQueue::new();
+            let restriction = cx
+                .restrict::<asupersync::cx::cap::None>()
+                .set_current_restricted();
+            let masked = Cx::current().unwrap();
+            assert!(masked.timer_driver().is_none());
+            let mut empty = Box::pin(queue.next_expired(&masked));
+            assert!(matches!(
+                empty.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(Ok(None))
+            ));
+            drop(empty);
+            let key = queue.insert_at("due", Time::ZERO);
+            let mut denied = Box::pin(queue.next_expired(&masked));
+            assert!(matches!(
+                denied.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(Err(DelayQueueNextError::TimerUnavailable))
+            ));
+            drop(denied);
+            assert_eq!(queue.len(), 1);
+            assert!(queue.contains(&key));
+            assert!(driver.is_empty());
+            drop(restriction);
+
+            type TimeOnly = asupersync::cx::cap::CapSet<false, true, false, false, false>;
+            let restricted = cx.restrict::<TimeOnly>();
+            let mut due = Box::pin(queue.next_expired(&restricted));
+            match due.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+                Poll::Ready(Ok(Some(expired))) => assert_eq!(expired.into_inner(), "due"),
+                other => panic!("the explicit time-only context must deliver its due value: {other:?}"),
+            }
+            drop(due);
+            assert!(queue.is_empty());
+            assert!(!queue.contains(&key));
+        });
+    }
+
+    #[test]
+    fn dropping_pending_or_fired_expiry_preserves_values_keys_and_removes_timer() {
+        for fired in [false, true] {
+            virtual_scenario(Budget::INFINITE, move |cx, clock, driver| {
+                let mut queue = DelayQueue::new();
+                let first = queue.insert_at("first", Time::from_millis(100));
+                let second = queue.insert_at("second", Time::from_millis(200));
+                let counter = Arc::new(CountingWaker::default());
+                let waker = Waker::from(Arc::clone(&counter));
+                let mut task = Context::from_waker(&waker);
+                let mut waiting = Box::pin(queue.next_expired(&cx));
+                assert!(waiting.as_mut().poll(&mut task).is_pending());
+                assert_eq!(driver.pending_count(), 1);
+                if fired {
+                    clock.advance_to(Time::from_millis(100));
+                    assert_eq!(driver.process_timers(), 1);
+                    assert_eq!(counter.0.load(Ordering::Acquire), 1);
+                }
+                drop(waiting);
+                assert!(driver.is_empty());
+                assert_eq!(queue.len(), 2);
+                assert!(queue.contains(&first));
+                assert!(queue.contains(&second));
+                assert_eq!(queue.deadline(&first), Time::from_millis(100));
+
+                // Cancellation released the mutable borrow: move a different
+                // key ahead, then continue with the same surviving identities.
+                queue.reset_at(&second, Time::from_millis(50));
+                clock.advance_to(Time::from_millis(100));
+                for (key, value) in [(second, "second"), (first, "first")] {
+                    let mut waiting = Box::pin(queue.next_expired(&cx));
+                    match waiting.as_mut().poll(&mut task) {
+                        Poll::Ready(Ok(Some(expired))) => {
+                            assert_eq!(expired.key(), key);
+                            assert_eq!(expired.into_inner(), value);
+                        }
+                        other => panic!("retained value must be recoverable: {other:?}"),
+                    }
+                    drop(waiting);
+                    assert!(!queue.contains(&key));
+                }
+                assert!(queue.is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn explicit_expiry_retires_a_previous_stream_timer_and_uses_one_registration() {
+        virtual_scenario(Budget::INFINITE, |cx, clock, driver| {
+            let mut queue = DelayQueue::new();
+            let key = queue.insert_at("kept", Time::from_millis(100));
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(queue.poll_expired(&mut task).is_pending());
+            assert_eq!(driver.pending_count(), 1);
+            let mut waiting = Box::pin(queue.next_expired(&cx));
+            assert!(waiting.as_mut().poll(&mut task).is_pending());
+            assert_eq!(driver.pending_count(), 1, "legacy registration was replaced");
+            clock.advance_to(Time::from_millis(99));
+            assert_eq!(driver.process_timers(), 0);
+            assert!(waiting.as_mut().poll(&mut task).is_pending());
+            drop(waiting);
+            assert!(driver.is_empty());
+            assert!(queue.contains(&key));
+            assert_eq!(queue.remove(&key).into_inner(), "kept");
+        });
+    }
+
+    #[test]
+    fn early_refusal_retires_a_previous_stream_timer_without_consuming_its_value() {
+        virtual_scenario(Budget::INFINITE, |cx, _, driver| {
+            let mut queue = DelayQueue::new();
+            let key = queue.insert_at("kept", Time::from_secs(3600));
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(queue.poll_expired(&mut task).is_pending());
+            assert_eq!(driver.pending_count(), 1);
+
+            let restriction = cx
+                .restrict::<asupersync::cx::cap::None>()
+                .set_current_restricted();
+            let masked = Cx::current().unwrap();
+            let mut denied = Box::pin(queue.next_expired(&masked));
+            assert!(matches!(
+                denied.as_mut().poll(&mut task),
+                Poll::Ready(Err(DelayQueueNextError::TimerUnavailable))
+            ));
+            drop(denied);
+            assert!(driver.is_empty());
+            assert!(queue.contains(&key));
+            drop(restriction);
+
+            // A legacy caller can re-arm the same retained entry. A later
+            // explicitly cancelled wait must retire that registration too.
+            assert!(queue.poll_expired(&mut task).is_pending());
+            assert_eq!(driver.pending_count(), 1);
+            cx.set_cancel_reason(CancelReason::user("cancel the new queue wait"));
+            let mut cancelled = Box::pin(queue.next_expired(&cx));
+            assert!(matches!(
+                cancelled.as_mut().poll(&mut task),
+                Poll::Ready(Err(DelayQueueNextError::Cancelled(reason)))
+                    if reason.kind == CancelKind::User
+            ));
+            drop(cancelled);
+            assert!(driver.is_empty());
+            assert!(queue.contains(&key));
+            assert_eq!(queue.remove(&key).into_inner(), "kept");
+        });
+    }
+
+    #[test]
+    fn explicit_owner_drives_expiry_while_the_ambient_context_has_no_timer() {
+        virtual_scenario(Budget::INFINITE, |cx, clock, driver| {
+            let mut queue = DelayQueue::new();
+            let key = queue.insert_at("explicit clock", Time::from_millis(100));
+            let ambient = Cx::detached_cancel_context().set_current_restricted();
+            assert!(Cx::current().unwrap().timer_driver().is_none());
+            let counter = Arc::new(CountingWaker::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            let mut waiting = Box::pin(queue.next_expired(&cx));
+            assert!(waiting.as_mut().poll(&mut task).is_pending());
+            assert_eq!(driver.pending_count(), 1);
+            clock.advance_to(Time::from_millis(100));
+            assert_eq!(driver.process_timers(), 1);
+            assert_eq!(counter.0.load(Ordering::Acquire), 1);
+            match waiting.as_mut().poll(&mut task) {
+                Poll::Ready(Ok(Some(expired))) => {
+                    assert_eq!(expired.key(), key);
+                    assert_eq!(expired.deadline(), Time::from_millis(100));
+                    assert_eq!(expired.into_inner(), "explicit clock");
+                }
+                other => panic!("the explicit owner's timer must drive expiry: {other:?}"),
+            }
+            drop(waiting);
+            assert!(queue.is_empty());
+            assert!(driver.is_empty());
+            drop(ambient);
+        });
+    }
+
+    #[test]
+    fn cancellation_wins_over_due_and_empty_and_retains_every_entry() {
+        virtual_scenario(Budget::INFINITE, |cx, clock, driver| {
+            let mut queue = DelayQueue::new();
+            let first = queue.insert_at("first", Time::from_millis(100));
+            let second = queue.insert_at("second", Time::from_millis(200));
+            let counter = Arc::new(CountingWaker::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            let mut waiting = Box::pin(queue.next_expired(&cx));
+            assert!(waiting.as_mut().poll(&mut task).is_pending());
+            assert_eq!(driver.pending_count(), 1);
+            clock.advance_to(Time::from_millis(200));
+            cx.set_cancel_reason(CancelReason::user("retain queued expiry values"));
+            assert!(counter.0.load(Ordering::Acquire) > 0);
+            assert!(matches!(
+                waiting.as_mut().poll(&mut task),
+                Poll::Ready(Err(DelayQueueNextError::Cancelled(reason))) if reason.kind == CancelKind::User
+            ));
+            drop(waiting);
+            assert!(driver.is_empty());
+            assert_eq!(queue.len(), 2);
+            assert_eq!(queue.remove(&first).into_inner(), "first");
+            assert_eq!(queue.remove(&second).into_inner(), "second");
+            let mut empty = Box::pin(queue.next_expired(&cx));
+            assert!(matches!(
+                empty.as_mut().poll(&mut task),
+                Poll::Ready(Err(DelayQueueNextError::Cancelled(reason))) if reason.kind == CancelKind::User
+            ));
+        });
+    }
+
+    #[test]
+    fn masked_expired_owner_deadline_does_not_spin_or_remove_a_value() {
+        virtual_scenario(
+            Budget::new().with_deadline(Time::from_millis(1)),
+            |cx, clock, driver| {
+                clock.advance_to(Time::from_millis(2));
+                let mut queue = DelayQueue::new();
+                let key = queue.insert_at("kept", Time::from_millis(100));
+                let counter = Arc::new(CountingWaker::default());
+                let waker = Waker::from(Arc::clone(&counter));
+                let mut task = Context::from_waker(&waker);
+                let mut waiting = Box::pin(queue.next_expired(&cx));
+                cx.masked(|| assert!(waiting.as_mut().poll(&mut task).is_pending()));
+                assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
+                assert_eq!(counter.0.load(Ordering::Acquire), 0);
+                // Explicit repoll after the synchronous mask; unmasking does
+                // not itself promise a wakeup.
+                assert!(matches!(
+                    waiting.as_mut().poll(&mut task),
+                    Poll::Ready(Err(DelayQueueNextError::Cancelled(reason))) if reason.kind == CancelKind::Deadline
+                ));
+                drop(waiting);
+                assert!(queue.contains(&key));
+                assert_eq!(queue.remove(&key).into_inner(), "kept");
+            },
+        );
+    }
+
+    fn native<F, Fut>(workers: usize, scenario: F)
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::multi_thread().worker_threads(workers)
+            };
+            let runtime = builder.build().unwrap();
+            let completed = Arc::new(AtomicBool::new(false));
+            let completion = Arc::clone(&completed);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                asupersync::time::timeout(cx.now(), Duration::from_secs(10), scenario(cx))
+                    .await
+                    .expect("context expiry watchdog");
+                completion.store(true, Ordering::Release);
+            }));
+            assert!(completed.load(Ordering::Acquire));
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            done_tx.send(()).unwrap();
+        });
+        match done_rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                runner.join().expect("native context expiry");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("native context expiry exceeded watchdog"),
+        }
+    }
+
+    #[derive(Debug)]
+    struct Retained {
+        value: u32,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for Retained {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn native_cancel_releases_a_parked_expiry_without_destroying_queued_values() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                let parked = Arc::new(AtomicBool::new(false));
+                let child_parked = Arc::clone(&parked);
+                let drops = Arc::new(AtomicUsize::new(0));
+                let child_drops = Arc::clone(&drops);
+                let mut child = cx
+                    .spawn(move |owner| async move {
+                        let mut queue = DelayQueue::new();
+                        let deadline = owner.now() + Duration::from_secs(3600);
+                        let key = queue.insert_at(Retained { value: 7, drops: child_drops }, deadline);
+                        let mut waiting = Box::pin(queue.next_expired(&owner));
+                        let result = poll_fn(|task| {
+                            let polled = waiting.as_mut().poll(task);
+                            if polled.is_pending() {
+                                child_parked.store(true, Ordering::Release);
+                            }
+                            polled
+                        })
+                        .await;
+                        assert!(matches!(
+                            result,
+                            Err(DelayQueueNextError::Cancelled(reason)) if reason.kind == CancelKind::User
+                        ));
+                        drop(waiting);
+                        assert!(queue.contains(&key));
+                        assert_eq!(queue.deadline(&key), deadline);
+                        (queue, key)
+                    })
+                    .unwrap();
+                while !parked.load(Ordering::Acquire) {
+                    yield_now().await;
+                }
+                assert_eq!(drops.load(Ordering::Acquire), 0);
+                child = std::thread::spawn(move || {
+                    child.abort();
+                    child
+                })
+                .join()
+                .unwrap();
+                let (mut queue, key) = child.join(&cx).await.expect("typed cancellation acknowledgement");
+                assert_eq!(queue.len(), 1);
+                assert_eq!(drops.load(Ordering::Acquire), 0);
+                let retained = queue.remove(&key).into_inner();
+                assert_eq!(retained.value, 7);
+                drop(retained);
+                assert_eq!(drops.load(Ordering::Acquire), 1);
+                assert!(queue.is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn native_expiry_and_inherited_deadline_wake_without_manual_progress() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                let mut queue = DelayQueue::new();
+                let deadline = cx.now() + Duration::from_millis(250);
+                let key = queue.insert_at("due", deadline);
+                let mut waiting = Box::pin(queue.next_expired(&cx));
+                poll_fn(|task| {
+                    assert!(waiting.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                let expired = waiting.await.unwrap().unwrap();
+                assert_eq!(expired.key(), key);
+                assert_eq!(expired.deadline(), deadline);
+                assert_eq!(expired.into_inner(), "due");
+                assert!(cx.now() >= deadline);
+                assert!(queue.is_empty());
+
+                let region = cx
+                    .open_child_region(ChildRegionSpec::inherit().with_budget(
+                        Budget::new().with_deadline(cx.now() + Duration::from_millis(250)),
+                    ))
+                    .await
+                    .unwrap();
+                let parked = Arc::new(AtomicBool::new(false));
+                let child_parked = Arc::clone(&parked);
+                let mut child = region
+                    .cx()
+                    .spawn(move |owner| async move {
+                        let mut queue = DelayQueue::new();
+                        let key = queue.insert_at("kept", owner.now() + Duration::from_secs(3600));
+                        let mut waiting = Box::pin(queue.next_expired(&owner));
+                        let result = poll_fn(|task| {
+                            let polled = waiting.as_mut().poll(task);
+                            if polled.is_pending() {
+                                child_parked.store(true, Ordering::Release);
+                            }
+                            polled
+                        })
+                        .await;
+                        assert!(matches!(
+                            result,
+                            Err(DelayQueueNextError::Cancelled(reason)) if reason.kind == CancelKind::Deadline
+                        ));
+                        drop(waiting);
+                        assert_eq!(queue.remove(&key).into_inner(), "kept");
+                    })
+                    .unwrap();
+                while !parked.load(Ordering::Acquire) {
+                    yield_now().await;
+                }
+                child.join(&cx).await.unwrap();
+                region.close().await.unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn lab_expiry_preserves_reset_order_equal_deadlines_and_max_time() {
+        for seed in [17, 41, 93] {
+            let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let (task, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async {
+                    let cx = Cx::current().unwrap();
+                    let mut queue = DelayQueue::new();
+                    let first = queue.insert_at("first", Time::from_millis(100));
+                    let second = queue.insert_at("second", Time::from_millis(100));
+                    let reset = queue.insert_at("reset", Time::from_secs(3600));
+                    let removed = queue.insert_at("removed", Time::from_millis(10));
+                    assert_eq!(queue.remove(&removed).into_inner(), "removed");
+                    queue.reset_at(&reset, Time::from_millis(50));
+                    for (key, value, deadline) in [
+                        (reset, "reset", Time::from_millis(50)),
+                        (first, "first", Time::from_millis(100)),
+                        (second, "second", Time::from_millis(100)),
+                    ] {
+                        let expired = queue.next_expired(&cx).await.unwrap().unwrap();
+                        assert_eq!(expired.key(), key);
+                        assert_eq!(expired.deadline(), deadline);
+                        assert_eq!(expired.into_inner(), value);
+                        assert_eq!(cx.now(), deadline);
+                        assert!(!queue.contains(&key));
+                    }
+                    assert!(queue.next_expired(&cx).await.unwrap().is_none());
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(task, 0);
+            let virtual_time = lab.run_with_auto_advance();
+            let report = lab.run_until_quiescent_with_report();
+            assert!(matches!(join.try_join(), Ok(Some(()))), "seed={seed}: {virtual_time:?} {report:?}");
+            assert!(lab.state.tasks_is_empty());
+            assert!(lab.state.obligations_iter().all(|(_, obligation)| !obligation.is_pending()));
+            assert!(report.lab_test_passed(), "seed={seed}: {report:?}");
+        }
+        virtual_scenario(Budget::INFINITE, |cx, clock, driver| {
+            let mut queue = DelayQueue::new();
+            let key = queue.insert_at("last", Time::MAX);
+            clock.advance_to(Time::MAX);
+            let mut due = Box::pin(queue.next_expired(&cx));
+            match due.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+                Poll::Ready(Ok(Some(expired))) => {
+                    assert_eq!(expired.key(), key);
+                    assert_eq!(expired.deadline(), Time::MAX);
+                    assert_eq!(expired.into_inner(), "last");
+                }
+                other => panic!("the final representable expiry must be delivered: {other:?}"),
+            }
+            drop(due);
+            assert!(queue.is_empty());
+            let mut empty = Box::pin(queue.next_expired(&cx));
+            assert!(matches!(
+                empty.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(Ok(None))
+            ));
+            assert!(driver.is_empty());
+        });
+    }
+}
+

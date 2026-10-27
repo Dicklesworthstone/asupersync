@@ -1012,7 +1012,9 @@ fn cargo_features_are_exhaustive_and_mapped() {
         artifact_features, source_features,
         "Cargo feature inventory drifted; update the capability registry before cutover work"
     );
-    assert_eq!(artifact_features.len(), 62);
+    // Exact Cargo/registry set equality above remains authoritative; this
+    // count records inventory size without excusing any unmapped feature.
+    assert_eq!(artifact_features.len(), 63);
 }
 
 #[test]

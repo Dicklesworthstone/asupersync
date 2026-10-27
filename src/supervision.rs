@@ -1900,11 +1900,16 @@ mod managed {
         }
     }
 
+    type ManagedCleanupObserver = Arc<
+        dyn Fn(ManagedGeneration) -> Option<crate::record::task::TaskOutcome> + Send + Sync,
+    >;
+
     /// Binds a compiled child name to the additive managed factory contract.
     pub struct ManagedChildBinding<E> {
         name: ChildName,
         mode: ManagedRestartMode,
         factory: Arc<dyn ManagedChildFactory<E>>,
+        cleanup_observer: Option<ManagedCleanupObserver>,
     }
 
     impl<E> std::fmt::Debug for ManagedChildBinding<E> {
@@ -1928,7 +1933,19 @@ mod managed {
                 name: name.into(),
                 mode,
                 factory: Arc::new(factory),
+                cleanup_observer: None,
             }
+        }
+
+        // Composed runtime adapters can close inner regions inside their own
+        // factory. Preserve those real cleanup receipts at the outer generation
+        // barrier instead of treating failed cleanup as a restartable domain error.
+        pub(crate) fn with_cleanup_observer(
+            mut self,
+            observer: ManagedCleanupObserver,
+        ) -> Self {
+            self.cleanup_observer = Some(observer);
+            self
         }
     }
 
@@ -2961,6 +2978,19 @@ mod managed {
             completed.region_outcome = Some(receipt.outcome);
             completed.cleanup_outcome = receipt.cleanup_outcome;
             let identity = completed.generation;
+            if let Some(observer) = &self.supervisor.bindings[index].cleanup_observer {
+                let observed = catch_unwind(AssertUnwindSafe(|| observer(identity)))
+                    .unwrap_or_else(|payload| Some(Outcome::Panicked(panic_payload(payload))));
+                if let Some(outcome) = observed {
+                    if completed
+                        .cleanup_outcome
+                        .as_ref()
+                        .is_none_or(|current| outcome.severity() > current.severity())
+                    {
+                        completed.cleanup_outcome = Some(outcome);
+                    }
+                }
+            }
             let failure = completed
                 .cleanup_outcome
                 .as_ref()

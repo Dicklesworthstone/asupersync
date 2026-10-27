@@ -80,9 +80,19 @@
 //!   - path: base_config.yaml
 //! ```
 //!
-//! The current loaders validate each include path but do not read, resolve, or
-//! merge the referenced document. Authors must keep every effective field in
-//! the file passed to the CLI until include resolution is implemented.
+//! Ordinary deserialization validates paths without opening referenced files.
+//! The `scenario-files` feature adds `Scenario::load_resolved` for explicit
+//! filesystem composition; FrankenLab exposes it with `--resolve-includes`.
+//! Includes are resolved relative to the containing document, within the root
+//! document's directory. Earlier includes supply defaults for later includes,
+//! and explicit local fields take precedence. Mappings merge recursively;
+//! sequences, scalars and explicit nulls replace inherited values. In
+//! particular, participant and fault lists are never concatenated. Only the
+//! root document supplies the scenario `id`. Resolved scenarios have an empty
+//! `include` list and can be serialized or replayed without reopening sources.
+//! In resolved mode, quote numeric, boolean and null values used as strings,
+//! such as `metadata: {revision: "123"}`; scalar types are preserved during
+//! composition. Ordinary YAML deserialization retains its existing coercions.
 //!
 //! # Determinism
 //!
@@ -109,6 +119,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+
+#[cfg(any(feature = "scenario-files", test))]
+mod loader;
+#[cfg(any(feature = "scenario-files", test))]
+pub use loader::{ScenarioLoadError, ScenarioLoadLimits};
 
 // ---------------------------------------------------------------------------
 // Top-level scenario

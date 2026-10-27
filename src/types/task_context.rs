@@ -973,6 +973,11 @@ pub struct CxInner {
     pub budget: Budget,
     /// Baseline budget used for checkpoint accounting.
     pub budget_baseline: Budget,
+    /// The native `block_on` driver charges the actual root future's polls.
+    /// Its local accounting task must not also spend that quota on admission,
+    /// cancellation bookkeeping, or retirement. Installed before admission
+    /// publishes the task; ordinary child tasks never inherit this flag.
+    pub(crate) caller_owned_poll_quota: bool,
     /// Explicit capability/resource envelope carried by this context.
     pub capability_budget: CapabilityBudget,
     /// Whether cancellation has been requested.
@@ -1019,6 +1024,10 @@ pub struct CxInner {
     pub(crate) cancel_waker_registry_closed: bool,
     /// Timer armed at the budget deadline (br-asupersync-pev2xi).
     pub(crate) budget_deadline_timer: Option<BudgetDeadlineTimer>,
+    /// Async-finalizer infrastructure keeps its legacy masked deadline
+    /// handling when its context enters a caller-driven adapter. This is
+    /// separate from cleanup_phase so poll-quota inheritance is unchanged.
+    pub(crate) budget_deadline_exempt: bool,
     /// Current mask depth.
     pub mask_depth: u32,
     /// The task runs cancellation or terminal lifecycle cleanup, including a
@@ -1074,6 +1083,7 @@ impl CxInner {
             task_type: None,
             budget,
             budget_baseline: budget,
+            caller_owned_poll_quota: false,
             capability_budget: CapabilityBudget::UNSPECIFIED,
             cancel_requested: false,
             cancel_reason: None,
@@ -1090,6 +1100,7 @@ impl CxInner {
             next_cancel_waker_token: 0,
             cancel_waker_registry_closed: false,
             budget_deadline_timer: None,
+            budget_deadline_exempt: false,
             mask_depth: 0,
             cleanup_phase: false,
             checkpoint_state: CheckpointState::new(),

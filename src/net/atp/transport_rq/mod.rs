@@ -622,6 +622,7 @@ pub struct RqReceiveOptions {
     sparse_files: bool,
     authenticated_control: bool,
     delta_chunks: bool,
+    cdc_delta: bool,
 }
 
 impl RqReceiveOptions {
@@ -633,6 +634,7 @@ impl RqReceiveOptions {
             sparse_files: false,
             authenticated_control: false,
             delta_chunks: false,
+            cdc_delta: false,
         }
     }
 
@@ -654,7 +656,7 @@ impl RqReceiveOptions {
     /// Whether legacy unauthenticated control connections are refused.
     #[must_use]
     pub const fn authenticated_control(&self) -> bool {
-        self.authenticated_control || self.delta_chunks
+        self.authenticated_control || self.delta_chunks || self.cdc_delta
     }
 
     /// Reuse verified local chunks of a single regular file when the sender
@@ -676,7 +678,27 @@ impl RqReceiveOptions {
     /// Whether authenticated, advertised changed-chunk reuse is enabled.
     #[must_use]
     pub const fn delta_chunks(&self) -> bool {
-        self.delta_chunks
+        self.delta_chunks || self.cdc_delta
+    }
+
+    /// Negotiate content-defined chunk reuse with
+    /// [`send_path_with_cdc_delta`], preserving reuse after insertions/deletions.
+    ///
+    /// Both peers authenticate support before a distinct CDC manifest schema
+    /// is emitted. Existing peers continue with fixed chunks or authenticated
+    /// full-object fallback. This also enables changed-chunk delivery and
+    /// requires authenticated control. Chunking buffers and manifest counts
+    /// are bounded; files beyond the CDC policy bound use the fixed path.
+    #[must_use]
+    pub const fn with_cdc_delta(mut self, enabled: bool) -> Self {
+        self.cdc_delta = enabled;
+        self
+    }
+
+    /// Whether authenticated content-defined delta negotiation is enabled.
+    #[must_use]
+    pub const fn cdc_delta(&self) -> bool {
+        self.cdc_delta
     }
 
     /// Recreate portable special files when the platform and kind support it.
@@ -4661,6 +4683,19 @@ async fn receive_sender_handshake_ack<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
+    receive_sender_handshake_ack_frame(cx, control, timeout)
+        .await
+        .map(|(ack, _)| ack)
+}
+
+async fn receive_sender_handshake_ack_frame<S>(
+    cx: &Cx,
+    control: &mut FrameTransport<S>,
+    timeout: Duration,
+) -> Result<(HelloAck, Frame), RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let frame = match crate::time::timeout(cx.now(), timeout, control.recv()).await {
         Ok(result) => result.map_err(|err| {
             RqError::HandshakeRejected(format!("invalid handshake response: {err}"))
@@ -4685,7 +4720,7 @@ where
             ack.reason.unwrap_or_else(|| "no reason given".to_string()),
         ));
     }
-    Ok(ack)
+    Ok((ack, frame))
 }
 
 fn sender_handshake_transport_error(stage: &str, error: RqError) -> RqError {
@@ -5045,22 +5080,40 @@ async fn build_rq_delta_manifest_for_file(
     expected_sha256_hex: &str,
     chunk_size: usize,
 ) -> Result<DeltaManifestWire, RqError> {
-    // br-asupersync-sizeku: fixed-size emission RESTORED (revert of the CDC
-    // builder change) to protect existing enable_delta=true opt-in users — a
-    // new sender must not emit variable content-defined chunks to an old
-    // fixed-size receiver (which rejects size != chunk_size) before capability
-    // negotiation exists (CopperOak review 6511/6515, release-blocking). The
-    // verified `delta::cdc` primitive stays; CDC re-lands gated on a Hello
-    // capability with a new/old cross-version fallback test.
+    build_rq_delta_manifest_with_layout(
+        cx, tree_id, path, entry_index, rel_path, expected_size, expected_sha256_hex,
+        chunk_size, false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_rq_delta_manifest_with_layout(
+    cx: &Cx,
+    tree_id: &str,
+    path: &Path,
+    entry_index: u32,
+    rel_path: &str,
+    expected_size: u64,
+    expected_sha256_hex: &str,
+    chunk_size: usize,
+    content_defined: bool,
+) -> Result<DeltaManifestWire, RqError> {
+    use crate::net::atp::transport_common::delta::cdc;
+
     const OBJECT_DATA_HEADER_BYTES: usize = 12;
     let max_chunk_size = usize::try_from(MAX_FRAME_SIZE)
         .unwrap_or(usize::MAX)
         .saturating_sub(OBJECT_DATA_HEADER_BYTES);
-    let chunk_size = chunk_size.max(1).min(max_chunk_size);
-    let mut file = crate::fs::File::open(path)
+    let chunk_size = if content_defined {
+        cdc::MAX_CHUNK_BYTES
+    } else {
+        chunk_size.max(1).min(max_chunk_size)
+    };
+    let file = crate::fs::File::open(path)
         .await
         .map_err(|error| RqError::Source(format!("{}: {error}", path.display())))?;
-    let mut buf = vec![0u8; chunk_size];
+    let mut reader = delta_chunks::ChunkReader::new(file, chunk_size, content_defined);
     let mut chunks = Vec::new();
     let mut planner_chunks = Vec::new();
     let mut offset = 0u64;
@@ -5069,18 +5122,18 @@ async fn build_rq_delta_manifest_for_file(
     let mut whole_content_id = ContentId::streaming();
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        // A whole `chunk_size` chunk per iteration (asupersync-u4j7sr): one
-        // read of `crate::fs::File` returns at most 128 KiB.
-        let read = crate::net::atp::transport_common::delta::read_full_chunk(&mut file, &mut buf)
+        let bytes = reader.next_chunk()
             .await
             .map_err(|error| RqError::Source(format!("{}: {error}", path.display())))?;
-        if read == 0 {
+        let Some(bytes) = bytes else {
             break;
+        };
+        if content_defined && u64::from(index) >= RQ_DELTA_MAX_MANIFEST_CHUNKS {
+            return Err(RqError::Source("RQ CDC source exceeds the manifest chunk bound".to_string()));
         }
-        let bytes = &buf[..read];
         sha256.update(bytes);
         whole_content_id.update(bytes);
-        let size_bytes = u64::try_from(read)
+        let size_bytes = u64::try_from(bytes.len())
             .map_err(|_| RqError::Control("RQ delta chunk size overflow".to_string()))?;
         let content_id = ContentId::from_bytes(bytes);
         planner_chunks.push(CasChunkRef {
@@ -5104,6 +5157,9 @@ async fn build_rq_delta_manifest_for_file(
         offset = offset
             .checked_add(size_bytes)
             .ok_or_else(|| RqError::Control("RQ delta chunk offset overflow".to_string()))?;
+        if content_defined && offset > expected_size {
+            return Err(RqError::Source("RQ CDC source grew beyond its declared size".to_string()));
+        }
     }
     if offset != expected_size {
         return Err(RqError::Source(format!(
@@ -5128,7 +5184,8 @@ async fn build_rq_delta_manifest_for_file(
     let planner = PersistentChunkManifest::new(tree_id.to_string(), planner_chunks)
         .map_err(|error| RqError::Control(format!("build RQ delta manifest: {error}")))?;
     Ok(DeltaManifestWire {
-        schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
+        schema: if content_defined { cdc::MANIFEST_SCHEMA } else { ATP_DELTA_CHUNK_MANIFEST_SCHEMA }
+            .to_string(),
         tree_id: tree_id.to_string(),
         chunk_size,
         total_size_bytes: planner.total_size_bytes,
@@ -5226,7 +5283,7 @@ async fn validate_rq_delta_source_unchanged(
             "RQ source metadata changed before delta no-op completion".to_string(),
         ));
     }
-    let current = build_rq_delta_manifest_for_file(
+    let current = build_rq_delta_manifest_with_layout(
         cx,
         &manifest.merkle_root_hex,
         &source.abs_path,
@@ -5235,6 +5292,7 @@ async fn validate_rq_delta_source_unchanged(
         entry.size,
         &entry.sha256_hex,
         delta.chunk_size,
+        delta_chunks::is_cdc(manifest),
     )
     .await?;
     if current != *delta
@@ -5287,7 +5345,7 @@ async fn build_rq_receiver_delta_request(
         return Ok(full());
     }
 
-    let receiver_delta = match build_rq_delta_manifest_for_file(
+    let receiver_delta = match build_rq_delta_manifest_with_layout(
         cx,
         &manifest.merkle_root_hex,
         &path,
@@ -5296,6 +5354,7 @@ async fn build_rq_receiver_delta_request(
         entry.size,
         &entry.sha256_hex,
         delta.chunk_size,
+        delta_chunks::is_cdc(manifest),
     )
     .await
     {
@@ -6693,6 +6752,14 @@ fn validate_rq_topology_content_shape(manifest: &TransferManifest) -> Result<(),
 /// sufficient memory bound because each entry size also drives RaptorQ decoder
 /// metadata and each entry creates receiver bookkeeping.
 fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(), RqError> {
+    validate_manifest_with_cdc(manifest, config, false)
+}
+
+fn validate_manifest_with_cdc(
+    manifest: &TransferManifest,
+    config: &RqConfig,
+    cdc_negotiated: bool,
+) -> Result<(), RqError> {
     if manifest.transfer_id.is_empty()
         || manifest.transfer_id.len() > 64
         || !manifest
@@ -6987,11 +7054,24 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
         config,
     )?;
     validate_rq_topology_content_shape(manifest)?;
-    validate_rq_delta_manifest(manifest)?;
+    if cdc_negotiated {
+        validate_rq_delta_manifest_with_cdc(manifest, true)?;
+    } else {
+        validate_rq_delta_manifest(manifest)?;
+    }
     Ok(())
 }
 
 fn validate_rq_delta_manifest(manifest: &TransferManifest) -> Result<(), RqError> {
+    validate_rq_delta_manifest_with_cdc(manifest, false)
+}
+
+fn validate_rq_delta_manifest_with_cdc(
+    manifest: &TransferManifest,
+    cdc_negotiated: bool,
+) -> Result<(), RqError> {
+    use crate::net::atp::transport_common::delta::cdc;
+
     let Some(delta) = manifest.delta_manifest.as_ref() else {
         return Ok(());
     };
@@ -7011,7 +7091,10 @@ fn validate_rq_delta_manifest(manifest: &TransferManifest) -> Result<(), RqError
             "RQ delta manifest declares too many chunks".to_string(),
         ));
     }
-    if delta.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA {
+    let content_defined = delta_chunks::is_cdc(manifest);
+    if delta.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA
+        && !(content_defined && cdc_negotiated)
+    {
         return Err(RqError::Frame(format!(
             "unsupported RQ delta manifest schema: {}",
             delta.schema
@@ -7030,6 +7113,12 @@ fn validate_rq_delta_manifest(manifest: &TransferManifest) -> Result<(), RqError
             "RQ delta manifest chunk size {} is outside 1..={max_chunk_size}",
             delta.chunk_size
         )));
+    }
+    if content_defined
+        && (delta.chunk_size != cdc::MAX_CHUNK_BYTES
+            || !delta_chunks::cdc_size_supported(delta.total_size_bytes))
+    {
+        return Err(RqError::Frame("RQ CDC manifest exceeds its fixed policy bounds".to_string()));
     }
     if delta.total_size_bytes != manifest.total_bytes || delta.total_size_bytes != entry.size {
         return Err(RqError::Frame(format!(
@@ -7051,7 +7140,8 @@ fn validate_rq_delta_manifest(manifest: &TransferManifest) -> Result<(), RqError
             || chunk.stream_offset != expected_offset
             || chunk.size_bytes == 0
             || chunk.size_bytes > max_chunk_size
-            || (!is_final && chunk.size_bytes != max_chunk_size)
+            || (!is_final && !content_defined && chunk.size_bytes != max_chunk_size)
+            || (!is_final && content_defined && chunk.size_bytes < cdc::MIN_CHUNK_BYTES as u64)
         {
             return Err(RqError::Frame(format!(
                 "malformed RQ delta chunk at position {position}"
@@ -8276,7 +8366,7 @@ pub async fn send_path(
     config: RqConfig,
     peer_id: &str,
 ) -> Result<SendReport, RqError> {
-    send_path_inner(cx, addr, source, config, peer_id, false, false).await
+    send_path_inner(cx, addr, source, config, peer_id, false, false, false).await
 }
 
 /// Transfer a bounded single file with authenticated delta negotiation and a
@@ -8298,7 +8388,7 @@ pub async fn send_path_with_authenticated_control(
     config: RqConfig,
     peer_id: &str,
 ) -> Result<SendReport, RqError> {
-    send_path_inner(cx, addr, source, config, peer_id, true, false).await
+    send_path_inner(cx, addr, source, config, peer_id, true, false, false).await
 }
 
 /// Transfer one bounded regular file with authenticated changed-chunk reuse.
@@ -8318,9 +8408,33 @@ pub async fn send_path_with_delta_chunks(
     config: RqConfig,
     peer_id: &str,
 ) -> Result<SendReport, RqError> {
-    send_path_inner(cx, addr, source, config, peer_id, true, true).await
+    send_path_inner(cx, addr, source, config, peer_id, true, true, false).await
 }
 
+/// Transfer one bounded regular file with negotiated content-defined delta.
+///
+/// With [`RqReceiveOptions::with_cdc_delta`], both peers authenticate support
+/// before emitting a distinct CDC manifest. A streaming gear chunker preserves
+/// reusable content after insertions and deletions; only missing chunks cross
+/// the authenticated control stream. Reused and received bytes are verified
+/// before the whole staged object is checked and atomically installed.
+///
+/// Without authenticated peer support, or above the 64 MiB CDC policy bound,
+/// the sender uses the existing fixed-chunk manifest and authenticated fallback
+/// behavior of [`send_path_with_delta_chunks`]. Existing entry points never
+/// emit CDC manifests. This does not provide RaptorQ coding of delta payloads,
+/// encryption, directory delta, or resumable transfer state.
+pub async fn send_path_with_cdc_delta(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: RqConfig,
+    peer_id: &str,
+) -> Result<SendReport, RqError> {
+    send_path_inner(cx, addr, source, config, peer_id, true, true, true).await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn send_path_inner(
     cx: &Cx,
     addr: SocketAddr,
@@ -8329,6 +8443,7 @@ async fn send_path_inner(
     peer_id: &str,
     require_authenticated_control: bool,
     offer_delta_chunks: bool,
+    offer_cdc_delta: bool,
 ) -> Result<SendReport, RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
     if require_authenticated_control {
@@ -8664,7 +8779,16 @@ async fn send_path_inner(
         })?;
         hello.delta_client_auth_tag = Some(sign_rq_delta_hello(context, &hello)?);
     }
-    let hello_frame = json_frame(FrameType::Handshake, &hello)?;
+    let mut hello_frame = json_frame(FrameType::Handshake, &hello)?;
+    let offer_cdc_delta = offer_cdc_delta
+        && delta_transfer_nonce.is_some()
+        && delta_chunks::cdc_size_supported(total_bytes);
+    if offer_cdc_delta {
+        let context = delta_auth.as_ref().ok_or_else(|| {
+            RqError::Authentication("RQ CDC offer requires authenticated delta".to_string())
+        })?;
+        delta_chunks::advertise_cdc(&mut hello_frame, context, &hello)?;
+    }
     if delta_transfer_nonce.is_some() {
         send_delta_control_frame(
             cx,
@@ -8686,7 +8810,7 @@ async fn send_path_inner(
     } else {
         DEFAULT_CONNECT_TIMEOUT
     };
-    let ack = receive_sender_handshake_ack(cx, &mut control, ack_timeout)
+    let (ack, ack_frame) = receive_sender_handshake_ack_frame(cx, &mut control, ack_timeout)
         .await
         .map_err(|error| {
             if delta_transfer_nonce.is_some() {
@@ -8718,6 +8842,14 @@ async fn send_path_inner(
     let control_source_stream = ack.control_source_stream;
     if delta_transfer_nonce.is_some() && delta_handshake.is_none() {
         manifest.delta_manifest = None;
+    }
+    if offer_cdc_delta && delta_handshake.is_some() {
+        let context = delta_auth.as_ref().ok_or_else(|| {
+            RqError::Authentication("RQ CDC acknowledgement requires authenticated delta".to_string())
+        })?;
+        if delta_chunks::cdc_acknowledged(&ack_frame, context, &hello, &ack)? {
+            delta_chunks::select_cdc_manifest(cx, &mut manifest, &entries).await?;
+        }
     }
     let delta_session = match delta_handshake {
         Some(handshake) => Some(derive_rq_delta_session(
@@ -11458,7 +11590,20 @@ pub async fn receive_connection_with_options(
             });
         }
     }
-    let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
+    let mut ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
+    let cdc_negotiated = if options.cdc_delta() && delta_handshake.is_some() {
+        let context = strict_delta_context.ok_or_else(|| {
+            RqError::Authentication("RQ CDC acknowledgement requires strict authentication".to_string())
+        })?;
+        if delta_chunks::cdc_offered(&hello_frame, context, &hello)? {
+            delta_chunks::acknowledge_cdc(&mut ack_frame, context, &hello, &ack)?;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     if delta_offered && accepted {
         send_delta_control_frame(
             cx,
@@ -11514,7 +11659,7 @@ pub async fn receive_connection_with_options(
         let session =
             derive_rq_delta_session(handshake, &hello.peer_id, peer_id, &envelope.manifest)?;
         validate_rq_delta_manifest_envelope(context, session, &envelope)?;
-        validate_manifest(&envelope.manifest, &config)?;
+        validate_manifest_with_cdc(&envelope.manifest, &config, cdc_negotiated)?;
         if hello.total_bytes != envelope.manifest.total_bytes {
             return Err(RqError::Frame(format!(
                 "authenticated handshake total_bytes {} does not match manifest total_bytes {}",

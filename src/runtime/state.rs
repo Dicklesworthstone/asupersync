@@ -5117,7 +5117,9 @@ impl RuntimeState {
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         // Cleanup (async finalizer) tasks keep their masked legacy deadline
         // handling; only work tasks get the deadline timer.
-        if !cleanup_task {
+        if cleanup_task {
+            cx.inner.write().budget_deadline_exempt = true;
+        } else {
             cx.arm_budget_deadline();
         }
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
@@ -5614,6 +5616,8 @@ impl RuntimeState {
             inner.runnable_publication =
                 crate::types::task_context::RunnablePublication::Unpublished;
             inner.retirement_barrier = retirement_barrier;
+            inner.caller_owned_poll_quota =
+                slot.is_some_and(AdmittedTaskSlot::caller_owned_poll_quota);
         }
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
@@ -9917,6 +9921,7 @@ impl RuntimeState {
                 logical_clock,
             )
             .with_runtime_obligation_context();
+            cx.inner.write().budget_deadline_exempt = true;
             cx.set_trace_buffer(self.trace_handle());
             cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
             cx

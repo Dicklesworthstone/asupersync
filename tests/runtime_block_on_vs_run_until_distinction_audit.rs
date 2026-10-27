@@ -303,15 +303,23 @@ fn block_on_returns_future_output_not_step_count() {
     let body_end = source[pos..].find("\n    }\n").expect("block_on close");
     let body = &source[pos..pos + body_end];
 
-    // The body must call run_future_with_budget which
-    // returns F::Output. If it called something returning
-    // u64, the type system would error — but we also pin
-    // the call here for clarity. Whitespace is ignored, since
-    // rustfmt wraps the call once it takes a third argument.
     let compact: String = body.split_whitespace().collect();
     assert!(
+        compact.contains("self.block_on_with_budget(Budget::INFINITE,future)"),
+        "block_on must preserve its unlimited root budget through the shared driver",
+    );
+
+    // The additive budgeted entry shares the future-driving path. Pin both
+    // the default delegation above and the actual F::Output driver below.
+    let budgeted_marker = "pub fn block_on_with_budget<F: Future>";
+    let pos = source.find(budgeted_marker).expect("budgeted block_on fn");
+    let body_end = source[pos..]
+        .find("\n    }\n")
+        .expect("budgeted block_on close");
+    let compact: String = source[pos..pos + body_end].split_whitespace().collect();
+    assert!(
         compact.contains("run_future_with_budget(future,"),
-        "REGRESSION: block_on body no longer calls \
+        "REGRESSION: shared block_on driver no longer calls \
          run_future_with_budget. The future-driving path \
          has changed — re-audit.",
     );

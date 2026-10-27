@@ -1,8 +1,9 @@
-//! Negotiated, authenticated fixed-chunk reuse for one RQ object.
+//! Negotiated, authenticated chunk reuse for one RQ object.
 //!
 //! Only missing chunks cross the reliable control stream. Reconstruction uses
 //! bounded buffers and the ordinary RQ staging, verification and atomic commit
-//! path. This does not change the fixed-size manifest or claim CDC/rateless delta.
+//! path. CDC has a separate authenticated capability and manifest schema;
+//! existing fixed-size peers retain their wire contract.
 
 use super::{
     AsyncReadExt, AsyncWriteExt, BTreeMap, BTreeSet, CasChunkRef, CompletionDigestIndex,
@@ -19,18 +20,168 @@ use super::{
     verify_and_commit_with_options, verify_rq_delta_control, write_entry_staging_range,
 };
 use serde::{Deserialize, Serialize};
+use crate::net::atp::transport_common::delta::cdc;
 
 /// Old frame codecs preserve/ignore unknown extensions; no Hello JSON or wire
 /// version changes. The offer itself is authenticated, not merely a hint that
 /// an active peer can add to an old sender's manifest.
 pub(super) const OFFER_EXTENSION: u16 = 0x5252;
 const SELECTOR: &str = "authenticated_fixed_delta_chunks_v1";
+const CDC_SELECTOR: &str = "authenticated_cdc_delta_chunks_v1";
 const OFFER_KEY: &[u8] = b"atp-rq-delta-chunks-offer-v1";
 const OFFER_DOMAIN: &[u8] = b"ATP-RQ-DELTA-CHUNKS-OFFER-V1\0";
 const DATA_HEADER_BYTES: usize = 12;
 // Leave ample room for the canonical header and sequenced authentication tag;
 // a manifest chunk can be almost MAX_FRAME_SIZE before either is added.
 const DATA_FRAGMENT_BYTES: usize = 64 * 1024;
+
+pub(super) const CDC_HELLO_EXTENSION: u16 = 0x5253;
+pub(super) const CDC_ACK_EXTENSION: u16 = 0x5254;
+const CDC_HELLO_KEY: &[u8] = b"atp-rq-cdc-hello-v1";
+const CDC_ACK_KEY: &[u8] = b"atp-rq-cdc-ack-v1";
+
+pub(super) fn advertise_cdc(
+    frame: &mut Frame,
+    context: &SecurityContext,
+    hello: &super::Hello,
+) -> Result<(), RqError> {
+    let tag = context.derive_context(CDC_HELLO_KEY)
+        .sign_symbol_tag(&super::rq_delta_hello_auth_symbol(hello)?);
+    frame.header.extensions.insert(CDC_HELLO_EXTENSION, tag.as_bytes().to_vec());
+    Ok(())
+}
+
+pub(super) fn cdc_offered(
+    frame: &Frame,
+    context: &SecurityContext,
+    hello: &super::Hello,
+) -> Result<bool, RqError> {
+    let Some(bytes) = frame.header.extensions.get(&CDC_HELLO_EXTENSION) else {
+        return Ok(false);
+    };
+    let tag = bytes.as_slice().try_into().map_err(|_| {
+        RqError::Authentication("malformed RQ CDC offer".to_string())
+    })?;
+    super::verify_rq_delta_auth_tag(
+        context, CDC_HELLO_KEY, super::rq_delta_hello_auth_symbol(hello)?, tag,
+        "RQ CDC offer",
+    )?;
+    Ok(true)
+}
+
+pub(super) fn acknowledge_cdc(
+    frame: &mut Frame,
+    context: &SecurityContext,
+    hello: &super::Hello,
+    ack: &super::HelloAck,
+) -> Result<(), RqError> {
+    let tag = context.derive_context(CDC_ACK_KEY)
+        .sign_symbol_tag(&super::rq_delta_ack_auth_symbol(hello, ack)?);
+    frame.header.extensions.insert(CDC_ACK_EXTENSION, tag.as_bytes().to_vec());
+    Ok(())
+}
+
+pub(super) fn cdc_acknowledged(
+    frame: &Frame,
+    context: &SecurityContext,
+    hello: &super::Hello,
+    ack: &super::HelloAck,
+) -> Result<bool, RqError> {
+    let Some(bytes) = frame.header.extensions.get(&CDC_ACK_EXTENSION) else {
+        return Ok(false);
+    };
+    let tag = bytes.as_slice().try_into().map_err(|_| {
+        RqError::Authentication("malformed RQ CDC acknowledgement".to_string())
+    })?;
+    super::verify_rq_delta_auth_tag(
+        context, CDC_ACK_KEY, super::rq_delta_ack_auth_symbol(hello, ack)?, tag,
+        "RQ CDC acknowledgement",
+    )?;
+    Ok(true)
+}
+
+/// Local policy bound, independent of a sender-supplied chunk size. The final
+/// short tail is the only chunk below MIN; a valid CDC manifest fits this cap.
+pub(super) fn cdc_size_supported(size: u64) -> bool {
+    size.div_ceil(cdc::MIN_CHUNK_BYTES as u64) <= RQ_DELTA_MAX_MANIFEST_CHUNKS
+}
+
+pub(super) fn is_cdc(manifest: &TransferManifest) -> bool {
+    manifest.delta_manifest.as_ref().is_some_and(|delta| delta.schema == cdc::MANIFEST_SCHEMA)
+}
+
+fn selector(manifest: &TransferManifest) -> &'static str {
+    if is_cdc(manifest) { CDC_SELECTOR } else { SELECTOR }
+}
+
+pub(super) async fn select_cdc_manifest(
+    cx: &Cx,
+    manifest: &mut TransferManifest,
+    entries: &[RqSourceEntry],
+) -> Result<(), RqError> {
+    let entry = rq_delta_manifest_entry(manifest).ok_or_else(|| {
+        RqError::Control("RQ CDC requires one regular file".to_string())
+    })?;
+    let [source] = entries else {
+        return Err(RqError::Control("RQ CDC source must contain one file".to_string()));
+    };
+    if !cdc_size_supported(entry.size) {
+        return Ok(());
+    }
+    let delta = super::build_rq_delta_manifest_with_layout(
+        cx, &manifest.merkle_root_hex, &source.abs_path, entry.index,
+        &entry.rel_path, entry.size, &entry.sha256_hex, cdc::MAX_CHUNK_BYTES, true,
+    )
+    .await?;
+    let mut candidate = manifest.clone();
+    candidate.delta_manifest = Some(delta);
+    match json_frame(FrameType::ObjectManifest, &candidate) {
+        Ok(frame) if frame.payload().len() <= usize::try_from(super::MAX_FRAME_SIZE)
+            .unwrap_or(usize::MAX).saturating_sub(super::RQ_DELTA_ENVELOPE_WIRE_BUDGET) => {
+            *manifest = candidate;
+        }
+        Ok(_) | Err(RqError::Frame(_)) => {
+            cx.trace_with_fields("atp_rq.cdc_manifest_fallback", &[("reason", "envelope_budget")]);
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+/// Use one bounded reader for the sender, no-op revalidation and old-file
+/// reuse. No file-sized byte store is created on either side.
+pub(super) enum ChunkReader {
+    Fixed { file: crate::fs::File, buffer: Vec<u8> },
+    Cdc { reader: cdc::ChunkReader<crate::fs::File>, chunk: Vec<u8> },
+}
+
+impl ChunkReader {
+    pub(super) fn new(file: crate::fs::File, chunk_size: usize, content_defined: bool) -> Self {
+        if content_defined {
+            Self::Cdc { reader: cdc::ChunkReader::new(file), chunk: Vec::new() }
+        } else {
+            Self::Fixed { file, buffer: vec![0; chunk_size] }
+        }
+    }
+
+    pub(super) async fn next_chunk(&mut self) -> std::io::Result<Option<&[u8]>> {
+        match self {
+            Self::Cdc { reader, chunk } => {
+                let Some(next) = reader.next_chunk().await? else {
+                    chunk.clear();
+                    return Ok(None);
+                };
+                *chunk = next;
+                Ok(Some(chunk.as_slice()))
+            }
+            Self::Fixed { file, buffer } => {
+                let read = crate::net::atp::transport_common::delta::read_full_chunk(file, buffer)
+                    .await?;
+                Ok((read != 0).then(|| &buffer[..read]))
+            }
+        }
+    }
+}
 
 pub(super) fn advertise(
     frame: &mut Frame,
@@ -45,7 +196,7 @@ pub(super) fn advertise(
         session,
         &manifest.transfer_id,
         0,
-        &SELECTOR,
+        &selector(manifest),
     )?;
     frame.header.extensions.insert(OFFER_EXTENSION, tag.to_vec());
     Ok(())
@@ -71,7 +222,7 @@ pub(super) fn offered(
         session,
         &manifest.transfer_id,
         0,
-        &SELECTOR,
+        &selector(manifest),
         tag,
         "RQ changed-chunk capability proof",
     )?;
@@ -90,7 +241,7 @@ pub(super) fn validate_request(
     })?;
     if rq_delta_manifest_entry(manifest).is_none()
         || request.mode != DeltaWireMode::DeltaChunks
-        || request.fallback_reason.as_deref() != Some(SELECTOR)
+        || request.fallback_reason.as_deref() != Some(selector(manifest))
         || request.sender_merkle_root_hex != delta.merkle_root_hex
         || request.receiver_merkle_root_hex.is_none()
         || udp_port != 0
@@ -167,16 +318,19 @@ pub(super) async fn plan(
     // manifest before reading or allocating even for an authenticated peer.
     let chunk_size = u64::try_from(delta.chunk_size)
         .map_err(|_| RqError::Control("delta chunk size overflow".to_string()))?;
+    let content_defined = is_cdc(manifest);
     if chunk_size == 0
         || !metadata.is_file()
         || metadata.len() == 0
         || metadata.len() > config.max_transfer_bytes
-        || metadata.len().div_ceil(chunk_size) > RQ_DELTA_MAX_MANIFEST_CHUNKS
+        || (content_defined && !cdc_size_supported(metadata.len()))
+        || (!content_defined
+            && metadata.len().div_ceil(chunk_size) > RQ_DELTA_MAX_MANIFEST_CHUNKS)
     {
         return Ok(None);
     }
-    let mut file = crate::fs::File::open(&baseline).await?;
-    let mut buffer = vec![0u8; delta.chunk_size];
+    let file = crate::fs::File::open(&baseline).await?;
+    let mut reader = ChunkReader::new(file, delta.chunk_size, content_defined);
     let mut receiver_chunks = Vec::new();
     let mut planner_chunks = Vec::new();
     let mut reusable = BTreeMap::new();
@@ -185,15 +339,10 @@ pub(super) async fn plan(
     let mut whole_content_id = ContentId::streaming();
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        let read = crate::net::atp::transport_common::delta::read_full_chunk(
-            &mut file,
-            &mut buffer,
-        )
-        .await?;
-        if read == 0 {
+        let Some(bytes) = reader.next_chunk().await? else {
             break;
-        }
-        let size_bytes = u64::try_from(read)
+        };
+        let size_bytes = u64::try_from(bytes.len())
             .map_err(|_| RqError::Control("baseline chunk size overflow".to_string()))?;
         let end = offset.checked_add(size_bytes)
             .ok_or_else(|| RqError::Control("baseline size overflow".to_string()))?;
@@ -203,7 +352,6 @@ pub(super) async fn plan(
         {
             return Ok(None);
         }
-        let bytes = &buffer[..read];
         sha256.update(bytes);
         whole_content_id.update(bytes);
         let content_id = ContentId::from_bytes(bytes);
@@ -245,7 +393,7 @@ pub(super) async fn plan(
         .map_err(|error| RqError::Control(format!("build RQ baseline manifest: {error}")))?;
     let request = DeltaObjectRequest {
         mode: DeltaWireMode::DeltaChunks,
-        fallback_reason: Some(SELECTOR.to_string()),
+        fallback_reason: Some(selector(manifest).to_string()),
         sender_merkle_root_hex: delta.merkle_root_hex.clone(),
         receiver_merkle_root_hex: Some(receiver_manifest.merkle_root.to_hex()),
         missing_bytes: diff.missing_bytes,
