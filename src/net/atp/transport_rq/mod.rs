@@ -107,7 +107,7 @@ use crate::net::atp::transport_common::metadata::apply_entry_metadata;
 use crate::net::atp::transport_common::metadata::apply_entry_metadata_sync;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata,
-    FileKind, HardlinkIdentity, MetadataApplyReport, PathLinkKind,
+    FileKind, HardlinkIdentity, MetadataApplyReport, PathLinkKind, StagedFileSync, SyncedStagedFile,
     capture_directory_metadata_manifest, classify_path_link, classify_path_link_sync,
     commit_hardlink_transactionally, commit_symlink_transactionally, inode_key_if_regular_sync,
     metadata_commitment, path_is_link_or_reparse, read_entry_metadata_sync,
@@ -14297,10 +14297,54 @@ fn split_rq_metadata_for_commit(
 async fn prepare_rq_entry_metadata_for_commit(
     staging_path: &Path,
     metadata: &EntryMetadata,
-) -> Result<Option<EntryMetadata>, RqError> {
+) -> Result<(Option<EntryMetadata>, SyncedStagedFile), RqError> {
+    // Open before mode/ownership changes can make the verified staging file
+    // inaccessible. Sync after metadata, and close before the next member so
+    // a large packed transfer does not retain one descriptor per file.
+    let sync = StagedFileSync::open(staging_path)
+        .await
+        .map_err(|error| RqError::Source(error.into_message()))?;
     let (before_commit, after_commit) = split_rq_metadata_for_commit(metadata);
     apply_rq_entry_metadata(staging_path, &before_commit).await?;
-    Ok(after_commit)
+    let synced = sync
+        .sync()
+        .await
+        .map_err(|error| RqError::Source(error.into_message()))?;
+    Ok((after_commit, synced))
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn rq_staged_commit_syncs_and_publishes_mode_zero_without_reopening() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().expect("temporary directory");
+    let staging = root.path().join("staging");
+    let destination = root.path().join("destination");
+    std::fs::write(&staging, b"verified RQ bytes").unwrap();
+    std::fs::write(&destination, b"old bytes").unwrap();
+    let metadata = EntryMetadata {
+        unix_mode: Some(0),
+        ..EntryMetadata::default()
+    };
+    let (deferred, synced) = futures_lite::future::block_on(
+        prepare_rq_entry_metadata_for_commit(&staging, &metadata),
+    )
+    .expect("sync retains access through mode 000");
+    assert!(deferred.is_none());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"old bytes");
+    assert_eq!(std::fs::metadata(&staging).unwrap().permissions().mode() & 0o7777, 0);
+    let mut parents = DeferredParentSyncs::default();
+    futures_lite::future::block_on(parents.commit_synced_regular_file(synced, &destination))
+        .expect("publish the synced staging file");
+    futures_lite::future::block_on(parents.sync()).expect("sync the destination directory");
+    assert!(!staging.exists());
+    assert_eq!(
+        std::fs::metadata(&destination).unwrap().permissions().mode() & 0o7777,
+        0
+    );
+    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), b"verified RQ bytes");
 }
 
 async fn apply_rq_directory_metadata(
@@ -15227,7 +15271,7 @@ async fn verify_and_commit_with_options(
                     } else {
                         staging_path
                     };
-                    let deferred_metadata =
+                    let (deferred_metadata, synced) =
                         prepare_rq_entry_metadata_for_commit(&staging_path, &metadata).await?;
                     reject_destination_symlink_prefix(&base, &out_path).await?;
                     if let Some(parent) = out_path.parent() {
@@ -15235,7 +15279,7 @@ async fn verify_and_commit_with_options(
                     }
                     reject_destination_symlink_prefix(&base, &out_path).await?;
                     parent_syncs
-                        .commit_staged_regular_file(&staging_path, &out_path)
+                        .commit_synced_regular_file(synced, &out_path)
                         .await
                         .map_err(|error| RqError::Source(error.into_message()))?;
                     if let Some(deferred_metadata) = deferred_metadata {
@@ -15259,23 +15303,24 @@ async fn verify_and_commit_with_options(
                     )
                     .await?;
                     let mut deferred_metadata = Vec::with_capacity(members.len());
+                    let mut synced_members = Vec::with_capacity(members.len());
                     for member in &members {
-                        deferred_metadata.push(
-                            prepare_rq_entry_metadata_for_commit(
-                                &member.write_path,
-                                &member.metadata,
-                            )
-                            .await?,
-                        );
+                        let (deferred, synced) = prepare_rq_entry_metadata_for_commit(
+                            &member.write_path,
+                            &member.metadata,
+                        )
+                        .await?;
+                        deferred_metadata.push(deferred);
+                        synced_members.push(synced);
                     }
-                    for member in &members {
+                    for (member, synced) in members.iter().zip(synced_members) {
                         reject_destination_symlink_prefix(&base, &member.out_path).await?;
                         if let Some(parent) = member.out_path.parent() {
                             crate::fs::create_dir_all(parent).await?;
                         }
                         reject_destination_symlink_prefix(&base, &member.out_path).await?;
                         parent_syncs
-                            .commit_staged_regular_file(&member.write_path, &member.out_path)
+                            .commit_synced_regular_file(synced, &member.out_path)
                             .await
                             .map_err(|error| RqError::Source(error.into_message()))?;
                     }
@@ -15371,7 +15416,7 @@ async fn verify_and_commit_with_options(
                         )
                         .await?;
                     }
-                    let deferred_metadata =
+                    let (deferred_metadata, synced) =
                         prepare_rq_entry_metadata_for_commit(&staging_path, &metadata).await?;
                     reject_destination_symlink_prefix(&base, &out_path).await?;
                     if let Some(parent) = out_path.parent() {
@@ -15379,7 +15424,7 @@ async fn verify_and_commit_with_options(
                     }
                     reject_destination_symlink_prefix(&base, &out_path).await?;
                     parent_syncs
-                        .commit_staged_regular_file(&staging_path, &out_path)
+                        .commit_synced_regular_file(synced, &out_path)
                         .await
                         .map_err(|error| RqError::Source(error.into_message()))?;
                     if let Some(deferred_metadata) = deferred_metadata {

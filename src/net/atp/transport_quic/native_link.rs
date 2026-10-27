@@ -76,6 +76,7 @@ use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
 use crate::net::atp::transport_common::codec::{self, CodecAccept, CodecOffer, EntryCompression};
+use crate::net::atp::transport_common::metadata::{StagedFileSync, SyncedStagedFile};
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, MetadataApplyReport, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode,
@@ -10055,6 +10056,7 @@ struct QuicPackedBatchWrite {
     reports: Vec<(PathBuf, MetadataApplyReport)>,
     guards: Vec<QuicPackedStagingGuard>,
     metadata_deferred: Vec<bool>,
+    synced_members: Vec<SyncedStagedFile>,
 }
 
 /// One-shot packed-member commit cap (mirrors the RQ tier): above this staged
@@ -10081,6 +10083,7 @@ fn write_quic_packed_member_batch_oneshot(
     let mut reports = Vec::new();
     let mut guards = Vec::with_capacity(members.len());
     let mut metadata_deferred = Vec::with_capacity(members.len());
+    let mut synced_members = Vec::with_capacity(members.len());
     let operation = (|| -> std::io::Result<()> {
         let mut staged = vec![0u8; span_len];
         let mut source = std::fs::File::open(&staging_path)?;
@@ -10110,8 +10113,6 @@ fn write_quic_packed_member_batch_oneshot(
             } else {
                 out.write_all(&staged[start..end])?;
             }
-            out.sync_all()?;
-            drop(out);
             let deferred = member
                 .metadata
                 .as_ref()
@@ -10124,6 +10125,11 @@ fn write_quic_packed_member_batch_oneshot(
                         .map_err(|err| std::io::Error::other(err.into_message()))?;
                 reports.push((member.out_path.clone(), report));
             }
+            // The original writable handle survives restrictive metadata.
+            // Sync and close each member now, before publishing any member.
+            synced_members.push(
+                StagedFileSync::from_file(member.staging_path.clone(), out)?.sync_sync()?,
+            );
             metadata_deferred.push(deferred);
             guards.push(guard);
         }
@@ -10137,6 +10143,7 @@ fn write_quic_packed_member_batch_oneshot(
         reports,
         guards,
         metadata_deferred,
+        synced_members,
     })
 }
 
@@ -10154,6 +10161,7 @@ fn write_quic_packed_member_batch_streaming(
     let mut reports = Vec::new();
     let mut guards = Vec::with_capacity(members.len());
     let mut metadata_deferred = Vec::with_capacity(members.len());
+    let mut synced_members = Vec::with_capacity(members.len());
     let operation = (|| -> std::io::Result<()> {
         let mut source = std::fs::File::open(&staging_path)?;
         for member in &members {
@@ -10199,8 +10207,6 @@ fn write_quic_packed_member_batch_streaming(
                 )));
             }
             out.flush()?;
-            out.sync_all()?;
-            drop(out);
             let deferred = member
                 .metadata
                 .as_ref()
@@ -10213,6 +10219,9 @@ fn write_quic_packed_member_batch_streaming(
                         .map_err(|err| std::io::Error::other(err.into_message()))?;
                 reports.push((member.out_path.clone(), report));
             }
+            synced_members.push(
+                StagedFileSync::from_file(member.staging_path.clone(), out)?.sync_sync()?,
+            );
             metadata_deferred.push(deferred);
             guards.push(guard);
         }
@@ -10226,7 +10235,65 @@ fn write_quic_packed_member_batch_streaming(
         reports,
         guards,
         metadata_deferred,
+        synced_members,
     })
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn quic_packed_batches_sync_restrictive_members_before_publication() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for streaming in [false, true] {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let staging = root.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        let pack = staging.join("pack");
+        std::fs::write(&pack, b"abcdef").unwrap();
+        let mut members = Vec::new();
+        let mut outputs = Vec::new();
+        for (offset, name) in [(0, "first"), (3, "second")] {
+            let out_path = root.path().join(name);
+            std::fs::write(&out_path, b"old").unwrap();
+            outputs.push(out_path.clone());
+            members.push(QuicPackedMemberWrite {
+                offset,
+                len: 3,
+                staging_path: staging.join(name),
+                out_path,
+                metadata: Some(EntryMetadata {
+                    unix_mode: Some(0),
+                    ..EntryMetadata::default()
+                }),
+            });
+        }
+        let mut batch = if streaming {
+            write_quic_packed_member_batch_streaming(pack, members, false)
+        } else {
+            write_quic_packed_member_batch_oneshot(pack, members, 6, false)
+        }
+        .expect("both builders retain write handles through mode 000");
+        assert_eq!(batch.synced_members.len(), 2);
+        for out_path in &outputs {
+            assert_eq!(std::fs::read(out_path).unwrap(), b"old");
+        }
+        let mut parents =
+            crate::net::atp::transport_common::metadata::DeferredParentSyncs::default();
+        for (index, synced) in batch.synced_members.drain(..).enumerate() {
+            let out_path = &outputs[index];
+            futures_lite::future::block_on(parents.commit_synced_regular_file(synced, out_path))
+                .expect("publish an already synced member without reopening");
+            batch.guards[index].disarm();
+            assert_eq!(
+                std::fs::metadata(out_path).unwrap().permissions().mode() & 0o7777,
+                0
+            );
+            std::fs::set_permissions(out_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let expected: &[u8] = if index == 0 { b"abc" } else { b"def" };
+            assert_eq!(std::fs::read(out_path).unwrap(), expected);
+        }
+        futures_lite::future::block_on(parents.sync()).expect("sync committed directory");
+    }
 }
 
 /// Split a verified staged pack into guarded member staging files.
@@ -10469,7 +10536,12 @@ async fn commit_staged_entries(
                     super::trace_quic_metadata_skips(cx, path, report);
                 }
                 let mut member_clock = Instant::now();
-                for (member_index, (member, write)) in entry.members.iter().zip(&writes).enumerate()
+                for (member_index, ((member, write), synced)) in entry
+                    .members
+                    .iter()
+                    .zip(&writes)
+                    .zip(batch.synced_members.drain(..))
+                    .enumerate()
                 {
                     keep_peer_alive_during_local_work(cx, link, control, &mut member_keep_alive)
                         .await?;
@@ -10488,7 +10560,7 @@ async fn commit_staged_entries(
                     }
                     super::reject_quic_destination_symlink_prefix(&base, &write.out_path).await?;
                     parent_syncs
-                        .commit_staged_regular_file(&write.staging_path, &write.out_path)
+                        .commit_synced_regular_file(synced, &write.out_path)
                         .await?;
                     batch.guards[member_index].disarm();
                     if batch.metadata_deferred[member_index] {
@@ -10517,6 +10589,7 @@ async fn commit_staged_entries(
             if let Some(parent) = out_path.parent() {
                 crate::fs::create_dir_all(parent).await?;
             }
+            let sync = StagedFileSync::open(&staged_entry.staging_path).await?;
             let metadata_deferred = entry
                 .metadata
                 .as_ref()
@@ -10524,9 +10597,13 @@ async fn commit_staged_entries(
             if !metadata_deferred {
                 super::apply_quic_entry_metadata(cx, &staged_entry.staging_path, entry).await?;
             }
+            let synced = keep_peer_alive_while(cx, link, control, async move {
+                sync.sync().await.map_err(QuicTransportError::from)
+            })
+            .await?;
             super::reject_quic_destination_symlink_prefix(&base, &out_path).await?;
             parent_syncs
-                .commit_staged_regular_file(&staged_entry.staging_path, &out_path)
+                .commit_synced_regular_file(synced, &out_path)
                 .await?;
             if metadata_deferred {
                 super::apply_quic_entry_metadata(cx, &out_path, entry).await?;

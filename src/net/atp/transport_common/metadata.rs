@@ -770,7 +770,7 @@ async fn create_guarded_temporary_file(
     candidate: PathBuf,
     contents: Vec<u8>,
     sparse_files: bool,
-) -> io::Result<TemporaryLeafGuard> {
+) -> io::Result<(TemporaryLeafGuard, StagedFileSync)> {
     crate::runtime::spawn_blocking_io(move || {
         use std::io::Write as _;
 
@@ -791,9 +791,9 @@ async fn create_guarded_temporary_file(
         } else {
             file.write_all(&contents)?;
         }
-        file.sync_all()?;
-        drop(file);
-        Ok(guard)
+        // Retain this handle through metadata that can prohibit reopening.
+        let sync = StagedFileSync::from_file(guard.path.clone(), file)?;
+        Ok((guard, sync))
     })
     .await
 }
@@ -977,6 +977,10 @@ pub async fn commit_symlink_transactionally(
 /// rename is denied. Real directories and unsupported reparse points fail
 /// closed.
 ///
+/// Staged file contents are synced before the rename. The caller must finish
+/// and flush all writers before committing; a sync failure leaves both paths
+/// unchanged. Opening the staged file for syncing must be permitted.
+///
 /// # Errors
 ///
 /// Returns a validation or filesystem error. A failed rename leaves the prior
@@ -985,13 +989,137 @@ pub async fn commit_staged_regular_file_transactionally(
     staging_path: &Path,
     out_path: &Path,
 ) -> Result<(), StreamingError> {
-    install_staged_leaf_transactionally(
-        staging_path,
-        out_path,
-        ReplaceableLeafKind::RegularFile,
-        None,
-    )
-    .await
+    StagedFileSync::open(staging_path)
+        .await?
+        .sync()
+        .await?
+        .install(out_path, None)
+        .await
+}
+
+/// A regular staging file opened before restrictive metadata is applied.
+///
+/// Finish all writes before syncing this handle. Keeping it open through
+/// metadata replay avoids temporarily loosening Unix permissions. Each file
+/// closes after its sync, so a packed batch does not pin a descriptor per member.
+pub(crate) struct StagedFileSync {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+impl StagedFileSync {
+    pub(crate) async fn open(path: &Path) -> Result<Self, StreamingError> {
+        let path = path.to_path_buf();
+        let display = path.display().to_string();
+        crate::runtime::spawn_blocking_io(move || Self::open_sync(path))
+            .await
+            .map_err(|error| {
+                StreamingError::new(format!("{display}: open staged file for sync: {error}"))
+            })
+    }
+
+    fn open_sync(path: PathBuf) -> io::Result<Self> {
+        // Never follow a symlink or block while opening a FIFO.
+        if !std::fs::symlink_metadata(&path)?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staged commit leaf has the wrong filesystem kind",
+            ));
+        }
+        Self::from_file(path.clone(), open_staged_sync_handle(&path)?)
+    }
+
+    pub(crate) fn from_file(path: PathBuf, file: std::fs::File) -> io::Result<Self> {
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staged commit leaf has the wrong filesystem kind",
+            ));
+        }
+        Ok(Self { path, file })
+    }
+
+    pub(crate) async fn sync(self) -> Result<SyncedStagedFile, StreamingError> {
+        let display = self.path.display().to_string();
+        crate::runtime::spawn_blocking_io(move || self.sync_sync())
+            .await
+            .map_err(|error| {
+                StreamingError::new(format!("{display}: sync staged file before commit: {error}"))
+            })
+    }
+
+    pub(crate) fn sync_sync(self) -> io::Result<SyncedStagedFile> {
+        self.sync_with(std::fs::File::sync_all)
+    }
+
+    fn sync_with(
+        self,
+        sync: impl FnOnce(&std::fs::File) -> io::Result<()>,
+    ) -> io::Result<SyncedStagedFile> {
+        sync(&self.file)?;
+        Ok(SyncedStagedFile { path: self.path })
+    }
+}
+
+#[cfg(not(windows))]
+fn open_staged_sync_handle(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Protect the gap between the type check and open. The opened
+        // handle is checked again by StagedFileSync::from_file.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    options.open(path)
+}
+
+#[cfg(windows)]
+fn open_staged_sync_handle(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    // FlushFileBuffers needs a writable handle. Restore READONLY through the
+    // existing handle-based guard before flushing, including when open fails.
+    let restore = clear_windows_readonly(path)?;
+    let opened = std::fs::OpenOptions::new()
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path);
+    if let Some(restore) = restore {
+        restore.restore()?;
+    }
+    let file = opened?;
+    reject_windows_reparse_handle(&file.metadata()?)?;
+    Ok(file)
+}
+
+/// A completed file sync, with no retained descriptor. Only a successful
+/// StagedFileSync constructs this value. Its path and bytes must remain
+/// unchanged until installation.
+#[derive(Debug)]
+pub(crate) struct SyncedStagedFile {
+    path: PathBuf,
+}
+
+impl SyncedStagedFile {
+    async fn install(
+        self,
+        out_path: &Path,
+        deferred: Option<&mut DeferredParentSyncs>,
+    ) -> Result<(), StreamingError> {
+        install_staged_leaf_transactionally(
+            &self.path,
+            out_path,
+            ReplaceableLeafKind::RegularFile,
+            deferred,
+        )
+        .await
+    }
 }
 
 /// Parent directories whose fsync a batch of regular-file commits defers to
@@ -1019,13 +1147,18 @@ impl DeferredParentSyncs {
         staging_path: &Path,
         out_path: &Path,
     ) -> Result<(), StreamingError> {
-        install_staged_leaf_transactionally(
-            staging_path,
-            out_path,
-            ReplaceableLeafKind::RegularFile,
-            Some(self),
-        )
-        .await
+        let staged = StagedFileSync::open(staging_path).await?.sync().await?;
+        self.commit_synced_regular_file(staged, out_path).await
+    }
+
+    /// Installs a file synced after its final write and metadata replay,
+    /// using a handle opened before permissions became restrictive.
+    pub(crate) async fn commit_synced_regular_file(
+        &mut self,
+        staged: SyncedStagedFile,
+        out_path: &Path,
+    ) -> Result<(), StreamingError> {
+        staged.install(out_path, Some(self)).await
     }
 
     /// Fsyncs every recorded parent directory once.
@@ -1128,7 +1261,7 @@ async fn commit_regular_bytes_with_metadata_transactionally_inner(
             }
         }
     }
-    let mut staged_guard = staged.ok_or_else(|| {
+    let (mut staged_guard, sync) = staged.ok_or_else(|| {
         StreamingError::new(format!(
             "{}: unable to allocate unique regular-file staging leaf",
             out_path.display()
@@ -1149,7 +1282,7 @@ async fn commit_regular_bytes_with_metadata_transactionally_inner(
         (Some(metadata), None) => apply_entry_metadata(&staged, metadata).await?,
         (None, _) => MetadataApplyReport::default(),
     };
-    commit_staged_regular_file_transactionally(&staged, out_path).await?;
+    sync.sync().await?.install(out_path, None).await?;
     staged_guard.disarm();
     Ok(report)
 }
@@ -1315,8 +1448,10 @@ async fn sync_committed_parent(_path: &Path) -> io::Result<()> {
 /// destination first.
 ///
 /// The hardlink is created at a unique sibling, then installed through
-/// [`commit_staged_regular_file_transactionally`]. This gives hardlink commits
-/// the same read-only handling and rollback behavior as regular files.
+/// the same replacement machinery as [`commit_staged_regular_file_transactionally`].
+/// This preserves read-only handling and rollback behavior without reopening or
+/// loosening the permissions of the primary inode. Its contents must already
+/// be durable; installing another link only changes directory entries.
 ///
 /// # Errors
 ///
@@ -1351,7 +1486,14 @@ pub async fn commit_hardlink_transactionally(
     })?;
     let temporary = temporary_guard.path.clone();
 
-    if let Err(error) = commit_staged_regular_file_transactionally(&temporary, out_path).await {
+    if let Err(error) = install_staged_leaf_transactionally(
+        &temporary,
+        out_path,
+        ReplaceableLeafKind::RegularFile,
+        None,
+    )
+    .await
+    {
         let cleanup = temporary_guard.cleanup();
         let cleanup = cleanup.err().map_or_else(String::new, |cleanup| {
             format!("; staged hardlink cleanup failed: {cleanup}")
@@ -3218,7 +3360,7 @@ fn replaceable_leaf_kind_sync(path: &Path) -> Result<Option<ReplaceableLeafKind>
 
 /// [`DeferredParentSyncs::commit_staged_regular_file`] as synchronous steps,
 /// for a caller already on a blocking thread (br-asupersync-dfdwyt): the same
-/// staged-leaf and destination-leaf checks, then the rename, with the same
+/// staged-leaf and destination-leaf checks, file sync, then rename, with the same
 /// errors. The caller then records the parent with
 /// [`DeferredParentSyncs::record`]. Not on Windows, where a refused
 /// replacement of a read-only destination takes the async path's retry.
@@ -3239,6 +3381,14 @@ pub(crate) fn install_staged_regular_file_sync(
     // The async path inspects the destination too (only Windows uses the
     // result), so a destination it cannot inspect is refused here as well.
     replaceable_leaf_kind_sync(out_path)?;
+    StagedFileSync::open_sync(staging_path.to_path_buf())
+        .and_then(StagedFileSync::sync_sync)
+        .map_err(|error| {
+            StreamingError::new(format!(
+                "{}: sync staged file before commit: {error}",
+                staging_path.display()
+            ))
+        })?;
     std::fs::rename(staging_path, out_path).map_err(|error| {
         StreamingError::new(format!(
             "{}: atomic staged replacement: {error}",
