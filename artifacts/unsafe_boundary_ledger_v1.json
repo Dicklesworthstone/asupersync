@@ -4927,62 +4927,62 @@
         },
         {
           "kind": "unsafe_block",
-        "line": 747,
+        "line": 754,
           "pattern": "unsafe { &*self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 754,
+        "line": 761,
           "pattern": "unsafe { &mut *self.mutex.data.get() }"
-        },
-        {
-          "kind": "unsafe_block",
-        "line": 837,
-          "pattern": "unsafe { self.data.as_ref() }"
         },
         {
           "kind": "unsafe_block",
         "line": 844,
-          "pattern": "unsafe { self.data.as_mut() }"
-        },
-        {
-          "kind": "unsafe_block",
-        "line": 958,
-          "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
-        },
-        {
-          "kind": "unsafe_block",
-        "line": 978,
-          "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
-        },
-        {
-          "kind": "unsafe_block",
-        "line": 997,
-          "pattern": "unsafe { &*self.mutex.data.get() }"
-        },
-        {
-          "kind": "unsafe_block",
-        "line": 1004,
-          "pattern": "unsafe { &mut *self.mutex.data.get() }"
-        },
-        {
-          "kind": "unsafe_block",
-        "line": 1043,
           "pattern": "unsafe { self.data.as_ref() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 1050,
+        "line": 851,
           "pattern": "unsafe { self.data.as_mut() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 1092,
+        "line": 966,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1072,
+        "line": 986,
+          "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
+        },
+        {
+          "kind": "unsafe_block",
+        "line": 1005,
+          "pattern": "unsafe { &*self.mutex.data.get() }"
+        },
+        {
+          "kind": "unsafe_block",
+        "line": 1012,
+          "pattern": "unsafe { &mut *self.mutex.data.get() }"
+        },
+        {
+          "kind": "unsafe_block",
+        "line": 1051,
+          "pattern": "unsafe { self.data.as_ref() }"
+        },
+        {
+          "kind": "unsafe_block",
+        "line": 1058,
+          "pattern": "unsafe { self.data.as_mut() }"
+        },
+        {
+          "kind": "unsafe_block",
+        "line": 1100,
+          "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1080,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
@@ -4997,32 +4997,32 @@
         },
         {
           "kind": "unsafe_impl",
-        "line": 734,
+        "line": 741,
           "pattern": "unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 822,
+        "line": 829,
           "pattern": "unsafe impl<T, U: ?Sized + Sync> Sync for MappedMutexGuard<'_, T, U> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 908,
+        "line": 915,
           "pattern": "unsafe impl<T: Send> Send for OwnedMutexGuard<T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 909,
+        "line": 916,
           "pattern": "unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 1027,
+        "line": 1035,
           "pattern": "unsafe impl<T: Send, U: ?Sized + Send> Send for OwnedMappedMutexGuard<T, U> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 1028,
+        "line": 1036,
           "pattern": "unsafe impl<T: Send, U: ?Sized + Sync> Sync for OwnedMappedMutexGuard<T, U> {}"
         }
       ]

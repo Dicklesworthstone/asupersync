@@ -4310,4 +4310,333 @@ mod tests {
         );
         crate::test_complete!("revoked_grantee_polled_again_takes_the_free_mutex");
     }
+
+    fn mutex_causality_context(runtime: u64, node: &str) -> Cx {
+        Cx::for_testing()
+            .with_logical_clock(
+                crate::trace::distributed::LogicalClockMode::Vector {
+                    node: crate::remote::NodeId::new(node),
+                }
+                .build_handle(None),
+            )
+            .with_task_causality_runtime(Some(runtime))
+    }
+
+    #[test]
+    fn mutex_causality_all_guard_forms_publish_only_the_released_past() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        for api in 0..8 {
+            let source = mutex_causality_context(97, "source");
+            let observer = mutex_causality_context(97, "observer");
+            let mutex = Arc::new(Mutex::new((3_u32, [5_u32, 7])));
+            let before_release = {
+                let _current = Cx::set_current(Some(source.clone()));
+                match api {
+                    0 => {
+                        let held = lock_blocking(&mutex, &source);
+                        let before = source.logical_tick();
+                        drop(held);
+                        before
+                    }
+                    1 => {
+                        let held = mutex.try_lock().unwrap();
+                        let before = source.logical_tick();
+                        drop(held);
+                        before
+                    }
+                    2 => {
+                        let held =
+                            block_on(OwnedMutexGuard::lock(Arc::clone(&mutex), &source)).unwrap();
+                        let before = source.logical_tick();
+                        drop(held);
+                        before
+                    }
+                    3 => {
+                        let held = mutex.try_lock_owned().unwrap();
+                        let before = source.logical_tick();
+                        drop(held);
+                        before
+                    }
+                    4 => {
+                        let held = lock_blocking(&mutex, &source).map(|value| &mut value.1);
+                        let held = held.try_map(|value| Some(&mut value[..])).unwrap();
+                        let before = source.logical_tick();
+                        drop(held);
+                        before
+                    }
+                    5 => {
+                        let held = mutex.try_lock().unwrap();
+                        let held = held.try_map(|value| Some(&mut value.1)).unwrap();
+                        let held = held.map(|value| &mut value[..]);
+                        let before = source.logical_tick();
+                        drop(held);
+                        before
+                    }
+                    6 => {
+                        let held = block_on(OwnedMutexGuard::lock(Arc::clone(&mutex), &source))
+                            .unwrap()
+                            .map(|value| &mut value.1);
+                        let held = held.try_map(|value| Some(&mut value[..])).unwrap();
+                        let before = source.logical_tick();
+                        drop(held);
+                        before
+                    }
+                    _ => {
+                        let held = mutex.try_lock_owned().unwrap();
+                        let held = held.try_map(|value| Some(&mut value.1)).ok().unwrap();
+                        let held = held.map(|value| &mut value[..]);
+                        let before = source.logical_tick();
+                        drop(held);
+                        before
+                    }
+                }
+            };
+            let after_release = source.logical_tick();
+            assert!(!mutex.is_locked(), "api={api}");
+            let observed = {
+                let _current = Cx::set_current(Some(observer.clone()));
+                // Cover both context-free successful acquisition paths too.
+                if api % 2 == 0 {
+                    let held = mutex.try_lock().unwrap();
+                    assert_eq!(held.0, 3);
+                } else {
+                    let held = mutex.try_lock_owned().unwrap();
+                    assert_eq!(held.1, [5, 7]);
+                }
+                observer.logical_now()
+            };
+            assert_eq!(
+                before_release.causal_order(&observed),
+                CausalOrder::Before,
+                "api={api}"
+            );
+            assert_eq!(
+                after_release.causal_order(&observed),
+                CausalOrder::Concurrent,
+                "api={api}"
+            );
+            assert!(!mutex.is_locked());
+            assert_eq!(mutex.waiters(), 0);
+        }
+    }
+
+    #[test]
+    fn mutex_causality_host_release_uses_the_acquisition_clock() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        let source = mutex_causality_context(97, "source");
+        let observer = mutex_causality_context(97, "observer");
+        let mutex = Mutex::new(1_u32);
+        let held = lock_blocking(&mutex, &source);
+        // These effects happen after acquisition, and no ambient task is
+        // installed at release. The retained handle must see their clock.
+        let inside = source.logical_tick();
+        drop(held);
+        let outside = source.logical_tick();
+        let _next = lock_blocking(&mutex, &observer);
+        let observed = observer.logical_now();
+        assert_eq!(inside.causal_order(&observed), CausalOrder::Before);
+        assert_eq!(outside.causal_order(&observed), CausalOrder::Concurrent);
+    }
+
+    #[test]
+    fn mutex_causality_acquisition_uses_the_actual_poller() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        // Same runtime, foreign runtime, and a legacy current task. None may
+        // borrow the supplied cancellation context's attribution by accident.
+        for mode in 0..3 {
+            let source = mutex_causality_context(97, "source");
+            let argument = mutex_causality_context(97, "argument");
+            let poller = match mode {
+                0 => mutex_causality_context(97, "poller"),
+                1 => mutex_causality_context(98, "poller"),
+                _ => Cx::for_testing(),
+            };
+            let mutex = Mutex::new(());
+            let held = lock_blocking(&mutex, &source);
+            let before_release = source.logical_tick();
+            drop(held);
+            let argument_before = argument.logical_now();
+            let poller_before = poller.logical_tick();
+            let mut future = mutex.lock(&argument);
+            {
+                let _current = Cx::set_current(Some(poller.clone()));
+                let held = poll_once(&mut future).unwrap().unwrap();
+                let observed = poller.logical_now();
+                if mode == 0 {
+                    assert_eq!(before_release.causal_order(&observed), CausalOrder::Before);
+                } else {
+                    assert_eq!(observed, poller_before);
+                }
+                assert_eq!(argument.logical_now(), argument_before);
+                drop(held);
+            }
+        }
+    }
+
+    #[test]
+    fn mutex_causality_owned_release_uses_the_actual_dropper() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        let constructor = mutex_causality_context(97, "constructor");
+        let dropper = mutex_causality_context(97, "dropper");
+        let observer = mutex_causality_context(97, "observer");
+        let mutex = Arc::new(Mutex::new([1_u32, 2]));
+        let held = block_on(OwnedMutexGuard::lock(Arc::clone(&mutex), &constructor))
+            .unwrap()
+            .map(|value| &mut value[..]);
+        // Passing the guard through uninstrumented host memory establishes
+        // no source-task evidence. Do not sample that task's subsequent work
+        // just because its handle originally acquired this guard.
+        let unrelated = constructor.logical_tick();
+        let released = dropper.logical_tick();
+        {
+            let _current = Cx::set_current(Some(dropper));
+            drop(held);
+        }
+        let _next = lock_blocking(&mutex, &observer);
+        let observed = observer.logical_now();
+        assert_eq!(released.causal_order(&observed), CausalOrder::Before);
+        assert_eq!(unrelated.causal_order(&observed), CausalOrder::Concurrent);
+    }
+
+    #[test]
+    fn mutex_causality_cancelled_or_abandoned_grantee_preserves_release_for_successor() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        for cancel in [false, true] {
+            let source = mutex_causality_context(97, "source");
+            let refused = mutex_causality_context(97, "refused");
+            let follower = mutex_causality_context(97, "follower");
+            let mutex = Mutex::new(19_u32);
+            let held = lock_blocking(&mutex, &source);
+            let mut first = mutex.lock(&refused);
+            let mut next = mutex.lock(&follower);
+            let refused_before = refused.logical_now();
+            let follower_before = follower.logical_now();
+            assert!(poll_once(&mut first).is_none());
+            assert!(poll_once(&mut next).is_none());
+            assert_eq!(mutex.waiters(), 2);
+            assert_eq!(refused.logical_now(), refused_before);
+            assert_eq!(follower.logical_now(), follower_before);
+            let released = source.logical_tick();
+            drop(held);
+            assert!(mutex.is_locked(), "the FIFO grant is still outstanding");
+            if cancel {
+                refused.cancel_fast(crate::types::CancelKind::User);
+                assert!(matches!(
+                    poll_once(&mut first),
+                    Some(Err(LockError::Cancelled))
+                ));
+            }
+            drop(first);
+            assert_eq!(refused.logical_now(), refused_before);
+            let acquired = poll_once(&mut next).unwrap().unwrap();
+            assert_eq!(*acquired, 19);
+            assert_eq!(
+                released.causal_order(&follower.logical_now()),
+                CausalOrder::Before
+            );
+            assert_eq!(mutex.waiters(), 0);
+            drop(acquired);
+            assert!(!mutex.is_locked());
+        }
+    }
+
+    #[test]
+    fn mutex_causality_untracked_release_clears_evidence_and_legacy_keeps_no_sidecar() {
+        let _host = Cx::set_current(None);
+        let source = mutex_causality_context(97, "source");
+        let observer = mutex_causality_context(97, "observer");
+        let legacy = Cx::for_testing();
+        let mutex = Mutex::new(());
+        drop(lock_blocking(&mutex, &source));
+        assert!(
+            mutex
+                .state
+                .lock()
+                .causality
+                .as_ref()
+                .unwrap()
+                .released
+                .is_some()
+        );
+        drop(mutex.try_lock().unwrap());
+        assert!(
+            mutex
+                .state
+                .lock()
+                .causality
+                .as_ref()
+                .unwrap()
+                .released
+                .is_none()
+        );
+        let before = observer.logical_now();
+        drop(lock_blocking(&mutex, &observer));
+        assert_eq!(observer.logical_now(), before);
+
+        let legacy_mutex = Arc::new(Mutex::new(()));
+        let before = legacy.logical_now();
+        {
+            let _current = Cx::set_current(Some(legacy.clone()));
+            drop(lock_blocking(&legacy_mutex, &legacy));
+            drop(legacy_mutex.try_lock_owned().unwrap());
+        }
+        assert!(legacy_mutex.state.lock().causality.is_none());
+        assert_eq!(legacy.logical_now(), before);
+    }
+
+    #[test]
+    fn mutex_causality_failed_attempts_do_not_observe_or_replace_release() {
+        let _host = Cx::set_current(None);
+        let source = mutex_causality_context(97, "source");
+        let observer = mutex_causality_context(97, "observer");
+        let mutex = Arc::new(Mutex::new(()));
+        let held = lock_blocking(&mutex, &source);
+        let before = observer.logical_now();
+        {
+            let _current = Cx::set_current(Some(observer.clone()));
+            assert!(matches!(mutex.try_lock(), Err(TryLockError::Locked)));
+            assert!(matches!(mutex.try_lock_owned(), Err(TryLockError::Locked)));
+        }
+        let _ = source.logical_tick();
+        drop(held);
+        let released = mutex
+            .state
+            .lock()
+            .causality
+            .as_ref()
+            .unwrap()
+            .released
+            .clone();
+        observer.cancel_fast(crate::types::CancelKind::User);
+        assert!(matches!(
+            poll_once(&mut mutex.lock(&observer)),
+            Some(Err(LockError::Cancelled))
+        ));
+        mutex.poison_for_testing();
+        {
+            let _current = Cx::set_current(Some(observer.clone()));
+            assert!(matches!(mutex.try_lock(), Err(TryLockError::Poisoned)));
+            assert!(matches!(
+                mutex.try_lock_owned(),
+                Err(TryLockError::Poisoned)
+            ));
+        }
+        assert_eq!(observer.logical_now(), before);
+        assert_eq!(
+            mutex.state.lock().causality.as_ref().unwrap().released,
+            released
+        );
+        assert!(!mutex.is_locked());
+        assert_eq!(mutex.waiters(), 0);
+    }
 }

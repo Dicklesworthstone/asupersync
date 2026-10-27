@@ -128,6 +128,8 @@ struct MutexState {
     /// Waiter that has been granted the next turn but has not yet resumed.
     /// Holds the stable waiter id, not the reusable slab index.
     granted_waiter: Option<WaiterId>,
+    /// Allocated only when an opt-in task-causal context acquires or releases.
+    causality: Option<Box<MutexCausality>>,
 }
 
 use super::waiter::{WaiterChain, WaiterId};
@@ -145,6 +147,7 @@ impl<T> Mutex<T> {
                 locked: false,
                 waiters: WaiterChain::new(),
                 granted_waiter: None,
+                causality: None,
             }),
             name,
             rank,
@@ -264,6 +267,7 @@ impl<T> Mutex<T> {
             lock_ordering::check_acquire(self.name, rank);
         }
 
+        state.acquire_causality(Cx::with_current(MutexCausalOwner::from_cx).flatten());
         state.locked = true;
         drop(state);
 
@@ -347,6 +351,7 @@ impl<T> Mutex<T> {
         // if the woken task tries to acquire another mutex.
         let granted = {
             let mut state = self.state.lock();
+            state.release_causality();
             state.locked = false;
             // br-asupersync-wlf0xh: O(1) FIFO take via slab pop_front.
             if let Some((id, waker, _)) = state.waiters.pop_front() {
@@ -594,6 +599,7 @@ impl<'a, T, Caps> LockFuture<'a, '_, T, Caps> {
                             lock_ordering::check_acquire(self.mutex.name, rank);
                         }
 
+                        state.acquire_causality(MutexCausalOwner::for_acquire(self.cx));
                         state.granted_waiter = None;
                         state.locked = true;
                         self.waiter_id = None;
@@ -638,6 +644,7 @@ impl<'a, T, Caps> LockFuture<'a, '_, T, Caps> {
                 }
 
                 // Acquire lock immediately only when nobody else already owns the turn.
+                state.acquire_causality(MutexCausalOwner::for_acquire(self.cx));
                 state.locked = true;
                 self.completed = true;
 
@@ -939,6 +946,7 @@ impl<T> OwnedMutexGuard<T> {
                 lock_ordering::check_acquire(mutex.name, rank);
             }
 
+            state.acquire_causality(Cx::with_current(MutexCausalOwner::from_cx).flatten());
             state.locked = true;
         }
 
@@ -1125,6 +1133,81 @@ impl MutexState {
     /// locators, so they keep their lines.
     fn is_held(&self) -> bool {
         self.locked || self.granted_waiter.is_some()
+    }
+}
+
+/// One mutex's opt-in task-clock evidence. The active owner lives with the
+/// lock state, so borrowed, owned, and mapped guards all preserve it through
+/// their existing ownership transfers and converge on the same unlock path.
+/// Legacy/native contexts allocate no sidecar and perform no clock operation.
+#[derive(Debug, Default)]
+struct MutexCausality {
+    owner: Option<MutexCausalOwner>,
+    released: Option<(u64, crate::trace::distributed::LogicalTime)>,
+}
+
+#[derive(Debug)]
+struct MutexCausalOwner {
+    runtime: u64,
+    clock: crate::trace::distributed::LogicalClockHandle,
+}
+
+impl MutexCausalOwner {
+    fn from_cx<Caps>(cx: &Cx<Caps>) -> Option<Self> {
+        cx.task_causality_runtime().map(|runtime| Self {
+            runtime,
+            clock: cx.logical_clock_handle(),
+        })
+    }
+
+    fn for_acquire<Caps>(cx: &Cx<Caps>) -> Option<Self> {
+        // A future may be constructed with another task's cancellation
+        // context. Clock attribution follows the actual successful poller;
+        // an untracked current task must not fall back to a tracked argument.
+        Cx::with_current(Self::from_cx).unwrap_or_else(|| Self::from_cx(cx))
+    }
+}
+
+impl MutexState {
+    fn acquire_causality(&mut self, owner: Option<MutexCausalOwner>) {
+        if let Some(owner) = owner {
+            if let Some((runtime, time)) = self
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.released.as_ref())
+                && *runtime == owner.runtime
+            {
+                // Observe before publishing ownership or exposing the data.
+                // A failed/queued/cancelled attempt never reaches this point.
+                let _ = owner.clock.receive(time);
+            }
+            self.causality.get_or_insert_with(Default::default).owner = Some(owner);
+        } else if let Some(causality) = &mut self.causality {
+            causality.owner = None;
+        }
+    }
+
+    fn release_causality(&mut self) {
+        let owner = Cx::with_current(MutexCausalOwner::from_cx).unwrap_or_else(|| {
+            self.causality
+                .as_mut()
+                .and_then(|causality| causality.owner.take())
+        });
+        if let Some(causality) = &mut self.causality {
+            causality.owner = None;
+        }
+        if let Some(owner) = owner {
+            // A fixed snapshot, taken before unlock is visible, excludes the
+            // source's later events. Reading without ticking also keeps clock
+            // counter overflow out of guard Drop. A different current task
+            // is authoritative; do not sample the original owner's later work.
+            let released = (owner.runtime, owner.clock.now());
+            self.causality.get_or_insert_with(Default::default).released = Some(released);
+        } else if let Some(causality) = &mut self.causality {
+            // An unattributed critical section must not republish stale
+            // evidence from a previous owner or a different runtime.
+            causality.released = None;
+        }
     }
 }
 

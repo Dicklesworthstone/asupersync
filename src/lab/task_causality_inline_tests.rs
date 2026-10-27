@@ -378,6 +378,124 @@ fn run_channel_task(
     lab.step();
 }
 
+fn mutex_handoff_trace(receiver_waits: bool) -> Vec<TraceEvent> {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let mutex = Arc::new(crate::sync::Mutex::new(0_u32));
+    let (release, mut gate) = crate::channel::oneshot::channel::<()>();
+    let sender_mutex = Arc::clone(&mutex);
+    let (sender, _sender_join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().unwrap();
+            let mut held = crate::sync::OwnedMutexGuard::lock(sender_mutex, &cx)
+                .await
+                .unwrap();
+            if receiver_waits {
+                gate.recv(&cx).await.unwrap();
+            }
+            *held = 41;
+            cx.trace("mutex-before-unlock");
+            drop(held);
+            cx.trace("mutex-after-unlock");
+        })
+        .unwrap();
+    let receiver_mutex = Arc::clone(&mutex);
+    let (receiver, _receiver_join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().unwrap();
+            let held = receiver_mutex.lock(&cx).await.unwrap();
+            assert_eq!(*held, 41);
+            cx.trace("mutex-acquired");
+        })
+        .unwrap();
+
+    lab.scheduler.lock().schedule(sender, 0);
+    lab.step();
+    if receiver_waits {
+        assert!(mutex.is_locked());
+        lab.scheduler.lock().schedule(receiver, 0);
+        lab.step();
+        assert_eq!(mutex.waiters(), 1, "receiver reached the queued state");
+        // The host gate releases the holder without importing an unrelated
+        // task's clock. The tested cross-task edge comes from mutex unlock.
+        release.send_blocking(()).unwrap();
+    } else {
+        assert!(
+            !mutex.is_locked(),
+            "first critical section already finished"
+        );
+        lab.scheduler.lock().schedule(receiver, 0);
+    }
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    assert!(!mutex.is_locked());
+    assert_eq!(mutex.waiters(), 0);
+    lab.trace().snapshot()
+}
+
+#[test]
+fn mutex_handoff_orders_critical_sections_with_and_without_a_wake() {
+    for receiver_waits in [false, true] {
+        let events = mutex_handoff_trace(receiver_waits);
+        let observed = message_time(&events, "mutex-acquired");
+        assert_eq!(
+            message_time(&events, "mutex-before-unlock").causal_order(&observed),
+            CausalOrder::Before,
+            "receiver_waits={receiver_waits}"
+        );
+        assert_eq!(
+            message_time(&events, "mutex-after-unlock").causal_order(&observed),
+            CausalOrder::Concurrent,
+            "source events after release must stay concurrent"
+        );
+        assert_eq!(
+            observed,
+            message_time(&mutex_handoff_trace(receiver_waits), "mutex-acquired"),
+            "same seed and ownership schedule must reproduce the exact clock"
+        );
+    }
+}
+
+#[test]
+fn dpor_conflict_model_consumes_real_mutex_release_evidence() {
+    for receiver_waits in [false, true] {
+        let events = mutex_handoff_trace(receiver_waits);
+        for (source_event, expected_races) in
+            [("mutex-before-unlock", 0), ("mutex-after-unlock", 1)]
+        {
+            // As in the channel regression, this is an explicit conflict
+            // model whose timestamps come from actual task execution. The
+            // synthetic region writes are not actual cancellation calls.
+            let region = RegionId::new_for_test(0, 0);
+            let conflicts = [
+                TraceEvent::cancel_request(
+                    1,
+                    Time::ZERO,
+                    TaskId::new_for_test(0, 0),
+                    region,
+                    CancelReason::user("model-mutex-source"),
+                )
+                .with_logical_time(message_time(&events, source_event)),
+                TraceEvent::cancel_request(
+                    2,
+                    Time::ZERO,
+                    TaskId::new_for_test(1, 0),
+                    region,
+                    CancelReason::user("model-mutex-acquired"),
+                )
+                .with_logical_time(message_time(&events, "mutex-acquired")),
+            ];
+            assert_eq!(
+                crate::trace::detect_hb_races(&conflicts).race_count(),
+                expected_races,
+                "receiver_waits={receiver_waits}, source_event={source_event}"
+            );
+        }
+    }
+}
+
 #[test]
 fn buffered_mpsc_keeps_each_senders_evidence_with_its_own_message() {
     let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
