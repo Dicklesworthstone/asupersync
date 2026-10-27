@@ -12,17 +12,20 @@
 //! deferral: their decided credit contributes an unapplied barrier but no live
 //! quota. Region close additionally requires an empty actual arena marking.
 //!
-//! This is projection consistency, not a lifetime conservation ledger. It does
-//! not count historical terminals after retention reaps them, and it does not
-//! prove conservation of credits whose ownership projection is still queued,
-//! including unprojected posts from the legacy unchecked registration API.
+//! When enabled, a second ledger counts arena reservations and terminals even
+//! after resolved-record retention reaps their records. Its epoch starts with
+//! the pending records present at enablement. Per-region, per-kind conservation
+//! includes cross-region handoffs and independently reconstructs live records.
+//! Finalized region buckets are retired after verification; aggregate lifetime
+//! totals survive. Neither ledger proves conservation of credits whose ownership
+//! projection is still queued, including unprojected legacy registration posts.
 
 use super::obligation_mailbox::{
     AdmittedObligation, ObligationCreditProjection, ObligationMailbox,
 };
 use super::obligation_table::ObligationTable;
 use super::region_table::RegionTable;
-use crate::record::{ObligationKind, ObligationRecord};
+use crate::record::{ObligationKind, ObligationRecord, ObligationResolution};
 use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::det_hash::DetHashMap;
 use std::collections::BTreeMap;
@@ -85,6 +88,323 @@ pub enum ObligationConservationIssue {
     },
     /// Cached close readiness would reclaim a region with a pending arena record.
     PendingAtClose,
+    /// Historical reservations and terminals disagree with actual live records.
+    LifetimeCountMismatch {
+        /// Counts for this exact region generation and obligation kind.
+        counts: ObligationLifetimeCounts,
+        /// Last lifecycle transition recorded for this bucket, if any.
+        last_transition: Option<ObligationLifetimeTransition>,
+    },
+    /// A lifetime counter could no longer represent the exact transition count.
+    LifetimeCounterOverflow {
+        /// Transition whose counter overflowed.
+        transition: ObligationLifetimeTransition,
+    },
+}
+
+/// An arena lifecycle transition counted by the optional lifetime ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ObligationLifetimeTransition {
+    /// An already-pending record included when monitoring was enabled.
+    Baseline,
+    /// A new pending record entered the arena.
+    Reserve,
+    /// A pending record committed.
+    Commit,
+    /// A pending record aborted.
+    Abort,
+    /// A pending record was marked leaked.
+    Leak,
+    /// An existing pending record entered another region generation.
+    TransferIn,
+    /// An existing pending record left this region generation.
+    TransferOut,
+    /// Low-level arena access removed a record without a terminal transition.
+    RemovePending,
+}
+
+/// Lifetime counts since monitoring was enabled, independent of record retention.
+///
+/// Conservation requires `baseline_live + reserved + transferred_in` to equal
+/// `committed + aborted + leaked + transferred_out + live`. `live` is scanned
+/// from actual pending arena records, never inferred from the other counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ObligationLifetimeCounts {
+    /// Pending records present at enablement; earlier history is unavailable.
+    pub baseline_live: u128,
+    /// New pending records admitted to the arena after enablement.
+    pub reserved: u128,
+    /// Successful arena commit transitions, including reaped records.
+    pub committed: u128,
+    /// Successful arena abort transitions, including reaped records.
+    pub aborted: u128,
+    /// Successful arena leak transitions.
+    pub leaked: u128,
+    /// Pending records transferred into a different region generation.
+    pub transferred_in: u128,
+    /// Pending records transferred out to a different region generation.
+    pub transferred_out: u128,
+    /// Pending records independently observed at this checkpoint.
+    pub live: u128,
+}
+
+impl ObligationLifetimeCounts {
+    /// Whether the exact arithmetic establishes the lifetime place invariant.
+    /// Overflow never produces a verified balance.
+    #[must_use]
+    pub fn is_balanced(&self) -> bool {
+        let (admitted, accounted) = self.sides();
+        admitted.is_some() && admitted == accounted
+    }
+
+    fn sides(&self) -> (Option<u128>, Option<u128>) {
+        let admitted = self
+            .baseline_live
+            .checked_add(self.reserved)
+            .and_then(|count| count.checked_add(self.transferred_in));
+        let accounted = self
+            .committed
+            .checked_add(self.aborted)
+            .and_then(|count| count.checked_add(self.leaked))
+            .and_then(|count| count.checked_add(self.transferred_out))
+            .and_then(|count| count.checked_add(self.live));
+        (admitted, accounted)
+    }
+
+    fn note(&mut self, transition: ObligationLifetimeTransition) -> bool {
+        let counter = match transition {
+            ObligationLifetimeTransition::Baseline => &mut self.baseline_live,
+            ObligationLifetimeTransition::Reserve => &mut self.reserved,
+            ObligationLifetimeTransition::Commit => &mut self.committed,
+            ObligationLifetimeTransition::Abort => &mut self.aborted,
+            ObligationLifetimeTransition::Leak => &mut self.leaked,
+            ObligationLifetimeTransition::TransferIn => &mut self.transferred_in,
+            ObligationLifetimeTransition::TransferOut => &mut self.transferred_out,
+            ObligationLifetimeTransition::RemovePending => return true,
+        };
+        let Some(next) = counter.checked_add(1) else {
+            return false;
+        };
+        *counter = next;
+        let (admitted, accounted) = self.sides();
+        admitted.is_some() && accounted.is_some()
+    }
+}
+
+/// Aggregate history for one obligation kind across all region generations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ObligationLifetimeKindReport {
+    /// Obligation kind whose lifecycle was counted.
+    pub kind: ObligationKind,
+    /// Counts since enablement, including finalized regions and reaped records.
+    pub counts: ObligationLifetimeCounts,
+}
+
+/// Lifetime coverage for projected arena records since enablement.
+///
+/// Queued admission receipts remain governed by the enclosing report's deferral
+/// fields. Pre-enable terminals and imported already-terminal records are not
+/// reconstructed as history. Re-enabling preserves the original epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ObligationLifetimeReport {
+    /// Region/kind history buckets retained at this checkpoint.
+    pub retained_region_kinds: usize,
+    /// Aggregate totals in deterministic obligation-kind order.
+    pub by_kind: Vec<ObligationLifetimeKindReport>,
+}
+
+#[derive(Debug, Default)]
+struct LifetimeBucket {
+    counts: ObligationLifetimeCounts,
+    last_transition: Option<ObligationLifetimeTransition>,
+    last_obligation: Option<ObligationId>,
+}
+
+/// Stored with the authoritative arena, so every successful lifecycle operation
+/// and ledger update share its existing lock. Disabled monitoring allocates no ledger.
+#[derive(Debug, Default)]
+pub(crate) struct ObligationLifetimeLedger {
+    by_region: BTreeMap<(RegionId, ObligationKind), LifetimeBucket>,
+    totals: BTreeMap<ObligationKind, ObligationLifetimeCounts>,
+    overflow: Option<(
+        RegionId,
+        ObligationKind,
+        ObligationId,
+        ObligationLifetimeTransition,
+    )>,
+}
+
+impl ObligationLifetimeLedger {
+    pub(crate) fn note(
+        &mut self,
+        id: ObligationId,
+        region: RegionId,
+        kind: ObligationKind,
+        transition: ObligationLifetimeTransition,
+    ) {
+        let bucket = self.by_region.entry((region, kind)).or_default();
+        bucket.last_transition = Some(transition);
+        bucket.last_obligation = Some(id);
+        let region_exact = bucket.counts.note(transition);
+        let total_exact = self.totals.entry(kind).or_default().note(transition);
+        if !region_exact || !total_exact {
+            self.overflow.get_or_insert((region, kind, id, transition));
+        }
+    }
+
+    pub(crate) fn resolved(
+        &mut self,
+        id: ObligationId,
+        region: RegionId,
+        kind: ObligationKind,
+        resolution: ObligationResolution,
+    ) {
+        let transition = match resolution {
+            ObligationResolution::Commit => ObligationLifetimeTransition::Commit,
+            ObligationResolution::Abort(_) => ObligationLifetimeTransition::Abort,
+            ObligationResolution::Leak => ObligationLifetimeTransition::Leak,
+        };
+        self.note(id, region, kind, transition);
+    }
+
+    pub(crate) fn transferred(
+        &mut self,
+        id: ObligationId,
+        old_region: RegionId,
+        region: RegionId,
+        kind: ObligationKind,
+    ) {
+        if old_region != region {
+            self.note(
+                id,
+                old_region,
+                kind,
+                ObligationLifetimeTransition::TransferOut,
+            );
+            self.note(id, region, kind, ObligationLifetimeTransition::TransferIn);
+        }
+    }
+
+    fn check(
+        &self,
+        live: &BTreeMap<(RegionId, ObligationKind), u128>,
+        checkpoint: ObligationConservationCheckpoint,
+        only_region: Option<RegionId>,
+    ) -> Option<ObligationConservationViolation> {
+        if let Some((region, kind, id, transition)) = self.overflow {
+            // An inexact global history cannot certify another region's close.
+            return Some(ObligationConservationViolation {
+                checkpoint,
+                region,
+                obligation: Some(id),
+                kind: Some(kind),
+                ticket: None,
+                issue: ObligationConservationIssue::LifetimeCounterOverflow { transition },
+            });
+        }
+        // Include observed buckets without any recorded reservation as well as
+        // recorded buckets whose entire live marking has disappeared.
+        let mut keys: Vec<_> = self
+            .by_region
+            .keys()
+            .chain(live.keys())
+            .copied()
+            .filter(|(region, _)| only_region.is_none_or(|only| only == *region))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        for (region, kind) in keys {
+            if only_region.is_some_and(|only| only != region) {
+                continue;
+            }
+            let bucket = self.by_region.get(&(region, kind));
+            let mut counts = bucket.map_or_else(ObligationLifetimeCounts::default, |b| b.counts);
+            counts.live = live.get(&(region, kind)).copied().unwrap_or_default();
+            if !counts.is_balanced() {
+                return Some(ObligationConservationViolation {
+                    checkpoint,
+                    region,
+                    obligation: bucket.and_then(|b| b.last_obligation),
+                    kind: Some(kind),
+                    ticket: None,
+                    issue: ObligationConservationIssue::LifetimeCountMismatch {
+                        counts,
+                        last_transition: bucket.and_then(|b| b.last_transition),
+                    },
+                });
+            }
+        }
+        None
+    }
+
+    pub(crate) fn inspect(
+        &self,
+        obligations: &ObligationTable,
+        checkpoint: ObligationConservationCheckpoint,
+    ) -> (
+        ObligationLifetimeReport,
+        Option<ObligationConservationViolation>,
+    ) {
+        let live = live_marking(obligations, None);
+        let fault = self.check(&live, checkpoint, None);
+        let mut totals = self.totals.clone();
+        for (&(_, kind), &count) in &live {
+            totals.entry(kind).or_default().live += count;
+        }
+        (
+            ObligationLifetimeReport {
+                retained_region_kinds: self.by_region.len(),
+                by_kind: totals
+                    .into_iter()
+                    .map(|(kind, counts)| ObligationLifetimeKindReport { kind, counts })
+                    .collect(),
+            },
+            fault,
+        )
+    }
+
+    pub(crate) fn check_close(
+        &self,
+        region: RegionId,
+        obligations: &ObligationTable,
+    ) -> Option<ObligationConservationViolation> {
+        self.check(
+            &live_marking(obligations, Some(region)),
+            ObligationConservationCheckpoint::RegionClose,
+            Some(region),
+        )
+    }
+
+    /// Called only after independently checking an empty, conserved marking.
+    pub(crate) fn retire_region(&mut self, region: RegionId) {
+        for kind in [
+            ObligationKind::SendPermit,
+            ObligationKind::Ack,
+            ObligationKind::Lease,
+            ObligationKind::IoOp,
+            ObligationKind::SemaphorePermit,
+            ObligationKind::Transaction,
+        ] {
+            let _ = self.by_region.remove(&(region, kind));
+        }
+    }
+}
+
+fn live_marking(
+    obligations: &ObligationTable,
+    only_region: Option<RegionId>,
+) -> BTreeMap<(RegionId, ObligationKind), u128> {
+    let mut live = BTreeMap::new();
+    for (_, record) in obligations.iter().filter(|(_, record)| {
+        record.is_pending() && only_region.is_none_or(|region| record.region == region)
+    }) {
+        *live.entry((record.region, record.kind)).or_default() += 1;
+    }
+    live
 }
 
 /// Typed evidence of the first detected projection disagreement.
@@ -96,6 +416,7 @@ pub struct ObligationConservationViolation {
     /// Exact region generation affected.
     pub region: RegionId,
     /// Exact arena identity, when the disagreement involves one record.
+    /// Lifetime disagreements identify the bucket's last recorded transition.
     pub obligation: Option<ObligationId>,
     /// Obligation kind, when a record supplies it.
     pub kind: Option<ObligationKind>,
@@ -136,6 +457,9 @@ pub struct ObligationConservationReport {
     /// This remains explicit even when a damaged region table has no rows from
     /// which to name deferred region identities.
     pub pending_ownership_projection: bool,
+    /// Aggregate historical arena counts when this checkpoint collected them.
+    /// `None` means no aggregate lifetime snapshot was collected.
+    pub lifetime: Option<ObligationLifetimeReport>,
     /// First disagreement seen by this inspection or enabled monitor.
     pub violation: Option<ObligationConservationViolation>,
 }
@@ -147,12 +471,13 @@ impl ObligationConservationReport {
             checked_regions: 0,
             deferred_regions: Vec::new(),
             pending_ownership_projection: false,
+            lifetime: None,
             violation: None,
         }
     }
 
     /// Whether this checkpoint established projection equality without a fault.
-    /// This does not establish lifetime conservation of reaped records.
+    /// Historical conservation is included only when `lifetime` is present.
     #[must_use]
     pub fn is_verified(&self) -> bool {
         self.violation.is_none()
@@ -214,8 +539,26 @@ fn violation(
 /// excludes producer admit, settle, and both ends of transfer, whose mutations
 /// all require that same gate for writing. Never retain a credit decision or
 /// ticket guard while acquiring a region gate.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn inspect_projection(
+    regions: &RegionTable,
+    obligations: &ObligationTable,
+    admitted: &DetHashMap<ObligationId, Arc<AdmittedObligation>>,
+    mailbox: Option<&ObligationMailbox>,
+    checkpoint: ObligationConservationCheckpoint,
+) -> ObligationConservationReport {
+    let mut report =
+        inspect_current_projection(regions, obligations, admitted, mailbox, checkpoint);
+    if let Some((lifetime, fault)) = obligations.inspect_lifetime(checkpoint) {
+        report.lifetime = Some(lifetime);
+        if report.violation.is_none() {
+            report.violation = fault;
+        }
+    }
+    report
+}
+
+#[allow(clippy::too_many_lines)]
+fn inspect_current_projection(
     regions: &RegionTable,
     obligations: &ObligationTable,
     admitted: &DetHashMap<ObligationId, Arc<AdmittedObligation>>,
@@ -404,6 +747,7 @@ pub(crate) fn pending_at_close(
                 ObligationConservationIssue::PendingAtClose,
             )
         })
+        .or_else(|| obligations.lifetime_violation_at_close(region))
 }
 
 #[cfg(test)]

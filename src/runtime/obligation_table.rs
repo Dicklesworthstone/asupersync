@@ -4,6 +4,10 @@
 //! obligation lifecycle management. This separation enables finer-grained locking
 //! in the sharded runtime state (each table behind its own lock).
 
+use super::obligation_conservation::{
+    ObligationConservationCheckpoint, ObligationConservationViolation, ObligationLifetimeLedger,
+    ObligationLifetimeReport, ObligationLifetimeTransition,
+};
 use crate::error::{Error, ErrorKind};
 use crate::obligation::ledger::{ObligationAuditRecord, ObligationCounts};
 use crate::record::{
@@ -136,6 +140,8 @@ pub struct ObligationTable {
     /// Task arena slots are generation-counted and can be reused. Keep each
     /// generation distinct so task-specific lookups remain correct across reuse.
     by_holder: Vec<HolderBucket>,
+    /// Opt-in history independent of resolved-record retention.
+    lifetime: Option<Box<ObligationLifetimeLedger>>,
     /// Cached count of pending (Reserved) obligations.
     ///
     /// Maintained incrementally: +1 on create, -1 on commit/abort/leak.
@@ -193,6 +199,7 @@ impl ObligationTable {
         Self {
             obligations: Arena::new(),
             by_holder: Vec::with_capacity(32),
+            lifetime: None,
             cached_pending: 0,
             pending_by_kind: [0; OBLIGATION_KIND_COUNT],
             pending_reserved_at_sum_ns: 0,
@@ -212,6 +219,7 @@ impl ObligationTable {
         Self {
             obligations: Arena::with_capacity(capacity),
             by_holder: Vec::with_capacity(capacity.max(32)),
+            lifetime: None,
             cached_pending: 0,
             pending_by_kind: [0; OBLIGATION_KIND_COUNT],
             pending_reserved_at_sum_ns: 0,
@@ -220,6 +228,49 @@ impl ObligationTable {
             resolved_order: VecDeque::new(),
             counter_checks: AtomicUsize::new(0),
         }
+    }
+
+    /// Starts a lifetime epoch from the currently pending arena marking.
+    /// Repeated enablement preserves all historical counts.
+    pub(crate) fn enable_lifetime_checks(&mut self) {
+        if self.lifetime.is_some() {
+            return;
+        }
+        let mut ledger = ObligationLifetimeLedger::default();
+        for (index, record) in self
+            .obligations
+            .iter()
+            .filter(|(_, record)| record.is_pending())
+        {
+            ledger.note(
+                ObligationId::from_arena(index),
+                record.region,
+                record.kind,
+                ObligationLifetimeTransition::Baseline,
+            );
+        }
+        self.lifetime = Some(Box::new(ledger));
+    }
+
+    pub(crate) fn inspect_lifetime(
+        &self,
+        checkpoint: ObligationConservationCheckpoint,
+    ) -> Option<(
+        ObligationLifetimeReport,
+        Option<ObligationConservationViolation>,
+    )> {
+        self.lifetime
+            .as_ref()
+            .map(|ledger| ledger.inspect(self, checkpoint))
+    }
+
+    pub(crate) fn lifetime_violation_at_close(
+        &self,
+        region: RegionId,
+    ) -> Option<ObligationConservationViolation> {
+        self.lifetime
+            .as_ref()
+            .and_then(|ledger| ledger.check_close(region, self))
     }
 
     /// Returns the reserved obligation arena capacity.
@@ -336,6 +387,7 @@ impl ObligationTable {
     pub fn insert(&mut self, mut record: ObligationRecord) -> ArenaIndex {
         let is_pending = record.is_pending();
         let holder = record.holder;
+        let region = record.region;
         let kind = record.kind;
         let reserved_at = record.reserved_at;
         let idx = self.obligations.insert_with(|idx| {
@@ -348,6 +400,14 @@ impl ObligationTable {
         self.push_holder_id(holder, ObligationId::from_arena(idx));
         if is_pending {
             self.note_pending_added(kind, reserved_at);
+            if let Some(ledger) = self.lifetime.as_mut() {
+                ledger.note(
+                    ObligationId::from_arena(idx),
+                    region,
+                    kind,
+                    ObligationLifetimeTransition::Reserve,
+                );
+            }
         }
         self.debug_assert_pending_counters_match();
         idx
@@ -384,6 +444,8 @@ impl ObligationTable {
             .filter(|record| record.is_pending())
             .ok_or_else(|| Error::new(ErrorKind::ObligationAlreadyResolved))?;
         let old_holder = record.holder;
+        let old_region = record.region;
+        let kind = record.kind;
         // Allocate the destination index before retiring the old index.
         self.push_holder_id(holder, id);
         let slot = old_holder.arena_index().index() as usize;
@@ -404,6 +466,9 @@ impl ObligationTable {
             .expect("pending record retained across index update");
         record.holder = holder;
         record.region = region;
+        if let Some(ledger) = self.lifetime.as_mut() {
+            ledger.transferred(id, old_region, region, kind);
+        }
         self.debug_assert_pending_counters_match();
         Ok(())
     }
@@ -424,15 +489,24 @@ impl ObligationTable {
         let note = self.obligations.get(idx).map(|record| {
             (
                 record.holder,
+                record.region,
                 record.kind,
                 record.reserved_at,
                 record.is_pending(),
             )
         });
-        if let Some((holder, kind, reserved_at, is_pending)) = note {
+        if let Some((holder, region, kind, reserved_at, is_pending)) = note {
             self.push_holder_id(holder, ObligationId::from_arena(idx));
             if is_pending {
                 self.note_pending_added(kind, reserved_at);
+                if let Some(ledger) = self.lifetime.as_mut() {
+                    ledger.note(
+                        ObligationId::from_arena(idx),
+                        region,
+                        kind,
+                        ObligationLifetimeTransition::Reserve,
+                    );
+                }
             }
         }
         self.debug_assert_pending_counters_match();
@@ -445,6 +519,14 @@ impl ObligationTable {
         let record = self.obligations.remove(index)?;
         if record.is_pending() {
             self.note_pending_removed(record.kind, record.reserved_at);
+            if let Some(ledger) = self.lifetime.as_mut() {
+                ledger.note(
+                    ObligationId::from_arena(index),
+                    record.region,
+                    record.kind,
+                    ObligationLifetimeTransition::RemovePending,
+                );
+            }
         }
         let ob_id = ObligationId::from_arena(index);
         let slot = record.holder.arena_index().index() as usize;
@@ -539,6 +621,9 @@ impl ObligationTable {
             .get(idx)
             .map_or(now, |record| record.reserved_at);
         self.note_pending_added(kind, reserved_at);
+        if let Some(ledger) = self.lifetime.as_mut() {
+            ledger.note(ob_id, region, kind, ObligationLifetimeTransition::Reserve);
+        }
         self.debug_assert_pending_counters_match();
         ob_id
     }
@@ -590,6 +675,9 @@ impl ObligationTable {
             duration,
         };
         self.note_pending_removed(kind, reserved_at);
+        if let Some(ledger) = self.lifetime.as_mut() {
+            ledger.resolved(obligation, region, kind, ObligationResolution::Commit);
+        }
         self.retain_resolved(info.id);
         self.debug_assert_pending_counters_match();
         Ok(info)
@@ -644,6 +732,14 @@ impl ObligationTable {
             reason,
         };
         self.note_pending_removed(kind, reserved_at);
+        if let Some(ledger) = self.lifetime.as_mut() {
+            ledger.resolved(
+                obligation,
+                region,
+                kind,
+                ObligationResolution::Abort(reason),
+            );
+        }
         self.retain_resolved(info.id);
         self.debug_assert_pending_counters_match();
         Ok(info)
@@ -704,6 +800,9 @@ impl ObligationTable {
             description: record.description.clone(),
         };
         self.note_pending_removed(kind, reserved_at);
+        if let Some(ledger) = self.lifetime.as_mut() {
+            ledger.resolved(obligation, info.region, kind, ObligationResolution::Leak);
+        }
         self.debug_assert_pending_counters_match();
         Ok(info)
     }
@@ -1044,6 +1143,21 @@ impl ObligationTable {
     /// region closes with none pending), so `commit()` and `abort()` still
     /// refuse them, as already resolved.
     pub fn mark_region_finalized(&mut self, region: RegionId) {
+        // Bound per-region history by regions still needing verification.
+        // Never erase an unconserved or nonempty marking, even if a low-level
+        // caller bypassed the runtime's region-close barrier.
+        let retire_lifetime = self.lifetime.as_ref().is_some_and(|ledger| {
+            !self
+                .obligations
+                .iter()
+                .any(|(_, record)| record.region == region && record.is_pending())
+                && ledger.check_close(region, self).is_none()
+        });
+        if retire_lifetime {
+            if let Some(ledger) = self.lifetime.as_mut() {
+                ledger.retire_region(region);
+            }
+        }
         if self.finalized_regions.insert(region) {
             self.finalized_order.push_back(region);
             while self.finalized_order.len() > FINALIZED_FENCE_RETENTION {
