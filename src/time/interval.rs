@@ -14,8 +14,10 @@
 //!
 //! # Cancel Safety
 //!
-//! The `tick()` method is cancel-safe. If cancelled, the next call to `tick()`
-//! will return the next scheduled tick as if nothing happened.
+//! [`Interval::tick_async`] waits using the supplied context's timer and
+//! observes its cancellation. Dropping a pending tick leaves the next deadline
+//! unchanged. The synchronous [`Interval::tick`] and [`Interval::poll_tick`]
+//! methods remain available for callers that drive time explicitly.
 //!
 //! # Example
 //!
@@ -36,7 +38,10 @@
 //! assert_eq!(t2, Time::from_millis(100));
 //! ```
 
-use crate::types::Time;
+use crate::cx::{Cx, cap::HasTime};
+use crate::types::{CancelReason, Time};
+use std::future::{Future, poll_fn};
+use std::task::Poll;
 use std::time::Duration;
 
 #[inline]
@@ -118,6 +123,42 @@ impl std::fmt::Display for MissedTickBehavior {
             Self::Delay => write!(f, "Delay"),
             Self::Skip => write!(f, "Skip"),
         }
+    }
+}
+
+/// A context-driven interval tick could not be delivered.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum IntervalTickError {
+    /// The context acknowledged cancellation before consuming the tick.
+    Cancelled(CancelReason),
+    /// The supplied context has no authorized timer driver.
+    TimerUnavailable,
+    /// The tick at [`Time::MAX`] was already consumed. Reset the interval to
+    /// start another sequence; no representable later deadline exists.
+    Exhausted,
+}
+
+impl std::fmt::Display for IntervalTickError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled(reason) => write!(f, "interval tick cancelled: {reason:?}"),
+            Self::TimerUnavailable => {
+                f.write_str("interval tick requires time capability and a timer driver")
+            }
+            Self::Exhausted => f.write_str("interval has consumed its final representable tick"),
+        }
+    }
+}
+
+impl std::error::Error for IntervalTickError {}
+
+impl IntervalTickError {
+    fn cancelled<Caps>(cx: &Cx<Caps>) -> Self {
+        Self::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("interval tick cancelled")),
+        )
     }
 }
 
@@ -265,6 +306,86 @@ impl Interval {
             Some(tick_time)
         } else {
             None
+        }
+    }
+
+    /// Waits for the next tick using the supplied context's timer driver.
+    ///
+    /// A due tick completes immediately. Otherwise this future parks until
+    /// its deadline or the context's cancellation, including an inherited
+    /// deadline. The returned time is the scheduled tick, and the next
+    /// deadline advances exactly once with the existing missed-tick behavior.
+    /// The interval's start and reset times must use the driver's clock domain.
+    /// No ambient clock, fallback timer thread, or periodic polling is used.
+    ///
+    /// Cancellation is checked before consuming a due tick and respects the
+    /// context's cancellation mask. Dropping a pending future unregisters its
+    /// timer and leaves the interval unchanged, so a later call can consume
+    /// that same tick. A completed call consumes its tick even if its result
+    /// is subsequently discarded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntervalTickError::Cancelled`] without advancing the interval
+    /// when cancellation is acknowledged. Returns
+    /// [`IntervalTickError::TimerUnavailable`] if the context cannot provide an
+    /// authorized timer, even for an apparently due tick. After the tick at
+    /// [`Time::MAX`], returns [`IntervalTickError::Exhausted`] until reset.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut heartbeat = asupersync::time::interval(cx.now(), period);
+    /// loop {
+    ///     let scheduled_at = heartbeat.tick_async(&cx).await?;
+    ///     send_heartbeat(scheduled_at).await?;
+    /// }
+    /// ```
+    pub async fn tick_async<Caps>(&mut self, cx: &Cx<Caps>) -> Result<Time, IntervalTickError>
+    where
+        Caps: HasTime,
+    {
+        cx.checkpoint()
+            .map_err(|_| IntervalTickError::cancelled(cx))?;
+        let driver = cx
+            .timer_driver()
+            .ok_or(IntervalTickError::TimerUnavailable)?;
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+
+        loop {
+            let now = driver.now();
+            // Check after taking the clock snapshot: a deadline excluded as
+            // already elapsed below must have been observed by a checkpoint.
+            cx.checkpoint()
+                .map_err(|_| IntervalTickError::cancelled(cx))?;
+            if self.exhausted {
+                return Err(IntervalTickError::Exhausted);
+            }
+            if now >= self.deadline {
+                let tick = self.deadline;
+                self.advance_deadline(now);
+                return Ok(tick);
+            }
+
+            // An expired masked owner deadline must not create an always-ready
+            // timer. The still-future tick is a real progress source even when
+            // cancellation remains masked.
+            let wake_at = cx
+                .budget()
+                .deadline
+                .filter(|deadline| *deadline > now)
+                .map_or(self.deadline, |deadline| self.deadline.min(deadline));
+            let mut timer = std::pin::pin!(super::Sleep::with_timer_driver(wake_at, driver.clone()));
+            poll_fn(|task| {
+                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                    return Poll::Ready(());
+                }
+                if timer.as_mut().poll_deadline(task).is_ready() {
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            })
+            .await;
         }
     }
 
@@ -474,3 +595,4 @@ pub fn interval_at(start: Time, period: Duration) -> Interval {
 #[cfg(test)]
 #[path = "interval_inline_tests.rs"]
 mod tests;
+

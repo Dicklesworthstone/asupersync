@@ -72,7 +72,7 @@ pub use driver::{
     TimerDriverHandle, TimerHandle, VirtualClock, WallClock,
 };
 pub use elapsed::Elapsed;
-pub use interval::{Interval, MissedTickBehavior, interval, interval_at};
+pub use interval::{Interval, IntervalTickError, MissedTickBehavior, interval, interval_at};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use sleep::process_epoch;
 #[cfg(target_arch = "wasm32")]
@@ -84,3 +84,4 @@ pub use wheel::{
     CoalescingConfig, TimerDurationExceeded, TimerHandle as WheelTimerHandle, TimerWheel,
     TimerWheelConfig,
 };
+
