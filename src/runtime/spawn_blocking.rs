@@ -283,7 +283,7 @@ impl<F, T> Drop for DrainedPoolWork<F, T> {
 struct DrainedBlockingWait<T> {
     cx: Cx,
     state: Arc<DrainedBlockingState<T>>,
-    task: BlockingTaskHandle,
+    task: Option<BlockingTaskHandle>,
     cancel_waker: Option<crate::cx::CancelWakerToken>,
     cancellation_observed: bool,
     done: bool,
@@ -300,7 +300,9 @@ impl<T> Drop for DrainedBlockingWait<T> {
             self.state.cancel(self.cx.cancel_reason().unwrap_or_else(
                 crate::types::CancelReason::shutdown,
             ));
-            self.task.cancel();
+            if let Some(task) = self.task.as_ref() {
+                task.cancel();
+            }
         }
     }
 }
@@ -330,11 +332,12 @@ pub(crate) async fn drive_drained_blocking<Caps, F, T>(
         state.cancel(control.cancel_reason().unwrap_or_else(crate::types::CancelReason::shutdown));
     }
     let priority = control.budget().priority;
-    let task = pool.spawn_with_priority(move || envelope.run(), priority);
+    let mut admission = pool.submit_with_priority(move || envelope.run(), priority);
+    let mut admission_done = false;
     let mut wait = DrainedBlockingWait {
         cx: control,
         state,
-        task,
+        task: None,
         cancel_waker: None,
         cancellation_observed: false,
         done: false,
@@ -347,11 +350,35 @@ pub(crate) async fn drive_drained_blocking<Caps, F, T>(
                 wait.state.cancel(wait.cx.cancel_reason().unwrap_or_else(
                     crate::types::CancelReason::shutdown,
                 ));
-                wait.task.cancel();
+                if let Some(task) = wait.task.as_ref() {
+                    task.cancel();
+                }
                 if let Some(token) = wait.cancel_waker.take() {
                     wait.cx.clear_cancel_waker(token);
                 }
             }
+        }
+        if !admission_done {
+            // Cancellation closes the claim gate above but does not drop the
+            // envelope: even an uninvoked closure can have blocking captures.
+            // Keep ownership until a pool worker can retire them. Saturation
+            // must neither run nor destroy them on this executor worker.
+            match std::future::Future::poll(std::pin::Pin::new(&mut admission), poll_cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(task)) => {
+                    if wait.cancellation_observed {
+                        task.cancel();
+                    }
+                    wait.task = Some(task);
+                }
+                Poll::Ready(Err(refused)) => {
+                    // Only shutdown ends asynchronous admission without a
+                    // worker. Preserve the existing closed-pool retirement
+                    // path; capacity pressure never reaches this branch.
+                    drop(refused);
+                }
+            }
+            admission_done = true;
         }
         wait.state.poll_finished(poll_cx)
     }).await;
@@ -714,7 +741,7 @@ where
         f()
     });
     let priority = Cx::current().map_or(128, |cx| cx.budget().priority);
-    let handle = pool.spawn_with_priority(
+    let admission = pool.submit_with_priority(
         move || {
             let f = pool_work
                 .lock()
@@ -725,6 +752,15 @@ where
         },
         priority,
     );
+    let handle = match admission.await {
+        Ok(handle) => handle,
+        Err(refused) => {
+            // Saturation remains parked in admission. Only a closed pool
+            // returns the closure, preserving the existing shutdown fallback.
+            drop(refused);
+            return rx.await;
+        }
+    };
 
     let mut guard = CancelOnDrop::new(handle);
     let result = rx.await;
