@@ -60,6 +60,7 @@
 //! - `reflection_rpc`: Native v1/v1alpha reflection (`http2-streaming` feature)
 //! - [`interceptor`]: Interceptor middleware and layers
 //! - [`web`]: gRPC-Web protocol support (HTTP/1.1, base64 text mode)
+//! - `web_client`: Native bounded unary/server-streaming gRPC-Web client (non-Wasm)
 //! - `web_handler`: Native registered unary and server-streaming gRPC-Web (non-Wasm)
 
 pub mod client;
@@ -125,7 +126,9 @@ pub use interceptor::{
     trace_interceptor, w3c_trace_context_interceptor,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use native_stream::{NativeDuplexEvent, NativeDuplexStream, NativeStreamConfig, NativeStreamKeepalive};
+pub use native_stream::{
+    NativeDuplexEvent, NativeDuplexStream, NativeStreamConfig, NativeStreamKeepalive,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_streaming::NativeServerStream;
 #[cfg(not(target_arch = "wasm32"))]
@@ -174,7 +177,8 @@ pub use web::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use web_client::{
-    GrpcWebClient, GrpcWebClientConfig, GrpcWebResponseStream, GrpcWebUnaryResponse,
+    GrpcWebClient, GrpcWebClientConfig, GrpcWebCompression, GrpcWebCompressionConfig,
+    GrpcWebResponseStream, GrpcWebUnaryResponse,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use web_handler::{GrpcWebConfig, GrpcWebHandlerFuture, GrpcWebStreamingHandlerFuture};

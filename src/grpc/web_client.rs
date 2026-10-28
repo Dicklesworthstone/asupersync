@@ -3,10 +3,14 @@
 //! This client owns HTTP/1 connections through the native HTTP client's pool.
 //! Binary and independently padded text response streams are decoded as bytes
 //! arrive. No background reader or browser runtime is required. HTTPS uses the
-//! HTTP client's configured trust roots. Message and HTTP content compression
-//! are deliberately not negotiated by this additive, identity-only transport.
+//! HTTP client's configured trust roots. HTTP content compression is not
+//! negotiated. Message-level gzip is opt-in through [`GrpcWebCompressionConfig`]
+//! and reuses the native gRPC codec's negotiated-encoding validation and
+//! decompression-bomb limits.
 
 use super::codec::{Codec, FramedCodec};
+#[cfg(feature = "compression")]
+use super::codec::{gzip_frame_compress, gzip_frame_decompress};
 use super::server::{format_grpc_timeout, parse_grpc_timeout};
 use super::status::{Code, GrpcError, Status};
 use super::streaming::{Metadata, MetadataValue, Request, Streaming};
@@ -27,6 +31,108 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 const POLL_STEPS: usize = 16;
+const RESERVED_WEB_FLAG_MASK: u8 = 0x7e;
+const WEB_TRAILER_FLAG: u8 = 0x80;
+
+/// Message-level encoding used by the native gRPC-Web client.
+///
+/// `Identity` is always available. `Gzip` requires the crate's `compression`
+/// feature; selecting it without that feature returns `UNIMPLEMENTED` at client
+/// construction rather than silently sending identity frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum GrpcWebCompression {
+    /// Do not compress request messages.
+    #[default]
+    Identity,
+    /// Compress request messages with gzip.
+    Gzip,
+}
+
+impl GrpcWebCompression {
+    const fn header_value(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Gzip => "gzip",
+        }
+    }
+}
+
+/// Additive message-compression policy for [`GrpcWebClient`].
+///
+/// The established constructors retain identity-only behavior. Use
+/// [`Self::gzip`] for bidirectional gzip, or independently select request gzip
+/// and response acceptance. Response compression is still per-message: a peer
+/// that selects gzip may legally send an uncompressed frame with flag zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GrpcWebCompressionConfig {
+    request_encoding: GrpcWebCompression,
+    accept_gzip: bool,
+}
+
+impl GrpcWebCompressionConfig {
+    /// Identity requests and identity-only responses.
+    #[must_use]
+    pub const fn identity() -> Self {
+        Self {
+            request_encoding: GrpcWebCompression::Identity,
+            accept_gzip: false,
+        }
+    }
+
+    /// Gzip request messages and advertise gzip response support.
+    #[must_use]
+    pub const fn gzip() -> Self {
+        Self {
+            request_encoding: GrpcWebCompression::Gzip,
+            accept_gzip: true,
+        }
+    }
+
+    /// Select request-message encoding without changing response acceptance.
+    #[must_use]
+    pub const fn with_request_encoding(mut self, encoding: GrpcWebCompression) -> Self {
+        self.request_encoding = encoding;
+        self
+    }
+
+    /// Select whether `grpc-accept-encoding` advertises gzip.
+    #[must_use]
+    pub const fn with_accept_gzip(mut self, accept: bool) -> Self {
+        self.accept_gzip = accept;
+        self
+    }
+
+    /// Configured request-message encoding.
+    #[must_use]
+    pub const fn request_encoding(self) -> GrpcWebCompression {
+        self.request_encoding
+    }
+
+    /// Whether a server may select `grpc-encoding: gzip`.
+    #[must_use]
+    pub const fn accepts_gzip(self) -> bool {
+        self.accept_gzip
+    }
+
+    fn validate(self) -> Result<(), Status> {
+        #[cfg(not(feature = "compression"))]
+        if self.request_encoding == GrpcWebCompression::Gzip || self.accept_gzip {
+            return Err(Status::unimplemented(
+                "gRPC-Web gzip requires the asupersync compression feature",
+            ));
+        }
+        Ok(())
+    }
+
+    const fn accept_header(self) -> &'static str {
+        if self.accept_gzip {
+            "gzip,identity"
+        } else {
+            "identity"
+        }
+    }
+}
 
 /// Bounds and wire mode for a native gRPC-Web client.
 ///
@@ -39,7 +145,7 @@ pub struct GrpcWebClientConfig {
     pub content_type: ContentType,
     /// Maximum serialized request message size, before framing or base64.
     pub max_send_message_size: usize,
-    /// Maximum serialized response message size, after base64 decoding.
+    /// Maximum serialized response message size, after decompression/base64.
     pub max_recv_message_size: usize,
     /// Aggregate HTTP body limit, independently applied to request and response.
     pub max_body_size: usize,
@@ -73,6 +179,7 @@ impl Default for GrpcWebClientConfig {
 pub struct GrpcWebClient {
     http: HttpClient,
     config: GrpcWebClientConfig,
+    compression: GrpcWebCompressionConfig,
     default_header_bytes: usize,
 }
 
@@ -80,6 +187,7 @@ impl fmt::Debug for GrpcWebClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GrpcWebClient")
             .field("config", &self.config)
+            .field("compression", &self.compression)
             .finish_non_exhaustive()
     }
 }
@@ -92,27 +200,56 @@ impl Default for GrpcWebClient {
 }
 
 impl GrpcWebClient {
-    /// Construct a client with finite default limits and a 30 second timeout.
+    /// Construct a client with finite default limits and identity messages.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Construct a client with explicit gRPC-Web bounds.
+    /// Construct an identity-only client with explicit gRPC-Web bounds.
     pub fn with_config(config: GrpcWebClientConfig) -> Result<Self, Status> {
-        Self::with_http_config(HttpClientConfig::default(), config)
+        Self::with_config_and_compression(config, GrpcWebCompressionConfig::identity())
     }
 
-    /// Configure native HTTP connectivity, TLS trust, DNS and pool admission.
+    /// Construct a client with explicit bounds and message-compression policy.
+    pub fn with_config_and_compression(
+        config: GrpcWebClientConfig,
+        compression: GrpcWebCompressionConfig,
+    ) -> Result<Self, Status> {
+        Self::with_http_config_and_compression(
+            HttpClientConfig::default(),
+            config,
+            compression,
+        )
+    }
+
+    /// Configure native HTTP connectivity with identity-only gRPC messages.
+    pub fn with_http_config(
+        http: HttpClientConfig,
+        config: GrpcWebClientConfig,
+    ) -> Result<Self, Status> {
+        Self::with_http_config_and_compression(
+            http,
+            config,
+            GrpcWebCompressionConfig::identity(),
+        )
+    }
+
+    /// Configure native HTTP connectivity, TLS trust, DNS, pool admission and
+    /// message-level compression.
     ///
-    /// Transport headers cannot be supplied through default_headers. Supply
+    /// Transport headers cannot be supplied through `default_headers`. Supply
     /// application metadata there or on each Request. A proxy is rejected:
     /// the owned pooled streaming HTTP transport currently uses direct
     /// HTTP/HTTPS connections. Automatic redirects and retries are disabled.
-    pub fn with_http_config(
+    /// HTTP `Content-Encoding` remains identity even when gRPC message gzip is
+    /// enabled; only message frames use `grpc-encoding`.
+    pub fn with_http_config_and_compression(
         mut http: HttpClientConfig,
         mut config: GrpcWebClientConfig,
+        compression: GrpcWebCompressionConfig,
     ) -> Result<Self, Status> {
+        compression.validate()?;
         if config.max_send_message_size > u32::MAX as usize
             || config.max_recv_message_size > u32::MAX as usize
             || config.max_metadata_size == 0
@@ -162,14 +299,21 @@ impl GrpcWebClient {
         Ok(Self {
             http: HttpClient::with_config(http),
             config,
+            compression,
             default_header_bytes,
         })
+    }
+
+    /// The configured message-compression policy.
+    #[must_use]
+    pub const fn compression(&self) -> GrpcWebCompressionConfig {
+        self.compression
     }
 
     /// Send one request and receive exactly one response with terminal status.
     ///
     /// The URL includes the full method path, for example
-    /// http://localhost:8080/package.Service/Method. A response is successful
+    /// `http://localhost:8080/package.Service/Method`. A response is successful
     /// only after HTTP EOF and a valid OK gRPC status. Extra response messages
     /// fail the unary call; a late remote error is never hidden by the first
     /// message.
@@ -214,10 +358,11 @@ impl GrpcWebClient {
     ) -> Result<GrpcWebResponseStream<C>, Status> {
         let mut control = CallControl::new(cx, request.metadata(), self.config.timeout)?;
         control.check_now()?;
-        let mut codec = FramedCodec::with_message_size_limits(
+        let mut codec = configure_codec(
             codec,
             self.config.max_send_message_size,
             self.config.max_recv_message_size,
+            self.compression,
         );
         let mut framed = BytesMut::new();
         codec
@@ -248,6 +393,7 @@ impl GrpcWebClient {
         let headers = request_headers(
             request.metadata(),
             &self.config,
+            self.compression,
             self.default_header_bytes,
             &control,
         )?;
@@ -269,8 +415,11 @@ impl GrpcWebClient {
                 .map(|result| result.map_err(transport_status))
         })
         .await?;
-        let (content_type, initial_metadata, trailers) =
-            response_headers(&response.head, self.config.max_metadata_size)?;
+        let (content_type, grpc_encoding, initial_metadata, trailers) = response_headers(
+            &response.head,
+            self.config.max_metadata_size,
+            self.compression,
+        )?;
         Ok(GrpcWebResponseStream {
             body: Some(response.body),
             codec,
@@ -288,6 +437,7 @@ impl GrpcWebClient {
             headers_only: trailers.is_some(),
             trailers,
             trailers_validated: false,
+            grpc_encoding,
             http_status: response.head.status,
             max_message_size: self.config.max_recv_message_size,
             max_metadata_size: self.config.max_metadata_size,
@@ -296,6 +446,39 @@ impl GrpcWebClient {
             eof: false,
             terminal: None,
         })
+    }
+}
+
+fn configure_codec<C: Codec>(
+    codec: C,
+    max_send_message_size: usize,
+    max_recv_message_size: usize,
+    compression: GrpcWebCompressionConfig,
+) -> FramedCodec<C> {
+    let codec = FramedCodec::with_message_size_limits(
+        codec,
+        max_send_message_size,
+        max_recv_message_size,
+    );
+    #[cfg(feature = "compression")]
+    {
+        match (compression.request_encoding, compression.accept_gzip) {
+            (GrpcWebCompression::Gzip, true) => {
+                codec.with_frame_codec(gzip_frame_compress, gzip_frame_decompress)
+            }
+            (GrpcWebCompression::Gzip, false) => {
+                codec.with_frame_hooks(Some(gzip_frame_compress), None)
+            }
+            (GrpcWebCompression::Identity, true) => {
+                codec.with_frame_hooks(None, Some(gzip_frame_decompress))
+            }
+            (GrpcWebCompression::Identity, false) => codec,
+        }
+    }
+    #[cfg(not(feature = "compression"))]
+    {
+        let _ = compression;
+        codec
     }
 }
 
@@ -333,11 +516,26 @@ impl<T> GrpcWebUnaryResponse<T> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NegotiatedGrpcEncoding {
+    Identity,
+    Gzip,
+}
+
+impl NegotiatedGrpcEncoding {
+    const fn header(self) -> Option<&'static str> {
+        match self {
+            Self::Identity => None,
+            Self::Gzip => Some("gzip"),
+        }
+    }
+}
+
 /// A bounded, pull-driven gRPC-Web response and its owned HTTP body.
 ///
 /// Each message is delivered before source EOF. Terminal status is accepted
 /// only after the final trailer frame and HTTP EOF. Protocol and transport
-/// errors are returned once, followed by Ok(None); terminal_status retains
+/// errors are returned once, followed by `Ok(None)`; `terminal_status` retains
 /// their classification. Missing status never becomes successful EOF.
 ///
 /// Dropping or cancelling an unfinished stream closes its HTTP connection
@@ -357,6 +555,7 @@ pub struct GrpcWebResponseStream<C: Codec> {
     headers_only: bool,
     trailers: Option<TrailerFrame>,
     trailers_validated: bool,
+    grpc_encoding: NegotiatedGrpcEncoding,
     http_status: u16,
     max_message_size: usize,
     max_metadata_size: usize,
@@ -371,6 +570,7 @@ impl<C: Codec> fmt::Debug for GrpcWebResponseStream<C> {
         f.debug_struct("GrpcWebResponseStream")
             .field("buffered_bytes", &self.pending.len())
             .field("received_body_bytes", &self.received_body_bytes)
+            .field("grpc_encoding", &self.grpc_encoding)
             .field("terminal_code", &self.terminal.as_ref().map(Status::code))
             .finish_non_exhaustive()
     }
@@ -390,7 +590,7 @@ impl<C: Codec> GrpcWebResponseStream<C> {
             .then(|| &self.trailers.as_ref().expect("validated trailers").metadata)
     }
 
-    /// Final observed remote or local status. None means the call is live.
+    /// Final observed remote or local status. `None` means the call is live.
     #[must_use]
     pub fn terminal_status(&self) -> Option<&Status> {
         self.terminal.as_ref()
@@ -402,7 +602,7 @@ impl<C: Codec> GrpcWebResponseStream<C> {
     }
 
     /// Immediately close an unfinished body without cancelling its parent Cx.
-    /// Subsequent reads return Ok(None); terminal_status records Cancelled.
+    /// Subsequent reads return `Ok(None)`; `terminal_status` records Cancelled.
     pub fn cancel(&mut self) {
         if self.terminal.is_none() {
             self.retire(Status::cancelled(
@@ -431,6 +631,11 @@ impl<C: Codec> GrpcWebResponseStream<C> {
     fn poll_progress(&mut self, task: &mut Context<'_>) -> Poll<Result<Option<C::Decode>, Status>> {
         self.control.poll_stop(task)?;
         for _ in 0..POLL_STEPS {
+            if self.trailers.is_some() && !self.pending.is_empty() {
+                return Poll::Ready(Err(Status::internal(
+                    "received bytes after terminal gRPC-Web trailer",
+                )));
+            }
             if self.pending.len() >= 5 {
                 let flag = self.pending[0];
                 let len = u32::from_be_bytes([
@@ -439,7 +644,13 @@ impl<C: Codec> GrpcWebResponseStream<C> {
                     self.pending[3],
                     self.pending[4],
                 ]) as usize;
-                let limit = if flag & 0x80 != 0 {
+                if flag & RESERVED_WEB_FLAG_MASK != 0 {
+                    return Poll::Ready(Err(Status::internal(format!(
+                        "gRPC-Web frame has reserved flag bits set: 0x{flag:02x}"
+                    ))));
+                }
+                let trailer = flag & WEB_TRAILER_FLAG != 0;
+                let limit = if trailer {
                     self.max_metadata_size
                 } else {
                     self.max_message_size
@@ -449,38 +660,54 @@ impl<C: Codec> GrpcWebResponseStream<C> {
                         "gRPC-Web frame limit exceeded",
                     )));
                 }
-                if flag & 1 != 0 {
-                    return Poll::Ready(Err(Status::unimplemented(
-                        "compressed gRPC-Web frames were not negotiated",
-                    )));
-                }
-                if flag & 0x80 != 0 && self.pending.len().saturating_sub(5) >= len {
-                    require_status(&self.pending[5..5 + len])?;
-                }
-            }
-            match self
-                .frames
-                .decode(&mut self.pending)
-                .map_err(GrpcError::into_status)?
-            {
-                Some(WebFrame::Data { compressed, data }) => {
-                    if compressed {
+                if trailer {
+                    if flag & 1 != 0 {
                         return Poll::Ready(Err(Status::unimplemented(
-                            "compressed gRPC-Web message",
+                            "compressed gRPC-Web trailer frames are unsupported",
                         )));
                     }
-                    let decoded = self
+                    if self.pending.len().saturating_sub(5) >= len {
+                        require_status(&self.pending[5..5 + len])?;
+                    }
+                    match self
+                        .frames
+                        .decode(&mut self.pending)
+                        .map_err(GrpcError::into_status)?
+                    {
+                        Some(WebFrame::Trailers(trailers)) => {
+                            self.trailers = Some(trailers);
+                            continue;
+                        }
+                        Some(WebFrame::Data { .. }) => {
+                            return Poll::Ready(Err(Status::internal(
+                                "gRPC-Web data frame reached trailer decoder",
+                            )));
+                        }
+                        None => {}
+                    }
+                } else {
+                    if flag & 1 != 0
+                        && self.grpc_encoding == NegotiatedGrpcEncoding::Identity
+                    {
+                        return Poll::Ready(Err(Status::unimplemented(
+                            "compressed gRPC-Web frames were not negotiated",
+                        )));
+                    }
+                    // Reuse the native codec's per-message compression rules:
+                    // gzip calls may carry flag-zero messages, while flag one
+                    // requires a negotiated gzip header and the matching hook.
+                    match self
                         .codec
-                        .inner_mut()
-                        .decode(&data)
-                        .map_err(|error| C::map_decode_error(error).into_status())?;
-                    return Poll::Ready(Ok(Some(decoded)));
+                        .decode_message_with_negotiated_encoding(
+                            &mut self.pending,
+                            self.grpc_encoding.header(),
+                        )
+                        .map_err(GrpcError::into_status)?
+                    {
+                        Some(decoded) => return Poll::Ready(Ok(Some(decoded))),
+                        None => {}
+                    }
                 }
-                Some(WebFrame::Trailers(trailers)) => {
-                    self.trailers = Some(trailers);
-                    continue;
-                }
-                None => {}
             }
             if self.eof {
                 if !self.pending.is_empty() {
@@ -729,6 +956,7 @@ fn charge_metadata(
 fn request_headers(
     metadata: &Metadata,
     config: &GrpcWebClientConfig,
+    compression: GrpcWebCompressionConfig,
     mut bytes: usize,
     control: &CallControl,
 ) -> Result<Vec<(String, String)>, Status> {
@@ -748,7 +976,10 @@ fn request_headers(
             config.content_type.as_header_value().to_owned(),
         ),
         ("accept-encoding".to_owned(), "identity".to_owned()),
-        ("grpc-accept-encoding".to_owned(), "identity".to_owned()),
+        (
+            "grpc-accept-encoding".to_owned(),
+            compression.accept_header().to_owned(),
+        ),
         ("x-grpc-web".to_owned(), "1".to_owned()),
         (
             "x-user-agent".to_owned(),
@@ -759,6 +990,12 @@ fn request_headers(
             format_grpc_timeout(Duration::from_nanos(control.deadline.duration_since(now))),
         ),
     ];
+    if compression.request_encoding != GrpcWebCompression::Identity {
+        headers.push((
+            "grpc-encoding".to_owned(),
+            compression.request_encoding.header_value().to_owned(),
+        ));
+    }
     for (name, value) in &headers {
         charge_metadata(
             &mut bytes,
@@ -811,7 +1048,16 @@ fn one_header<'a>(headers: &'a [(String, String)], name: &str) -> Result<Option<
 fn response_headers(
     head: &ResponseHead,
     limit: usize,
-) -> Result<(ContentType, Metadata, Option<TrailerFrame>), Status> {
+    compression: GrpcWebCompressionConfig,
+) -> Result<
+    (
+        ContentType,
+        NegotiatedGrpcEncoding,
+        Metadata,
+        Option<TrailerFrame>,
+    ),
+    Status,
+> {
     let mut bytes = 0;
     for (name, value) in &head.headers {
         charge_metadata(&mut bytes, name.len(), value.len(), limit)?;
@@ -839,15 +1085,33 @@ fn response_headers(
             Status::internal("missing or unsupported gRPC-Web content-type")
         }
     })?;
-    for name in ["content-encoding", "grpc-encoding"] {
-        if one_header(&head.headers, name)?
-            .is_some_and(|value| !value.trim().eq_ignore_ascii_case("identity"))
-        {
+    if one_header(&head.headers, "content-encoding")?
+        .is_some_and(|value| !value.trim().eq_ignore_ascii_case("identity"))
+    {
+        return Err(Status::unimplemented(
+            "HTTP content compression is unsupported for native gRPC-Web",
+        ));
+    }
+    let grpc_encoding = match one_header(&head.headers, "grpc-encoding")? {
+        None => NegotiatedGrpcEncoding::Identity,
+        Some(value) if value.trim().eq_ignore_ascii_case("identity") => {
+            NegotiatedGrpcEncoding::Identity
+        }
+        Some(value) if value.trim().eq_ignore_ascii_case("gzip") && compression.accept_gzip => {
+            NegotiatedGrpcEncoding::Gzip
+        }
+        Some(value) if value.trim().eq_ignore_ascii_case("gzip") => {
             return Err(Status::unimplemented(
-                "gRPC-Web response compression was not negotiated",
+                "server selected gzip without client grpc-accept-encoding support",
             ));
         }
-    }
+        Some(value) => {
+            return Err(Status::unimplemented(format!(
+                "unsupported gRPC-Web grpc-encoding: {}",
+                value.trim()
+            )));
+        }
+    };
     let mut block = Vec::with_capacity(bytes);
     for (name, value) in &head.headers {
         let lower = name.to_ascii_lowercase();
@@ -867,7 +1131,12 @@ fn response_headers(
     if status.is_some() {
         require_status(&block)?;
         let trailers = super::web::decode_trailers(&block).map_err(GrpcError::into_status)?;
-        Ok((content_type, Metadata::new(), Some(trailers)))
+        Ok((
+            content_type,
+            grpc_encoding,
+            Metadata::new(),
+            Some(trailers),
+        ))
     } else {
         if one_header(&head.headers, "grpc-message")?.is_some() {
             return Err(Status::internal(
@@ -876,7 +1145,7 @@ fn response_headers(
         }
         block.extend_from_slice(b"grpc-status: 0\r\n");
         let parsed = super::web::decode_trailers(&block).map_err(GrpcError::into_status)?;
-        Ok((content_type, parsed.metadata, None))
+        Ok((content_type, grpc_encoding, parsed.metadata, None))
     }
 }
 
