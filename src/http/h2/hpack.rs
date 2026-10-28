@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 
 use crate::bytes::{Bytes, BytesMut};
 
-use super::error::H2Error;
+use super::error::{ErrorCode, H2Error};
 
 /// br-asupersync-1tvdlr: 4-bit-stride Huffman decoder state table.
 ///
@@ -927,8 +927,43 @@ impl Decoder {
     /// representation). Any size update after a header field representation is
     /// a COMPRESSION_ERROR.
     pub fn decode(&mut self, src: &mut Bytes) -> Result<Vec<Header>, H2Error> {
+        self.decode_impl(src, None)
+    }
+
+    /// Decode a complete field block, isolating malformed field syntax to
+    /// `stream_id` after all compression-table updates have been applied.
+    ///
+    /// Invalid names and NUL/CR/LF values produce a stream PROTOCOL_ERROR.
+    /// Indexed entries are checked too, including malformed entries retained
+    /// from a previously rejected block. No headers from a rejected block
+    /// are returned. A later compression error takes precedence over an
+    /// earlier field error because the connection can no longer be reused.
+    ///
+    /// Encoded and decoded size limits remain connection-fatal. Names and
+    /// pseudo-header values still require UTF-8; unsupported raw octets are
+    /// not converted lossily and remain compression errors. This method does
+    /// not validate message-level pseudo-header ordering or completeness.
+    /// A zero stream identifier is a connection protocol error, rejected
+    /// before consuming input or changing compression state.
+    pub fn decode_for_stream(
+        &mut self,
+        src: &mut Bytes,
+        stream_id: u32,
+    ) -> Result<Vec<Header>, H2Error> {
+        if stream_id == 0 {
+            return Err(H2Error::protocol("cannot decode a field block for stream 0"));
+        }
+        self.decode_impl(src, Some(stream_id))
+    }
+
+    fn decode_impl(
+        &mut self,
+        src: &mut Bytes,
+        stream_id: Option<u32>,
+    ) -> Result<Vec<Header>, H2Error> {
         let mut headers = Vec::with_capacity(8);
         let mut total_size = 0;
+        let mut field_error = None;
 
         // RFC 7541 §4.2: dynamic table size updates are valid at the beginning
         // of a header block and MAY appear multiple times there.
@@ -954,15 +989,31 @@ impl Decoder {
         let limit = self.max_header_list_size.min(MAX_DECODED_HEADER_LIST_SIZE);
         while !src.is_empty() {
             let remaining_budget = limit.saturating_sub(total_size);
-            let header = self.decode_header(src, remaining_budget)?;
+            let header = self.decode_header(src, remaining_budget, stream_id.is_none())?;
             total_size = total_size.saturating_add(header.size());
             if total_size > limit {
                 return Err(H2Error::compression("header list too large"));
             }
+            if let Some(stream_id) = stream_id
+                && field_error.is_none()
+                && let Err(error) = validate_header_name(&header.name)
+                    .and_then(|()| validate_header_value(&header.value))
+            {
+                // RFC 9113 §§4.3 and 8.1.1: rejecting the HTTP message
+                // must not leave the shared HPACK context behind the peer.
+                field_error = Some(H2Error::stream(
+                    stream_id,
+                    ErrorCode::ProtocolError,
+                    error.message,
+                ));
+            }
             headers.push(header);
         }
 
-        Ok(headers)
+        match field_error {
+            Some(error) => Err(error),
+            None => Ok(headers),
+        }
     }
 
     /// Decode a single header.
@@ -976,6 +1027,7 @@ impl Decoder {
         &mut self,
         src: &mut Bytes,
         remaining_budget: usize,
+        validate_fields: bool,
     ) -> Result<Header, H2Error> {
         if src.is_empty() {
             return Err(H2Error::compression("unexpected end of header block"));
@@ -994,12 +1046,20 @@ impl Decoder {
             {
                 return Err(H2Error::compression("header list too large"));
             }
-            return self.get_indexed(index);
+            let header = self.get_indexed(index)?;
+            if validate_fields {
+                // A caller can switch back to legacy decoding after a
+                // stream-scoped rejection retained this indexed entry.
+                validate_header_name(&header.name)?;
+                validate_header_value(&header.value)?;
+            }
+            return Ok(header);
         }
 
         if first & 0x40 != 0 {
             // Literal with incremental indexing
-            let (name, value, value_octets) = self.decode_literal(src, 6, remaining_budget)?;
+            let (name, value, value_octets) =
+                self.decode_literal(src, 6, remaining_budget, validate_fields)?;
             let header = Header::new(name, value);
             self.dynamic_table
                 .insert_counted(header.clone(), value_octets);
@@ -1014,12 +1074,14 @@ impl Decoder {
 
         if first & 0x10 != 0 {
             // Literal never indexed
-            let (name, value, _) = self.decode_literal(src, 4, remaining_budget)?;
+            let (name, value, _) =
+                self.decode_literal(src, 4, remaining_budget, validate_fields)?;
             return Ok(Header::new(name, value));
         }
 
         // Literal without indexing
-        let (name, value, _) = self.decode_literal(src, 4, remaining_budget)?;
+        let (name, value, _) =
+            self.decode_literal(src, 4, remaining_budget, validate_fields)?;
         Ok(Header::new(name, value))
     }
 
@@ -1039,16 +1101,18 @@ impl Decoder {
         src: &mut Bytes,
         prefix_bits: u8,
         remaining_budget: usize,
+        validate_fields: bool,
     ) -> Result<(String, String, usize), H2Error> {
         let index = decode_integer(src, prefix_bits)?;
 
         let name = if index == 0 {
-            let n = decode_string_bounded(src, remaining_budget)?;
-            validate_header_name(&n)?;
-            n
+            decode_string_bounded(src, remaining_budget)?
         } else {
             self.get_indexed_name(index)?
         };
+        if validate_fields {
+            validate_header_name(&name)?;
+        }
 
         let value_budget = remaining_budget.saturating_sub(name.len());
         // Pseudo-header values (a method, scheme, authority, path or
@@ -1060,7 +1124,9 @@ impl Decoder {
         } else {
             decode_field_value_bounded(src, value_budget)?
         };
-        validate_header_value(&value)?;
+        if validate_fields {
+            validate_header_value(&value)?;
+        }
         Ok((name, value, value_octets))
     }
 
