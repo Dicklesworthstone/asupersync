@@ -213,7 +213,7 @@ pub mod local;
 pub use crate::record::RegionLimits;
 pub use crate::sync::{ContendedMutex, LockMetricsSnapshot};
 pub use blocking_pool::{
-    BlockingPool, BlockingPoolHandle, BlockingPoolOptions, BlockingTaskHandle,
+    BlockingPool, BlockingPoolHandle, BlockingPoolOptions, BlockingQueuePolicy, BlockingTaskHandle,
 };
 pub use builder::{
     BrowserHostServices, BrowserRuntime, BrowserRuntimeBuildError, BrowserRuntimeBuilder,

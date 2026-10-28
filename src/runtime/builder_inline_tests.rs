@@ -3987,6 +3987,8 @@ worker_threads = 16
             &NativeThreadHostServices::new(),
             false,
             None,
+            None,
+            BlockingQueuePolicy::Fifo,
         )
         .expect("runtime construction continues without a reactor");
 

@@ -36,6 +36,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
+#[path = "membership_remote_native/swim.rs"]
+mod swim;
+
 struct Bytes;
 impl HasSchema for Bytes {
     fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("membership-remote-bytes.v1") }
@@ -95,7 +98,7 @@ fn holds_lease(diagnostics: &Diagnostics, region: RegionId, holder: TaskId) -> b
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Case { Success, Dead, Left, Superseded, Suspect }
+enum Case { Success, Dead, Left, Superseded, Suspect, SwimStopped, SwimDeparture }
 
 fn exercise(workers: usize, case: Case) {
     let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
@@ -115,6 +118,10 @@ fn exercise(workers: usize, case: Case) {
         ).unwrap();
         apply(&owner, 1, 1, MembershipKind::Alive);
         owner.apply_authenticated(&NodeId::new("authority"), &decision("other", 1, 1, MembershipKind::Alive)).unwrap();
+
+        let mut swim = if matches!(case, Case::SwimStopped | Case::SwimDeparture) {
+            Some(swim::Detectors::start(&base).await)
+        } else { None };
 
         let mut registry = RemoteComputationRegistry::new();
         registry.register::<Bytes, Bytes, _, _>("echo", |_, invocation| async move {
@@ -176,6 +183,35 @@ fn exercise(workers: usize, case: Case) {
         let cx = base.with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("origin"))
             .with_default_lease(Duration::from_secs(30)).with_runtime(Arc::clone(&remote) as Arc<dyn RemoteRuntime>));
 
+        let contact = swim.as_ref().map(|swim| {
+            swim.observer.live_contact(&NodeId::new("worker")).expect("accepted direct contact")
+        });
+        if let Some(contact) = contact.as_ref() {
+            let mismatch = owner.run_remote_with_swim(
+                &cx, NodeId::new("other"), 1, contact.clone(), ComputationName::new("echo"),
+                RemoteInput::empty(), config(),
+            ).await;
+            assert!(matches!(mismatch, Err(MembershipRemoteError::ContactMismatch)));
+            let old_generation = owner.run_remote_with_swim(
+                &cx, NodeId::new("worker"), 0, contact.clone(), ComputationName::new("echo"),
+                RemoteInput::empty(), config(),
+            ).await;
+            assert!(matches!(old_generation, Err(MembershipRemoteError::Membership(MembershipWorkError::Lease(
+                OwnedMembershipError::Control(MembershipControlError::GrantDenied))))));
+            assert_eq!(owner.live_leases(), 0);
+            assert_eq!(remote.active_operations(), 0);
+            let live = owner.run_remote_with_swim(
+                &cx, NodeId::new("worker"), 1, contact.clone(), ComputationName::new("echo"),
+                RemoteInput::new(b"live contact and authenticated authority".to_vec()), config(),
+            ).await.unwrap();
+            assert!(live.is_success(), "{live:?}");
+            asupersync::time::timeout(cx.now(), Duration::from_secs(3), async {
+                while remote.active_operations() != 0 {
+                    asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                }
+            }).await.expect("positive-control native owner retired before the parked invocation");
+        }
+
         if matches!(case, Case::Success) {
             let report = owner.run_remote(&cx, NodeId::new("worker"), 1, ComputationName::new("echo"),
                 RemoteInput::new(b"membership-owned-secret".to_vec()), config()).await.unwrap();
@@ -190,9 +226,17 @@ fn exercise(workers: usize, case: Case) {
                 Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == b"membership-owned-secret"));
         } else {
             let running_owner = owner.clone();
+            let running_contact = contact.clone();
             let mut running = cx.spawn(move |caller| async move {
-                running_owner.run_remote(&caller, NodeId::new("worker"), 1, ComputationName::new("wait"),
-                    RemoteInput::empty(), config()).await
+                if let Some(contact) = running_contact {
+                    running_owner.run_remote_with_swim(
+                        &caller, NodeId::new("worker"), 1, contact, ComputationName::new("wait"),
+                        RemoteInput::empty(), config(),
+                    ).await
+                } else {
+                    running_owner.run_remote(&caller, NodeId::new("worker"), 1, ComputationName::new("wait"),
+                        RemoteInput::empty(), config()).await
+                }
             }).unwrap();
             asupersync::time::timeout(cx.now(), Duration::from_secs(5), witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire)))
                 .await.expect("remote handler actually reached Pending");
@@ -205,21 +249,30 @@ fn exercise(workers: usize, case: Case) {
             assert!(!witness.cancelled.load(Ordering::Acquire));
             assert_eq!(remote.active_operations(), 1);
 
-            let kind = match case {
-                Case::Dead => MembershipKind::Dead,
-                Case::Left => MembershipKind::Left,
-                Case::Superseded => MembershipKind::Alive,
-                Case::Suspect => MembershipKind::Suspect,
-                Case::Success => unreachable!(),
-            };
-            let incarnation = if matches!(case, Case::Superseded) { 2 } else { 1 };
-            apply(&owner, incarnation, 2, kind);
-            apply(&owner, incarnation, 2, kind); // Exact duplicate cannot repeat cleanup.
-            assert!(remote.effective_route(&NodeId::new("worker")).is_none());
-            assert!(matches!(spawn_remote(&cx, NodeId::new("worker"),
-                ComputationName::new("echo"), RemoteInput::empty()),
-                Err(RemoteError::NodeUnreachable(_))),
-                "native submission must enforce membership without an outer membership runner");
+            if let Some(swim) = swim.as_mut() {
+                swim.withdraw(&cx, matches!(case, Case::SwimStopped)).await;
+                assert!(!contact.as_ref().unwrap().is_live());
+                assert_eq!(owner.stamp(&NodeId::new("worker")).unwrap().kind, MembershipKind::Alive,
+                    "SWIM loss cannot manufacture authenticated revocation");
+                assert!(remote.effective_route(&NodeId::new("worker")).is_some(),
+                    "an unbound route retains its independently authenticated authority");
+            } else {
+                let kind = match case {
+                    Case::Dead => MembershipKind::Dead,
+                    Case::Left => MembershipKind::Left,
+                    Case::Superseded => MembershipKind::Alive,
+                    Case::Suspect => MembershipKind::Suspect,
+                    Case::Success | Case::SwimStopped | Case::SwimDeparture => unreachable!(),
+                };
+                let incarnation = if matches!(case, Case::Superseded) { 2 } else { 1 };
+                apply(&owner, incarnation, 2, kind);
+                apply(&owner, incarnation, 2, kind); // Exact duplicate cannot repeat cleanup.
+                assert!(remote.effective_route(&NodeId::new("worker")).is_none());
+                assert!(matches!(spawn_remote(&cx, NodeId::new("worker"),
+                    ComputationName::new("echo"), RemoteInput::empty()),
+                    Err(RemoteError::NodeUnreachable(_))),
+                    "native submission must enforce membership without an outer membership runner");
+            }
             assert!(remote.effective_route(&NodeId::new("other")).is_some());
             if matches!(case, Case::Suspect) {
                 assert!(!witness.cancelled.load(Ordering::Acquire));
@@ -232,9 +285,23 @@ fn exercise(workers: usize, case: Case) {
                 assert_eq!(remote.active_operations(), 1);
                 assert!(!witness.dropped.load(Ordering::Acquire));
             }
-            let refused = owner.run_remote(&cx, NodeId::new("worker"), 1, ComputationName::new("echo"), RemoteInput::empty(), config()).await;
-            assert!(matches!(refused, Err(MembershipRemoteError::Membership(MembershipWorkError::Lease(
-                OwnedMembershipError::Control(MembershipControlError::GrantDenied))))));
+            if let Some(contact) = contact.as_ref() {
+                assert_eq!(owner.live_leases(), 0, "the local checked lease aborted before remote cleanup");
+                let refused = owner.run_remote_with_swim(
+                    &cx, NodeId::new("worker"), 1, contact.clone(), ComputationName::new("echo"),
+                    RemoteInput::empty(), config(),
+                ).await;
+                assert!(matches!(refused, Err(MembershipRemoteError::ContactEnded)));
+                let unbound = owner.run_remote(
+                    &cx, NodeId::new("worker"), 1, ComputationName::new("echo"),
+                    RemoteInput::new(b"independent authority remains live".to_vec()), config(),
+                ).await.unwrap();
+                assert!(unbound.is_success(), "default owned execution remains independent: {unbound:?}");
+            } else {
+                let refused = owner.run_remote(&cx, NodeId::new("worker"), 1, ComputationName::new("echo"), RemoteInput::empty(), config()).await;
+                assert!(matches!(refused, Err(MembershipRemoteError::Membership(MembershipWorkError::Lease(
+                    OwnedMembershipError::Control(MembershipControlError::GrantDenied))))));
+            }
 
             // A different logical member on the same native transport still works.
             // Membership revocation must never drain the entire remote runtime.
@@ -256,7 +323,11 @@ fn exercise(workers: usize, case: Case) {
                 assert!(!witness.cancelled.load(Ordering::Acquire));
             } else {
                 assert!(!report.is_success());
-                let expected = if matches!(case, Case::Superseded) { OwnedLeaseStatus::Superseded } else { OwnedLeaseStatus::Revoked };
+                let expected = match case {
+                    Case::SwimStopped | Case::SwimDeparture => OwnedLeaseStatus::Dropped,
+                    Case::Superseded => OwnedLeaseStatus::Superseded,
+                    _ => OwnedLeaseStatus::Revoked,
+                };
                 assert!(matches!(report.work.trigger, MembershipWorkTrigger::LeaseEnded(status) if status == expected));
                 assert!(matches!(report.work.lease, Ok(status) if status == expected));
                 let remote_report = report.work.task.unwrap().expect("retain remote runner report through body cancellation");
@@ -279,6 +350,7 @@ fn exercise(workers: usize, case: Case) {
             }
         }).await.expect("all native request owners retired");
         assert!(remote.close(&cx).await);
+        if let Some(swim) = swim.as_mut() { swim.close(&cx).await; }
         owner.close();
         let _ = operator.begin_drain();
         asupersync::time::timeout(cx.now(), Duration::from_secs(5), serving.join(&cx)).await
@@ -299,6 +371,13 @@ fn authenticated_membership_remote_success_preserves_exact_value_and_both_closes
 fn authenticated_membership_revocation_drains_parked_v3_work_and_preserves_sibling() {
     for workers in [1, 2] {
         for case in [Case::Dead, Case::Left, Case::Superseded] { exercise(workers, case); }
+    }
+}
+
+#[test]
+fn swim_contact_loss_cancels_and_drains_opted_in_remote_work_without_revoking_authority() {
+    for workers in [1, 2] {
+        for case in [Case::SwimStopped, Case::SwimDeparture] { exercise(workers, case); }
     }
 }
 

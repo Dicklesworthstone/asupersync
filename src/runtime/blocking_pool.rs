@@ -7,7 +7,7 @@
 //! blocking the async runtime. It supports:
 //!
 //! - **Capacity management**: Configurable min/max threads with dynamic scaling
-//! - **Fairness**: FIFO ordering (a task's priority is recorded but not yet used)
+//! - **Fairness**: FIFO by default, with opt-in priority and bounded fairness turns
 //! - **Cancellation**: Soft cancellation with completion tracking
 //! - **Shutdown**: Graceful shutdown with bounded drain timeout
 //!
@@ -56,13 +56,17 @@ use crate::runtime::pool_sizing::{
     PoolSizingAction, PoolSizingBounds, PoolSizingControllerState, PoolSizingDecision,
     PoolSizingPolicy, PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing,
 };
-use crossbeam_queue::SegQueue;
 use parking_lot::{Condvar, Mutex};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
 use std::time::{Duration, Instant};
+
+#[path = "blocking_pool/priority.rs"]
+mod priority;
+pub use priority::BlockingQueuePolicy;
+use priority::BlockingTaskQueue;
 
 /// Default idle timeout before retiring excess threads.
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -184,7 +188,10 @@ impl fmt::Debug for BlockingPool {
 }
 
 impl BlockingPoolAffinityState {
-    fn from_options(options: &BlockingPoolOptions) -> Option<Self> {
+    fn from_options(
+        options: &BlockingPoolOptions,
+        queue_policy: BlockingQueuePolicy,
+    ) -> Option<Self> {
         match options.affinity_profile {
             BlockingPoolAffinityProfile::Disabled => None,
             BlockingPoolAffinityProfile::CohortBiased {
@@ -199,7 +206,9 @@ impl BlockingPoolAffinityState {
                     cohort_count,
                     local_queue_soft_limit,
                     spill_check_interval,
-                    cohort_queues: (0..cohort_count).map(|_| SegQueue::new()).collect(),
+                    cohort_queues: (0..cohort_count)
+                        .map(|_| BlockingTaskQueue::new(queue_policy))
+                        .collect(),
                     cohort_pending_counts: (0..cohort_count).map(|_| AtomicUsize::new(0)).collect(),
                     local_queue_dispatches: AtomicUsize::new(0),
                     spill_dispatches: AtomicUsize::new(0),
@@ -329,7 +338,7 @@ struct BlockingPoolInner {
     /// Monotonic worker thread sequence for deterministic naming.
     next_thread_id: AtomicU64,
     /// Work queue.
-    queue: SegQueue<BlockingTask>,
+    queue: BlockingTaskQueue,
     /// Optional cohort-aware blocking affinity state.
     affinity: Option<BlockingPoolAffinityState>,
     /// Shutdown flag.
@@ -358,7 +367,7 @@ struct BlockingPoolAffinityState {
     cohort_count: usize,
     local_queue_soft_limit: usize,
     spill_check_interval: usize,
-    cohort_queues: Vec<SegQueue<BlockingTask>>,
+    cohort_queues: Vec<BlockingTaskQueue>,
     cohort_pending_counts: Vec<AtomicUsize>,
     local_queue_dispatches: AtomicUsize,
     spill_dispatches: AtomicUsize,
@@ -376,8 +385,7 @@ enum BlockingTaskDequeueKind {
 struct BlockingTask {
     /// The work to execute.
     work: Box<dyn FnOnce() + Send + 'static>,
-    /// Priority (higher = more important, for future use).
-    #[allow(dead_code)]
+    /// Priority (higher = more important under the opt-in priority policy).
     priority: u8,
     /// Preferred cohort for locality-biased routing.
     preferred_cohort: Option<usize>,
@@ -536,6 +544,31 @@ impl BlockingPool {
         max_threads: usize,
         options: BlockingPoolOptions,
     ) -> Self {
+        Self::with_config_and_queue_policy(
+            min_threads,
+            max_threads,
+            options,
+            BlockingQueuePolicy::Fifo,
+        )
+    }
+
+    /// Creates a blocking pool with an explicit queue-selection policy.
+    ///
+    /// Existing constructors retain FIFO ordering. Priority scheduling is
+    /// opt-in and applies independently within global and cohort queues.
+    /// Admission remains unbounded; running closures are never preempted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_threads` is zero, `min_threads > max_threads`, or the
+    /// thread-name prefix contains an interior NUL byte.
+    #[must_use]
+    pub fn with_config_and_queue_policy(
+        min_threads: usize,
+        max_threads: usize,
+        options: BlockingPoolOptions,
+        queue_policy: BlockingQueuePolicy,
+    ) -> Self {
         assert!(max_threads > 0, "max_threads must be at least 1");
         assert!(
             min_threads <= max_threads,
@@ -546,7 +579,7 @@ impl BlockingPool {
             "thread_name_prefix may not contain interior NUL bytes"
         );
 
-        let affinity = BlockingPoolAffinityState::from_options(&options);
+        let affinity = BlockingPoolAffinityState::from_options(&options, queue_policy);
         let inner = Arc::new(BlockingPoolInner {
             min_threads,
             max_threads,
@@ -558,7 +591,7 @@ impl BlockingPool {
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),
             next_thread_id: AtomicU64::new(1),
-            queue: SegQueue::new(),
+            queue: BlockingTaskQueue::new(queue_policy),
             affinity,
             shutdown: AtomicBool::new(false),
             condvar: Condvar::new(),
@@ -614,13 +647,35 @@ impl BlockingPool {
 
     /// Spawns a blocking task with a priority.
     ///
-    /// Higher priority values are executed first (currently unused,
-    /// reserved for future priority queue implementation).
+    /// Larger values are preferred when a priority queue policy is selected.
+    /// FIFO pools record the value but retain arrival order.
     pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle
     where
         F: FnOnce() + Send + 'static,
     {
         self.spawn_with_affinity(f, priority, None)
+    }
+
+    /// Spawns a blocking task with both a cohort hint and explicit priority.
+    ///
+    /// The queue policy selects within the routed queue; existing cohort
+    /// locality, spill, and foreign-cohort fairness turns remain in effect.
+    pub fn spawn_on_cohort_with_priority<F>(
+        &self,
+        cohort: usize,
+        f: F,
+        priority: u8,
+    ) -> BlockingTaskHandle
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_with_affinity(f, priority, Some(cohort))
+    }
+
+    /// Returns the queue-selection policy installed when the pool was built.
+    #[must_use]
+    pub fn queue_policy(&self) -> BlockingQueuePolicy {
+        self.inner.queue.policy()
     }
 
     fn spawn_with_affinity<F>(
@@ -872,6 +927,28 @@ impl BlockingPoolHandle {
         F: FnOnce() + Send + 'static,
     {
         self.spawn_with_affinity(f, priority, None)
+    }
+
+    /// Spawns a blocking task with both a cohort hint and explicit priority.
+    ///
+    /// The queue policy selects within the routed queue; existing cohort
+    /// locality, spill, and foreign-cohort fairness turns remain in effect.
+    pub fn spawn_on_cohort_with_priority<F>(
+        &self,
+        cohort: usize,
+        f: F,
+        priority: u8,
+    ) -> BlockingTaskHandle
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_with_affinity(f, priority, Some(cohort))
+    }
+
+    /// Returns the queue-selection policy installed when the pool was built.
+    #[must_use]
+    pub fn queue_policy(&self) -> BlockingQueuePolicy {
+        self.inner.queue.policy()
     }
 
     fn spawn_with_affinity<F>(

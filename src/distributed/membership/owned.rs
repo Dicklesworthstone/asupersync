@@ -39,7 +39,7 @@ pub enum OwnedLeaseStatus {
     Active,
     /// The owner requested clean release.
     Released,
-    /// The guard was dropped without clean release.
+    /// The guard was dropped or its owner locally aborted it without clean release.
     Dropped,
     /// The local clock reached its deadline.
     Expired,
@@ -424,15 +424,18 @@ impl OwnedMembershipLease {
         if expired { Err(OwnedMembershipError::Ended(status)) }
         else if won == 1 { Ok(()) } else { Err(OwnedMembershipError::SettlementLost) }
     }
-}
-impl Drop for OwnedMembershipLease {
-    fn drop(&mut self) {
+    // Local retirement, not an authenticated membership revocation. Retain the
+    // guard's terminal signal while its owning runner awaits actual child drain.
+    fn abort_unreleased(&self) {
         let mut state = self.shared.state.lock();
         let mut retired = Vec::with_capacity(1);
         if let Some(entry) = remove(&mut state, self.id, OwnedLeaseStatus::Dropped) { retired.push(entry); }
         drop(state);
         if !retired.is_empty() { finish(&self.shared, retired); }
     }
+}
+impl Drop for OwnedMembershipLease {
+    fn drop(&mut self) { self.abort_unreleased(); }
 }
 
 #[cfg(test)]

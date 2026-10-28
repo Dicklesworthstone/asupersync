@@ -10,6 +10,12 @@ use super::{MembershipWorkError, MembershipWorkReport, OwnedMembershipController
 use crate::cx::Cx;
 use crate::distributed::remote_owned::{RemoteRunConfig, RemoteRunError, RemoteRunReport, run_remote};
 use crate::remote::{ComputationName, NodeId, RemoteInput};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::distributed::membership::driver::SwimContact;
+#[cfg(not(target_arch = "wasm32"))]
+use super::work::MembershipWorkGuard;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
 /// Refusal before membership-owned remote work reached its reporting phase.
 #[derive(Debug, thiserror::Error)]
@@ -21,6 +27,14 @@ pub enum MembershipRemoteError {
     /// Authenticated membership, checked lease or child admission refused.
     #[error(transparent)]
     Membership(#[from] MembershipWorkError),
+    /// The supplied contact belongs to another logical destination.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("SWIM contact does not match the remote destination")]
+    ContactMismatch,
+    /// This captured contact epoch ended; recovery requires a fresh token.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("SWIM contact ended before remote admission")]
+    ContactEnded,
 }
 
 /// Preserve both independent ownership and terminal-result reports.
@@ -106,6 +120,69 @@ impl OwnedMembershipController {
                 },
             )
             .await?;
+        Ok(MembershipRemoteReport { work })
+    }
+
+    /// Run remote work with an additional one-way SWIM contact veto.
+    ///
+    /// The contact must name `node` and still be live before admission. Accepted
+    /// authenticated Alive authority for the exact `node`/`incarnation` and the
+    /// caller's existing transport credentials and computation grants remain
+    /// independently required. The detector's incarnation is not proof of the
+    /// remote process's authenticated identity.
+    ///
+    /// Any observed suspicion, departure, incarnation change, or detector stop
+    /// permanently ends this operation's contact token, even if the observer
+    /// misses an intervening loss/recovery or its event log is compacted. The
+    /// runner aborts its checked membership lease with `OwnedLeaseStatus::Dropped`,
+    /// cancels its child, and waits for the existing remote cancel/drain path.
+    /// The contact remains monitored while child cleanup drains. This local
+    /// retirement never signs a membership update or revokes unrelated leases.
+    ///
+    /// A fresh direct contact permits a new token and a separately authorized
+    /// invocation; it cannot revive or retry this invocation. Existing
+    /// `run_remote` behavior is unchanged and does not opt in to this veto.
+    /// Continue polling through cleanup to obtain the independent close and
+    /// transport reports; an aborted local lease alone proves no remote drain.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_remote_with_swim(
+        &self,
+        cx: &Cx,
+        node: NodeId,
+        incarnation: u64,
+        contact: SwimContact,
+        computation: ComputationName,
+        input: RemoteInput,
+        config: RemoteRunConfig,
+    ) -> Result<MembershipRemoteReport, MembershipRemoteError> {
+        if cx.is_cancel_requested() {
+            return Err(RemoteRunError::Cancelled.into());
+        }
+        if contact.node() != &node {
+            return Err(MembershipRemoteError::ContactMismatch);
+        }
+        if !contact.is_live() {
+            return Err(MembershipRemoteError::ContactEnded);
+        }
+        let cap = cx.remote().ok_or(RemoteRunError::NoCapability)?;
+        if cap.runtime().is_none() {
+            return Err(RemoteRunError::NoRemoteRuntime.into());
+        }
+        let live = contact.clone();
+        let guard = MembershipWorkGuard {
+            active: Arc::new(move || live.is_live()),
+            ended: Box::pin(async move { contact.ended().await }),
+        };
+        let destination = node.clone();
+        let work = self.run_scoped_guarded(
+            cx, &node, incarnation, config.timeout, config.child.clone(), Some(guard),
+            move |body_cx| async move {
+                let report = run_remote(&body_cx, destination, computation, input, config).await;
+                let _ = body_cx.checkpoint();
+                report
+            },
+        ).await?;
         Ok(MembershipRemoteReport { work })
     }
 }

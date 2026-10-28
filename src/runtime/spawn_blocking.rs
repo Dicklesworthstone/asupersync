@@ -329,7 +329,8 @@ pub(crate) async fn drive_drained_blocking<Caps, F, T>(
         // wait below then reports any capture panic (br-asupersync-q1pr9n).
         state.cancel(control.cancel_reason().unwrap_or_else(crate::types::CancelReason::shutdown));
     }
-    let task = pool.spawn(move || envelope.run());
+    let priority = control.budget().priority;
+    let task = pool.spawn_with_priority(move || envelope.run(), priority);
     let mut wait = DrainedBlockingWait {
         cx: control,
         state,
@@ -712,14 +713,18 @@ where
             .expect("rejected blocking operation must retain its closure");
         f()
     });
-    let handle = pool.spawn(move || {
-        let f = pool_work
-            .lock()
-            .take()
-            .expect("blocking operation closure claimed exactly once");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        tx.send(result);
-    });
+    let priority = Cx::current().map_or(128, |cx| cx.budget().priority);
+    let handle = pool.spawn_with_priority(
+        move || {
+            let f = pool_work
+                .lock()
+                .take()
+                .expect("blocking operation closure claimed exactly once");
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            tx.send(result);
+        },
+        priority,
+    );
 
     let mut guard = CancelOnDrop::new(handle);
     let result = rx.await;
