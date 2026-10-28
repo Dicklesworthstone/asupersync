@@ -9,6 +9,7 @@ use crate::time::Sleep;
 use crate::types::{CancelReason, Outcome, RegionId, Time};
 use std::fmt;
 use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -114,8 +115,15 @@ fn clean_close(close: &Result<MembershipWorkClose, ChildRegionError>) -> bool {
     })
 }
 
+// Internal one-way veto; never grants or changes authenticated authority.
+pub(super) struct MembershipWorkGuard {
+    pub(super) active: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub(super) ended: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
 fn stop(
     owner: &OwnedMembershipController, cx: &Cx, lease: &OwnedMembershipLease, deadline: Time,
+    guard: Option<&MembershipWorkGuard>,
 ) -> Option<MembershipWorkTrigger> {
     if cx.is_cancel_requested() {
         return Some(MembershipWorkTrigger::ParentCancelled(
@@ -126,6 +134,11 @@ fn stop(
         if let Err(error) = owner.expire() {
             return Some(MembershipWorkTrigger::ControlFailed(error));
         }
+    }
+    if lease.status() == OwnedLeaseStatus::Active
+        && guard.is_some_and(|guard| !(guard.active)())
+    {
+        lease.abort_unreleased();
     }
     let status = lease.status();
     (status != OwnedLeaseStatus::Active).then_some(MembershipWorkTrigger::LeaseEnded(status))
@@ -168,6 +181,19 @@ impl OwnedMembershipController {
         F: FnOnce(Cx) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
+        self.run_scoped_guarded(cx, node, incarnation, duration, spec, None, factory).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn run_scoped_guarded<T, F, Fut>(
+        &self, cx: &Cx, node: &NodeId, incarnation: u64, duration: Duration,
+        spec: ChildRegionSpec, mut guard: Option<MembershipWorkGuard>, factory: F,
+    ) -> Result<MembershipWorkReport<T>, MembershipWorkError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
         let lease = self.try_grant(cx, node, incarnation, duration)?;
         let deadline = {
             let state = self.shared.state.lock();
@@ -176,17 +202,19 @@ impl OwnedMembershipController {
         };
         let child = cx.open_child_region(spec).await?;
         let region_id = child.region_id();
-        let mut trigger = stop(self, cx, &lease, deadline);
+        let mut trigger = stop(self, cx, &lease, deadline, guard.as_ref());
         let mut result = None;
         let mut handle = None;
         if trigger.is_none() {
             let signal = Arc::clone(&lease.signal);
             let clock = self.shared.clock.clone();
+            let live = guard.as_ref().map(|guard| Arc::clone(&guard.active));
             match child.cx().spawn(move |body_cx| async move {
                 // Admission can be delayed after the owner last checked. Never
                 // invoke a user factory after observing a terminal lease here.
                 if signal.status() != OwnedLeaseStatus::Active
                     || clock.now() >= deadline || body_cx.is_cancel_requested()
+                    || live.as_ref().is_some_and(|active| !active())
                 { return Err(MembershipWorkTaskError::NotStarted); }
                 Ok(factory(body_cx).await)
             }) {
@@ -204,13 +232,18 @@ impl OwnedMembershipController {
             let mut sleep = std::pin::pin!(Sleep::with_timer_driver(deadline, self.shared.clock.clone()));
             let (cause, observed) = poll_fn(|poll_cx| {
                 // Retirement/deadline wins a tie with an already-ready body.
-                if let Some(cause) = stop(self, cx, &lease, deadline) {
+                if let Some(cause) = stop(self, cx, &lease, deadline, guard.as_ref()) {
                     return Poll::Ready((cause, None));
+                }
+                if guard.as_mut().is_some_and(|guard| guard.ended.as_mut().poll(poll_cx).is_ready()) {
+                    if let Some(cause) = stop(self, cx, &lease, deadline, guard.as_ref()) {
+                        return Poll::Ready((cause, None));
+                    }
                 }
                 if cancelled.as_mut().poll(poll_cx).is_ready()
                     || ended.as_mut().poll(poll_cx).is_ready()
                 {
-                    if let Some(cause) = stop(self, cx, &lease, deadline) {
+                    if let Some(cause) = stop(self, cx, &lease, deadline, guard.as_ref()) {
                         return Poll::Ready((cause, None));
                     }
                 }
@@ -218,7 +251,7 @@ impl OwnedMembershipController {
                 // ambient Cx cancellation is neither owner cancellation nor
                 // elapsed lease time (br-asupersync-bi2462.168).
                 if sleep.as_mut().poll_deadline(poll_cx).is_ready() {
-                    if let Some(cause) = stop(self, cx, &lease, deadline) {
+                    if let Some(cause) = stop(self, cx, &lease, deadline, guard.as_ref()) {
                         return Poll::Ready((cause, None));
                     }
                     // A coalesced timer may fire before the authoritative
@@ -237,7 +270,18 @@ impl OwnedMembershipController {
         }
         // Close owns cancellation, descendant drain and finalization on every
         // path after opening, including spawn refusal and a returned body value.
-        let close = child.close_with_outcome().await.map(|receipt| MembershipWorkClose {
+        let mut closing = std::pin::pin!(child.close_with_outcome());
+        let close = poll_fn(|poll_cx| {
+            // A body may finish before its descendants/finalizers. Keep the
+            // local veto armed throughout drain, and abort before claiming a
+            // close receipt. Never re-poll an already-ended guard future.
+            if let Some(guard) = guard.as_mut() {
+                if !(guard.active)() || guard.ended.as_mut().poll(poll_cx).is_ready() {
+                    lease.abort_unreleased();
+                }
+            }
+            closing.as_mut().poll(poll_cx)
+        }).await.map(|receipt| MembershipWorkClose {
             region_id, outcome: receipt.outcome, cleanup_outcome: receipt.cleanup_outcome,
         });
         if result.is_none() {
@@ -256,7 +300,7 @@ impl OwnedMembershipController {
         // Preserve the first stop cause. If completion won initially, a later
         // lease or caller failure during drain still prevents authorized success.
         if matches!(trigger, Some(MembershipWorkTrigger::TaskFinished)) {
-            if let Some(cause) = stop(self, cx, &lease, deadline) { trigger = Some(cause); }
+            if let Some(cause) = stop(self, cx, &lease, deadline, guard.as_ref()) { trigger = Some(cause); }
         }
         let mut trigger = trigger.expect("terminal cause");
         let task = result.expect("body observation");

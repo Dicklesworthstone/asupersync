@@ -314,6 +314,117 @@ fn dropping_runner_requests_child_cleanup_without_a_false_drain_receipt() {
     });
 }
 
+
+struct LocalVeto {
+    active: AtomicBool,
+    changed: Notify,
+}
+
+fn local_guard(veto: &Arc<LocalVeto>) -> MembershipWorkGuard {
+    let live = Arc::clone(veto);
+    let ended = Arc::clone(veto);
+    MembershipWorkGuard {
+        active: Arc::new(move || live.active.load(Ordering::Acquire)),
+        ended: Box::pin(async move {
+            ended.changed.wait_until(|| !ended.active.load(Ordering::Acquire)).await;
+        }),
+    }
+}
+
+#[test]
+fn local_veto_refuses_factory_after_membership_admission() {
+    native(|cx| async move {
+        let owner = controller(&cx);
+        let veto = Arc::new(LocalVeto { active: AtomicBool::new(false), changed: Notify::new() });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let report = owner.run_scoped_guarded(
+            &cx, &NodeId::new("worker"), 1, BUDGET, ChildRegionSpec::inherit(),
+            Some(local_guard(&veto)),
+            move |_| { seen.fetch_add(1, Ordering::SeqCst); async {} },
+        ).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.live_leases(), 0);
+        assert!(matches!(report.trigger, MembershipWorkTrigger::LeaseEnded(OwnedLeaseStatus::Dropped)));
+        assert!(matches!(report.task, Err(MembershipWorkTaskError::NotStarted)));
+        assert!(matches!(report.lease, Ok(OwnedLeaseStatus::Dropped)));
+        assert!(report.close.is_ok());
+        assert!(!report.is_success());
+    });
+}
+
+#[test]
+fn local_veto_aborts_lease_while_completed_body_descendants_are_still_draining() {
+    native(|cx| async move {
+        #[derive(Default)]
+        struct Drain {
+            parked: AtomicBool,
+            cancelled: AtomicBool,
+            release: AtomicBool,
+            retired: AtomicBool,
+            changed: Notify,
+        }
+        let owner = controller(&cx);
+        let veto = Arc::new(LocalVeto { active: AtomicBool::new(true), changed: Notify::new() });
+        let drain = Arc::new(Drain::default());
+        let body = Arc::clone(&drain);
+        let node = NodeId::new("worker");
+        let mut run = Box::pin(owner.run_scoped_guarded(
+            &cx, &node, 1, BUDGET, ChildRegionSpec::inherit(), Some(local_guard(&veto)),
+            move |child| async move {
+                let seen = Arc::clone(&body);
+                let _descendant = child.spawn(move |cx| async move {
+                    let mut cancelled = std::pin::pin!(cx.cancelled());
+                    poll_fn(|task| {
+                        let state = cancelled.as_mut().poll(task);
+                        if state.is_pending() && !seen.parked.swap(true, Ordering::AcqRel) {
+                            seen.changed.notify_waiters();
+                        }
+                        state
+                    }).await;
+                    assert!(cx.checkpoint().is_err());
+                    seen.cancelled.store(true, Ordering::Release);
+                    seen.changed.notify_waiters();
+                    seen.changed.wait_until(|| seen.release.load(Ordering::Acquire)).await;
+                    seen.retired.store(true, Ordering::Release);
+                }).unwrap();
+                body.changed.wait_until(|| body.parked.load(Ordering::Acquire)).await;
+                7
+            },
+        ));
+        {
+            let mut draining = std::pin::pin!(drain.changed.wait_until(|| drain.cancelled.load(Ordering::Acquire)));
+            poll_fn(|task| {
+                assert!(run.as_mut().poll(task).is_pending());
+                draining.as_mut().poll(task)
+            }).await;
+        }
+        assert_eq!(owner.live_leases(), 1, "the returned body has not committed before close");
+        veto.active.store(false, Ordering::Release);
+        veto.changed.notify_waiters();
+        poll_fn(|task| {
+            for _ in 0..3 {
+                assert!(run.as_mut().poll(task).is_pending());
+                assert_eq!(owner.live_leases(), 0, "local abort must not wait for descendant cleanup");
+            }
+            Poll::Ready(())
+        }).await;
+        assert!(!drain.retired.load(Ordering::Acquire));
+        assert_eq!(owner.stamp(&node).unwrap().kind, MembershipKind::Alive,
+            "a local veto cannot fabricate an authority decision");
+        drain.release.store(true, Ordering::Release);
+        drain.changed.notify_waiters();
+        let report = run.await.unwrap();
+        assert_eq!(report.task.as_ref().unwrap(), &7);
+        assert!(matches!(report.trigger, MembershipWorkTrigger::LeaseEnded(OwnedLeaseStatus::Dropped)));
+        assert!(matches!(report.lease, Ok(OwnedLeaseStatus::Dropped)));
+        assert!(report.close.is_ok());
+        assert!(!report.is_success());
+        assert!(drain.retired.load(Ordering::Acquire));
+        assert!(!cx.is_cancel_requested());
+    });
+}
+
 #[test]
 fn report_debug_omits_application_payload() {
     native(|cx| async move {
