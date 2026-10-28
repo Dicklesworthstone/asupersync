@@ -63,6 +63,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
 use std::time::{Duration, Instant};
 
+#[path = "blocking_admission.rs"]
+mod admission;
+pub use admission::{
+    BlockingAdmissionPolicy, BlockingSpawnError, BlockingSpawnErrorKind, BlockingSubmission,
+};
+
 #[path = "blocking_pool/priority.rs"]
 mod priority;
 pub use priority::BlockingQueuePolicy;
@@ -333,6 +339,8 @@ struct BlockingPoolInner {
     busy_threads: AtomicUsize,
     /// Number of pending tasks in queue.
     pending_count: AtomicUsize,
+    /// Optional queue admission bound and parked submitters.
+    admission: admission::BlockingAdmission,
     /// Next task ID for tracking.
     next_task_id: AtomicU64,
     /// Monotonic worker thread sequence for deterministic naming.
@@ -569,6 +577,34 @@ impl BlockingPool {
         options: BlockingPoolOptions,
         queue_policy: BlockingQueuePolicy,
     ) -> Self {
+        Self::with_config_and_policies(
+            min_threads,
+            max_threads,
+            options,
+            queue_policy,
+            BlockingAdmissionPolicy::Unbounded,
+        )
+    }
+
+    /// Creates a pool with explicit queue-selection and admission policies.
+    ///
+    /// A bounded admission policy limits queued jobs across the global and all
+    /// cohort queues. Running jobs and caller-owned waiting submission futures
+    /// do not count toward that limit. Use `try_spawn` to recover refused work,
+    /// or `submit` to wait for capacity asynchronously. Existing `spawn` methods
+    /// return completed, cancelled handles when a configured bound is full.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`Self::with_config_and_queue_policy`].
+    #[must_use]
+    pub fn with_config_and_policies(
+        min_threads: usize,
+        max_threads: usize,
+        options: BlockingPoolOptions,
+        queue_policy: BlockingQueuePolicy,
+        admission_policy: BlockingAdmissionPolicy,
+    ) -> Self {
         assert!(max_threads > 0, "max_threads must be at least 1");
         assert!(
             min_threads <= max_threads,
@@ -589,6 +625,7 @@ impl BlockingPool {
             replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
+            admission: admission::BlockingAdmission::new(admission_policy),
             next_task_id: AtomicU64::new(1),
             next_thread_id: AtomicU64::new(1),
             queue: BlockingTaskQueue::new(queue_policy),
@@ -822,9 +859,12 @@ impl BlockingPool {
     ///
     /// No new tasks will be accepted. Pending tasks will continue to execute.
     pub fn shutdown(&self) {
-        let _guard = self.inner.mutex.lock();
-        self.close_admission();
-        self.inner.condvar.notify_all();
+        {
+            let _guard = self.inner.mutex.lock();
+            self.close_admission();
+            self.inner.condvar.notify_all();
+        }
+        self.inner.admission.notify();
     }
 
     /// Shuts down and waits for all threads to exit.
@@ -1090,16 +1130,22 @@ impl BlockingPoolHandle {
 
 fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool {
     let _guard = inner.mutex.lock();
-    if inner.shutdown.load(Ordering::Acquire) {
+    if inner.admission.refusal(inner).is_some() {
         return false;
     }
+    enqueue_task_locked(inner, task);
+    true
+}
+
+/// The caller holds the pool coordination mutex and has admitted this task.
+fn enqueue_task_locked(inner: &BlockingPoolInner, task: BlockingTask) {
     if let Some(affinity) = inner.affinity.as_ref() {
         match affinity.route_task(&inner.pending_count, task) {
-            Ok(()) => return true,
+            Ok(()) => return,
             Err(task) => {
                 inner.pending_count.fetch_add(1, Ordering::Relaxed);
                 inner.queue.push(task);
-                return true;
+                return;
             }
         }
     }
@@ -1107,7 +1153,6 @@ fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool 
     // pops it at once must not take `pending_count` below zero.
     inner.pending_count.fetch_add(1, Ordering::Relaxed);
     inner.queue.push(task);
-    true
 }
 
 fn blocking_pool_has_pending_work(inner: &BlockingPoolInner) -> bool {
@@ -1533,6 +1578,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     drop(spawn_guard);
     join_thread_handles(finished_handles);
     if let Some(stranded_tasks) = stranded_tasks {
+        inner.admission.notify();
         stranded_tasks.cancel();
     }
 }
@@ -1653,7 +1699,8 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
             // sees an idle thread, spawns none, and waits behind this one
             // although the cap allows more threads (br-asupersync-2u7bpm).
             inner.busy_threads.fetch_add(1, Ordering::Relaxed);
-            inner.pending_count.fetch_sub(1, Ordering::Relaxed);
+            inner.pending_count.fetch_sub(1, Ordering::Release);
+            inner.admission.notify();
 
             // Check if task was cancelled before execution. A skipped task still
             // owns its captures, whose destructors may block: destroy them

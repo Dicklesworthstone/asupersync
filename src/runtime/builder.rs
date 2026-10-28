@@ -167,7 +167,7 @@ use crate::observability::task_inspector::{
 use crate::record::RegionLimits;
 use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
-use crate::runtime::blocking_pool::BlockingQueuePolicy;
+use crate::runtime::blocking_pool::{BlockingAdmissionPolicy, BlockingQueuePolicy};
 use crate::runtime::config::{
     AdaptiveReadyBatchConfig, RuntimeCapacityHints, RuntimeConfig, SchedulerPlacementMode,
     WorkerCohortMapping,
@@ -2661,6 +2661,8 @@ pub struct RuntimeBuilder {
     blocking_sized: bool,
     /// Explicit queue selection without extending the public config structs.
     blocking_queue_policy: BlockingQueuePolicy,
+    /// Explicit queue capacity without extending public config structs.
+    blocking_admission_policy: BlockingAdmissionPolicy,
     /// Set by [`RuntimeBuilder::resource_sampling`]: how often a sampler
     /// thread refreshes resource pressure (asupersync-1ir2em).
     resource_sampling: Option<Duration>,
@@ -2696,6 +2698,7 @@ impl RuntimeBuilder {
             scheduler_evidence_sink: None,
             blocking_sized: false,
             blocking_queue_policy: BlockingQueuePolicy::Fifo,
+            blocking_admission_policy: BlockingAdmissionPolicy::Unbounded,
             resource_sampling: None,
         }
     }
@@ -2927,6 +2930,24 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn blocking_queue_policy(mut self, policy: BlockingQueuePolicy) -> Self {
         self.blocking_queue_policy = policy;
+        self
+    }
+
+    /// Select the blocking pool's queue admission policy.
+    ///
+    /// Admission is unbounded by default. A bound counts pending jobs across
+    /// all cohort and global queues, excluding running jobs and caller-owned
+    /// futures waiting to submit. Ordinary async blocking helpers wait for
+    /// capacity; saturation never redirects their work onto executor threads.
+    /// Drained blocking work retains cancelled captures until a blocking
+    /// worker can retire them.
+    ///
+    /// Direct `spawn` methods return a completed, cancelled handle on refusal.
+    /// Use the pool handle's `try_spawn` to recover refused closures or `submit`
+    /// to await capacity. This has no effect when the pool is disabled.
+    #[must_use]
+    pub fn blocking_admission_policy(mut self, policy: BlockingAdmissionPolicy) -> Self {
+        self.blocking_admission_policy = policy;
         self
     }
 
@@ -3472,6 +3493,7 @@ impl RuntimeBuilder {
             scheduler_evidence_sink,
             blocking_sized,
             blocking_queue_policy,
+            blocking_admission_policy,
             resource_sampling,
         } = self;
         #[cfg(target_arch = "wasm32")]
@@ -3535,6 +3557,7 @@ impl RuntimeBuilder {
             scheduler_evidence_sink,
             required_spawn_authorization,
             blocking_queue_policy,
+            blocking_admission_policy,
         )?;
         if capture_schedules {
             let trace = runtime
@@ -4154,6 +4177,7 @@ impl Runtime {
             None,
             None,
             BlockingQueuePolicy::Fifo,
+            BlockingAdmissionPolicy::Unbounded,
         )
     }
 
@@ -4173,6 +4197,7 @@ impl Runtime {
         scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
         required_spawn_authorization: Option<crate::security::key::AuthKey>,
         blocking_queue_policy: BlockingQueuePolicy,
+        blocking_admission_policy: BlockingAdmissionPolicy,
     ) -> Result<Self, Error> {
         config.normalize();
         if let Some(monitor) = config.deadline_monitor.as_mut()
@@ -4213,6 +4238,7 @@ impl Runtime {
                 host_services,
                 scheduler_evidence_sink,
                 blocking_queue_policy,
+                blocking_admission_policy,
             );
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
@@ -4237,6 +4263,7 @@ impl Runtime {
                 host_services,
                 scheduler_evidence_sink,
                 blocking_queue_policy,
+                blocking_admission_policy,
             );
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
@@ -6289,6 +6316,7 @@ impl RuntimeInner {
         host_services: &dyn RuntimeHostServices,
         scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
         blocking_queue_policy: BlockingQueuePolicy,
+        blocking_admission_policy: BlockingAdmissionPolicy,
     ) -> (Self, Vec<ThreeLaneWorker>) {
         // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape routes
         // internally below — the Sharded shape constructs a ShardedState
@@ -6446,7 +6474,11 @@ impl RuntimeInner {
         let deadline_monitor =
             host_services.start_deadline_monitor(&config, &state, scheduler.dispatch_task_table());
 
-        let blocking_pool = Self::create_blocking_pool(&config, blocking_queue_policy);
+        let blocking_pool = Self::create_blocking_pool(
+            &config,
+            blocking_queue_policy,
+            blocking_admission_policy,
+        );
         if let Some(pool) = blocking_pool.as_ref() {
             let mut guard = state
                 .lock()
@@ -6505,6 +6537,7 @@ impl RuntimeInner {
     fn create_blocking_pool(
         config: &RuntimeConfig,
         queue_policy: BlockingQueuePolicy,
+        admission_policy: BlockingAdmissionPolicy,
     ) -> Option<crate::runtime::blocking_pool::BlockingPool> {
         if config.blocking.max_threads == 0 {
             return None;
@@ -6521,11 +6554,12 @@ impl RuntimeInner {
                 .map(crate::runtime::config::WorkerCohortMapping::cohort_count),
             ..Default::default()
         };
-        Some(crate::runtime::blocking_pool::BlockingPool::with_config_and_queue_policy(
+        Some(crate::runtime::blocking_pool::BlockingPool::with_config_and_policies(
             config.blocking.min_threads,
             config.blocking.max_threads,
             options,
             queue_policy,
+            admission_policy,
         ))
     }
 

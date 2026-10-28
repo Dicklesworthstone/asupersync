@@ -384,6 +384,8 @@ pub struct Connection {
     hpack_encoder: hpack::Encoder,
     /// HPACK decoder.
     hpack_decoder: hpack::Decoder,
+    /// Opt-in recovery of fully decoded malformed HTTP field blocks.
+    malformed_header_isolation: bool,
     /// Connection-level send window.
     send_window: i32,
     /// Connection-level receive window.
@@ -473,6 +475,7 @@ impl Connection {
             streams,
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
+            malformed_header_isolation: false,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             initial_recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
@@ -529,6 +532,7 @@ impl Connection {
             streams,
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
+            malformed_header_isolation: false,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             initial_recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
@@ -547,6 +551,20 @@ impl Connection {
             rst_stream_count: 0,
             rst_stream_window_start: time_getter(),
         }
+    }
+
+    /// Scope malformed field names and NUL/CR/LF values to their stream.
+    ///
+    /// Disabled by default to retain the legacy connection-error behavior.
+    /// When enabled, the entire field block is decoded before returning a
+    /// stream PROTOCOL_ERROR, preserving the shared HPACK table for sibling
+    /// streams. The caller must handle that stream error as usual.
+    ///
+    /// Malformed HPACK, unsupported non-UTF-8 names or pseudo-header values,
+    /// and resource-limit violations remain connection errors. Recoverable
+    /// failures still consume the peer-reset rate-limit budget.
+    pub fn set_malformed_header_isolation(&mut self, enabled: bool) {
+        self.malformed_header_isolation = enabled;
     }
 
     /// Configure the RST_STREAM rate limit for CVE-2023-44487 protection.
@@ -1600,6 +1618,23 @@ impl Connection {
         }
     }
 
+    /// Decode a discarded block completely. HTTP field syntax is irrelevant
+    /// after a reset or refusal, but compression errors are still fatal.
+    fn decode_discarded_field_block(
+        &mut self,
+        src: &mut Bytes,
+        stream_id: u32,
+    ) -> Result<(), H2Error> {
+        if !self.malformed_header_isolation {
+            return self.hpack_decoder.decode(src).map(|_| ());
+        }
+        match self.hpack_decoder.decode_for_stream(src, stream_id) {
+            Ok(_) => Ok(()),
+            Err(error) if error.stream_id.is_some() => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// A HEADERS frame refused before any stream record exists (a stream id
     /// past the implementation's gap ceiling) still carries dynamic-table
     /// updates (RFC 9113 §4.3). A complete block is decoded and dropped
@@ -1620,8 +1655,9 @@ impl Connection {
                 "refused stream's field block continues in CONTINUATION frames",
             );
         }
-        match self.hpack_decoder.decode(&mut fragment) {
-            Ok(_) => error,
+        let stream_id = error.stream_id.expect("stream error checked above");
+        match self.decode_discarded_field_block(&mut fragment, stream_id) {
+            Ok(()) => error,
             Err(decode_error) => decode_error,
         }
     }
@@ -1657,7 +1693,7 @@ impl Connection {
         for fragment in stream.take_header_fragments() {
             block.extend_from_slice(&fragment);
         }
-        self.hpack_decoder.decode(&mut block.freeze())?;
+        self.decode_discarded_field_block(&mut block.freeze(), stream_id)?;
         Ok(None)
     }
 
@@ -1724,7 +1760,11 @@ impl Connection {
 
         // Decode headers
         let mut src = combined.freeze();
-        let headers = self.hpack_decoder.decode(&mut src)?;
+        let headers = if self.malformed_header_isolation {
+            self.hpack_decoder.decode_for_stream(&mut src, stream_id)?
+        } else {
+            self.hpack_decoder.decode(&mut src)?
+        };
 
         // br-asupersync-k4jj9p: refine is_trailers using the just-observed
         // :status pseudo-header. CLIENT side: a subsequent HEADERS is
@@ -1805,7 +1845,7 @@ impl Connection {
             stream_id: promised_stream_id,
             error_code: refusal.reset,
         });
-        self.hpack_decoder.decode(&mut block.freeze())?;
+        self.decode_discarded_field_block(&mut block.freeze(), promised_stream_id)?;
         match refusal.error {
             Some((stream_id, code, reason)) => Err(H2Error::stream(stream_id, code, reason)),
             None => Ok(None),
@@ -1844,7 +1884,12 @@ impl Connection {
         }
 
         let mut src = combined.freeze();
-        let headers = self.hpack_decoder.decode(&mut src)?;
+        let headers = if self.malformed_header_isolation {
+            self.hpack_decoder
+                .decode_for_stream(&mut src, promised_stream_id)?
+        } else {
+            self.hpack_decoder.decode(&mut src)?
+        };
 
         // br-asupersync-vqpx88: PUSH_PROMISE carries request semantics
         // (RFC 9113 §8.4 — server-pushed request that the server

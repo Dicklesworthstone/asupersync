@@ -3989,6 +3989,7 @@ worker_threads = 16
             None,
             None,
             BlockingQueuePolicy::Fifo,
+            BlockingAdmissionPolicy::Unbounded,
         )
         .expect("runtime construction continues without a reactor");
 

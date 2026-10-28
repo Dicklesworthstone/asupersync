@@ -9,9 +9,9 @@ use std::num::NonZeroUsize;
 /// Selection policy for queued blocking work.
 ///
 /// This controls dequeue order, not when concurrently dispatched closures
-/// start or finish. Running closures are never preempted. Queue admission
-/// remains unbounded, and cancellation and shutdown retain their existing
-/// semantics.
+/// start or finish. Running closures are never preempted. Queue capacity is
+/// controlled separately by [`super::BlockingAdmissionPolicy`]; existing
+/// constructors keep admission unbounded.
 ///
 /// With cohort affinity enabled, locality and spill/foreign-cohort turns choose
 /// a queue first; this policy then selects a task within that queue. It does

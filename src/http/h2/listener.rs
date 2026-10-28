@@ -3571,6 +3571,7 @@ async fn serve_h2_connection<F, Fut>(
     owned_request: bool,
     transport_timeouts: H2TransportTimeouts,
     request_limits: H2RequestLimits,
+    malformed_header_isolation: bool,
     #[cfg(feature = "http2-streaming")] streaming: Option<StreamingDispatch>,
     stats: Arc<Http2ListenerStats>,
 ) -> io::Result<()>
@@ -3651,6 +3652,7 @@ where
         // advertised value, never the peer's (br-asupersync-i1r9cw).
         let local_max_frame_size = settings.max_frame_size;
         let mut conn = Connection::server_with_time_getter(settings, time_getter);
+        conn.set_malformed_header_isolation(malformed_header_isolation);
         conn.queue_initial_settings();
         conn.set_initial_connection_recv_window(initial_connection_window_size)
             .map_err(io::Error::other)?;
@@ -5109,6 +5111,7 @@ pub struct Http2Listener<F> {
     in_flight_requests: Arc<AtomicUsize>,
     transport_timeouts: H2TransportTimeouts,
     request_limits: H2RequestLimits,
+    malformed_header_isolation: bool,
     #[cfg(feature = "http2-streaming")]
     streaming_config: Option<Http2StreamingListenerConfig>,
 }
@@ -5485,9 +5488,27 @@ impl<F> Http2Listener<F> {
             in_flight_requests: Arc::new(AtomicUsize::new(0)),
             transport_timeouts: H2TransportTimeouts::default(),
             request_limits: H2RequestLimits::default(),
+            malformed_header_isolation: false,
             #[cfg(feature = "http2-streaming")]
             streaming_config: None,
         }
+    }
+
+    /// Reject malformed HTTP field syntax on its stream while preserving
+    /// other requests on the connection.
+    ///
+    /// Disabled by default. Enabled listeners finish decoding each field block
+    /// before resetting the offending stream with PROTOCOL_ERROR, keeping the
+    /// shared HPACK table synchronized. Malformed HPACK, unsupported raw name
+    /// or pseudo-header octets, and resource-limit violations still close the
+    /// connection. The existing peer-reset rate limit also covers these resets.
+    ///
+    /// Applies to buffered, produced-response, and streaming listeners over
+    /// every supported transport.
+    #[must_use]
+    pub fn with_malformed_header_isolation(mut self, enabled: bool) -> Self {
+        self.malformed_header_isolation = enabled;
+        self
     }
 
     /// Returns a clone of the shutdown signal for external phase observation.
@@ -5812,6 +5833,7 @@ impl<F> Http2Listener<F> {
             let conn_time_getter = self.config.time_getter;
             let transport_timeouts = self.transport_timeouts;
             let request_limits = self.request_limits;
+            let malformed_header_isolation = self.malformed_header_isolation;
             #[cfg(feature = "tls")]
             let tls_acceptor = self.tls_acceptor.clone();
             #[cfg(feature = "http2-streaming")]
@@ -5844,6 +5866,7 @@ impl<F> Http2Listener<F> {
                     owned_request,
                     transport_timeouts,
                     request_limits,
+                    malformed_header_isolation,
                     #[cfg(feature = "http2-streaming")]
                     streaming,
                     stats_for_conn,
