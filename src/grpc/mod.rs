@@ -86,6 +86,8 @@ pub mod status;
 pub mod streaming;
 pub mod web;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod web_client;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod web_handler;
 
 /// Default maximum gRPC message size (4 MiB).
@@ -169,6 +171,10 @@ pub use web::{
     Base64StreamDecoder, ContentType as WebContentType, TrailerFrame, WebFrame, WebFrameCodec,
     base64_decode, base64_encode, decode_trailers, encode_trailers, is_grpc_web_request,
     is_text_mode,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use web_client::{
+    GrpcWebClient, GrpcWebClientConfig, GrpcWebResponseStream, GrpcWebUnaryResponse,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use web_handler::{GrpcWebConfig, GrpcWebHandlerFuture, GrpcWebStreamingHandlerFuture};
