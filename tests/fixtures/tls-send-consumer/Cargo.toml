@@ -1,0 +1,21 @@
+[package]
+name = "asupersync-tls-send-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A real downstream graph: do not unify the root workspace's dev-dependencies
+# or test-internals into the compiler regression checks.
+[workspace]
+
+[dependencies]
+asupersync = { path = "../../..", default-features = false, features = ["proc-macros", "native-runtime"] }
+
+[features]
+default = []
+runtime-defaults = ["asupersync/default"]
+nightly-outcome-try = ["asupersync/nightly-outcome-try"]
+tls = ["asupersync/tls"]
+tls-core = ["asupersync/tls-core"]
+tls-native-roots = ["asupersync/tls-native-roots"]
+tls-webpki-roots = ["asupersync/tls-webpki-roots"]
