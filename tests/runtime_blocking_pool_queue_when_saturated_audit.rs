@@ -8,17 +8,19 @@
 //! Audit findings:
 //!
 //!   `BlockingPool::spawn_with_priority`
-//!   (blocking_pool.rs:415-454) queues to an UNBOUNDED MPMC
-//!   FIFO `crossbeam_queue::SegQueue<BlockingTask>`. There is
+//!   queues by default to an UNBOUNDED MPMC FIFO
+//!   `crossbeam_queue::SegQueue<BlockingTask>`. Explicit priority
+//!   scheduling retains unbounded admission and has separate behavioral tests.
+//!   There is
 //!   no bounded capacity, no rejection on saturation, and no
 //!   panic. The only non-queue path is post-shutdown, which
 //!   returns an already-cancelled handle (graceful, no panic).
 //!
 //!   Audit chain:
 //!
-//!   1. **`BlockingPoolInner.queue`** is a
-//!      `crossbeam_queue::SegQueue<BlockingTask>`
-//!      (blocking_pool.rs:163). SegQueue is an UNBOUNDED
+//!   1. **`BlockingPoolInner.queue`** selects
+//!      `BlockingTaskQueue::Fifo(SegQueue<BlockingTask>)` by default.
+//!      SegQueue is an UNBOUNDED
 //!      lock-free MPMC FIFO — push always succeeds (no
 //!      `try_push` returning Err on full); pop returns
 //!      Option (None when empty). Pushes are O(1) amortized
@@ -95,47 +97,49 @@ fn read_blocking_pool_source() -> String {
 
 #[test]
 fn blocking_pool_uses_unbounded_segqueue_for_task_storage() {
-    // Pin AUDIT-CRITICAL: the queue is a SegQueue —
-    // unbounded lock-free MPMC FIFO. A regression to a
-    // bounded queue (ArrayQueue, channel with capacity)
-    // would force the spawn path to handle "queue full"
-    // some other way — typically panic or block, both
-    // wrong.
+    // Follow the default queue through its selection wrapper. Explicit
+    // priority scheduling is opt-in; FIFO constructors must still select the
+    // unbounded SegQueue and keep its direct, infallible push operation.
     let source = read_blocking_pool_source();
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src/runtime/blocking_pool/priority.rs");
+    let queues = std::fs::read_to_string(path).expect("read blocking queue implementation");
 
     assert!(
-        source.contains("queue: SegQueue<BlockingTask>,"),
-        "REGRESSION: BlockingPoolInner.queue is no longer \
-         `SegQueue<BlockingTask>`. The unbounded lock-free \
-         MPMC FIFO is what makes saturation graceful — \
-         pushes always succeed. A bounded queue would force \
-         a 'queue full' policy (panic / block / drop), all \
-         of which are spec violations.",
+        source.contains("queue: BlockingTaskQueue,"),
+        "the pool must use the audited queue-selection wrapper",
     );
-
+    let constructor = source.find("pub fn with_config(").expect("FIFO constructor");
+    let policy_constructor = source[constructor..]
+        .find("pub fn with_config_and_queue_policy(")
+        .expect("explicit-policy constructor");
     assert!(
-        source.contains("use crossbeam_queue::SegQueue;"),
-        "REGRESSION: blocking_pool.rs no longer imports \
-         crossbeam_queue::SegQueue. If a different queue \
-         type was substituted, verify the saturation \
-         contract is preserved.",
+        source[constructor..constructor + policy_constructor]
+            .contains("BlockingQueuePolicy::Fifo"),
+        "existing constructors must retain FIFO queue selection",
     );
+    for required in [
+        "use crossbeam_queue::SegQueue;",
+        "Fifo(SegQueue<BlockingTask>)",
+        "BlockingQueuePolicy::Fifo => Self::Fifo(SegQueue::new())",
+        "Self::Fifo(queue) => queue.push(task)",
+    ] {
+        assert!(
+            queues.contains(required),
+            "default FIFO storage must retain its unbounded SegQueue path: {required}",
+        );
+    }
 
-    // Forbid suspect bounded-queue substitutions.
-    let suspect_bounded_queues = [
+    // Retain the bounded-storage rejection across both implementation files.
+    for pattern in [
         "ArrayQueue<BlockingTask>",
         "Bounded<BlockingTask>",
-        "queue: VecDeque<BlockingTask>", // unbounded VecDeque is OK, but with a Mutex it's serialized
+        "queue: VecDeque<BlockingTask>",
         "channel::<BlockingTask>(",
-    ];
-    for pat in &suspect_bounded_queues {
+    ] {
         assert!(
-            !source.contains(pat),
-            "REGRESSION: BlockingPool now uses `{pat}` — a \
-             bounded or non-MPMC queue. Verify the saturation \
-             policy: does spawn block? panic? drop? Any of \
-             these is a regression from the queue-always \
-             contract.",
+            !source.contains(pattern) && !queues.contains(pattern),
+            "REGRESSION: blocking storage uses {pattern}; preserve queue-without-rejection admission",
         );
     }
 }
@@ -204,10 +208,9 @@ fn spawn_with_priority_returns_cancelled_handle_on_shutdown() {
     // lets callers continue cleanly during teardown.
     let source = read_blocking_pool_source();
 
-    let fn_marker =
-        "pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle";
+    let fn_marker = "fn spawn_with_affinity<F>(";
     let start = source.find(fn_marker).expect("spawn_with_priority fn");
-    // spawn_with_priority is short; take a generous window.
+    // Inspect the shared submission path used by every public spawn method.
     let after = &source[start + fn_marker.len()..];
     let next_fn_offset = after
         .find("\n    pub fn ")
@@ -246,8 +249,7 @@ fn spawn_path_has_no_panicking_code() {
     // graceful (returns a cancelled handle).
     let source = read_blocking_pool_source();
 
-    let fn_marker =
-        "pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle";
+    let fn_marker = "fn spawn_with_affinity<F>(";
     let start = source.find(fn_marker).expect("spawn_with_priority");
     let after = &source[start + fn_marker.len()..];
     let next_fn_offset = after
@@ -345,8 +347,7 @@ fn maybe_spawn_thread_called_after_enqueue_to_grow_pool() {
     // size at min_threads regardless of load.
     let source = read_blocking_pool_source();
 
-    let fn_marker =
-        "pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle";
+    let fn_marker = "fn spawn_with_affinity<F>(";
     let start = source.find(fn_marker).expect("spawn_with_priority");
     let after = &source[start + fn_marker.len()..];
     let next_fn_offset = after

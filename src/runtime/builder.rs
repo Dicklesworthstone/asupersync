@@ -167,6 +167,7 @@ use crate::observability::task_inspector::{
 use crate::record::RegionLimits;
 use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
+use crate::runtime::blocking_pool::BlockingQueuePolicy;
 use crate::runtime::config::{
     AdaptiveReadyBatchConfig, RuntimeCapacityHints, RuntimeConfig, SchedulerPlacementMode,
     WorkerCohortMapping,
@@ -2658,6 +2659,8 @@ pub struct RuntimeBuilder {
     /// Set once the blocking pool's maximum is chosen explicitly. The default
     /// pool is marked so CPU-bound fan-out ignores its cap (kpmoy5.1.15).
     blocking_sized: bool,
+    /// Explicit queue selection without extending the public config structs.
+    blocking_queue_policy: BlockingQueuePolicy,
     /// Set by [`RuntimeBuilder::resource_sampling`]: how often a sampler
     /// thread refreshes resource pressure (asupersync-1ir2em).
     resource_sampling: Option<Duration>,
@@ -2692,6 +2695,7 @@ impl RuntimeBuilder {
             capture_schedules: false,
             scheduler_evidence_sink: None,
             blocking_sized: false,
+            blocking_queue_policy: BlockingQueuePolicy::Fifo,
             resource_sampling: None,
         }
     }
@@ -2908,6 +2912,21 @@ impl RuntimeBuilder {
         self.config.blocking.min_threads = min;
         self.config.blocking.max_threads = max;
         self.blocking_sized = true;
+        self
+    }
+
+    /// Select the blocking pool's queue policy.
+    ///
+    /// FIFO remains the default. Opt-in priority scheduling uses larger
+    /// priority values first, with bounded fairness turns within each queue.
+    /// Async blocking work inherits the current context's budget priority;
+    /// explicit pool submissions may use `spawn_with_priority`.
+    ///
+    /// This is independent of cohort routing and does not bound queue admission
+    /// or preempt running closures. It has no effect when the pool is disabled.
+    #[must_use]
+    pub fn blocking_queue_policy(mut self, policy: BlockingQueuePolicy) -> Self {
+        self.blocking_queue_policy = policy;
         self
     }
 
@@ -3452,6 +3471,7 @@ impl RuntimeBuilder {
             capture_schedules,
             scheduler_evidence_sink,
             blocking_sized,
+            blocking_queue_policy,
             resource_sampling,
         } = self;
         #[cfg(target_arch = "wasm32")]
@@ -3514,6 +3534,7 @@ impl RuntimeBuilder {
             current_thread,
             scheduler_evidence_sink,
             required_spawn_authorization,
+            blocking_queue_policy,
         )?;
         if capture_schedules {
             let trace = runtime
@@ -4132,6 +4153,7 @@ impl Runtime {
             false,
             None,
             None,
+            BlockingQueuePolicy::Fifo,
         )
     }
 
@@ -4150,6 +4172,7 @@ impl Runtime {
         current_thread: bool,
         scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
         required_spawn_authorization: Option<crate::security::key::AuthKey>,
+        blocking_queue_policy: BlockingQueuePolicy,
     ) -> Result<Self, Error> {
         config.normalize();
         if let Some(monitor) = config.deadline_monitor.as_mut()
@@ -4189,6 +4212,7 @@ impl Runtime {
                 terminal_io_reactor_snapshot,
                 host_services,
                 scheduler_evidence_sink,
+                blocking_queue_policy,
             );
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
@@ -4212,6 +4236,7 @@ impl Runtime {
                 terminal_io_reactor_snapshot,
                 host_services,
                 scheduler_evidence_sink,
+                blocking_queue_policy,
             );
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
@@ -6263,6 +6288,7 @@ impl RuntimeInner {
         terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
         host_services: &dyn RuntimeHostServices,
         scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
+        blocking_queue_policy: BlockingQueuePolicy,
     ) -> (Self, Vec<ThreeLaneWorker>) {
         // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape routes
         // internally below — the Sharded shape constructs a ShardedState
@@ -6420,7 +6446,7 @@ impl RuntimeInner {
         let deadline_monitor =
             host_services.start_deadline_monitor(&config, &state, scheduler.dispatch_task_table());
 
-        let blocking_pool = Self::create_blocking_pool(&config);
+        let blocking_pool = Self::create_blocking_pool(&config, blocking_queue_policy);
         if let Some(pool) = blocking_pool.as_ref() {
             let mut guard = state
                 .lock()
@@ -6478,6 +6504,7 @@ impl RuntimeInner {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn create_blocking_pool(
         config: &RuntimeConfig,
+        queue_policy: BlockingQueuePolicy,
     ) -> Option<crate::runtime::blocking_pool::BlockingPool> {
         if config.blocking.max_threads == 0 {
             return None;
@@ -6494,10 +6521,11 @@ impl RuntimeInner {
                 .map(crate::runtime::config::WorkerCohortMapping::cohort_count),
             ..Default::default()
         };
-        Some(crate::runtime::blocking_pool::BlockingPool::with_config(
+        Some(crate::runtime::blocking_pool::BlockingPool::with_config_and_queue_policy(
             config.blocking.min_threads,
             config.blocking.max_threads,
             options,
+            queue_policy,
         ))
     }
 
