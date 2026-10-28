@@ -141,11 +141,25 @@ fn noop_waker() -> Waker {
     Waker::noop().clone()
 }
 
+/// The lazily built default client, behind a trait object. Auto-trait proofs
+/// (`Cx: Send`) stop at `dyn DefaultHttpClient`: the concrete client's pool
+/// holds rustls connection types under `tls`, and walking them from deep inside
+/// a downstream future overflowed stable rustc's default recursion limit (#86).
+trait DefaultHttpClient: Send + Sync {
+    fn client(&self) -> crate::http::h1::HttpClient;
+}
+
+impl DefaultHttpClient for crate::http::h1::HttpClient {
+    fn client(&self) -> crate::http::h1::HttpClient {
+        self.clone()
+    }
+}
+
 /// Grouped handle fields shared behind a single `Arc` to reduce per-clone
 /// refcount operations from ~13 to 1 for this bundle.
 #[derive(Clone)]
 struct DefaultHttpClientSlot {
-    inner: Arc<std::sync::OnceLock<crate::http::h1::HttpClient>>,
+    inner: Arc<std::sync::OnceLock<Box<dyn DefaultHttpClient>>>,
 }
 
 impl Default for DefaultHttpClientSlot {
@@ -167,8 +181,8 @@ impl std::fmt::Debug for DefaultHttpClientSlot {
 impl DefaultHttpClientSlot {
     fn get_or_init(&self) -> crate::http::h1::HttpClient {
         self.inner
-            .get_or_init(crate::http::h1::HttpClient::new)
-            .clone()
+            .get_or_init(|| Box::new(crate::http::h1::HttpClient::new()))
+            .client()
     }
 }
 
