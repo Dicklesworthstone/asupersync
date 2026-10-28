@@ -1816,7 +1816,18 @@ pub use managed::{
 #[path = "supervision/managed_names.rs"]
 mod managed_names;
 
+#[path = "supervision/managed_control.rs"]
+mod managed_control;
+pub use managed_control::{ManagedActivationError, ManagedSupervisorControl};
+
+#[cfg(test)]
+#[path = "supervision/managed_control_tests.rs"]
+mod managed_control_tests;
+
 mod managed {
+    use super::managed_control::{
+        ActivationReceiver, ActivationRequest, ManagedActivationError, ManagedSupervisorControl,
+    };
     use super::managed_names::{GenerationName, RegistrationFailure};
     use super::{
         Arc, BTreeMap, Budget, BudgetRefusal, CancelReason, ChildName, ChildSpec,
@@ -2402,9 +2413,15 @@ mod managed {
         }
     }
 
+    enum ControllerEvent {
+        Terminal(usize),
+        Activate(ActivationRequest),
+    }
+
     struct Controller<E> {
         supervisor: ManagedSupervisor<E>,
         cx: Cx,
+        control: Option<ActivationReceiver>,
         root: Option<ChildRegion>,
         running: Vec<Option<RunningChild<E>>>,
         latest: Vec<Option<ManagedChildCompletion<E>>>,
@@ -2469,6 +2486,7 @@ mod managed {
             Self {
                 supervisor,
                 cx: cx.clone(),
+                control: None,
                 root: None,
                 running: (0..count).map(|_| None).collect(),
                 latest: (0..count).map(|_| None).collect(),
@@ -3055,8 +3073,19 @@ mod managed {
                 .cloned()
         }
 
-        async fn wait_exit(&mut self) -> Option<usize> {
+        async fn wait_event(&mut self) -> Option<ControllerEvent> {
             let mut cursor: usize = 0;
+            // A controlled tree can be idle with no child task to wake it at
+            // its region deadline. Keep that deadline live while awaiting work.
+            let mut deadline = self
+                .control
+                .as_ref()
+                .and_then(|_| {
+                    self.root
+                        .as_ref()
+                        .and_then(|region| region.cx().budget().deadline)
+                })
+                .map(|at| Box::pin(crate::time::sleep_until(at)));
             poll_fn(|poll_cx| {
                 self.cancel_waker = Some(
                     self.cx
@@ -3067,6 +3096,13 @@ mod managed {
                     return Poll::Ready(None);
                 }
                 if !matches!(self.report.outcome, Outcome::Ok(())) {
+                    return Poll::Ready(None);
+                }
+                if deadline
+                    .as_mut()
+                    .is_some_and(|sleep| sleep.as_mut().poll_deadline(poll_cx).is_ready())
+                {
+                    self.record_deadline();
                     return Poll::Ready(None);
                 }
                 let end = cursor.saturating_add(SCAN_QUANTUM).min(self.running.len());
@@ -3100,9 +3136,20 @@ mod managed {
                     (completed.completed_at, completed.generation.task)
                 });
                 if !self.ready.is_empty() {
-                    return Poll::Ready(Some(self.ready.remove(0).0));
+                    return Poll::Ready(Some(ControllerEvent::Terminal(self.ready.remove(0).0)));
                 }
-                if self.running.iter().all(Option::is_none) {
+                if let Some(control) = self.control.as_mut() {
+                    match control.poll_recv(&self.cx, poll_cx) {
+                        Poll::Ready(Ok(request)) => {
+                            return Poll::Ready(Some(ControllerEvent::Activate(request)));
+                        }
+                        Poll::Ready(Err(_)) => {
+                            self.control = None;
+                        }
+                        Poll::Pending => {}
+                    }
+                }
+                if self.control.is_none() && self.running.iter().all(Option::is_none) {
                     Poll::Ready(None)
                 } else {
                     // A child that terminated at an index this sweep already
@@ -3117,6 +3164,96 @@ mod managed {
                 }
             })
             .await
+        }
+
+        async fn activate(&mut self, request: ActivationRequest) {
+            let Some(index) = self
+                .supervisor
+                .children
+                .iter()
+                .position(|child| child.name == request.child)
+            else {
+                let child = request.child.clone();
+                request.complete(Err(ManagedActivationError::UnknownChild { child }));
+                return;
+            };
+            let child = self.supervisor.children[index].name.clone();
+            if self.supervisor.children[index].start_immediately {
+                request.complete(Err(ManagedActivationError::NotDeferred { child }));
+                return;
+            }
+            if self.numbers[index] != 0 || self.retired[index] {
+                request.complete(Err(ManagedActivationError::AlreadyActivated { child }));
+                return;
+            }
+            let unavailable = self.supervisor.children[index]
+                .depends_on
+                .iter()
+                .find(|name| {
+                    let dependency = self
+                        .supervisor
+                        .children
+                        .iter()
+                        .position(|spec| &spec.name == *name)
+                        .expect("compiled dependency");
+                    self.running[dependency].as_ref().is_none_or(|running| {
+                        let publication = running.publication.lock();
+                        !publication.started
+                            || publication.terminal.is_some()
+                            || running.terminal_observed
+                            || running.cancellation_sent
+                    })
+                })
+                .cloned();
+            if let Some(dependency) = unavailable {
+                request.complete(Err(ManagedActivationError::DependencyUnavailable {
+                    child,
+                    dependency,
+                }));
+                return;
+            }
+            if self.cancelled() {
+                self.record_cancel();
+                request.complete(Err(ManagedActivationError::Closed));
+                return;
+            }
+            if self.deadline_passed() {
+                self.record_deadline();
+                request.complete(Err(ManagedActivationError::Closed));
+                return;
+            }
+            if !request.claim() {
+                return;
+            }
+            match self.start(index).await {
+                Ok(()) => {
+                    let generation = self.running[index].as_ref().and_then(|running| {
+                        running
+                            .start_observed
+                            .then(|| running.publication.lock().identity)
+                            .flatten()
+                    });
+                    if let Some(generation) = generation {
+                        self.trace("activated", index, generation);
+                        request.complete(Ok(generation));
+                    } else {
+                        // Parent cancellation can stop region admission before
+                        // factory entry; finish() still drains any owned task.
+                        request.complete(Err(ManagedActivationError::Closed));
+                    }
+                }
+                Err(error) => {
+                    request.complete(Err(ManagedActivationError::StartFailed { child }));
+                    if self.supervisor.children[index].required {
+                        self.record_error(error);
+                    } else {
+                        if let Err(cleanup) = self.drain(index).await {
+                            self.record_error(cleanup);
+                        }
+                        self.retire_factory(index);
+                    }
+                }
+            }
         }
 
         async fn backoff(&mut self, delay: Option<Duration>) -> bool {
@@ -3222,7 +3359,7 @@ mod managed {
                     return;
                 }
                 if !self.supervisor.children[index].start_immediately {
-                    if !self.retire_factory(index) {
+                    if self.control.is_none() && !self.retire_factory(index) {
                         return;
                     }
                     continue;
@@ -3257,7 +3394,17 @@ mod managed {
                     return;
                 }
             }
-            while let Some(failed) = self.wait_exit().await {
+            while let Some(event) = self.wait_event().await {
+                let failed = match event {
+                    ControllerEvent::Terminal(index) => index,
+                    ControllerEvent::Activate(request) => {
+                        self.activate(request).await;
+                        // Refused commands must not monopolize a worker while
+                        // producers keep refilling the bounded mailbox.
+                        crate::runtime::yield_now().await;
+                        continue;
+                    }
+                };
                 let completed = self.latest[failed].as_ref().expect("joined terminal");
                 if self.supervisor.stop_on_child_failure
                     && ManagedRestartMode::Transient.eligible(completed)
@@ -3527,6 +3674,8 @@ mod managed {
         }
 
         async fn finish(&mut self) {
+            // Refuse/wake queued callers before asynchronous region cleanup.
+            drop(self.control.take());
             self.cancel_children((0..self.running.len()).rev());
             for index in (0..self.running.len()).rev() {
                 if let Err(error) = self.drain(index).await {
@@ -3672,7 +3821,16 @@ mod managed {
         /// [`EscalationPolicy::ResetCounter`]. Those policies govern restart
         /// budget exhaustion, not failure to clean up a retired generation.
         pub async fn run(self, cx: &Cx) -> ManagedSupervisorReport<E> {
+            self.run_with_control(cx, None).await
+        }
+
+        async fn run_with_control(
+            self,
+            cx: &Cx,
+            control: Option<ActivationReceiver>,
+        ) -> ManagedSupervisorReport<E> {
             let mut controller = Controller::new(self, cx);
+            controller.control = control;
             controller.execute().await;
             controller.finish().await;
             let empty = ManagedSupervisorReport {
@@ -3703,6 +3861,35 @@ mod managed {
             })?;
             Ok(ManagedSupervisorHandle { task, report })
         }
+
+        /// Spawn a supervisor that retains deferred bindings for live activation.
+        ///
+        /// The returned control shares one bounded mailbox among its clones.
+        /// A configured deferred child is activated at most once, then uses the
+        /// same generation regions, dependencies, restart policy and intensity
+        /// as eager children. Dormant bindings do not join sibling restart sets.
+        ///
+        /// An idle controlled supervisor waits while a control handle exists.
+        /// Dropping the last control closes activation; existing children keep
+        /// their normal lifecycle. Aborting the supervisor handle or cancelling
+        /// its parent closes activation and drains the entire tree before join.
+        /// The existing `run` and `spawn` entry points still retire deferred
+        /// bindings at boot.
+        pub fn spawn_controlled(
+            self,
+            cx: &Cx,
+            pending_capacity: std::num::NonZeroUsize,
+        ) -> Result<(ManagedSupervisorHandle<E>, ManagedSupervisorControl), SpawnError> {
+            let (control, incoming) = super::managed_control::channel(pending_capacity);
+            let report = Arc::new(Mutex::new(None));
+            let publication = Arc::clone(&report);
+            let task = cx.spawn(move |controller_cx| async move {
+                let result = self.run_with_control(&controller_cx, Some(incoming)).await;
+                *publication.lock() = Some(result);
+            })?;
+            Ok((ManagedSupervisorHandle { task, report }, control))
+        }
+
     }
 
     #[cfg(test)]
