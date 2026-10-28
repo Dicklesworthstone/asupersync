@@ -13,9 +13,24 @@ asupersync = { path = "../../..", default-features = false, features = ["proc-ma
 
 [features]
 default = []
+# Only the separate pinned-compiler sentinel lowers its own recursion limit.
+depth-probe = []
 runtime-defaults = ["asupersync/default"]
 nightly-outcome-try = ["asupersync/nightly-outcome-try"]
 tls = ["asupersync/tls"]
 tls-core = ["asupersync/tls-core"]
 tls-native-roots = ["asupersync/tls-native-roots"]
 tls-webpki-roots = ["asupersync/tls-webpki-roots"]
+
+# Runtime tests are deliberately separate from the production-only Send graph.
+behavior = ["asupersync/test-internals"]
+
+[[test]]
+name = "http_slot"
+path = "tests/http_slot.rs"
+required-features = ["behavior"]
+
+[[bin]]
+name = "depth_probe"
+path = "src/bin/depth_probe.rs"
+required-features = ["depth-probe"]

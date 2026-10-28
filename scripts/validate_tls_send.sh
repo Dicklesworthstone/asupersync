@@ -21,8 +21,13 @@ Each compiler must be an installed, exact stable Rust 1.99.x release.
 No RUSTC_BOOTSTRAP, compiler wrappers, or inherited rustflags are used.
 Logs, resolved dependency features, and the consumer lockfile are retained in
 TLS_SEND_OUTPUT_DIR (default: a new directory below target/tls-send-results).
+The native TLS/off rows also compile an opt-in depth sentinel at a LOWER
+recursion limit (60), scoped to these exact compilers. The ordinary consumer
+uses Rust's default limit. A failed sentinel is a failure, not a skipped row.
 A missing compiler, resolution error, or failed cell makes the runner fail.
-A pass covers this downstream compilation matrix only, not release readiness.
+The runtime tests additionally check lazy/concurrent access, inherited sharing,
+and cancellation. Focused root HTTP/TLS integration targets run separately.
+A pass is scoped to these checks, not release readiness.
 HELP
     exit 0
 fi
@@ -61,6 +66,9 @@ git status --porcelain=v1 > "$OUTPUT/git-status.txt"
 # Qualification must not accidentally exercise a bootstrap/new-solver wrapper.
 unset RUSTC_BOOTSTRAP RUSTC RUSTDOC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+# .cargo/config.toml sets nightly-only -Z threads=4. A nonempty RUSTFLAGS
+# overrides Cargo config/target rustflags without enabling unstable features.
+export RUSTFLAGS='-C debuginfo=0'
 export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/tls-send-build}"
 export CARGO_TERM_COLOR=never
@@ -132,6 +140,31 @@ for toolchain in "${TOOLCHAINS[@]}"; do
             continue
         fi
         run_stage "$name-check" cargo "+$toolchain" check --lib "${args[@]}" || :
+        if [[ "${PROFILES[$i]}" == native || "${PROFILES[$i]}" == native-tls ]]; then
+            probe_features=depth-probe
+            if [[ -n "${FEATURES[$i]}" ]]; then probe_features+=,${FEATURES[$i]}; fi
+            run_stage "$name-depth-probe" cargo "+$toolchain" check --bin depth_probe --manifest-path "$MANIFEST" --locked --no-default-features --features "$probe_features" || :
+        fi
+    done
+    # Only these separate runtime rows enable test-internals. Never use their
+    # unified graph as evidence for the production-only compile rows above.
+    for tls in off on; do
+        features=behavior
+        root_features=proc-macros,native-runtime,test-internals
+        tests=(--test http_client_default_for_runtime_conformance --test http_client_pool_wait)
+        if [[ "$tls" == on ]]; then
+            features+=,tls
+            root_features+=,tls
+            tests+=(--test http_client_https_e2e)
+        fi
+        name="$toolchain-slot-tls-$tls"
+        if run_stage "$name" cargo "+$toolchain" test --manifest-path "$MANIFEST" --locked --no-default-features --features "$features" --test http_slot -- --nocapture; then
+            if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$OUTPUT/$name.log"; then
+                printf '%s\t1\t%s\n' "$name-nonzero-tests" "$name.log" >> "$OUTPUT/summary.tsv"
+                failed=1
+            fi
+        fi
+        run_stage "$toolchain-http-tls-$tls" cargo "+$toolchain" test --locked -p asupersync --no-default-features --features "$root_features" "${tests[@]}" -- --nocapture || :
     done
 done
 printf 'Qualification logs: %s\n' "$OUTPUT"
@@ -139,4 +172,4 @@ if [[ "$failed" != 0 ]]; then
     echo 'FAIL: at least one required compiler or matrix cell did not pass.' >&2
     exit 1
 fi
-echo 'PASS: downstream compilation matrix only; release gates remain separate.'
+echo 'PASS: downstream Send matrix and focused runtime HTTP/TLS checks; release gates remain separate.'
