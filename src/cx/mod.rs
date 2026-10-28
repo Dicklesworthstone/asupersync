@@ -62,6 +62,7 @@ pub mod cap;
 pub mod capacity_ticket;
 pub mod child_region;
 pub mod cx;
+mod dynamic_replacement;
 pub mod dynamic_service;
 pub mod dynamic_supervisor;
 pub mod fiber;
@@ -100,6 +101,7 @@ pub use cx::{
     BudgetStats, CapabilityLayerSnapshot, CapabilitySnapshot, CostBudgetStats, Cx,
     DeadlineBudgetStats, MAX_SPAWN_BATCH_SIZE, PollBudgetStats, SpanGuard, SpawnBatchError,
 };
+pub use dynamic_replacement::DynamicChildReplacement;
 pub use dynamic_service::{
     DynamicControlError, DynamicServiceChildInfo, DynamicServiceChildState, DynamicServiceConfig,
     DynamicServiceExit, DynamicServiceHandle, DynamicSupervisorClient,
