@@ -53,6 +53,6 @@ pub use stream::{
     StreamingServerRequest,
 };
 pub use types::{
-    Method, MultipartError, MultipartForm, Request, RequestBuilder, Response, ResponseBuilder,
-    StatusCode, Version,
+    Method, MultipartBody, MultipartBodyError, MultipartBodyPart, MultipartChunk, MultipartError,
+    MultipartForm, Request, RequestBuilder, Response, ResponseBuilder, StatusCode, Version,
 };
