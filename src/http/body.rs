@@ -661,6 +661,153 @@ where
     }
 }
 
+/// An HTTP body read incrementally from an [`AsyncRead`](crate::io::AsyncRead).
+///
+/// Each poll performs at most one read, and each data frame contains at most
+/// the configured chunk size (8 KiB by default). The filled allocation moves
+/// into the returned frame without copying the payload. A pending read keeps
+/// its buffer for the next poll; no task, read-ahead loop, or whole-body
+/// collector is created. The reader may be `!Unpin`.
+///
+/// Input length remains unknown until EOF. To declare an upload length, set
+/// the request's `Content-Length` or the multipart part's explicit length;
+/// the streaming encoder checks that declaration against actual EOF.
+///
+/// In-place bytes produced alongside `Pending` or an error are yielded first.
+/// An accompanying error is returned on the next poll, after which the body
+/// is complete. A provider that panics or replaces the offered destination
+/// cannot be polled again through this adapter. Dropping the body drops its
+/// reader; cancellation and pending-I/O cleanup follow the reader's contract.
+#[derive(Debug)]
+#[pin_project::pin_project]
+pub struct ReaderBody<R> {
+    #[pin]
+    reader: R,
+    buffer: Vec<u8>,
+    chunk_size: usize,
+    pending_error: Option<std::io::Error>,
+    done: bool,
+    poisoned: bool,
+}
+
+impl<R> ReaderBody<R> {
+    /// Creates a body that yields frames of at most 8 KiB.
+    #[must_use]
+    pub fn new(reader: R) -> Self {
+        Self::with_capacity(reader, 8 * 1024)
+    }
+
+    /// Creates a body with a maximum data-frame size.
+    ///
+    /// A zero size is treated as one byte, matching [`crate::io::ReaderStream`].
+    /// Storage is allocated on the first poll, not when the body is created.
+    #[must_use]
+    pub fn with_capacity(reader: R, chunk_size: usize) -> Self {
+        Self {
+            reader,
+            buffer: Vec::new(),
+            chunk_size: chunk_size.max(1),
+            pending_error: None,
+            done: false,
+            poisoned: false,
+        }
+    }
+
+    /// Returns the reader without polling it.
+    #[must_use]
+    pub fn get_ref(&self) -> &R {
+        &self.reader
+    }
+
+    /// Recovers the reader, discarding any deferred error.
+    ///
+    /// Data already yielded belongs to its recipient. A read pending inside
+    /// the reader remains subject to that reader's own resume/drop contract.
+    #[must_use]
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+}
+
+impl<R: crate::io::AsyncRead> Body for ReaderBody<R> {
+    type Data = BytesCursor;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.project();
+        if *this.done {
+            return Poll::Ready(None);
+        }
+        if let Some(error) = this.pending_error.take() {
+            *this.done = true;
+            return Poll::Ready(Some(Err(error)));
+        }
+        if *this.poisoned {
+            *this.done = true;
+            *this.buffer = Vec::new();
+            return Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP body reader has unknown effects after a provider failure",
+            ))));
+        }
+
+        this.buffer.resize(*this.chunk_size, 0);
+        let start = this.buffer.as_ptr();
+        let offered = this.buffer.len();
+        // Arm before invoking arbitrary provider code. If it unwinds, a
+        // caller that catches the panic must not accidentally read twice.
+        *this.poisoned = true;
+        let (result, filled) = {
+            let mut read_buf = crate::io::ReadBuf::new(this.buffer);
+            let result = this.reader.poll_read(cx, &mut read_buf);
+            let filled = read_buf.filled();
+            if !filled.is_empty() && (filled.as_ptr() != start || filled.len() > offered) {
+                *this.done = true;
+                *this.buffer = Vec::new();
+                return Poll::Ready(Some(Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "HTTP body reader replaced its destination buffer",
+                ))));
+            }
+            (result, filled.len())
+        };
+        *this.poisoned = false;
+
+        if filled != 0 {
+            if let Poll::Ready(Err(error)) = result {
+                *this.pending_error = Some(error);
+            }
+            this.buffer.truncate(filled);
+            let bytes = Bytes::from(std::mem::take(this.buffer));
+            return Poll::Ready(Some(Ok(Frame::Data(BytesCursor::new(bytes)))));
+        }
+
+        match result {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                *this.done = true;
+                *this.buffer = Vec::new();
+                Poll::Ready(result.err().map(Err))
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        if self.done {
+            SizeHint::with_exact(0)
+        } else {
+            SizeHint::default()
+        }
+    }
+}
+
 /// A body that collects data from another body.
 ///
 /// This is useful for buffering an entire body into memory.
