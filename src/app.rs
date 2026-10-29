@@ -695,6 +695,13 @@ mod managed_execution {
                 mask = mask.intersect(<cap::CapSet<true, true, true, true, false>>::MASK);
             }
             cx.runtime_mask = cx.runtime_mask.intersect(mask);
+            // Spawn and blocking-pool access are separate AppSpec grants.
+            // Removing only the spawn bit cannot isolate a Spawn-only unit;
+            // detach the handle so its ambient context and descendants also
+            // retain the narrower authority.
+            if !has(AppCxCapabilityV1::Blocking) {
+                cx = cx.with_blocking_pool_handle(None);
+            }
             cx.with_registry_handle(if has(AppCxCapabilityV1::Registry) {
                 registry
             } else {
@@ -993,6 +1000,9 @@ mod managed_execution {
     /// govern participating runtime primitives, not arbitrary Rust allocations.
     /// The existing five Cx effect bits are attenuated; tracing remains an
     /// ungated diagnostic capability, as on other restricted Cx values.
+    /// Blocking-pool handles are supplied only to units declaring `Blocking`,
+    /// independently of `Spawn`. This does not prohibit ordinary Rust code
+    /// from blocking its own thread or change legacy inline fallback APIs.
     ///
     /// Signal jobs require `ManagedAppBinding::signal_worker` with the exact
     /// declared source name. Named resources require the explicit typed

@@ -156,6 +156,271 @@
             }
         }
 
+        struct UploadBody {
+            frames: std::collections::VecDeque<Frame<crate::bytes::BytesCursor>>,
+            exact: Option<u64>,
+        }
+
+        impl Body for UploadBody {
+            type Data = crate::bytes::BytesCursor;
+            type Error = std::convert::Infallible;
+
+            fn poll_frame(
+                self: Pin<&mut Self>,
+                _task: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                Poll::Ready(self.get_mut().frames.pop_front().map(Ok))
+            }
+
+            fn size_hint(&self) -> SizeHint {
+                self.exact.map_or_else(SizeHint::default, SizeHint::with_exact)
+            }
+        }
+
+        fn upload_data(bytes: &'static [u8]) -> Frame<crate::bytes::BytesCursor> {
+            Frame::Data(crate::bytes::BytesCursor::new(crate::bytes::Bytes::from_static(bytes)))
+        }
+
+        #[test]
+        fn streaming_uploads_preserve_wire_framing_cookies_and_pool_reuse() {
+            for multithread in [false, true] {
+                let (listener, url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut socket = accept(&listener);
+                    let head = request_head(&mut socket);
+                    assert!(head.starts_with("POST /fixed "));
+                    assert!(head.to_ascii_lowercase().contains("content-length: 6\r\n"));
+                    assert!(head.contains("Authorization: Bearer upload-token\r\n"));
+                    assert!(head.contains("X-Default: shared\r\n"));
+                    let mut body = [0_u8; 6];
+                    socket.read_exact(&mut body).unwrap();
+                    assert_eq!(&body, b"abcdef");
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: session=upload\r\n\r\nok").unwrap();
+
+                    let head = request_head(&mut socket);
+                    assert!(head.starts_with("POST /chunked "));
+                    assert!(head.to_ascii_lowercase().contains("transfer-encoding: chunked\r\n"));
+                    assert!(!head.to_ascii_lowercase().contains("content-length:"));
+                    assert!(head.contains("Cookie: session=upload\r\n"));
+                    let expected = b"3\r\nghi\r\n3\r\njkl\r\n0\r\nx-checksum: complete\r\n\r\n";
+                    let mut body = vec![0_u8; expected.len()];
+                    socket.read_exact(&mut body).unwrap();
+                    assert_eq!(body, expected);
+                    socket.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+
+                    assert!(request_head(&mut socket).starts_with("GET /after "));
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                    assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                });
+                let runtime = runtime(multithread);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let client = HttpClient::builder()
+                    .max_connections_per_host(1)
+                    .max_total_connections(1)
+                    .cookie_store(true)
+                    .default_header("X-Default", "shared")
+                    .request_timeout(Duration::from_secs(4))
+                    .build();
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let body = UploadBody {
+                        frames: [upload_data(b"abc"), upload_data(b"def")].into(),
+                        exact: Some(6),
+                    };
+                    let mut response = client.post(format!("{url}/fixed"))
+                        .bearer_auth("upload-token")
+                        .send_with_body(&cx, body).await.unwrap();
+                    assert!(!response.body_withheld);
+                    assert_eq!(client.pool_stats().idle_connections, 0);
+                    assert_eq!(drain(&mut response.body).await.unwrap(), b"ok");
+                    assert_eq!(client.pool_stats().idle_connections, 1);
+
+                    let mut trailers = crate::http::body::HeaderMap::new();
+                    trailers.insert(HeaderName::from_static("x-checksum"), crate::http::body::HeaderValue::from_static("complete"));
+                    let body = UploadBody {
+                        frames: [upload_data(b"ghi"), upload_data(b"jkl"), Frame::Trailers(trailers)].into(),
+                        exact: None,
+                    };
+                    let response = client.request_with_body(
+                        &cx, Method::Post, &format!("{url}/chunked"),
+                        vec![("Trailer".into(), "x-checksum".into())], body,
+                    ).await.unwrap();
+                    assert_eq!(response.head.status, 204);
+                    assert!(!response.body_withheld);
+                    assert!(response.body.is_end_stream());
+                    assert_eq!(client.pool_stats().idle_connections, 1);
+                    assert_eq!(client.send_get(&cx, &format!("{url}/after")).await.unwrap().body, b"ok");
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                });
+                peer.join().unwrap();
+                assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        struct ParkedUpload {
+            polled: Option<std::sync::mpsc::Sender<()>>,
+            polls: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Body for ParkedUpload {
+            type Data = crate::bytes::BytesCursor;
+            type Error = std::convert::Infallible;
+
+            fn poll_frame(
+                self: Pin<&mut Self>,
+                _task: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                let this = self.get_mut();
+                this.polls.fetch_add(1, Ordering::SeqCst);
+                if let Some(witness) = this.polled.take() {
+                    witness.send(()).unwrap();
+                }
+                // No self wake: only owner cancellation/deadline or peer I/O
+                // can allow the operation to make progress from this state.
+                Poll::Pending
+            }
+        }
+
+        impl Drop for ParkedUpload {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn streaming_upload_owner_cancel_wakes_parked_producer_and_releases_admission() {
+            for multithread in [false, true] {
+                let (listener, url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut abandoned = accept(&listener);
+                    assert!(request_head(&mut abandoned).starts_with("POST /parked "));
+                    expect_closed(&mut abandoned);
+                    let mut replacement = accept(&listener);
+                    assert!(request_head(&mut replacement).starts_with("GET /after "));
+                    replacement.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                });
+                let runtime = runtime(multithread);
+                let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+                let owner = Cx::for_testing();
+                let (polled, witness) = std::sync::mpsc::channel();
+                let polls = Arc::new(AtomicUsize::new(0));
+                let drops = Arc::new(AtomicUsize::new(0));
+                let cancel_owner = owner.clone();
+                let canceller = std::thread::spawn(move || {
+                    witness.recv_timeout(Duration::from_secs(3)).unwrap();
+                    cancel_owner.cancel_with(crate::types::CancelKind::User, Some("parked upload"));
+                });
+                let client = HttpClient::builder()
+                    .max_connections_per_host(1)
+                    .max_total_connections(1)
+                    .request_timeout(Duration::from_secs(4))
+                    .build();
+                runtime.block_on_with_cx(driver.clone(), async {
+                    let body = ParkedUpload { polled: Some(polled), polls: polls.clone(), drops: drops.clone() };
+                    let result = client.request_with_body(&owner, Method::Post, &format!("{url}/parked"), Vec::new(), body).await;
+                    assert!(matches!(result, Err(ClientError::Cancelled)), "{result:?}");
+                    assert!(polls.load(Ordering::SeqCst) > 0);
+                    assert_eq!(drops.load(Ordering::SeqCst), 1);
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                    assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                    assert_eq!(client.send_get(&driver, &format!("{url}/after")).await.unwrap().body, b"ok");
+                });
+                canceller.join().unwrap();
+                peer.join().unwrap();
+                assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[test]
+        fn streaming_upload_early_redirect_is_returned_without_polling_or_replay() {
+            let (listener, url) = listener();
+            let peer = std::thread::spawn(move || {
+                let mut socket = accept(&listener);
+                let head = request_head(&mut socket);
+                assert!(head.contains("Expect: 100-continue\r\n"));
+                socket.write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /elsewhere\r\nContent-Length: 0\r\n\r\n").unwrap();
+                expect_closed(&mut socket);
+                assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+            });
+            let runtime = runtime(false);
+            let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let client = HttpClient::builder().request_timeout(Duration::from_secs(4)).build();
+            runtime.block_on_with_cx(cx.clone(), async {
+                let body = ParkedUpload { polled: None, polls: polls.clone(), drops: drops.clone() };
+                let response = client.post(&url).header("Expect", "100-continue").send_with_body(&cx, body).await.unwrap();
+                assert_eq!(response.head.status, 307);
+                assert!(response.body_withheld);
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert_eq!(client.pool_stats().total_connections, 0);
+            });
+            peer.join().unwrap();
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+
+        #[test]
+        fn streaming_upload_builder_timeout_covers_a_parked_producer() {
+            let (listener, url) = listener();
+            let peer = std::thread::spawn(move || {
+                let mut socket = accept(&listener);
+                request_head(&mut socket);
+                expect_closed(&mut socket);
+            });
+            let runtime = runtime(false);
+            let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+            let clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_nanos(100)));
+            let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(7, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let (polled, witness) = std::sync::mpsc::channel();
+            let expire = std::thread::spawn(move || {
+                witness.recv_timeout(Duration::from_secs(3)).unwrap();
+                clock.advance(250_000_000);
+                assert!(timer.process_timers() > 0, "parked upload must register its deadline");
+            });
+            let polls = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let client = HttpClient::builder().request_timeout(Duration::from_secs(4)).build();
+            runtime.block_on_with_cx(driver, async {
+                let body = ParkedUpload { polled: Some(polled), polls: polls.clone(), drops: drops.clone() };
+                let result = client.post(&url).timeout(Duration::from_millis(250)).send_with_body(&owner, body).await;
+                assert!(matches!(result, Err(ClientError::DeadlineExceeded)), "{result:?}");
+                assert!(polls.load(Ordering::SeqCst) > 0, "deadline must interrupt an admitted, parked producer");
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert_eq!(client.pool_stats().total_connections, 0);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            });
+            expire.join().unwrap();
+            peer.join().unwrap();
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+
+        #[test]
+        fn streaming_upload_rejects_proxy_and_conflicting_body_before_admission() {
+            let cx = Cx::for_testing();
+            let client = HttpClient::new();
+            let result = block_on(client.post("http://127.0.0.1:9").body(b"buffered".to_vec()).send_with_body(&cx, crate::http::body::Empty::new()));
+            assert!(matches!(result, Err(ClientError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput));
+            assert_eq!(client.pool_stats().total_connections, 0);
+            let client = HttpClient::builder().proxy("http://127.0.0.1:9").build();
+            let result = block_on(client.request_with_body(&cx, Method::Post, "http://127.0.0.1:9", Vec::new(), crate::http::body::Empty::new()));
+            assert!(matches!(result, Err(ClientError::ProxyError(_))));
+            assert_eq!(client.pool_stats().total_connections, 0);
+        }
+
         #[test]
         fn pooled_streaming_holds_admission_until_final_frame_and_reuses_the_socket() {
             for multithread in [false, true] {

@@ -1266,6 +1266,40 @@ impl<'a> ClientRequestBuilder<'a> {
                 .await
         }
     }
+
+    /// Send a streaming request body and retain a pooled streaming response.
+    ///
+    /// Uses the builder's URL, headers and timeout. The body is consumed once:
+    /// redirects are returned to the caller and failed uploads are not retried.
+    /// See [`HttpClient::request_with_body`] for framing and ownership details.
+    /// A nonempty body already set with `body`, `json`, `form` or `multipart`
+    /// is rejected before connection admission instead of silently discarded.
+    pub async fn send_with_body<B>(
+        self,
+        cx: &Cx,
+        body: B,
+    ) -> Result<PooledClientStreamingResponse, ClientError>
+    where
+        B: Body,
+        B::Error: std::fmt::Display,
+    {
+        if !self.body.is_empty() {
+            return Err(ClientError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a streaming request cannot also contain a buffered body",
+            )));
+        }
+        self.client
+            .request_with_body_timeout(
+                cx,
+                self.method,
+                &self.url,
+                self.headers,
+                body,
+                self.timeout,
+            )
+            .await
+    }
 }
 
 /// High-level HTTP/1.1 client.
@@ -1310,7 +1344,8 @@ pub struct HttpClient {
 
 /// A response whose streaming body retains its connection-pool admission.
 ///
-/// Produced by [`HttpClient::request_streaming_pooled`]. Consuming the body to
+/// Produced by [`HttpClient::request_streaming_pooled`] and
+/// [`HttpClient::request_with_body`]. Consuming the body to
 /// its complete HTTP message boundary returns a reusable connection to the
 /// shared pool. Dropping an unfinished body closes the connection and releases
 /// admission synchronously. No task is spawned to drain abandoned responses.
@@ -1730,6 +1765,148 @@ impl HttpClient {
                 return Poll::Ready(Err(error));
             }
             request.as_mut().poll(task)
+        })
+        .await
+    }
+
+    /// Stream an upload and its response over one direct pooled connection.
+    ///
+    /// The upload is pulled through [`Body`] only as the transport can write
+    /// it. One producer frame is retained at a time; the client does not
+    /// collect or clone the payload. Producers control their own frame sizes.
+    /// An explicit `Content-Length`, or an exact body size hint, is checked
+    /// against the bytes actually produced. Otherwise HTTP/1.1 chunked framing
+    /// is used. Request trailers require chunked framing.
+    ///
+    /// This is a one-shot operation, including when the method is idempotent:
+    /// there are no automatic retries or redirects because the body cannot be
+    /// replayed. Redirect responses are returned intact. The existing default
+    /// headers, host-scoped cookies, DNS, TLS and pool admission rules apply.
+    /// Proxy configurations are rejected before connection admission.
+    ///
+    /// Cancellation and the tighter of the owner's deadline and the client's
+    /// request timeout cover pool wait, upload and response consumption. An
+    /// early final response stops the producer and prohibits connection reuse.
+    /// Dropping the exchange or an unfinished response releases its pool slot
+    /// and closes the connection; no background drain task is created.
+    /// Response bytes retain their wire content encoding, as with
+    /// [`Self::request_streaming_pooled`].
+    pub async fn request_with_body<B>(
+        &self,
+        cx: &Cx,
+        method: Method,
+        url: &str,
+        extra_headers: Vec<(String, String)>,
+        body: B,
+    ) -> Result<PooledClientStreamingResponse, ClientError>
+    where
+        B: Body,
+        B::Error: std::fmt::Display,
+    {
+        self.request_with_body_timeout(cx, method, url, extra_headers, body, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn request_with_body_timeout<B>(
+        &self,
+        cx: &Cx,
+        method: Method,
+        url: &str,
+        extra_headers: Vec<(String, String)>,
+        body: B,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<PooledClientStreamingResponse, ClientError>
+    where
+        B: Body,
+        B::Error: std::fmt::Display,
+    {
+        check_cx(cx)?;
+        if self.config.proxy_url.is_some() {
+            return Err(ClientError::ProxyError(
+                "pooled streaming uploads require a direct HTTP or HTTPS connection".to_owned(),
+            ));
+        }
+        let timeout = self.config.request_timeout.into_iter().chain(timeout).min();
+        let deadline = PooledStreamDeadline::capture(cx, timeout);
+        let parsed = ParsedUrl::parse(url)?;
+        let mut owner = PooledStreamOwner::new(cx.clone(), &deadline);
+        let mut exchange = std::pin::pin!(async {
+            let request = self.build_request_with_origin(
+                &method,
+                &parsed,
+                &extra_headers,
+                &[],
+                None,
+                None,
+                None,
+            );
+            let request_forbids_reuse = request_forbids_connection_reuse(&request.headers);
+            let head = crate::http::h1::stream::RequestHead {
+                method: request.method,
+                uri: request.uri,
+                version: request.version,
+                headers: request.headers,
+            };
+            let key = parsed.pool_key();
+            let acquired = self
+                .acquire_connection_with_clock(cx, &parsed, true, Some(&deadline))
+                .await?;
+            let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
+            // Close an acquired socket before releasing admission if the
+            // owner is cancelled at the checkpoint below.
+            let io = acquired.io;
+            check_cx(cx)?;
+            let response = if let Some(max_body_size) = self.config.max_body_size {
+                Http1Client::request_with_body_and_max_body_size(cx, io, head, body, max_body_size)
+                    .await
+            } else {
+                Http1Client::request_with_body(cx, io, head, body).await
+            };
+            // Cancellation can arrive after the outer owner check but before
+            // the low-level exchange polls its own explicit context.
+            let response = match response {
+                Err(crate::http::h1::codec::HttpError::BodyCancelled)
+                    if cx.checkpoint().is_err() =>
+                {
+                    return Err(ClientError::Cancelled);
+                }
+                result => {
+                    cancellation_reported_as_cancelled(cx, result.map_err(ClientError::from))?
+                }
+            };
+            check_cx(cx)?;
+            self.store_response_cookies(&parsed.host, parsed.scheme, &response.head.headers);
+            let may_reuse = !request_forbids_reuse
+                && !response.body_withheld
+                && !header_has_token(&response.head.headers, "connection", "close")
+                && !(matches!(method, Method::Connect)
+                    && (200..300).contains(&response.head.status))
+                && response_head_can_be_reused(
+                    response.head.status,
+                    response.head.version,
+                    &response.head.headers,
+                    &method,
+                );
+            let lease = PooledStreamLease {
+                client: self.clone(),
+                key,
+                pool_id: acquired.pool_id,
+                fresh: acquired.fresh,
+                may_reuse,
+            };
+            guard.defused = true;
+            Ok(PooledClientStreamingResponse {
+                head: response.head,
+                body: PooledClientIncomingBody::new(response.body, lease, cx, &deadline),
+                body_withheld: response.body_withheld,
+            })
+        });
+        poll_fn(|task| {
+            if let Some(error) = owner.poll_stop(task) {
+                return Poll::Ready(Err(error));
+            }
+            exchange.as_mut().poll(task)
         })
         .await
     }
