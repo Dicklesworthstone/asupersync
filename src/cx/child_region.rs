@@ -188,6 +188,7 @@ pub struct ChildRegionOpening<Caps = crate::cx::cap::All> {
     failure: Option<ChildRegionError>,
     parent_mask: crate::cx::cap::CapMask,
     parent_remote: Option<Arc<crate::remote::RemoteCap>>,
+    parent_blocking_pool: Option<crate::runtime::BlockingPoolHandle>,
     caps: PhantomData<fn() -> Caps>,
 }
 
@@ -197,12 +198,14 @@ impl<Caps> ChildRegionOpening<Caps> {
         liveness: Weak<()>,
         parent_mask: crate::cx::cap::CapMask,
         parent_remote: Option<Arc<crate::remote::RemoteCap>>,
+        parent_blocking_pool: Option<crate::runtime::BlockingPoolHandle>,
     ) -> Self {
         Self {
             pending: Some((slot, liveness)),
             failure: None,
             parent_mask,
             parent_remote,
+            parent_blocking_pool,
             caps: PhantomData,
         }
     }
@@ -213,6 +216,7 @@ impl<Caps> ChildRegionOpening<Caps> {
             failure: Some(error),
             parent_mask: crate::cx::cap::CapMask::none(),
             parent_remote: None,
+            parent_blocking_pool: None,
             caps: PhantomData,
         }
     }
@@ -239,9 +243,14 @@ impl<Caps> Future for ChildRegionOpening<Caps> {
                     admitted.cx.runtime_mask = admitted.cx.runtime_mask.intersect(this.parent_mask);
                     // The scheduler cannot recover handles attached to this
                     // particular caller from the region record. Inherit the
-                    // explicit remote handle without widening the mask or
-                    // replacing the freshly minted identity and gateways.
-                    admitted.cx = admitted.cx.with_remote_cap_handle(this.parent_remote.take());
+                    // explicit handles without widening the mask or replacing
+                    // the freshly minted identity and gateways. An absent pool
+                    // must stay absent, and a caller-supplied pool must not be
+                    // silently replaced with the runtime's default pool.
+                    admitted.cx = admitted
+                        .cx
+                        .with_remote_cap_handle(this.parent_remote.take())
+                        .with_blocking_pool_handle(this.parent_blocking_pool.take());
                     Ok(ChildRegion::from_admitted(admitted))
                 }
                 Err(error) => Err(ChildRegionError::Create(error)),

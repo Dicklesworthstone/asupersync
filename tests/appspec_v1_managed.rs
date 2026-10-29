@@ -2257,3 +2257,205 @@ fn managed_app_groups_reach_seeded_lab_quiescence() {
         assert!(report.lab_test_passed(), "seed={seed}: {report:?}");
     }
 }
+
+fn assert_managed_blocking_pool_access(cx: &Cx, expected: bool) {
+    assert!(cx.capabilities().spawn, "structured spawn stays available");
+    assert_eq!(cx.blocking_pool_handle().is_some(), expected);
+    let ambient = Cx::current().expect("managed work has an ambient context");
+    assert_eq!(ambient.task_id(), cx.task_id());
+    assert_eq!(ambient.blocking_pool_handle().is_some(), expected);
+}
+
+async fn check_managed_blocking_pool_descendants(cx: Cx, expected: bool) {
+    assert_managed_blocking_pool_access(&cx, expected);
+    yield_now().await;
+    assert_managed_blocking_pool_access(&cx, expected);
+
+    let mut child = cx
+        .spawn(move |child| async move {
+            assert_managed_blocking_pool_access(&child, expected);
+            let region = child
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            assert_eq!(region.cx().blocking_pool_handle().is_some(), expected);
+            let mut nested = region
+                .cx()
+                .spawn(move |nested| async move {
+                    assert_managed_blocking_pool_access(&nested, expected);
+                    let called = Arc::new(AtomicBool::new(false));
+                    let invocation = Arc::clone(&called);
+                    let blocking = nested.spawn_blocking_drained(move |blocking_cx| {
+                        assert!(blocking_cx.blocking_pool_handle().is_some());
+                        invocation.store(true, Ordering::Release);
+                        17_u32
+                    });
+                    if expected {
+                        let mut blocking = blocking.expect("explicit Blocking grant has a pool");
+                        assert_eq!(blocking.join().await.unwrap(), 17);
+                        assert!(called.load(Ordering::Acquire));
+                    } else {
+                        assert!(matches!(
+                            blocking,
+                            Err(asupersync::runtime::SpawnError::RuntimeUnavailable)
+                        ));
+                        assert!(!called.load(Ordering::Acquire));
+                    }
+                })
+                .unwrap();
+            nested.join(&child).await.unwrap();
+            region.close().await.unwrap();
+        })
+        .unwrap();
+    child.join(&cx).await.unwrap();
+}
+
+async fn managed_blocking_pool_authority_scenario(cx: Cx) {
+    assert!(cx.blocking_pool_handle().is_some(), "test requires a real pool");
+    for capabilities in [
+        json!(["spawn"]),
+        json!(["blocking"]),
+        json!(["spawn", "blocking"]),
+    ] {
+        let expected = capabilities
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|cap| cap == "blocking");
+        let mut manifest = manifest_json();
+        manifest["budgets"] = json!([]);
+        for kind in ["routes", "actors"] {
+            manifest["services"][0][kind][0]["budget"] = Value::Null;
+            manifest["services"][0][kind][0]["required_capabilities"]["cx_capabilities"] =
+                capabilities.clone();
+        }
+        let starts = Arc::new(AtomicUsize::new(0));
+        let observed_starts = Arc::clone(&starts);
+        let completed = Arc::new(AtomicUsize::new(0));
+        let completed_work = Arc::clone(&completed);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let app = parse(manifest)
+            .bind_managed(
+                vec![
+                    ManagedAppBinding::route(
+                        "api.route.health",
+                        AsyncCxFnHandler::new(move |cx: Cx| {
+                            assert_managed_blocking_pool_access(&cx, expected);
+                            let calls = Arc::clone(&observed_calls);
+                            async move {
+                                check_managed_blocking_pool_descendants(cx, expected).await;
+                                calls.fetch_add(1, Ordering::AcqRel);
+                                Response::new(StatusCode::OK, "pool authority checked")
+                            }
+                        }),
+                    ),
+                    ManagedAppBinding::worker(
+                        "api.actor.cache",
+                        ManagedRestartMode::Transient,
+                        move |cx: Cx, _: ManagedGeneration| {
+                            assert_managed_blocking_pool_access(&cx, expected);
+                            let attempt = observed_starts.fetch_add(1, Ordering::AcqRel);
+                            let completed = Arc::clone(&completed_work);
+                            async move {
+                                check_managed_blocking_pool_descendants(cx, expected).await;
+                                completed.fetch_add(1, Ordering::AcqRel);
+                                if attempt == 0 {
+                                    Outcome::Err("restart with the same authority")
+                                } else {
+                                    Outcome::Ok(())
+                                }
+                            }
+                        },
+                    ),
+                ],
+                config(),
+            )
+            .unwrap();
+        let router = app.router();
+        let mut app = app.start(&cx).unwrap();
+        while !app.routes_ready() || completed.load(Ordering::Acquire) < 2 {
+            yield_now().await;
+        }
+        let response = router
+            .handle_with_cx(&cx, Request::new("GET", "/health"))
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert_eq!(starts.load(Ordering::Acquire), 2);
+        app.abort();
+        let report = app.join().await.unwrap();
+        assert_eq!(report.started, 3);
+        assert_eq!(report.joined, 3);
+        assert_eq!(report.restart_batches, 1);
+        assert!(matches!(report.outcome, Outcome::Cancelled(_)));
+        assert!(!app.routes_ready());
+    }
+}
+
+#[test]
+fn managed_app_blocking_pool_authority_survives_routes_restarts_and_descendants() {
+    for workers in [1, 2] {
+        native(workers, managed_blocking_pool_authority_scenario);
+    }
+}
+
+#[test]
+fn managed_app_preserves_explicit_blocking_pool_through_child_regions() {
+    use asupersync::runtime::{BlockingPool, BlockingPoolOptions};
+
+    for workers in [1, 2] {
+        let pool = BlockingPool::with_config(
+            1,
+            1,
+            BlockingPoolOptions {
+                thread_name_prefix: "appspec-explicit".to_owned(),
+                ..BlockingPoolOptions::default()
+            },
+        );
+        let handle = pool.handle();
+        native(workers, move |cx| async move {
+            let cx = cx.with_blocking_pool_handle(Some(handle));
+            let mut manifest = manifest_json();
+            manifest["budgets"] = json!([]);
+            manifest["services"][0]["routes"] = json!([]);
+            manifest["services"][0]["actors"][0]["budget"] = Value::Null;
+            manifest["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] =
+                json!(["blocking"]);
+            let app = parse(manifest)
+                .bind_managed(
+                    vec![ManagedAppBinding::worker(
+                        "api.actor.cache",
+                        ManagedRestartMode::Temporary,
+                        |cx: Cx, _: ManagedGeneration| async move {
+                            assert_managed_blocking_pool_access(&cx, true);
+                            let region = cx
+                                .open_child_region(ChildRegionSpec::inherit())
+                                .await
+                                .unwrap();
+                            let mut blocking = region
+                                .cx()
+                                .spawn_blocking_drained(|_| {
+                                    std::thread::current().name().unwrap().to_owned()
+                                })
+                                .unwrap();
+                            let thread_name = blocking.join().await.unwrap();
+                            assert!(
+                                thread_name.starts_with("appspec-explicit-blocking-"),
+                                "child region replaced the explicit pool: {thread_name}"
+                            );
+                            region.close().await.unwrap();
+                            Outcome::<(), ()>::Ok(())
+                        },
+                    )],
+                    config(),
+                )
+                .unwrap();
+            let report = app.run(&cx).await.unwrap();
+            assert!(matches!(report.outcome, Outcome::Ok(())));
+            assert_eq!(report.started, 1);
+            assert_eq!(report.joined, 1);
+        });
+        assert!(pool.shutdown_and_wait(Duration::from_secs(3)));
+    }
+}

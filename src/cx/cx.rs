@@ -4609,7 +4609,8 @@ impl<Caps> Cx<Caps> {
     /// context was built without runtime wiring; detached contexts never
     /// invent ambient authority. A runtime mask without spawning authority
     /// returns [`ChildRegionError::RuntimeUnavailable`](crate::cx::ChildRegionError::RuntimeUnavailable) before enqueueing.
-    /// The derived context preserves this context's runtime capability mask.
+    /// The derived context preserves this context's runtime capability mask
+    /// and explicit blocking-pool handle, including a deliberately absent pool.
     /// Scheduler and capability budgets meet both this context's limits and
     /// the owning region's limits, even when the request supplies an override.
     ///
@@ -4681,6 +4682,7 @@ impl<Caps> Cx<Caps> {
             gateway.runtime_liveness_weak(),
             self.runtime_mask,
             self.remote_cap_handle(),
+            self.blocking_pool_handle_for_inheritance(),
         )
     }
 
