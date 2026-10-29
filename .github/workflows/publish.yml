@@ -47,9 +47,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Keep in sync with rust-toolchain.toml (issue #53: CI must exercise the
-  # same pinned nightly that local/rch/downstream builds resolve).
-  RUST_TOOLCHAIN: nightly-2026-07-05
+  # The plan resolves the compiler from the tagged rust-toolchain.toml.
+  # A second hard-coded pin here drifted from the qualified source (#53/#86).
   WASM_RELEASE_CONTRACT_ID: wasm-release-channel-strategy-v1
   WASM_RELEASE_BEAD_ID: asupersync-umelq.15.2
 
@@ -61,6 +60,8 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
       prerelease: ${{ steps.tag.outputs.prerelease }}
+      source_sha: ${{ steps.tag.outputs.source_sha }}
+      rust_toolchain: ${{ steps.tag.outputs.rust_toolchain }}
       publish_wasm: ${{ steps.flags.outputs.publish_wasm }}
       publish_npm: ${{ steps.flags.outputs.publish_npm }}
       npm_tag: ${{ steps.flags.outputs.npm_tag }}
@@ -71,28 +72,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+      - name: Test release source selection
+        run: python3 -m unittest discover -s scripts/ci -p test_release_source.py -v
       - name: Determine and validate tag
         id: tag
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ALLOW_MISSING_CHANGELOG: ${{ inputs.allow_missing_changelog || false }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
+          set -euo pipefail
+          args=()
+          if [[ "$ALLOW_MISSING_CHANGELOG" == true ]]; then
+            args+=(--allow-missing-changelog)
           fi
-          VERSION="${TAG#v}"
-
-          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
-            echo "Error: Version '$VERSION' does not match semver format"
-            exit 1
-          fi
-
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          if [[ "$VERSION" == *-* ]]; then
-            echo "prerelease=true" >> $GITHUB_OUTPUT
-          else
-            echo "prerelease=false" >> $GITHUB_OUTPUT
-          fi
+          python3 scripts/ci/release_source.py "${args[@]}" --github-output "$GITHUB_OUTPUT"
 
       - name: Resolve publish flags
         id: flags
@@ -113,32 +106,69 @@ jobs:
             echo "allow_missing_changelog=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Validate changelog entry
-        if: ${{ steps.flags.outputs.allow_missing_changelog != 'true' }}
+  qualify_tls:
+    name: Qualify TLS Send regression (${{ matrix.os }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.source_sha }}
+          fetch-depth: 0
+      - name: Verify qualification source
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_SHA: ${{ needs.plan.outputs.source_sha }}
+        run: python3 scripts/ci/release_source.py --verify-head "$RELEASE_SHA" --allow-missing-changelog
+      - name: Install exact regression compilers
         run: |
-          version="${{ steps.tag.outputs.version }}"
-          if ! grep -Eq "^##[[:space:]]+(\[)?v?${version}(\])?([[:space:]]|$|-)" CHANGELOG.md; then
-            echo "Missing CHANGELOG entry for ${version}. Re-run with allow_missing_changelog=true only when justified."
-            exit 1
-          fi
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup toolchain install 1.99.1 --profile minimal
+      - name: Qualify downstream type graph and HTTP behavior
+        env:
+          TLS_SEND_OUTPUT_DIR: ${{ runner.temp }}/tls-send-results
+          CARGO_TARGET_DIR: ${{ runner.temp }}/tls-send-build
+        run: bash scripts/validate_tls_send.sh 1.99.0 1.99.1
+      - name: Upload TLS qualification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tls-send-${{ matrix.os }}-${{ needs.plan.outputs.source_sha }}
+          path: ${{ runner.temp }}/tls-send-results/
+          if-no-files-found: error
 
   publish:
     name: Publish to crates.io
-    needs: plan
+    needs: [plan, qualify_tls]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: ${{ !contains(needs.plan.outputs.tag, '-') }}
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       RUST_CRATE_PROVENANCE_DIR: artifacts/release_provenance/rust-crates
+      ASUPERSYNC_GIT_COMMIT: ${{ needs.plan.outputs.source_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ needs.plan.outputs.source_sha }}
           fetch-depth: 0
+
+      - name: Verify publication source
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_SHA: ${{ needs.plan.outputs.source_sha }}
+        run: python3 scripts/ci/release_source.py --verify-head "$RELEASE_SHA" --allow-missing-changelog
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: ${{ needs.plan.outputs.rust_toolchain }}
 
       - name: Generate release lockfile for locked publish
         run: cargo generate-lockfile
@@ -257,7 +287,7 @@ jobs:
 
             jq -n \
               --arg record_id "${crate}-${version}-${record_suffix}" \
-              --arg git_head "$GITHUB_SHA" \
+              --arg git_head "$(git rev-parse HEAD)" \
               --arg tag "${{ needs.plan.outputs.tag }}" \
               --arg crate "$crate" \
               --arg version "$version" \
@@ -415,7 +445,8 @@ jobs:
                 "not_run_token_absent" "" "" "not_checked_token_absent" false "skipped-token"
             done
             generate_release_provenance_manifest
-            exit 0
+            echo "::error::crates.io publication requested without CARGO_REGISTRY_TOKEN"
+            exit 1
           fi
 
           publish_if_needed() {
@@ -509,7 +540,18 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ needs.plan.outputs.source_sha }}
           fetch-depth: 0
+
+      - name: Verify WASM source
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_SHA: ${{ needs.plan.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git --no-replace-objects rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git --no-replace-objects rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
+          git diff --exit-code HEAD --
 
       - name: Generate release traceability artifact
         run: |
@@ -546,7 +588,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: ${{ needs.plan.outputs.rust_toolchain }}
           targets: wasm32-unknown-unknown
 
       - name: Resolve cargo executor
@@ -803,7 +845,18 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ needs.plan.outputs.source_sha }}
           fetch-depth: 0
+
+      - name: Verify npm source
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_SHA: ${{ needs.plan.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git --no-replace-objects rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git --no-replace-objects rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
+          git diff --exit-code HEAD --
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
