@@ -189,6 +189,8 @@ jobs:
           mkdir -p "$RUST_CRATE_PROVENANCE_DIR/records" "$RUST_CRATE_PROVENANCE_DIR/logs"
           cargo metadata --no-deps --format-version 1 \
             > "$RUST_CRATE_PROVENANCE_DIR/cargo-metadata.json"
+          python3 scripts/ci/release_source.py --check-publish-order \
+            "$RUST_CRATE_PROVENANCE_DIR/cargo-metadata.json"
 
       - name: Publish crates to crates.io
         run: |
@@ -430,6 +432,7 @@ jobs:
             franken-evidence
             franken-decision
             asupersync-macros
+            asupersync-zstd
             asupersync
             asupersync-conformance
             frankenlab

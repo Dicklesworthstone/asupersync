@@ -629,15 +629,31 @@ fn validate_final_signoff(signoff: &Value, contract: &Value) -> Result<(), Strin
         }
     }
 
-    let surface = array(contract, "published_crate_surface")?;
+    // The June 0.3.4 packet is retained evidence for its original inventory.
+    // Current publication is checked separately against the workflow and Cargo
+    // metadata; adding a crate must not invent a historical packaging receipt.
+    if string(contract, "fixture_crate_surface_scope")? != "historical_2026-06-13_v0.3.4" {
+        return Err("historical fixture surface scope drifted".to_string());
+    }
+    let surface = array(contract, "fixture_crate_surface")?;
+    if surface.len() != 9 {
+        return Err("historical fixture surface must retain all nine original packages".to_string());
+    }
     let results = array(e2e, "per_package_results")?;
     if results.len() != surface.len() {
-        return Err("R5 e2e rows must cover every published crate surface".to_string());
+        return Err("R5 e2e rows must cover every historical fixture package".to_string());
     }
     let operator_doc = read_repo_file(FINAL_SIGNOFF_DOC_PATH);
     let e2e_log = read_repo_file(DRY_RUN_E2E_LOG_PATH);
+    let mut historical_packages = BTreeSet::new();
     for (index, (surface_row, result)) in surface.iter().zip(results.iter()).enumerate() {
         let expected_order = index + 1;
+        if surface_row.get("publish_order").and_then(Value::as_u64) != Some(expected_order as u64) {
+            return Err("historical fixture publish_order must remain contiguous".to_string());
+        }
+        if !historical_packages.insert(string(surface_row, "package")?) {
+            return Err("historical fixture surface contains a duplicate package".to_string());
+        }
         if result
             .get("publish_order")
             .and_then(Value::as_u64)
@@ -866,6 +882,25 @@ fn final_signoff_packet_maps_dry_run_e2e_and_child_evidence() {
     let signoff = json(FINAL_SIGNOFF_PATH);
     validate_final_signoff(&signoff, &contract).unwrap_or_else(|error| panic!("{error}"));
 
+    let mut missing_historical_package = contract.clone();
+    missing_historical_package["fixture_crate_surface"]
+        .as_array_mut()
+        .expect("historical surface")
+        .pop();
+    let error = validate_final_signoff(&signoff, &missing_historical_package).unwrap_err();
+    assert!(error.contains("all nine original packages"), "{error}");
+
+    let mut duplicated_historical_order = contract.clone();
+    duplicated_historical_order["fixture_crate_surface"][1]["publish_order"] = Value::from(1);
+    let error = validate_final_signoff(&signoff, &duplicated_historical_order).unwrap_err();
+    assert!(error.contains("historical fixture publish_order"), "{error}");
+
+    let mut duplicated_historical_package = contract.clone();
+    duplicated_historical_package["fixture_crate_surface"][1]["package"] =
+        Value::from("franken-kernel");
+    let error = validate_final_signoff(&signoff, &duplicated_historical_package).unwrap_err();
+    assert!(error.contains("duplicate package"), "{error}");
+
     let mut overclaiming = signoff.clone();
     overclaiming["dry_run_e2e"]["live_publish_performed"] = Value::Bool(true);
     let error = validate_final_signoff(&overclaiming, &contract).unwrap_err();
@@ -902,6 +937,7 @@ fn publish_workflow_records_and_validates_provenance_before_live_publish() {
         "WASM and npm provenance remain separate workflow surfaces.",
         "Generate release lockfile for locked publish",
         "cargo generate-lockfile",
+        "python3 scripts/ci/release_source.py --check-publish-order",
     ] {
         assert!(
             workflow.contains(marker),

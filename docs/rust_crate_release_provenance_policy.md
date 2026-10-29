@@ -12,25 +12,45 @@ from the existing WASM/browser SBOM, browser package, and npm provenance lane.
 
 ## Current Publish Surface
 
-`.github/workflows/publish.yml` publishes crates in this order when the release
-tag is not a prerelease and `CARGO_REGISTRY_TOKEN` is configured. The workflow
-uses `cargo metadata --no-deps --format-version 1` to read each package version,
-and each package version is owned by the package's `Cargo.toml`.
+The retained `.github/workflows/publish.yml` publishes crates in the order
+below when explicitly enabled, the release tag is not a prerelease, and
+`CARGO_REGISTRY_TOKEN` is configured. GitHub Actions remains disabled under
+the owner decision in `AGENTS.md`; the established RCH/DSR release route is
+unchanged. This table describes the current 0.6.0 candidate, not a delivered
+release.
 
-| Order | Package | Manifest | Current version | Role | Dry-run coverage today |
-|---:|---|---|---|---|---|
-| 1 | `franken-kernel` | `franken_kernel/Cargo.toml` | `0.4.4` | FrankenSuite support | independent dry-run before publish |
-| 2 | `franken-evidence` | `franken_evidence/Cargo.toml` | `0.4.4` | FrankenSuite support | independent dry-run before publish |
-| 3 | `franken-decision` | `franken_decision/Cargo.toml` | `0.4.4` | FrankenSuite support | dry-run inside `publish_if_needed` |
-| 4 | `asupersync-macros` | `asupersync-macros/Cargo.toml` | `0.4.4` | proc macro | independent dry-run before publish |
-| 5 | `asupersync` | `Cargo.toml` | `0.4.4` | runtime core | dry-run inside `publish_if_needed` |
-| 6 | `asupersync-conformance` | `conformance/Cargo.toml` | `0.4.4` | conformance | dry-run inside `publish_if_needed` |
-| 7 | `frankenlab` | `frankenlab/Cargo.toml` | `0.4.4` | deterministic testing harness | dry-run inside `publish_if_needed` |
-| 8 | `asupersync-browser-core` | `asupersync-browser-core/Cargo.toml` | `0.4.4` | browser boundary | dry-run inside `publish_if_needed` |
-| 9 | `asupersync-tokio-compat` | `asupersync-tokio-compat/Cargo.toml` | `0.4.4` | compat satellite | dry-run inside `publish_if_needed` |
+The workflow uses `cargo metadata --no-deps --format-version 1` to read
+versions and dependencies from the workspace. Before any package or publish,
+`scripts/ci/release_source.py --check-publish-order <metadata.json>` compares
+the workflow order and `published_crate_surface` against that graph. Every
+publishable workspace member must appear exactly once, with normal and build
+dependencies before their consumers. Optional, renamed and target-specific
+dependencies are included. Development dependency cycles do not constrain
+publication order.
 
-`drop_unwrap_finder/Cargo.toml` is a workspace helper package visible to Cargo
-metadata, but it is not a crates.io publish target in the current workflow.
+| Order | Package | Manifest | Candidate version | Role |
+|---:|---|---|---|---|
+| 1 | `franken-kernel` | `franken_kernel/Cargo.toml` | `0.6.0` | FrankenSuite support |
+| 2 | `franken-evidence` | `franken_evidence/Cargo.toml` | `0.6.0` | FrankenSuite support |
+| 3 | `franken-decision` | `franken_decision/Cargo.toml` | `0.6.0` | FrankenSuite support |
+| 4 | `asupersync-macros` | `asupersync-macros/Cargo.toml` | `0.6.0` | proc macro |
+| 5 | `asupersync-zstd` | `asupersync-zstd/Cargo.toml` | `0.6.0` | compression codec |
+| 6 | `asupersync` | `Cargo.toml` | `0.6.0` | runtime core |
+| 7 | `asupersync-conformance` | `conformance/Cargo.toml` | `0.6.0` | conformance |
+| 8 | `frankenlab` | `frankenlab/Cargo.toml` | `0.6.0` | deterministic testing harness |
+| 9 | `asupersync-browser-core` | `asupersync-browser-core/Cargo.toml` | `0.6.0` | browser boundary |
+| 10 | `asupersync-tokio-compat` | `asupersync-tokio-compat/Cargo.toml` | `0.6.0` | compat satellite |
+
+Each package retains its own `cargo package` and `cargo publish --dry-run`
+checks before publication. `asupersync-zstd` must be available before the
+runtime is packaged even when its optional feature is not selected.
+`drop_unwrap_finder` declares `publish = false` and remains excluded.
+
+The contract's `fixture_crate_surface` preserves the nine-package snapshot
+for the June 13, 2026 synthetic 0.3.4 records and final-signoff packet.
+Those historical rows, hashes and receipts remain unchanged; they do not
+cover the added codec or establish readiness of the current candidate.
+The current inventory and graph checks are independent of that snapshot.
 
 ## Version Policy
 

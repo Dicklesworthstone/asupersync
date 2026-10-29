@@ -8,7 +8,7 @@
   "entries": [
     {
       "path": "artifacts/rust_crate_release_provenance_contract_v1.json",
-      "sha256": "sha256:a308e5ceb91de6419aee8ac4c314ea119f225afa345aa59e09a2e40232a2685a",
+      "sha256": "sha256:5b4ee77fd8d235a204e307f5d8acf264624000524033bfc38f443c137f7cbbfe",
       "role": "machine_readable_contract",
       "citeability": "contract_fixture"
     },
@@ -20,7 +20,7 @@
     },
     {
       "path": "docs/rust_crate_release_provenance_policy.md",
-      "sha256": "sha256:2db4b3b864ec27fc5ea7c2be498f30bf21d0ea1a2deb8c05f9f854d1ee3c9639",
+      "sha256": "sha256:cd336fe0bd44c0825b14ccbe4a61980955234de94f8e9fa9604acd28bf0aeddb",
       "role": "policy_baseline",
       "citeability": "release_surface_inventory"
     }

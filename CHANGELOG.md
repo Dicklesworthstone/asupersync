@@ -10,22 +10,24 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-10-16, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts. `v0.6.0` release evidence is
-recorded in its release bead; `v0.5.0` release evidence is recorded in
-`asupersync-v5fn1e`.
+Scope window: current work through 2026-10-28, reconstructed from git history,
+beads, benchmark ledgers, and live repo artifacts. `v0.6.0` is an unpublished
+release candidate; its package version does not establish delivery. The latest
+verified GitHub and crates.io release is `v0.5.0`, with release evidence recorded
+in `asupersync-v5fn1e`.
 
 ## Version Timeline
 
-- **v0.6.0 Release** (2026-10-16): durable ATP sender/receiver journaling and
+- **v0.6.0 candidate (unreleased)**: durable ATP sender/receiver journaling and
   resume across process loss, targeted resume-client revocation without peer
   restart, QUIC protected close and post-close accounting shutdown, bounded
   clock capture and replay, protected macaroon delegation, a `spawn_blocking`
   fallback that never detaches its thread (GitHub #80), opt-in zstd
   compression for ATP over TCP and QUIC, and an HTTP/1 fix that answers a
-  rejected request head with `400`/`413`/`431` instead of a silent close. Ten
-  crates, including the first `asupersync-zstd`, with signed Linux (amd64 and
-  arm64), macOS and Windows assets, built through DSR without GitHub Actions.
+  rejected request head with `400`/`413`/`431` instead of a silent close. Also
+  includes the TLS-enabled downstream `Cx: Send` compilation fix (GitHub #86).
+  The candidate contains ten publishable workspace crates, including the first
+  `asupersync-zstd`; publication and release artifacts are still pending.
   Breaking changes are listed in the v0.6.0 section.
 - **v0.5.0 Release**: the approved capability-preserving context installation
   boundary, browser local-task isolation and shutdown, reentrant worker
@@ -105,12 +107,28 @@ explicit `DecodeLimits`. A dropped read or write future loses nothing as long
 as the adapter is kept. A truncated stream fails with `UnexpectedEof`, and any
 other decoding failure with `InvalidData`. (`br-asupersync-t1fblr.31`.)
 
-## [v0.6.0] - 2026-10-16
+## [v0.6.0] - Unreleased
 
 About 3,000 commits since v0.5.0. The theme is **durability**: ATP transfers now
 survive a process dying mid-send or mid-receive, QUIC closes cleanly and stops
 accounting afterwards, and the clock can be captured and replayed within bounded
 windows.
+
+### Fixed: TLS-enabled downstream `Cx: Send` compilation (GitHub #86)
+
+The lazy default HTTP client slot in `CxHandles` and `InheritedHandles` now
+stores a private `DefaultHttpClient: Send + Sync` trait object instead of the
+concrete client (`dbcd4e834`). This ends downstream auto-trait traversal before
+the rustls connection internals, avoiding the extra trait-solver depth that
+caused E0275 on stable Rust 1.99.x even for callers that never use HTTP.
+Initialization remains lazy, inherited contexts share the same client, and
+the public API is unchanged.
+
+Release qualification uses the isolated `tls-send-consumer` fixture on exact
+stable Rust 1.99.0 and 1.99.1 with TLS enabled and disabled, including actual
+blocking-pool submission and HTTP client lifecycle checks. Source inclusion,
+packaged-byte checks, successful qualification, and registry/release delivery
+are separate requirements; this changelog entry does not claim publication.
 
 ### Security — third-party macaroon caveats (asupersync-s45073)
 
@@ -232,7 +250,7 @@ symlink, where it used to fail on whichever came first.
     spawn token is denied. This fails closed (L5);
   - `SecurityConfig` derives `Debug`, which prints `auth_key_seed` (L6).
 - **The `zstd` feature is experimental, opt-in and off by default.**
-  `asupersync-zstd` 0.6.0 is the codec's first crates.io release, and its
+  `asupersync-zstd` 0.6.0 is planned as the codec's first crates.io release, and its
   encoder strategies are still being built (asupersync-t1fblr).
 - **JetStream and NATS:** every HIGH finding of the 10-03 messaging audit is
   fixed (asupersync-messaging-client-audit-k6pxks). Two items wait on owner
@@ -455,7 +473,7 @@ Against an older receiver, a sender stays raw, and an older sender never
 offers. Default builds and `send_path`/`send_path_filtered` are unchanged.
 (`br-asupersync-t1fblr.14`, `.16`.)
 
-`asupersync-zstd` 0.6.0 is the codec's first crates.io release, and it is
+`asupersync-zstd` 0.6.0 is planned as the codec's first crates.io release, and it is
 experimental. It decodes every RFC 8878 frame without dictionaries, and
 encodes stored or `Level::Fast` frames, which compress slightly better than
 libzstd level 1. It has streaming encoder and decoder types, resumable async

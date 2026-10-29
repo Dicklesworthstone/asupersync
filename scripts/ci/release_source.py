@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -89,6 +90,67 @@ def resolve(repo: Path, tag: str, *, allow_missing_changelog: bool = False,
     }
 
 
+def validate_publish_order(metadata: dict, contract: dict, workflow: str) -> list[str]:
+    """Check the declared release surface against Cargo's complete workspace graph.
+
+    Cargo metadata preserves optional, target-specific, renamed and inherited
+    dependencies here, without resolving a feature-filtered build graph.
+    Development edges do not constrain publication order (they can be cyclic).
+    """
+    rows = contract.get("published_crate_surface", [])
+    names = [row.get("package") for row in rows]
+    if not names or len(set(names)) != len(names):
+        raise ReleaseSourceError("publish surface is empty or contains duplicate packages")
+    if [row.get("publish_order") for row in rows] != list(range(1, len(rows) + 1)):
+        raise ReleaseSourceError("publish surface orders must be contiguous starting at one")
+
+    arrays = re.findall(r"^[ \t]*crates=\(\s*\n(.*?)^[ \t]*\)", workflow,
+                        re.MULTILINE | re.DOTALL)
+    if len(arrays) != 1:
+        raise ReleaseSourceError("expected one explicit crates array in publish workflow")
+    workflow_names = shlex.split(arrays[0], comments=True)
+    if names != workflow_names:
+        raise ReleaseSourceError("publish workflow order differs from the crate surface")
+
+    workspace_ids = set(metadata.get("workspace_members", []))
+    packages = {package["name"]: package for package in metadata.get("packages", [])
+                if package["id"] in workspace_ids}
+    if len(packages) != len(workspace_ids):
+        raise ReleaseSourceError("Cargo metadata does not describe every workspace package")
+    publishable = {name for name, package in packages.items()
+                   if package.get("publish") is None or "crates-io" in package["publish"]}
+    if set(names) != publishable:
+        raise ReleaseSourceError(
+            f"publish surface differs from publishable workspace packages: "
+            f"missing={sorted(publishable - set(names))}, "
+            f"extra={sorted(set(names) - publishable)}")
+
+    workspace_root = Path(metadata["workspace_root"]).resolve()
+    order = {name: index for index, name in enumerate(names)}
+    for row in rows:
+        name = row["package"]
+        manifest = Path(row["manifest_path"])
+        if manifest.is_absolute() or not (workspace_root / manifest).resolve().is_relative_to(workspace_root):
+            raise ReleaseSourceError(f"{name}: manifest must stay inside the workspace")
+        expected_manifest = Path(packages[name]["manifest_path"]).resolve()
+        if (workspace_root / manifest).resolve() != expected_manifest:
+            raise ReleaseSourceError(f"{name}: manifest path differs from Cargo metadata")
+        for dependency in packages[name].get("dependencies", []):
+            if dependency.get("kind") == "dev" or dependency.get("path") is None:
+                continue
+            dependency_name = dependency["name"]
+            if dependency_name not in packages:
+                continue  # A local dependency outside this workspace is not our release surface.
+            if dependency_name not in order:
+                raise ReleaseSourceError(f"{name}: workspace dependency {dependency_name} is not publishable")
+            dependency_manifest = Path(dependency["path"]) / "Cargo.toml"
+            if dependency_manifest.resolve() != Path(packages[dependency_name]["manifest_path"]).resolve():
+                raise ReleaseSourceError(f"{name}: workspace dependency {dependency_name} has a different path")
+            if order[dependency_name] >= order[name]:
+                raise ReleaseSourceError(f"{name}: publish dependency {dependency_name} first")
+    return names
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
@@ -96,10 +158,18 @@ def main() -> int:
     parser.add_argument("--verify-head", metavar="PLANNED_SHA")
     parser.add_argument("--allow-missing-changelog", action="store_true")
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--check-publish-order", type=Path, metavar="CARGO_METADATA_JSON")
     args = parser.parse_args()
-    if not args.tag:
+    if not args.tag and args.check_publish_order is None:
         parser.error("--tag or RELEASE_TAG is required")
     try:
+        if args.check_publish_order is not None:
+            metadata = json.loads(args.check_publish_order.read_text(encoding="utf-8"))
+            contract = json.loads((args.repo / "artifacts/rust_crate_release_provenance_contract_v1.json")
+                                  .read_text(encoding="utf-8"))
+            workflow = (args.repo / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+            print(json.dumps({"publish_order": validate_publish_order(metadata, contract, workflow)}))
+            return 0
         identity = resolve(args.repo, args.tag,
                            allow_missing_changelog=args.allow_missing_changelog,
                            expected_sha=args.verify_head)
@@ -110,7 +180,7 @@ def main() -> int:
                 for key, value in identity.items():
                     output.write(f"{key}={value}\n")
         print(json.dumps(identity, sort_keys=True))
-    except (ReleaseSourceError, OSError) as error:
+    except (ReleaseSourceError, OSError, KeyError, TypeError, json.JSONDecodeError) as error:
         print(f"release source refused: {error}", file=sys.stderr)
         return 1
     return 0

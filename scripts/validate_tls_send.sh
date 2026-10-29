@@ -26,7 +26,9 @@ recursion limit (60), scoped to these exact compilers. The ordinary consumer
 uses Rust's default limit. A failed sentinel is a failure, not a skipped row.
 A missing compiler, resolution error, or failed cell makes the runner fail.
 The runtime tests additionally check lazy/concurrent access, inherited sharing,
-and cancellation. Focused root HTTP/TLS integration targets run separately.
+and cancellation. Production-only tests submit a Cx-capturing future to the
+attached blocking pool with TLS off/on. Focused root HTTP/TLS integration
+targets run separately.
 A pass is scoped to these checks, not release readiness.
 HELP
     exit 0
@@ -144,6 +146,17 @@ for toolchain in "${TOOLCHAINS[@]}"; do
             probe_features=depth-probe
             if [[ -n "${FEATURES[$i]}" ]]; then probe_features+=,${FEATURES[$i]}; fi
             run_stage "$name-depth-probe" cargo "+$toolchain" check --bin depth_probe --manifest-path "$MANIFEST" --locked --no-default-features --features "$probe_features" || :
+            if run_stage "$name-blocking-pool" cargo "+$toolchain" test --lib "${args[@]}" -- --nocapture; then
+                log="$OUTPUT/$name-blocking-pool.log"
+                # Name both sentinels: a filtered or ignored test must never
+                # turn this production-only runtime row into an empty pass.
+                if ! grep -Fxq 'test public_runtime_types_are_send ... ok' "$log" ||
+                   ! grep -Fxq 'test cx_capturing_future_runs_on_attached_blocking_pool ... ok' "$log" ||
+                   ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' "$log"; then
+                    printf '%s\t1\t%s\n' "$name-blocking-pool-required-tests" "$name-blocking-pool.log" >> "$OUTPUT/summary.tsv"
+                    failed=1
+                fi
+            fi
         fi
     done
     # Only these separate runtime rows enable test-internals. Never use their

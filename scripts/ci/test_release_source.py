@@ -181,5 +181,102 @@ class ReleaseSourceTests(unittest.TestCase):
         self.assertEqual(selected["source_sha"], self.candidate)
 
 
+class PublishOrderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.metadata = {
+            "workspace_root": "/release-workspace",
+            "workspace_members": ["codec", "asupersync", "helper"],
+            "packages": [
+                {"id": "codec", "name": "asupersync-zstd", "publish": None,
+                 "manifest_path": "/release-workspace/asupersync-zstd/Cargo.toml", "dependencies": []},
+                {"id": "asupersync", "name": "asupersync", "publish": None,
+                 "manifest_path": "/release-workspace/Cargo.toml",
+                 "dependencies": [{"name": "asupersync-zstd", "rename": "codec", "kind": None,
+                                   "optional": True, "target": 'cfg(unix)',
+                                   "path": "/release-workspace/asupersync-zstd"}]},
+                {"id": "helper", "name": "helper", "publish": [],
+                 "manifest_path": "/release-workspace/helper/Cargo.toml", "dependencies": []},
+            ],
+        }
+        self.rows = [
+            {"publish_order": 1, "package": "asupersync-zstd", "manifest_path": "asupersync-zstd/Cargo.toml"},
+            {"publish_order": 2, "package": "asupersync", "manifest_path": "Cargo.toml"},
+        ]
+        self.workflow = "crates=(\n  asupersync-zstd\n  asupersync\n)\n"
+
+    def validate(self) -> list[str]:
+        return source.validate_publish_order(
+            self.metadata, {"published_crate_surface": self.rows}, self.workflow)
+
+    def test_optional_target_specific_renamed_dependency_precedes_consumer(self) -> None:
+        self.assertEqual(self.validate(), ["asupersync-zstd", "asupersync"])
+
+    def test_omission_from_both_lists_still_fails_against_workspace(self) -> None:
+        self.rows = [{"publish_order": 1, "package": "asupersync", "manifest_path": "Cargo.toml"}]
+        self.workflow = "crates=(\n  asupersync\n)\n"
+        with self.assertRaisesRegex(source.ReleaseSourceError, "missing=.*asupersync-zstd"):
+            self.validate()
+
+    def test_consistent_but_reversed_lists_fail_dependency_order(self) -> None:
+        self.rows.reverse()
+        for index, row in enumerate(self.rows, 1):
+            row["publish_order"] = index
+        self.workflow = "crates=(\n  asupersync\n  asupersync-zstd\n)\n"
+        with self.assertRaisesRegex(source.ReleaseSourceError, "publish dependency asupersync-zstd first"):
+            self.validate()
+
+    def test_build_dependency_is_checked(self) -> None:
+        self.metadata["packages"][0]["dependencies"] = [
+            {"name": "asupersync", "kind": "build", "path": "/release-workspace"}]
+        with self.assertRaisesRegex(source.ReleaseSourceError, "publish dependency asupersync first"):
+            self.validate()
+
+    def test_development_cycle_does_not_change_publication_order(self) -> None:
+        self.metadata["packages"][0]["dependencies"] = [
+            {"name": "asupersync", "kind": "dev", "path": "/release-workspace"}]
+        self.validate()
+
+    def test_unpublished_workspace_helper_is_not_a_release(self) -> None:
+        self.rows.append({"publish_order": 3, "package": "helper", "manifest_path": "helper/Cargo.toml"})
+        self.workflow = "crates=(\n  asupersync-zstd\n  asupersync\n  helper\n)\n"
+        with self.assertRaisesRegex(source.ReleaseSourceError, "extra=.*helper"):
+            self.validate()
+
+    def test_production_dependency_on_nonpublishable_helper_is_refused(self) -> None:
+        self.metadata["packages"][1]["dependencies"].append(
+            {"name": "helper", "kind": None, "path": "/release-workspace/helper"})
+        with self.assertRaisesRegex(source.ReleaseSourceError, "helper is not publishable"):
+            self.validate()
+
+    def test_workflow_drift_is_refused(self) -> None:
+        self.workflow = "crates=(\n  asupersync\n)\n"
+        with self.assertRaisesRegex(source.ReleaseSourceError, "workflow order differs"):
+            self.validate()
+
+    def test_duplicate_packages_are_refused(self) -> None:
+        self.rows.append(dict(self.rows[0], publish_order=3))
+        with self.assertRaisesRegex(source.ReleaseSourceError, "duplicate packages"):
+            self.validate()
+
+    def test_noncontiguous_orders_are_refused(self) -> None:
+        self.rows[1]["publish_order"] = 4
+        with self.assertRaisesRegex(source.ReleaseSourceError, "contiguous"):
+            self.validate()
+
+    def test_manifest_substitution_is_refused(self) -> None:
+        self.rows[0]["manifest_path"] = "helper/Cargo.toml"
+        with self.assertRaisesRegex(source.ReleaseSourceError, "manifest path differs"):
+            self.validate()
+
+    def test_dependency_path_substitution_is_refused(self) -> None:
+        self.metadata["packages"][1]["dependencies"][0]["path"] = "/release-workspace/helper"
+        with self.assertRaisesRegex(source.ReleaseSourceError, "has a different path"):
+            self.validate()
+
+    def test_incomplete_workspace_metadata_is_refused(self) -> None:
+        self.metadata["packages"].pop()
+        with self.assertRaisesRegex(source.ReleaseSourceError, "every workspace package"):
+            self.validate()
+
 if __name__ == "__main__":
     unittest.main()
