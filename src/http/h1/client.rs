@@ -13,7 +13,7 @@ use crate::http::h1::codec::{
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use memchr::memmem;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::Poll;
 
@@ -693,6 +693,196 @@ impl Http1ClientCodec {
 pub struct Http1Client;
 
 impl Http1Client {
+    /// Send a streaming request body and return a streaming response.
+    ///
+    /// Unlike [`Self::request_streaming`], this does not collect the upload.
+    /// It retains at most one producer frame, writes its [`Buf`] segments
+    /// directly, and polls the response while the producer or socket is
+    /// blocked. An early final response stops the upload and sets
+    /// [`ClientStreamingResponse::body_withheld`], so its transport must not
+    /// be reused for another request.
+    ///
+    /// An explicit `Content-Length` is enforced exactly. Otherwise an exact
+    /// [`Body::size_hint`] selects that framing, and an unknown length selects
+    /// chunked framing on HTTP/1.1. Unknown-length HTTP/1.0 uploads are refused.
+    /// Producers with trailers must explicitly select chunked framing; one
+    /// trailer frame is allowed, followed by end of stream. Invalid framing,
+    /// producer errors, and cancellation discard the owned transport.
+    ///
+    /// `Expect: 100-continue` delays producer polling until a `100` response
+    /// or the one-second expectation wait expires. Headers and trailers are
+    /// each limited to 64 KiB and 128 fields. Data frames are not copied or
+    /// prefetched; their allocation size remains the producer's responsibility.
+    /// The explicit context observes cancellation even for a producer that
+    /// never wakes. After the head is returned, response-body polling follows
+    /// the ordinary [`ClientIncomingBody`] contract.
+    pub async fn request_with_body<T, B>(
+        cx: &crate::cx::Cx,
+        io: T,
+        head: crate::http::h1::stream::RequestHead,
+        body: B,
+    ) -> Result<ClientStreamingResponse<T>, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+        B: Body,
+        B::Error: std::fmt::Display,
+    {
+        Self::request_with_body_and_max_body_size(cx, io, head, body, DEFAULT_MAX_BODY_SIZE).await
+    }
+
+    /// Like [`Self::request_with_body`], with an explicit maximum response
+    /// body size. This limit does not collect or limit the request body.
+    pub async fn request_with_body_and_max_body_size<T, B>(
+        cx: &crate::cx::Cx,
+        mut io: T,
+        head: crate::http::h1::stream::RequestHead,
+        body: B,
+        max_body_size: usize,
+    ) -> Result<ClientStreamingResponse<T>, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+        B: Body,
+        B::Error: std::fmt::Display,
+    {
+        let exchange = async {
+            let (wire, framing, expect_continue) =
+                streaming_request_head(&head, body.size_hint().exact())?;
+            let mut upload = RequestBodyUpload::new(wire, framing, !expect_continue);
+            let mut body = std::pin::pin!(body);
+            let mut read_buf = BytesMut::with_capacity(8192);
+            let mut scratch = [0u8; 8192];
+            let mut informational_responses = 0usize;
+            let mut expectation_wait = None;
+            let mut upload_error = None;
+
+            let response_head = poll_fn(|task| {
+                // This poll runs under the explicit owner's restricted
+                // ambient context, including for caller-supplied transports.
+                crate::cx::io_gate::require_ambient_io("http::h1::request_with_body")?;
+                let mut read_blocked = false;
+                // Bound ready/empty producer frames and socket work per poll.
+                // Every accepted byte and frame remains owned across yielding.
+                for _ in 0..64 {
+                    while let Some(response) = take_streaming_response_head(&mut read_buf)? {
+                        if (100..=199).contains(&response.status) && response.status != 101 {
+                            informational_responses += 1;
+                            if informational_responses > MAX_INFORMATIONAL_RESPONSES {
+                                return Poll::Ready(Err(HttpError::TooManyInformationalResponses {
+                                    actual: informational_responses,
+                                    limit: MAX_INFORMATIONAL_RESPONSES,
+                                }));
+                            }
+                            if response.status == 100 {
+                                upload.allow_body();
+                                expectation_wait = None;
+                            }
+                            // Parse a coalesced final response before polling
+                            // the producer, even when a 100 preceded it.
+                            continue;
+                        }
+                        return Poll::Ready(Ok(response));
+                    }
+
+                    if (upload.started() || upload_error.is_some()) && !read_blocked {
+                        let mut buf = ReadBuf::new(&mut scratch);
+                        match Pin::new(&mut io).poll_read(task, &mut buf) {
+                            Poll::Ready(Ok(())) if buf.filled().is_empty() => {
+                                return Poll::Ready(Err(HttpError::Io(
+                                    upload_error.take().unwrap_or_else(|| {
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::UnexpectedEof,
+                                            "connection closed before response headers",
+                                        )
+                                    }),
+                                )));
+                            }
+                            Poll::Ready(Ok(())) => {
+                                read_buf.extend_from_slice(buf.filled());
+                                continue;
+                            }
+                            Poll::Ready(Err(error)) => {
+                                return Poll::Ready(Err(HttpError::Io(
+                                    upload_error.take().unwrap_or(error),
+                                )));
+                            }
+                            Poll::Pending => read_blocked = true,
+                        }
+                    }
+
+                    if upload.waiting_for_continue() {
+                        let wait = expectation_wait.get_or_insert_with(|| {
+                            if let Some(driver) = cx.timer_driver() {
+                                let deadline = driver.now().saturating_add_nanos(1_000_000_000);
+                                crate::time::Sleep::with_timer_driver(deadline, driver)
+                            } else {
+                                crate::time::Sleep::after(cx.now(), EXPECT_CONTINUE_WAIT)
+                            }
+                        });
+                        if Pin::new(wait).poll_deadline(task).is_ready() {
+                            upload.allow_body();
+                            expectation_wait = None;
+                            // Check for a final response once more before
+                            // sending a body whose expectation just expired.
+                            read_blocked = false;
+                            continue;
+                        }
+                    }
+
+                    if upload_error.is_some() {
+                        return Poll::Pending;
+                    }
+                    match upload.poll_step(body.as_mut(), &mut io, task) {
+                        Poll::Ready(Ok(true)) => continue,
+                        Poll::Ready(Ok(false)) | Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(HttpError::Io(error)))
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                            ) =>
+                        {
+                            // A peer can reject an upload and close its read
+                            // half. Preserve its final 401/413 if available.
+                            upload_error = Some(error);
+                            read_blocked = false;
+                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    }
+                }
+                task.waker().wake_by_ref();
+                Poll::Pending
+            })
+            .await?;
+
+            let kind = response_body_kind(
+                &response_head.headers,
+                response_head.status,
+                &head.method,
+                max_body_size,
+            )?;
+            Ok(ClientStreamingResponse {
+                head: response_head,
+                body: ClientIncomingBody::with_max_body_size(io, kind, read_buf, max_body_size),
+                body_withheld: !upload.complete() || upload_error.is_some(),
+            })
+        };
+        let mut exchange = std::pin::pin!(cx.with_ambient(exchange));
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+        poll_fn(|task| {
+            // Check the polling caller before installing the stored owner.
+            crate::cx::io_gate::require_ambient_io("http::h1::request_with_body")?;
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(HttpError::BodyCancelled));
+            }
+            if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                return Poll::Ready(Err(HttpError::BodyCancelled));
+            }
+            exchange.as_mut().poll(task)
+        })
+        .await
+    }
+
     /// Send a request over the given transport and return the response.
     pub async fn request<T>(io: T, req: Request) -> Result<Response, HttpError>
     where
@@ -976,6 +1166,402 @@ impl Http1Client {
             read_buf.extend_from_slice(&scratch[..n]);
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum UploadFraming {
+    ContentLength(u64),
+    Chunked,
+}
+
+/// Validate the whole head before emitting any bytes. In particular, a size
+/// hint only chooses framing; the upload state still checks its actual EOF.
+fn streaming_request_head(
+    head: &crate::http::h1::stream::RequestHead,
+    exact_hint: Option<u64>,
+) -> Result<(BytesMut, UploadFraming, bool), HttpError> {
+    if Method::from_bytes(head.method.as_str().as_bytes()).is_none() {
+        return Err(HttpError::BadMethod);
+    }
+    if head.uri.is_empty() || head.uri.bytes().any(|byte| byte <= b' ' || byte == 0x7f) {
+        return Err(HttpError::BadRequestLine);
+    }
+    if !matches!(head.version, Version::Http10 | Version::Http11) {
+        return Err(HttpError::UnsupportedVersion);
+    }
+    let te = unique_header_value(&head.headers, "Transfer-Encoding")?;
+    let cl = unique_header_value(&head.headers, "Content-Length")?;
+    if te.is_some() && cl.is_some() {
+        return Err(HttpError::AmbiguousBodyLength);
+    }
+    let framing = if let Some(te) = te {
+        require_transfer_encoding_chunked(te)?;
+        if head.version != Version::Http11 {
+            return Err(HttpError::BadTransferEncoding);
+        }
+        UploadFraming::Chunked
+    } else if let Some(cl) = cl {
+        let value = trim_ows(cl);
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(HttpError::BadContentLength);
+        }
+        UploadFraming::ContentLength(value.parse().map_err(|_| HttpError::BadContentLength)?)
+    } else if let Some(length) = exact_hint {
+        UploadFraming::ContentLength(length)
+    } else if head.version == Version::Http11 {
+        UploadFraming::Chunked
+    } else {
+        return Err(HttpError::BadContentLength);
+    };
+    let generated = if te.is_none() && cl.is_none() {
+        Some(match framing {
+            UploadFraming::ContentLength(length) => ("Content-Length", length.to_string()),
+            UploadFraming::Chunked => ("Transfer-Encoding", "chunked".to_owned()),
+        })
+    } else {
+        None
+    };
+    if head.headers.len().saturating_add(usize::from(generated.is_some())) > MAX_HEADERS {
+        return Err(HttpError::TooManyHeaders);
+    }
+    let expect_continue = unique_header_value(&head.headers, "Expect")?
+        .is_some_and(|value| trim_ows(value).eq_ignore_ascii_case("100-continue"));
+    let mut length = head
+        .method
+        .as_str()
+        .len()
+        .saturating_add(head.uri.len())
+        .saturating_add(head.version.as_str().len())
+        .saturating_add(6);
+    for (name, value) in &head.headers {
+        validate_header_field(name, value)?;
+        length = length
+            .saturating_add(name.len())
+            .saturating_add(value.len())
+            .saturating_add(4);
+    }
+    if let Some((name, value)) = &generated {
+        length = length
+            .saturating_add(name.len())
+            .saturating_add(value.len())
+            .saturating_add(4);
+    }
+    if length > DEFAULT_MAX_HEADERS_SIZE {
+        return Err(HttpError::HeadersTooLarge);
+    }
+    let mut wire = BytesMut::with_capacity(length);
+    wire.extend_from_slice(head.method.as_str().as_bytes());
+    wire.extend_from_slice(b" ");
+    wire.extend_from_slice(head.uri.as_bytes());
+    wire.extend_from_slice(b" ");
+    wire.extend_from_slice(head.version.as_str().as_bytes());
+    wire.extend_from_slice(b"\r\n");
+    for (name, value) in &head.headers {
+        wire.extend_from_slice(name.as_bytes());
+        wire.extend_from_slice(b": ");
+        wire.extend_from_slice(value.as_bytes());
+        wire.extend_from_slice(b"\r\n");
+    }
+    if let Some((name, value)) = generated {
+        wire.extend_from_slice(name.as_bytes());
+        wire.extend_from_slice(b": ");
+        wire.extend_from_slice(value.as_bytes());
+        wire.extend_from_slice(b"\r\n");
+    }
+    wire.extend_from_slice(b"\r\n");
+    Ok((wire, framing, expect_continue))
+}
+
+fn take_streaming_response_head(
+    bytes: &mut BytesMut,
+) -> Result<Option<crate::http::h1::stream::ResponseHead>, HttpError> {
+    let Some(end) = find_headers_end(bytes.as_ref()) else {
+        return if bytes.len() > DEFAULT_MAX_HEADERS_SIZE {
+            Err(HttpError::HeadersTooLarge)
+        } else {
+            Ok(None)
+        };
+    };
+    if end > DEFAULT_MAX_HEADERS_SIZE {
+        return Err(HttpError::HeadersTooLarge);
+    }
+    let encoded = bytes.split_to(end);
+    let text = response_head_str(encoded.as_ref());
+    let mut lines = text.split("\r\n");
+    let (version, status, reason) =
+        parse_status_line(lines.next().ok_or(HttpError::BadRequestLine)?)?;
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if headers.len() == MAX_HEADERS {
+            return Err(HttpError::TooManyHeaders);
+        }
+        headers.push(parse_header_line(line)?);
+    }
+    Ok(Some(crate::http::h1::stream::ResponseHead {
+        version,
+        status,
+        reason,
+        headers,
+    }))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UploadPhase {
+    Head,
+    FlushHead,
+    WaitContinue,
+    NextFrame,
+    ChunkPrefix,
+    Data,
+    ChunkSuffix,
+    FinalBytes,
+    FlushBody,
+    Complete,
+}
+
+/// The only retained producer data is the current frame. Control bytes have
+/// their own bounded buffer, and every cursor advances only after a write.
+struct RequestBodyUpload<D> {
+    phase: UploadPhase,
+    framing: UploadFraming,
+    wire: BytesMut,
+    wire_offset: usize,
+    data: Option<D>,
+    trailers: Option<BytesMut>,
+    body_allowed: bool,
+}
+
+impl<D: Buf> RequestBodyUpload<D> {
+    fn new(wire: BytesMut, framing: UploadFraming, body_allowed: bool) -> Self {
+        Self {
+            phase: UploadPhase::Head,
+            framing,
+            wire,
+            wire_offset: 0,
+            data: None,
+            trailers: None,
+            body_allowed,
+        }
+    }
+
+    fn started(&self) -> bool {
+        self.phase != UploadPhase::Head || self.wire_offset != 0
+    }
+
+    fn complete(&self) -> bool {
+        self.phase == UploadPhase::Complete
+    }
+
+    fn waiting_for_continue(&self) -> bool {
+        self.phase == UploadPhase::WaitContinue
+    }
+
+    fn allow_body(&mut self) {
+        self.body_allowed = true;
+        if self.phase == UploadPhase::WaitContinue {
+            self.phase = UploadPhase::NextFrame;
+        }
+    }
+
+    /// One bounded write, producer poll, or state transition. `true` means
+    /// progress, `false` means the complete upload has been flushed.
+    fn poll_step<T, B>(
+        &mut self,
+        mut body: Pin<&mut B>,
+        io: &mut T,
+        task: &mut std::task::Context<'_>,
+    ) -> Poll<Result<bool, HttpError>>
+    where
+        T: AsyncWrite + Unpin,
+        B: Body<Data = D>,
+        B::Error: std::fmt::Display,
+    {
+        match self.phase {
+            UploadPhase::Head
+            | UploadPhase::ChunkPrefix
+            | UploadPhase::ChunkSuffix
+            | UploadPhase::FinalBytes => {
+                if self.wire_offset < self.wire.len() {
+                    let end = self.wire.len().min(self.wire_offset.saturating_add(16 * 1024));
+                    let remaining = &self.wire[self.wire_offset..end];
+                    let written =
+                        std::task::ready!(Pin::new(&mut *io).poll_write(task, remaining))?;
+                    validate_upload_write(written, remaining.len())?;
+                    self.wire_offset += written;
+                }
+                if self.wire_offset == self.wire.len() {
+                    self.wire.clear();
+                    self.wire_offset = 0;
+                    self.phase = match self.phase {
+                        UploadPhase::Head => UploadPhase::FlushHead,
+                        UploadPhase::ChunkPrefix => UploadPhase::Data,
+                        UploadPhase::ChunkSuffix => UploadPhase::NextFrame,
+                        UploadPhase::FinalBytes => UploadPhase::FlushBody,
+                        _ => unreachable!(),
+                    };
+                    if self.phase == UploadPhase::FlushBody {
+                        // The terminating chunk was accepted. Finish its
+                        // flush before classifying an immediately arriving
+                        // response as an early rejection.
+                        return self.poll_step(body, io, task);
+                    }
+                }
+            }
+            UploadPhase::FlushHead => {
+                std::task::ready!(Pin::new(&mut *io).poll_flush(task))?;
+                self.phase = if self.body_allowed {
+                    UploadPhase::NextFrame
+                } else {
+                    UploadPhase::WaitContinue
+                };
+            }
+            UploadPhase::WaitContinue => return Poll::Pending,
+            UploadPhase::NextFrame => {
+                match std::task::ready!(body.as_mut().poll_frame(task)) {
+                    Some(Err(error)) => {
+                        return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("request body producer failed: {error}"),
+                        ))));
+                    }
+                    Some(Ok(Frame::Data(data))) => {
+                        if self.trailers.is_some() {
+                            return Poll::Ready(Err(HttpError::TrailersNotAllowed));
+                        }
+                        let length = data.remaining();
+                        let bytes = u64::try_from(length).map_err(|_| HttpError::BodyTooLarge)?;
+                        if let UploadFraming::ContentLength(remaining) = &mut self.framing {
+                            if bytes > *remaining {
+                                return Poll::Ready(Err(HttpError::BadContentLength));
+                            }
+                            *remaining -= bytes;
+                        }
+                        if length != 0 {
+                            self.data = Some(data);
+                            self.phase = if matches!(self.framing, UploadFraming::Chunked) {
+                                append_chunk_size_line(&mut self.wire, length);
+                                UploadPhase::ChunkPrefix
+                            } else {
+                                UploadPhase::Data
+                            };
+                        }
+                    }
+                    Some(Ok(Frame::Trailers(trailers))) => {
+                        if !matches!(self.framing, UploadFraming::Chunked) || self.trailers.is_some()
+                        {
+                            return Poll::Ready(Err(HttpError::TrailersNotAllowed));
+                        }
+                        self.trailers = Some(streaming_request_trailers(&trailers)?);
+                        // Confirm producer EOF before committing the final
+                        // chunk; a second trailer/data frame is an error.
+                    }
+                    None => {
+                        if matches!(self.framing, UploadFraming::ContentLength(left) if left != 0) {
+                            return Poll::Ready(Err(HttpError::BadContentLength));
+                        }
+                        if matches!(self.framing, UploadFraming::Chunked) {
+                            self.wire = self
+                                .trailers
+                                .take()
+                                .unwrap_or_else(|| BytesMut::from(&b"0\r\n\r\n"[..]));
+                            self.phase = UploadPhase::FinalBytes;
+                        } else {
+                            self.phase = UploadPhase::FlushBody;
+                            return self.poll_step(body, io, task);
+                        }
+                    }
+                }
+            }
+            UploadPhase::Data => {
+                let data = self.data.as_mut().expect("upload data phase owns a frame");
+                let chunk = data.chunk();
+                if chunk.is_empty() {
+                    return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "request body Buf has remaining bytes but an empty chunk",
+                    ))));
+                }
+                let length = chunk.len().min(16 * 1024);
+                let written =
+                    std::task::ready!(Pin::new(&mut *io).poll_write(task, &chunk[..length]))?;
+                validate_upload_write(written, length)?;
+                data.advance(written);
+                if !data.has_remaining() {
+                    self.data = None;
+                    self.phase = if matches!(self.framing, UploadFraming::Chunked) {
+                        self.wire.extend_from_slice(b"\r\n");
+                        UploadPhase::ChunkSuffix
+                    } else {
+                        UploadPhase::NextFrame
+                    };
+                    if self.phase == UploadPhase::NextFrame {
+                        // A fixed-length body still owes an actual EOF.
+                        // Give it one poll after its last accepted bytes,
+                        // so a ready EOF/flush retires before the response.
+                        return self.poll_step(body, io, task);
+                    }
+                }
+            }
+            UploadPhase::FlushBody => {
+                std::task::ready!(Pin::new(&mut *io).poll_flush(task))?;
+                self.phase = UploadPhase::Complete;
+            }
+            UploadPhase::Complete => return Poll::Ready(Ok(false)),
+        }
+        Poll::Ready(Ok(true))
+    }
+}
+
+fn validate_upload_write(written: usize, offered: usize) -> Result<(), HttpError> {
+    if written == 0 {
+        Err(HttpError::Io(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "transport accepted no request bytes",
+        )))
+    } else if written > offered {
+        Err(HttpError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "transport reported more request bytes than offered",
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn streaming_request_trailers(trailers: &HeaderMap) -> Result<BytesMut, HttpError> {
+    if trailers.len() > MAX_HEADERS {
+        return Err(HttpError::TooManyHeaders);
+    }
+    let mut length = 5usize; // Last chunk and final CRLF.
+    for (name, value) in trailers.iter() {
+        if is_forbidden_trailer(name.as_str()) {
+            return Err(HttpError::TrailersNotAllowed);
+        }
+        length = length
+            .saturating_add(name.as_str().len())
+            .saturating_add(value.as_bytes().len())
+            .saturating_add(4);
+        if length > DEFAULT_MAX_TRAILERS_SIZE {
+            return Err(HttpError::HeadersTooLarge);
+        }
+        // Lossy conversion preserves all forbidden ASCII controls while
+        // allowing legal obs-text; the original bytes go on the wire. The
+        // length bound above also bounds this validation allocation.
+        validate_header_field(name.as_str(), &String::from_utf8_lossy(value.as_bytes()))?;
+    }
+    let mut wire = BytesMut::with_capacity(length);
+    wire.extend_from_slice(b"0\r\n");
+    for (name, value) in trailers.iter() {
+        wire.extend_from_slice(name.as_str().as_bytes());
+        wire.extend_from_slice(b": ");
+        wire.extend_from_slice(value.as_bytes());
+        wire.extend_from_slice(b"\r\n");
+    }
+    wire.extend_from_slice(b"\r\n");
+    Ok(wire)
 }
 
 /// Writes and flushes request bytes: a whole request, or a deferred

@@ -1493,3 +1493,575 @@
         let result = codec.decode(&mut buf);
         assert!(matches!(result, Err(HttpError::BadChunkedEncoding)));
     }
+
+    mod streaming_upload {
+        use super::*;
+        use crate::cx::Cx;
+        use crate::http::h1::stream::RequestHead;
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+        use std::marker::PhantomPinned;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Observed {
+            written: Mutex<Vec<u8>>,
+            write_polls: AtomicUsize,
+            producer_polls: AtomicUsize,
+            producer_drops: AtomicUsize,
+            transport_drops: AtomicUsize,
+            wakes: AtomicUsize,
+        }
+
+        impl std::task::Wake for Observed {
+            fn wake(self: Arc<Self>) {
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct Segments(VecDeque<&'static [u8]>, PhantomPinned);
+
+        impl Buf for Segments {
+            fn remaining(&self) -> usize {
+                self.0.iter().map(|segment| segment.len()).sum()
+            }
+
+            fn chunk(&self) -> &[u8] {
+                self.0.front().copied().unwrap_or_default()
+            }
+
+            fn advance(&mut self, mut count: usize) {
+                assert!(count <= self.remaining());
+                while count != 0 {
+                    let segment = self.0.pop_front().unwrap();
+                    let consumed = count.min(segment.len());
+                    count -= consumed;
+                    if consumed != segment.len() {
+                        self.0.push_front(&segment[consumed..]);
+                    }
+                }
+            }
+        }
+
+        fn data(segments: &[&'static [u8]]) -> Result<Frame<Segments>, &'static str> {
+            Ok(Frame::Data(Segments(
+                segments.iter().copied().collect(),
+                PhantomPinned,
+            )))
+        }
+
+        // RefCell permits safe polling without projecting a pinned field.
+        // PhantomPinned deliberately proves that the public API needs no Unpin.
+        struct Producer {
+            frames: RefCell<VecDeque<Result<Frame<Segments>, &'static str>>>,
+            exact: Option<u64>,
+            parked: bool,
+            observed: Arc<Observed>,
+            _pinned: PhantomPinned,
+        }
+
+        impl Body for Producer {
+            type Data = Segments;
+            type Error = &'static str;
+
+            fn poll_frame(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                let this = self.as_ref().get_ref();
+                this.observed.producer_polls.fetch_add(1, Ordering::SeqCst);
+                if this.parked {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(this.frames.borrow_mut().pop_front())
+                }
+            }
+
+            fn size_hint(&self) -> SizeHint {
+                self.exact.map_or_else(SizeHint::default, SizeHint::with_exact)
+            }
+        }
+
+        impl Drop for Producer {
+            fn drop(&mut self) {
+                self.observed.producer_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn producer(
+            observed: &Arc<Observed>,
+            exact: Option<u64>,
+            frames: Vec<Result<Frame<Segments>, &'static str>>,
+        ) -> Producer {
+            Producer {
+                frames: RefCell::new(frames.into()),
+                exact,
+                parked: false,
+                observed: Arc::clone(observed),
+                _pinned: PhantomPinned,
+            }
+        }
+
+        struct UploadIo {
+            observed: Arc<Observed>,
+            answer_after: Option<Vec<u8>>,
+            response: std::io::Cursor<Vec<u8>>,
+            reader: Option<Waker>,
+            pause_write: bool,
+            partial: bool,
+            write_failure: Option<std::io::ErrorKind>,
+        }
+
+        impl AsyncRead for UploadIo {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                let ready = self.answer_after.as_ref().is_some_and(|suffix| {
+                    self.observed.written.lock().unwrap().ends_with(suffix)
+                });
+                if !ready {
+                    self.reader = Some(cx.waker().clone());
+                    return Poll::Pending;
+                }
+                let count = std::io::Read::read(&mut self.response, buf.unfilled())?;
+                buf.advance(count);
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        impl AsyncWrite for UploadIo {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                self.observed.write_polls.fetch_add(1, Ordering::SeqCst);
+                if let Some(kind) = self.write_failure {
+                    return Poll::Ready(Err(std::io::Error::new(kind, "peer refused upload")));
+                }
+                if self.pause_write {
+                    self.pause_write = false;
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                self.pause_write = self.partial;
+                let count = if self.partial {
+                    bytes.len().min(2)
+                } else {
+                    bytes.len()
+                };
+                self.observed
+                    .written
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&bytes[..count]);
+                if let Some(reader) = self.reader.take() {
+                    reader.wake();
+                }
+                Poll::Ready(Ok(count))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        impl Drop for UploadIo {
+            fn drop(&mut self) {
+                self.observed.transport_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn io(observed: &Arc<Observed>, answer_after: Option<&[u8]>) -> UploadIo {
+            UploadIo {
+                observed: Arc::clone(observed),
+                answer_after: answer_after.map(|bytes| bytes.to_vec()),
+                response: std::io::Cursor::new(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()),
+                reader: None,
+                pause_write: false,
+                partial: true,
+                write_failure: None,
+            }
+        }
+
+        fn head(headers: &[(&str, &str)]) -> RequestHead {
+            RequestHead {
+                method: Method::Post,
+                uri: "/upload".to_owned(),
+                version: Version::Http11,
+                headers: std::iter::once(("Host".to_owned(), "example.test".to_owned()))
+                    .chain(
+                        headers
+                            .iter()
+                            .map(|(name, value)| (name.to_string(), value.to_string())),
+                    )
+                    .collect(),
+            }
+        }
+
+        fn drive<F: Future>(future: F) -> F::Output {
+            let mut future = std::pin::pin!(future);
+            let mut task = Context::from_waker(Waker::noop());
+            for _ in 0..10_000 {
+                if let Poll::Ready(result) = future.as_mut().poll(&mut task) {
+                    return result;
+                }
+            }
+            panic!("streaming exchange made no terminal progress");
+        }
+
+        fn payload(observed: &Observed) -> Vec<u8> {
+            let written = observed.written.lock().unwrap();
+            written[find_headers_end(&written).expect("request head")..].to_vec()
+        }
+
+        fn trailers(
+            name: &'static str,
+            value: &'static str,
+        ) -> Result<Frame<Segments>, &'static str> {
+            let mut trailers = HeaderMap::new();
+            trailers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+            Ok(Frame::Trailers(trailers))
+        }
+
+        #[test]
+        fn streaming_upload_supports_pinned_producer_segmented_data_and_partial_writes() {
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let body = producer(
+                &observed,
+                Some(6),
+                vec![data(&[b"ab", b"c"]), data(&[b"de", b"f"])],
+            );
+            let response = drive(Http1Client::request_with_body(
+                &cx,
+                io(&observed, Some(b"\r\n\r\nabcdef")),
+                head(&[]),
+                body,
+            ))
+            .unwrap();
+            assert_eq!(response.head.status, 204);
+            assert!(
+                !response.body_withheld,
+                "ready producer EOF must precede the final response"
+            );
+            assert_eq!(payload(&observed), b"abcdef");
+            assert!(
+                String::from_utf8(observed.written.lock().unwrap().clone())
+                    .unwrap()
+                    .contains("Content-Length: 6\r\n")
+            );
+            assert_eq!(observed.producer_polls.load(Ordering::SeqCst), 3);
+            assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 1);
+            drop(response);
+            assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn streaming_upload_unknown_length_encodes_chunks_and_trailers() {
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let body = producer(
+                &observed,
+                None,
+                vec![
+                    data(&[b"ab", b"c"]),
+                    data(&[b"d"]),
+                    trailers("x-checksum", "ok"),
+                ],
+            );
+            let response = drive(Http1Client::request_with_body(
+                &cx,
+                io(&observed, Some(b"0\r\nx-checksum: ok\r\n\r\n")),
+                head(&[]),
+                body,
+            ))
+            .unwrap();
+            assert!(!response.body_withheld);
+            assert_eq!(
+                payload(&observed),
+                b"3\r\nabc\r\n1\r\nd\r\n0\r\nx-checksum: ok\r\n\r\n"
+            );
+            assert_eq!(observed.producer_polls.load(Ordering::SeqCst), 4);
+        }
+
+        #[test]
+        fn streaming_upload_checks_actual_length_and_drops_failed_exchange() {
+            for (length, frames, sent) in [
+                (4, vec![data(&[b"abc"])], &b"abc"[..]),
+                (2, vec![data(&[b"abc"])], &b""[..]),
+                (3, vec![data(&[b"abc"]), data(&[b"extra"])], &b"abc"[..]),
+            ] {
+                let cx = Cx::for_testing();
+                let observed = Arc::new(Observed::default());
+                let result = drive(Http1Client::request_with_body(
+                    &cx,
+                    io(&observed, None),
+                    head(&[]),
+                    producer(&observed, Some(length), frames),
+                ));
+                assert!(matches!(result, Err(HttpError::BadContentLength)));
+                assert_eq!(
+                    payload(&observed),
+                    sent,
+                    "an overrun must never reach the wire"
+                );
+                assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[test]
+        fn streaming_upload_explicit_length_overrides_untrusted_hint() {
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let response = drive(Http1Client::request_with_body(
+                &cx,
+                io(&observed, Some(b"\r\n\r\nabc")),
+                head(&[("Content-Length", "3")]),
+                producer(&observed, Some(999), vec![data(&[b"abc"])]),
+            ))
+            .unwrap();
+            assert!(!response.body_withheld);
+            assert_eq!(payload(&observed), b"abc");
+            assert_eq!(observed.producer_polls.load(Ordering::SeqCst), 2);
+        }
+
+        #[test]
+        fn streaming_upload_producer_error_is_terminal() {
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let result = drive(Http1Client::request_with_body(
+                &cx,
+                io(&observed, None),
+                head(&[]),
+                producer(&observed, None, vec![data(&[b"abc"]), Err("source failed")]),
+            ));
+            assert!(
+                matches!(result, Err(HttpError::Io(ref error)) if error.kind() == std::io::ErrorKind::InvalidData && error.to_string().contains("source failed"))
+            );
+            assert_eq!(payload(&observed), b"3\r\nabc\r\n");
+            assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn streaming_upload_rejects_ambiguous_or_invalid_heads_before_writing() {
+            for headers in [
+                vec![
+                    ("Content-Length", "1"),
+                    ("Transfer-Encoding", "chunked"),
+                ],
+                vec![("Content-Length", "1"), ("content-length", "1")],
+                vec![("Transfer-Encoding", "gzip, chunked")],
+                vec![("Content-Length", "+1")],
+                vec![("X-Injected", "good\r\nInjected: bad")],
+            ] {
+                let cx = Cx::for_testing();
+                let observed = Arc::new(Observed::default());
+                let result = drive(Http1Client::request_with_body(
+                    &cx,
+                    io(&observed, None),
+                    head(&headers),
+                    producer(&observed, None, vec![]),
+                ));
+                assert!(result.is_err(), "invalid request headers: {headers:?}");
+                assert!(observed.written.lock().unwrap().is_empty());
+                assert_eq!(observed.producer_polls.load(Ordering::SeqCst), 0);
+                assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[test]
+        fn streaming_upload_rejects_unknown_length_http10_before_writing() {
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let mut request = head(&[]);
+            request.version = Version::Http10;
+            let result = drive(Http1Client::request_with_body(
+                &cx,
+                io(&observed, None),
+                request,
+                producer(&observed, None, vec![]),
+            ));
+            assert!(matches!(result, Err(HttpError::BadContentLength)));
+            assert!(observed.written.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn streaming_upload_forbidden_or_nonterminal_trailers_never_commit_final_chunk() {
+            for frames in [
+                vec![trailers("content-length", "4")],
+                vec![trailers("x-checksum", "ok"), data(&[b"late"])],
+                vec![trailers("x-first", "ok"), trailers("x-second", "bad")],
+            ] {
+                let cx = Cx::for_testing();
+                let observed = Arc::new(Observed::default());
+                let result = drive(Http1Client::request_with_body(
+                    &cx,
+                    io(&observed, None),
+                    head(&[]),
+                    producer(&observed, None, frames),
+                ));
+                assert!(matches!(result, Err(HttpError::TrailersNotAllowed)));
+                assert!(payload(&observed).is_empty());
+                assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[test]
+        fn streaming_upload_coalesced_continue_and_final_response_do_not_poll_producer() {
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let mut transport = io(&observed, Some(b"\r\n\r\n"));
+            transport.response = std::io::Cursor::new(
+                b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            );
+            let mut body = producer(&observed, Some(3), vec![data(&[b"abc"])]);
+            body.parked = true;
+            let response = drive(Http1Client::request_with_body(
+                &cx,
+                transport,
+                head(&[("Expect", "100-continue")]),
+                body,
+            ))
+            .unwrap();
+            assert_eq!(response.head.status, 413);
+            assert!(response.body_withheld);
+            assert!(payload(&observed).is_empty());
+            assert_eq!(observed.producer_polls.load(Ordering::SeqCst), 0);
+            assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn streaming_upload_first_write_failure_still_returns_ready_final_response() {
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let mut transport = io(&observed, Some(b""));
+            transport.write_failure = Some(std::io::ErrorKind::BrokenPipe);
+            transport.response = std::io::Cursor::new(
+                b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            );
+            let response = drive(Http1Client::request_with_body(
+                &cx,
+                transport,
+                head(&[]),
+                producer(&observed, Some(3), vec![data(&[b"abc"])]),
+            ))
+            .unwrap();
+            assert_eq!(response.head.status, 413);
+            assert!(response.body_withheld);
+            assert_eq!(observed.write_polls.load(Ordering::SeqCst), 1);
+            assert!(observed.written.lock().unwrap().is_empty());
+            assert_eq!(observed.producer_polls.load(Ordering::SeqCst), 0);
+            assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 1);
+            drop(response);
+            assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn streaming_upload_io_authority_requires_both_owner_and_polling_caller() {
+            use crate::cx::cap::{CapSet, CapSetRuntimeMask};
+
+            for (restrict_owner, restrict_caller) in [(true, false), (false, true)] {
+                let mut owner = Cx::for_testing();
+                let mut caller = Cx::for_testing();
+                if restrict_owner {
+                    owner.runtime_mask = <CapSet<true, true, true, false, true>>::MASK;
+                }
+                if restrict_caller {
+                    caller.runtime_mask = <CapSet<true, true, true, false, true>>::MASK;
+                }
+                let _current = Cx::set_current(Some(caller));
+                let observed = Arc::new(Observed::default());
+                let result = drive(Http1Client::request_with_body(
+                    &owner,
+                    io(&observed, None),
+                    head(&[]),
+                    producer(&observed, Some(3), vec![data(&[b"abc"])]),
+                ));
+                assert!(
+                    matches!(result, Err(HttpError::Io(ref error)) if error.kind() == std::io::ErrorKind::PermissionDenied),
+                    "owner restriction={restrict_owner}, caller restriction={restrict_caller}"
+                );
+                assert_eq!(observed.write_polls.load(Ordering::SeqCst), 0);
+                assert!(observed.written.lock().unwrap().is_empty());
+                assert_eq!(observed.producer_polls.load(Ordering::SeqCst), 0);
+                assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[test]
+        fn streaming_upload_owner_cancel_wakes_parked_body_and_drops_both_owners() {
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let mut body = producer(&observed, None, vec![]);
+            body.parked = true;
+            let mut transport = io(&observed, None);
+            transport.partial = false;
+            let waker = Waker::from(Arc::clone(&observed));
+            let mut task = Context::from_waker(&waker);
+            {
+                let mut future = std::pin::pin!(Http1Client::request_with_body(
+                    &cx,
+                    transport,
+                    head(&[]),
+                    body,
+                ));
+                assert!(future.as_mut().poll(&mut task).is_pending());
+                assert_eq!(observed.producer_polls.load(Ordering::SeqCst), 1);
+                let wakes = observed.wakes.load(Ordering::SeqCst);
+                cx.cancel_with(crate::types::CancelKind::User, None);
+                assert!(
+                    observed.wakes.load(Ordering::SeqCst) > wakes,
+                    "cancellation must wake the owner without producer cooperation"
+                );
+                assert!(matches!(
+                    future.as_mut().poll(&mut task),
+                    Poll::Ready(Err(HttpError::BodyCancelled))
+                ));
+            }
+            assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn streaming_upload_future_drop_releases_parked_body_and_transport() {
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let mut body = producer(&observed, None, vec![]);
+            body.parked = true;
+            let mut transport = io(&observed, None);
+            transport.partial = false;
+            {
+                let mut future = std::pin::pin!(Http1Client::request_with_body(
+                    &cx,
+                    transport,
+                    head(&[]),
+                    body,
+                ));
+                let mut task = Context::from_waker(Waker::noop());
+                assert!(future.as_mut().poll(&mut task).is_pending());
+                assert_eq!(observed.producer_polls.load(Ordering::SeqCst), 1);
+                assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 0);
+                assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 0);
+            }
+            assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+        }
+    }
