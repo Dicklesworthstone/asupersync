@@ -52,3 +52,80 @@ pub fn assert_capturing_closure_is_send(cx: Cx, request: SpawnRequest) {
 fn public_runtime_types_are_send() {
     assert_runtime_send_contracts();
 }
+
+#[test]
+fn cx_capturing_future_runs_on_attached_blocking_pool() {
+    use asupersync::runtime::RuntimeBuilder;
+    use std::future::poll_fn;
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+    use std::sync::{Arc, mpsc};
+    use std::task::{Context, Poll, Waker};
+    use std::thread;
+    use std::time::Duration;
+
+    const BOUND: Duration = Duration::from_secs(10);
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("runtime with a real blocking worker");
+    // Always exercise bounded teardown, including when a worker or assertion
+    // fails. The worker itself never waits for the runtime to make progress.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime-owned context");
+            let expected = (cx.region_id(), cx.task_id());
+            let pool = cx.blocking_pool_handle().expect("attached blocking pool");
+            let caller = thread::current().id();
+            let witness = Arc::new(());
+            let released = Arc::downgrade(&witness);
+            let (sender, receiver) = mpsc::channel();
+
+            // Construct the concrete future here, before the pool imposes its
+            // Send obligation. Retain the whole Cx across a real Pending poll;
+            // do not route through a helper already returning impl Send.
+            let future = async move {
+                let mut suspended = false;
+                poll_fn(|task| {
+                    if suspended {
+                        Poll::Ready(())
+                    } else {
+                        suspended = true;
+                        task.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                let observed = (cx.region_id(), cx.task_id());
+                drop(cx);
+                drop(witness);
+                observed
+            };
+            let task = pool.spawn(move || {
+                let mut future = std::pin::pin!(future);
+                let mut context = Context::from_waker(Waker::noop());
+                assert!(future.as_mut().poll(&mut context).is_pending());
+                let Poll::Ready(observed) = future.as_mut().poll(&mut context) else {
+                    panic!("the second poll must complete");
+                };
+                sender
+                    .send((thread::current().id(), observed))
+                    .expect("send worker observation");
+            });
+            assert!(task.wait_timeout(BOUND), "blocking task completes in time");
+            let (worker, observed) = receiver
+                .recv_timeout(BOUND)
+                .expect("worker completes both polls without panicking");
+            assert_ne!(worker, caller, "the real pool executes the future");
+            assert_eq!(observed, expected, "the captured Cx retains its identity");
+            assert!(released.upgrade().is_none(), "future captures are released");
+            assert_eq!(pool.pending_count(), 0);
+            assert_eq!(pool.busy_threads(), 0);
+        });
+        assert!(runtime.is_quiescent(), "runtime has no remaining live work");
+    }));
+    let shutdown = runtime.shutdown_timeout(BOUND);
+    if let Err(panic) = result {
+        resume_unwind(panic);
+    }
+    assert!(shutdown, "blocking worker exits within the shutdown bound");
+}
