@@ -42,7 +42,7 @@ use crate::http::body::{Body, Frame, SizeHint};
 use crate::http::h1::client::{ClientIncomingBody, ClientStreamingResponse, Http1Client};
 use crate::http::h1::codec::{for_each_header_value_token, validate_header_field};
 use crate::http::h1::types::{
-    Method, MultipartForm, Request, Response, Version, url_encode_params,
+    Method, MultipartBody, MultipartForm, Request, Response, Version, url_encode_params,
 };
 use crate::http::pool::{Pool, PoolConfig, PoolKey};
 use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -1300,6 +1300,33 @@ impl<'a> ClientRequestBuilder<'a> {
             )
             .await
     }
+
+    /// Stream a multipart form and retain a pooled streaming response.
+    ///
+    /// The form's validated boundary supplies `Content-Type`, replacing any
+    /// per-request value and taking precedence over client defaults. Parts are
+    /// consumed once, under this builder's headers and total timeout. No
+    /// automatic redirect or retry can replay a consumed source.
+    ///
+    /// A file or other reader can be supplied as a
+    /// [`ReaderBody`](crate::http::body::ReaderBody) inside a
+    /// [`MultipartBodyPart`](crate::http::h1::MultipartBodyPart). Neither the
+    /// file nor the complete multipart envelope is collected before sending.
+    pub async fn send_multipart_with_body<B>(
+        mut self,
+        cx: &Cx,
+        form: MultipartBody<B>,
+    ) -> Result<PooledClientStreamingResponse, ClientError>
+    where
+        B: Body,
+        B::Error: std::fmt::Display,
+    {
+        self.headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+        self.headers
+            .push(("Content-Type".to_owned(), form.content_type_header()));
+        self.send_with_body(cx, form).await
+    }
 }
 
 /// High-level HTTP/1.1 client.
@@ -1911,7 +1938,32 @@ impl HttpClient {
         .await
     }
 
-    /// Send a multipart request and stream the response body.
+    /// Stream multipart fields and their response through the connection pool.
+    ///
+    /// The form's boundary determines `Content-Type`, overriding a conflicting
+    /// value in `extra_headers` or the client's defaults. All other ownership,
+    /// cancellation, deadline and one-shot rules of [`Self::request_with_body`]
+    /// apply. Existing [`Self::request_multipart_streaming`] remains the API
+    /// for a buffered [`MultipartForm`] with an unpooled streaming response.
+    pub async fn request_multipart_with_body<B>(
+        &self,
+        cx: &Cx,
+        method: Method,
+        url: &str,
+        mut extra_headers: Vec<(String, String)>,
+        form: MultipartBody<B>,
+    ) -> Result<PooledClientStreamingResponse, ClientError>
+    where
+        B: Body,
+        B::Error: std::fmt::Display,
+    {
+        extra_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+        extra_headers.push(("Content-Type".to_owned(), form.content_type_header()));
+        self.request_with_body(cx, method, url, extra_headers, form)
+            .await
+    }
+
+    /// Send a buffered multipart request and stream the response body.
     pub async fn request_multipart_streaming(
         &self,
         cx: &Cx,

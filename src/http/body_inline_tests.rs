@@ -1130,3 +1130,316 @@
              This re-opens the hash-collision DoS vector that yrwie0 fixed."
         );
     }
+
+    mod reader_body_tests {
+        use super::*;
+        use crate::io::{AsyncRead, ReadBuf};
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+        use std::io;
+        use std::marker::PhantomPinned;
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Default)]
+        struct Observations {
+            polls: AtomicUsize,
+            drops: AtomicUsize,
+            offers: StdMutex<Vec<(usize, usize)>>,
+        }
+
+        enum ReadStep {
+            Data(&'static [u8]),
+            Pending,
+            DataPending(&'static [u8]),
+            DataError(&'static [u8], io::ErrorKind),
+            Error(io::ErrorKind),
+            Eof,
+            Panic,
+        }
+
+        // Interior mutation makes the provider deliberately !Unpin without
+        // requiring unsafe pin projections in the test.
+        struct ScriptedReader {
+            steps: RefCell<VecDeque<ReadStep>>,
+            observations: Arc<Observations>,
+            _pin: PhantomPinned,
+        }
+
+        impl ScriptedReader {
+            fn new(steps: impl IntoIterator<Item = ReadStep>) -> (Self, Arc<Observations>) {
+                let observations = Arc::new(Observations::default());
+                (
+                    Self {
+                        steps: RefCell::new(steps.into_iter().collect()),
+                        observations: Arc::clone(&observations),
+                        _pin: PhantomPinned,
+                    },
+                    observations,
+                )
+            }
+        }
+
+        impl Drop for ScriptedReader {
+            fn drop(&mut self) {
+                self.observations.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl AsyncRead for ScriptedReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                let this = self.as_ref().get_ref();
+                this.observations.polls.fetch_add(1, Ordering::SeqCst);
+                let pointer = buf.unfilled().as_ptr() as usize;
+                let offered = buf.remaining();
+                this.observations.offers.lock().unwrap().push((pointer, offered));
+                let step = this.steps.borrow_mut().pop_front()
+                    .expect("ReaderBody repolled a completed or failed reader");
+                match step {
+                    ReadStep::Data(bytes) => {
+                        let count = bytes.len().min(buf.remaining());
+                        buf.put_slice(&bytes[..count]);
+                        if count < bytes.len() {
+                            this.steps.borrow_mut().push_front(ReadStep::Data(&bytes[count..]));
+                        }
+                        Poll::Ready(Ok(()))
+                    }
+                    ReadStep::Pending => Poll::Pending,
+                    ReadStep::DataPending(bytes) => {
+                        buf.put_slice(bytes);
+                        // No self-wake: the already consumed bytes must be
+                        // returned immediately instead of parking the body.
+                        Poll::Pending
+                    }
+                    ReadStep::DataError(bytes, kind) => {
+                        buf.put_slice(bytes);
+                        Poll::Ready(Err(io::Error::new(kind, "reader body source error")))
+                    }
+                    ReadStep::Error(kind) => {
+                        Poll::Ready(Err(io::Error::new(kind, "reader body source error")))
+                    }
+                    ReadStep::Eof => Poll::Ready(Ok(())),
+                    ReadStep::Panic => {
+                        buf.put_slice(b"!");
+                        panic!("reader body provider panic sentinel");
+                    }
+                }
+            }
+        }
+
+        fn poll_reader<R: AsyncRead>(
+            body: Pin<&mut ReaderBody<R>>,
+        ) -> Poll<Option<Result<Frame<BytesCursor>, io::Error>>> {
+            body.poll_frame(&mut Context::from_waker(Waker::noop()))
+        }
+
+        fn next_data<R: AsyncRead>(body: Pin<&mut ReaderBody<R>>) -> Bytes {
+            match poll_reader(body) {
+                Poll::Ready(Some(Ok(Frame::Data(data)))) => data.into_inner(),
+                other => panic!("expected a data frame, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn pinned_reader_is_lazy_and_each_poll_reads_only_one_bounded_chunk() {
+            let (reader, observed) = ScriptedReader::new([
+                ReadStep::Data(b"abcdefgh"),
+                ReadStep::Eof,
+            ]);
+            let mut body = Box::pin(ReaderBody::with_capacity(reader, 3));
+            assert_eq!(body.as_ref().get_ref().buffer.capacity(), 0);
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 0);
+            assert_eq!(body.size_hint().lower(), 0);
+            assert_eq!(body.size_hint().upper(), None);
+            assert!(!body.is_end_stream());
+
+            let mut received = Vec::new();
+            for (index, expected) in [b"abc".as_slice(), b"def", b"gh"].into_iter().enumerate() {
+                let frame = next_data(body.as_mut());
+                assert_eq!(frame.as_ref(), expected);
+                assert_eq!(observed.polls.load(Ordering::SeqCst), index + 1);
+                assert!(frame.len() <= 3);
+                received.extend_from_slice(frame.as_ref());
+                assert_eq!(body.size_hint().upper(), None);
+                assert!(!body.is_end_stream());
+            }
+            assert_eq!(received, b"abcdefgh");
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 3);
+            assert!(matches!(poll_reader(body.as_mut()), Poll::Ready(None)));
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 4);
+            assert!(body.is_end_stream());
+            assert_eq!(body.size_hint().exact(), Some(0));
+            assert!(observed.offers.lock().unwrap().iter().all(|(_, length)| *length == 3));
+            for _ in 0..3 {
+                assert!(matches!(poll_reader(body.as_mut()), Poll::Ready(None)));
+            }
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 4);
+        }
+
+        #[test]
+        fn pending_read_reuses_its_buffer_and_transfers_it_without_payload_copy() {
+            let (reader, observed) = ScriptedReader::new([
+                ReadStep::Pending,
+                ReadStep::Pending,
+                ReadStep::Data(b"payload"),
+                ReadStep::Eof,
+            ]);
+            let mut body = Box::pin(ReaderBody::with_capacity(reader, 32));
+            assert!(poll_reader(body.as_mut()).is_pending());
+            assert!(!body.is_end_stream());
+            assert_eq!(body.size_hint().upper(), None);
+            assert!(poll_reader(body.as_mut()).is_pending());
+            let frame = next_data(body.as_mut());
+            let offers = observed.offers.lock().unwrap();
+            assert_eq!(offers.len(), 3);
+            assert!(offers.iter().all(|offer| *offer == offers[0]));
+            assert_eq!(frame.as_ref(), b"payload");
+            assert_eq!(frame.as_ref().as_ptr() as usize, offers[2].0);
+            drop(offers);
+            assert_eq!(body.as_ref().get_ref().buffer.capacity(), 0);
+
+            // The yielded allocation remains owned by the recipient after
+            // the producer reaches EOF and is dropped.
+            assert!(matches!(poll_reader(body.as_mut()), Poll::Ready(None)));
+            drop(body);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+            assert_eq!(frame.as_ref(), b"payload");
+        }
+
+        #[test]
+        fn zero_capacity_reads_one_byte_and_default_capacity_is_eight_kib() {
+            let (reader, observed) = ScriptedReader::new([
+                ReadStep::Data(b"xy"),
+                ReadStep::Eof,
+            ]);
+            let mut body = Box::pin(ReaderBody::with_capacity(reader, 0));
+            assert_eq!(next_data(body.as_mut()).as_ref(), b"x");
+            assert_eq!(next_data(body.as_mut()).as_ref(), b"y");
+            assert!(matches!(poll_reader(body.as_mut()), Poll::Ready(None)));
+            assert!(observed.offers.lock().unwrap().iter().all(|(_, length)| *length == 1));
+
+            let (reader, observed) = ScriptedReader::new([ReadStep::Pending]);
+            let mut body = Box::pin(ReaderBody::new(reader));
+            assert_eq!(body.as_ref().get_ref().buffer.capacity(), 0);
+            assert!(poll_reader(body.as_mut()).is_pending());
+            assert_eq!(observed.offers.lock().unwrap()[0].1, 8 * 1024);
+        }
+
+        #[test]
+        fn bytes_returned_with_pending_are_yielded_without_another_read_or_wake() {
+            let (reader, observed) = ScriptedReader::new([
+                ReadStep::DataPending(b"first"),
+                ReadStep::Data(b"second"),
+                ReadStep::Eof,
+            ]);
+            let mut body = Box::pin(ReaderBody::with_capacity(reader, 8));
+            assert_eq!(next_data(body.as_mut()).as_ref(), b"first");
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 1);
+            assert_eq!(next_data(body.as_mut()).as_ref(), b"second");
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 2);
+            assert!(matches!(poll_reader(body.as_mut()), Poll::Ready(None)));
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 3);
+        }
+
+        #[test]
+        fn bytes_before_error_are_yielded_once_then_original_error_is_terminal() {
+            let (reader, observed) = ScriptedReader::new([
+                ReadStep::DataError(b"partial", io::ErrorKind::ConnectionReset),
+            ]);
+            let mut body = Box::pin(ReaderBody::with_capacity(reader, 16));
+            let frame = next_data(body.as_mut());
+            assert_eq!(frame.as_ref(), b"partial");
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 1);
+            assert!(!body.is_end_stream());
+            assert_eq!(body.size_hint().upper(), None);
+            let error = match poll_reader(body.as_mut()) {
+                Poll::Ready(Some(Err(error))) => error,
+                other => panic!("expected the deferred source error, got {other:?}"),
+            };
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            assert_eq!(error.to_string(), "reader body source error");
+            assert!(body.is_end_stream());
+            assert_eq!(body.size_hint().exact(), Some(0));
+            for _ in 0..3 {
+                assert!(matches!(poll_reader(body.as_mut()), Poll::Ready(None)));
+            }
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 1);
+            assert_eq!(frame.as_ref(), b"partial");
+        }
+
+        #[test]
+        fn empty_eof_and_immediate_error_are_terminal_without_repolling() {
+            for fail in [false, true] {
+                let step = if fail {
+                    ReadStep::Error(io::ErrorKind::BrokenPipe)
+                } else {
+                    ReadStep::Eof
+                };
+                let (reader, observed) = ScriptedReader::new([step]);
+                let mut body = Box::pin(ReaderBody::new(reader));
+                match poll_reader(body.as_mut()) {
+                    Poll::Ready(Some(Err(error))) if fail => {
+                        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+                        assert_eq!(error.to_string(), "reader body source error");
+                    }
+                    Poll::Ready(None) if !fail => {}
+                    other => panic!("unexpected terminal result: {other:?}"),
+                }
+                assert!(body.is_end_stream());
+                assert_eq!(body.size_hint().exact(), Some(0));
+                assert_eq!(body.as_ref().get_ref().buffer.capacity(), 0);
+                for _ in 0..3 {
+                    assert!(matches!(poll_reader(body.as_mut()), Poll::Ready(None)));
+                }
+                assert_eq!(observed.polls.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[test]
+        fn caught_provider_panic_poison_is_reported_without_replaying_the_reader() {
+            let (reader, observed) = ScriptedReader::new([ReadStep::Panic]);
+            let mut body = Box::pin(ReaderBody::with_capacity(reader, 8));
+            let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = poll_reader(body.as_mut());
+            }));
+            let payload = failure.expect_err("the original provider panic must propagate");
+            let message = payload.downcast_ref::<&str>().copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+            assert_eq!(message, Some("reader body provider panic sentinel"));
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                poll_reader(body.as_mut()),
+                Poll::Ready(Some(Err(error))) if error.kind() == io::ErrorKind::InvalidData
+            ));
+            assert!(body.is_end_stream());
+            assert_eq!(body.size_hint().exact(), Some(0));
+            assert_eq!(body.as_ref().get_ref().buffer.capacity(), 0);
+            for _ in 0..3 {
+                assert!(matches!(poll_reader(body.as_mut()), Poll::Ready(None)));
+            }
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn drop_and_into_inner_preserve_sole_reader_ownership() {
+            let (reader, observed) = ScriptedReader::new([ReadStep::Pending]);
+            let mut body = Box::pin(ReaderBody::new(reader));
+            assert!(poll_reader(body.as_mut()).is_pending());
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 0);
+            drop(body);
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+
+            let (reader, observed) = ScriptedReader::new([ReadStep::Eof]);
+            let body = ReaderBody::new(reader);
+            assert!(Arc::ptr_eq(&body.get_ref().observations, &observed));
+            let reader = body.into_inner();
+            assert_eq!(observed.polls.load(Ordering::SeqCst), 0);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 0);
+            drop(reader);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+        }
+    }

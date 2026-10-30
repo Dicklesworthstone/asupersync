@@ -5,8 +5,13 @@
 //! constructing requests with JSON, form, multipart, query, and auth helpers,
 //! plus response body reading utilities.
 
+use crate::bytes::{Buf, Bytes, BytesCursor};
+use crate::http::body::{Body, Frame, SizeHint};
+use std::collections::VecDeque;
 use std::fmt;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 /// HTTP request method.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -505,6 +510,582 @@ impl MultipartForm {
         body.extend_from_slice(b"--\r\n");
         body
     }
+}
+
+/// Maximum encoded headers retained for one streaming multipart part.
+const MULTIPART_STREAM_HEADER_LIMIT: usize = 64 * 1024;
+
+/// An error constructing or reading a streaming multipart request body.
+///
+/// A producer error, a length mismatch, or a trailer frame is terminal: no
+/// closing multipart delimiter is emitted and all remaining producers are
+/// dropped. The legacy [`MultipartError`] remains unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MultipartBodyError {
+    /// The boundary is not a valid MIME boundary of 1 through 70 bytes.
+    InvalidBoundary,
+    /// A metadata value is empty where required or contains a control byte.
+    InvalidMetadata {
+        /// The rejected metadata field.
+        field: &'static str,
+    },
+    /// One part's encoded header block exceeds its fixed allocation bound.
+    HeaderTooLarge {
+        /// Maximum encoded header bytes, including its boundary line.
+        limit: usize,
+    },
+    /// A data frame cannot be represented by a 64-bit body length.
+    LengthOverflow,
+    /// A producer's actual length differs from its declared or exact hint.
+    LengthMismatch,
+    /// HTTP trailers cannot be embedded inside a multipart part.
+    TrailersNotAllowed,
+    /// The part producer returned an error.
+    Producer(String),
+}
+
+impl fmt::Display for MultipartBodyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBoundary => f.write_str("invalid streaming multipart boundary"),
+            Self::InvalidMetadata { field } => {
+                write!(f, "invalid streaming multipart {field}")
+            }
+            Self::HeaderTooLarge { limit } => {
+                write!(f, "streaming multipart part headers exceed {limit} bytes")
+            }
+            Self::LengthOverflow => f.write_str("streaming multipart body length overflows u64"),
+            Self::LengthMismatch => f.write_str("streaming multipart part length mismatch"),
+            Self::TrailersNotAllowed => {
+                f.write_str("streaming multipart parts cannot emit trailers")
+            }
+            Self::Producer(message) => write!(f, "streaming multipart producer failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for MultipartBodyError {}
+
+enum MultipartPartSource<B> {
+    Buffered(Bytes),
+    Stream(Pin<Box<B>>),
+}
+
+/// One text, buffered, or streaming field in a [`MultipartBody`].
+///
+/// Text fields and streaming files can share a form without sharing their
+/// producer type. Different streaming producer types can use
+/// [`crate::http::body::BoxBody`] when their data and error types agree.
+/// Metadata is checked by [`MultipartBody::with_boundary`] before any output.
+pub struct MultipartBodyPart<B = crate::http::body::Empty> {
+    name: String,
+    filename: Option<String>,
+    content_type: Option<String>,
+    source: MultipartPartSource<B>,
+    declared_length: Option<u64>,
+    remaining: Option<u64>,
+    header_length: usize,
+}
+
+impl<B> fmt::Debug for MultipartBodyPart<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MultipartBodyPart")
+            .field("name", &self.name)
+            .field("filename", &self.filename)
+            .field("content_type", &self.content_type)
+            .field("declared_length", &self.declared_length)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<B> MultipartBodyPart<B> {
+    /// Add an owned UTF-8 text field without copying it into a whole form.
+    #[must_use]
+    pub fn text(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::bytes(name, Bytes::from(value.into()))
+    }
+
+    /// Add an already-buffered field. The `Bytes` allocation is transferred
+    /// directly into an output frame when this part is reached.
+    #[must_use]
+    pub fn bytes(name: impl Into<String>, value: impl Into<Bytes>) -> Self {
+        Self {
+            name: name.into(),
+            filename: None,
+            content_type: None,
+            source: MultipartPartSource::Buffered(value.into()),
+            declared_length: None,
+            remaining: None,
+            header_length: 0,
+        }
+    }
+
+    /// Add a lazy body producer, defaulting its media type to
+    /// `application/octet-stream`. No producer frame is polled at construction.
+    /// The producer is pinned internally, so it need not implement `Unpin`.
+    #[must_use]
+    pub fn stream(name: impl Into<String>, body: B) -> Self {
+        Self {
+            name: name.into(),
+            filename: None,
+            content_type: Some("application/octet-stream".to_owned()),
+            source: MultipartPartSource::Stream(Box::pin(body)),
+            declared_length: None,
+            remaining: None,
+            header_length: 0,
+        }
+    }
+
+    /// Set the quoted filename parameter. Quotes and backslashes are escaped;
+    /// control bytes are refused when the form is constructed.
+    #[must_use]
+    pub fn filename(mut self, filename: impl Into<String>) -> Self {
+        self.filename = Some(filename.into());
+        self
+    }
+
+    /// Set this part's media type. CR, LF, NUL and other ASCII control bytes
+    /// are refused when the form is constructed.
+    #[must_use]
+    pub fn content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.content_type = Some(content_type.into());
+        self
+    }
+
+    /// Declare an exact part length, overriding the producer's size hint.
+    ///
+    /// This is checked against actual DATA and EOF; it does not add a
+    /// `Content-Length` header inside the multipart field. An overlong frame
+    /// is rejected before any of that frame is returned to the transport.
+    #[must_use]
+    pub fn with_length(mut self, length: u64) -> Self {
+        self.declared_length = Some(length);
+        self
+    }
+
+    fn effective_content_type(&self) -> Option<&str> {
+        self.content_type
+            .as_deref()
+            .or_else(|| self.filename.as_ref().map(|_| "application/octet-stream"))
+    }
+
+    fn checked_header_length(&self, boundary: &str) -> Result<usize, MultipartBodyError> {
+        let mut length = b"--\r\nContent-Disposition: form-data; name=\"\"\r\n\r\n"
+            .len()
+            .saturating_add(boundary.len())
+            .saturating_add(self.name.len());
+        if let Some(filename) = &self.filename {
+            length = length
+                .saturating_add(b"; filename=\"\"".len())
+                .saturating_add(filename.len());
+        }
+        if let Some(content_type) = self.effective_content_type() {
+            length = length
+                .saturating_add(b"\r\nContent-Type: ".len())
+                .saturating_add(content_type.len());
+        }
+        // Bound work and allocation before escaping potentially large input.
+        if length > MULTIPART_STREAM_HEADER_LIMIT {
+            return Err(MultipartBodyError::HeaderTooLarge {
+                limit: MULTIPART_STREAM_HEADER_LIMIT,
+            });
+        }
+        for (field, value) in [
+            ("name", Some(self.name.as_str())),
+            ("filename", self.filename.as_deref()),
+            ("content type", self.effective_content_type()),
+        ] {
+            if let Some(value) = value {
+                if value.bytes().any(|byte| byte < b' ' || byte == 0x7f)
+                    || field == "content type" && value.trim().is_empty()
+                {
+                    return Err(MultipartBodyError::InvalidMetadata { field });
+                }
+            }
+        }
+        for value in [Some(self.name.as_str()), self.filename.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            length = length.saturating_add(
+                value
+                    .bytes()
+                    .filter(|&byte| matches!(byte, b'"' | b'\\'))
+                    .count(),
+            );
+        }
+        if length > MULTIPART_STREAM_HEADER_LIMIT {
+            return Err(MultipartBodyError::HeaderTooLarge {
+                limit: MULTIPART_STREAM_HEADER_LIMIT,
+            });
+        }
+        Ok(length)
+    }
+
+    fn encode_head(&self, boundary: &str) -> Bytes {
+        let mut encoded = Vec::with_capacity(self.header_length);
+        encoded.extend_from_slice(b"--");
+        encoded.extend_from_slice(boundary.as_bytes());
+        encoded.extend_from_slice(b"\r\nContent-Disposition: form-data; name=\"");
+        append_multipart_quoted_value(&mut encoded, &self.name);
+        encoded.extend_from_slice(b"\"");
+        if let Some(filename) = &self.filename {
+            encoded.extend_from_slice(b"; filename=\"");
+            append_multipart_quoted_value(&mut encoded, filename);
+            encoded.extend_from_slice(b"\"");
+        }
+        if let Some(content_type) = self.effective_content_type() {
+            encoded.extend_from_slice(b"\r\nContent-Type: ");
+            encoded.extend_from_slice(content_type.as_bytes());
+        }
+        encoded.extend_from_slice(b"\r\n\r\n");
+        debug_assert_eq!(encoded.len(), self.header_length);
+        Bytes::from(encoded)
+    }
+}
+
+/// One multipart output frame, preserving the source buffer's segmentation.
+///
+/// Generated delimiters, headers and owned text use `Framing`; streaming
+/// producer DATA is returned as `Payload` without copying or requiring `Unpin`.
+pub enum MultipartChunk<D> {
+    /// Multipart syntax or an already-buffered field.
+    Framing(BytesCursor),
+    /// The original data buffer returned by a part producer.
+    Payload(D),
+}
+
+impl<D: Buf> fmt::Debug for MultipartChunk<D> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MultipartChunk")
+            .field("remaining", &self.remaining())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<D: Buf> Buf for MultipartChunk<D> {
+    fn remaining(&self) -> usize {
+        match self {
+            Self::Framing(bytes) => bytes.remaining(),
+            Self::Payload(data) => data.remaining(),
+        }
+    }
+
+    fn chunk(&self) -> &[u8] {
+        match self {
+            Self::Framing(bytes) => bytes.chunk(),
+            Self::Payload(data) => data.chunk(),
+        }
+    }
+
+    fn advance(&mut self, count: usize) {
+        match self {
+            Self::Framing(bytes) => bytes.advance(count),
+            Self::Payload(data) => data.advance(count),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MultipartBodyPhase {
+    Head,
+    Data,
+    Separator,
+    Closing,
+    Done,
+}
+
+/// A lazy multipart/form-data upload over the shared [`Body`] contract.
+///
+/// Only the current part is polled. Producer DATA is forwarded without copying;
+/// generated headers are limited to 64 KiB per part. Each call returns at most
+/// one frame and no background task or whole-upload buffer is created. The
+/// caller still owns the cost of its supplied part list, buffered fields and
+/// individual producer frames.
+///
+/// Supply a boundary that cannot occur as a delimiter in any part (typically a
+/// fresh high-entropy value chosen by the caller). A streaming encoder cannot
+/// pre-scan arbitrary producers to prove that condition. Unlike the legacy
+/// [`MultipartForm`], this API does not silently choose a deterministic boundary.
+/// Parts with the same name remain separate and retain their supplied order.
+///
+/// The size hint is exact only when every part supplies a known length and the
+/// aggregate fits in `u64`. Each known length is checked against actual DATA and
+/// EOF. A part error, unexpected trailers, or length mismatch terminates the
+/// body, drops queued producers, and never emits a successful closing delimiter.
+///
+/// For a text-only form, select the otherwise unused producer type explicitly:
+///
+/// ```
+/// use asupersync::http::body::Empty;
+/// use asupersync::http::h1::{MultipartBody, MultipartBodyError, MultipartBodyPart};
+///
+/// let body = MultipartBody::<Empty>::with_boundary(
+///     "chosen-for-these-fields",
+///     [MultipartBodyPart::text("message", "hello")],
+/// )?;
+/// assert_eq!(body.boundary(), "chosen-for-these-fields");
+/// # Ok::<(), MultipartBodyError>(())
+/// ```
+pub struct MultipartBody<B = crate::http::body::Empty> {
+    boundary: String,
+    parts: VecDeque<MultipartBodyPart<B>>,
+    phase: MultipartBodyPhase,
+    remaining: Option<u64>,
+}
+
+impl<B> fmt::Debug for MultipartBody<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MultipartBody")
+            .field("boundary", &self.boundary)
+            .field("remaining_parts", &self.parts.len())
+            .field("phase", &self.phase)
+            .field("remaining", &self.remaining)
+            .finish()
+    }
+}
+
+impl<B: Body> MultipartBody<B> {
+    /// Validate all metadata and create a one-shot multipart body.
+    ///
+    /// No DATA is polled here. The boundary must satisfy MIME's 1–70 byte
+    /// grammar; internal spaces are allowed, a trailing space is not. Names
+    /// and filenames are quoted and escaped rather than interpreted as header
+    /// fragments. Metadata containing ASCII controls is rejected.
+    pub fn with_boundary(
+        boundary: impl Into<String>,
+        parts: impl IntoIterator<Item = MultipartBodyPart<B>>,
+    ) -> Result<Self, MultipartBodyError> {
+        let boundary = boundary.into();
+        if !is_valid_streaming_multipart_boundary(&boundary) {
+            return Err(MultipartBodyError::InvalidBoundary);
+        }
+        let mut remaining = u64::try_from(boundary.len()).ok().and_then(|n| n.checked_add(6));
+        let mut queued = VecDeque::new();
+        for mut part in parts {
+            part.header_length = part.checked_header_length(&boundary)?;
+            part.remaining = part.declared_length.or_else(|| match &part.source {
+                MultipartPartSource::Buffered(bytes) => u64::try_from(bytes.len()).ok(),
+                MultipartPartSource::Stream(body) => body.size_hint().exact(),
+            });
+            remaining = remaining.and_then(|length| {
+                length
+                    .checked_add(u64::try_from(part.header_length).ok()?)?
+                    .checked_add(part.remaining?)?
+                    .checked_add(2)
+            });
+            queued.push_back(part);
+        }
+        Ok(Self {
+            boundary,
+            parts: queued,
+            phase: MultipartBodyPhase::Head,
+            remaining,
+        })
+    }
+
+    /// The exact boundary used by both the body and its media-type header.
+    #[must_use]
+    pub fn boundary(&self) -> &str {
+        &self.boundary
+    }
+
+    /// The media type for the outer HTTP request. Quoting also supports MIME
+    /// boundary characters, such as `:` and spaces, that are not HTTP tokens.
+    #[must_use]
+    pub fn content_type_header(&self) -> String {
+        format!("multipart/form-data; boundary=\"{}\"", self.boundary)
+    }
+
+    fn fail(&mut self, error: MultipartBodyError) -> MultipartBodyError {
+        self.phase = MultipartBodyPhase::Done;
+        self.remaining = Some(0);
+        // Producer destructors are caller code. Publish terminal ownership
+        // before invoking them, even if a caller catches a destructor panic.
+        let retired = std::mem::take(&mut self.parts);
+        drop(retired);
+        error
+    }
+
+    fn emit(
+        &mut self,
+        chunk: MultipartChunk<B::Data>,
+    ) -> Result<Frame<MultipartChunk<B::Data>>, MultipartBodyError> {
+        let Ok(length) = u64::try_from(chunk.remaining()) else {
+            return Err(self.fail(MultipartBodyError::LengthOverflow));
+        };
+        if let Some(remaining) = self.remaining {
+            let Some(remaining) = remaining.checked_sub(length) else {
+                return Err(self.fail(MultipartBodyError::LengthMismatch));
+            };
+            self.remaining = Some(remaining);
+        }
+        Ok(Frame::Data(chunk))
+    }
+}
+
+impl<B> Body for MultipartBody<B>
+where
+    B: Body,
+    B::Error: fmt::Display,
+{
+    type Data = MultipartChunk<B::Data>;
+    type Error = MultipartBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        // An always-ready producer may emit arbitrarily many empty frames.
+        // Yield after bounded work even when no output bytes are available.
+        for _ in 0..32 {
+            match this.phase {
+                MultipartBodyPhase::Head => {
+                    let Some(part) = this.parts.front() else {
+                        this.phase = MultipartBodyPhase::Closing;
+                        continue;
+                    };
+                    let head = part.encode_head(&this.boundary);
+                    this.phase = MultipartBodyPhase::Data;
+                    return Poll::Ready(Some(this.emit(MultipartChunk::Framing(
+                        BytesCursor::new(head),
+                    ))));
+                }
+                MultipartBodyPhase::Data => {
+                    let part = this.parts.front_mut().expect("multipart DATA owns a part");
+                    let frame = match &mut part.source {
+                        MultipartPartSource::Buffered(bytes) => {
+                            if bytes.is_empty() {
+                                None
+                            } else {
+                                Some(Ok(Frame::Data(MultipartChunk::Framing(BytesCursor::new(
+                                    std::mem::take(bytes),
+                                )))))
+                            }
+                        }
+                        MultipartPartSource::Stream(body) => {
+                            std::task::ready!(body.as_mut().poll_frame(cx))
+                                .map(|frame| {
+                                    frame.map(|frame| frame.map_data(MultipartChunk::Payload))
+                                })
+                        }
+                    };
+                    match frame {
+                        Some(Ok(Frame::Data(data))) => {
+                            let Ok(length) = u64::try_from(data.remaining()) else {
+                                return Poll::Ready(Some(Err(
+                                    this.fail(MultipartBodyError::LengthOverflow),
+                                )));
+                            };
+                            if let Some(remaining) = part.remaining {
+                                let Some(remaining) = remaining.checked_sub(length) else {
+                                    return Poll::Ready(Some(Err(
+                                        this.fail(MultipartBodyError::LengthMismatch),
+                                    )));
+                                };
+                                part.remaining = Some(remaining);
+                            }
+                            if length != 0 {
+                                return Poll::Ready(Some(this.emit(data)));
+                            }
+                        }
+                        Some(Ok(Frame::Trailers(_))) => {
+                            return Poll::Ready(Some(Err(
+                                this.fail(MultipartBodyError::TrailersNotAllowed),
+                            )));
+                        }
+                        Some(Err(error)) => {
+                            return Poll::Ready(Some(Err(
+                                this.fail(MultipartBodyError::Producer(error.to_string())),
+                            )));
+                        }
+                        None => {
+                            if part.remaining.is_some_and(|remaining| remaining != 0) {
+                                return Poll::Ready(Some(Err(
+                                    this.fail(MultipartBodyError::LengthMismatch),
+                                )));
+                            }
+                            this.phase = MultipartBodyPhase::Separator;
+                        }
+                    }
+                }
+                MultipartBodyPhase::Separator => {
+                    // Retiring a producer may run an arbitrary destructor.
+                    // A caught panic must leave a terminal form rather than
+                    // let the next poll silently skip the following part.
+                    this.phase = MultipartBodyPhase::Done;
+                    let mut parts = std::mem::take(&mut this.parts);
+                    let retired = parts.pop_front();
+                    drop(retired);
+                    this.parts = parts;
+                    this.phase = MultipartBodyPhase::Head;
+                    return Poll::Ready(Some(this.emit(MultipartChunk::Framing(
+                        BytesCursor::new(Bytes::from_static(b"\r\n")),
+                    ))));
+                }
+                MultipartBodyPhase::Closing => {
+                    let closing = Bytes::from(format!("--{}--\r\n", this.boundary));
+                    this.phase = MultipartBodyPhase::Done;
+                    return Poll::Ready(Some(this.emit(MultipartChunk::Framing(
+                        BytesCursor::new(closing),
+                    ))));
+                }
+                MultipartBodyPhase::Done => return Poll::Ready(None),
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.phase == MultipartBodyPhase::Done
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        if self.is_end_stream() {
+            SizeHint::with_exact(0)
+        } else {
+            self.remaining.map_or_else(SizeHint::default, SizeHint::with_exact)
+        }
+    }
+}
+
+fn append_multipart_quoted_value(encoded: &mut Vec<u8>, value: &str) {
+    for byte in value.bytes() {
+        if matches!(byte, b'"' | b'\\') {
+            encoded.push(b'\\');
+        }
+        encoded.push(byte);
+    }
+}
+
+fn is_valid_streaming_multipart_boundary(boundary: &str) -> bool {
+    !boundary.is_empty()
+        && boundary.len() <= 70
+        && !boundary.ends_with(' ')
+        && boundary.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b' '
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'+'
+                    | b'_'
+                    | b','
+                    | b'-'
+                    | b'.'
+                    | b'/'
+                    | b':'
+                    | b'='
+                    | b'?'
+            )
+        })
 }
 
 fn is_valid_multipart_boundary(boundary: &str) -> bool {

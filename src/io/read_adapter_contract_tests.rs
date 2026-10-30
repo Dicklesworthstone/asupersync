@@ -291,3 +291,64 @@ fn bounded_scalar_and_vectored_reads_agree_for_every_small_partition() {
         }
     }
 }
+
+#[test]
+fn reader_body_rejects_shifted_storage_for_every_status_and_never_repolls() {
+    use crate::http::body::{Body, ReaderBody};
+
+    for status in [Status::Ready, Status::Pending, Status::Error] {
+        let mut source = Reader::new(status);
+        source.shifted = true;
+        let polls = Arc::clone(&source.polls);
+        let mut body = ReaderBody::with_capacity(source, 8);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut body).poll_frame(&mut cx),
+            Poll::Ready(Some(Err(error))) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert!(body.is_end_stream());
+        assert_eq!(body.size_hint().exact(), Some(0));
+        assert_eq!(body.get_ref().bytes, b"defghij");
+        for _ in 0..3 {
+            assert!(matches!(Pin::new(&mut body).poll_frame(&mut cx), Poll::Ready(None)));
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn reader_body_accepts_filled_bytes_in_a_shorter_original_prefix() {
+    use crate::bytes::Buf;
+    use crate::http::body::{Body, Frame, ReaderBody};
+
+    struct PrefixReader {
+        done: bool,
+    }
+
+    impl AsyncRead for PrefixReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if !this.done {
+                this.done = true;
+                let storage = std::mem::replace(buf, ReadBuf::new(&mut [])).buf;
+                *buf = ReadBuf::new(&mut storage[..3]);
+                buf.put_slice(b"abc");
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let mut body = ReaderBody::with_capacity(PrefixReader { done: false }, 8);
+    let mut cx = Context::from_waker(Waker::noop());
+    let data = match Pin::new(&mut body).poll_frame(&mut cx) {
+        Poll::Ready(Some(Ok(Frame::Data(data)))) => data,
+        other => panic!("valid original-buffer prefix was rejected: {other:?}"),
+    };
+    assert_eq!(data.remaining(), 3);
+    assert_eq!(data.chunk(), b"abc");
+    assert!(matches!(Pin::new(&mut body).poll_frame(&mut cx), Poll::Ready(None)));
+}

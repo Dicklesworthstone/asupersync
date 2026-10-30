@@ -421,6 +421,258 @@
             assert_eq!(client.pool_stats().total_connections, 0);
         }
 
+        fn read_chunked_upload(socket: &mut std::net::TcpStream) -> (Vec<u8>, usize) {
+            let mut decoded = Vec::new();
+            let mut largest_chunk = 0;
+            loop {
+                let mut line = Vec::new();
+                while !line.ends_with(b"\r\n") {
+                    assert!(line.len() < 32);
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).unwrap();
+                    line.push(byte[0]);
+                }
+                let length = usize::from_str_radix(
+                    std::str::from_utf8(&line[..line.len() - 2]).unwrap(),
+                    16,
+                )
+                .unwrap();
+                largest_chunk = largest_chunk.max(length);
+                assert!(length <= 1024, "multipart source must remain chunked");
+                let start = decoded.len();
+                decoded.resize(start + length, 0);
+                socket.read_exact(&mut decoded[start..]).unwrap();
+                let mut crlf = [0; 2];
+                socket.read_exact(&mut crlf).unwrap();
+                assert_eq!(&crlf, b"\r\n");
+                if length == 0 {
+                    return (decoded, largest_chunk);
+                }
+            }
+        }
+
+        #[test]
+        fn multipart_upload_streams_async_files_with_exact_or_chunked_framing_and_reuse() {
+            use crate::http::body::ReaderBody;
+            use crate::http::h1::{MultipartBody, MultipartBodyPart};
+
+            for multithread in [false, true] {
+                for known_length in [false, true] {
+                    let boundary = "native:reader-file";
+                    let payload = [vec![b'z'; 32 * 1024], b"tail".to_vec()].concat();
+                    let expected = MultipartForm::with_boundary(boundary)
+                        .unwrap()
+                        .text("description", "streamed file")
+                        .file("asset", "payload.bin", "application/octet-stream", payload.clone())
+                        .to_body();
+                    let mut file = tempfile::tempfile().unwrap();
+                    file.write_all(&payload).unwrap();
+                    std::io::Seek::rewind(&mut file).unwrap();
+                    let (listener, url) = listener();
+                    let peer = std::thread::spawn(move || {
+                        let mut socket = accept(&listener);
+                        let head = request_head(&mut socket);
+                        assert!(head.starts_with("POST /multipart "));
+                        let lower = head.to_ascii_lowercase();
+                        assert_eq!(lower.matches("content-type:").count(), 1);
+                        assert!(head.contains(
+                            "Content-Type: multipart/form-data; boundary=\"native:reader-file\"\r\n"
+                        ));
+                        if known_length {
+                            assert!(lower.contains(&format!("content-length: {}\r\n", expected.len())));
+                            assert!(!lower.contains("transfer-encoding:"));
+                            let mut received = vec![0; expected.len()];
+                            socket.read_exact(&mut received).unwrap();
+                            assert_eq!(received, expected);
+                        } else {
+                            assert!(lower.contains("transfer-encoding: chunked\r\n"));
+                            assert!(!lower.contains("content-length:"));
+                            let (received, largest) = read_chunked_upload(&mut socket);
+                            assert_eq!(received, expected);
+                            assert_eq!(largest, 1024);
+                        }
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+                        assert!(request_head(&mut socket).starts_with("GET /after "));
+                        socket.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").unwrap();
+                        assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                    });
+                    let runtime = runtime(multithread);
+                    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                    let client = HttpClient::builder()
+                        .default_header("Content-Type", "application/json")
+                        .max_connections_per_host(1)
+                        .max_total_connections(1)
+                        .request_timeout(Duration::from_secs(4))
+                        .build();
+                    runtime.block_on_with_cx(cx.clone(), async {
+                        let source = ReaderBody::with_capacity(crate::fs::File::from_std(file), 1024);
+                        let part = MultipartBodyPart::stream("asset", source)
+                            .filename("payload.bin")
+                            .content_type("application/octet-stream");
+                        let part = if known_length {
+                            part.with_length(payload.len() as u64)
+                        } else {
+                            part
+                        };
+                        let form = MultipartBody::with_boundary(
+                            boundary,
+                            vec![MultipartBodyPart::text("description", "streamed file"), part],
+                        )
+                        .unwrap();
+                        assert_eq!(form.size_hint().exact().is_some(), known_length);
+                        let mut response = if known_length {
+                            client.post(format!("{url}/multipart"))
+                                .content_type("text/plain")
+                                .send_multipart_with_body(&cx, form)
+                                .await
+                                .unwrap()
+                        } else {
+                            client.request_multipart_with_body(
+                                &cx,
+                                Method::Post,
+                                &format!("{url}/multipart"),
+                                vec![("content-type".to_owned(), "text/plain".to_owned())],
+                                form,
+                            )
+                            .await
+                            .unwrap()
+                        };
+                        assert!(!response.body_withheld);
+                        assert_eq!(drain(&mut response.body).await.unwrap(), b"ok");
+                        assert_eq!(client.pool_stats().idle_connections, 1);
+                        assert_eq!(client.send_get(&cx, &format!("{url}/after")).await.unwrap().status, 204);
+                        assert_eq!(client.pool_stats().total_connections, 0);
+                        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                    });
+                    peer.join().unwrap();
+                    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+                }
+            }
+        }
+
+        struct ParkedMultipartReader {
+            witness: Option<std::sync::mpsc::Sender<()>>,
+            polls: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl AsyncRead for ParkedMultipartReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _task: &mut Context<'_>,
+                _buffer: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                let this = self.get_mut();
+                this.polls.fetch_add(1, Ordering::SeqCst);
+                if let Some(witness) = this.witness.take() {
+                    witness.send(()).unwrap();
+                }
+                Poll::Pending
+            }
+        }
+
+        impl Drop for ParkedMultipartReader {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn multipart_upload_early_response_and_cancellation_drop_current_and_queued_sources() {
+            use crate::http::body::ReaderBody;
+            use crate::http::h1::{MultipartBody, MultipartBodyPart};
+
+            for multithread in [false, true] {
+                for early_response in [false, true] {
+                    let (listener, url) = listener();
+                    let peer = std::thread::spawn(move || {
+                        let mut socket = accept(&listener);
+                        let head = request_head(&mut socket);
+                        if early_response {
+                            assert!(head.contains("Expect: 100-continue\r\n"));
+                            socket.write_all(b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\n\r\n").unwrap();
+                            expect_closed(&mut socket);
+                        } else {
+                            // The first multipart header can precede the
+                            // parked reader, but no file data is produced.
+                            let mut received = 0;
+                            let mut bytes = [0; 1024];
+                            loop {
+                                match socket.read(&mut bytes) {
+                                    Ok(0) => break,
+                                    Ok(count) => {
+                                        received += count;
+                                        assert!(received < 4096);
+                                    }
+                                    Err(error) if matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe) => break,
+                                    Err(error) => panic!("cancelled multipart socket: {error}"),
+                                }
+                            }
+                        }
+                        assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                    });
+                    let runtime = runtime(multithread);
+                    let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+                    let owner = Cx::for_testing();
+                    let (witness, parked) = std::sync::mpsc::channel();
+                    let canceller = if early_response {
+                        None
+                    } else {
+                        let owner = owner.clone();
+                        Some(std::thread::spawn(move || {
+                            parked.recv_timeout(Duration::from_secs(3)).unwrap();
+                            owner.cancel_with(crate::types::CancelKind::User, Some("multipart source parked"));
+                        }))
+                    };
+                    let polls = Arc::new(AtomicUsize::new(0));
+                    let drops = Arc::new(AtomicUsize::new(0));
+                    let client = HttpClient::builder()
+                        .max_connections_per_host(1)
+                        .max_total_connections(1)
+                        .request_timeout(Duration::from_secs(4))
+                        .build();
+                    runtime.block_on_with_cx(driver, async {
+                        let first = ParkedMultipartReader {
+                            witness: Some(witness), polls: polls.clone(), drops: drops.clone(),
+                        };
+                        let second = ParkedMultipartReader {
+                            witness: None, polls: polls.clone(), drops: drops.clone(),
+                        };
+                        let form = MultipartBody::with_boundary("parked:multipart", vec![
+                            MultipartBodyPart::stream("first", ReaderBody::new(first)),
+                            MultipartBodyPart::stream("second", ReaderBody::new(second)),
+                        ]).unwrap();
+                        let builder = client.post(&url);
+                        let builder = if early_response {
+                            builder.header("Expect", "100-continue")
+                        } else {
+                            builder
+                        };
+                        let result = builder.send_multipart_with_body(&owner, form).await;
+                        if early_response {
+                            let response = result.unwrap();
+                            assert_eq!(response.head.status, 413);
+                            assert!(response.body_withheld);
+                            assert_eq!(polls.load(Ordering::SeqCst), 0);
+                        } else {
+                            assert!(matches!(result, Err(ClientError::Cancelled)), "{result:?}");
+                            assert!(polls.load(Ordering::SeqCst) > 0);
+                        }
+                        assert_eq!(drops.load(Ordering::SeqCst), 2);
+                        assert_eq!(client.pool_stats().total_connections, 0);
+                        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                    });
+                    if let Some(canceller) = canceller {
+                        canceller.join().unwrap();
+                    }
+                    peer.join().unwrap();
+                    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+                }
+            }
+        }
+
         #[test]
         fn pooled_streaming_holds_admission_until_final_frame_and_reuses_the_socket() {
             for multithread in [false, true] {

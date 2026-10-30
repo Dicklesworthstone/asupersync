@@ -965,3 +965,516 @@
             request_response_builder_snapshot(&request, &response)
         );
     }
+
+    mod streaming_multipart {
+        use super::*;
+        use crate::http::body::{Empty, HeaderMap};
+        use crate::web::extract::FromRequest;
+        use std::cell::{Cell, RefCell};
+        use std::marker::PhantomPinned;
+        use std::rc::Rc;
+        use std::task::Waker;
+
+        #[derive(Default)]
+        struct Counts {
+            polls: Cell<usize>,
+            drops: Cell<usize>,
+        }
+
+        struct Segments(VecDeque<&'static [u8]>, PhantomPinned);
+
+        impl Buf for Segments {
+            fn remaining(&self) -> usize {
+                self.0.iter().map(|segment| segment.len()).sum()
+            }
+
+            fn chunk(&self) -> &[u8] {
+                self.0.front().copied().unwrap_or_default()
+            }
+
+            fn advance(&mut self, mut count: usize) {
+                assert!(count <= self.remaining());
+                while count != 0 {
+                    let segment = self.0.pop_front().unwrap();
+                    let advanced = count.min(segment.len());
+                    count -= advanced;
+                    if advanced < segment.len() {
+                        self.0.push_front(&segment[advanced..]);
+                    }
+                }
+            }
+        }
+
+        struct Source {
+            frames: RefCell<VecDeque<Result<Frame<Segments>, &'static str>>>,
+            exact: Option<u64>,
+            first_pending: Cell<bool>,
+            parked: bool,
+            panic_on_drop: bool,
+            counts: Rc<Counts>,
+            _pinned: PhantomPinned,
+        }
+
+        impl Body for Source {
+            type Data = Segments;
+            type Error = &'static str;
+
+            fn poll_frame(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                let this = self.as_ref().get_ref();
+                this.counts.polls.set(this.counts.polls.get() + 1);
+                if this.parked {
+                    return Poll::Pending;
+                }
+                if this.first_pending.replace(false) {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Poll::Ready(this.frames.borrow_mut().pop_front())
+            }
+
+            fn size_hint(&self) -> SizeHint {
+                self.exact.map_or_else(SizeHint::default, SizeHint::with_exact)
+            }
+        }
+
+        impl Drop for Source {
+            fn drop(&mut self) {
+                self.counts.drops.set(self.counts.drops.get() + 1);
+                assert!(!self.panic_on_drop, "deliberate producer destructor panic");
+            }
+        }
+
+        fn data(segments: &[&'static [u8]]) -> Result<Frame<Segments>, &'static str> {
+            Ok(Frame::Data(Segments(
+                segments.iter().copied().collect(),
+                PhantomPinned,
+            )))
+        }
+
+        fn source(
+            exact: Option<u64>,
+            frames: Vec<Result<Frame<Segments>, &'static str>>,
+        ) -> (Source, Rc<Counts>) {
+            let counts = Rc::new(Counts::default());
+            (
+                Source {
+                    frames: RefCell::new(frames.into()),
+                    exact,
+                    first_pending: Cell::new(false),
+                    parked: false,
+                    panic_on_drop: false,
+                    counts: Rc::clone(&counts),
+                    _pinned: PhantomPinned,
+                },
+                counts,
+            )
+        }
+
+        fn collect<B: Body>(
+            body: &mut MultipartBody<B>,
+        ) -> (Vec<u8>, Option<MultipartBodyError>)
+        where
+            B::Error: fmt::Display,
+        {
+            let mut wire = Vec::new();
+            let mut cx = Context::from_waker(Waker::noop());
+            for _ in 0..10_000 {
+                let before = body.size_hint().exact();
+                match Pin::new(&mut *body).poll_frame(&mut cx) {
+                    Poll::Ready(Some(Ok(Frame::Data(mut data)))) => {
+                        if let Some(before) = before {
+                            assert_eq!(
+                                body.size_hint().exact(),
+                                Some(before - data.remaining() as u64),
+                                "exact size hint must include all remaining multipart syntax"
+                            );
+                        }
+                        while data.has_remaining() {
+                            let chunk = data.chunk();
+                            assert!(!chunk.is_empty());
+                            wire.extend_from_slice(chunk);
+                            let count = chunk.len();
+                            data.advance(count);
+                        }
+                    }
+                    Poll::Ready(Some(Err(error))) => {
+                        assert!(body.is_end_stream());
+                        assert_eq!(body.size_hint().exact(), Some(0));
+                        assert!(matches!(
+                            Pin::new(&mut *body).poll_frame(&mut cx),
+                            Poll::Ready(None)
+                        ));
+                        return (wire, Some(error));
+                    }
+                    Poll::Ready(None) => {
+                        assert!(body.is_end_stream());
+                        assert_eq!(body.size_hint().exact(), Some(0));
+                        return (wire, None);
+                    }
+                    Poll::Ready(Some(Ok(Frame::Trailers(_)))) => {
+                        panic!("multipart must never emit HTTP trailers");
+                    }
+                    Poll::Pending => {}
+                }
+            }
+            panic!("multipart body did not terminate within its bounded test drive");
+        }
+
+        #[test]
+        fn streaming_multipart_mixes_text_and_pinned_sources_without_collecting() {
+            let (producer, counts) = source(Some(6), vec![data(&[b"ab", b"c"]), data(&[b"def"])]);
+            producer.first_pending.set(true);
+            let parts = [
+                MultipartBodyPart::text("tag", "first"),
+                MultipartBodyPart::text("tag", "second"),
+                MultipartBodyPart::stream("file", producer)
+                    .filename("data.bin")
+                    .content_type("application/octet-stream"),
+            ];
+            let mut body = MultipartBody::with_boundary("upload: boundary", parts).unwrap();
+            assert_eq!(counts.polls.get(), 0, "construction must not poll the source");
+            assert_eq!(
+                body.content_type_header(),
+                "multipart/form-data; boundary=\"upload: boundary\""
+            );
+            let length = body.size_hint().exact().unwrap();
+            let content_type = body.content_type_header();
+            let (wire, error) = collect(&mut body);
+            assert!(error.is_none(), "{error:?}");
+            assert_eq!(wire.len() as u64, length);
+            assert_eq!(counts.polls.get(), 4, "Pending, two DATA frames, actual EOF");
+            assert_eq!(counts.drops.get(), 1);
+
+            let request = crate::web::extract::Request::new("POST", "/upload")
+                .with_header("content-type", content_type)
+                .with_body(wire);
+            let parsed = crate::web::multipart::Multipart::from_request(request).unwrap();
+            let tags = parsed.fields_by_name("tag");
+            assert_eq!(tags.len(), 2);
+            assert_eq!(tags[0].text().unwrap(), "first");
+            assert_eq!(tags[1].text().unwrap(), "second");
+            let file = parsed.field("file").unwrap();
+            assert_eq!(file.filename(), Some("data.bin"));
+            assert_eq!(file.body().as_ref(), b"abcdef");
+        }
+
+        #[test]
+        fn streaming_multipart_wire_matches_legacy_for_equivalent_known_parts() {
+            let expected = MultipartForm::with_boundary("wire-compatible")
+                .unwrap()
+                .text("tag", "value")
+                .file("f\"ield", "fi\\le.txt", "text/plain", b"file-data".to_vec())
+                .to_body();
+            let mut body = MultipartBody::with_boundary(
+                "wire-compatible",
+                [
+                    MultipartBodyPart::text("tag", "value"),
+                    MultipartBodyPart::stream("f\"ield", Bytes::from_static(b"file-data"))
+                        .filename("fi\\le.txt")
+                        .content_type("text/plain"),
+                ],
+            )
+            .unwrap();
+            assert_eq!(body.size_hint().exact(), Some(expected.len() as u64));
+            let (wire, error) = collect(&mut body);
+            assert!(error.is_none());
+            assert_eq!(wire, expected);
+        }
+
+        #[test]
+        fn streaming_multipart_preserves_the_original_segmented_payload() {
+            static FIRST: &[u8] = b"ab";
+            let (producer, counts) = source(Some(5), vec![data(&[FIRST, b"cde"])]);
+            let mut body = MultipartBody::with_boundary(
+                "B",
+                [MultipartBodyPart::stream("file", producer)],
+            )
+            .unwrap();
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                Pin::new(&mut body).poll_frame(&mut cx),
+                Poll::Ready(Some(Ok(Frame::Data(MultipartChunk::Framing(_)))))
+            ));
+            assert_eq!(counts.polls.get(), 0);
+            let Poll::Ready(Some(Ok(Frame::Data(MultipartChunk::Payload(mut data))))) =
+                Pin::new(&mut body).poll_frame(&mut cx)
+            else {
+                panic!("streaming DATA must retain the producer's buffer type");
+            };
+            assert_eq!(data.remaining(), 5);
+            assert_eq!(data.chunk(), b"ab");
+            assert_eq!(data.chunk().as_ptr(), FIRST.as_ptr());
+            data.advance(2);
+            assert_eq!(data.chunk(), b"cde");
+            assert_eq!(counts.polls.get(), 1, "no next-frame prefetch");
+            drop(body);
+            assert_eq!(counts.drops.get(), 1);
+        }
+
+        #[test]
+        fn streaming_multipart_empty_forms_and_fields_have_exact_framing() {
+            let mut empty = MultipartBody::<Empty>::with_boundary("B", []).unwrap();
+            assert_eq!(empty.size_hint().exact(), Some(7));
+            let (wire, error) = collect(&mut empty);
+            assert!(error.is_none());
+            assert_eq!(wire, b"--B--\r\n");
+
+            let mut fields = MultipartBody::<Empty>::with_boundary(
+                "B",
+                [
+                    MultipartBodyPart::text("one", ""),
+                    MultipartBodyPart::bytes("two", Bytes::new()),
+                    MultipartBodyPart::stream("three", Empty::new()),
+                ],
+            )
+            .unwrap();
+            let length = fields.size_hint().exact().unwrap();
+            let (wire, error) = collect(&mut fields);
+            assert!(error.is_none());
+            assert_eq!(wire.len() as u64, length);
+            assert_eq!(
+                wire,
+                b"--B\r\nContent-Disposition: form-data; name=\"one\"\r\n\r\n\r\n--B\r\nContent-Disposition: form-data; name=\"two\"\r\n\r\n\r\n--B\r\nContent-Disposition: form-data; name=\"three\"\r\nContent-Type: application/octet-stream\r\n\r\n\r\n--B--\r\n"
+            );
+        }
+
+        #[test]
+        fn streaming_multipart_unknown_or_overflowing_aggregate_has_no_exact_hint() {
+            let (producer, _) = source(None, vec![data(&[b"abc"])]);
+            let mut body = MultipartBody::with_boundary(
+                "B",
+                [MultipartBodyPart::stream("file", producer)],
+            )
+            .unwrap();
+            assert_eq!(body.size_hint().exact(), None);
+            let (wire, error) = collect(&mut body);
+            assert!(error.is_none());
+            assert!(wire.ends_with(b"abc\r\n--B--\r\n"));
+
+            let (producer, counts) = source(Some(u64::MAX), vec![]);
+            let body = MultipartBody::with_boundary(
+                "B",
+                [MultipartBodyPart::stream("huge", producer)],
+            )
+            .unwrap();
+            assert_eq!(body.size_hint().exact(), None, "framing addition must not wrap");
+            assert_eq!(counts.polls.get(), 0);
+        }
+
+        #[test]
+        fn streaming_multipart_explicit_length_overrides_the_source_hint() {
+            let (producer, counts) = source(Some(999), vec![data(&[b"abc"])]);
+            let mut body = MultipartBody::with_boundary(
+                "B",
+                [MultipartBodyPart::stream("file", producer).with_length(3)],
+            )
+            .unwrap();
+            let length = body.size_hint().exact().unwrap();
+            let (wire, error) = collect(&mut body);
+            assert!(error.is_none());
+            assert_eq!(wire.len() as u64, length);
+            assert!(wire.ends_with(b"abc\r\n--B--\r\n"));
+            assert_eq!(counts.polls.get(), 2, "actual EOF must be observed");
+        }
+
+        #[test]
+        fn streaming_multipart_length_errors_never_emit_the_closing_boundary() {
+            for (exact, frames, suffix) in [
+                (4, vec![data(&[b"abc"])], &b"abc"[..]),
+                (2, vec![data(&[b"abc"])], &b"\r\n\r\n"[..]),
+                (3, vec![data(&[b"abc"]), data(&[b"extra"])], &b"abc"[..]),
+            ] {
+                let (producer, counts) = source(Some(exact), frames);
+                let (queued, queued_counts) = source(Some(0), vec![]);
+                let mut body = MultipartBody::with_boundary(
+                    "B",
+                    [
+                        MultipartBodyPart::stream("first", producer),
+                        MultipartBodyPart::stream("queued", queued),
+                    ],
+                )
+                .unwrap();
+                let (wire, error) = collect(&mut body);
+                assert_eq!(error, Some(MultipartBodyError::LengthMismatch));
+                assert!(wire.ends_with(suffix));
+                assert!(!wire.ends_with(b"--B--\r\n"));
+                assert!(!wire.windows(5).any(|part| part == b"extra"));
+                assert_eq!(counts.drops.get(), 1);
+                assert_eq!(queued_counts.polls.get(), 0);
+                assert_eq!(queued_counts.drops.get(), 1, "queued producer must drop on failure");
+            }
+        }
+
+        #[test]
+        fn streaming_multipart_source_errors_and_trailers_are_terminal() {
+            for (frame, expected) in [
+                (
+                    Err("source failed"),
+                    MultipartBodyError::Producer("source failed".to_owned()),
+                ),
+                (
+                    Ok(Frame::Trailers(HeaderMap::new())),
+                    MultipartBodyError::TrailersNotAllowed,
+                ),
+            ] {
+                let (producer, counts) = source(None, vec![data(&[b"abc"]), frame]);
+                let (queued, queued_counts) = source(None, vec![]);
+                let mut body = MultipartBody::with_boundary(
+                    "B",
+                    [
+                        MultipartBodyPart::stream("first", producer),
+                        MultipartBodyPart::stream("second", queued),
+                    ],
+                )
+                .unwrap();
+                let (wire, error) = collect(&mut body);
+                assert_eq!(error, Some(expected));
+                assert!(wire.ends_with(b"abc"));
+                assert!(!wire.ends_with(b"--B--\r\n"));
+                assert_eq!(counts.drops.get(), 1);
+                assert_eq!(queued_counts.polls.get(), 0);
+                assert_eq!(queued_counts.drops.get(), 1);
+            }
+        }
+
+        #[test]
+        fn streaming_multipart_pending_and_drop_do_not_poll_later_parts() {
+            let (mut producer, counts) = source(None, vec![]);
+            producer.parked = true;
+            let (queued, queued_counts) = source(None, vec![]);
+            let mut body = MultipartBody::with_boundary(
+                "B",
+                [
+                    MultipartBodyPart::stream("first", producer),
+                    MultipartBodyPart::stream("second", queued),
+                ],
+            )
+            .unwrap();
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                Pin::new(&mut body).poll_frame(&mut cx),
+                Poll::Ready(Some(Ok(Frame::Data(_))))
+            ));
+            assert_eq!(counts.polls.get(), 0);
+            assert!(Pin::new(&mut body).poll_frame(&mut cx).is_pending());
+            assert_eq!(counts.polls.get(), 1);
+            assert_eq!(queued_counts.polls.get(), 0);
+            drop(body);
+            assert_eq!(counts.drops.get(), 1);
+            assert_eq!(queued_counts.drops.get(), 1);
+        }
+
+        #[test]
+        fn streaming_multipart_destructor_panic_leaves_terminal_ownership() {
+            for fails in [false, true] {
+                let frames = if fails { vec![Err("source failed")] } else { vec![] };
+                let (mut producer, counts) = source(None, frames);
+                producer.panic_on_drop = true;
+                let (queued, queued_counts) = source(None, vec![]);
+                let mut body = MultipartBody::with_boundary(
+                    "B",
+                    [
+                        MultipartBodyPart::stream("first", producer),
+                        MultipartBodyPart::stream("queued", queued),
+                    ],
+                )
+                .unwrap();
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    collect(&mut body)
+                }));
+                assert!(panic.is_err());
+                assert!(body.is_end_stream());
+                assert_eq!(body.size_hint().exact(), Some(0));
+                let mut cx = Context::from_waker(Waker::noop());
+                assert!(matches!(
+                    Pin::new(&mut body).poll_frame(&mut cx),
+                    Poll::Ready(None)
+                ));
+                assert_eq!(counts.drops.get(), 1);
+                assert_eq!(queued_counts.polls.get(), 0);
+                assert_eq!(queued_counts.drops.get(), 1);
+            }
+        }
+
+        #[test]
+        fn streaming_multipart_empty_ready_frames_yield_bounded_work() {
+            let frames = (0..100).map(|_| data(&[])).collect();
+            let (producer, counts) = source(None, frames);
+            let mut body = MultipartBody::with_boundary(
+                "B",
+                [MultipartBodyPart::stream("file", producer)],
+            )
+            .unwrap();
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                Pin::new(&mut body).poll_frame(&mut cx),
+                Poll::Ready(Some(Ok(Frame::Data(_))))
+            ));
+            assert!(Pin::new(&mut body).poll_frame(&mut cx).is_pending());
+            assert_eq!(counts.polls.get(), 32);
+            let (_, error) = collect(&mut body);
+            assert!(error.is_none());
+            assert_eq!(counts.polls.get(), 101);
+        }
+
+        #[test]
+        fn streaming_multipart_refuses_invalid_metadata_before_polling_sources() {
+            for (name, filename, content_type) in [
+                ("bad\r\nname", None, None),
+                ("file", Some("bad\0name"), None),
+                ("file", None, Some("text/plain\r\nInjected: yes")),
+                ("file", None, Some(" \t")),
+                ("bad\u{7f}name", None, None),
+            ] {
+                let (producer, counts) = source(None, vec![]);
+                let mut part = MultipartBodyPart::stream(name, producer);
+                if let Some(filename) = filename {
+                    part = part.filename(filename);
+                }
+                if let Some(content_type) = content_type {
+                    part = part.content_type(content_type);
+                }
+                let error = MultipartBody::with_boundary("B", [part]).unwrap_err();
+                assert!(matches!(error, MultipartBodyError::InvalidMetadata { .. }));
+                assert_eq!(counts.polls.get(), 0);
+                assert_eq!(counts.drops.get(), 1);
+            }
+
+            let (producer, counts) = source(None, vec![]);
+            let error = MultipartBody::with_boundary(
+                "B",
+                [MultipartBodyPart::stream("\"".repeat(MULTIPART_STREAM_HEADER_LIMIT / 2), producer)],
+            )
+            .unwrap_err();
+            assert!(matches!(error, MultipartBodyError::HeaderTooLarge { .. }));
+            assert_eq!(counts.polls.get(), 0);
+            assert_eq!(counts.drops.get(), 1);
+        }
+
+        #[test]
+        fn streaming_multipart_validates_boundary_and_escapes_quoted_parameters() {
+            for boundary in ["", "bad\r\n", "bad\"quote", "bad\\slash", "trailing "] {
+                assert!(matches!(
+                    MultipartBody::<Empty>::with_boundary(boundary, []),
+                    Err(MultipartBodyError::InvalidBoundary)
+                ));
+            }
+            assert!(MultipartBody::<Empty>::with_boundary("a".repeat(70), []).is_ok());
+            assert!(MultipartBody::<Empty>::with_boundary("a".repeat(71), []).is_err());
+            let mut body = MultipartBody::<Empty>::with_boundary(
+                "b:() ?",
+                [MultipartBodyPart::text("a\"b\\c", "text").filename("x\"y\\z")],
+            )
+            .unwrap();
+            assert_eq!(body.content_type_header(), "multipart/form-data; boundary=\"b:() ?\"");
+            let (wire, error) = collect(&mut body);
+            assert!(error.is_none());
+            let text = String::from_utf8(wire).unwrap();
+            assert!(text.contains("name=\"a\\\"b\\\\c\"; filename=\"x\\\"y\\\\z\"\r\n"));
+            assert!(text.contains("Content-Type: application/octet-stream\r\n"));
+            assert!(!text.contains("filename*="));
+        }
+    }
