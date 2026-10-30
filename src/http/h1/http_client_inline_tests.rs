@@ -1413,6 +1413,104 @@
         }
 
         #[test]
+        fn streaming_driverless_deadline_does_not_adopt_a_foreign_virtual_clock() {
+            let owner = Cx::for_testing();
+            assert!(owner.timer_driver().is_none());
+            let deadline = PooledStreamDeadline::capture(&owner, Some(Duration::from_secs(3600)));
+            let foreign_clock = Arc::new(crate::time::VirtualClock::starting_at(
+                deadline.at.unwrap() + Duration::from_secs(3600),
+            ));
+            let foreign_timer = crate::time::TimerDriverHandle::with_virtual_clock(foreign_clock);
+            let foreign = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(81, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(foreign_timer.clone()),
+                None,
+            );
+            let _ambient = Cx::set_current(Some(foreign));
+            let mut operation = PooledStreamOwner::new(owner.clone(), &deadline);
+            let mut task = Context::from_waker(std::task::Waker::noop());
+            assert!(
+                operation.poll_stop(&mut task).is_none(),
+                "a foreign virtual instant cannot expire the owner's wall-clock deadline"
+            );
+            assert_eq!(foreign_timer.process_timers(), 0);
+            drop(operation);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+
+        #[test]
+        fn streaming_driverless_pool_wait_does_not_adopt_a_foreign_virtual_clock() {
+            let (listener, url) = listener();
+            let peer = std::thread::spawn(move || {
+                let mut socket = accept(&listener);
+                request_head(&mut socket);
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                    .unwrap();
+                expect_closed(&mut socket);
+            });
+            let runtime = runtime(false);
+            let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+            let owner = Cx::for_testing();
+            let clock = Arc::new(crate::time::VirtualClock::starting_at(
+                crate::time::wall_now() + Duration::from_secs(86400),
+            ));
+            let timer = crate::time::TimerDriverHandle::with_virtual_clock(clock);
+            let foreign = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(82, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let client = HttpClient::builder()
+                .max_connections_per_host(1)
+                .max_total_connections(1)
+                .pool_wait_timeout(Duration::from_secs(3600))
+                .request_timeout(Duration::from_secs(7200))
+                .build();
+            runtime.block_on_with_cx(driver.clone(), async {
+                let first = client
+                    .request_streaming_pooled(&driver, Method::Get, &url, Vec::new(), Vec::new())
+                    .await
+                    .unwrap();
+                {
+                    let _ambient = Cx::set_current(Some(foreign));
+                    let mut waiting = Box::pin(client.request_streaming_pooled(
+                        &owner,
+                        Method::Get,
+                        &url,
+                        Vec::new(),
+                        Vec::new(),
+                    ));
+                    let mut task = Context::from_waker(std::task::Waker::noop());
+                    assert!(
+                        waiting.as_mut().poll(&mut task).is_pending(),
+                        "pool wait must use wall time while the driverless owner remains live"
+                    );
+                    assert_eq!(client.pool_released.waiter_count(), 1);
+                    assert_eq!(timer.process_timers(), 0);
+                    drop(waiting);
+                }
+                assert_eq!(client.pool_released.waiter_count(), 0);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(client.pool_stats().total_connections, 1);
+                drop(first);
+                assert_eq!(client.pool_stats().total_connections, 0);
+            });
+            peer.join().unwrap();
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+
+        #[test]
         fn pooled_streaming_refuses_invalid_proxy_configuration_before_admission() {
             let client = HttpClient::builder().proxy("ftp://127.0.0.1:9").build();
             let result = block_on(client.request_streaming_pooled(&Cx::for_testing(), Method::Get, "http://127.0.0.1:9", Vec::new(), Vec::new()));

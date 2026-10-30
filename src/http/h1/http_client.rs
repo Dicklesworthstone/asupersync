@@ -3362,7 +3362,10 @@ impl HttpClient {
                     if let Poll::Ready(released) = woken.as_mut().poll(task) {
                         return Poll::Ready(Ok(released));
                     }
-                    let _ambient = clock.clock.is_none().then(|| Cx::set_current(None));
+                    let _ambient = clock
+                        .clock
+                        .is_none()
+                        .then(|| Cx::set_current(Some(cx.clone())));
                     Pin::new(&mut timer).poll_deadline(task).map(|()| Err(()))
                 })
                 .await
@@ -3580,10 +3583,7 @@ impl PooledStreamDeadline {
     fn timer(&self, at: Time) -> crate::time::Sleep {
         match &self.clock {
             Some(clock) => crate::time::Sleep::with_timer_driver(at, clock.clone()),
-            None => {
-                let _ambient = Cx::set_current(None);
-                crate::time::Sleep::new(at)
-            }
+            None => crate::time::Sleep::new(at),
         }
     }
 }
@@ -3620,8 +3620,11 @@ impl PooledStreamOwner {
         }
         self.cancel_waker = Some(self.cx.refresh_cancel_waker(self.cancel_waker, task.waker()));
         if let Some(timer) = self.deadline.as_mut() {
-            // A driverless timer otherwise adopts a foreign ambient clock.
-            let _ambient = self.standalone_clock.then(|| Cx::set_current(None));
+            // Install the actual driverless owner: set_current(None) installs
+            // no frame and cannot hide a foreign polling task's timer driver.
+            let _ambient = self
+                .standalone_clock
+                .then(|| Cx::set_current(Some(self.cx.clone())));
             if Pin::new(timer).poll_deadline(task).is_ready() {
                 // Record an expired owner budget, while retaining the client's
                 // typed timeout verdict for the configured absolute deadline.
