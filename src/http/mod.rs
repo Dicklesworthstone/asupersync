@@ -78,11 +78,12 @@ pub mod trace_client;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use auto::{HttpAutoListener, HttpAutoListenerConfig, HttpAutoShutdownStats};
-pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};
+pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, ReaderBody, SizeHint};
 pub use h1::{
     ClientError, ClientRequestBuilder, HttpClient, HttpClientBuilder, HttpClientConfig, Method,
-    MultipartError, MultipartForm, ParsedUrl, RedirectPolicy, Request, RequestBuilder, Response,
-    ResponseBuilder, RetryPolicy, Scheme, StatusCode, Version,
+    MultipartBody, MultipartBodyError, MultipartBodyPart, MultipartChunk, MultipartError,
+    MultipartForm, ParsedUrl, RedirectPolicy, Request, RequestBuilder, Response, ResponseBuilder,
+    RetryPolicy, Scheme, StatusCode, Version,
 };
 
 /// Ergonomic, capability-gated handle for the high-level pooled HTTP client.
