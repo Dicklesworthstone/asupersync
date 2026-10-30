@@ -348,6 +348,26 @@ fn conformance_comprehensive_poison_matrix() {
     }
 }
 
+/// Like std's poisoning `Mutex`, the asupersync mutex is `UnwindSafe` for an
+/// `UnwindSafe` payload. v0.5.0 shipped this surface; losing it (as an auto
+/// impl side effect) breaks callers that move a mutex into `catch_unwind`.
+#[test]
+fn mutex_is_unwind_safe_like_std() {
+    fn assert_unwind_safe<T: std::panic::UnwindSafe>() {}
+    assert_unwind_safe::<StdMutex<u32>>();
+    assert_unwind_safe::<AsupersyncMutex<u32>>();
+    assert_unwind_safe::<AsupersyncMutex<Vec<String>>>();
+    #[cfg(feature = "tower")]
+    assert_unwind_safe::<asupersync::service::AsupersyncAdapter<u32>>();
+
+    let mutex = AsupersyncMutex::new(7_u32);
+    let unwound = std::panic::catch_unwind(move || {
+        assert_eq!(*mutex.try_lock().expect("uncontended lock"), 7);
+        panic!("unwinds while owning the mutex");
+    });
+    assert!(unwound.is_err(), "the closure must unwind");
+}
+
 /// Verify the documented poison coverage matrix instead of printing a report
 /// that can pass without exercising any implementation behavior.
 #[test]
