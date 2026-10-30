@@ -38,6 +38,7 @@ use std::time::Duration;
 
 mod worker;
 pub use worker::{
+    SymbolRepairMembership, SymbolRepairMembershipReport, SymbolRepairMembershipStop,
     SymbolRepairRequest, SymbolRepairRoundError, SymbolRepairRoundReport, SymbolRepairRoundTrigger,
     SymbolRepairWorker, SymbolRepairWorkerConfig, SymbolRepairWorkerError, SymbolRepairWorkerHandle,
     SymbolRepairWorkerReport, SymbolRepairWorkerSnapshot, SymbolRepairWorkerStatus,

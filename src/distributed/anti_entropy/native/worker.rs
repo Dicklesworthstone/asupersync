@@ -17,6 +17,9 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
+mod membership;
+pub use membership::{SymbolRepairMembership, SymbolRepairMembershipReport, SymbolRepairMembershipStop};
+
 /// Explicit finite work policy for one repair service.
 ///
 /// A round starts with a fresh catalog cut and runs at most the configured

@@ -174,6 +174,9 @@ pub struct MembershipRevocation {
 struct Member {
     floor: MembershipFloor,
     stamp: Option<MembershipStamp>,
+    // One retained authenticated activation, not an event log. A coalesced
+    // observer must still see Alive -> Suspect -> Alive between its polls.
+    last_alive_transition: Option<MembershipStamp>,
     leases: BTreeMap<ObligationId, Lease>,
 }
 
@@ -269,7 +272,9 @@ impl MembershipLeaseController {
             if !valid_label(floor.node.as_str()) || members.contains_key(&floor.node) {
                 return Err(MembershipControlError::Format);
             }
-            members.insert(floor.node.clone(), Member { floor, stamp: None, leases: BTreeMap::new() });
+            members.insert(floor.node.clone(), Member {
+                floor, stamp: None, last_alive_transition: None, leases: BTreeMap::new(),
+            });
         }
         Ok(Self { authority, epoch, key, members, seen_leases: BTreeSet::new(),
             revocations: Vec::new(), limits, now: Time::ZERO })
@@ -281,6 +286,14 @@ impl MembershipLeaseController {
     pub fn stamp(&self, node: &NodeId) -> Option<MembershipStamp> {
         self.members.get(node).and_then(|member| member.stamp)
     }
+    // The provisioned set is immutable. None distinguishes an unknown subject
+    // from a known member which has not received its first authenticated update.
+    pub(super) fn observation(&self, node: &NodeId)
+        -> Option<(Option<MembershipStamp>, Option<MembershipStamp>)>
+    {
+        self.members.get(node).map(|member| (member.stamp, member.last_alive_transition))
+    }
+
     /// Number of retained active lease objects for a member; call expire for due ones.
     pub fn active_leases(&self, node: &NodeId) -> usize {
         self.members.get(node).map_or(0, |member| member.leases.len())
@@ -347,6 +360,14 @@ impl MembershipLeaseController {
                     node: node.clone(), incarnation: old_incarnation, obligation_id,
                 }, reason });
             }
+        }
+        // Publish only after every authentication, sequence, incarnation and
+        // allocation check has succeeded. Heartbeats and duplicates do not
+        // manufacture recovery transitions; a newer Alive incarnation does.
+        if kind == MembershipKind::Alive && previous.is_none_or(|old| {
+            old.kind != MembershipKind::Alive || old.incarnation != incarnation
+        }) {
+            member.last_alive_transition = Some(stamp);
         }
         member.stamp = Some(stamp);
         Ok(MembershipApplied::Applied { revoked })
