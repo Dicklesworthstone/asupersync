@@ -203,10 +203,31 @@ impl Drop for BodySource {
     }
 }
 
+/// Retain the cancellation and completion handle for every live admission.
+enum StreamingCoordinator {
+    Root(Pin<Box<CatchUnwind<JoinHandle<()>>>>),
+    Owned { handle: TaskHandle<()>, owner: Cx },
+}
+
+impl StreamingCoordinator {
+    fn poll_completion(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
+        match self {
+            Self::Root(handle) => handle.as_mut().poll(cx).map(|result| result.map_err(|_| ())),
+            Self::Owned { handle, .. } => handle.poll_join(cx).map(|result| result.map_err(|_| ())),
+        }
+    }
+
+    fn cancel(&self, kind: CancelKind) {
+        if let Self::Owned { handle, owner } = self {
+            handle.abort_with_reason(h2_request_cancel_reason(owner, kind));
+        }
+    }
+}
+
 struct LiveRequest {
     publication: Option<oneshot::Receiver<BodyPublication>>,
     source: Option<BodySource>,
-    coordinator: Option<Pin<Box<CatchUnwind<JoinHandle<()>>>>>,
+    coordinator: Option<StreamingCoordinator>,
     // A ring, so taking each chunk off the front never moves the rest of a
     // receive window that a slow consumer left staged.
     pending_data: std::collections::VecDeque<u8>,
@@ -251,6 +272,10 @@ impl LiveRequest {
             return;
         }
         self.failed = true;
+        let kind = match &error {
+            IncomingBodyError::Cancelled { kind } => *kind,
+            _ => CancelKind::ParentCancelled,
+        };
         *self.failure.lock() = Some(error.clone());
         if let Some(mut publication) = self.publication.take()
             && let Ok(publication) = publication.try_recv()
@@ -262,18 +287,19 @@ impl LiveRequest {
         if let Some(BodySource { cx, writer, .. }) = &mut self.source {
             // Publish the exact body cause before cancellation wakes readers.
             writer.fail(error.clone());
-            let kind = match error {
-                IncomingBodyError::Cancelled { kind } => kind,
-                _ => CancelKind::ParentCancelled,
-            };
             cx.cancel_with(kind, Some("HTTP/2 live request body failed"));
+        }
+        // A coordinator can still be waiting for request admission and have
+        // no published BodySource. Its task handle must be cancelled too.
+        if let Some(coordinator) = &self.coordinator {
+            coordinator.cancel(kind);
         }
     }
 
     fn poll(&mut self, poll_cx: &mut Context<'_>) -> Result<(bool, u64), IncomingBodyError> {
         let mut progress = false;
         if let Some(coordinator) = &mut self.coordinator {
-            if let Poll::Ready(result) = coordinator.as_mut().poll(poll_cx) {
+            if let Poll::Ready(result) = coordinator.poll_completion(poll_cx) {
                 self.coordinator = None;
                 progress = true;
                 if result.is_err() || !self.completion_posted.load(Ordering::Acquire) {
@@ -362,6 +388,9 @@ impl Drop for LiveRequest {
     fn drop(&mut self) {
         if !self.completion_seen {
             self.fail(IncomingBodyError::ClientAborted);
+        }
+        if let Some(coordinator) = &self.coordinator {
+            coordinator.cancel(CancelKind::ParentCancelled);
         }
     }
 }
@@ -453,6 +482,7 @@ impl StreamingRequests {
         signal: &ShutdownSignal,
         in_flight: &Arc<AtomicUsize>,
         runtime: &RuntimeHandle,
+        owner: Option<&Cx>,
         response_guards: &mut HashMap<u32, Arc<InFlightRequestGuard>>,
         request_limits: H2RequestLimits,
     ) -> bool {
@@ -553,10 +583,7 @@ impl StreamingRequests {
             return false;
         };
         let guard = Arc::new(guard);
-        let coordinator = runtime.try_spawn(async move {
-            let Some(cx) = Cx::current() else {
-                return;
-            };
+        let coordinator = move |cx: Cx| async move {
             let now = cx.now();
             let (budget, source) = derive_request_budget(
                 cx.budget(),
@@ -755,7 +782,20 @@ impl StreamingRequests {
                 let posted = permit.try_send(item).is_ok();
                 posted_by_coordinator.store(posted, Ordering::Release);
             }
-        });
+        };
+        let coordinator = match owner {
+            Some(owner) => owner.spawn(coordinator).map(|handle| StreamingCoordinator::Owned {
+                handle,
+                owner: owner.clone(),
+            }),
+            None => runtime
+                .try_spawn(async move {
+                    if let Some(cx) = Cx::current() {
+                        coordinator(cx).await;
+                    }
+                })
+                .map(|handle| StreamingCoordinator::Root(Box::pin(CatchUnwind { inner: handle }))),
+        };
         let coordinator = match coordinator {
             Ok(coordinator) => coordinator,
             Err(_) => {
@@ -769,7 +809,7 @@ impl StreamingRequests {
             LiveRequest {
                 publication: Some(publication),
                 source: None,
-                coordinator: Some(Box::pin(CatchUnwind { inner: coordinator })),
+                coordinator: Some(coordinator),
                 pending_data: std::collections::VecDeque::with_capacity(config.wire_credit()),
                 pending_trailers: None,
                 total_bytes: 0,
@@ -1020,12 +1060,14 @@ impl StreamingRequests {
     }
 
     pub(super) async fn close(&mut self, error: IncomingBodyError) {
+        // Cancel every coordinator before awaiting any one. This also reaches
+        // admissions that have not yet published a request body owner.
         for entry in self.entries.values_mut() {
             entry.fail(error.clone());
         }
         for entry in self.entries.values_mut() {
-            if let Some(coordinator) = entry.coordinator.take() {
-                let _ = coordinator.await;
+            if let Some(mut coordinator) = entry.coordinator.take() {
+                let _ = std::future::poll_fn(|cx| coordinator.poll_completion(cx)).await;
             }
         }
     }

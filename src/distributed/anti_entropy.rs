@@ -19,8 +19,9 @@
 //! This legacy FNV tree is a local comparison core. The additive [`catalog`],
 //! [`symbols`] and native repair modules provide bounded SHA-256 catalog pages,
 //! authenticated origin isolation and resumable repair of retained symbol
-//! batches. Automatic partition-heal triggers and saga-state merge remain
-//! separate work; the FNV hashes are never network authentication authority.
+//! batches. Authenticated membership recovery can hint the native repair worker;
+//! raw SWIM observations do not grant repair authority, and saga-state merge
+//! remains separate work. The FNV hashes are never network authentication authority.
 
 use std::collections::BTreeMap;
 

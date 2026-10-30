@@ -4220,6 +4220,7 @@ where
                                 &shutdown_signal,
                                 &in_flight_requests,
                                 &_runtime,
+                                owned_request.then_some(request_owners.cx()),
                                 &mut response_guards,
                                 request_limits,
                             ) {
@@ -5376,6 +5377,57 @@ impl<F> Http2Listener<F> {
         .await
     }
 
+    /// Like [`Self::run_streaming_produced`], with connection and request
+    /// tasks owned by `cx`'s region. Cancelling or closing that region stops
+    /// admission and drains the live bodies and response producers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration and accept errors of
+    /// [`Self::run_streaming_produced`], or an error when called outside a
+    /// runtime task.
+    #[cfg(feature = "http2-streaming")]
+    pub async fn run_streaming_produced_in<Fut>(self, cx: &Cx) -> io::Result<ShutdownStats>
+    where
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        let Some(runtime) = crate::runtime::Runtime::current_handle() else {
+            return Err(io::Error::other(
+                "Http2Listener::run_streaming_produced_in must run inside a runtime task",
+            ));
+        };
+        let config = self.streaming_config.clone().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "run_streaming_produced_in requires a streaming listener constructor",
+            )
+        })?;
+        config.validate()?;
+        let handler = Arc::clone(&self.handler);
+        let dispatch = StreamingDispatch {
+            config,
+            handler: Arc::new(move |request| {
+                let handler = Arc::clone(&handler);
+                Box::pin(async move { handler(request).await.into_driver_response() })
+            }),
+        };
+        let spawner = cx.clone();
+        self.run_mapped_with(
+            Some(cx.clone()),
+            runtime,
+            move |connection| {
+                spawner
+                    .spawn(move |_connection_cx| connection)
+                    .map(H2ConnectionTask::Owned)
+            },
+            true,
+            Some(dispatch),
+            |_, _| async { H2DispatchResponse::Buffered(invalid_h2_response_fallback()) },
+        )
+        .await
+    }
+
     /// Bind a listener whose handler may return a deferred produced body.
     pub async fn bind_produced<A, Fut>(addr: A, handler: F) -> io::Result<Self>
     where
@@ -5466,6 +5518,23 @@ impl<F> Http2Listener<F> {
         config: Http2ListenerConfig,
     ) -> Self {
         Self::from_parts(H2AcceptSource::Handoff(queue), handler, config)
+    }
+
+    /// Serve handed-off connections with live request bodies and produced
+    /// responses, retaining the explicit streaming queue and admission limits.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "http2-streaming"))]
+    pub(crate) fn from_handoff_streaming_produced(
+        queue: Arc<HandoffQueue>,
+        handler: F,
+        config: Http2StreamingListenerConfig,
+    ) -> Self {
+        let mut listener = Self::from_parts(
+            H2AcceptSource::Handoff(queue),
+            handler,
+            config.listener.clone(),
+        );
+        listener.streaming_config = Some(config);
+        listener
     }
 
     fn from_parts(listener: H2AcceptSource, handler: F, config: Http2ListenerConfig) -> Self {

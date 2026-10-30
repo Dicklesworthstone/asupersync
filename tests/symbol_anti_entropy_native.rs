@@ -172,7 +172,7 @@ impl Drop for Stop {
 enum Case {
     RepairAndRefusals, CancelAndResume, WorkerManual, WorkerPeriodic,
     WorkerStopDeadline, WorkerCancelMetadata, WorkerCancelData, WorkerRetries,
-    WorkerStepLimit, WorkerClockExhausted,
+    WorkerStepLimit, WorkerClockExhausted, WorkerMembership,
 }
 
 fn exercise(workers: usize, case: Case) {
@@ -500,6 +500,10 @@ impl WorkerFixture<'_> {
 }
 
 async fn exercise_worker(fixture: WorkerFixture<'_>, case: Case) {
+    if matches!(case, Case::WorkerMembership) {
+        exercise_membership_worker(fixture).await;
+        return;
+    }
     if matches!(case, Case::WorkerClockExhausted) {
         let timers = asupersync::time::TimerDriverHandle::with_virtual_clock(Arc::new(
             asupersync::time::VirtualClock::starting_at(Time::MAX)));
@@ -784,4 +788,107 @@ fn native_symbol_repair_worker_step_exhaustion_is_a_typed_incomplete_round() {
 #[test]
 fn native_symbol_repair_worker_saturated_clock_refuses_without_dispatch_or_spin() {
     for workers in [1, 2] { exercise_on_large_stack(workers, Case::WorkerClockExhausted); }
+}
+
+
+async fn exercise_membership_worker(fixture: WorkerFixture<'_>) {
+    use asupersync::distributed::anti_entropy::native::SymbolRepairMembershipStop;
+    use asupersync::distributed::membership::{MembershipEvent, MembershipKind};
+    use asupersync::distributed::membership::authority::{
+        MembershipApplied, MembershipControllerLimits, MembershipFloor, MembershipUpdate,
+    };
+    use asupersync::distributed::membership::owned::OwnedMembershipController;
+
+    fn statement(incarnation: u64, sequence: u64, kind: MembershipKind) -> Vec<u8> {
+        MembershipUpdate {
+            event: MembershipEvent { node: NodeId::new("source"), incarnation, kind },
+            sequence,
+        }.authenticated_bytes(&NodeId::new("authority"), 7, &AuthKey::from_seed(42)).unwrap()
+    }
+
+    let membership = OwnedMembershipController::new(
+        NodeId::new("authority"), 7, AuthKey::from_seed(42),
+        vec![MembershipFloor { node: NodeId::new("source"), incarnation: 0, sequence: 0 }],
+        MembershipControllerLimits { max_members: 1, max_lease_ids: 8 },
+        fixture.cx.timer_driver().unwrap(),
+    ).unwrap();
+    let authority = NodeId::new("authority");
+    membership.apply_authenticated(&authority, &statement(1, 1, MembershipKind::Alive)).unwrap();
+    let worker = SymbolRepairWorker::new(
+        fixture.repair.clone(), fixture.symbols.clone(),
+        SymbolRepairWorkerConfig::new(Duration::from_secs(10), 64).with_initial_repair(false),
+    ).unwrap();
+    let control = worker.handle();
+    let trigger = worker.membership_trigger(&membership).unwrap();
+    assert_eq!(trigger.source(), &NodeId::new("source"));
+    assert_eq!(control.snapshot().rounds_started, 0);
+
+    let parked = Arc::new(AtomicBool::new(false));
+    let changed = Arc::new(asupersync::sync::Notify::new());
+    let observed = Arc::clone(&parked);
+    let wake = Arc::clone(&changed);
+    let mut trigger_task = fixture.cx.spawn(move |body| async move {
+        let mut run = std::pin::pin!(trigger.run(&body));
+        poll_fn(|task| {
+            let result = run.as_mut().poll(task);
+            if result.is_pending() && !observed.swap(true, Ordering::AcqRel) {
+                wake.notify_waiters();
+            }
+            result
+        }).await
+    }).unwrap();
+    let mut worker_task = fixture.cx.spawn(move |body| async move { worker.run(&body).await }).unwrap();
+    changed.wait_until(|| parked.load(Ordering::Acquire)).await;
+    assert_eq!(fixture.metadata.calls.load(Ordering::Acquire), 0,
+        "an already-Alive source does not dispatch before a recovery");
+    assert_eq!(control.snapshot().rounds_started, 0);
+
+    membership.apply_authenticated(&authority, &statement(1, 2, MembershipKind::Suspect)).unwrap();
+    membership.apply_authenticated(&authority, &statement(1, 3, MembershipKind::Alive)).unwrap();
+    let first = control.changed(0).await;
+    assert_eq!((first.rounds_finished, first.successful_rounds), (1, 1));
+    assert!(first.last_round.as_ref().unwrap().is_success());
+    assert_eq!(fixture.destination.stats().batches, 3);
+
+    // Ordinary Alive refreshes and an exact replay must not produce a round.
+    let heartbeat = statement(1, 4, MembershipKind::Alive);
+    membership.apply_authenticated(&authority, &heartbeat).unwrap();
+    assert_eq!(membership.apply_authenticated(&authority, &heartbeat).unwrap(),
+        MembershipApplied::Duplicate);
+    // A new published cut stays undiscovered until authenticated recovery.
+    fixture.publish(2, [4]);
+    membership.apply_authenticated(&authority, &statement(1, 5, MembershipKind::Dead)).unwrap();
+    assert!(membership.apply_authenticated(&authority, &statement(1, 6, MembershipKind::Alive)).is_err());
+    membership.apply_authenticated(&authority, &statement(2, 6, MembershipKind::Alive)).unwrap();
+    let second = control.changed(1).await;
+    assert_eq!((second.rounds_started, second.rounds_finished, second.successful_rounds), (2, 2, 2));
+    let round = second.last_round.as_ref().unwrap();
+    assert!(round.is_success());
+    assert_eq!(round.progress.unwrap().repaired_batches, 1);
+    assert_eq!(fixture.destination.stats().batches, 4);
+    assert_eq!(fixture.destination.get(fixture.origin, batch(4).key()).unwrap().as_ref().as_ref(),
+        batch(4).as_ref());
+
+    membership.close();
+    let receipt = trigger_task.join(fixture.cx).await.expect("membership trigger retires");
+    assert_eq!(receipt.source, NodeId::new("source"));
+    assert_eq!(receipt.stop, SymbolRepairMembershipStop::ControllerClosed);
+    assert_eq!((receipt.scheduled, receipt.coalesced), (2, 0));
+    assert_eq!(receipt.last_trigger.unwrap().incarnation, 2);
+    assert_eq!(receipt.last_trigger.unwrap().sequence, 6);
+    assert!(!control.snapshot().status.is_terminal(),
+        "stopping membership observation does not stop the separately owned repair worker");
+    control.stop();
+    let completed = worker_task.join(fixture.cx).await.expect("repair worker drains");
+    assert!(matches!(completed.outcome, Outcome::Ok(())));
+    assert_eq!(completed.snapshot.status, SymbolRepairWorkerStatus::Stopped);
+    assert_eq!(control.request(), SymbolRepairRequest::Closed);
+    assert_eq!(fixture.remote.active_operations(), 0);
+}
+
+#[test]
+fn native_authenticated_membership_recovery_repairs_new_cuts_and_retires_owners() {
+    for workers in [1, 2] {
+        exercise_on_large_stack(workers, Case::WorkerMembership);
+    }
 }

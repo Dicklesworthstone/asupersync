@@ -441,6 +441,9 @@ impl Drop for OwnedMembershipLease {
 #[cfg(test)]
 mod tests;
 
+mod observation;
+pub use observation::{OwnedMembershipObservation, OwnedMembershipObserver};
+
 /// Execute protected work with independent subtree cancellation and drain receipts.
 pub mod work;
 
