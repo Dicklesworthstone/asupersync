@@ -5,6 +5,10 @@
 
 #![recursion_limit = "256"]
 
+#[cfg(feature = "http2-streaming")]
+#[path = "http_auto_listener/streaming.rs"]
+mod streaming;
+
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder as _;
 use asupersync::cx::{ChildRegionSpec, Cx};

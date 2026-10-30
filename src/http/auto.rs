@@ -21,6 +21,11 @@
 //! let stats = listener.run(&runtime_handle).await?;
 //! ```
 
+#[cfg(feature = "http2-streaming")]
+mod streaming;
+#[cfg(feature = "http2-streaming")]
+pub use streaming::HttpAutoStreamingListener;
+
 use super::handoff::{HandoffQueue, Prefixed};
 use crate::cx::{CancelWakerToken, Cx};
 use crate::http::h1::listener::{Http1Listener, Http1ListenerConfig};
@@ -348,6 +353,82 @@ where
     }
 
     async fn run_with(self, spawner: TaskSpawner) -> io::Result<HttpAutoShutdownStats> {
+        let http1_queue = Arc::new(HandoffQueue::default());
+        let http2_queue = Arc::new(HandoffQueue::default());
+        let handler = Arc::clone(&self.handler);
+        let http1 = Http1Listener::from_handoff(
+            Arc::clone(&http1_queue),
+            move |request: Request| (*handler)(request),
+            self.config.http1.clone(),
+        );
+        let handler = Arc::clone(&self.handler);
+        let http2 = self.http2_options.apply(Http2Listener::from_handoff(
+            Arc::clone(&http2_queue),
+            move |request: Request| (*handler)(request),
+            self.config.http2.clone(),
+        ));
+        let http1 = ProtocolService {
+            queue: http1_queue,
+            manager: http1.connection_manager().clone(),
+            run: move |child: TaskSpawner| async move {
+                match child {
+                    TaskSpawner::Root(runtime) => http1.run(&runtime).await,
+                    TaskSpawner::Owned(cx) => http1.run_in(&cx).await,
+                }
+            },
+        };
+        let http2 = ProtocolService {
+            queue: http2_queue,
+            manager: http2.connection_manager().clone(),
+            run: move |child: TaskSpawner| async move {
+                match child {
+                    TaskSpawner::Root(runtime) => http2.run(&runtime).await,
+                    TaskSpawner::Owned(cx) => http2.run_in(&cx).await,
+                }
+            },
+        };
+        AutoCoordinator {
+            listener: self.listener,
+            config: self.config,
+            shutdown_signal: self.shutdown_signal,
+            #[cfg(feature = "tls")]
+            tls_acceptor: self.tls_acceptor,
+        }
+        .run(spawner, http1, http2)
+        .await
+    }
+}
+
+// Both buffered and streaming handlers use this one accept/detect/drain path.
+// Protocol factories choose only the established per-protocol serving mode;
+// they cannot replace connection detection, admission, or terminal ownership.
+struct ProtocolService<F> {
+    queue: Arc<HandoffQueue>,
+    manager: ConnectionManager,
+    run: F,
+}
+
+struct AutoCoordinator {
+    listener: TcpListener,
+    config: HttpAutoListenerConfig,
+    shutdown_signal: ShutdownSignal,
+    #[cfg(feature = "tls")]
+    tls_acceptor: Option<TlsAcceptor>,
+}
+
+impl AutoCoordinator {
+    async fn run<F1, F2, Fut1, Fut2>(
+        self,
+        spawner: TaskSpawner,
+        http1: ProtocolService<F1>,
+        http2: ProtocolService<F2>,
+    ) -> io::Result<HttpAutoShutdownStats>
+    where
+        F1: FnOnce(TaskSpawner) -> Fut1 + Send + 'static,
+        F2: FnOnce(TaskSpawner) -> Fut2 + Send + 'static,
+        Fut1: Future<Output = io::Result<ShutdownStats>> + Send + 'static,
+        Fut2: Future<Output = io::Result<ShutdownStats>> + Send + 'static,
+    {
         #[cfg(feature = "tls")]
         if let Some(acceptor) = &self.tls_acceptor
             && !acceptor
@@ -362,34 +443,17 @@ where
             ));
         }
 
-        let http1_queue = Arc::new(HandoffQueue::default());
-        let http2_queue = Arc::new(HandoffQueue::default());
-        let handler = Arc::clone(&self.handler);
         let http1_drain = self.config.http1.drain_timeout;
-        let http1 = Http1Listener::from_handoff(
-            Arc::clone(&http1_queue),
-            move |request: Request| (*handler)(request),
-            self.config.http1.clone(),
-        );
-        let handler = Arc::clone(&self.handler);
         let http2_drain = self.config.http2.drain_timeout;
-        let http2 = self.http2_options.apply(Http2Listener::from_handoff(
-            Arc::clone(&http2_queue),
-            move |request: Request| (*handler)(request),
-            self.config.http2.clone(),
-        ));
+        let ProtocolService { queue: http1_queue, manager: http1_manager, run: run_http1 } = http1;
+        let ProtocolService { queue: http2_queue, manager: http2_manager, run: run_http2 } = http2;
         let mut shutdown = ProtocolShutdown {
             signal: self.shutdown_signal.clone(),
-            http1: http1.connection_manager().clone(),
-            http2: http2.connection_manager().clone(),
+            http1: http1_manager,
+            http2: http2_manager,
             completed: false,
         };
-        let mut http1_run = match spawner.spawn(move |child| async move {
-            match child {
-                TaskSpawner::Root(runtime) => http1.run(&runtime).await,
-                TaskSpawner::Owned(cx) => http1.run_in(&cx).await,
-            }
-        }) {
+        let mut http1_run = match spawner.spawn(run_http1) {
             Ok(run) => ProtocolRun::new(run),
             Err(error) => {
                 drop(self.listener);
@@ -397,12 +461,7 @@ where
                 return Err(io::Error::other(format!("spawn HTTP/1.1 listener: {error}")));
             }
         };
-        let http2_run = match spawner.spawn(move |child| async move {
-            match child {
-                TaskSpawner::Root(runtime) => http2.run(&runtime).await,
-                TaskSpawner::Owned(cx) => http2.run_in(&cx).await,
-            }
-        }) {
+        let http2_run = match spawner.spawn(run_http2) {
             Ok(run) => ProtocolRun::new(run),
             Err(error) => {
                 // The first spawn already owns a live accept loop. Stop and
@@ -428,11 +487,8 @@ where
         let accept_result = self
             .accept_loop(&spawner, &mut protocols, &mut detecting)
             .await;
-        // Accepting is over: close the listening socket now, as the HTTP/1.1
-        // and HTTP/2 listeners do when their drain starts, so a new client is
-        // refused at once instead of queuing in the backlog through the drain
-        // and then being reset. As with them, `lb_compat_keep_socket` (in
-        // either protocol's config) keeps it bound until the drain is over.
+        // Close the listening socket when accepting ends unless either
+        // protocol explicitly retains it for load-balancer compatibility.
         let keep_socket =
             self.config.http1.lb_compat_keep_socket || self.config.http2.lb_compat_keep_socket;
         let parked_socket = keep_socket.then_some(self.listener);
@@ -472,9 +528,7 @@ where
         let mut shutdown = self.shutdown_signal.subscribe();
         let mut transient_streak: u32 = 0;
         // Once this task's cancellation is requested, accept fails with
-        // `Interrupted` on every poll and the backoff sleep completes at once:
-        // treated as transient, the loop would spin and never drain. The
-        // cancellation ends accepting instead, like the shutdown signal.
+        // Interrupted on every poll. End acceptance instead of spinning.
         let mut owner = OwnerCancellation {
             cx: spawner.owner(),
             token: None,
@@ -484,9 +538,6 @@ where
             token: None,
         };
         loop {
-            // The explicit region owner and the task polling run_in can have
-            // different cancellation contexts. Observe both: native accept
-            // and backoff also observe the ambient coordinator's cancellation.
             let owner_cancelled = owner.is_requested();
             let coordinator_cancelled = coordinator.is_requested();
             if self.shutdown_signal.is_shutting_down() || owner_cancelled || coordinator_cancelled {
@@ -505,9 +556,8 @@ where
                     {
                         return Poll::Ready(None);
                     }
-                    // Keep both terminal observers registered while accept is
-                    // parked. Cache results for the drain: never repoll a
-                    // consumed terminal or drop a temporary abort-on-drop join.
+                    // Retain both passive terminal observers while parked.
+                    // Cached results remain available to the common drain.
                     let http1_done = protocols.http1.poll_completion(cx);
                     let http2_done = protocols.http2.poll_completion(cx);
                     if http1_done || http2_done {
@@ -526,7 +576,6 @@ where
                     connection
                 }
                 Err(error) if is_transient_accept_error(&error) => {
-                    // Back off so a persistent condition (EMFILE) does not spin.
                     transient_streak = transient_streak.saturating_add(1);
                     let delay = Duration::from_millis(2_u64 << transient_streak.min(5));
                     let _ = until_shutdown(
@@ -542,8 +591,6 @@ where
                 drop(stream);
                 continue;
             };
-            // Owned by the detection future, so the slot is released even if
-            // the future is dropped without running.
             let detection = Detection {
                 http1: Arc::clone(&protocols.http1_queue),
                 http2: Arc::clone(&protocols.http2_queue),
@@ -552,8 +599,8 @@ where
                 timeout: self.config.detect_timeout,
                 shutdown: self.shutdown_signal.clone(),
             };
-            // A spawn failure drops the future, and with it the connection and
-            // its detection slot.
+            // The detection future owns its socket and slot even when
+            // admission fails or it is dropped before the first poll.
             let connection = DetectingConnection { stream, peer, slot };
             if let Ok(task) = spawner.spawn(move |_| detection.hand_off(connection)) {
                 detecting.push(task);
