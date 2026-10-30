@@ -866,4 +866,5 @@ fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> PanicPayload {
 }
 
 #[cfg(test)]
+#[path = "event_manager/tests.rs"]
 mod tests;

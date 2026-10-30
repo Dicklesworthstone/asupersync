@@ -6866,7 +6866,7 @@ fn local_owner_retirement_before_first_poll_case(sharded: bool, prior: Option<Ca
     assert!(!factory_called.get(), "admission does not invoke the factory");
     assert_eq!(
         validator.lock().task_state(task_id),
-        Some(crate::cancel::protocol_state_machines::TaskState::Running),
+        Some(&crate::cancel::protocol_state_machines::TaskState::Running),
         "tracking must observe a fresh admitted task before owner exit"
     );
 

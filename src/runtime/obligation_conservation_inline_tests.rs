@@ -318,7 +318,7 @@ fn lifetime_conservation_holds_across_thousands_of_mixed_transitions() {
     let mut seed = 0xD152_u64;
     for step in 0..4096 {
         seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-        if live.is_empty() || seed & 3 == 0 {
+        if live.is_empty() || seed.trailing_zeros() >= 2 {
             let region = regions[step % regions.len()];
             live.push(table.create(lifetime_args(region, kinds[step % kinds.len()])));
         } else {

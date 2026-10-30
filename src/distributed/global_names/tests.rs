@@ -344,7 +344,7 @@ fn abandoning_the_driver_reports_absent_receipt_then_runtime_closes_real_childre
         let mut driver = cx.spawn(move |driver_cx| async move {
             let mut run = Box::pin(driven.run(&driver_cx));
             poll_fn(|task| {
-                if let Poll::Ready(Ok(())) = stopped.poll_recv(&driver_cx, task) { return Poll::Ready(()); }
+                if matches!(stopped.poll_recv(&driver_cx, task), Poll::Ready(Ok(()))) { return Poll::Ready(()); }
                 assert!(run.as_mut().poll(task).is_pending(), "driver remains live until explicit abandonment");
                 Poll::Pending
             }).await;

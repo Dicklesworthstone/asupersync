@@ -2,6 +2,11 @@
 //! Pending witnesses come from the real TCP transport, never synthetic stalls.
 
 #![cfg(all(not(target_arch = "wasm32"), feature = "test-internals"))]
+// An integration test is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. Proving `Send` for its async chains exceeds rustc's default
+// depth, which the future-incompatible `recursion_depth_exceeding_limit` lint
+// (rust-lang #159228) will turn into a hard error.
+#![recursion_limit = "256"]
 
 use asupersync::Cx;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};

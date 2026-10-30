@@ -253,7 +253,7 @@ fn relay_direction(
                         }
                         Attack::ObserveRequestMode(_) => {
                             serde_json::from_slice::<serde_json::Value>(frame.payload())
-                                .ok().is_some_and(|body| {
+                                .is_ok_and(|body| {
                                     body["control_seq"].as_u64() == Some(1)
                                         && body["server_auth_tag"].as_array()
                                             .is_some_and(|tag| tag.len() == 32)
@@ -264,8 +264,7 @@ fn relay_direction(
                             // before sequenced control begins. Mutate before forwarding
                             // it, so the source check and later baseline copy are causal.
                             serde_json::from_slice::<serde_json::Value>(frame.payload())
-                                .ok()
-                                .is_some_and(|body| {
+                                .is_ok_and(|body| {
                                     body["control_seq"].as_u64() == Some(1)
                                         && body["request"]["mode"].as_str() == Some("delta_chunks")
                                         && body["server_auth_tag"].as_array()

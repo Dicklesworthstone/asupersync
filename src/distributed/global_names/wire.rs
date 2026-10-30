@@ -172,6 +172,7 @@ pub(super) fn lookup_reply(
 }
 
 /// Verify the requested name and destination incarnation in an owner reply.
+///
 /// The result describes that owner's observation at reply time. It neither
 /// proves cluster-wide exclusivity nor reserves a subsequent invocation.
 pub fn decode_lookup_reply(

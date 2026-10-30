@@ -2339,7 +2339,7 @@ mod async_admission_tests {
 
         let clock = Arc::new(CrossingClock::default());
         let driver = TimerDriverHandle::new(Arc::new(TimerDriver::with_clock(Arc::clone(&clock))));
-        let cx = Cx::new_with_drivers(
+        let cx: Cx = Cx::new_with_drivers(
             RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::new().with_deadline(Time::from_millis(1)),

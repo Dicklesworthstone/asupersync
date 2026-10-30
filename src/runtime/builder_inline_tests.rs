@@ -6306,9 +6306,7 @@ worker_threads = 16
                     .lock()
                     .unwrap()
                     .push((self.index, std::thread::current().id()));
-                if self.index == 0 {
-                    panic!("parked local destructor");
-                }
+                assert!(self.index != 0, "parked local destructor");
             }
         }
 

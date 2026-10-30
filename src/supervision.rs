@@ -4563,13 +4563,16 @@ mod managed {
                         .unwrap(),
                 );
                 controller.start(0).await.unwrap();
-                assert_eq!(controller.wait_exit().await, Some(0));
+                assert!(matches!(
+                    controller.wait_event().await,
+                    Some(ControllerEvent::Terminal(0))
+                ));
                 let old = controller.latest[0].as_ref().unwrap().generation;
                 controller.drain(0).await.unwrap();
                 controller.start(0).await.unwrap();
                 controller.ready.push((0, old));
                 assert!(!controller.accepts_terminal(0, old));
-                let mut wait = Box::pin(controller.wait_exit());
+                let mut wait = Box::pin(controller.wait_event());
                 poll_fn(|poll_cx| {
                     assert!(wait.as_mut().poll(poll_cx).is_pending());
                     Poll::Ready(())

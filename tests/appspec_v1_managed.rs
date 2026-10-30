@@ -1709,9 +1709,7 @@ async fn grouped_parent_policy_scenario(cx: Cx, stop: bool, panic: bool) {
                         async move {
                             if attempt == 0 {
                                 fail_gate.wait_until(|| fail_ready.load(Ordering::Acquire)).await;
-                                if panic {
-                                    panic!("nested group failure");
-                                }
+                                assert!(!panic, "nested group failure");
                                 Outcome::Err("nested domain failure")
                             } else {
                                 cx.cancelled().await;
@@ -3221,7 +3219,7 @@ mod managed_observability {
                         ManagedAppAdapters::new()
                             .slo_hook(ManagedAppSloBinding::new("admission", AppSloHookKindV1::Saturation,
                                 "api.actor.cache", move |_, _| {
-                                    if panics { panic!("policy panic remains the result"); }
+                                    assert!(!panics, "policy panic remains the result");
                                     ManagedAppSloDecision::Reject("saturated".to_owned())
                                 }))
                             .observability(Observer::new("events", SinkKind::Evidence, move |_, event| {

@@ -15,19 +15,19 @@ use crate::types::{
 };
 use std::sync::{Arc, Mutex};
 
-pub(crate) const SPAWN_ONLY: CapMask =
+pub const SPAWN_ONLY: CapMask =
     <CapSet<true, false, false, false, false> as CapSetRuntimeMask>::MASK;
 
 /// Model a framework passing the ambient view from a restricted execution
 /// scope. The returned full-typed Cx retains the public restriction's mask.
-pub(crate) fn restricted_caller(cx: Cx, mask: CapMask) -> Cx {
-    let _current = cx.set_current();
+pub fn restricted_caller(cx: Cx, mask: CapMask) -> Cx {
+    let _current = Cx::set_current(Some(cx));
     let _restriction = Cx::push_restriction(mask);
     Cx::current().unwrap()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Authority {
+pub struct Authority {
     pub(crate) budget: Budget,
     pub(crate) envelope: CapabilityBudget,
     pub(crate) mask: CapMask,
@@ -48,7 +48,7 @@ impl Authority {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct ChildProbe {
+pub struct ChildProbe {
     pub(crate) boot: Arc<Mutex<Option<Cx>>>,
     pub(crate) polled: Arc<Mutex<Option<(Authority, Authority)>>>,
     pub(crate) task: Arc<Mutex<Option<TaskHandle<()>>>>,
@@ -56,7 +56,7 @@ pub(crate) struct ChildProbe {
 
 /// Keep the handle alive until the test joins it; dropping it would abort the
 /// child and make a context-inheritance test accidentally test cancellation.
-pub(crate) fn child_probe() -> (ChildSpec, ChildProbe) {
+pub fn child_probe() -> (ChildSpec, ChildProbe) {
     let probe = ChildProbe::default();
     let retained = probe.clone();
     let child = ChildSpec {
@@ -85,11 +85,11 @@ pub(crate) fn child_probe() -> (ChildSpec, ChildProbe) {
     (child, probe)
 }
 
-pub(crate) fn admitted_authority(state: &RuntimeState, task: TaskId) -> Authority {
+pub fn admitted_authority(state: &RuntimeState, task: TaskId) -> Authority {
     Authority::capture(state.task(task).unwrap().cx.as_ref().unwrap())
 }
 
-pub(crate) fn assert_polled(probe: &ChildProbe, admitted: Authority) {
+pub fn assert_polled(probe: &ChildProbe, admitted: Authority) {
     let (child, ambient) = probe.polled.lock().unwrap().expect("child was polled");
     assert_eq!(
         child, ambient,
