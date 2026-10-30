@@ -963,7 +963,7 @@ impl NativeQuicConnection {
     fn wake_local_stream_openers(&mut self) {
         // Retire both registration owners even if the first arbitrary Waker
         // panics. Dispatch all notifications, then preserve the first panic.
-        let waiters = std::mem::replace(&mut self.local_stream_open_waiters, [None, None]);
+        let waiters = std::mem::take(&mut self.local_stream_open_waiters);
         let mut first_panic = None;
         for waiter in waiters.into_iter().flatten() {
             if let Err(payload) =

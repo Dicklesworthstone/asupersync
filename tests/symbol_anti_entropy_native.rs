@@ -100,6 +100,9 @@ impl HasSchema for SymbolRequestSchema {
 impl HasSchema for SymbolResponseSchema {
     fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("asupersync.symbol-service.response.canonical-binary.v1") }
 }
+// `fetch_update` is deprecated as `try_update` on the pinned nightly, which
+// the stable-lane toolchain lacks; keep the old name and allow the lint.
+#[allow(deprecated)]
 fn gated_registry<I: HasSchema, O: HasSchema>(inner: RemoteComputationRegistry,
     computation: &'static str, protocol: RemoteProtocolVersion, gate: Arc<Gate>, await_cancel: bool)
     -> RemoteComputationRegistry

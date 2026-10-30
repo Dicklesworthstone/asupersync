@@ -1817,6 +1817,7 @@ pub use managed::{
 mod managed_names;
 
 #[path = "supervision/managed_control.rs"]
+#[allow(clippy::redundant_pub_crate)]
 mod managed_control;
 pub use managed_control::{ManagedActivationError, ManagedSupervisorControl};
 

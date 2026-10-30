@@ -380,6 +380,9 @@ impl<E> Shared<E> {
         if self.closed.load(Ordering::Acquire) { return Err(EventManagerError::Closed); }
         Ok(())
     }
+    // `fetch_update` is deprecated as `try_update` on the pinned nightly, which
+    // the stable-lane toolchain lacks; keep the old name and allow the lint.
+    #[allow(deprecated)]
     fn credit(&self) -> Result<Credit, EventManagerError> {
         self.used.fetch_update(Ordering::AcqRel, Ordering::Acquire,
             |used| if used < self.limit { used.checked_add(1) } else { None })
