@@ -1744,7 +1744,7 @@ impl HttpClient {
         drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
     }
 
-    /// Stream a direct HTTP or HTTPS response through this client's pool.
+    /// Stream an HTTP or HTTPS response with this client's pool admission.
     ///
     /// The request shares per-host/total connection admission and
     /// [`HttpClientBuilder::pool_wait_timeout`] with buffered requests. Its
@@ -1759,9 +1759,10 @@ impl HttpClient {
     /// follow the ordinary client rules; only safe stale-connection retries
     /// before receiving a response head are allowed.
     ///
-    /// Proxy configurations return [`ClientError::ProxyError`] before opening
-    /// a connection; they cannot silently bypass this API's pool guarantees.
-    /// Use [`Self::request_streaming`] for the existing unpooled proxy lane.
+    /// Configured HTTP, HTTPS and SOCKS5 proxies use the same admission and
+    /// deadline. Proxy connections are closed after the response, including
+    /// successful responses: authenticated tunnels are not shared between
+    /// requests with potentially different proxy credentials.
     pub async fn request_streaming_pooled(
         &self,
         cx: &Cx,
@@ -1771,11 +1772,6 @@ impl HttpClient {
         body: Vec<u8>,
     ) -> Result<PooledClientStreamingResponse, ClientError> {
         check_cx(cx)?;
-        if self.config.proxy_url.is_some() {
-            return Err(ClientError::ProxyError(
-                "pooled streaming requires a direct HTTP or HTTPS connection".to_owned(),
-            ));
-        }
         let deadline = PooledStreamDeadline::capture(cx, self.config.request_timeout);
         let parsed = ParsedUrl::parse(url)?;
         let mut owner = PooledStreamOwner::new(cx.clone(), &deadline);
@@ -1796,7 +1792,7 @@ impl HttpClient {
         .await
     }
 
-    /// Stream an upload and its response over one direct pooled connection.
+    /// Stream an upload and its response under bounded connection admission.
     ///
     /// The upload is pulled through [`Body`] only as the transport can write
     /// it. One producer frame is retained at a time; the client does not
@@ -1809,7 +1805,9 @@ impl HttpClient {
     /// there are no automatic retries or redirects because the body cannot be
     /// replayed. Redirect responses are returned intact. The existing default
     /// headers, host-scoped cookies, DNS, TLS and pool admission rules apply.
-    /// Proxy configurations are rejected before connection admission.
+    /// HTTP, HTTPS and SOCKS5 proxy negotiation shares the same admission and
+    /// total deadline. Proxied connections are closed after the exchange;
+    /// direct connections can be reused after complete response consumption.
     ///
     /// Cancellation and the tighter of the owner's deadline and the client's
     /// request timeout cover pool wait, upload and response consumption. An
@@ -1849,25 +1847,18 @@ impl HttpClient {
         B::Error: std::fmt::Display,
     {
         check_cx(cx)?;
-        if self.config.proxy_url.is_some() {
-            return Err(ClientError::ProxyError(
-                "pooled streaming uploads require a direct HTTP or HTTPS connection".to_owned(),
-            ));
-        }
         let timeout = self.config.request_timeout.into_iter().chain(timeout).min();
         let deadline = PooledStreamDeadline::capture(cx, timeout);
         let parsed = ParsedUrl::parse(url)?;
         let mut owner = PooledStreamOwner::new(cx.clone(), &deadline);
         let mut exchange = std::pin::pin!(async {
-            let request = self.build_request_with_origin(
+            let (request, route) = self.build_pooled_streaming_request(
                 &method,
                 &parsed,
                 &extra_headers,
                 &[],
                 None,
-                None,
-                None,
-            );
+            )?;
             let request_forbids_reuse = request_forbids_connection_reuse(&request.headers);
             let head = crate::http::h1::stream::RequestHead {
                 method: request.method,
@@ -1877,7 +1868,13 @@ impl HttpClient {
             };
             let key = parsed.pool_key();
             let acquired = self
-                .acquire_connection_with_clock(cx, &parsed, true, Some(&deadline))
+                .acquire_connection_for_route(
+                    cx,
+                    &parsed,
+                    true,
+                    Some(&deadline),
+                    route.proxy_transport(),
+                )
                 .await?;
             let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
             // Close an acquired socket before releasing admission if the
@@ -1904,7 +1901,8 @@ impl HttpClient {
             };
             check_cx(cx)?;
             self.store_response_cookies(&parsed.host, parsed.scheme, &response.head.headers);
-            let may_reuse = !request_forbids_reuse
+            let may_reuse = route.proxy.is_none()
+                && !request_forbids_reuse
                 && !response.body_withheld
                 && !header_has_token(&response.head.headers, "connection", "close")
                 && !(matches!(method, Method::Connect)
@@ -2303,11 +2301,20 @@ impl HttpClient {
             let next_method = redirect_method(response.head.status, &method);
             // Unread redirect bodies release admission before the next hop.
             drop(response);
+            // A redirect changes the origin, not the configured proxy. Keep
+            // the proxy's credentials while stripping origin credentials.
+            let proxy_authorization = self.config.proxy_url.as_ref()
+                .and_then(|_| self.caller_proxy_authorization(&extra_headers));
             extra_headers = strip_sensitive_headers_on_redirect(
                 &parsed,
                 &next_parsed,
                 extra_headers,
             );
+            if let Some(authorization) = proxy_authorization
+                && !has_header(&extra_headers, "proxy-authorization")
+            {
+                extra_headers.push(("Proxy-Authorization".to_owned(), authorization));
+            }
             if next_method != method {
                 extra_headers = strip_content_headers(extra_headers);
             }
@@ -2335,35 +2342,42 @@ impl HttpClient {
         let mut retry_fresh = false;
         loop {
             check_cx(cx)?;
-            let request = self.build_request_with_origin(
+            let (request, route) = self.build_pooled_streaming_request(
                 method,
                 parsed,
                 extra_headers,
                 body,
-                None,
-                None,
                 origin,
-            );
+            )?;
             let request_forbids_reuse = request_forbids_connection_reuse(&request.headers);
             let key = parsed.pool_key();
-            let acquired = if retry_fresh {
+            let acquired = if retry_fresh && route.proxy.is_none() {
                 self.acquire_fresh_connection_with_clock(cx, parsed, Some(deadline))
                     .await?
             } else {
-                self.acquire_connection_with_clock(cx, parsed, true, Some(deadline))
-                    .await?
+                self.acquire_connection_for_route(
+                    cx,
+                    parsed,
+                    true,
+                    Some(deadline),
+                    route.proxy_transport(),
+                )
+                .await?
             };
             let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
+            // A cancellation at this checkpoint must close the actual
+            // transport before the guard wakes another admission waiter.
+            let io = acquired.io;
             check_cx(cx)?;
             let result = if let Some(max_body_size) = self.config.max_body_size {
                 Http1Client::request_streaming_with_max_body_size(
-                    acquired.io,
+                    io,
                     request,
                     max_body_size,
                 )
                 .await
             } else {
-                Http1Client::request_streaming(acquired.io, request).await
+                Http1Client::request_streaming(io, request).await
             };
             match result {
                 Ok(response) => {
@@ -2373,7 +2387,8 @@ impl HttpClient {
                         parsed.scheme,
                         &response.head.headers,
                     );
-                    let may_reuse = !request_forbids_reuse
+                    let may_reuse = route.proxy.is_none()
+                        && !request_forbids_reuse
                         && !response.body_withheld
                         && !header_has_token(&response.head.headers, "connection", "close")
                         && !(matches!(method, Method::Connect)
@@ -2673,6 +2688,52 @@ impl HttpClient {
         check_cx(cx)?;
         self.store_response_cookies(&parsed.host, parsed.scheme, &resp.head.headers);
         Ok(resp)
+    }
+
+    /// Select request framing and proxy authentication before taking a pool
+    /// slot or polling an upload producer. The selected route also controls
+    /// connection setup, so a proxy can never silently become a direct dial.
+    fn build_pooled_streaming_request(
+        &self,
+        method: &Method,
+        parsed: &ParsedUrl,
+        extra_headers: &[(String, String)],
+        body: &[u8],
+        origin: Option<&ParsedUrl>,
+    ) -> Result<(Request, PooledStreamRoute), ClientError> {
+        let proxy = self.config.proxy_url.as_deref()
+            .map(parse_proxy_endpoint)
+            .transpose()?;
+        let proxy_authorization = proxy.as_ref().and_then(|proxy| {
+            self.caller_proxy_authorization(extra_headers)
+                .or_else(|| proxy.http_proxy_authorization().map(str::to_owned))
+        });
+        let absolute_form = proxy.as_ref().is_some_and(|proxy| {
+            matches!(proxy.scheme, ProxyScheme::Http | ProxyScheme::Https)
+                && parsed.scheme == Scheme::Http
+        });
+        let mut request = self.build_request_with_origin(
+            method,
+            parsed,
+            extra_headers,
+            body,
+            absolute_form.then(|| absolute_request_target(parsed)),
+            if absolute_form {
+                proxy_authorization.as_deref()
+            } else {
+                None
+            },
+            origin,
+        );
+        if proxy.is_some() && !absolute_form {
+            // CONNECT authenticates the outer hop. SOCKS5 has its own
+            // negotiation. Neither may forward this header to the origin.
+            strip_proxy_authorization(&mut request.headers);
+        }
+        Ok((request, PooledStreamRoute {
+            proxy,
+            proxy_authorization,
+        }))
     }
 
     /// The `Proxy-Authorization` the caller set, for this request or as a
@@ -3175,8 +3236,20 @@ impl HttpClient {
         &self,
         cx: &Cx,
         parsed: &ParsedUrl,
+        reuse_idle: bool,
+        clock: Option<&PooledStreamDeadline>,
+    ) -> Result<AcquiredConnection, ClientError> {
+        self.acquire_connection_for_route(cx, parsed, reuse_idle, clock, None)
+            .await
+    }
+
+    async fn acquire_connection_for_route(
+        &self,
+        cx: &Cx,
+        parsed: &ParsedUrl,
         mut reuse_idle: bool,
         clock: Option<&PooledStreamDeadline>,
+        proxy: Option<(&ProxyEndpoint, Option<&str>)>,
     ) -> Result<AcquiredConnection, ClientError> {
         struct ConnectGuard<'a> {
             client: &'a HttpClient,
@@ -3210,7 +3283,7 @@ impl HttpClient {
             let now = self.pool_now();
             self.cleanup_expired_idle_connections(now);
 
-            if reuse_idle {
+            if reuse_idle && proxy.is_none() {
                 loop {
                     let taken = {
                         let mut pool = self.pool.lock();
@@ -3321,7 +3394,13 @@ impl HttpClient {
             id: Some(fresh_id),
         };
 
-        let io = self.connect_io(cx, parsed).await?;
+        let io = if let Some((proxy, authorization)) = proxy {
+            self.connect_via_proxy(cx, parsed, proxy, authorization)
+                .await?
+                .io
+        } else {
+            self.connect_io(cx, parsed).await?
+        };
 
         guard.id = None; // defuse the guard upon success
 
@@ -3454,6 +3533,21 @@ struct AcquiredConnection {
     fresh: bool,
 }
 
+/// Proxy connections participate in admission but are never cached. In
+/// particular, a CONNECT authenticated for one request cannot be inherited
+/// by another request carrying different credentials.
+struct PooledStreamRoute {
+    proxy: Option<ProxyEndpoint>,
+    proxy_authorization: Option<String>,
+}
+
+impl PooledStreamRoute {
+    fn proxy_transport(&self) -> Option<(&ProxyEndpoint, Option<&str>)> {
+        self.proxy.as_ref()
+            .map(|proxy| (proxy, self.proxy_authorization.as_deref()))
+    }
+}
+
 /// A single absolute bound is copied into each redirect's response owner.
 /// The clock is captured at entry and cannot be replaced by the context that
 /// happens to poll the body later.
@@ -3513,6 +3607,17 @@ impl PooledStreamOwner {
     }
 
     fn poll_stop(&mut self, task: &mut Context<'_>) -> Option<ClientError> {
+        // Check both authorities before even DNS/proxy negotiation, and on
+        // every later body poll. A privileged polling task must not lend I/O
+        // authority to a restricted explicit owner (or the reverse).
+        let permission = crate::cx::io_gate::require_ambient_io("http::h1::pooled_streaming")
+            .and_then(|()| {
+                let _owner = self.cx.clone().set_current_restricted();
+                crate::cx::io_gate::require_ambient_io("http::h1::pooled_streaming")
+            });
+        if let Err(error) = permission {
+            return Some(ClientError::Io(error));
+        }
         self.cancel_waker = Some(self.cx.refresh_cancel_waker(self.cancel_waker, task.waker()));
         if let Some(timer) = self.deadline.as_mut() {
             // A driverless timer otherwise adopts a foreign ambient clock.

@@ -409,15 +409,15 @@
         }
 
         #[test]
-        fn streaming_upload_rejects_proxy_and_conflicting_body_before_admission() {
+        fn streaming_upload_rejects_invalid_proxy_and_conflicting_body_before_admission() {
             let cx = Cx::for_testing();
             let client = HttpClient::new();
             let result = block_on(client.post("http://127.0.0.1:9").body(b"buffered".to_vec()).send_with_body(&cx, crate::http::body::Empty::new()));
             assert!(matches!(result, Err(ClientError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput));
             assert_eq!(client.pool_stats().total_connections, 0);
-            let client = HttpClient::builder().proxy("http://127.0.0.1:9").build();
+            let client = HttpClient::builder().proxy("ftp://127.0.0.1:9").build();
             let result = block_on(client.request_with_body(&cx, Method::Post, "http://127.0.0.1:9", Vec::new(), crate::http::body::Empty::new()));
-            assert!(matches!(result, Err(ClientError::ProxyError(_))));
+            assert!(matches!(result, Err(ClientError::InvalidUrl(_))));
             assert_eq!(client.pool_stats().total_connections, 0);
         }
 
@@ -449,6 +449,301 @@
                     return (decoded, largest_chunk);
                 }
             }
+        }
+
+        fn accept_socks5_upload(socket: &mut std::net::TcpStream) {
+            let mut greeting = [0; 2];
+            socket.read_exact(&mut greeting).unwrap();
+            assert_eq!(greeting[0], 5);
+            let mut methods = vec![0; usize::from(greeting[1])];
+            socket.read_exact(&mut methods).unwrap();
+            assert!(methods.contains(&2));
+            socket.write_all(&[5, 2]).unwrap();
+            let mut auth = [0; 2];
+            socket.read_exact(&mut auth).unwrap();
+            assert_eq!(auth, [1, 5]);
+            let mut username = [0; 5];
+            socket.read_exact(&mut username).unwrap();
+            assert_eq!(&username, b"agent");
+            let mut length = [0];
+            socket.read_exact(&mut length).unwrap();
+            assert_eq!(length, [2]);
+            let mut password = [0; 2];
+            socket.read_exact(&mut password).unwrap();
+            assert_eq!(&password, b"pw");
+            socket.write_all(&[1, 0]).unwrap();
+            let mut connect = [0; 5];
+            socket.read_exact(&mut connect).unwrap();
+            assert_eq!(&connect[..4], &[5, 1, 0, 3]);
+            let mut target = vec![0; usize::from(connect[4])];
+            socket.read_exact(&mut target).unwrap();
+            assert_eq!(target, b"origin.invalid");
+            let mut port = [0; 2];
+            socket.read_exact(&mut port).unwrap();
+            assert_eq!(u16::from_be_bytes(port), 8080);
+            socket.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+        }
+
+        #[test]
+        fn streaming_proxy_uploads_preserve_auth_framing_and_pool_admission() {
+            for multithread in [false, true] {
+                for socks in [false, true] {
+                    let (listener, proxy_url) = listener();
+                    let proxy_address = listener.local_addr().unwrap();
+                    let peer = std::thread::spawn(move || {
+                        for (index, token) in ["first", "second"].into_iter().enumerate() {
+                            let mut socket = accept(&listener);
+                            if socks {
+                                accept_socks5_upload(&mut socket);
+                            }
+                            let head = request_head(&mut socket);
+                            if socks {
+                                assert!(head.starts_with("POST /upload HTTP/1.1\r\n"));
+                                assert!(!head.to_ascii_lowercase().contains("proxy-authorization:"));
+                            } else {
+                                assert!(head.starts_with("POST http://origin.invalid:8080/upload HTTP/1.1\r\n"));
+                                assert!(head.contains(&format!("Proxy-Authorization: Bearer {token}\r\n")));
+                            }
+                            assert!(head.contains("Host: origin.invalid:8080\r\n"));
+                            assert!(head.contains("Authorization: Bearer origin-only\r\n"));
+                            let lower = head.to_ascii_lowercase();
+                            if index == 0 {
+                                assert!(lower.contains("content-length: 6\r\n"));
+                                let mut body = [0; 6];
+                                socket.read_exact(&mut body).unwrap();
+                                assert_eq!(&body, b"abcdef");
+                            } else {
+                                assert!(lower.contains("transfer-encoding: chunked\r\n"));
+                                assert_eq!(read_chunked_upload(&mut socket).0, b"abcdef");
+                            }
+                            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong").unwrap();
+                            // Even a healthy keep-alive tunnel cannot retain
+                            // the first request's proxy authentication.
+                            expect_closed(&mut socket);
+                        }
+                        assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                    });
+                    let runtime = runtime(multithread);
+                    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                    let proxy_url = if socks {
+                        format!("socks5://agent:pw@{proxy_address}")
+                    } else {
+                        proxy_url
+                    };
+                    let client = HttpClient::builder()
+                        .proxy(proxy_url)
+                        .default_header("Proxy-Authorization", "Bearer default")
+                        .max_connections_per_host(1)
+                        .max_total_connections(1)
+                        .request_timeout(Duration::from_secs(4))
+                        .build();
+                    runtime.block_on_with_cx(cx.clone(), async {
+                        for (index, token) in ["first", "second"].into_iter().enumerate() {
+                            let body = UploadBody {
+                                frames: [upload_data(b"abc"), upload_data(b"def")].into(),
+                                exact: (index == 0).then_some(6),
+                            };
+                            let mut response = client.post("http://origin.invalid:8080/upload")
+                                .bearer_auth("origin-only")
+                                .header("Proxy-Authorization", format!("Bearer {token}"))
+                                .send_with_body(&cx, body).await.unwrap();
+                            assert_eq!(client.pool_stats().total_connections, 1);
+                            assert_eq!(client.pool_stats().idle_connections, 0);
+                            let polls = Arc::new(AtomicUsize::new(0));
+                            let drops = Arc::new(AtomicUsize::new(0));
+                            let blocked = ParkedUpload {
+                                polled: None, polls: polls.clone(), drops: drops.clone(),
+                            };
+                            let result = client.post("http://origin.invalid:8080/blocked")
+                                .send_with_body(&cx, blocked).await;
+                            assert!(matches!(result, Err(ClientError::PoolExhausted { .. })));
+                            assert_eq!(polls.load(Ordering::SeqCst), 0);
+                            assert_eq!(drops.load(Ordering::SeqCst), 1);
+                            assert_eq!(drain(&mut response.body).await.unwrap(), b"pong");
+                            assert_eq!(client.pool_stats().total_connections, 0);
+                            assert_eq!(client.pool_stats().idle_connections, 0);
+                        }
+                        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                    });
+                    peer.join().unwrap();
+                    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+                }
+            }
+        }
+
+        #[test]
+        fn streaming_proxy_redirect_keeps_proxy_auth_and_strips_origin_auth() {
+            for multithread in [false, true] {
+                let (listener, proxy_url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut first = accept(&listener);
+                    let head = request_head(&mut first);
+                    assert!(head.starts_with("GET http://first.invalid/start HTTP/1.1\r\n"));
+                    assert!(head.contains("Authorization: Bearer origin-only\r\n"));
+                    assert!(head.contains("Proxy-Authorization: Bearer proxy-only\r\n"));
+                    first.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://second.invalid/done\r\nContent-Length: 8\r\nSet-Cookie: private=first\r\n\r\n").unwrap();
+                    expect_closed(&mut first);
+                    let mut second = accept(&listener);
+                    let head = request_head(&mut second);
+                    assert!(head.starts_with("GET http://second.invalid/done HTTP/1.1\r\n"));
+                    assert!(head.contains("Proxy-Authorization: Bearer proxy-only\r\n"));
+                    assert!(!head.contains("\r\nAuthorization:"));
+                    assert!(!head.contains("\r\nCookie:"));
+                    second.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+                    expect_closed(&mut second);
+                });
+                let runtime = runtime(multithread);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let client = HttpClient::builder().proxy(proxy_url)
+                    .cookie_store(true)
+                    .default_header("Authorization", "Bearer origin-only")
+                    .default_header("Cookie", "secret=origin")
+                    .max_total_connections(1)
+                    .request_timeout(Duration::from_secs(4)).build();
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let mut response = client.request_streaming_pooled(
+                        &cx, Method::Get, "http://first.invalid/start",
+                        vec![("Proxy-Authorization".into(), "Bearer proxy-only".into())],
+                        Vec::new(),
+                    ).await.unwrap();
+                    assert_eq!(response.head.status, 200);
+                    assert_eq!(drain(&mut response.body).await.unwrap(), b"ok");
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                });
+                peer.join().unwrap();
+                assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[test]
+        fn streaming_proxy_connect_rejection_and_cancel_retire_unpolled_uploads() {
+            for multithread in [false, true] {
+                for reject in [false, true] {
+                    let (listener, proxy_url) = listener();
+                    let (negotiated, observed) = std::sync::mpsc::channel();
+                    let peer = std::thread::spawn(move || {
+                        let mut socket = accept(&listener);
+                        let head = request_head(&mut socket);
+                        assert!(head.starts_with("CONNECT origin.invalid:443 HTTP/1.1\r\n"));
+                        assert!(head.contains("Proxy-Authorization: Bearer tunnel\r\n"));
+                        if reject {
+                            socket.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n").unwrap();
+                        } else {
+                            negotiated.send(()).unwrap();
+                        }
+                        expect_closed(&mut socket);
+                        assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                    });
+                    let runtime = runtime(multithread);
+                    let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+                    let owner = Cx::for_testing();
+                    let cancel_owner = owner.clone();
+                    let canceller = (!reject).then(|| std::thread::spawn(move || {
+                        observed.recv_timeout(Duration::from_secs(3)).unwrap();
+                        cancel_owner.cancel_with(crate::types::CancelKind::User, Some("CONNECT parked"));
+                    }));
+                    let client = HttpClient::builder().proxy(proxy_url)
+                        .max_total_connections(1)
+                        .request_timeout(Duration::from_secs(4)).build();
+                    let polls = Arc::new(AtomicUsize::new(0));
+                    let drops = Arc::new(AtomicUsize::new(0));
+                    runtime.block_on_with_cx(driver, async {
+                        let body = ParkedUpload { polled: None, polls: polls.clone(), drops: drops.clone() };
+                        let result = client.post("https://origin.invalid/upload")
+                            .header("Proxy-Authorization", "Bearer tunnel")
+                            .send_with_body(&owner, body).await;
+                        if reject {
+                            assert!(matches!(result, Err(ClientError::ConnectRejected { status: 407, .. })), "{result:?}");
+                        } else {
+                            assert!(matches!(result, Err(ClientError::Cancelled)), "{result:?}");
+                        }
+                        assert_eq!(polls.load(Ordering::SeqCst), 0);
+                        assert_eq!(drops.load(Ordering::SeqCst), 1);
+                        assert_eq!(client.pool_stats().total_connections, 0);
+                        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                    });
+                    if let Some(canceller) = canceller { canceller.join().unwrap(); }
+                    peer.join().unwrap();
+                    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+                }
+            }
+        }
+
+        #[test]
+        fn streaming_proxy_setup_deadline_releases_parked_negotiation() {
+            let (listener, proxy_url) = listener();
+            let (negotiated, observed) = std::sync::mpsc::channel();
+            let peer = std::thread::spawn(move || {
+                let mut socket = accept(&listener);
+                assert!(request_head(&mut socket).starts_with("CONNECT origin.invalid:443 "));
+                negotiated.send(()).unwrap();
+                expect_closed(&mut socket);
+            });
+            let runtime = runtime(false);
+            let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+            let clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_nanos(100)));
+            let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1), TaskId::new_for_test(7, 0), Budget::INFINITE,
+                None, None, None, Some(timer.clone()), None,
+            );
+            let expire = std::thread::spawn(move || {
+                observed.recv_timeout(Duration::from_secs(3)).unwrap();
+                clock.advance(250_000_000);
+                assert!(timer.process_timers() > 0);
+            });
+            let client = HttpClient::builder().proxy(proxy_url)
+                .max_total_connections(1).request_timeout(Duration::from_secs(4)).build();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            runtime.block_on_with_cx(driver, async {
+                let body = ParkedUpload { polled: None, polls: polls.clone(), drops: drops.clone() };
+                let result = client.post("https://origin.invalid/upload")
+                    .timeout(Duration::from_millis(250)).send_with_body(&owner, body).await;
+                assert!(matches!(result, Err(ClientError::DeadlineExceeded)), "{result:?}");
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert_eq!(client.pool_stats().total_connections, 0);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            });
+            expire.join().unwrap();
+            peer.join().unwrap();
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+
+        #[test]
+        fn streaming_io_authority_is_checked_before_direct_or_proxy_admission() {
+            let (listener, url) = listener();
+            let runtime = runtime(false);
+            let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+            runtime.block_on_with_cx(owner.clone(), async {
+                let restricted = {
+                    let _restriction = Cx::push_restriction(crate::cx::cap::CapMask::none());
+                    Cx::current().unwrap()
+                };
+                for proxy in [false, true] {
+                    let client = if proxy {
+                        HttpClient::builder().proxy(&url).build()
+                    } else {
+                        HttpClient::new()
+                    };
+                    let result = client.request_streaming_pooled(
+                        &restricted, Method::Get, &url, Vec::new(), Vec::new(),
+                    ).await;
+                    assert!(matches!(result, Err(ClientError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied));
+                    let _restriction = Cx::push_restriction(crate::cx::cap::CapMask::none());
+                    let result = client.post(&url).send_with_body(&owner, crate::http::body::Empty::new()).await;
+                    assert!(matches!(result, Err(ClientError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied));
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                    assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                }
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            });
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
         }
 
         #[test]
@@ -1118,10 +1413,10 @@
         }
 
         #[test]
-        fn pooled_streaming_refuses_proxy_configuration_before_admission() {
-            let client = HttpClient::builder().proxy("http://127.0.0.1:9").build();
+        fn pooled_streaming_refuses_invalid_proxy_configuration_before_admission() {
+            let client = HttpClient::builder().proxy("ftp://127.0.0.1:9").build();
             let result = block_on(client.request_streaming_pooled(&Cx::for_testing(), Method::Get, "http://127.0.0.1:9", Vec::new(), Vec::new()));
-            assert!(matches!(result, Err(ClientError::ProxyError(_))));
+            assert!(matches!(result, Err(ClientError::InvalidUrl(_))));
             assert_eq!(client.pool_stats().total_connections, 0);
         }
     }
