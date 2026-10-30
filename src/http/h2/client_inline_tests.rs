@@ -893,3 +893,377 @@
             "a budget of 0 still refuses one idle PING"
         );
     }
+
+    #[cfg(feature = "http2-streaming")]
+    mod streaming_authority {
+        use super::*;
+        use crate::bytes::BytesCursor;
+        use crate::cx::cap::CapMask;
+        use crate::http::body::{Body, Frame as BodyFrame, SizeHint};
+        use crate::types::{Budget, RegionId, TaskId};
+
+        type Events = Arc<Mutex<Vec<(&'static str, CapMask)>>>;
+
+        fn record(events: &Events, event: &'static str) {
+            events.lock().push((
+                event,
+                Cx::current().expect("callback has an owner").runtime_mask,
+            ));
+        }
+
+        fn restricted(owner: &Cx) -> Cx {
+            let _current = Cx::set_current(Some(owner.clone()));
+            let _restriction = Cx::push_restriction(CapMask::none());
+            Cx::current().unwrap()
+        }
+
+        struct ObservedBody(Events);
+
+        impl Body for ObservedBody {
+            type Data = BytesCursor;
+            type Error = io::Error;
+
+            fn poll_frame(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Option<Result<BodyFrame<Self::Data>, Self::Error>>> {
+                record(&self.0, "body_poll");
+                Poll::Pending
+            }
+
+            fn size_hint(&self) -> SizeHint {
+                record(&self.0, "size_hint");
+                SizeHint::new()
+            }
+        }
+
+        impl Drop for ObservedBody {
+            fn drop(&mut self) {
+                record(&self.0, "body_drop");
+            }
+        }
+
+        struct ParkedPreface(Events);
+
+        impl AsyncRead for ParkedPreface {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &mut crate::io::ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                record(&self.0, "transport_read");
+                Poll::Pending
+            }
+        }
+
+        impl AsyncWrite for ParkedPreface {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                assert_eq!(bytes, CLIENT_PREFACE, "the request parked in setup");
+                record(&self.0, "transport_write");
+                Poll::Pending
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                record(&self.0, "transport_flush");
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                record(&self.0, "transport_shutdown");
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        impl Drop for ParkedPreface {
+            fn drop(&mut self) {
+                record(&self.0, "transport_drop");
+            }
+        }
+
+        #[test]
+        fn unpolled_streaming_sends_drop_owned_values_under_the_explicit_authority() {
+            let ambient = Cx::for_testing();
+            let owner = restricted(&ambient);
+            let _current = Cx::set_current(Some(ambient));
+            let events: Events = Arc::new(Mutex::new(Vec::new()));
+
+            let native = Http2Client::new()
+                .post("http://127.0.0.1:1/upload")
+                .send_with_body(&owner, ObservedBody(events.clone()));
+            assert!(events.lock().is_empty(), "constructing a future polls no producer");
+            drop(native);
+            assert_eq!(*events.lock(), vec![("body_drop", CapMask::none())]);
+
+            events.lock().clear();
+            let supplied = Http2Client::new()
+                .post("http://127.0.0.1:1/upload")
+                .send_with_body_on(
+                    &owner,
+                    ParkedPreface(events.clone()),
+                    ObservedBody(events.clone()),
+                );
+            assert!(events.lock().is_empty());
+            drop(supplied);
+            assert_eq!(
+                *events.lock(),
+                vec![
+                    ("transport_drop", CapMask::none()),
+                    ("body_drop", CapMask::none()),
+                ],
+                "even an unpolled future retires the transport before its producer",
+            );
+        }
+
+        #[test]
+        fn supplied_streaming_setup_scopes_transport_poll_and_parked_drop() {
+            let ambient = Cx::for_testing();
+            let owner = restricted(&ambient);
+            let _current = Cx::set_current(Some(ambient.clone()));
+            let events: Events = Arc::new(Mutex::new(Vec::new()));
+            let mut future = Box::pin(Http2Client::new()
+                .post("http://localhost/upload")
+                .send_with_body_on(
+                    &owner,
+                    ParkedPreface(events.clone()),
+                    ObservedBody(events.clone()),
+                ));
+            let mut task = Context::from_waker(Waker::noop());
+
+            assert!(future.as_mut().poll(&mut task).is_pending());
+            assert_eq!(
+                *events.lock(),
+                vec![
+                    ("size_hint", CapMask::none()),
+                    ("transport_write", CapMask::none()),
+                ],
+                "the preface is parked before any producer frame is polled",
+            );
+            assert_eq!(Cx::current().unwrap().runtime_mask, CapMask::all());
+            assert!(!owner.inner.read().cancel_waker_registrations.is_empty());
+            drop(future);
+            assert_eq!(
+                *events.lock(),
+                vec![
+                    ("size_hint", CapMask::none()),
+                    ("transport_write", CapMask::none()),
+                    ("transport_drop", CapMask::none()),
+                    ("body_drop", CapMask::none()),
+                ],
+            );
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(ambient.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(Cx::current().unwrap().runtime_mask, CapMask::all());
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn native_streaming_refuses_either_missing_authority_before_size_hint() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+                .build()
+                .unwrap();
+            let privileged = runtime.request_cx_with_budget(Budget::INFINITE);
+            let narrow = restricted(&privileged);
+            for (owner, poller) in [
+                (privileged.clone(), narrow.clone()),
+                (narrow.clone(), privileged.clone()),
+            ] {
+                let events: Events = Arc::new(Mutex::new(Vec::new()));
+                let _current = Cx::set_current(Some(poller));
+                let mut future = Box::pin(Http2Client::new()
+                    .post("http://127.0.0.1:1/upload")
+                    .send_with_body(&owner, ObservedBody(events.clone())));
+                let mut task = Context::from_waker(Waker::noop());
+                assert!(matches!(
+                    future.as_mut().poll(&mut task),
+                    Poll::Ready(Err(Http2ClientError::MissingIoCapability)),
+                ));
+                drop(future);
+                assert_eq!(
+                    *events.lock(),
+                    vec![("body_drop", owner.runtime_mask)],
+                    "denial precedes both size_hint and poll_frame user callbacks",
+                );
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            }
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+
+        #[test]
+        fn driverless_request_control_rejects_a_later_pollers_foreign_clock() {
+            let owner = Cx::for_testing();
+            assert!(owner.timer_driver().is_none());
+            let mut control = {
+                let _current = Cx::set_current(Some(owner.clone()));
+                RequestControl::new(&owner, Duration::from_secs(3600))
+            };
+            assert!(control.driver.is_none());
+            let clock = Arc::new(crate::time::VirtualClock::starting_at(
+                control.deadline + Duration::from_secs(3600),
+            ));
+            let timer = TimerDriverHandle::with_virtual_clock(clock);
+            let foreign = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(83, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let _current = Cx::set_current(Some(foreign));
+            let wake = Arc::new(CountWake::default());
+            let waker = Waker::from(wake.clone());
+            let mut task = Context::from_waker(&waker);
+            control.check(&mut task).expect("the owner's wall deadline is still live");
+            assert_eq!(wake.0.load(Ordering::SeqCst), 0,
+                "a foreign clock cannot cause an early ready/reset wake loop");
+            assert_eq!(timer.process_timers(), 0);
+            drop(control);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+
+        #[test]
+        fn request_control_translates_initial_budgets_between_clock_domains() {
+            for (owner_origin, ambient_origin) in [(1_000_000u64, 10u64), (10, 1_000_000)] {
+                let owner_clock = Arc::new(crate::time::VirtualClock::starting_at(
+                    Time::from_nanos(owner_origin),
+                ));
+                let owner_timer = TimerDriverHandle::with_virtual_clock(owner_clock.clone());
+                let owner = Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(84, 0),
+                    Budget::INFINITE.with_deadline(Time::from_nanos(owner_origin + 100)),
+                    None,
+                    None,
+                    None,
+                    Some(owner_timer),
+                    None,
+                );
+                let ambient_clock = Arc::new(crate::time::VirtualClock::starting_at(
+                    Time::from_nanos(ambient_origin),
+                ));
+                let ambient_timer = TimerDriverHandle::with_virtual_clock(ambient_clock);
+                let ambient = Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(85, 0),
+                    Budget::INFINITE.with_deadline(Time::from_nanos(ambient_origin + 7)),
+                    None,
+                    None,
+                    None,
+                    Some(ambient_timer.clone()),
+                    None,
+                );
+                let _current = Cx::set_current(Some(ambient.clone()));
+                let mut control = RequestControl::new(&owner, Duration::from_nanos(500));
+                assert_eq!(control.deadline, Time::from_nanos(owner_origin + 7),
+                    "the shortest remaining duration is translated to the captured owner clock");
+                let mut task = Context::from_waker(Waker::noop());
+                control.check(&mut task).expect("seven owner ticks remain");
+                owner_clock.advance(6);
+                control.check(&mut task).expect("one owner tick remains");
+                owner_clock.advance(1);
+                assert!(matches!(control.check(&mut task), Err(Http2ClientError::DeadlineExceeded)));
+                assert_eq!(ambient_timer.process_timers(), 0);
+                drop(control);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                assert!(ambient.inner.read().cancel_waker_registrations.is_empty());
+            }
+        }
+
+        struct CapturedTransport {
+            scripted: ScriptedTransport,
+            written: Arc<Mutex<Vec<u8>>>,
+        }
+
+        impl AsyncRead for CapturedTransport {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                task: &mut Context<'_>,
+                buf: &mut crate::io::ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Pin::new(&mut self.get_mut().scripted).poll_read(task, buf)
+            }
+        }
+
+        impl AsyncWrite for CapturedTransport {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                self.written.lock().extend_from_slice(bytes);
+                Poll::Ready(Ok(bytes.len()))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        #[test]
+        fn continuously_ready_response_data_does_not_starve_the_upload() {
+            use crate::bytes::{Buf, BytesMut};
+            use crate::codec::Decoder;
+            use crate::http::h2::frame::{DataFrame, HeadersFrame, SettingsFrame};
+
+            let mut frames = vec![
+                Frame::Settings(SettingsFrame::new(vec![])),
+                Frame::Headers(HeadersFrame::new(1, Bytes::from_static(&[0x88]), false, true)),
+            ];
+            for index in 0u8..16 {
+                frames.push(Frame::Data(DataFrame::new(
+                    1,
+                    Bytes::from(vec![index]),
+                    index == 15,
+                )));
+            }
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let transport = CapturedTransport {
+                scripted: ScriptedTransport::new(server_frames(frames)),
+                written: written.clone(),
+            };
+            let owner = Cx::for_testing();
+            let _current = Cx::set_current(Some(owner.clone()));
+            let upload = b"upload-before-download-finishes";
+            let mut response = complete(Http2Client::new()
+                .post("http://localhost/duplex")
+                .send_with_body_on(&owner, transport, Bytes::from_static(upload)))
+                .expect("streaming response headers");
+            assert_eq!(response.status, 200);
+            for expected in 0u8..8 {
+                let frame = complete(poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)))
+                    .expect("response is still open")
+                    .expect("valid response data");
+                let BodyFrame::Data(data) = frame else {
+                    panic!("the scripted response has no trailers");
+                };
+                assert_eq!(data.chunk(), &[expected]);
+            }
+            assert!(!response.body.is_end_stream(), "half the download remains unread");
+            let written = written.lock();
+            assert!(written.starts_with(CLIENT_PREFACE));
+            let mut bytes = BytesMut::from(&written[CLIENT_PREFACE.len()..]);
+            let mut codec = FrameCodec::new();
+            let mut sent = Vec::new();
+            while let Some(frame) = codec.decode(&mut bytes).expect("valid client frame") {
+                if let Frame::Data(data) = frame {
+                    sent.extend_from_slice(&data.data);
+                }
+            }
+            assert_eq!(sent.as_slice(), upload.as_slice(),
+                "stream WINDOW_UPDATE traffic must leave room for the upload to advance");
+            drop(written);
+            drop(response);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }

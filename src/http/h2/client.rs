@@ -41,7 +41,7 @@ use crate::http::{Method, ParsedUrl, Scheme};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::net::TcpStream;
 use crate::stream::Stream;
-use crate::time::Sleep;
+use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelReason, Time};
 use parking_lot::Mutex;
 
@@ -349,6 +349,43 @@ impl Http2Client {
     pub fn post(&self, url: impl Into<String>) -> Http2RequestBuilder {
         self.request(Method::Post, url)
     }
+
+    fn validate_native_target(&self, cx: &Cx, url: &ParsedUrl) -> Result<(), Http2ClientError> {
+        require_native_io(cx)?;
+        if url.scheme == Scheme::Https {
+            #[cfg(feature = "tls")]
+            if self.tls_connector.is_none() {
+                return Err(Http2ClientError::Tls("HTTPS requires a TLS connector".into()));
+            }
+            #[cfg(not(feature = "tls"))]
+            return Err(Http2ClientError::Tls("TLS support is disabled".into()));
+        }
+        Ok(())
+    }
+
+    async fn connect_transport(&self, url: &ParsedUrl) -> Result<Http2ClientIo, Http2ClientError> {
+        let host = url.host.trim_matches(['[', ']']);
+        let tcp = if let Ok(ip) = host.parse::<IpAddr>() {
+            TcpStream::connect(SocketAddr::new(ip, url.port)).await?
+        } else {
+            crate::net::happy_eyeballs::connect_resolved((host.to_owned(), url.port), None).await?
+        };
+        #[cfg(feature = "tls")]
+        if url.scheme == Scheme::Https {
+            let connector = self.tls_connector.as_ref().ok_or_else(|| {
+                Http2ClientError::Tls("HTTPS requires a TLS connector".into())
+            })?;
+            let tls = connector
+                .connect(host, tcp)
+                .await
+                .map_err(|error| Http2ClientError::Tls(error.to_string()))?;
+            if tls.alpn_protocol() != Some(b"h2".as_slice()) {
+                return Err(Http2ClientError::Tls("peer did not negotiate h2 ALPN".into()));
+            }
+            return Ok(Http2ClientIo::Tls(tls));
+        }
+        Ok(Http2ClientIo::Plain(tcp))
+    }
 }
 
 /// Fluent builder for one owned HTTP/2 exchange.
@@ -409,18 +446,8 @@ impl Http2RequestBuilder {
             .unwrap_or(self.client.timeout)
             .min(self.client.timeout);
         drive(cx, timeout, async {
-            require_native_io(cx)?;
+            self.client.validate_native_target(cx, &request.url)?;
             let host = request.url.host.trim_matches(['[', ']']).to_owned();
-            if request.url.scheme == Scheme::Https {
-                #[cfg(feature = "tls")]
-                if self.client.tls_connector.is_none() {
-                    return Err(Http2ClientError::Tls(
-                        "HTTPS requires a TLS connector".into(),
-                    ));
-                }
-                #[cfg(not(feature = "tls"))]
-                return Err(Http2ClientError::Tls("TLS support is disabled".into()));
-            }
             let limit = self.client.max_response_body;
             let origin: Origin = (
                 request.url.scheme == Scheme::Https,
@@ -451,34 +478,7 @@ impl Http2RequestBuilder {
                     }
                 }
             }
-            let tcp = if let Ok(ip) = host.parse::<IpAddr>() {
-                TcpStream::connect(SocketAddr::new(ip, request.url.port)).await?
-            } else {
-                crate::net::happy_eyeballs::connect_resolved((host.clone(), request.url.port), None)
-                    .await?
-            };
-            let transport = DialedTransport::Plain(tcp);
-            #[cfg(feature = "tls")]
-            let transport = if request.url.scheme == Scheme::Https {
-                let DialedTransport::Plain(tcp) = transport else {
-                    unreachable!("dialed above")
-                };
-                let connector = self.client.tls_connector.as_ref().ok_or_else(|| {
-                    Http2ClientError::Tls("HTTPS requires a TLS connector".into())
-                })?;
-                let tls = connector
-                    .connect(&host, tcp)
-                    .await
-                    .map_err(|error| Http2ClientError::Tls(error.to_string()))?;
-                if tls.alpn_protocol() != Some(b"h2".as_slice()) {
-                    return Err(Http2ClientError::Tls(
-                        "peer did not negotiate h2 ALPN".into(),
-                    ));
-                }
-                DialedTransport::Tls(tls)
-            } else {
-                transport
-            };
+            let transport = self.client.connect_transport(&request.url).await?;
             let mut conn =
                 Http2Conn::start(transport, limit, self.client.max_overhead_frames).await?;
             let (response, closed) = conn
@@ -525,7 +525,14 @@ impl Http2RequestBuilder {
     }
 
     fn prepare(&self) -> Result<PreparedRequest, Http2ClientError> {
-        if self.body.len() > self.client.max_request_body {
+        self.prepare_for_length(Some(self.body.len() as u64))
+    }
+
+    fn prepare_for_length(
+        &self,
+        exact_length: Option<u64>,
+    ) -> Result<PreparedRequest, Http2ClientError> {
+        if exact_length.is_some_and(|length| length > self.client.max_request_body as u64) {
             return Err(Http2ClientError::BodyTooLarge {
                 request: true,
                 limit: self.client.max_request_body,
@@ -607,13 +614,20 @@ impl Http2RequestBuilder {
             }
             headers.push(header.clone());
         }
-        if content_length.is_some_and(|length| length != self.body.len() as u64) {
+        if content_length.zip(exact_length).is_some_and(|(declared, exact)| declared != exact) {
             return Err(invalid("content-length does not match request body"));
         }
+        if content_length.is_some_and(|length| length > self.client.max_request_body as u64) {
+            return Err(Http2ClientError::BodyTooLarge {
+                request: true,
+                limit: self.client.max_request_body,
+            });
+        }
         if content_length.is_none()
-            && (!self.body.is_empty() || self.method == Method::Post || self.method == Method::Put)
+            && let Some(length) = exact_length
+            && (length != 0 || self.method == Method::Post || self.method == Method::Put)
         {
-            headers.push(Header::new("content-length", self.body.len().to_string()));
+            headers.push(Header::new("content-length", length.to_string()));
         }
         if header_size(&headers) > HEADER_LIMIT {
             return Err(invalid("request headers exceed 64 KiB"));
@@ -622,6 +636,8 @@ impl Http2RequestBuilder {
             url,
             headers,
             head: self.method.as_str() == "HEAD",
+            #[cfg(feature = "http2-streaming")]
+            content_length: content_length.or(exact_length),
         })
     }
 }
@@ -698,51 +714,99 @@ async fn drive<T>(
     timeout: Duration,
     future: impl Future<Output = Result<T, Http2ClientError>>,
 ) -> Result<T, Http2ClientError> {
-    let mut caller = Cancellation::new(cx.clone());
-    let mut ambient = Cx::current().map(Cancellation::new);
-    let driver = cx
-        .timer_driver()
-        .or_else(|| ambient.as_ref().and_then(|guard| guard.cx.timer_driver()));
-    let now = driver
-        .as_ref()
-        .map_or_else(crate::time::wall_now, |driver| driver.now());
-    let nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
-    let mut deadline = now.saturating_add_nanos(nanos);
-    for context in std::iter::once(cx).chain(ambient.as_ref().map(|guard| &guard.cx)) {
-        if let Some(budget) = context.budget().deadline {
-            deadline = deadline.min(budget);
-        }
-    }
-    let mut sleep = driver.as_ref().map_or_else(
-        || Sleep::new(deadline),
-        |driver| Sleep::with_timer_driver(deadline, driver.clone()),
-    );
-    let mut future = std::pin::pin!(future);
-    poll_fn(|task| {
-        // Registration precedes checkpoint: cancellation can occur during a
-        // custom Waker's clone callback, before its registry entry is visible.
-        caller.register(task.waker());
-        if let Some(ambient) = &mut ambient {
-            ambient.register(task.waker());
-        }
+    RequestControl::new(cx, timeout).drive(future).await
+}
+
+/// One absolute deadline and its cancellation registrations, retained when a
+/// streaming response takes over driving the connection from its send future.
+struct RequestControl {
+    caller: Cancellation,
+    ambient: Option<Cancellation>,
+    driver: Option<TimerDriverHandle>,
+    deadline: Time,
+    sleep: Sleep,
+}
+
+impl RequestControl {
+    fn new(cx: &Cx, timeout: Duration) -> Self {
+        let caller = Cancellation::new(cx.clone());
+        let ambient = Cx::current().map(Cancellation::new);
+        let driver = cx
+            .timer_driver()
+            .or_else(|| ambient.as_ref().and_then(|guard| guard.cx.timer_driver()));
         let now = driver
             .as_ref()
             .map_or_else(crate::time::wall_now, |driver| driver.now());
-        if now >= deadline {
-            return Poll::Ready(Err(Http2ClientError::DeadlineExceeded));
+        let nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+        let mut deadline = now.saturating_add_nanos(nanos);
+        for context in std::iter::once(cx).chain(ambient.as_ref().map(|guard| &guard.cx)) {
+            if let Some(budget) = context.budget().deadline {
+                let context_now = context
+                    .timer_driver()
+                    .map_or_else(crate::time::wall_now, |driver| driver.now());
+                let remaining = budget.as_nanos().saturating_sub(context_now.as_nanos());
+                deadline = deadline.min(now.saturating_add_nanos(remaining));
+            }
         }
-        caller.check()?;
-        if let Some(ambient) = &ambient {
+        let sleep = driver.as_ref().map_or_else(
+            || Sleep::new(deadline),
+            |driver| Sleep::with_timer_driver(deadline, driver.clone()),
+        );
+        Self {
+            caller,
+            ambient,
+            driver,
+            deadline,
+            sleep,
+        }
+    }
+
+    fn check(&mut self, task: &mut std::task::Context<'_>) -> Result<(), Http2ClientError> {
+        // Registration precedes checkpoint: cancellation can occur during a
+        // custom Waker's clone callback, before its registry entry is visible.
+        self.caller.register(task.waker());
+        if let Some(ambient) = &mut self.ambient {
+            ambient.register(task.waker());
+        }
+        let now = self
+            .driver
+            .as_ref()
+            .map_or_else(crate::time::wall_now, |driver| driver.now());
+        if now >= self.deadline {
+            return Err(Http2ClientError::DeadlineExceeded);
+        }
+        self.caller.check()?;
+        if let Some(ambient) = &self.ambient {
             ambient.check()?;
         }
-        if Pin::new(&mut sleep).poll_deadline(task).is_ready() {
+        let timer_ready = {
+            // A response can move to another task. A wall-clock deadline must
+            // not acquire that task's unrelated virtual or native timer.
+            let _ambient = self
+                .driver
+                .is_none()
+                .then(|| self.caller.cx.clone().set_current_restricted());
+            Pin::new(&mut self.sleep).poll_deadline(task).is_ready()
+        };
+        if timer_ready {
             // An early timer wake must never cause polling a completed Sleep.
-            sleep.reset(deadline);
+            self.sleep.reset(self.deadline);
             task.waker().wake_by_ref();
         }
-        future.as_mut().poll(task)
-    })
-    .await
+        Ok(())
+    }
+
+    async fn drive<T>(
+        &mut self,
+        future: impl Future<Output = Result<T, Http2ClientError>>,
+    ) -> Result<T, Http2ClientError> {
+        let mut future = std::pin::pin!(future);
+        poll_fn(|task| {
+            self.check(task)?;
+            future.as_mut().poll(task)
+        })
+        .await
+    }
 }
 
 #[derive(Clone)]
@@ -750,6 +814,8 @@ struct PreparedRequest {
     url: ParsedUrl,
     headers: Vec<Header>,
     head: bool,
+    #[cfg(feature = "http2-streaming")]
+    content_length: Option<u64>,
 }
 
 struct ResponseState {
@@ -757,6 +823,7 @@ struct ResponseState {
     header_bytes: usize,
     content_length: Option<u64>,
     body: Vec<u8>,
+    received: usize,
     head: bool,
     limit: usize,
 }
@@ -773,6 +840,7 @@ impl ResponseState {
             header_bytes: 0,
             content_length: None,
             body: Vec::new(),
+            received: 0,
             head,
             limit,
         }
@@ -863,34 +931,40 @@ impl ResponseState {
     }
 
     fn data(&mut self, data: &[u8], end: bool) -> Result<bool, Http2ClientError> {
+        self.record_data(data.len())?;
+        self.body.extend_from_slice(data);
+        if end { self.finish() } else { Ok(false) }
+    }
+
+    fn record_data(&mut self, length: usize) -> Result<(), Http2ClientError> {
         if self.response.status == 0 {
             return Err(protocol("DATA precedes final response headers"));
         }
-        if self.bodyless() && !data.is_empty() {
+        if self.bodyless() && length != 0 {
             return Err(protocol("DATA on a bodyless response"));
         }
-        if data.len() > self.limit.saturating_sub(self.body.len()) {
+        if length > self.limit.saturating_sub(self.received) {
             return Err(Http2ClientError::BodyTooLarge {
                 request: false,
                 limit: self.limit,
             });
         }
-        self.body.extend_from_slice(data);
+        self.received += length;
         if !self.bodyless()
             && self
                 .content_length
-                .is_some_and(|length| self.body.len() as u64 > length)
+                .is_some_and(|length| self.received as u64 > length)
         {
             return Err(protocol("response exceeds content-length"));
         }
-        if end { self.finish() } else { Ok(false) }
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<bool, Http2ClientError> {
         if !self.bodyless()
             && self
                 .content_length
-                .is_some_and(|length| length != self.body.len() as u64)
+                .is_some_and(|length| length != self.received as u64)
         {
             return Err(protocol("response ends before content-length"));
         }
@@ -1102,7 +1176,7 @@ where
     async fn refresh(&mut self) -> Result<(), Http2ClientError> {
         self.overhead_frames = 0;
         poll_fn(|task| {
-            loop {
+            for _ in 0..POLL_STEPS {
                 match Pin::new(&mut self.wire).poll_next(task) {
                     Poll::Ready(Some(Ok(frame))) => {
                         if is_overhead_frame(&frame, &self.connection, &mut self.settings_acked) {
@@ -1124,14 +1198,20 @@ where
                             "pooled HTTP/2 connection closed",
                         ))));
                     }
-                    Poll::Pending => break,
+                    Poll::Pending => {
+                        return if self.reusable() {
+                            Poll::Ready(Ok(()))
+                        } else {
+                            Poll::Ready(Err(protocol("pooled HTTP/2 connection is draining")))
+                        };
+                    }
                 }
             }
-            if self.reusable() {
-                Poll::Ready(Ok(()))
-            } else {
-                Poll::Ready(Err(protocol("pooled HTTP/2 connection is draining")))
-            }
+            // WINDOW_UPDATE is legitimate upload progress and does not spend
+            // the overhead-frame budget. A readable idle peer must still
+            // yield so the owning request can observe cancellation/deadline.
+            task.waker().wake_by_ref();
+            Poll::Pending
         })
         .await
     }
@@ -1333,14 +1413,22 @@ fn pool_now(cx: &Cx) -> Time {
 /// load-balancer idle timeouts (60 s and up).
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A connection [`Http2Client::send`] dialed: plain TCP, or TLS over it.
-enum DialedTransport {
+/// Owned native transport used by the HTTP/2 client.
+///
+/// Streaming responses retain this transport until their body is consumed or
+/// dropped. HTTPS is authenticated and checked for `h2` ALPN before it is
+/// exposed through a response.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Http2ClientIo {
+    /// Cleartext HTTP/2 with prior knowledge over TCP.
     Plain(TcpStream),
+    /// HTTP/2 over a verified TLS connection.
     #[cfg(feature = "tls")]
     Tls(crate::tls::TlsStream<TcpStream>),
 }
 
-impl AsyncRead for DialedTransport {
+impl AsyncRead for Http2ClientIo {
     fn poll_read(
         self: Pin<&mut Self>,
         task: &mut std::task::Context<'_>,
@@ -1354,7 +1442,7 @@ impl AsyncRead for DialedTransport {
     }
 }
 
-impl AsyncWrite for DialedTransport {
+impl AsyncWrite for Http2ClientIo {
     fn poll_write(
         self: Pin<&mut Self>,
         task: &mut std::task::Context<'_>,
@@ -1390,7 +1478,7 @@ impl AsyncWrite for DialedTransport {
 /// Idle connections an [`Http2Client`] keeps per origin
 /// ([`Http2Client::reuse_connections`]); shared by the client's clones.
 /// Generic only so its bookkeeping can be tested without sockets.
-struct ConnectionPool<C = Http2Conn<DialedTransport>> {
+struct ConnectionPool<C = Http2Conn<Http2ClientIo>> {
     max_idle: usize,
     idle: Mutex<HashMap<Origin, Vec<(Time, C)>>>,
 }
@@ -1454,6 +1542,846 @@ impl<C> ConnectionPool<C> {
             }
         }
         drop(expired);
+    }
+}
+
+#[cfg(feature = "http2-streaming")]
+pub use streaming::{Http2IncomingBody, Http2StreamingResponse};
+
+#[cfg(feature = "http2-streaming")]
+mod streaming {
+    use super::*;
+    use crate::bytes::{Buf, BytesCursor};
+    use crate::http::body::{
+        Body, Frame as BodyFrame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint,
+    };
+    use std::task::Context;
+
+    /// Final HTTP/2 response headers and an owned, incremental response body.
+    ///
+    /// Polling `body` drives both directions of the exchange. An upload can
+    /// continue after the peer sends its final response headers; response
+    /// END_STREAM stops an unfinished upload. No detached driver is spawned.
+    #[must_use = "the response body drives the exchange and must be consumed or dropped"]
+    #[non_exhaustive]
+    pub struct Http2StreamingResponse<T, B: Body> {
+        /// Final response status, after any informational responses.
+        pub status: u16,
+        /// Final response fields, excluding `:status`.
+        pub headers: Vec<Header>,
+        /// DATA and trailers, retaining the original deadline and cancellation.
+        pub body: Http2IncomingBody<T, B>,
+    }
+
+    impl<T, B: Body> fmt::Debug for Http2StreamingResponse<T, B> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Http2StreamingResponse")
+                .field("status", &self.status)
+                .field("headers", &self.headers)
+                .field("body", &self.body)
+                .finish()
+        }
+    }
+
+    impl<T, B: Body> Http2StreamingResponse<T, B> {
+        /// Return the first final response field with this case-insensitive name.
+        #[must_use]
+        pub fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|header| header.name.eq_ignore_ascii_case(name))
+                .map(|header| header.value.as_str())
+        }
+    }
+
+    /// An HTTP/2 response body that owns its connection and request producer.
+    ///
+    /// One upload frame is retained at a time and split by the peer's stream
+    /// and connection credit. Response DATA is delivered one frame at a time;
+    /// its stream credit is returned only when the caller polls for the next
+    /// frame. Trailers are a separate [`BodyFrame::Trailers`] frame. The total
+    /// response byte limit still applies, without collecting those bytes.
+    ///
+    /// Draining to EOF can return a healthy native connection to the client's
+    /// opt-in pool, after the upload reaches EOF and all queued writes flush.
+    /// Dropping an unfinished body closes its connection before dropping the
+    /// producer. Cancellation and the original total deadline also close it;
+    /// no background task continues reading or draining.
+    #[must_use = "a streaming body makes progress only while polled"]
+    pub struct Http2IncomingBody<T, B: Body> {
+        // Field drop order is deliberate: user producer/data destructors may
+        // panic or re-enter the client, after the socket has been retired.
+        conn: Option<Http2Conn<T>>,
+        control: Option<RequestControl>,
+        upload: Option<Upload<B>>,
+        owner: Cx,
+        pool: Option<(Arc<ConnectionPool<Http2Conn<T>>>, Origin)>,
+        response: ResponseState,
+        request_headers: Option<Vec<Header>>,
+        stream_id: Option<u32>,
+        credit_due: u32,
+        response_done: bool,
+        done: bool,
+        poisoned: bool,
+        native: bool,
+        poller: Option<Cancellation>,
+    }
+
+    impl<T, B: Body> fmt::Debug for Http2IncomingBody<T, B> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Http2IncomingBody")
+                .field("stream_id", &self.stream_id)
+                .field("received", &self.response.received)
+                .field("response_done", &self.response_done)
+                .field("done", &self.done)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl<T, B: Body> Drop for Http2IncomingBody<T, B> {
+        fn drop(&mut self) {
+            let _ambient = self.owner.clone().set_current_restricted();
+            drop(self.conn.take());
+            drop(self.upload.take());
+            drop(self.control.take());
+            drop(self.poller.take());
+        }
+    }
+
+    struct UploadData<D> {
+        // The buffer is owned and is never structurally pinned. Boxing keeps
+        // the response body Unpin without requiring D: Unpin.
+        data: Box<D>,
+        remaining: usize,
+    }
+
+    /// Retain the explicit authority even if a send future is dropped before
+    /// its first poll. Producer destruction must not inherit the dropping task.
+    struct SourceOwner<B> {
+        owner: Cx,
+        source: Option<Pin<Box<B>>>,
+    }
+
+    impl<B: Body> SourceOwner<B> {
+        fn new(owner: &Cx, source: B) -> Self {
+            Self {
+                owner: owner.clone(),
+                source: Some(Box::pin(source)),
+            }
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            let _ambient = self.owner.clone().set_current_restricted();
+            self.source.as_ref().expect("live producer").size_hint()
+        }
+
+        fn poll_frame(
+            &mut self,
+            task: &mut Context<'_>,
+        ) -> Poll<Option<Result<BodyFrame<B::Data>, B::Error>>> {
+            let _ambient = self.owner.clone().set_current_restricted();
+            self.source
+                .as_mut()
+                .expect("live producer")
+                .as_mut()
+                .poll_frame(task)
+        }
+    }
+
+    impl<B> Drop for SourceOwner<B> {
+        fn drop(&mut self) {
+            let _ambient = self.owner.clone().set_current_restricted();
+            drop(self.source.take());
+        }
+    }
+
+    /// Preflight and unpolled-drop ordering for caller-supplied transports.
+    struct SuppliedUpload<T, B> {
+        transport: Option<T>,
+        source: Option<SourceOwner<B>>,
+    }
+
+    impl<T, B> Drop for SuppliedUpload<T, B> {
+        fn drop(&mut self) {
+            let _ambient = self
+                .source
+                .as_ref()
+                .map(|source| source.owner.clone().set_current_restricted());
+            drop(self.transport.take());
+            drop(self.source.take());
+        }
+    }
+
+    struct Upload<B: Body> {
+        source: SourceOwner<B>,
+        data: Option<UploadData<B::Data>>,
+        produced: u64,
+        expected: Option<u64>,
+        limit: usize,
+        header_bytes: usize,
+        trailers: Option<Vec<Header>>,
+        saw_trailers: bool,
+        eof: bool,
+    }
+
+    impl<B: Body> Drop for Upload<B> {
+        fn drop(&mut self) {
+            let _ambient = self.source.owner.clone().set_current_restricted();
+            drop(self.data.take());
+            // SourceOwner independently scopes its own field destruction,
+            // including unwinding if the retained data's destructor panics.
+        }
+    }
+
+    impl Http2RequestBuilder {
+        /// Send the builder's buffered upload and stream the response.
+        ///
+        /// Unlike [`Self::send`], this returns after the final response headers.
+        /// The response body owns the connection, deadline, and cancellation
+        /// registrations. This is a one-shot exchange with no implicit replay.
+        pub fn send_streaming(
+            mut self,
+            cx: &Cx,
+        ) -> impl Future<
+            Output = Result<
+                Http2StreamingResponse<Http2ClientIo, Full<BytesCursor>>,
+                Http2ClientError,
+            >,
+        > + use<> {
+            let body = Full::new(BytesCursor::new(std::mem::take(&mut self.body)));
+            self.send_with_body(cx, body)
+        }
+
+        /// Stream both directions using a caller-supplied transport.
+        ///
+        /// Transport ownership and TLS responsibility are the same as for
+        /// [`Self::send_on`]. Borrowed transports are accepted; no `Send`,
+        /// `'static`, or background executor requirement is introduced.
+        pub fn send_streaming_on<T>(
+            mut self,
+            cx: &Cx,
+            transport: T,
+        ) -> impl Future<
+            Output = Result<Http2StreamingResponse<T, Full<BytesCursor>>, Http2ClientError>,
+        > + use<T>
+        where
+            T: AsyncRead + AsyncWrite + Unpin,
+        {
+            let body = Full::new(BytesCursor::new(std::mem::take(&mut self.body)));
+            self.send_with_body_on(cx, transport, body)
+        }
+
+        /// Stream an arbitrary [`Body`] upload and return a streaming response.
+        ///
+        /// [`crate::http::ReaderBody`] and [`crate::http::MultipartBody`] can
+        /// feed this method without collecting their payloads. An exact size
+        /// hint supplies Content-Length; an explicit length is checked against
+        /// the actual producer EOF. Unknown-length bodies use DATA and
+        /// END_STREAM, without HTTP/1 transfer encoding. A single final trailer
+        /// frame is supported. Producer errors become [`Http2ClientError::Io`].
+        ///
+        /// A builder with a nonempty buffered body is rejected. The producer
+        /// needs neither `Unpin` nor `Send`. It is consumed once: unlike the
+        /// buffered API, no failed request is retried, even on a reused socket.
+        pub fn send_with_body<B>(
+            self,
+            cx: &Cx,
+            source: B,
+        ) -> impl Future<Output = Result<Http2StreamingResponse<Http2ClientIo, B>, Http2ClientError>>
+        + use<B>
+        where
+            B: Body,
+            B::Error: fmt::Display,
+        {
+            let source = SourceOwner::new(cx, source);
+            let cx = cx.clone();
+            async move {
+                if !self.body.is_empty() {
+                    return Err(invalid("streaming request also has a buffered body"));
+                }
+                // Check the original poller's authority before invoking producer
+                // code under the explicit request owner's restricted context.
+                require_native_io(&cx)?;
+                let request = self.prepare_for_length(source.size_hint().exact())?;
+                let timeout = self
+                    .timeout
+                    .unwrap_or(self.client.timeout)
+                    .min(self.client.timeout);
+                let mut control = RequestControl::new(&cx, timeout);
+                let origin = (
+                    request.url.scheme == Scheme::Https,
+                    request.url.host.trim_matches(['[', ']']).to_owned(),
+                    request.url.port,
+                );
+                let conn = control
+                    .drive(async {
+                        self.client.validate_native_target(&cx, &request.url)?;
+                        if let Some(pool) = &self.client.pool {
+                            while let Some(mut conn) = pool.take(&origin, pool_now(&cx)) {
+                                conn.max_overhead_frames = self.client.max_overhead_frames;
+                                if conn.refresh().await.is_ok() {
+                                    return Ok(conn);
+                                }
+                            }
+                        }
+                        let transport = self.client.connect_transport(&request.url).await?;
+                        // Streaming does not need the buffered client's large
+                        // initial receive window.
+                        Http2Conn::start(
+                            transport,
+                            MIN_RECEIVE_WINDOW as usize,
+                            self.client.max_overhead_frames,
+                        )
+                        .await
+                    })
+                    .await?;
+                let pool = self.client.pool.map(|pool| (pool, origin));
+                Http2IncomingBody::new(
+                    conn,
+                    control,
+                    request,
+                    source,
+                    self.client.max_request_body,
+                    self.client.max_response_body,
+                    pool,
+                    true,
+                )
+                .response().await
+            }
+        }
+
+        /// Stream a [`Body`] on an owned transport, starting with the H2 preface.
+        ///
+        /// This has the framing, deadline and one-shot rules of
+        /// [`Self::send_with_body`] and never pools the supplied transport.
+        /// A TLS transport's certificate and `h2` ALPN checks remain the
+        /// caller's responsibility, as for [`Self::send_on`].
+        pub fn send_with_body_on<T, B>(
+            self,
+            cx: &Cx,
+            transport: T,
+            source: B,
+        ) -> impl Future<Output = Result<Http2StreamingResponse<T, B>, Http2ClientError>>
+        + use<T, B>
+        where
+            T: AsyncRead + AsyncWrite + Unpin,
+            B: Body,
+            B::Error: fmt::Display,
+        {
+            let mut supplied = SuppliedUpload {
+                transport: Some(transport),
+                source: Some(SourceOwner::new(cx, source)),
+            };
+            let cx = cx.clone();
+            async move {
+                if !self.body.is_empty() {
+                    return Err(invalid("streaming request also has a buffered body"));
+                }
+                let request = self.prepare_for_length(
+                    supplied.source.as_ref().expect("owned source").size_hint().exact(),
+                )?;
+                let timeout = self
+                    .timeout
+                    .unwrap_or(self.client.timeout)
+                    .min(self.client.timeout);
+                let mut control = RequestControl::new(&cx, timeout);
+                let conn = control
+                    .drive(cx.with_ambient(Http2Conn::start(
+                        supplied.transport.take().expect("owned transport"),
+                        MIN_RECEIVE_WINDOW as usize,
+                        self.client.max_overhead_frames,
+                    )))
+                    .await?;
+                Http2IncomingBody::new(
+                    conn,
+                    control,
+                    request,
+                    supplied.source.take().expect("owned source"),
+                    self.client.max_request_body,
+                    self.client.max_response_body,
+                    None,
+                    false,
+                )
+                .response()
+                .await
+            }
+        }
+    }
+
+    impl<T, B> Http2IncomingBody<T, B>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+        B: Body,
+        B::Error: fmt::Display,
+    {
+        #[allow(clippy::too_many_arguments)]
+        fn new(
+            conn: Http2Conn<T>,
+            control: RequestControl,
+            request: PreparedRequest,
+            source: SourceOwner<B>,
+            request_limit: usize,
+            response_limit: usize,
+            pool: Option<(Arc<ConnectionPool<Http2Conn<T>>>, Origin)>,
+            native: bool,
+        ) -> Self {
+            let owner = source.owner.clone();
+            let upload = Upload {
+                source,
+                data: None,
+                produced: 0,
+                expected: request.content_length,
+                limit: request_limit,
+                header_bytes: header_size(&request.headers),
+                trailers: None,
+                saw_trailers: false,
+                eof: false,
+            };
+            Self {
+                conn: Some(conn), control: Some(control), upload: Some(upload), owner, pool,
+                response: ResponseState::new(request.head, response_limit),
+                request_headers: Some(request.headers), stream_id: None,
+                credit_due: 0, response_done: false, done: false, poisoned: false,
+                native, poller: None,
+            }
+        }
+
+        async fn response(mut self) -> Result<Http2StreamingResponse<T, B>, Http2ClientError> {
+            poll_fn(|task| self.poll_exchange(task, true)).await?;
+            Ok(Http2StreamingResponse {
+                status: self.response.response.status,
+                headers: std::mem::take(&mut self.response.response.headers),
+                body: self,
+            })
+        }
+
+        fn check_owner(&mut self, task: &mut Context<'_>) -> Result<(), Http2ClientError> {
+            let control = self.control.as_mut().ok_or_else(|| protocol("retired streaming owner"))?;
+            if self.native {
+                require_native_io(&control.caller.cx)?;
+            }
+            let current = Cx::current().filter(|current| {
+                !Arc::ptr_eq(&current.inner, &control.caller.cx.inner)
+                    && !control.ambient.as_ref().is_some_and(|ambient| {
+                        Arc::ptr_eq(&current.inner, &ambient.cx.inner)
+                    })
+            });
+            if let Some(current) = current {
+                if self.poller.as_ref().is_none_or(|poller| !Arc::ptr_eq(&poller.cx.inner, &current.inner)) {
+                    self.poller = Some(Cancellation::new(current));
+                }
+            } else {
+                self.poller = None;
+            }
+            if let Some(poller) = &mut self.poller {
+                poller.register(task.waker());
+                poller.check()?;
+                if let Some(deadline) = poller.cx.budget().deadline {
+                    // Budget deadlines belong to their context's clock. A
+                    // body transferred across runtimes can only shorten its
+                    // original allowance by the new poller's remaining time.
+                    let poller_now = poller.cx.timer_driver()
+                        .map_or_else(crate::time::wall_now, |driver| driver.now());
+                    let now = control.driver.as_ref()
+                        .map_or_else(crate::time::wall_now, |driver| driver.now());
+                    let remaining = deadline.as_nanos().saturating_sub(poller_now.as_nanos());
+                    let deadline = now.saturating_add_nanos(remaining);
+                    if deadline < control.deadline {
+                        control.deadline = deadline;
+                        control.sleep.reset(deadline);
+                    }
+                }
+            }
+            control.check(task)
+        }
+
+        fn retire(&mut self, reuse: bool) {
+            let _ambient = self.owner.clone().set_current_restricted();
+            self.done = true;
+            self.credit_due = 0;
+            let conn = self.conn.take();
+            let pool = self.pool.take();
+            let upload = self.upload.take();
+            let control = self.control.take();
+            let poller = self.poller.take();
+            let now = control.as_ref().map(|control| pool_now(&control.caller.cx));
+            match (conn, pool) {
+                (Some(conn), Some((pool, origin))) if reuse && conn.reusable() => {
+                    // A producer destructor that panics cannot publish a
+                    // reusable connection: the local connection drops while
+                    // unwinding, after all ownership has left the body.
+                    drop(upload);
+                    drop(poller);
+                    drop(control);
+                    pool.put(origin, conn, now.unwrap_or(Time::ZERO));
+                }
+                (conn, _) => {
+                    drop(conn);
+                    drop(upload);
+                    drop(poller);
+                    drop(control);
+                }
+            }
+        }
+
+        fn poll_exchange(
+            &mut self,
+            task: &mut Context<'_>,
+            head_only: bool,
+        ) -> Poll<Result<Option<BodyFrame<BytesCursor>>, Http2ClientError>> {
+            if self.done {
+                return Poll::Ready(Ok(None));
+            }
+            if std::mem::replace(&mut self.poisoned, true) {
+                self.retire(false);
+                return Poll::Ready(Err(Http2ClientError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData, "streaming HTTP/2 owner resumed after a panic",
+                ))));
+            }
+            let result = match self.check_owner(task) {
+                Ok(()) => {
+                    let _ambient = self.owner.clone().set_current_restricted();
+                    self.poll_inner(task, head_only)
+                }
+                Err(error) => Poll::Ready(Err(error)),
+            };
+            if matches!(&result, Poll::Ready(Err(_))) {
+                self.retire(false);
+            }
+            self.poisoned = false;
+            result
+        }
+
+        fn poll_inner(
+            &mut self,
+            task: &mut Context<'_>,
+            head_only: bool,
+        ) -> Poll<Result<Option<BodyFrame<BytesCursor>>, Http2ClientError>> {
+            if self.credit_due != 0 {
+                if let (Some(conn), Some(id)) = (&mut self.conn, self.stream_id) {
+                    conn.connection.release_stream_receive_capacity(id, self.credit_due)?;
+                }
+                self.credit_due = 0;
+            }
+            for _ in 0..POLL_STEPS {
+                let mut progress = false;
+                let mut delivery = None;
+                if !self.response_done {
+                    let conn = self.conn.as_mut().ok_or_else(|| protocol("missing streaming connection"))?;
+                    match Pin::new(&mut conn.wire).poll_next(task) {
+                        Poll::Ready(Some(Ok(frame))) => {
+                            progress = true;
+                            if is_overhead_frame(&frame, &conn.connection, &mut conn.settings_acked) {
+                                if conn.overhead_frames >= conn.max_overhead_frames {
+                                    return Poll::Ready(Err(H2Error::connection(
+                                        ErrorCode::EnhanceYourCalm,
+                                        "HTTP/2 connection frame overhead limit exceeded",
+                                    ).into()));
+                                }
+                                conn.overhead_frames = conn.overhead_frames.saturating_add(1);
+                            }
+                            match conn.connection.process_frame(frame)? {
+                                Some(ReceivedFrame::Headers { stream_id: id, headers, end_stream })
+                                    if Some(id) == self.stream_id =>
+                                {
+                                    let had_final_headers = self.response.response.status != 0;
+                                    self.response_done = self.response.headers(headers, end_stream)?;
+                                    if !had_final_headers && self.response.response.status != 0 && !end_stream {
+                                        // Informational HEADERS do not initialize the
+                                        // stream's receive body. Defer only after final
+                                        // headers, and before processing any DATA.
+                                        conn.connection.defer_stream_receive_window(id)?;
+                                    }
+                                    if had_final_headers {
+                                        let mut trailers = HeaderMap::new();
+                                        for header in std::mem::take(&mut self.response.response.trailers) {
+                                            trailers.append(HeaderName::from_string(&header.name),
+                                                HeaderValue::from_string(header.value));
+                                        }
+                                        delivery = Some(BodyFrame::Trailers(trailers));
+                                    }
+                                }
+                                Some(ReceivedFrame::Data { stream_id: id, data, end_stream })
+                                    if Some(id) == self.stream_id =>
+                                {
+                                    self.response.record_data(data.len())?;
+                                    if end_stream {
+                                        self.response_done = self.response.finish()?;
+                                    }
+                                    if !data.is_empty() {
+                                        self.credit_due = u32::try_from(data.len())
+                                            .map_err(|_| protocol("response DATA length exceeds u32"))?;
+                                        delivery = Some(BodyFrame::Data(BytesCursor::new(data)));
+                                    }
+                                }
+                                Some(ReceivedFrame::Reset { stream_id: id, error_code })
+                                    if Some(id) == self.stream_id =>
+                                {
+                                    return Poll::Ready(Err(Http2ClientError::Reset(error_code)));
+                                }
+                                Some(ReceivedFrame::GoAway { last_stream_id, error_code, .. }) => {
+                                    if error_code != ErrorCode::NoError
+                                        || self.stream_id.is_none_or(|id| id > last_stream_id)
+                                    {
+                                        return Poll::Ready(Err(Http2ClientError::GoAway { last_stream_id, error_code }));
+                                    }
+                                }
+                                Some(ReceivedFrame::Headers { stream_id: id, .. }
+                                    | ReceivedFrame::Data { stream_id: id, .. }
+                                    | ReceivedFrame::Reset { stream_id: id, .. })
+                                    if self.stream_id.is_some_and(|current| id < current) => {}
+                                Some(_) => return Poll::Ready(Err(protocol("unexpected HTTP/2 response stream"))),
+                                None => {}
+                            }
+                        }
+                        Poll::Ready(Some(Err(error))) => {
+                            let error = conn.wire.get_mut().read_error.take()
+                                .map_or_else(|| error.into(), Http2ClientError::Io);
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(None) => {
+                            return Poll::Ready(Err(Http2ClientError::Io(io::Error::new(
+                                io::ErrorKind::UnexpectedEof, "peer closed before response completed",
+                            ))));
+                        }
+                        Poll::Pending => {}
+                    }
+                }
+
+                // A completed response is authoritative even if the upload
+                // producer is parked. Never await its EOF after an early
+                // rejection, and never pool that half-finished connection.
+                if self.response_done && self.upload.as_ref().is_some_and(|upload| !upload.eof) {
+                    self.retire(false);
+                    return Poll::Ready(Ok(delivery));
+                }
+                if head_only && self.response.response.status != 0 {
+                    return Poll::Ready(Ok(None));
+                }
+
+                {
+                    let conn = self.conn.as_mut().ok_or_else(|| protocol("missing streaming connection"))?;
+                    if self.stream_id.is_none()
+                        && conn.connection.state() == ConnectionState::Open
+                        && conn.connection.remote_settings().max_concurrent_streams != 0
+                    {
+                        let headers = self.request_headers.take()
+                            .ok_or_else(|| protocol("request headers already consumed"))?;
+                        // Even an exact zero hint must be checked at producer
+                        // EOF; END_STREAM is not inferred from a hint.
+                        self.stream_id = Some(conn.connection.open_stream(headers, false)?);
+                        progress = true;
+                    }
+                }
+                if !self.response_done {
+                    // Consumption queues stream credit before each new read.
+                    // Flush that credit before admitting another upload chunk:
+                    // otherwise continuously ready response DATA can leave a
+                    // WINDOW_UPDATE queued on every poll and starve uploads.
+                    for _ in 0..POLL_STEPS {
+                        let (wrote, flushed) = self.poll_outbound(task)?;
+                        progress |= wrote;
+                        if !flushed
+                            || !self.conn.as_ref().expect("live connection")
+                                .connection.has_pending_frames()
+                        {
+                            break;
+                        }
+                    }
+                    match self.poll_upload(task) {
+                        Poll::Ready(Ok(changed)) => progress |= changed,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Pending => {}
+                    }
+                }
+                let (wrote, flushed) = self.poll_outbound(task)?;
+                progress |= wrote;
+                if self.response_done && flushed {
+                    let conn = self.conn.as_ref().ok_or_else(|| protocol("missing streaming connection"))?;
+                    if !conn.connection.has_pending_frames() && conn.wire.write_buffer().is_empty() {
+                        if self.credit_due != 0 {
+                            if let Some(id) = self.stream_id {
+                                self.conn.as_mut().expect("connection checked above").connection
+                                    .release_stream_receive_capacity(id, self.credit_due)?;
+                            }
+                            self.credit_due = 0;
+                        }
+                        self.retire(true);
+                        return Poll::Ready(Ok(delivery));
+                    }
+                }
+                if delivery.is_some() {
+                    return Poll::Ready(Ok(delivery));
+                }
+                if !progress {
+                    return Poll::Pending;
+                }
+            }
+            task.waker().wake_by_ref();
+            Poll::Pending
+        }
+
+        fn poll_upload(&mut self, task: &mut Context<'_>) -> Poll<Result<bool, Http2ClientError>> {
+            let Some(id) = self.stream_id else { return Poll::Ready(Ok(false)); };
+            let conn = self.conn.as_mut().ok_or_else(|| protocol("missing streaming connection"))?;
+            let upload = self.upload.as_mut().ok_or_else(|| protocol("missing upload owner"))?;
+            if upload.eof || conn.connection.has_pending_frames() || !conn.wire.write_buffer().is_empty() {
+                return Poll::Ready(Ok(false));
+            }
+            if let Some(data) = &mut upload.data {
+                let capacity = conn.connection.available_send_capacity(id).min(DATA_CHUNK);
+                if capacity == 0 {
+                    return Poll::Pending;
+                }
+                if data.data.remaining() != data.remaining || data.data.chunk().is_empty() {
+                    return Poll::Ready(Err(invalid("request body buffer violated its remaining/chunk contract")));
+                }
+                let length = capacity.min(data.remaining).min(data.data.chunk().len());
+                let bytes = data.data.copy_to_bytes(length);
+                let remaining = data.remaining - length;
+                if bytes.len() != length || data.data.remaining() != remaining {
+                    return Poll::Ready(Err(invalid("request body buffer did not advance by the emitted length")));
+                }
+                data.remaining = remaining;
+                conn.connection.send_data(id, bytes, false)?;
+                if remaining == 0 {
+                    upload.data = None;
+                }
+                return Poll::Ready(Ok(true));
+            }
+            match upload.source.poll_frame(task) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Some(Err(error))) => {
+                    // Error formatting and destruction are user code too.
+                    // Retire the transport before either can panic or re-enter.
+                    self.retire(false);
+                    Poll::Ready(Err(Http2ClientError::Io(io::Error::other(
+                        format!("HTTP/2 request body failed: {error}"),
+                    ))))
+                }
+                Poll::Ready(Some(Ok(BodyFrame::Data(data)))) => {
+                    upload.data = Some(UploadData { data: Box::new(data), remaining: 0 });
+                    if upload.saw_trailers {
+                        return Poll::Ready(Err(invalid("request DATA follows trailers")));
+                    }
+                    let data = upload.data.as_mut().expect("stored above");
+                    let length = data.data.remaining();
+                    if length as u64 > (upload.limit as u64).saturating_sub(upload.produced) {
+                        return Poll::Ready(Err(Http2ClientError::BodyTooLarge { request: true, limit: upload.limit }));
+                    }
+                    if upload.expected.is_some_and(|expected| length as u64 > expected.saturating_sub(upload.produced)) {
+                        return Poll::Ready(Err(invalid("request body exceeds content-length")));
+                    }
+                    upload.produced += length as u64;
+                    data.remaining = length;
+                    if length == 0 { upload.data = None; }
+                    Poll::Ready(Ok(true))
+                }
+                Poll::Ready(Some(Ok(BodyFrame::Trailers(trailers)))) => {
+                    if upload.saw_trailers {
+                        return Poll::Ready(Err(invalid("multiple request trailer frames")));
+                    }
+                    upload.trailers = Some(request_trailers(trailers, upload.header_bytes)?);
+                    upload.saw_trailers = true;
+                    Poll::Ready(Ok(true))
+                }
+                Poll::Ready(None) => {
+                    if upload.expected.is_some_and(|expected| expected != upload.produced) {
+                        return Poll::Ready(Err(invalid("request body ends before content-length")));
+                    }
+                    upload.eof = true;
+                    if let Some(trailers) = upload.trailers.take() {
+                        conn.connection.send_headers(id, trailers, true)?;
+                    } else {
+                        conn.connection.send_data(id, Bytes::new(), true)?;
+                    }
+                    Poll::Ready(Ok(true))
+                }
+            }
+        }
+
+        /// Progress at most one queued protocol frame, then flush. A frame
+        /// removed from Connection is still owned by Framed until flush ends.
+        fn poll_outbound(&mut self, task: &mut Context<'_>) -> Result<(bool, bool), Http2ClientError> {
+            let conn = self.conn.as_mut().ok_or_else(|| protocol("missing streaming connection"))?;
+            let mut progress = false;
+            if conn.connection.has_pending_frames() {
+                match conn.wire.poll_ready(task) {
+                    Poll::Ready(Ok(())) => {
+                        if let Some(frame) = conn.connection.next_frame() {
+                            conn.wire.start_send(frame)?;
+                            progress = true;
+                        }
+                    }
+                    Poll::Ready(Err(error)) => return Err(error.into()),
+                    Poll::Pending => {}
+                }
+            }
+            let buffered = !conn.wire.write_buffer().is_empty();
+            match conn.wire.poll_flush(task) {
+                Poll::Ready(Ok(())) => Ok((progress || buffered, true)),
+                Poll::Ready(Err(error)) => Err(error.into()),
+                Poll::Pending => Ok((progress, false)),
+            }
+        }
+    }
+
+    fn request_trailers(trailers: HeaderMap, mut size: usize) -> Result<Vec<Header>, Http2ClientError> {
+        let mut headers = Vec::new();
+        for (name, value) in trailers.iter() {
+            size = size.saturating_add(name.as_str().len())
+                .saturating_add(value.as_bytes().len()).saturating_add(32);
+            if size > HEADER_LIMIT {
+                return Err(invalid("request headers and trailers exceed 64 KiB"));
+            }
+            if name.as_str().starts_with(':')
+                || crate::http::h1::codec::is_forbidden_trailer(name.as_str())
+            {
+                return Err(invalid("forbidden request trailer field"));
+            }
+            let value = value.to_str().map_err(|_| invalid("request trailer is not UTF-8"))?;
+            validate_header_field(name.as_str(), value).map_err(|error| invalid(error.to_string()))?;
+            if value.starts_with([' ', '\t']) || value.ends_with([' ', '\t']) {
+                return Err(invalid("trailer value has leading or trailing whitespace"));
+            }
+            headers.push(Header::new(name.as_str(), value));
+        }
+        Ok(headers)
+    }
+
+    impl<T, B> Body for Http2IncomingBody<T, B>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+        B: Body,
+        B::Error: fmt::Display,
+    {
+        type Data = BytesCursor;
+        type Error = Http2ClientError;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<Option<Result<BodyFrame<Self::Data>, Self::Error>>> {
+            match self.get_mut().poll_exchange(task, false) {
+                Poll::Ready(Ok(frame)) => Poll::Ready(frame.map(Ok)),
+                Poll::Ready(Err(error)) => Poll::Ready(Some(Err(error))),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+
+        fn is_end_stream(&self) -> bool { self.done }
+
+        fn size_hint(&self) -> SizeHint {
+            if self.done || self.response.bodyless() {
+                return SizeHint::with_exact(0);
+            }
+            if let Some(length) = self.response.content_length {
+                return SizeHint::with_exact(length.saturating_sub(self.response.received as u64));
+            }
+            let mut hint = SizeHint::new();
+            hint.set_upper(self.response.limit.saturating_sub(self.response.received) as u64);
+            hint
+        }
     }
 }
 

@@ -1044,3 +1044,390 @@ fn response_headers_with_leading_or_trailing_whitespace_are_rejected() {
     }
 }
 
+#[cfg(feature = "http2-streaming")]
+mod streaming {
+    use super::*;
+    use asupersync::bytes::{Buf, BytesCursor};
+    use asupersync::http::body::{
+        Body, Frame as BodyFrame, HeaderMap, HeaderName, HeaderValue, SizeHint,
+    };
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct Upload {
+        frames: VecDeque<Result<BodyFrame<BytesCursor>, std::io::Error>>,
+        open: Arc<AtomicBool>,
+        eof: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Body for Upload {
+        type Data = BytesCursor;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<BodyFrame<Self::Data>, Self::Error>>> {
+            if !self.open.load(Ordering::Acquire) {
+                return Poll::Pending;
+            }
+            let frame = self.frames.pop_front();
+            if frame.is_none() {
+                self.eof.fetch_add(1, Ordering::SeqCst);
+            }
+            Poll::Ready(frame)
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            SizeHint::new()
+        }
+    }
+
+    impl Drop for Upload {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn data(bytes: impl Into<Bytes>) -> Result<BodyFrame<BytesCursor>, std::io::Error> {
+        Ok(BodyFrame::Data(BytesCursor::new(bytes.into())))
+    }
+
+    fn trailers(name: &str, value: &str) -> Result<BodyFrame<BytesCursor>, std::io::Error> {
+        let mut fields = HeaderMap::new();
+        fields.append(HeaderName::from_string(name), HeaderValue::from_string(value.to_owned()));
+        Ok(BodyFrame::Trailers(fields))
+    }
+
+    fn request_headers(peer: &mut Peer) -> (u32, Vec<Header>) {
+        loop {
+            if let Some(ReceivedFrame::Headers { stream_id, headers, end_stream }) = peer.receive() {
+                assert!(!end_stream, "producer EOF must be checked before END_STREAM");
+                return (stream_id, headers);
+            }
+        }
+    }
+
+    #[test]
+    fn bidirectional_streaming_returns_headers_before_upload_and_crosses_both_windows() {
+        for workers in [1, 2] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut peer = Peer::accept(listener, 1024);
+                let (id, headers) = request_headers(&mut peer);
+                assert!(!headers.iter().any(|h| h.name == "content-length" || h.name == "transfer-encoding"));
+                peer.connection.send_headers(id, vec![Header::new(":status", "103")], false).unwrap();
+                peer.connection.send_headers(id, vec![
+                    Header::new(":status", "200"),
+                    Header::new("content-length", LARGE_BODY.to_string()),
+                ], false).unwrap();
+                let expected: Vec<u8> = (0..LARGE_BODY).map(|i| (i % 251) as u8).collect();
+                let mut sent = 0;
+                let mut upload = Vec::new();
+                let mut upload_done = false;
+                loop {
+                    while sent < expected.len() {
+                        let length = peer.connection.available_send_capacity(id)
+                            .min(16 * 1024).min(expected.len() - sent);
+                        if length == 0 {
+                            break;
+                        }
+                        peer.connection.send_data(id, Bytes::copy_from_slice(&expected[sent..sent + length]), false).unwrap();
+                        sent += length;
+                    }
+                    peer.flush();
+                    if upload_done && sent == expected.len() {
+                        break;
+                    }
+                    match peer.receive() {
+                        Some(ReceivedFrame::Data { stream_id, data, end_stream }) => {
+                            assert_eq!(stream_id, id);
+                            assert!(!end_stream, "request terminates with trailers");
+                            upload.extend_from_slice(&data);
+                        }
+                        Some(ReceivedFrame::Headers { stream_id, headers, end_stream }) => {
+                            assert_eq!(stream_id, id);
+                            assert!(end_stream);
+                            assert!(headers.iter().any(|h| h.name == "x-upload" && h.value == "complete"));
+                            upload_done = true;
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(upload, expected);
+                peer.connection.send_headers(id, vec![Header::new("x-download", "complete")], true).unwrap();
+                peer.flush();
+                peer.eof();
+            });
+            let runtime = runtime(workers);
+            runtime.block_on(async move {
+                let cx = Cx::current().unwrap();
+                let open = Arc::new(AtomicBool::new(false));
+                let eof = Arc::new(AtomicUsize::new(0));
+                let drops = Arc::new(AtomicUsize::new(0));
+                let expected: Vec<u8> = (0..LARGE_BODY).map(|i| (i % 251) as u8).collect();
+                let upload = Upload {
+                    frames: VecDeque::from([data(expected.clone()), trailers("x-upload", "complete")]),
+                    open: Arc::clone(&open), eof: Arc::clone(&eof), drops: Arc::clone(&drops),
+                };
+                let mut response = Http2Client::new().timeout(Duration::from_secs(5))
+                    .post(format!("http://{address}/duplex")).send_with_body(&cx, upload).await.unwrap();
+                assert_eq!(response.status, 200);
+                assert_eq!(eof.load(Ordering::SeqCst), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                open.store(true, Ordering::Release);
+                let mut received = Vec::new();
+                let mut saw_trailers = false;
+                while let Some(frame) = poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await {
+                    match frame.unwrap() {
+                        BodyFrame::Data(mut bytes) => {
+                            if received.is_empty() {
+                                assert_eq!(eof.load(Ordering::SeqCst), 0, "download begins while upload is unfinished");
+                            }
+                            let length = bytes.remaining();
+                            received.extend_from_slice(&bytes.copy_to_bytes(length));
+                        }
+                        BodyFrame::Trailers(fields) => {
+                            assert_eq!(fields.get(&HeaderName::from_string("x-download")).unwrap().to_str().unwrap(), "complete");
+                            saw_trailers = true;
+                        }
+                    }
+                }
+                assert_eq!(received, expected);
+                assert!(saw_trailers);
+                assert_eq!(eof.load(Ordering::SeqCst), 1);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+            });
+            peer.join().unwrap();
+            quiescent(&runtime);
+        }
+    }
+
+    #[test]
+    fn streaming_early_response_cancel_and_drop_retire_a_parked_producer() {
+        for workers in [1, 2] {
+            for action in 0..3 {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                let peer = std::thread::spawn(move || {
+                    let mut peer = Peer::accept(listener, 0);
+                    let (id, _) = request_headers(&mut peer);
+                    peer.connection.send_headers(id, vec![Header::new(":status", if action == 0 { "413" } else { "200" })], action == 0).unwrap();
+                    peer.flush();
+                    peer.eof();
+                });
+                let runtime = runtime(workers);
+                let caller = runtime.request_cx_with_budget(Budget::INFINITE);
+                let reason = CancelReason::user("stream consumer stopped");
+                let (parked_tx, parked_rx) = mpsc::channel();
+                let controller = if action == 1 {
+                    let caller = caller.clone();
+                    let reason = reason.clone();
+                    Some(std::thread::spawn(move || {
+                        parked_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                        caller.cancel_with_reason(reason);
+                    }))
+                } else {
+                    None
+                };
+                runtime.block_on(async move {
+                    let eof = Arc::new(AtomicUsize::new(0));
+                    let drops = Arc::new(AtomicUsize::new(0));
+                    let upload = Upload {
+                        frames: VecDeque::from([data("never produced")]),
+                        open: Arc::new(AtomicBool::new(false)),
+                        eof: Arc::clone(&eof), drops: Arc::clone(&drops),
+                    };
+                    let mut response = Http2Client::new().timeout(Duration::from_secs(5))
+                        .post(format!("http://{address}/parked")).send_with_body(&caller, upload).await.unwrap();
+                    if action == 0 {
+                        assert_eq!(response.status, 413);
+                        assert!(poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await.is_none());
+                    } else if action == 1 {
+                        let mut parked = false;
+                        let frame = poll_fn(|task| {
+                            let result = Pin::new(&mut response.body).poll_frame(task);
+                            if result.is_pending() && !parked {
+                                parked = true;
+                                parked_tx.send(()).unwrap();
+                            }
+                            result
+                        }).await;
+                        assert!(parked, "controller must observe Pending before cancelling");
+                        match frame {
+                            Some(Err(Http2ClientError::Cancelled(actual))) => assert_eq!(actual, reason),
+                            other => panic!("body lost its explicit owner cancellation: {other:?}"),
+                        }
+                        assert!(poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await.is_none());
+                    } else {
+                        // The final headers arrived, both directions are now
+                        // parked, and dropping the body retires their owners.
+                        poll_fn(|task| {
+                            assert!(Pin::new(&mut response.body).poll_frame(task).is_pending());
+                            Poll::Ready(())
+                        }).await;
+                    }
+                    drop(response);
+                    assert_eq!(eof.load(Ordering::SeqCst), 0);
+                    assert_eq!(drops.load(Ordering::SeqCst), 1);
+                    assert!(Cx::current().unwrap().checkpoint().is_ok());
+                });
+                if let Some(controller) = controller {
+                    controller.join().unwrap();
+                }
+                peer.join().unwrap();
+                quiescent(&runtime);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_upload_length_limits_errors_and_trailer_order_are_enforced() {
+        for workers in [1, 2] {
+            for case in 0..5 {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                let peer = std::thread::spawn(move || {
+                    let mut peer = Peer::accept(listener, 65_535);
+                    request_headers(&mut peer);
+                    peer.eof();
+                });
+                let runtime = runtime(workers);
+                runtime.block_on(async move {
+                    let cx = Cx::current().unwrap();
+                    let drops = Arc::new(AtomicUsize::new(0));
+                    let frames = match case {
+                        0 | 1 | 2 => VecDeque::from([data("abcd")]),
+                        3 => VecDeque::from([Err(std::io::Error::other("source failed"))]),
+                        _ => VecDeque::from([trailers("x-upload", "done"), data("late")]),
+                    };
+                    let upload = Upload {
+                        frames, open: Arc::new(AtomicBool::new(true)),
+                        eof: Arc::new(AtomicUsize::new(0)), drops: Arc::clone(&drops),
+                    };
+                    let client = Http2Client::new().timeout(Duration::from_secs(5))
+                        .max_request_body(if case == 2 { 3 } else { 100 });
+                    let mut request = client.post(format!("http://{address}/invalid-body"));
+                    if case < 2 {
+                        request = request.header("content-length", if case == 0 { "3" } else { "5" });
+                    }
+                    let result = request.send_with_body(&cx, upload).await;
+                    match (case, result) {
+                        (0 | 1 | 4, Err(Http2ClientError::InvalidRequest(_))) => {}
+                        (2, Err(Http2ClientError::BodyTooLarge { request: true, limit: 3 })) => {}
+                        (3, Err(Http2ClientError::Io(error))) => assert!(error.to_string().contains("source failed")),
+                        (_, other) => panic!("incorrect streaming upload result in case {case}: {other:?}"),
+                    }
+                    assert_eq!(drops.load(Ordering::SeqCst), 1);
+                });
+                peer.join().unwrap();
+                quiescent(&runtime);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_drain_returns_a_connection_for_the_next_request() {
+        for workers in [1, 2] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut peer = Peer::accept(listener, 65_535);
+                let mut previous = 0;
+                for _ in 0..2 {
+                    let (id, headers) = request_headers(&mut peer);
+                    assert!(id > previous, "a drained response must reuse the same connection");
+                    previous = id;
+                    assert!(headers.iter().any(|h| h.name == "content-length" && h.value == "3"));
+                    let mut upload = Vec::new();
+                    loop {
+                        if let Some(ReceivedFrame::Data { data, end_stream, .. }) = peer.receive() {
+                            upload.extend_from_slice(&data);
+                            if end_stream { break; }
+                        }
+                    }
+                    assert_eq!(upload, b"abc");
+                    peer.connection.send_headers(id, vec![Header::new(":status", "200"), Header::new("content-length", "3")], false).unwrap();
+                    peer.connection.send_data(id, Bytes::from_static(b"abc"), true).unwrap();
+                    peer.flush();
+                }
+                peer.eof();
+            });
+            let runtime = runtime(workers);
+            runtime.block_on(async move {
+                let cx = Cx::current().unwrap();
+                let client = Http2Client::new().timeout(Duration::from_secs(5)).reuse_connections(1);
+                for _ in 0..2 {
+                    let mut response = client.post(format!("http://{address}/reuse"))
+                        .body("abc").send_streaming(&cx).await.unwrap();
+                    let mut downloaded = Vec::new();
+                    while let Some(frame) = poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await {
+                        let mut data = frame.unwrap().into_data().expect("DATA only");
+                        let length = data.remaining();
+                        downloaded.extend_from_slice(&data.copy_to_bytes(length));
+                    }
+                    assert_eq!(downloaded, b"abc");
+                }
+                drop(client);
+            });
+            peer.join().unwrap();
+            quiescent(&runtime);
+        }
+    }
+
+    #[test]
+    fn reader_body_streams_through_the_native_client_and_production_listener() {
+        for workers in [1, 2] {
+            let runtime = runtime(workers);
+            let handle = runtime.handle();
+            runtime.block_on(async move {
+                let listener = Http2Listener::bind_with_config(
+                    "127.0.0.1:0",
+                    |request: Request| async move {
+                        assert_eq!(request.method, Method::Post);
+                        assert_eq!(request.body.len(), LARGE_BODY);
+                        Response::new(200, "OK", request.body)
+                    },
+                    config(),
+                )
+                .await
+                .unwrap();
+                let address = listener.local_addr().unwrap();
+                let shutdown = listener.shutdown_signal();
+                let server = handle
+                    .clone()
+                    .try_spawn(async move { listener.run(&handle).await })
+                    .unwrap();
+                let cx = Cx::current().unwrap();
+                let expected: Vec<u8> = (0..LARGE_BODY).map(|i| (i % 239) as u8).collect();
+                let source = asupersync::http::ReaderBody::with_capacity(
+                    std::io::Cursor::new(expected.clone()),
+                    1637,
+                );
+                let mut response = Http2Client::new()
+                    .timeout(Duration::from_secs(5))
+                    .post(format!("http://{address}/reader"))
+                    .send_with_body(&cx, source)
+                    .await
+                    .unwrap();
+                assert_eq!(response.status, 200);
+                let mut received = Vec::new();
+                while let Some(frame) =
+                    poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await
+                {
+                    let mut bytes = frame.unwrap().into_data().expect("echo response DATA");
+                    let length = bytes.remaining();
+                    received.extend_from_slice(&bytes.copy_to_bytes(length));
+                }
+                assert_eq!(received, expected);
+                assert!(shutdown.begin_drain(Duration::from_secs(2)));
+                server.await.unwrap();
+            });
+            quiescent(&runtime);
+        }
+    }
+}
+

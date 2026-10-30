@@ -27,7 +27,9 @@ pub mod stream;
 
 // Re-export commonly used types
 #[cfg(not(target_arch = "wasm32"))]
-pub use client::{Http2Client, Http2ClientError, Http2RequestBuilder, Http2Response};
+pub use client::{Http2Client, Http2ClientError, Http2ClientIo, Http2RequestBuilder, Http2Response};
+#[cfg(all(not(target_arch = "wasm32"), feature = "http2-streaming"))]
+pub use client::{Http2IncomingBody, Http2StreamingResponse};
 pub use connection::{Connection, ConnectionState, FrameCodec};
 pub use error::{ErrorCode, H2Error};
 pub use frame::{Frame, FrameHeader, FrameType, Setting};
