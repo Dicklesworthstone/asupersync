@@ -12,6 +12,11 @@
 //! explicit nameservers are configured, or when record-specific lookups (MX,
 //! SRV, TXT) are requested, the resolver uses its own DNS transport over
 //! UDP/TCP on the blocking pool.
+//! The additive `lookup_*_native` methods use the runtime reactor instead;
+//! they require explicit nameservers and an owning native I/O context.
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
 
 use std::future::Future;
 use std::io::{self, Read, Write};
