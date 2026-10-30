@@ -363,8 +363,10 @@ pub fn decode_pgoutput_prefix(data: &[u8]) -> Result<(PgOutputMessage<'_>, usize
 }
 
 /// Decode consecutive messages from one application buffer without copying
-/// their payloads. An error is yielded once, then iteration stops; malformed
-/// bytes are never skipped in an attempt to resynchronize the change stream.
+/// their payloads.
+///
+/// An error is yielded once, then iteration stops; malformed bytes are never
+/// skipped in an attempt to resynchronize the change stream.
 #[derive(Debug, Clone)]
 pub struct PgOutputMessages<'a> {
     remaining: &'a [u8],

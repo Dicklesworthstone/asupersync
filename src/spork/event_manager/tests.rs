@@ -460,7 +460,7 @@ fn native_failed_terminate_forbids_replacement_but_other_handlers_continue() {
             if drop_panic {
                 assert!(matches!(supervised.children[0].cleanup_outcome, Some(Outcome::Panicked(_))));
             } else {
-                assert!(matches!(supervised.children[0].cleanup_outcome, Some(Outcome::Err(()))));
+                assert!(matches!(supervised.children[0].cleanup_outcome, Some(Outcome::Err(_))));
             }
             assert!(!cx.is_cancel_requested());
         });

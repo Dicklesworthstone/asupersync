@@ -109,6 +109,8 @@
         let bytes = Arc::new(vec![0x6d_u8; 256 * 1024 + 17]);
         let gate = Arc::new(Barrier::new(8));
         let writes = std::thread::scope(|scope| {
+            // All eight publishers must be spawned before the first join, or Barrier::new(8) never releases.
+            #[allow(clippy::needless_collect)]
             let handles: Vec<_> = (0..8)
                 .map(|_| {
                     let store = &store;

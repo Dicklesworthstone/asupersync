@@ -1550,6 +1550,9 @@ pub use streaming::{Http2IncomingBody, Http2StreamingResponse};
 
 #[cfg(feature = "http2-streaming")]
 mod streaming {
+    // The streaming bodies share the client's private connection, frame and
+    // budget helpers as one unit (as runtime/io_driver/shared.rs does).
+    #[allow(clippy::wildcard_imports)]
     use super::*;
     use crate::bytes::{Buf, BytesCursor};
     use crate::http::body::{

@@ -413,7 +413,7 @@
         let mut writer = std::fs::File::create(&staging).unwrap();
         writer.write_all(b"complete payload").unwrap();
         let pending = StagedFileSync::from_file(staging.clone(), writer).unwrap();
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o0)).unwrap();
         let synced = pending
             .sync_with(|file| {
                 assert_eq!(file.metadata()?.permissions().mode() & 0o7777, 0);

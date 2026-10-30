@@ -51,7 +51,7 @@ fn name_wire(name: &str) -> Vec<u8> {
 fn answer(query: &[u8], flags: u16, record: Option<(u16, u32, &[u8])>) -> Vec<u8> {
     let mut packet = query.to_vec();
     packet[2..4].copy_from_slice(&flags.to_be_bytes());
-    let count = if record.is_some() { 1u16 } else { 0u16 };
+    let count = u16::from(record.is_some());
     packet[6..8].copy_from_slice(&count.to_be_bytes());
     if let Some((kind, ttl, data)) = record {
         packet.extend_from_slice(&[0xc0, 0x0c]);
@@ -243,7 +243,7 @@ fn native_dns_parked_tcp_cancel_deadline_drop_and_authority_loss_retire_socket()
                         owner.cancel_with_reason(CancelReason::user("DNS consumer stopped"));
                     } else {
                         clock.advance(4_000_000_000);
-                        timer.process_timers();
+                        let _ = timer.process_timers();
                     }
                 }))
             } else { None };

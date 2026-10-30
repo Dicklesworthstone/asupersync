@@ -656,7 +656,7 @@
                             .header("Proxy-Authorization", "Bearer tunnel")
                             .send_with_body(&owner, body).await;
                         if reject {
-                            assert!(matches!(result, Err(ClientError::ConnectRejected { status: 407, .. })), "{result:?}");
+                            assert!(matches!(result, Err(ClientError::ConnectTunnelRefused { status: 407, .. })), "{result:?}");
                         } else {
                             assert!(matches!(result, Err(ClientError::Cancelled)), "{result:?}");
                         }
