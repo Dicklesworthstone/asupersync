@@ -1,7 +1,10 @@
 //! Executing AppSpec bindings: real native/Lab tasks, routes, limits and drain.
 #![cfg(not(target_arch = "wasm32"))]
 
-use asupersync::app::{AppSpecV1, ManagedAppBindError, ManagedAppBinding};
+use asupersync::app::{
+    AppSloHookKindV1, AppSpecV1, ManagedAppAdapters, ManagedAppBindError, ManagedAppBinding,
+    ManagedAppSloBinding, ManagedAppSloDecision, ManagedAppWorkError,
+};
 use asupersync::cx::{ChildRegionSpec, Cx};
 use asupersync::runtime::{RuntimeBuilder, yield_now};
 use asupersync::supervision::{
@@ -2457,5 +2460,486 @@ fn managed_app_preserves_explicit_blocking_pool_through_child_regions() {
             assert_eq!(report.joined, 1);
         });
         assert!(pool.shutdown_and_wait(Duration::from_secs(3)));
+    }
+}
+
+fn slo_route_manifest() -> Value {
+    let mut manifest = manifest_json();
+    manifest["services"][0]["actors"] = json!([]);
+    manifest["services"][0]["routes"][0]["slo_hook"] = json!("route_policy");
+    manifest["slo_hooks"] = json!([{
+        "name": "route_policy", "kind": "latency", "target": "api.route.health",
+        "budget": "hook"
+    }]);
+    manifest["budgets"] = json!([
+        {"name": "work", "poll_quota": 512, "deadline_ms": 10000,
+            "io_bytes": 512, "memory_bytes": 96},
+        {"name": "hook", "poll_quota": 256, "deadline_ms": 5000,
+            "io_bytes": 128, "memory_bytes": 256}
+    ]);
+    manifest
+}
+
+fn allow_route_slo() -> ManagedAppSloBinding {
+    ManagedAppSloBinding::new(
+        "route_policy",
+        AppSloHookKindV1::Latency,
+        "api.route.health",
+        |_, _| ManagedAppSloDecision::Admit(Budget::INFINITE),
+    )
+}
+
+#[test]
+fn managed_app_slo_preflight_is_exact_and_preserves_legacy_refusal() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let bindings = || {
+        let calls = Arc::clone(&calls);
+        vec![ManagedAppBinding::<&'static str>::route(
+            "api.route.health",
+            AsyncCxFnHandler::new(move |_: Cx| {
+                calls.fetch_add(1, Ordering::AcqRel);
+                async { Response::empty(StatusCode::OK) }
+            }),
+        )]
+    };
+    assert!(matches!(
+        parse(slo_route_manifest()).bind_managed(bindings(), config()),
+        Err(ManagedAppBindError::Unsupported { .. })
+    ));
+    assert!(matches!(
+        parse(slo_route_manifest()).bind_managed_with_adapters(
+            bindings(),
+            ManagedAppAdapters::new(),
+            config(),
+        ),
+        Err(ManagedAppBindError::Missing(name)) if name == "slo:route_policy"
+    ));
+    assert!(matches!(
+        parse(slo_route_manifest()).bind_managed_with_adapters(
+            bindings(),
+            ManagedAppAdapters::new()
+                .slo_hook(allow_route_slo())
+                .slo_hook(allow_route_slo()),
+            config(),
+        ),
+        Err(ManagedAppBindError::Duplicate(name)) if name == "slo:route_policy"
+    ));
+    let extra = ManagedAppSloBinding::new(
+        "extra",
+        AppSloHookKindV1::Latency,
+        "api.route.health",
+        |_, _| ManagedAppSloDecision::Admit(Budget::INFINITE),
+    );
+    assert!(matches!(
+        parse(slo_route_manifest()).bind_managed_with_adapters(
+            bindings(),
+            ManagedAppAdapters::new()
+                .slo_hook(allow_route_slo())
+                .slo_hook(extra),
+            config(),
+        ),
+        Err(ManagedAppBindError::Unexpected(name)) if name == "slo:extra"
+    ));
+    for (kind, target) in [
+        (AppSloHookKindV1::ErrorRate, "api.route.health"),
+        (AppSloHookKindV1::Latency, "api.actor.cache"),
+    ] {
+        let wrong = ManagedAppSloBinding::new("route_policy", kind, target, |_, _| {
+            ManagedAppSloDecision::Admit(Budget::INFINITE)
+        });
+        assert!(matches!(
+            parse(slo_route_manifest()).bind_managed_with_adapters(
+                bindings(),
+                ManagedAppAdapters::new().slo_hook(wrong),
+                config(),
+            ),
+            Err(ManagedAppBindError::KindMismatch(name)) if name == "slo:route_policy"
+        ));
+    }
+    let mut missing_target = slo_route_manifest();
+    missing_target["slo_hooks"][0]["target"] = json!("missing.route.health");
+    let missing_hook = ManagedAppSloBinding::new(
+        "route_policy",
+        AppSloHookKindV1::Latency,
+        "missing.route.health",
+        |_, _| ManagedAppSloDecision::Admit(Budget::INFINITE),
+    );
+    assert!(matches!(
+        parse(missing_target).bind_managed_with_adapters(
+            bindings(),
+            ManagedAppAdapters::new().slo_hook(missing_hook),
+            config(),
+        ),
+        Err(ManagedAppBindError::Unsupported { .. })
+    ));
+    let mut mismatched_reference = manifest_json();
+    mismatched_reference["services"][0]["routes"][0]["slo_hook"] = json!("actor_policy");
+    mismatched_reference["slo_hooks"] = json!([{
+        "name": "actor_policy", "kind": "latency", "target": "api.actor.cache"
+    }]);
+    let actor_hook = ManagedAppSloBinding::new(
+        "actor_policy",
+        AppSloHookKindV1::Latency,
+        "api.actor.cache",
+        |_, _| ManagedAppSloDecision::Admit(Budget::INFINITE),
+    );
+    assert!(matches!(
+        parse(mismatched_reference).bind_managed_with_adapters(
+            bindings(),
+            ManagedAppAdapters::new().slo_hook(actor_hook),
+            config(),
+        ),
+        Err(ManagedAppBindError::KindMismatch(name)) if name == "slo:actor_policy"
+    ));
+    let mut invalid_budget = slo_route_manifest();
+    invalid_budget["budgets"][1]["poll_quota"] = json!(u64::from(u32::MAX) + 1);
+    assert!(matches!(
+        parse(invalid_budget).bind_managed_with_adapters(
+            bindings(),
+            ManagedAppAdapters::new().slo_hook(allow_route_slo()),
+            config(),
+        ),
+        Err(ManagedAppBindError::Budget { .. })
+    ));
+    let mut duplicate_target = slo_route_manifest();
+    duplicate_target["services"][0]["routes"][0]["slo_hook"] = Value::Null;
+    duplicate_target["slo_hooks"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "name": "second", "kind": "latency", "target": "api.route.health"
+        }));
+    let second = ManagedAppSloBinding::new(
+        "second",
+        AppSloHookKindV1::Latency,
+        "api.route.health",
+        |_, _| ManagedAppSloDecision::Admit(Budget::INFINITE),
+    );
+    assert!(matches!(
+        parse(duplicate_target).bind_managed_with_adapters(
+            bindings(),
+            ManagedAppAdapters::new()
+                .slo_hook(allow_route_slo())
+                .slo_hook(second),
+            config(),
+        ),
+        Err(ManagedAppBindError::Duplicate(name)) if name == "slo-target:api.route.health"
+    ));
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        0,
+        "preflight must not run user work"
+    );
+}
+
+async fn managed_slo_route_scenario(cx: Cx) {
+    let mut parent_spec = ChildRegionSpec::inherit()
+        .with_budget(Budget::INFINITE.with_poll_quota(2048).with_cost_quota(96));
+    parent_spec.capability_budget = Some(
+        CapabilityBudget::new()
+            .with_io_bytes(64)
+            .with_memory_bytes(512),
+    );
+    let parent = cx.open_child_region(parent_spec).await.unwrap();
+    let policies = Arc::new(AtomicUsize::new(0));
+    let policy_calls = Arc::clone(&policies);
+    let work = Arc::new(AtomicUsize::new(0));
+    let work_calls = Arc::clone(&work);
+    let hook = ManagedAppSloBinding::new(
+        "route_policy",
+        AppSloHookKindV1::Latency,
+        "api.route.health",
+        move |cx, admission| {
+            assert_eq!(admission.unit, "api.route.health");
+            assert!(admission.generation.is_none());
+            assert_eq!(admission.budget.poll_quota, 256);
+            assert_eq!(admission.budget.cost_quota, Some(96));
+            assert!(admission.budget.deadline.unwrap() <= admission.now + Duration::from_secs(5));
+            assert_eq!(admission.capability_budget.io_bytes, Some(64));
+            assert_eq!(admission.capability_budget.memory_bytes, Some(96));
+            let caps = cx.capabilities();
+            assert!(!caps.spawn && !caps.time && !caps.entropy && !caps.io && !caps.remote);
+            assert!(cx.blocking_pool_handle().is_none());
+            let ambient = Cx::current().unwrap();
+            assert_eq!(ambient.task_id(), cx.task_id());
+            assert!(!ambient.capabilities().io && !ambient.capabilities().spawn);
+            assert!(
+                cx.spawn(|_| async { panic!("SLO callback escaped through explicit spawn") })
+                    .is_err()
+            );
+            assert!(
+                ambient
+                    .spawn(|_| async { panic!("SLO callback escaped through ambient spawn") })
+                    .is_err()
+            );
+            match policy_calls.fetch_add(1, Ordering::AcqRel) {
+                0 => ManagedAppSloDecision::Reject("capacity closed".to_owned()),
+                1 => panic!("policy failure is contained before admission"),
+                2 => ManagedAppSloDecision::Admit(
+                    Budget::INFINITE.with_poll_quota(128).with_cost_quota(11),
+                ),
+                3 => ManagedAppSloDecision::Admit(Budget::INFINITE),
+                _ => panic!("unexpected admission"),
+            }
+        },
+    );
+    let app = parse(slo_route_manifest())
+        .bind_managed_with_adapters(
+            vec![ManagedAppBinding::<&'static str>::route(
+                "api.route.health",
+                AsyncCxFnHandler::new(move |cx: Cx| {
+                    let call = work_calls.fetch_add(1, Ordering::AcqRel);
+                    assert!(cx.budget().poll_quota <= if call == 0 { 128 } else { 256 });
+                    assert!(cx.budget().cost_quota.unwrap() <= if call == 0 { 11 } else { 96 });
+                    assert_eq!(cx.capability_budget().io_bytes, Some(64));
+                    assert_eq!(cx.capability_budget().memory_bytes, Some(96));
+                    assert!(
+                        cx.budget().deadline.unwrap()
+                            <= cx.now_for_observability() + Duration::from_secs(5)
+                    );
+                    assert!(!cx.capabilities().io && !cx.capabilities().spawn);
+                    async { Response::new(StatusCode::OK, "admitted") }
+                }),
+            )],
+            ManagedAppAdapters::new().slo_hook(hook),
+            config(),
+        )
+        .unwrap();
+    let router = app.router();
+    let mut app = app.start(parent.cx()).unwrap();
+    while !app.routes_ready() {
+        yield_now().await;
+    }
+    for (index, status) in [
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::OK,
+        StatusCode::OK,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = router
+            .handle_with_cx(&cx, Request::new("GET", "/health"))
+            .await;
+        assert_eq!(response.status, status);
+        assert_eq!(policies.load(Ordering::Acquire), index + 1);
+        assert_eq!(work.load(Ordering::Acquire), (index + 1).saturating_sub(2));
+    }
+    app.abort();
+    let report = app.join().await.unwrap();
+    assert!(matches!(report.outcome, Outcome::Cancelled(_)));
+    assert_eq!(report.started, 1);
+    assert_eq!(report.joined, 1);
+    assert!(!app.routes_ready());
+    parent.close().await.unwrap();
+    assert!(!cx.is_cancel_requested());
+}
+
+#[test]
+fn managed_app_slo_routes_enforce_admission_authority_and_all_budget_layers() {
+    for workers in [1, 2] {
+        native(workers, managed_slo_route_scenario);
+    }
+}
+
+async fn managed_slo_restart_scenario(cx: Cx) {
+    let mut manifest = manifest_json();
+    manifest["services"][0]["routes"] = json!([]);
+    // Actor schemas have no slo_hook field. The explicit target is sufficient.
+    manifest["slo_hooks"] = json!([{
+        "name": "actor_policy", "kind": "error_rate", "target": "api.actor.cache"
+    }]);
+    let policies = Arc::new(AtomicUsize::new(0));
+    let policy_calls = Arc::clone(&policies);
+    let work = Arc::new(AtomicUsize::new(0));
+    let work_calls = Arc::clone(&work);
+    let hook = ManagedAppSloBinding::new(
+        "actor_policy",
+        AppSloHookKindV1::ErrorRate,
+        "api.actor.cache",
+        move |cx, admission| {
+            assert_eq!(admission.unit, "api.actor.cache");
+            assert!(admission.generation.is_some());
+            assert!(!cx.capabilities().spawn);
+            let attempt = policy_calls.fetch_add(1, Ordering::AcqRel);
+            assert_eq!(
+                admission.generation.unwrap().number,
+                u64::try_from(attempt + 1).unwrap()
+            );
+            if attempt == 0 {
+                ManagedAppSloDecision::Reject("first attempt refused".to_owned())
+            } else {
+                ManagedAppSloDecision::Admit(Budget::INFINITE.with_poll_quota(32))
+            }
+        },
+    );
+    let app = parse(manifest)
+        .bind_managed_with_adapters(
+            vec![ManagedAppBinding::worker(
+                "api.actor.cache",
+                ManagedRestartMode::Transient,
+                move |cx: Cx, _: ManagedGeneration| {
+                    assert!(cx.budget().poll_quota <= 32);
+                    let attempt = work_calls.fetch_add(1, Ordering::AcqRel);
+                    async move {
+                        if attempt == 0 {
+                            Outcome::Err("restart after admitted failure")
+                        } else {
+                            Outcome::Ok(())
+                        }
+                    }
+                },
+            )],
+            ManagedAppAdapters::new().slo_hook(hook),
+            config(),
+        )
+        .unwrap();
+    let report = app.run(&cx).await.unwrap();
+    assert_eq!(policies.load(Ordering::Acquire), 3);
+    assert_eq!(work.load(Ordering::Acquire), 2);
+    assert_eq!(report.started, 3);
+    assert_eq!(report.joined, 3);
+    assert_eq!(report.restart_batches, 2);
+    assert_eq!(report.children.len(), 1);
+    assert_eq!(report.children[0].generation.number, 3);
+    assert!(matches!(report.children[0].outcome, Outcome::Ok(())));
+    assert!(matches!(report.outcome, Outcome::Ok(())));
+    assert!(!cx.is_cancel_requested());
+}
+
+#[test]
+fn managed_app_slo_actor_target_is_rechecked_before_each_restart() {
+    for workers in [1, 2] {
+        native(workers, managed_slo_restart_scenario);
+    }
+}
+
+async fn managed_slo_trigger_scenario(cx: Cx) {
+    for trigger in ["startup", "interval", "signal"] {
+        let mut manifest = signal_job_manifest();
+        manifest["services"][0]["background_jobs"][0]["trigger"] = match trigger {
+            "startup" => json!("startup"),
+            "interval" => json!({"interval": {"every_ms": 1}}),
+            _ => json!({"signal": {"source": "reload"}}),
+        };
+        manifest["services"][0]["background_jobs"][0]["slo_hook"] = json!("job_policy");
+        manifest["slo_hooks"] = json!([{
+            "name": "job_policy", "kind": "throughput", "target": "api.job.reload"
+        }]);
+        let policies = Arc::new(AtomicUsize::new(0));
+        let policy_calls = Arc::clone(&policies);
+        let work = Arc::new(AtomicUsize::new(0));
+        let work_calls = Arc::clone(&work);
+        let hook = ManagedAppSloBinding::new(
+            "job_policy",
+            AppSloHookKindV1::Throughput,
+            "api.job.reload",
+            move |cx, admission| {
+                assert_eq!(admission.generation.unwrap().number, 1);
+                assert!(!cx.capabilities().io && !cx.capabilities().spawn);
+                let index = policy_calls.fetch_add(1, Ordering::AcqRel);
+                if trigger != "startup" && index == 0 {
+                    ManagedAppSloDecision::Admit(Budget::INFINITE)
+                } else {
+                    ManagedAppSloDecision::Reject("trigger admission closed".to_owned())
+                }
+            },
+        );
+        let factory = move |_: Cx, _: ManagedGeneration| {
+            work_calls.fetch_add(1, Ordering::AcqRel);
+            async { Outcome::<(), &'static str>::Ok(()) }
+        };
+        let (sender, receiver) = asupersync::channel::mpsc::channel(3);
+        sender.try_send(()).unwrap();
+        sender.try_send(()).unwrap();
+        sender.try_send(()).unwrap();
+        let binding = if trigger == "signal" {
+            ManagedAppBinding::signal_worker(
+                "api.job.reload",
+                "reload",
+                receiver,
+                ManagedRestartMode::Temporary,
+                factory,
+            )
+        } else {
+            drop(receiver);
+            ManagedAppBinding::worker("api.job.reload", ManagedRestartMode::Temporary, factory)
+        };
+        let app = parse(manifest)
+            .bind_managed_with_adapters(
+                vec![binding],
+                ManagedAppAdapters::new().slo_hook(hook),
+                config(),
+            )
+            .unwrap();
+        let report = app.run(&cx).await.unwrap();
+        assert_eq!(
+            policies.load(Ordering::Acquire),
+            if trigger == "startup" { 1 } else { 2 }
+        );
+        assert_eq!(work.load(Ordering::Acquire), usize::from(trigger != "startup"));
+        assert_eq!(report.started, 1);
+        assert_eq!(report.joined, 1);
+        assert_eq!(report.restart_batches, 0);
+        assert!(matches!(
+            &report.children[0].outcome,
+            Outcome::Err(ManagedAppWorkError::SloRejected { hook, reason })
+                if hook == "job_policy" && reason == "trigger admission closed"
+        ));
+        assert!(
+            sender.is_closed(),
+            "rejected signal and pending queue cannot retain a receiver"
+        );
+    }
+}
+
+#[test]
+fn managed_app_slo_gates_each_trigger_and_does_not_replay_rejected_signals() {
+    for workers in [1, 2] {
+        native(workers, managed_slo_trigger_scenario);
+    }
+}
+
+#[test]
+fn managed_app_slo_worker_panic_precedes_factory_and_drains_controller() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let mut manifest = manifest_json();
+            manifest["services"][0]["routes"] = json!([]);
+            manifest["slo_hooks"] = json!([{
+                "name": "panic_policy", "kind": "saturation", "target": "api.actor.cache"
+            }]);
+            let work = Arc::new(AtomicUsize::new(0));
+            let work_calls = Arc::clone(&work);
+            let app = parse(manifest)
+                .bind_managed_with_adapters(
+                    vec![ManagedAppBinding::worker(
+                        "api.actor.cache",
+                        ManagedRestartMode::Temporary,
+                        move |_: Cx, _: ManagedGeneration| {
+                            work_calls.fetch_add(1, Ordering::AcqRel);
+                            async { Outcome::<(), &'static str>::Ok(()) }
+                        },
+                    )],
+                    ManagedAppAdapters::new().slo_hook(ManagedAppSloBinding::new(
+                        "panic_policy",
+                        AppSloHookKindV1::Saturation,
+                        "api.actor.cache",
+                        |_, _| panic!("policy callback panic"),
+                    )),
+                    config(),
+                )
+                .unwrap();
+            let report = app.run(&cx).await.unwrap();
+            assert_eq!(work.load(Ordering::Acquire), 0);
+            assert_eq!(report.started, 1);
+            assert_eq!(report.joined, 1);
+            assert_eq!(report.restart_batches, 0);
+            assert!(matches!(
+                &report.children[0].outcome,
+                Outcome::Panicked(payload) if payload.message() == "policy callback panic"
+            ));
+        });
     }
 }

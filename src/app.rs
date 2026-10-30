@@ -38,7 +38,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use managed_execution::{
-    ManagedApp, ManagedAppBindError, ManagedAppBinding, ManagedAppGroupReport, ManagedAppHandle,
+    ManagedApp, ManagedAppAdapters, ManagedAppAdmission, ManagedAppBindError, ManagedAppBinding,
+    ManagedAppGroupReport, ManagedAppHandle, ManagedAppSloBinding, ManagedAppSloDecision,
     ManagedAppTree, ManagedAppTreeHandle, ManagedAppTreeReport, ManagedAppWorkError,
 };
 
@@ -53,7 +54,7 @@ pub use resources::{
 mod managed_execution {
     use super::{
         AppBudgetSpecV1, AppCxCapabilityV1, AppFeatureFlagV1, AppJobTriggerV1,
-        AppRequiredCapabilitiesV1, AppRouteMethodV1, AppSpecV1, AppSpecV1CompileError,
+        AppRequiredCapabilitiesV1, AppRouteMethodV1, AppSloHookKindV1, AppSpecV1, AppSpecV1CompileError,
         AppSpecV1WorkUnitKind, BTreeMap, BTreeSet, Budget, CancelKind, CancelReason, ChildSpec, Cx,
         RegistryHandle, RuntimeState, SupervisorBuilder, runtime_restart_policy,
     };
@@ -70,12 +71,13 @@ mod managed_execution {
         ManagedSupervisor, ManagedSupervisorBindError, ManagedSupervisorHandle,
         ManagedSupervisorReport, SupervisionConfig,
     };
-    use crate::types::{CapabilityBudget, CapabilityBudgetRequirements, Outcome};
+    use crate::types::{CapabilityBudget, CapabilityBudgetRequirements, Outcome, PanicPayload, Time};
     use crate::web::extract::Request;
     use crate::web::handler::Handler;
     use crate::web::{MethodRouter, Response, Router, StatusCode};
     use parking_lot::Mutex;
     use std::future::{Future, poll_fn};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::Poll;
@@ -104,6 +106,143 @@ mod managed_execution {
     }
 
     type SignalReceiver = Arc<Mutex<Option<mpsc::Receiver<()>>>>;
+
+    /// One proposed workload invocation, before its region or factory is admitted.
+    ///
+    /// The budget already meets the live owner's limits, the work-unit budget,
+    /// and the hook's named budget. An adapter may only tighten it further.
+    /// Route calls have no supervisor generation; actor/job attempts carry the
+    /// generation that is making this admission request.
+    #[derive(Clone, Debug)]
+    pub struct ManagedAppAdmission {
+        /// Qualified manifest work-unit name.
+        pub unit: String,
+        /// Route, actor, or background-job admission.
+        pub kind: AppSpecV1WorkUnitKind,
+        /// The current supervising generation, when applicable.
+        pub generation: Option<ManagedGeneration>,
+        /// Owner-clock instant at which the proposal was constructed.
+        pub now: Time,
+        /// Tightest scheduler budget before the adapter's additional limit.
+        pub budget: Budget,
+        /// Tightest resource envelope before workload admission.
+        pub capability_budget: CapabilityBudget,
+    }
+
+    /// Explicit policy verdict for one managed workload invocation.
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    pub enum ManagedAppSloDecision {
+        /// Admit with an additional scheduler limit, composed using `Budget::meet`.
+        /// `Budget::INFINITE` leaves the proposed limits intact.
+        Admit(Budget),
+        /// Refuse this invocation without calling its workload factory.
+        Reject(String),
+    }
+
+    impl ManagedAppSloDecision {
+        /// Adapt an existing compiled SLO-policy result without inventing a
+        /// second admission engine. Brownout/no-win/non-start stays a refusal.
+        #[must_use]
+        pub fn from_runtime_decision(
+            decision: &crate::runtime::slo_policy::SloRuntimePolicyBridgeDecision,
+        ) -> Self {
+            if decision.work_may_start {
+                Self::Admit(decision.runtime_budget)
+            } else {
+                Self::Reject(format!("SLO admission: {:?}", decision.outcome.status))
+            }
+        }
+    }
+
+    type SloAdmissionFn = dyn Fn(&Cx, &ManagedAppAdmission) -> ManagedAppSloDecision + Send + Sync;
+
+    /// Explicit implementation of a manifest SLO hook.
+    ///
+    /// Name, kind, and exact qualified target must all match the declaration.
+    /// The callback runs before each real route invocation, worker generation,
+    /// or consumed trigger, under that work unit's restricted authority and
+    /// ambient context. It must return promptly: this synchronous policy seam
+    /// does not spawn a hidden task, perform sampling, or infer a threshold from
+    /// the hook's kind. Stateful policies and the existing SLO policy bridge
+    /// can be supplied explicitly by the caller.
+    ///
+    /// The `Cx` retains the live owner's identity, cancellation, and accounting;
+    /// proposed invocation limits are in `ManagedAppAdmission`. Returning a
+    /// larger budget cannot widen them. Callback panics become a route 500 or
+    /// a supervised panic before any workload region is opened.
+    #[derive(Clone)]
+    pub struct ManagedAppSloBinding {
+        name: String,
+        kind: AppSloHookKindV1,
+        target: String,
+        callback: Arc<SloAdmissionFn>,
+    }
+
+    impl ManagedAppSloBinding {
+        /// Bind one declared hook to an explicit admission policy.
+        #[must_use]
+        pub fn new(
+            name: impl Into<String>,
+            kind: AppSloHookKindV1,
+            target: impl Into<String>,
+            callback: impl Fn(&Cx, &ManagedAppAdmission) -> ManagedAppSloDecision
+            + Send
+            + Sync
+            + 'static,
+        ) -> Self {
+            Self {
+                name: name.into(),
+                kind,
+                target: target.into(),
+                callback: Arc::new(callback),
+            }
+        }
+    }
+
+    /// Opt-in runtime adapters for an executing AppSpec manifest.
+    ///
+    /// Legacy binding entry points retain their refusal of route/job SLO-hook
+    /// references. This catalog requires exactly one implementation for every
+    /// declared hook; it also applies target-only declarations to their exact
+    /// work units and can carry the existing explicit typed resource bindings.
+    #[derive(Default)]
+    pub struct ManagedAppAdapters {
+        slo_hooks: Vec<ManagedAppSloBinding>,
+        resources: Option<Vec<ManagedAppResourceBinding>>,
+    }
+
+    impl ManagedAppAdapters {
+        /// Start an empty explicit adapter catalog.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Add a hook; duplicate and undeclared names fail during binding.
+        #[must_use]
+        pub fn slo_hook(mut self, binding: ManagedAppSloBinding) -> Self {
+            self.slo_hooks.push(binding);
+            self
+        }
+
+        /// Use the same typed resource contract as `bind_managed_with_resources`.
+        #[must_use]
+        pub fn resources(mut self, bindings: Vec<ManagedAppResourceBinding>) -> Self {
+            self.resources = Some(bindings);
+            self
+        }
+    }
+
+    struct WorkSlo {
+        binding: ManagedAppSloBinding,
+        budget: Option<AppBudgetSpecV1>,
+    }
+
+    enum WorkAdmissionFailure {
+        Rejected { hook: String, reason: String },
+        Panicked(PanicPayload),
+    }
 
     // Own the receiver while waiting, without a non-Send lock guard across await.
     // Dropping a generation restores its source before a replacement starts.
@@ -441,6 +580,9 @@ mod managed_execution {
         GroupFailed(String),
         /// A retained, already validated group could not be reconstructed.
         GroupBinding(ManagedSupervisorBindError),
+        /// An explicit SLO admission policy refused this invocation before its
+        /// workload factory ran. The configured restart policy still applies.
+        SloRejected { hook: String, reason: String },
     }
 
     type AppFactory<E> = Arc<dyn ManagedChildFactory<ManagedAppWorkError<E>>>;
@@ -587,8 +729,10 @@ mod managed_execution {
 
     struct WorkPolicy {
         name: String,
+        kind: AppSpecV1WorkUnitKind,
         required: AppRequiredCapabilitiesV1,
         budget: Option<AppBudgetSpecV1>,
+        slo: Option<WorkSlo>,
         interval: Option<Duration>,
         signal: Option<SignalReceiver>,
         cleanup: WorkCleanup,
@@ -635,6 +779,11 @@ mod managed_execution {
                 || self
                     .budget
                     .as_ref()
+                    .is_some_and(|b| b.deadline_ms.is_some())
+                || self
+                    .slo
+                    .as_ref()
+                    .and_then(|slo| slo.budget.as_ref())
                     .is_some_and(|b| b.deadline_ms.is_some()))
                 && cx.timer_driver().is_none()
             {
@@ -653,26 +802,100 @@ mod managed_execution {
 
         fn envelope(&self) -> CapabilityBudget {
             let mut budget = CapabilityBudget::UNSPECIFIED;
-            if let Some(spec) = &self.budget {
-                budget.io_bytes = spec.io_bytes;
-                budget.memory_bytes = spec.memory_bytes;
+            for spec in self
+                .budget
+                .iter()
+                .chain(self.slo.iter().filter_map(|slo| slo.budget.as_ref()))
+            {
+                budget = budget.meet(CapabilityBudget {
+                    io_bytes: spec.io_bytes,
+                    memory_bytes: spec.memory_bytes,
+                    ..CapabilityBudget::UNSPECIFIED
+                });
             }
             budget
         }
 
         fn region_spec(&self, cx: &Cx) -> ChildRegionSpec {
             let mut budget = Budget::INFINITE;
-            if let Some(spec) = &self.budget {
+            let now = cx.now_for_observability();
+            for spec in self
+                .budget
+                .iter()
+                .chain(self.slo.iter().filter_map(|slo| slo.budget.as_ref()))
+            {
+                let mut limit = Budget::INFINITE;
                 if let Some(polls) = spec.poll_quota {
-                    budget.poll_quota = u32::try_from(polls).expect("validated AppSpec poll quota");
+                    limit.poll_quota = u32::try_from(polls).expect("validated AppSpec poll quota");
                 }
                 if let Some(ms) = spec.deadline_ms {
-                    budget.deadline = Some(cx.now_for_observability() + Duration::from_millis(ms));
+                    limit.deadline = Some(now + Duration::from_millis(ms));
                 }
+                budget = budget.meet(limit);
             }
             let mut spec = ChildRegionSpec::inherit().with_budget(budget);
             spec.capability_budget = Some(self.envelope());
             spec
+        }
+
+        fn admission_spec(
+            &self,
+            cx: &Cx,
+            generation: Option<ManagedGeneration>,
+        ) -> Result<ChildRegionSpec, WorkAdmissionFailure> {
+            let mut spec = self.region_spec(cx);
+            let Some(slo) = &self.slo else {
+                return Ok(spec);
+            };
+            let proposed = cx.budget().meet(spec.budget.unwrap_or(Budget::INFINITE));
+            let admission = ManagedAppAdmission {
+                unit: self.name.clone(),
+                kind: self.kind.clone(),
+                generation,
+                now: cx.now_for_observability(),
+                budget: proposed,
+                capability_budget: cx.capability_budget().meet(self.envelope()),
+            };
+            let restricted = self.restrict(cx.clone(), cx.registry_handle());
+            let decision = catch_unwind(AssertUnwindSafe(|| {
+                let _ambient = Cx::set_current(Some(restricted.clone()));
+                (slo.binding.callback)(&restricted, &admission)
+            }))
+            .map_err(|payload| {
+                let message = crate::cx::scope::payload_to_string(&payload);
+                // A user panic payload can itself panic in Drop. The managed
+                // supervisor uses the same containment policy at factory seams.
+                std::mem::forget(payload);
+                WorkAdmissionFailure::Panicked(PanicPayload::new(message))
+            })?;
+            let limit = match decision {
+                ManagedAppSloDecision::Admit(limit) => proposed.meet(limit),
+                ManagedAppSloDecision::Reject(reason) => {
+                    return Err(WorkAdmissionFailure::Rejected {
+                        hook: slo.binding.name.clone(),
+                        reason,
+                    });
+                }
+            };
+            if limit.poll_quota == 0
+                || limit.cost_quota == Some(0)
+                || limit
+                    .deadline
+                    .is_some_and(|at| cx.now_for_observability() >= at)
+            {
+                return Err(WorkAdmissionFailure::Rejected {
+                    hook: slo.binding.name.clone(),
+                    reason: "SLO admission budget is exhausted".to_owned(),
+                });
+            }
+            if limit.deadline.is_some() && cx.timer_driver().is_none() {
+                return Err(WorkAdmissionFailure::Rejected {
+                    hook: slo.binding.name.clone(),
+                    reason: "SLO deadline requires the owner's timer driver".to_owned(),
+                });
+            }
+            spec.budget = Some(limit);
+            Ok(spec)
         }
 
         fn restrict(&self, mut cx: Cx, registry: Option<RegistryHandle>) -> Cx {
@@ -798,10 +1021,16 @@ mod managed_execution {
                 if owner.is_cancel_requested() {
                     return Response::empty(StatusCode::SERVICE_UNAVAILABLE);
                 }
-                let region = match owner
-                    .open_child_region(self.policy.region_spec(&owner))
-                    .await
-                {
+                let spec = match self.policy.admission_spec(&owner, None) {
+                    Ok(spec) => spec,
+                    Err(WorkAdmissionFailure::Rejected { .. }) => {
+                        return Response::empty(StatusCode::SERVICE_UNAVAILABLE);
+                    }
+                    Err(WorkAdmissionFailure::Panicked(_)) => {
+                        return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
+                    }
+                };
+                let region = match owner.open_child_region(spec).await {
                     Ok(region) => region,
                     Err(_) => return Response::empty(StatusCode::SERVICE_UNAVAILABLE),
                 };
@@ -890,7 +1119,14 @@ mod managed_execution {
                         .unwrap_or_else(|| CancelReason::user("AppSpec worker cancelled")),
                 );
             }
-            let region = match owner.open_child_region(policy.region_spec(&owner)).await {
+            let spec = match policy.admission_spec(&owner, Some(generation)) {
+                Ok(spec) => spec,
+                Err(WorkAdmissionFailure::Rejected { hook, reason }) => {
+                    return Outcome::Err(ManagedAppWorkError::SloRejected { hook, reason });
+                }
+                Err(WorkAdmissionFailure::Panicked(payload)) => return Outcome::Panicked(payload),
+            };
+            let region = match owner.open_child_region(spec).await {
                 Ok(region) => region,
                 Err(error) => return Outcome::Err(ManagedAppWorkError::Region(error)),
             };
@@ -1006,7 +1242,8 @@ mod managed_execution {
     ///
     /// Signal jobs require `ManagedAppBinding::signal_worker` with the exact
     /// declared source name. Named resources require the explicit typed
-    /// resource entry point; SLO and observability adapters remain unsupported.
+    /// resource entry point. SLO admission hooks require the opt-in adapter
+    /// binding entry point; observability sink adapters remain unsupported.
     /// The legacy `compile_with_child_specs` and `CompiledApp::start` are unchanged.
     pub struct ManagedApp<E> {
         template: AppGroupTemplate<E>,
@@ -1145,9 +1382,10 @@ mod managed_execution {
     /// old generations fully drain before replacement publishes those routes.
     /// Budgets and capabilities are checked for every work unit before start.
     ///
-    /// Named resources require [`AppSpecV1::bind_managed_groups_with_resources`].
-    /// SLO and observability adapters retain their explicit refusals.
-    /// Use [`AppSpecV1::bind_managed_groups`] for groups without resources.
+    /// Named resources require [`AppSpecV1::bind_managed_groups_with_resources`]
+    /// or [`AppSpecV1::bind_managed_groups_with_adapters`]. The latter also binds
+    /// explicit SLO admission policies. Observability sinks remain unsupported.
+    /// Use [`AppSpecV1::bind_managed_groups`] for groups without these adapters.
     pub struct ManagedAppTree<E> {
         app: ManagedApp<E>,
         reports: GroupReports<E>,
@@ -1230,6 +1468,22 @@ mod managed_execution {
         }
     }
 
+    fn validate_execution_budget(budget: &AppBudgetSpecV1) -> Result<(), ManagedAppBindError> {
+        if budget
+            .poll_quota
+            .is_some_and(|n| n == 0 || n > u64::from(u32::MAX))
+            || budget.deadline_ms == Some(0)
+            || budget.io_bytes == Some(0)
+            || budget.memory_bytes == Some(0)
+        {
+            return Err(ManagedAppBindError::Budget {
+                name: budget.name.clone(),
+                reason: "zero or unrepresentable execution limit",
+            });
+        }
+        Ok(())
+    }
+
     fn feature_enabled(feature: &AppFeatureFlagV1) -> bool {
         match feature {
             AppFeatureFlagV1::NativeRuntime => cfg!(feature = "native-runtime"),
@@ -1266,7 +1520,9 @@ mod managed_execution {
             config: SupervisionConfig,
         ) -> Result<ManagedApp<E>, ManagedAppBindError> {
             let configs = BTreeMap::from([(self.supervision.root_group.clone(), config)]);
-            Ok(self.bind_managed_impl(bindings, configs, false, None)?.app)
+            Ok(self
+                .bind_managed_impl(bindings, configs, false, None, None)?
+                .app)
         }
 
         /// Bind a single group with explicit typed, caller-owned resources.
@@ -1290,7 +1546,7 @@ mod managed_execution {
         ) -> Result<ManagedApp<E>, ManagedAppBindError> {
             let configs = BTreeMap::from([(self.supervision.root_group.clone(), config)]);
             Ok(self
-                .bind_managed_impl(bindings, configs, false, Some(resources))?
+                .bind_managed_impl(bindings, configs, false, Some(resources), None)?
                 .app)
         }
 
@@ -1305,7 +1561,7 @@ mod managed_execution {
             bindings: Vec<ManagedAppBinding<E>>,
             configs: BTreeMap<String, SupervisionConfig>,
         ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
-            self.bind_managed_impl(bindings, configs, true, None)
+            self.bind_managed_impl(bindings, configs, true, None, None)
         }
 
         /// Bind every group with the typed resource contract of
@@ -1319,7 +1575,58 @@ mod managed_execution {
             resources: Vec<ManagedAppResourceBinding>,
             configs: BTreeMap<String, SupervisionConfig>,
         ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
-            self.bind_managed_impl(bindings, configs, true, Some(resources))
+            self.bind_managed_impl(bindings, configs, true, Some(resources), None)
+        }
+
+        /// Bind a single group with explicit SLO admission adapters.
+        ///
+        /// Every declared hook must have one exact name/kind/target match.
+        /// Targets select actors as well as routes and jobs; an explicit
+        /// route/job hook reference must agree with that selection. At most
+        /// one hook may select a unit. Missing, duplicate, mismatched,
+        /// unused-target, and extra bindings fail before publication.
+        /// Hook-named budgets tighten work-unit limits. Every invocation asks
+        /// its policy again, including supervised replacements and triggers.
+        ///
+        /// A refusal returns HTTP 503 for a route or `SloRejected` for a worker;
+        /// a panic returns HTTP 500 or a supervised panic. The workload factory
+        /// does not run in either case. Worker restart policy remains explicit:
+        /// a permanent/transient worker may retry a rejection, bounded by its
+        /// existing restart intensity. No rejected signal is silently replayed.
+        /// Observability sink declarations still require a future adapter.
+        pub fn bind_managed_with_adapters<E: Send + 'static>(
+            self,
+            bindings: Vec<ManagedAppBinding<E>>,
+            adapters: ManagedAppAdapters,
+            config: SupervisionConfig,
+        ) -> Result<ManagedApp<E>, ManagedAppBindError> {
+            let configs = BTreeMap::from([(self.supervision.root_group.clone(), config)]);
+            Ok(self
+                .bind_managed_impl(
+                    bindings,
+                    configs,
+                    false,
+                    adapters.resources,
+                    Some(adapters.slo_hooks),
+                )?
+                .app)
+        }
+
+        /// Bind a complete managed hierarchy with the same explicit SLO and
+        /// typed-resource contract as [`Self::bind_managed_with_adapters`].
+        pub fn bind_managed_groups_with_adapters<E: Send + 'static>(
+            self,
+            bindings: Vec<ManagedAppBinding<E>>,
+            adapters: ManagedAppAdapters,
+            configs: BTreeMap<String, SupervisionConfig>,
+        ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
+            self.bind_managed_impl(
+                bindings,
+                configs,
+                true,
+                adapters.resources,
+                Some(adapters.slo_hooks),
+            )
         }
 
         #[allow(clippy::too_many_lines)]
@@ -1329,8 +1636,64 @@ mod managed_execution {
             mut configs: BTreeMap<String, SupervisionConfig>,
             grouped: bool,
             resources: Option<Vec<ManagedAppResourceBinding>>,
+            slo_bindings: Option<Vec<ManagedAppSloBinding>>,
         ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
             let plan = self.compiler_plan().map_err(ManagedAppBindError::Compile)?;
+            let slo_catalog = slo_bindings
+                .map(|bindings| {
+                    let mut supplied = BTreeMap::new();
+                    for binding in bindings {
+                        let name = binding.name.clone();
+                        if supplied.insert(name.clone(), binding).is_some() {
+                            return Err(ManagedAppBindError::Duplicate(format!("slo:{name}")));
+                        }
+                    }
+                    let mut catalog = BTreeMap::new();
+                    let mut targets = BTreeSet::new();
+                    for declaration in &self.slo_hooks {
+                        let binding = supplied.remove(&declaration.name).ok_or_else(|| {
+                            ManagedAppBindError::Missing(format!("slo:{}", declaration.name))
+                        })?;
+                        if binding.kind != declaration.kind || binding.target != declaration.target {
+                            return Err(ManagedAppBindError::KindMismatch(format!(
+                                "slo:{}",
+                                declaration.name,
+                            )));
+                        }
+                        let Some(target) = plan
+                            .children
+                            .iter()
+                            .find(|child| child.name == declaration.target)
+                        else {
+                            return Err(ManagedAppBindError::Unsupported {
+                                unit: format!("slo:{}", declaration.name),
+                                reason: "SLO target must be an exact qualified work-unit name",
+                            });
+                        };
+                        if target
+                            .slo_hook
+                            .as_ref()
+                            .is_some_and(|name| *name != declaration.name)
+                        {
+                            return Err(ManagedAppBindError::KindMismatch(format!(
+                                "slo:{}",
+                                declaration.name,
+                            )));
+                        }
+                        if !targets.insert(declaration.target.clone()) {
+                            return Err(ManagedAppBindError::Duplicate(format!(
+                                "slo-target:{}",
+                                declaration.target,
+                            )));
+                        }
+                        catalog.insert(declaration.name.clone(), binding);
+                    }
+                    if let Some((name, _)) = supplied.into_iter().next() {
+                        return Err(ManagedAppBindError::Unexpected(format!("slo:{name}")));
+                    }
+                    Ok(catalog)
+                })
+                .transpose()?;
             let resource_catalog = resources
                 .map(|bindings| ResourceCatalog::bind(&self.resources, bindings))
                 .transpose()
@@ -1428,12 +1791,45 @@ mod managed_execution {
                 let kind = supplied
                     .remove(&child.name)
                     .ok_or_else(|| ManagedAppBindError::Missing(child.name.clone()))?;
-                if child.slo_hook.is_some() {
-                    return Err(ManagedAppBindError::Unsupported {
-                        unit: child.name,
-                        reason: "SLO hooks need an explicit runtime adapter",
-                    });
-                }
+                let selected_hook = child.slo_hook.as_ref().or_else(|| {
+                    slo_catalog.as_ref().and_then(|catalog| {
+                        catalog
+                            .iter()
+                            .find(|(_, binding)| binding.target == child.name)
+                            .map(|(name, _)| name)
+                    })
+                });
+                let slo = selected_hook
+                    .map(|name| {
+                        let Some(catalog) = &slo_catalog else {
+                            return Err(ManagedAppBindError::Unsupported {
+                                unit: child.name.clone(),
+                                reason: "SLO hooks need an explicit runtime adapter",
+                            });
+                        };
+                        let binding = catalog.get(name).expect("declared SLO binding validated");
+                        if binding.target != child.name {
+                            return Err(ManagedAppBindError::KindMismatch(format!("slo:{name}")));
+                        }
+                        let declaration = self
+                            .slo_hooks
+                            .iter()
+                            .find(|hook| hook.name == *name)
+                            .expect("compiler validated hook reference");
+                        let budget = declaration
+                            .budget
+                            .as_ref()
+                            .and_then(|name| budgets.get(name))
+                            .cloned();
+                        if let Some(budget) = &budget {
+                            validate_execution_budget(budget)?;
+                        }
+                        Ok(WorkSlo {
+                            binding: binding.clone(),
+                            budget,
+                        })
+                    })
+                    .transpose()?;
                 let resource_view = if let Some(catalog) = &resource_catalog {
                     let mut names: BTreeSet<_> =
                         child.required_capabilities.resources.iter().cloned().collect();
@@ -1515,23 +1911,14 @@ mod managed_execution {
                     .and_then(|name| budgets.get(name))
                     .cloned();
                 if let Some(budget) = &budget {
-                    if budget
-                        .poll_quota
-                        .is_some_and(|n| n == 0 || n > u64::from(u32::MAX))
-                        || budget.deadline_ms == Some(0)
-                        || budget.io_bytes == Some(0)
-                        || budget.memory_bytes == Some(0)
-                    {
-                        return Err(ManagedAppBindError::Budget {
-                            name: budget.name.clone(),
-                            reason: "zero or unrepresentable execution limit",
-                        });
-                    }
+                    validate_execution_budget(budget)?;
                 }
                 let policy = Arc::new(WorkPolicy {
                     name: child.name.clone(),
+                    kind: child.kind.clone(),
                     required: child.required_capabilities,
                     budget,
+                    slo,
                     interval,
                     signal,
                     cleanup: Arc::new(Mutex::new(None)),
