@@ -278,7 +278,9 @@ pub enum SymbolRepairRequest {
     Closed,
 }
 
-/// Cloneable trigger and observation access. This retains no Cx, transport or
+/// Cloneable trigger and observation access.
+///
+/// This retains no Cx, transport or
 /// runtime task. Dropping all handles does not detach the worker: its calling
 /// task/region remains its owner. Use `stop` and await `run` for graceful drain.
 #[derive(Clone)]
@@ -361,7 +363,9 @@ pub struct SymbolRepairWorkerReport {
 }
 
 /// Automatic one-source repair using existing authenticated metadata and value
-/// transports. Poll `run` inside an existing owned task, for example through
+/// transports.
+///
+/// Poll `run` inside an existing owned task, for example through
 /// `Cx::spawn`. No hidden task, alternate transport, source election, or raw
 /// SWIM authority is created. External membership observations may request a
 /// repair, but all ordinary origin/source/grant checks still govern every call.
@@ -746,18 +750,18 @@ async fn execute_attempt(
 fn retryable(error: &SymbolRepairRoundError) -> bool {
     matches!(
         error,
-        SymbolRepairRoundError::Repair(SymbolRepairError::Remote)
-            | SymbolRepairRoundError::Repair(SymbolRepairError::Catalog(
-                CatalogError::SnapshotChanged
-            ))
-            | SymbolRepairRoundError::Repair(SymbolRepairError::Fetch(
-                RemoteSymbolError::Admission
-                    | RemoteSymbolError::Client(
-                        RemoteComputationClientError::Connect { .. }
-                            | RemoteComputationClientError::AttemptTimeout { .. }
-                            | RemoteComputationClientError::AmbiguousExchange { .. }
-                    )
-            ))
+        SymbolRepairRoundError::Repair(
+            SymbolRepairError::Remote
+                | SymbolRepairError::Catalog(CatalogError::SnapshotChanged)
+                | SymbolRepairError::Fetch(
+                    RemoteSymbolError::Admission
+                        | RemoteSymbolError::Client(
+                            RemoteComputationClientError::Connect { .. }
+                                | RemoteComputationClientError::AttemptTimeout { .. }
+                                | RemoteComputationClientError::AmbiguousExchange { .. }
+                        )
+                )
+        )
     )
 }
 

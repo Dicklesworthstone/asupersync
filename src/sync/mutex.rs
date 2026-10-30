@@ -112,6 +112,12 @@ pub struct Mutex<T> {
 unsafe impl<T: Send> Send for Mutex<T> {}
 unsafe impl<T: Send> Sync for Mutex<T> {}
 
+// v0.5.0 derived this impl from the fields. The opt-in causality state's
+// type-erased clock handle is not `RefUnwindSafe`, which silently dropped it.
+// A panic while the lock is held poisons the mutex (as with std's `Mutex`), so
+// the v0.5.0 surface and bound are restored explicitly.
+impl<T> std::panic::UnwindSafe for Mutex<T> where UnsafeCell<T>: std::panic::UnwindSafe {}
+
 #[derive(Debug)]
 struct MutexState {
     /// Whether the mutex is currently locked.

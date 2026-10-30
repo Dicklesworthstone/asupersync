@@ -335,6 +335,9 @@ fn retire_panic_payload(payload: Box<dyn std::any::Any + Send>) {
     }
 }
 
+// `fetch_update` is deprecated as `try_update` on the pinned nightly, which
+// the stable-lane toolchain lacks; keep the old name and allow the lint.
+#[allow(deprecated)]
 fn increment(counter: &AtomicU64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
         Some(value.saturating_add(1))

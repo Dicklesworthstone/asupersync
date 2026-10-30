@@ -1901,6 +1901,8 @@ impl HttpClient {
             };
             check_cx(cx)?;
             self.store_response_cookies(&parsed.host, parsed.scheme, &response.head.headers);
+            // One reuse condition per line; clippy's negated disjunction is harder to audit.
+            #[allow(clippy::nonminimal_bool)]
             let may_reuse = route.proxy.is_none()
                 && !request_forbids_reuse
                 && !response.body_withheld
@@ -2387,6 +2389,8 @@ impl HttpClient {
                         parsed.scheme,
                         &response.head.headers,
                     );
+                    // One reuse condition per line; clippy's negated disjunction is harder to audit.
+                    #[allow(clippy::nonminimal_bool)]
                     let may_reuse = route.proxy.is_none()
                         && !request_forbids_reuse
                         && !response.body_withheld

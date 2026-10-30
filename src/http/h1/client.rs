@@ -832,7 +832,8 @@ impl Http1Client {
                         return Poll::Pending;
                     }
                     match upload.poll_step(body.as_mut(), &mut io, task) {
-                        Poll::Ready(Ok(true)) => continue,
+                        // The step made progress: loop to poll the response again.
+                        Poll::Ready(Ok(true)) => {}
                         Poll::Ready(Ok(false)) | Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(HttpError::Io(error)))
                             if matches!(

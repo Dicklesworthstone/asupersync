@@ -1,5 +1,8 @@
 //! Explicitly owned DNS queries on the native UDP/TCP reactor.
 
+// This split implementation shares its parent resolver's private query
+// helpers as one unit (as runtime/io_driver/shared.rs does).
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::cx::{CancelWakerToken, Cx, cap::CapMask};
 use crate::io::{AsyncReadExt, AsyncWriteExt};

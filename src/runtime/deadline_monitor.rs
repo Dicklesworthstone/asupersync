@@ -188,6 +188,9 @@ pub(crate) struct DeadlineCompletionObservation {
 }
 
 impl DeadlineCompletionObservation {
+    // Boxed on purpose: the completion paths in runtime/state.rs carry it as
+    // `Option<Box<Self>>`, which keeps those hot-path records pointer-sized.
+    #[allow(clippy::unnecessary_box_returns)]
     pub(crate) fn capture(
         queue: &Arc<DeadlineCompletionQueue>,
         task: &TaskRecord,
@@ -215,6 +218,7 @@ impl DeadlineCompletionObservation {
         })
     }
 
+    #[allow(clippy::boxed_local)] // consumes the box `capture` handed out
     pub(crate) fn publish(self: Box<Self>) {
         self.queue.publish(self.completion);
     }

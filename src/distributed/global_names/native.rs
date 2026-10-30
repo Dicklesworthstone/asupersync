@@ -468,8 +468,10 @@ impl NativeGlobalNameTransport {
                     report.stop = GlobalNamePropagationStop::RegistryClosed;
                     return Ok(report);
                 }
-                Err(error @ NativeGlobalNameError::RoundRunning)
-                | Err(error @ NativeGlobalNameError::Registry(GlobalNameError::PendingRetirement)) => {
+                Err(
+                    error @ (NativeGlobalNameError::RoundRunning
+                    | NativeGlobalNameError::Registry(GlobalNameError::PendingRetirement)),
+                ) => {
                     report.skipped_rounds = report.skipped_rounds.saturating_add(1);
                     report.last_round_error = Some(error);
                 }

@@ -377,9 +377,10 @@ where
         if let Some(Err(payload)) = self.state.use_result.take() {
             std::panic::resume_unwind(payload);
         }
-        if cleanup_budget_exhausted {
-            panic!("bracket release future did not complete within drop-time cleanup poll budget");
-        }
+        assert!(
+            !cleanup_budget_exhausted,
+            "bracket release future did not complete within drop-time cleanup poll budget"
+        );
     }
 }
 
