@@ -5,11 +5,12 @@
 //! This module provides comprehensive conformance testing for PostgreSQL logical
 //! replication protocol per the pgoutput plugin specification.
 //!
-//! Scope: asupersync's PostgreSQL client implements no logical replication
-//! (`src/database/postgres.rs` sends no `START_REPLICATION` and has no pgoutput
-//! decoder). The tests below check this module's own reference decoder against
-//! the specification. They are not evidence about asupersync code. The tests
-//! validate:
+//! Scope: the historical harness below checks its own reference decoder.
+//! The `production_pgoutput_*` tests, enabled with `postgres`, instead exercise
+//! asupersync's public decoder using this harness's independently built wire
+//! fixtures. Native CopyBoth transport tests live with the PostgreSQL client.
+//! Neither this reference harness nor these codec tests prove live-server
+//! replication or durable application of changes. The covered formats include:
 //!
 //! - BEGIN/COMMIT transaction boundary message parsing
 //! - INSERT/UPDATE/DELETE change data capture with tuple encoding
@@ -1873,6 +1874,91 @@ pub enum TupleData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn production_pgoutput_decodes_schema_changes_and_a_complete_transaction() {
+        use asupersync::database::postgres::pgoutput::{
+            PgOldTuple, PgOutputMessage, PgOutputMessages, PgReplicaIdentity, PgTupleValue,
+        };
+
+        let harness = PgLogicalReplicationHarness::new();
+        let old = [TupleData::Text("1".into()), TupleData::Text("old".into())];
+        let new = [TupleData::Text("1".into()), TupleData::Binary(vec![0, 255])];
+        let messages = [
+            harness.create_begin_message(100, 200, 300),
+            harness.create_type_message(50_000, "custom", "opaque"),
+            harness.create_relation_message(
+                42, "public", "items", ReplicaIdentity::Full,
+                &[("id", 23, u32::MAX), ("value", 50_000, u32::MAX)],
+            ),
+            harness.create_insert_message(42, &new),
+            harness.create_update_message(42, Some(&old), &new),
+            harness.create_delete_message(42, &old),
+            harness.create_truncate_message(&[42, 43], 3),
+            // Protocol-v1 COMMIT reserves its flag byte as zero.
+            harness.create_commit_message(0, 110, 120, 201),
+        ];
+        let wire: Vec<u8> = messages.into_iter().flatten().collect();
+        let decoded = PgOutputMessages::new(&wire)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the production decoder accepts the independently encoded transaction");
+        assert_eq!(decoded.len(), 8);
+        assert!(matches!(&decoded[0], PgOutputMessage::Begin {
+            final_lsn, commit_time_micros: 200, xid: 300,
+        } if final_lsn.as_u64() == 100));
+        assert!(matches!(&decoded[1], PgOutputMessage::Type {
+            id: 50_000, namespace: "custom", name: "opaque",
+        }));
+        let PgOutputMessage::Relation(relation) = &decoded[2] else {
+            panic!("expected the relation schema");
+        };
+        assert_eq!(relation.id, 42);
+        assert_eq!(relation.namespace, "public");
+        assert_eq!(relation.name, "items");
+        assert_eq!(relation.replica_identity, PgReplicaIdentity::Full);
+        assert_eq!(relation.columns[1].type_oid, 50_000);
+        assert_eq!(relation.columns[1].type_modifier, -1);
+        let PgOutputMessage::Insert { relation_id, new_tuple } = &decoded[3] else {
+            panic!("expected the inserted row");
+        };
+        assert_eq!(*relation_id, 42);
+        assert_eq!(new_tuple, &vec![PgTupleValue::Text(b"1"), PgTupleValue::Binary(&[0, 255])]);
+        assert!(matches!(&decoded[4], PgOutputMessage::Update {
+            relation_id: 42, old_tuple: Some(PgOldTuple::Full(old)), new_tuple: new,
+        } if old == &vec![PgTupleValue::Text(b"1"), PgTupleValue::Text(b"old")]
+            && new == new_tuple));
+        assert!(matches!(&decoded[5], PgOutputMessage::Delete {
+            relation_id: 42, old_tuple: PgOldTuple::Full(old),
+        } if old.len() == 2));
+        assert!(matches!(&decoded[6], PgOutputMessage::Truncate {
+            relation_ids, cascade: true, restart_identity: true,
+        } if relation_ids == &vec![42, 43]));
+        assert!(matches!(&decoded[7], PgOutputMessage::Commit {
+            commit_lsn, end_lsn, commit_time_micros: 201,
+        } if commit_lsn.as_u64() == 110 && end_lsn.as_u64() == 120));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn production_pgoutput_refuses_reserved_flags_and_does_not_skip_a_bad_change() {
+        use asupersync::database::postgres::pgoutput::{
+            PgOutputError, PgOutputMessages, decode_pgoutput,
+        };
+
+        let harness = PgLogicalReplicationHarness::new();
+        // The legacy reference harness accepted this reserved COMMIT flag.
+        // Keep the production expectation tied to the negotiated wire format.
+        let invalid = harness.create_commit_message(1, 10, 20, 30);
+        assert!(matches!(decode_pgoutput(&invalid), Err(PgOutputError::Invalid { .. })));
+        let mut wire = harness.create_begin_message(10, 30, 42);
+        wire.extend_from_slice(b"I\0\0\0\x01N\0\x01x");
+        wire.extend_from_slice(&harness.create_commit_message(0, 10, 20, 30));
+        let mut messages = PgOutputMessages::new(&wire);
+        assert!(messages.next().unwrap().is_ok());
+        assert!(messages.next().unwrap().is_err());
+        assert!(messages.next().is_none(), "a malformed row cannot expose a later commit");
+    }
 
     #[test]
     #[allow(dead_code)]

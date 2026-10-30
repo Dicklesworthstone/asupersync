@@ -63,6 +63,13 @@ pub use tls_options::{PgTlsOptions, PgTlsVerification};
 mod cursor;
 pub use cursor::{PgCursor, PgCursorComplete, PgCursorConfig};
 
+/// Logical replication protocol messages produced by PostgreSQL's pgoutput plugin.
+#[path = "postgres/pgoutput.rs"]
+pub mod pgoutput;
+/// Owned logical replication connections, streaming events, and feedback.
+#[path = "postgres/replication.rs"]
+pub mod replication;
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -5450,6 +5457,18 @@ impl PgConnection {
         options: PgConnectOptions,
         tls: PgTlsOptions,
     ) -> Outcome<Self, PgError> {
+        Self::connect_with_startup_mode(cx, options, tls, false).await
+    }
+
+    // A dedicated replication connection uses the existing transport, trust,
+    // authentication, and connect deadline path without changing the public,
+    // exhaustive PgConnectOptions struct or normal connection startup.
+    async fn connect_with_startup_mode(
+        cx: &Cx,
+        options: PgConnectOptions,
+        tls: PgTlsOptions,
+        logical_replication: bool,
+    ) -> Outcome<Self, PgError> {
         use std::future::Future;
 
         if cx.checkpoint().is_err() {
@@ -5460,7 +5479,12 @@ impl PgConnection {
             .unwrap_or(tls.connect_timeout_duration());
         let now = crate::time::wall_now();
         let mut deadline = std::pin::pin!(crate::time::Sleep::after(now, duration));
-        let mut connect = std::pin::pin!(Self::connect_with_tls_options_inner(cx, options, tls));
+        let mut connect = std::pin::pin!(Self::connect_with_tls_options_inner(
+            cx,
+            options,
+            tls,
+            logical_replication,
+        ));
         let mut cancel_wake = CancelWakerGuard::new(cx);
         std::future::poll_fn(|task_cx| {
             cancel_wake.refresh(task_cx.waker());
@@ -5487,6 +5511,7 @@ impl PgConnection {
         cx: &Cx,
         mut options: PgConnectOptions,
         tls: PgTlsOptions,
+        logical_replication: bool,
     ) -> Outcome<Self, PgError> {
         if tls.requires_tls() {
             options.ssl_mode = SslMode::Require;
@@ -5587,7 +5612,7 @@ impl PgConnection {
         };
 
         // Send startup message
-        if let Err(e) = conn.send_startup(cx, &options).await {
+        if let Err(e) = conn.send_startup(cx, &options, logical_replication).await {
             return outcome_from_error(e);
         }
 
@@ -5785,7 +5810,12 @@ impl PgConnection {
     }
 
     /// Send the startup message.
-    async fn send_startup(&mut self, cx: &Cx, options: &PgConnectOptions) -> Result<(), PgError> {
+    async fn send_startup(
+        &mut self,
+        cx: &Cx,
+        options: &PgConnectOptions,
+        logical_replication: bool,
+    ) -> Result<(), PgError> {
         let mut buf = MessageBuffer::new();
 
         // Protocol version 3.0
@@ -5797,6 +5827,11 @@ impl PgConnection {
 
         buf.write_startup_cstring("startup parameter name", "database")?;
         buf.write_startup_cstring("startup database", &options.database)?;
+
+        if logical_replication {
+            buf.write_startup_cstring("startup parameter name", "replication")?;
+            buf.write_startup_cstring("startup replication", "database")?;
+        }
 
         if let Some(ref app_name) = options.application_name {
             buf.write_startup_cstring("startup parameter name", "application_name")?;
