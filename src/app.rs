@@ -48,6 +48,11 @@ pub use resources::{
     ManagedAppResourceBinding, ManagedAppResourceError, ManagedAppResourceRequirement,
     ManagedAppResources,
 };
+mod observability;
+pub use observability::{
+    ManagedAppEvent, ManagedAppEventOutcome, ManagedAppEventPhase, ManagedAppObservabilityBinding,
+    ManagedAppObservabilityStats,
+};
 
 /// Executing bindings for the declarative manifest, separate from the legacy
 /// state-threaded lowering so existing application contracts remain intact.
@@ -58,8 +63,11 @@ mod managed_execution {
         AppSpecV1WorkUnitKind, BTreeMap, BTreeSet, Budget, CancelKind, CancelReason, ChildSpec, Cx,
         RegistryHandle, RuntimeState, SupervisorBuilder, runtime_restart_policy,
     };
+    use super::observability::ObservationCatalog;
     use super::resources::ResourceCatalog;
     use super::{
+        ManagedAppEvent, ManagedAppEventOutcome, ManagedAppEventPhase,
+        ManagedAppObservabilityBinding, ManagedAppObservabilityStats,
         ManagedAppResourceBinding, ManagedAppResourceError, ManagedAppResourceRequirement,
         ManagedAppResources,
     };
@@ -205,11 +213,14 @@ mod managed_execution {
     /// Legacy binding entry points retain their refusal of route/job SLO-hook
     /// references. This catalog requires exactly one implementation for every
     /// declared hook; it also applies target-only declarations to their exact
-    /// work units and can carry the existing explicit typed resource bindings.
+    /// work units. Declared observability sinks similarly require exact named
+    /// adapters. The catalog can carry explicit typed resource bindings for
+    /// both work units and their lifecycle sinks.
     #[derive(Default)]
     pub struct ManagedAppAdapters {
         slo_hooks: Vec<ManagedAppSloBinding>,
         resources: Option<Vec<ManagedAppResourceBinding>>,
+        observability: Vec<ManagedAppObservabilityBinding>,
     }
 
     impl ManagedAppAdapters {
@@ -230,6 +241,14 @@ mod managed_execution {
         #[must_use]
         pub fn resources(mut self, bindings: Vec<ManagedAppResourceBinding>) -> Self {
             self.resources = Some(bindings);
+            self
+        }
+
+        /// Bind one declared lifecycle sink. All names and kinds must match;
+        /// callback authority and typed resources follow the sink declaration.
+        #[must_use]
+        pub fn observability(mut self, binding: ManagedAppObservabilityBinding) -> Self {
+            self.observability.push(binding);
             self
         }
     }
@@ -737,43 +756,54 @@ mod managed_execution {
         signal: Option<SignalReceiver>,
         cleanup: WorkCleanup,
         resource_capabilities: Vec<AppCxCapabilityV1>,
+        observability: Option<Arc<ObservationCatalog>>,
+    }
+
+    pub(super) fn validate_required_capabilities(
+        name: &str,
+        required: &AppRequiredCapabilitiesV1,
+        resource_capabilities: &[AppCxCapabilityV1],
+        cx: &Cx,
+    ) -> Result<(), ManagedAppBindError> {
+        let caps = cx.capabilities();
+        for capability in &required.cx_capabilities {
+            let present = match capability {
+                AppCxCapabilityV1::Pure | AppCxCapabilityV1::Trace => true,
+                AppCxCapabilityV1::Spawn => caps.spawn,
+                AppCxCapabilityV1::Time => caps.time && cx.timer_driver().is_some(),
+                AppCxCapabilityV1::Entropy => caps.entropy,
+                AppCxCapabilityV1::Io | AppCxCapabilityV1::Net => {
+                    caps.io && cx.io_driver_handle().is_some()
+                }
+                AppCxCapabilityV1::Remote => caps.remote && cx.has_remote(),
+                AppCxCapabilityV1::Registry => cx.registry_handle().is_some(),
+                AppCxCapabilityV1::Blocking => caps.spawn && cx.blocking_pool_handle().is_some(),
+                // These families need an explicitly supplied, kind-matched
+                // named handle. Independent driver checks still apply.
+                AppCxCapabilityV1::Database
+                | AppCxCapabilityV1::Messaging
+                | AppCxCapabilityV1::Tls
+                | AppCxCapabilityV1::Quic
+                | AppCxCapabilityV1::BrowserHost => resource_capabilities.contains(capability),
+            };
+            if !present {
+                return Err(ManagedAppBindError::Capability {
+                    unit: name.to_owned(),
+                    capability: capability.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     impl WorkPolicy {
         fn validate_runtime(&self, cx: &Cx) -> Result<(), ManagedAppBindError> {
-            let caps = cx.capabilities();
-            for capability in &self.required.cx_capabilities {
-                let present = match capability {
-                    AppCxCapabilityV1::Pure | AppCxCapabilityV1::Trace => true,
-                    AppCxCapabilityV1::Spawn => caps.spawn,
-                    AppCxCapabilityV1::Time => caps.time && cx.timer_driver().is_some(),
-                    AppCxCapabilityV1::Entropy => caps.entropy,
-                    AppCxCapabilityV1::Io | AppCxCapabilityV1::Net => {
-                        caps.io && cx.io_driver_handle().is_some()
-                    }
-                    AppCxCapabilityV1::Remote => caps.remote && cx.has_remote(),
-                    AppCxCapabilityV1::Registry => cx.registry_handle().is_some(),
-                    AppCxCapabilityV1::Blocking => {
-                        caps.spawn && cx.blocking_pool_handle().is_some()
-                    }
-                    // These families have no generic Cx driver bit. Only an
-                    // explicitly supplied, kind-matched named handle admits
-                    // them. Independent Io/Time/Spawn/etc checks still apply.
-                    AppCxCapabilityV1::Database
-                    | AppCxCapabilityV1::Messaging
-                    | AppCxCapabilityV1::Tls
-                    | AppCxCapabilityV1::Quic
-                    | AppCxCapabilityV1::BrowserHost => {
-                        self.resource_capabilities.contains(capability)
-                    }
-                };
-                if !present {
-                    return Err(ManagedAppBindError::Capability {
-                        unit: self.name.clone(),
-                        capability: capability.clone(),
-                    });
-                }
-            }
+            validate_required_capabilities(
+                &self.name,
+                &self.required,
+                &self.resource_capabilities,
+                cx,
+            )?;
             if (self.interval.is_some()
                 || cx.budget().deadline.is_some()
                 || self
@@ -898,39 +928,74 @@ mod managed_execution {
             Ok(spec)
         }
 
-        fn restrict(&self, mut cx: Cx, registry: Option<RegistryHandle>) -> Cx {
-            use cap::CapSetRuntimeMask;
-            let has = |wanted| self.required.cx_capabilities.contains(&wanted);
-            let mut mask = cap::CapMask::all();
-            if !has(AppCxCapabilityV1::Spawn) && !has(AppCxCapabilityV1::Blocking) {
-                mask = mask.intersect(<cap::CapSet<false, true, true, true, true>>::MASK);
-            }
-            if !has(AppCxCapabilityV1::Time) {
-                mask = mask.intersect(<cap::CapSet<true, false, true, true, true>>::MASK);
-            }
-            if !has(AppCxCapabilityV1::Entropy) {
-                mask = mask.intersect(<cap::CapSet<true, true, false, true, true>>::MASK);
-            }
-            if !has(AppCxCapabilityV1::Io) && !has(AppCxCapabilityV1::Net) {
-                mask = mask.intersect(<cap::CapSet<true, true, true, false, true>>::MASK);
-            }
-            if !has(AppCxCapabilityV1::Remote) {
-                mask = mask.intersect(<cap::CapSet<true, true, true, true, false>>::MASK);
-            }
-            cx.runtime_mask = cx.runtime_mask.intersect(mask);
-            // Spawn and blocking-pool access are separate AppSpec grants.
-            // Removing only the spawn bit cannot isolate a Spawn-only unit;
-            // detach the handle so its ambient context and descendants also
-            // retain the narrower authority.
-            if !has(AppCxCapabilityV1::Blocking) {
-                cx = cx.with_blocking_pool_handle(None);
-            }
-            cx.with_registry_handle(if has(AppCxCapabilityV1::Registry) {
-                registry
-            } else {
-                None
-            })
+        fn restrict(&self, cx: Cx, registry: Option<RegistryHandle>) -> Cx {
+            restrict_required_capabilities(&self.required, cx, registry)
         }
+
+        fn observe(
+            &self,
+            owner: &Cx,
+            generation: Option<ManagedGeneration>,
+            phase: ManagedAppEventPhase,
+            describe: impl FnOnce(&mut ManagedAppEvent),
+        ) {
+            if let Some(observers) = &self.observability {
+                let mut event = ManagedAppEvent {
+                    unit: self.name.clone(),
+                    kind: self.kind.clone(),
+                    generation,
+                    phase,
+                    at: owner.now_for_observability(),
+                    region: None,
+                    task: None,
+                    outcome: None,
+                    region_outcome: None,
+                    cleanup_outcome: None,
+                    descendant_panicked: false,
+                    http_status: None,
+                };
+                describe(&mut event);
+                observers.emit(owner, &event);
+            }
+        }
+    }
+
+    pub(super) fn restrict_required_capabilities(
+        required: &AppRequiredCapabilitiesV1,
+        mut cx: Cx,
+        registry: Option<RegistryHandle>,
+    ) -> Cx {
+        use cap::CapSetRuntimeMask;
+        let has = |wanted| required.cx_capabilities.contains(&wanted);
+        let mut mask = cap::CapMask::all();
+        if !has(AppCxCapabilityV1::Spawn) && !has(AppCxCapabilityV1::Blocking) {
+            mask = mask.intersect(<cap::CapSet<false, true, true, true, true>>::MASK);
+        }
+        if !has(AppCxCapabilityV1::Time) {
+            mask = mask.intersect(<cap::CapSet<true, false, true, true, true>>::MASK);
+        }
+        if !has(AppCxCapabilityV1::Entropy) {
+            mask = mask.intersect(<cap::CapSet<true, true, false, true, true>>::MASK);
+        }
+        if !has(AppCxCapabilityV1::Io) && !has(AppCxCapabilityV1::Net) {
+            mask = mask.intersect(<cap::CapSet<true, true, true, false, true>>::MASK);
+        }
+        if !has(AppCxCapabilityV1::Remote) {
+            mask = mask.intersect(<cap::CapSet<true, true, true, true, false>>::MASK);
+        }
+        cx.runtime_mask = cx.runtime_mask.intersect(mask);
+        // Spawn and blocking-pool access are separate AppSpec grants.
+        // Removing only the spawn bit cannot isolate a Spawn-only unit;
+        // detach the handle so its ambient context and descendants also
+        // retain the narrower authority.
+        if !has(AppCxCapabilityV1::Blocking) {
+            cx = cx.with_blocking_pool_handle(None);
+        }
+        cx.with_registry_handle(if has(AppCxCapabilityV1::Registry) {
+            registry
+        } else {
+            None
+        })
     }
 
     async fn poll_restricted<F: Future>(cx: &Cx, future: F) -> F::Output {
@@ -1024,20 +1089,40 @@ mod managed_execution {
                 let spec = match self.policy.admission_spec(&owner, None) {
                     Ok(spec) => spec,
                     Err(WorkAdmissionFailure::Rejected { .. }) => {
+                        self.policy.observe(&owner, None, ManagedAppEventPhase::AdmissionRejected, |event| {
+                            event.outcome = Some(ManagedAppEventOutcome::Rejected);
+                            event.http_status = Some(503);
+                        });
                         return Response::empty(StatusCode::SERVICE_UNAVAILABLE);
                     }
                     Err(WorkAdmissionFailure::Panicked(_)) => {
+                        self.policy.observe(&owner, None, ManagedAppEventPhase::AdmissionRejected, |event| {
+                            event.outcome = Some(ManagedAppEventOutcome::Panicked);
+                            event.http_status = Some(500);
+                        });
                         return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
                     }
                 };
                 let region = match owner.open_child_region(spec).await {
                     Ok(region) => region,
-                    Err(_) => return Response::empty(StatusCode::SERVICE_UNAVAILABLE),
+                    Err(_) => {
+                        self.policy.observe(&owner, None, ManagedAppEventPhase::AdmissionRejected, |event| {
+                            event.outcome = Some(ManagedAppEventOutcome::Failed);
+                            event.http_status = Some(503);
+                        });
+                        return Response::empty(StatusCode::SERVICE_UNAVAILABLE);
+                    }
                 };
                 let policy = Arc::clone(&self.policy);
                 let handler = Arc::clone(&self.handler);
                 let registry = owner.registry_handle();
+                let region_id = region.region_id();
+                let observation_owner = owner.clone();
                 let spawned = region.cx().spawn(move |cx| async move {
+                    policy.observe(&observation_owner, None, ManagedAppEventPhase::Started, |event| {
+                        event.region = Some(cx.region_id());
+                        event.task = Some(cx.task_id());
+                    });
                     let restricted = policy.restrict(cx, registry);
                     let future = {
                         let _current = Cx::set_current(Some(restricted.clone()));
@@ -1045,21 +1130,70 @@ mod managed_execution {
                     };
                     poll_restricted(&restricted, future).await
                 });
+                let task_id = spawned.as_ref().ok().map(TaskHandle::task_id);
                 let result = match spawned {
                     Ok(mut task) => join_work(&mut task, &region, &requester).await,
                     Err(_) => Err(JoinError::Cancelled(CancelReason::resource_unavailable())),
                 };
-                let clean = region.close_with_outcome().await.is_ok_and(|closed| {
-                    closed
-                        .cleanup_outcome
-                        .is_none_or(|outcome| matches!(outcome, Outcome::Ok(())))
-                });
-                if clean {
+                let mut outcome = match &result {
+                    Ok(response) if response.status.as_u16() < 400 => ManagedAppEventOutcome::Succeeded,
+                    Ok(_) => ManagedAppEventOutcome::Failed,
+                    Err(JoinError::Panicked(_)) => ManagedAppEventOutcome::Panicked,
+                    Err(JoinError::Cancelled(_)) if task_id.is_some() => ManagedAppEventOutcome::Cancelled,
+                    Err(_) => ManagedAppEventOutcome::Failed,
+                };
+                let mut phase = ManagedAppEventPhase::CloseFailed;
+                let mut region_outcome = None;
+                let mut cleanup_outcome = None;
+                let mut descendant_panicked = false;
+                let clean = match region.close_with_outcome().await {
+                    Ok(closed) => {
+                        phase = ManagedAppEventPhase::Finished;
+                        region_outcome = Some(event_outcome(&closed.outcome));
+                        cleanup_outcome = closed.cleanup_outcome.as_ref().map(event_outcome);
+                        descendant_panicked = closed.descendant_panic.is_some();
+                        match closed.cleanup_outcome {
+                            None | Some(Outcome::Ok(())) => true,
+                            Some(cleanup) => {
+                                if outcome != ManagedAppEventOutcome::Panicked {
+                                    outcome = event_outcome(&cleanup);
+                                }
+                                false
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        if outcome != ManagedAppEventOutcome::Panicked {
+                            outcome = ManagedAppEventOutcome::Failed;
+                        }
+                        false
+                    }
+                };
+                let response = if clean {
                     result.unwrap_or_else(|_| Response::empty(StatusCode::INTERNAL_SERVER_ERROR))
                 } else {
                     Response::empty(StatusCode::INTERNAL_SERVER_ERROR)
-                }
+                };
+                self.policy.observe(&owner, None, phase, |event| {
+                    event.region = Some(region_id);
+                    event.task = task_id;
+                    event.outcome = Some(outcome);
+                    event.region_outcome = region_outcome;
+                    event.cleanup_outcome = cleanup_outcome;
+                    event.descendant_panicked = descendant_panicked;
+                    event.http_status = Some(response.status.as_u16());
+                });
+                response
             })
+        }
+    }
+
+    fn event_outcome<T, E>(outcome: &Outcome<T, E>) -> ManagedAppEventOutcome {
+        match outcome {
+            Outcome::Ok(_) => ManagedAppEventOutcome::Succeeded,
+            Outcome::Err(_) => ManagedAppEventOutcome::Failed,
+            Outcome::Cancelled(_) => ManagedAppEventOutcome::Cancelled,
+            Outcome::Panicked(_) => ManagedAppEventOutcome::Panicked,
         }
     }
 
@@ -1122,23 +1256,42 @@ mod managed_execution {
             let spec = match policy.admission_spec(&owner, Some(generation)) {
                 Ok(spec) => spec,
                 Err(WorkAdmissionFailure::Rejected { hook, reason }) => {
+                    policy.observe(&owner, Some(generation), ManagedAppEventPhase::AdmissionRejected, |event| {
+                        event.outcome = Some(ManagedAppEventOutcome::Rejected);
+                    });
                     return Outcome::Err(ManagedAppWorkError::SloRejected { hook, reason });
                 }
-                Err(WorkAdmissionFailure::Panicked(payload)) => return Outcome::Panicked(payload),
+                Err(WorkAdmissionFailure::Panicked(payload)) => {
+                    policy.observe(&owner, Some(generation), ManagedAppEventPhase::AdmissionRejected, |event| {
+                        event.outcome = Some(ManagedAppEventOutcome::Panicked);
+                    });
+                    return Outcome::Panicked(payload);
+                }
             };
             let region = match owner.open_child_region(spec).await {
                 Ok(region) => region,
-                Err(error) => return Outcome::Err(ManagedAppWorkError::Region(error)),
+                Err(error) => {
+                    policy.observe(&owner, Some(generation), ManagedAppEventPhase::AdmissionRejected, |event| {
+                        event.outcome = Some(ManagedAppEventOutcome::Failed);
+                    });
+                    return Outcome::Err(ManagedAppWorkError::Region(error));
+                }
             };
             let body_policy = Arc::clone(&policy);
             let body_factory = Arc::clone(&factory);
             let registry = owner.registry_handle();
+            let region_id = region.region_id();
+            let observation_owner = owner.clone();
             let task = region.cx().spawn(move |cx| async move {
                 let identity = ManagedGeneration {
                     number: generation.number,
                     region: cx.region_id(),
                     task: cx.task_id(),
                 };
+                body_policy.observe(&observation_owner, Some(generation), ManagedAppEventPhase::Started, |event| {
+                    event.region = Some(cx.region_id());
+                    event.task = Some(cx.task_id());
+                });
                 let restricted = body_policy.restrict(cx, registry);
                 let future = {
                     let _current = Cx::set_current(Some(restricted.clone()));
@@ -1146,6 +1299,7 @@ mod managed_execution {
                 };
                 poll_restricted(&restricted, future).await
             });
+            let task_id = task.as_ref().ok().map(TaskHandle::task_id);
             let mut outcome = match task {
                 Ok(mut task) => match join_work(&mut task, &region, &owner).await {
                     Ok(Outcome::Ok(())) => Outcome::Ok(()),
@@ -1160,8 +1314,16 @@ mod managed_execution {
                 },
                 Err(error) => Outcome::Err(ManagedAppWorkError::Spawn(error)),
             };
+            let mut phase = ManagedAppEventPhase::CloseFailed;
+            let mut region_outcome = None;
+            let mut cleanup_outcome = None;
+            let mut descendant_panicked = false;
             match region.close_with_outcome().await {
                 Ok(closed) => {
+                    phase = ManagedAppEventPhase::Finished;
+                    region_outcome = Some(event_outcome(&closed.outcome));
+                    cleanup_outcome = closed.cleanup_outcome.as_ref().map(event_outcome);
+                    descendant_panicked = closed.descendant_panic.is_some();
                     if let Some(cleanup) = closed.cleanup_outcome {
                         if !cleanup.is_ok() {
                             let retired = policy
@@ -1185,6 +1347,14 @@ mod managed_execution {
                 }
                 Err(_) => {}
             }
+            policy.observe(&owner, Some(generation), phase, |event| {
+                event.region = Some(region_id);
+                event.task = task_id;
+                event.outcome = Some(event_outcome(&outcome));
+                event.region_outcome = region_outcome;
+                event.cleanup_outcome = cleanup_outcome;
+                event.descendant_panicked = descendant_panicked;
+            });
             if (policy.interval.is_none() && policy.signal.is_none())
                 || !matches!(outcome, Outcome::Ok(()))
             {
@@ -1243,13 +1413,14 @@ mod managed_execution {
     /// Signal jobs require `ManagedAppBinding::signal_worker` with the exact
     /// declared source name. Named resources require the explicit typed
     /// resource entry point. SLO admission hooks require the opt-in adapter
-    /// binding entry point; observability sink adapters remain unsupported.
+    /// binding entry point, as do explicit lifecycle observability sinks.
     /// The legacy `compile_with_child_specs` and `CompiledApp::start` are unchanged.
     pub struct ManagedApp<E> {
         template: AppGroupTemplate<E>,
         router: Arc<Router>,
         policies: Vec<Arc<WorkPolicy>>,
         routes: Vec<RouteSlot>,
+        observability: Option<Arc<ObservationCatalog>>,
     }
 
     impl<E: Send + 'static> ManagedApp<E> {
@@ -1263,6 +1434,9 @@ mod managed_execution {
             for policy in &self.policies {
                 policy.validate_runtime(cx)?;
             }
+            if let Some(observers) = &self.observability {
+                observers.validate_runtime(cx)?;
+            }
             Ok(())
         }
 
@@ -1270,6 +1444,12 @@ mod managed_execution {
         #[must_use]
         pub fn router(&self) -> Arc<Router> {
             Arc::clone(&self.router)
+        }
+
+        /// Snapshot bounded observer delivery and panic counts.
+        #[must_use]
+        pub fn observability_stats(&self) -> Vec<ManagedAppObservabilityStats> {
+            self.observability.as_ref().map_or_else(Vec::new, |o| o.stats())
         }
 
         /// Run until every worker stops or the owner requests cancellation.
@@ -1299,6 +1479,7 @@ mod managed_execution {
                 controller,
                 router: self.router,
                 routes: self.routes,
+                observability: self.observability,
             })
         }
     }
@@ -1311,9 +1492,16 @@ mod managed_execution {
         controller: ManagedSupervisorHandle<ManagedAppWorkError<E>>,
         router: Arc<Router>,
         routes: Vec<RouteSlot>,
+        observability: Option<Arc<ObservationCatalog>>,
     }
 
     impl<E> ManagedAppHandle<E> {
+        /// Snapshot delivery counts, including after controller join.
+        #[must_use]
+        pub fn observability_stats(&self) -> Vec<ManagedAppObservabilityStats> {
+            self.observability.as_ref().map_or_else(Vec::new, |o| o.stats())
+        }
+
         /// Router backed by this application's live route generations.
         #[must_use]
         pub fn router(&self) -> Arc<Router> {
@@ -1384,7 +1572,7 @@ mod managed_execution {
     ///
     /// Named resources require [`AppSpecV1::bind_managed_groups_with_resources`]
     /// or [`AppSpecV1::bind_managed_groups_with_adapters`]. The latter also binds
-    /// explicit SLO admission policies. Observability sinks remain unsupported.
+    /// explicit SLO admission policies and lifecycle observability sinks.
     /// Use [`AppSpecV1::bind_managed_groups`] for groups without these adapters.
     pub struct ManagedAppTree<E> {
         app: ManagedApp<E>,
@@ -1407,6 +1595,12 @@ mod managed_execution {
     }
 
     impl<E: Send + 'static> ManagedAppTree<E> {
+        /// Snapshot delivery counts shared across all groups and replacements.
+        #[must_use]
+        pub fn observability_stats(&self) -> Vec<ManagedAppObservabilityStats> {
+            self.app.observability_stats()
+        }
+
         /// Router covering routes from every group; inactive routes return 503.
         #[must_use]
         pub fn router(&self) -> Arc<Router> {
@@ -1441,6 +1635,12 @@ mod managed_execution {
     }
 
     impl<E> ManagedAppTreeHandle<E> {
+        /// Snapshot delivery counts, including after the complete tree drains.
+        #[must_use]
+        pub fn observability_stats(&self) -> Vec<ManagedAppObservabilityStats> {
+            self.app.observability_stats()
+        }
+
         /// Router shared by all current group generations.
         #[must_use]
         pub fn router(&self) -> Arc<Router> {
@@ -1484,7 +1684,7 @@ mod managed_execution {
         Ok(())
     }
 
-    fn feature_enabled(feature: &AppFeatureFlagV1) -> bool {
+    pub(super) fn feature_enabled(feature: &AppFeatureFlagV1) -> bool {
         match feature {
             AppFeatureFlagV1::NativeRuntime => cfg!(feature = "native-runtime"),
             AppFeatureFlagV1::WasmRuntime => cfg!(feature = "wasm-runtime"),
@@ -1521,7 +1721,7 @@ mod managed_execution {
         ) -> Result<ManagedApp<E>, ManagedAppBindError> {
             let configs = BTreeMap::from([(self.supervision.root_group.clone(), config)]);
             Ok(self
-                .bind_managed_impl(bindings, configs, false, None, None)?
+                .bind_managed_impl(bindings, configs, false, None, None, None)?
                 .app)
         }
 
@@ -1546,7 +1746,7 @@ mod managed_execution {
         ) -> Result<ManagedApp<E>, ManagedAppBindError> {
             let configs = BTreeMap::from([(self.supervision.root_group.clone(), config)]);
             Ok(self
-                .bind_managed_impl(bindings, configs, false, Some(resources), None)?
+                .bind_managed_impl(bindings, configs, false, Some(resources), None, None)?
                 .app)
         }
 
@@ -1561,7 +1761,7 @@ mod managed_execution {
             bindings: Vec<ManagedAppBinding<E>>,
             configs: BTreeMap<String, SupervisionConfig>,
         ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
-            self.bind_managed_impl(bindings, configs, true, None, None)
+            self.bind_managed_impl(bindings, configs, true, None, None, None)
         }
 
         /// Bind every group with the typed resource contract of
@@ -1575,7 +1775,7 @@ mod managed_execution {
             resources: Vec<ManagedAppResourceBinding>,
             configs: BTreeMap<String, SupervisionConfig>,
         ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
-            self.bind_managed_impl(bindings, configs, true, Some(resources), None)
+            self.bind_managed_impl(bindings, configs, true, Some(resources), None, None)
         }
 
         /// Bind a single group with explicit SLO admission adapters.
@@ -1593,7 +1793,10 @@ mod managed_execution {
         /// does not run in either case. Worker restart policy remains explicit:
         /// a permanent/transient worker may retry a rejection, bounded by its
         /// existing restart intensity. No rejected signal is silently replayed.
-        /// Observability sink declarations still require a future adapter.
+        /// Every declared observability sink also needs an exact name/kind
+        /// adapter. These synchronous observers see actual invocation starts,
+        /// terminal outcomes after cleanup, and admission refusals, under their
+        /// separately declared authority. They do not install global exporters.
         pub fn bind_managed_with_adapters<E: Send + 'static>(
             self,
             bindings: Vec<ManagedAppBinding<E>>,
@@ -1608,12 +1811,14 @@ mod managed_execution {
                     false,
                     adapters.resources,
                     Some(adapters.slo_hooks),
+                    Some(adapters.observability),
                 )?
                 .app)
         }
 
-        /// Bind a complete managed hierarchy with the same explicit SLO and
-        /// typed-resource contract as [`Self::bind_managed_with_adapters`].
+        /// Bind a complete managed hierarchy with the same explicit SLO,
+        /// observability, and typed-resource contract as
+        /// [`Self::bind_managed_with_adapters`].
         pub fn bind_managed_groups_with_adapters<E: Send + 'static>(
             self,
             bindings: Vec<ManagedAppBinding<E>>,
@@ -1626,6 +1831,7 @@ mod managed_execution {
                 true,
                 adapters.resources,
                 Some(adapters.slo_hooks),
+                Some(adapters.observability),
             )
         }
 
@@ -1637,6 +1843,7 @@ mod managed_execution {
             grouped: bool,
             resources: Option<Vec<ManagedAppResourceBinding>>,
             slo_bindings: Option<Vec<ManagedAppSloBinding>>,
+            observability_bindings: Option<Vec<ManagedAppObservabilityBinding>>,
         ) -> Result<ManagedAppTree<E>, ManagedAppBindError> {
             let plan = self.compiler_plan().map_err(ManagedAppBindError::Compile)?;
             let slo_catalog = slo_bindings
@@ -1715,15 +1922,26 @@ mod managed_execution {
                 .iter()
                 .map(|service| (service.name.clone(), service.resources.clone()))
                 .collect();
+            let observability = observability_bindings
+                .map(|bindings| {
+                    ObservationCatalog::bind(
+                        &self.observability,
+                        bindings,
+                        resource_catalog.as_ref(),
+                    )
+                    .map(Arc::new)
+                })
+                .transpose()?
+                .filter(|catalog| !catalog.is_empty());
             if (!grouped && plan.service_groups.len() != 1)
-                || !plan.observability_sinks.is_empty()
+                || (!plan.observability_sinks.is_empty() && observability.is_none())
             {
                 return Err(ManagedAppBindError::Unsupported {
                     unit: plan.app_name,
                     reason: if grouped {
-                        "explicit observability adapters are not yet supported"
+                        "observability sinks require explicit runtime adapters"
                     } else {
-                        "managed binding requires one group and explicit observability adapters are not yet supported"
+                        "managed binding requires one group and explicit observability adapters"
                     },
                 });
             }
@@ -1923,6 +2141,7 @@ mod managed_execution {
                     signal,
                     cleanup: Arc::new(Mutex::new(None)),
                     resource_capabilities,
+                    observability: observability.clone(),
                 });
                 let template = templates
                     .get_mut(&child.group)
@@ -2058,6 +2277,7 @@ mod managed_execution {
                     router: Arc::new(router),
                     policies,
                     routes,
+                    observability,
                 },
                 reports,
                 group_order,

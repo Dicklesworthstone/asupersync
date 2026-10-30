@@ -2943,3 +2943,516 @@ fn managed_app_slo_worker_panic_precedes_factory_and_drains_controller() {
         });
     }
 }
+
+mod managed_observability {
+    use super::*;
+    use asupersync::app::{
+        AppObservabilitySinkKindV1 as SinkKind, ManagedAppEvent, ManagedAppEventOutcome as ResultKind,
+        ManagedAppEventPhase as Phase, ManagedAppObservabilityBinding as Observer,
+        ManagedAppResourceBinding, ManagedAppResourceError, ManagedAppResourceRequirement as Requires,
+    };
+    use std::sync::Mutex;
+
+    fn sink(name: &str, kind: &str, capabilities: Value) -> Value {
+        json!({
+            "name": name, "kind": kind,
+            "required_capabilities": {
+                "cx_capabilities": capabilities, "feature_flags": [], "resources": []
+            }
+        })
+    }
+
+    fn route_manifest() -> Value {
+        let mut manifest = manifest_json();
+        manifest["services"][0]["actors"] = json!([]);
+        manifest["observability"] = json!([sink("events", "trace", json!(["pure"]))]);
+        manifest
+    }
+
+    fn routes() -> Vec<ManagedAppBinding<&'static str>> {
+        vec![ManagedAppBinding::route(
+            "api.route.health",
+            AsyncCxFnHandler::new(|_: Cx| async { Response::empty(StatusCode::OK) }),
+        )]
+    }
+
+    fn assert_observer_context(cx: &Cx, time: bool) {
+        let caps = cx.capabilities();
+        assert!(!caps.spawn && !caps.entropy && !caps.io && !caps.remote);
+        assert_eq!(caps.time, time);
+        assert_eq!(cx.timer_driver().is_some(), time);
+        assert!(cx.blocking_pool_handle().is_none());
+        assert!(cx.registry_handle().is_none());
+        let ambient = Cx::current().expect("observer has explicit ambient context");
+        assert_eq!(ambient.task_id(), cx.task_id());
+        assert_eq!(ambient.region_id(), cx.region_id());
+        assert!(!ambient.capabilities().spawn && !ambient.capabilities().io);
+        assert_eq!(ambient.capabilities().time, time);
+    }
+
+    #[test]
+    fn catalog_requires_exact_sinks_and_preserves_legacy_refusal() {
+        let observer = || Observer::new("events", SinkKind::Trace, |_, _| {});
+        assert!(matches!(
+            parse(route_manifest()).bind_managed(routes(), config()),
+            Err(ManagedAppBindError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            parse(route_manifest()).bind_managed_with_adapters(
+                routes(), ManagedAppAdapters::new(), config()),
+            Err(ManagedAppBindError::Missing(name)) if name == "observability:events"
+        ));
+        assert!(matches!(
+            parse(route_manifest()).bind_managed_with_adapters(
+                routes(), ManagedAppAdapters::new().observability(observer()).observability(observer()), config()),
+            Err(ManagedAppBindError::Duplicate(name)) if name == "observability:events"
+        ));
+        assert!(matches!(
+            parse(route_manifest()).bind_managed_with_adapters(
+                routes(), ManagedAppAdapters::new().observability(
+                    Observer::new("events", SinkKind::Metrics, |_, _| {})), config()),
+            Err(ManagedAppBindError::KindMismatch(name)) if name == "observability:events"
+        ));
+        assert!(matches!(
+            parse(route_manifest()).bind_managed_with_adapters(
+                routes(), ManagedAppAdapters::new().observability(observer()).observability(
+                    Observer::new("extra", SinkKind::Evidence, |_, _| {})), config()),
+            Err(ManagedAppBindError::Unexpected(name)) if name == "observability:extra"
+        ));
+    }
+
+    #[test]
+    fn missing_sink_authority_refuses_before_any_factory_or_observer_runs() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                let mut manifest = route_manifest();
+                manifest["observability"][0]["required_capabilities"]["cx_capabilities"] =
+                    json!(["remote"]);
+                let calls = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::clone(&calls);
+                let app = parse(manifest).bind_managed_with_adapters(
+                    routes(),
+                    ManagedAppAdapters::new().observability(Observer::new(
+                        "events", SinkKind::Trace, move |_, _| {
+                            observed.fetch_add(1, Ordering::AcqRel);
+                        })),
+                    config(),
+                ).unwrap();
+                let router = app.router();
+                assert!(matches!(app.start(&cx), Err(ManagedAppBindError::Capability {
+                    unit, capability: asupersync::app::AppCxCapabilityV1::Remote
+                }) if unit == "observability:events"));
+                assert_eq!(router.handle_with_cx(&cx, Request::new("GET", "/health")).await.status,
+                    StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(calls.load(Ordering::Acquire), 0);
+            });
+        }
+    }
+
+    struct Dropped(Arc<AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    struct ObserverPanicPayload(Arc<AtomicUsize>);
+    impl Drop for ObserverPanicPayload {
+        fn drop(&mut self) {
+            let ambient = Cx::current().expect("panic payload retains observer context");
+            assert_observer_context(&ambient, false);
+            self.0.fetch_add(1, Ordering::AcqRel);
+            panic!("observer panic payload destructor");
+        }
+    }
+
+    async fn lifecycle_scenario(cx: Cx) {
+        use asupersync::observability::{LogCollector, LogEntry, Metrics};
+
+        let mut manifest = manifest_json();
+        manifest["observability"] = json!([
+            sink("panic", "trace", json!(["pure"])),
+            sink("logs", "trace", json!(["trace"])),
+            sink("counts", "metrics", json!(["time"])),
+            sink("evidence", "evidence", json!(["pure"]))
+        ]);
+        let events = Arc::new(Mutex::new(Vec::<ManagedAppEvent>::new()));
+        let records = Arc::clone(&events);
+        let collector = LogCollector::new(32);
+        let logs = collector.clone();
+        let counter = Metrics::new().counter("app.boundaries");
+        let metric = Arc::clone(&counter);
+        let starts = Arc::new(AtomicUsize::new(0));
+        let started = Arc::clone(&starts);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::clone(&drops);
+        let retired = Arc::clone(&drops);
+        let panic_drops = Arc::new(AtomicUsize::new(0));
+        let panic_payload_drops = Arc::clone(&panic_drops);
+        let parked = Arc::new(AtomicBool::new(false));
+        let waiting = Arc::clone(&parked);
+        let app = parse(manifest).bind_managed_with_adapters(
+            vec![
+                ManagedAppBinding::route("api.route.health", AsyncCxFnHandler::new(|cx: Cx| {
+                    assert!(!cx.capabilities().time && !cx.capabilities().spawn);
+                    async { Response::new(StatusCode::BAD_REQUEST, "typed response survives observers") }
+                })),
+                ManagedAppBinding::worker("api.actor.cache", ManagedRestartMode::Transient,
+                    move |cx: Cx, _: ManagedGeneration| {
+                        let attempt = started.fetch_add(1, Ordering::AcqRel);
+                        let dropped = Arc::clone(&dropped);
+                        let waiting = Arc::clone(&waiting);
+                        async move {
+                            let _drop = Dropped(dropped);
+                            if attempt == 0 {
+                                return Outcome::Err("restart after exact domain error");
+                            }
+                            let mut cancelled = std::pin::pin!(cx.cancelled());
+                            poll_fn(|task| {
+                                let result = cancelled.as_mut().poll(task);
+                                if result.is_pending() {
+                                    waiting.store(true, Ordering::Release);
+                                }
+                                result
+                            }).await;
+                            let _ = cx.checkpoint();
+                            Outcome::Cancelled(cx.cancel_reason().unwrap())
+                        }
+                    }),
+            ],
+            ManagedAppAdapters::new()
+                .observability(Observer::new("panic", SinkKind::Trace, move |_, _| {
+                    std::panic::panic_any(ObserverPanicPayload(Arc::clone(&panic_payload_drops)));
+                }))
+                .observability(Observer::new("logs", SinkKind::Trace, move |cx, event| {
+                    assert_observer_context(cx, false);
+                    logs.log(LogEntry::info(format!("{} {:?}", event.unit, event.phase)));
+                }))
+                .observability(Observer::new("counts", SinkKind::Metrics, move |cx, _| {
+                    // A Pure work unit does not mask its separately authorized sink.
+                    assert_observer_context(cx, true);
+                    metric.increment();
+                }))
+                .observability(Observer::new("evidence", SinkKind::Evidence, move |cx, event| {
+                    assert_observer_context(cx, false);
+                    if event.unit == "api.actor.cache" && event.phase == Phase::Finished {
+                        assert!(retired.load(Ordering::Acquire)
+                            >= usize::try_from(event.generation.unwrap().number).unwrap());
+                    }
+                    records.lock().unwrap().push(event.clone());
+                })),
+            config(),
+        ).unwrap();
+        let router = app.router();
+        let mut app = app.start(&cx).unwrap();
+        while !app.routes_ready() || !parked.load(Ordering::Acquire) {
+            yield_now().await;
+        }
+        let response = router.handle_with_cx(&cx, Request::new("GET", "/health")).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        app.abort();
+        let report = app.join().await.unwrap();
+        assert_eq!(report.restart_batches, 1);
+        assert_eq!(report.started, report.joined);
+        assert_eq!(starts.load(Ordering::Acquire), 2);
+        assert_eq!(drops.load(Ordering::Acquire), 2);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 6);
+        assert_eq!(collector.len(), 6);
+        assert_eq!(counter.get(), 6);
+        for start in events.iter().filter(|event| event.phase == Phase::Started) {
+            let finish = events.iter().find(|event| {
+                event.phase == Phase::Finished && event.region == start.region
+            }).unwrap();
+            assert_eq!(finish.task, start.task);
+            assert!(finish.at >= start.at);
+        }
+        let finished: Vec<_> = events.iter().filter(|event| event.phase == Phase::Finished).collect();
+        assert!(finished.iter().any(|event| event.unit == "api.route.health"
+            && event.outcome == Some(ResultKind::Failed) && event.http_status == Some(400)));
+        assert!(finished.iter().any(|event| event.generation.is_some_and(|g| g.number == 1)
+            && event.outcome == Some(ResultKind::Failed)));
+        assert!(finished.iter().any(|event| event.generation.is_some_and(|g| g.number == 2)
+            && event.outcome == Some(ResultKind::Cancelled)));
+        let stats = app.observability_stats();
+        assert_eq!(stats.len(), 4);
+        for stat in stats {
+            if stat.name == "panic" {
+                assert!(stat.disabled);
+                assert!((1..=6).contains(&stat.attempted));
+                assert_eq!((stat.delivered, stat.panicked), (0, stat.attempted));
+                assert_eq!(u64::try_from(panic_drops.load(Ordering::Acquire)).unwrap(), stat.panicked);
+            } else {
+                assert!(!stat.disabled);
+                assert_eq!(stat.attempted, 6);
+                assert_eq!((stat.delivered, stat.panicked), (6, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn adapters_observe_real_routes_restarts_and_cancelled_cleanup_on_native_workers() {
+        for workers in [1, 2] {
+            native(workers, lifecycle_scenario);
+        }
+    }
+
+    #[test]
+    fn admission_refusal_and_panic_emit_no_false_work_start() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                for panics in [false, true] {
+                    let mut manifest = manifest_json();
+                    manifest["services"][0]["routes"] = json!([]);
+                    manifest["slo_hooks"] = json!([{
+                        "name": "admission", "kind": "saturation", "target": "api.actor.cache"
+                    }]);
+                    manifest["observability"] = json!([sink("events", "evidence", json!(["pure"]))]);
+                    let events = Arc::new(Mutex::new(Vec::new()));
+                    let records = Arc::clone(&events);
+                    let work = Arc::new(AtomicUsize::new(0));
+                    let work_calls = Arc::clone(&work);
+                    let app = parse(manifest).bind_managed_with_adapters(
+                        vec![ManagedAppBinding::worker("api.actor.cache", ManagedRestartMode::Temporary,
+                            move |_: Cx, _| {
+                                work_calls.fetch_add(1, Ordering::AcqRel);
+                                async { Outcome::<(), &'static str>::Ok(()) }
+                            })],
+                        ManagedAppAdapters::new()
+                            .slo_hook(ManagedAppSloBinding::new("admission", AppSloHookKindV1::Saturation,
+                                "api.actor.cache", move |_, _| {
+                                    if panics { panic!("policy panic remains the result"); }
+                                    ManagedAppSloDecision::Reject("saturated".to_owned())
+                                }))
+                            .observability(Observer::new("events", SinkKind::Evidence, move |_, event| {
+                                records.lock().unwrap().push(event.clone());
+                            })),
+                        config(),
+                    ).unwrap();
+                    let mut app = app.start(&cx).unwrap();
+                    let report = app.join().await.unwrap();
+                    assert_eq!(work.load(Ordering::Acquire), 0, "refused factory ran");
+                    if panics {
+                        assert!(matches!(&report.children[0].outcome, Outcome::Panicked(payload)
+                            if payload.message() == "policy panic remains the result"));
+                    } else {
+                        assert!(matches!(&report.children[0].outcome,
+                            Outcome::Err(ManagedAppWorkError::SloRejected { reason, .. }) if reason == "saturated"));
+                    }
+                    let events = events.lock().unwrap();
+                    assert_eq!(events.len(), 1);
+                    assert_eq!(events[0].phase, Phase::AdmissionRejected);
+                    assert_eq!(events[0].outcome, Some(if panics { ResultKind::Panicked } else { ResultKind::Rejected }));
+                    assert!(events[0].region.is_none() && events[0].task.is_none());
+                    assert_eq!(app.observability_stats()[0].delivered, 1);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn observers_follow_each_background_trigger_invocation() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                for trigger in ["startup", "interval", "signal"] {
+                    let mut manifest = signal_job_manifest();
+                    manifest["services"][0]["background_jobs"][0]["trigger"] = match trigger {
+                        "startup" => json!("startup"),
+                        "interval" => json!({"interval": {"every_ms": 1}}),
+                        _ => json!({"signal": {"source": "reload"}}),
+                    };
+                    manifest["slo_hooks"] = json!([{
+                        "name":"limit", "kind":"throughput", "target":"api.job.reload"
+                    }]);
+                    manifest["observability"] = json!([sink("events", "evidence", json!(["pure"]))]);
+                    let events = Arc::new(Mutex::new(Vec::new()));
+                    let records = Arc::clone(&events);
+                    let admissions = Arc::new(AtomicUsize::new(0));
+                    let count = Arc::clone(&admissions);
+                    let factory = |_: Cx, _: ManagedGeneration| async { Outcome::<(), &'static str>::Ok(()) };
+                    let (sender, receiver) = asupersync::channel::mpsc::channel(3);
+                    sender.try_send(()).unwrap();
+                    sender.try_send(()).unwrap();
+                    let binding = if trigger == "signal" {
+                        ManagedAppBinding::signal_worker("api.job.reload", "reload", receiver,
+                            ManagedRestartMode::Temporary, factory)
+                    } else {
+                        drop(receiver);
+                        ManagedAppBinding::worker("api.job.reload", ManagedRestartMode::Temporary, factory)
+                    };
+                    let app = parse(manifest).bind_managed_with_adapters(vec![binding],
+                        ManagedAppAdapters::new()
+                            .slo_hook(ManagedAppSloBinding::new("limit", AppSloHookKindV1::Throughput,
+                                "api.job.reload", move |_, _| {
+                                    if count.fetch_add(1, Ordering::AcqRel) == 0 {
+                                        ManagedAppSloDecision::Admit(Budget::INFINITE)
+                                    } else {
+                                        ManagedAppSloDecision::Reject("stop this trigger".to_owned())
+                                    }
+                                }))
+                            .observability(Observer::new("events", SinkKind::Evidence, move |_, event| {
+                                records.lock().unwrap().push(event.clone());
+                            })),
+                        config()).unwrap();
+                    let mut app = app.start(&cx).unwrap();
+                    app.join().await.unwrap();
+                    let events = events.lock().unwrap();
+                    assert_eq!(events.len(), if trigger == "startup" { 2 } else { 3 });
+                    assert_eq!(events[0].phase, Phase::Started);
+                    assert_eq!(events[1].phase, Phase::Finished);
+                    assert_eq!(events[1].outcome, Some(ResultKind::Succeeded));
+                    assert_eq!(events[0].region, events[1].region);
+                    if trigger != "startup" {
+                        assert_eq!(events[2].phase, Phase::AdmissionRejected);
+                        assert_eq!(events[2].outcome, Some(ResultKind::Rejected));
+                        assert!(events[2].region.is_none());
+                    }
+                    assert!(events.iter().all(|event| event.kind == asupersync::app::AppSpecV1WorkUnitKind::BackgroundJob));
+                    assert_eq!(app.observability_stats()[0].panicked, 0);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn sink_resources_are_typed_and_physically_scoped() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                let mut manifest = route_manifest();
+                manifest["resources"] = json!([
+                    {"name":"events", "kind":"memory", "capability":"trace"},
+                    {"name":"hidden", "kind":"memory", "capability":"trace"}
+                ]);
+                manifest["observability"][0]["required_capabilities"]["cx_capabilities"] = json!(["trace"]);
+                manifest["observability"][0]["required_capabilities"]["resources"] = json!(["events"]);
+                let spec = parse(manifest);
+                let count = Arc::new(AtomicUsize::new(0));
+                let hidden_drops = Arc::new(AtomicUsize::new(0));
+                let resources = vec![
+                    ManagedAppResourceBinding::new(spec.resources[0].clone(), Arc::clone(&count)),
+                    ManagedAppResourceBinding::new(spec.resources[1].clone(), Dropped(Arc::clone(&hidden_drops))),
+                ];
+                let observer = Observer::with_resources("events", SinkKind::Trace,
+                    vec![Requires::of::<Arc<AtomicUsize>>("events")], |cx, _, resources| {
+                        assert_observer_context(cx, false);
+                        assert_eq!(resources.names().collect::<Vec<_>>(), vec!["events"]);
+                        assert!(matches!(resources.get::<Dropped>("hidden"), Err(ManagedAppResourceError::Undeclared(_))));
+                        resources.get::<Arc<AtomicUsize>>("events").unwrap().fetch_add(1, Ordering::AcqRel);
+                    });
+                let app = spec.bind_managed_with_adapters(routes(),
+                    ManagedAppAdapters::new().resources(resources).observability(observer), config()).unwrap();
+                assert_eq!(hidden_drops.load(Ordering::Acquire), 1, "sink retained the whole catalog");
+                let router = app.router();
+                let mut app = app.start(&cx).unwrap();
+                while !app.routes_ready() { yield_now().await; }
+                assert_eq!(router.handle_with_cx(&cx, Request::new("GET", "/health")).await.status, StatusCode::OK);
+                app.abort();
+                app.join().await.unwrap();
+                assert_eq!(count.load(Ordering::Acquire), 2);
+                assert_eq!(app.observability_stats()[0].panicked, 0);
+            });
+        }
+    }
+
+    #[test]
+    fn sink_resource_type_mismatch_is_a_preflight_error() {
+        let mut manifest = route_manifest();
+        manifest["resources"] = json!([
+            {"name":"events", "kind":"memory", "capability":"trace"}
+        ]);
+        manifest["observability"][0]["required_capabilities"]["cx_capabilities"] = json!(["trace"]);
+        manifest["observability"][0]["required_capabilities"]["resources"] = json!(["events"]);
+        for include_requirement in [false, true] {
+            let spec = parse(manifest.clone());
+            let resource = ManagedAppResourceBinding::new(spec.resources[0].clone(), 7_u32);
+            let requirements = if include_requirement {
+                vec![Requires::of::<AtomicUsize>("events")]
+            } else {
+                Vec::new()
+            };
+            let result = spec.bind_managed_with_adapters(routes(),
+                ManagedAppAdapters::new().resources(vec![resource]).observability(
+                    Observer::with_resources("events", SinkKind::Trace, requirements,
+                        |_, _, _| panic!("invalid resource adapter must never run"))),
+                config());
+            if include_requirement {
+                assert!(matches!(result, Err(ManagedAppBindError::Resource(
+                    ManagedAppResourceError::TypeMismatch { resource, .. })) if resource == "events"));
+            } else {
+                assert!(matches!(result, Err(ManagedAppBindError::Resource(
+                    ManagedAppResourceError::MissingRequirement { unit, resource }))
+                    if unit == "observability:events" && resource == "events"));
+            }
+        }
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn finished_event_follows_native_finalizers_and_reports_cleanup_panic() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                let runtime = asupersync::runtime::Runtime::current_handle().unwrap();
+                let parent = cx.open_child_region(signal_parent_spec()).await.unwrap();
+                let mut manifest = manifest_json();
+                manifest["services"][0]["routes"] = json!([]);
+                manifest["observability"] = json!([sink("events", "evidence", json!(["pure"]))]);
+                let (release, receiver) = asupersync::channel::oneshot::channel::<()>();
+                let receiver = Arc::new(Mutex::new(Some(receiver)));
+                let parked = Arc::new(AtomicBool::new(false));
+                let waiting = Arc::clone(&parked);
+                let events = Arc::new(Mutex::new(Vec::<ManagedAppEvent>::new()));
+                let records = Arc::clone(&events);
+                let finalized = Arc::new(AtomicUsize::new(0));
+                let observed_finalizer = Arc::clone(&finalized);
+                let app = parse(manifest).bind_managed_with_adapters(
+                    vec![ManagedAppBinding::worker("api.actor.cache", ManagedRestartMode::Temporary,
+                        move |cx: Cx, _| {
+                            let mut receiver = receiver.lock().unwrap().take().unwrap();
+                            let waiting = Arc::clone(&waiting);
+                            async move {
+                                let mut receive = std::pin::pin!(receiver.recv(&cx));
+                                poll_fn(|task| {
+                                    let result = receive.as_mut().poll(task);
+                                    if result.is_pending() { waiting.store(true, Ordering::Release); }
+                                    result
+                                }).await.unwrap();
+                                Outcome::<(), &'static str>::Ok(())
+                            }
+                        })],
+                    ManagedAppAdapters::new().observability(Observer::new(
+                        "events", SinkKind::Evidence, move |_, event| {
+                            if event.phase == Phase::Finished {
+                                assert_eq!(observed_finalizer.load(Ordering::Acquire), 1,
+                                    "terminal telemetry preceded owned finalization");
+                            }
+                            records.lock().unwrap().push(event.clone());
+                        })),
+                    config(),
+                ).unwrap();
+                let mut app = app.start(parent.cx()).unwrap();
+                while !parked.load(Ordering::Acquire) { yield_now().await; }
+                let region = events.lock().unwrap()[0].region.unwrap();
+                let finalizer_count = Arc::clone(&finalized);
+                assert!(runtime.register_sync_finalizer_for_testing(region, move || {
+                    finalizer_count.fetch_add(1, Ordering::AcqRel);
+                    panic!("observed native finalizer failure");
+                }));
+                release.send_blocking(()).unwrap();
+                let report = app.join().await.unwrap();
+                assert!(matches!(&report.children[0].outcome, Outcome::Panicked(_)));
+                {
+                    let events = events.lock().unwrap();
+                    assert_eq!(events.len(), 2);
+                    let finish = &events[1];
+                    assert_eq!(finish.phase, Phase::Finished);
+                    assert_eq!(finish.outcome, Some(ResultKind::Panicked));
+                    assert_eq!(finish.cleanup_outcome, Some(ResultKind::Panicked));
+                    assert_eq!(finish.region_outcome, Some(ResultKind::Panicked));
+                    assert!(finish.descendant_panicked);
+                }
+                assert_eq!(app.observability_stats()[0].panicked, 0);
+                parent.close().await.unwrap();
+            });
+        }
+    }
+}
