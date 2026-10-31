@@ -1151,6 +1151,10 @@ mod imp {
         /// retries the rearm so `Reactor::wake()` interruption is restored
         /// without discarding the completions of the failing cycle.
         wake_rearm_needed: AtomicBool,
+        #[cfg(test)]
+        before_wake_rearm: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        #[cfg(test)]
+        fail_wake_rearm: AtomicBool,
         buffer_pool: Mutex<Option<RegisteredBufferPool>>,
         fixed_buffer_probe: OnceLock<IoUringProbeOutcome>,
         provided_group_probe: OnceLock<IoUringProbeOutcome>,
@@ -1208,6 +1212,10 @@ mod imp {
                 wake_fd,
                 wake_pending: AtomicBool::new(false),
                 wake_rearm_needed: AtomicBool::new(false),
+                #[cfg(test)]
+                before_wake_rearm: Mutex::new(None),
+                #[cfg(test)]
+                fail_wake_rearm: AtomicBool::new(false),
                 buffer_pool: Mutex::new(None),
                 fixed_buffer_probe: OnceLock::new(),
                 provided_group_probe: OnceLock::new(),
@@ -1394,10 +1402,15 @@ mod imp {
             }
         }
 
-        fn rearm_wake_poll(&self) -> io::Result<()> {
-            let mut ring = self.ring.lock();
+        /// The caller keeps the ring locked from wake completion consumption
+        /// through rearm, so another poll cannot wait with no wake poll armed.
+        fn rearm_wake_poll(&self, ring: &mut IoUring) -> io::Result<()> {
+            #[cfg(test)]
+            if self.fail_wake_rearm.load(Ordering::Acquire) {
+                return Err(io::Error::other("injected wake poll rearm failure"));
+            }
             if let Err(err) = submit_poll_entry(
-                &mut ring,
+                ring,
                 self.wake_fd.as_raw_fd(),
                 Interest::READABLE,
                 WAKE_USER_DATA,
@@ -1407,7 +1420,7 @@ mod imp {
                 }
                 ring.submit()?;
                 submit_poll_entry(
-                    &mut ring,
+                    ring,
                     self.wake_fd.as_raw_fd(),
                     Interest::READABLE,
                     WAKE_USER_DATA,
@@ -1684,17 +1697,16 @@ mod imp {
         fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
             events.clear();
 
+            let mut ring = self.ring.lock();
             // A prior cycle may have deferred a failed wake-poll rearm so that
             // it could still deliver the completions it had already dequeued.
-            // Retry it now, before taking the ring lock (rearm_wake_poll takes
-            // that lock itself), to restore Reactor::wake() interruption. A
-            // continued failure simply stays deferred for a later cycle; fd
-            // readiness polling remains fully functional meanwhile.
-            if self.wake_rearm_needed.load(Ordering::Acquire) && self.rearm_wake_poll().is_ok() {
+            // Retry under the same ring lock before entering any wait. A
+            // failure cannot be ignored: waiting without an armed wake poll
+            // could block the next rearm or driver mutation indefinitely.
+            if self.wake_rearm_needed.load(Ordering::Acquire) {
+                self.rearm_wake_poll(&mut ring)?;
                 self.wake_rearm_needed.store(false, Ordering::Release);
             }
-
-            let mut ring = self.ring.lock();
 
             match timeout {
                 None => {
@@ -1723,8 +1735,6 @@ mod imp {
                 completions.push((cqe.user_data(), cqe.result(), cqe.flags()));
             }
 
-            drop(ring);
-
             // A wake-poll rearm failure must NOT short-circuit this batch: the
             // completions already dequeued from the kernel CQ (above) would be
             // lost forever — their poll_ops entries would leak, their
@@ -1741,7 +1751,14 @@ mod imp {
                     // wakeup instead of being suppressed forever.
                     self.wake_pending.store(false, Ordering::Release);
                     self.drain_wake_fd();
-                    if let Err(err) = self.rearm_wake_poll() {
+                    #[cfg(test)]
+                    {
+                        let observe = self.before_wake_rearm.lock().take();
+                        if let Some(observe) = observe {
+                            observe();
+                        }
+                    }
+                    if let Err(err) = self.rearm_wake_poll(&mut ring) {
                         wake_rearm_result = Err(err);
                     }
                     // br-asupersync-zft20e: a concurrent wake() between
@@ -1775,6 +1792,12 @@ mod imp {
                 poll_completions.push((user_data, res, flags));
             }
 
+            // Publish a failed rearm before releasing the ring. A competing
+            // poller must repair it (or return its error) before it can wait.
+            self.wake_rearm_needed
+                .store(wake_rearm_result.is_err(), Ordering::Release);
+            drop(ring);
+
             let mut emitted_events = SmallVec::<[Event; 64]>::new();
             let mut deferred_poll_removes = SmallVec::<[u64; 16]>::new();
             if !poll_completions.is_empty() {
@@ -1797,10 +1820,9 @@ mod imp {
             match wake_rearm_result {
                 Ok(()) => Ok(events.len()),
                 Err(err) => {
-                    // The wake eventfd poll could not be re-armed this cycle.
-                    // Record it so the next poll retries the rearm and keeps
-                    // Reactor::wake() interruption working.
-                    self.wake_rearm_needed.store(true, Ordering::Release);
+                    // The failed rearm was recorded while holding the ring;
+                    // another poll may already have repaired it. Do not
+                    // overwrite that newer state after releasing the lock.
                     if events.is_empty() {
                         // Nothing to deliver, so surfacing the error loses no
                         // completions.
@@ -3300,6 +3322,136 @@ mod imp {
         }
 
         #[test]
+        fn wake_completion_rearms_before_another_poller_can_take_the_ring() {
+            use std::sync::{Arc, mpsc};
+
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            let reactor = Arc::new(reactor);
+            let watchdog = Duration::from_secs(10);
+            let (consumed_tx, consumed_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            *reactor.before_wake_rearm.lock() = Some(Box::new(move || {
+                // This hook runs only after a real one-shot wake completion
+                // was dequeued and its eventfd drained, but before rearm.
+                consumed_tx.send(()).expect("report consumed wake");
+                resume_rx.recv_timeout(watchdog).expect("resume rearm");
+            }));
+            reactor.wake().expect("queue first wake");
+
+            std::thread::scope(|scope| {
+                let polling = scope.spawn(|| {
+                    let mut events = Events::with_capacity(4);
+                    let count = reactor.poll(&mut events, Some(watchdog));
+                    (count, events.is_empty())
+                });
+                let consumed = consumed_rx.recv_timeout(watchdog);
+                // A competing poller used to acquire this lock and enter a
+                // blocking wait with no wake poll, preventing the first one
+                // from reacquiring the lock to rearm it.
+                let retained_ring = reactor.ring.try_lock().is_none();
+                let _ = resume_tx.send(());
+                let result = polling.join().expect("first poller panicked");
+                assert!(consumed.is_ok(), "wake was not consumed: {consumed:?}");
+                assert!(
+                    retained_ring,
+                    "the disarmed interval exposed the ring to another poller"
+                );
+                assert_eq!(result.0.expect("first poll failed"), 0);
+                assert!(result.1, "internal wake became user readiness");
+            });
+
+            // Now establish an actual blocking poll on the rearmed ring and
+            // prove a fresh wake interrupts it, without relying on a sleep
+            // to guess when the poller entered the kernel wait.
+            let (done_tx, done_rx) = mpsc::channel();
+            std::thread::scope(|scope| {
+                let polling = scope.spawn(|| {
+                    let mut events = Events::with_capacity(4);
+                    let result = reactor.poll(&mut events, Some(watchdog * 2));
+                    let _ = done_tx.send(());
+                    (result, events.is_empty())
+                });
+                let start = std::time::Instant::now();
+                let entered = loop {
+                    if reactor.ring.try_lock().is_none() {
+                        break true;
+                    }
+                    if start.elapsed() >= watchdog {
+                        break false;
+                    }
+                    std::thread::yield_now();
+                };
+                reactor.wake().expect("interrupt the next poller");
+                let completed = done_rx.recv_timeout(watchdog);
+                let result = polling.join().expect("second poller panicked");
+                assert!(entered, "second poller never acquired the ring");
+                assert!(
+                    completed.is_ok(),
+                    "fresh wake did not interrupt the poll: {completed:?}"
+                );
+                assert_eq!(result.0.expect("second poll failed"), 0);
+                assert!(result.1);
+            });
+            assert!(!reactor.wake_rearm_needed.load(Ordering::Acquire));
+        }
+
+        #[test]
+        fn failed_wake_rearm_preserves_ready_events_and_refuses_an_unwakeable_wait() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            let (left, mut right) = UnixStream::pair().expect("unix stream pair");
+            let token = Token::new(71);
+            reactor
+                .register(&left, token, Interest::READABLE)
+                .expect("register read");
+            std::io::Write::write_all(&mut right, b"ready").expect("publish readable data");
+            reactor.wake().expect("queue wake completion");
+            {
+                // Wait for both actual kernel completions without dequeuing
+                // either: the fault must share a batch with useful readiness.
+                let ring = reactor.ring.lock();
+                let timeout = types::Timespec::new().sec(10);
+                let args = types::SubmitArgs::new().timespec(&timeout);
+                ring.submitter()
+                    .submit_with_args(2, &args)
+                    .expect("two kernel completions");
+            }
+            reactor.fail_wake_rearm.store(true, Ordering::Release);
+            let mut events = Events::with_capacity(4);
+            assert_eq!(
+                reactor
+                    .poll(&mut events, Some(Duration::ZERO))
+                    .expect("deliver dequeued readiness"),
+                1,
+            );
+            assert_eq!(events.iter().next().unwrap().token, token);
+            assert!(events.iter().next().unwrap().is_readable());
+            assert!(reactor.wake_rearm_needed.load(Ordering::Acquire));
+
+            let error = reactor
+                .poll(&mut events, Some(Duration::ZERO))
+                .expect_err("a failed retry must not continue into a wait");
+            assert_eq!(error.to_string(), "injected wake poll rearm failure");
+            assert!(events.is_empty());
+            assert!(reactor.wake_rearm_needed.load(Ordering::Acquire));
+
+            reactor.fail_wake_rearm.store(false, Ordering::Release);
+            reactor.wake().expect("queue wake while rearm is pending");
+            assert_eq!(
+                reactor
+                    .poll(&mut events, Some(Duration::from_secs(10)))
+                    .expect("repair and consume retained wake"),
+                0,
+            );
+            assert!(!reactor.wake_rearm_needed.load(Ordering::Acquire));
+            reactor.deregister(token).expect("release registration");
+            assert_eq!(reactor.registration_count(), 0);
+        }
+
+        #[test]
         fn test_wake_coalesces_eventfd_notifications() {
             let Some(reactor) = new_or_skip() else {
                 return;
@@ -3367,7 +3519,7 @@ mod imp {
             }
 
             reactor
-                .rearm_wake_poll()
+                .rearm_wake_poll(&mut reactor.ring.lock())
                 .expect("wake rearm should flush and retry when the SQ is full");
 
             let mut events = Events::with_capacity(8);

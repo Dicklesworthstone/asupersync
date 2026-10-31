@@ -4173,72 +4173,72 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1383,
+          "line": 1391,
           "pattern": "unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1468,
+          "line": 1481,
           "pattern": "match unsafe { ring.submitter().register_buffers(&io_vecs) } {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1762,
+          "line": 1779,
           "pattern": "let _ = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1828,
+          "line": 1850,
           "pattern": "unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1877,
+          "line": 1899,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1937,
+          "line": 1959,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2002,
+          "line": 2024,
           "pattern": "let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2007,
+          "line": 2029,
           "pattern": "let owned = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2693,
+          "line": 2715,
           "pattern": "let pushed = unsafe { ring.submission().push(&entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2788,
+          "line": 2810,
           "pattern": "let stale_fd = unsafe { libc::dup(old_sock.as_raw_fd()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2801,
+          "line": 2823,
           "pattern": "unsafe { libc::dup2(new_sock.as_raw_fd(), stale_fd) },"
         },
         {
           "kind": "unsafe_block",
-          "line": 2822,
+          "line": 2844,
           "pattern": "let _ = unsafe { libc::close(stale_fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3313,
+          "line": 3465,
           "pattern": "let n = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3340,
+          "line": 3492,
           "pattern": "let n = unsafe {"
         }
       ]
