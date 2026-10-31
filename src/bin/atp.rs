@@ -481,6 +481,12 @@ struct SendArgs {
     /// transfer path.
     #[arg(long)]
     no_delta: bool,
+    /// Reuse content-defined chunks of one bounded regular file over authenticated RQ
+    /// control. Requires --transport rq, a shared auth key, and a receiver with
+    /// --rq-cdc-delta (forwarded for SSH targets). Peers without CDC can use
+    /// authenticated fixed-chunk/full fallback; legacy control is refused.
+    #[arg(long, conflicts_with_all = ["no_delta", "rq_allow_unauthenticated_lab"])]
+    rq_cdc_delta: bool,
     /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
     /// delta negotiation now runs inside authenticated framed control.
     #[arg(long, hide = true)]
@@ -589,6 +595,12 @@ struct RecvArgs {
     /// Disable receiver-side delta package application and state refresh.
     #[arg(long)]
     no_delta: bool,
+    /// Accept authenticated bounded single regular-file RQ delta transfers from
+    /// senders using --rq-cdc-delta. Requires --transport rq and a shared auth
+    /// key. Negotiates content-defined chunk reuse or authenticated fallback;
+    /// legacy unauthenticated control and directory transfers are refused.
+    #[arg(long, conflicts_with_all = ["no_delta", "rq_allow_unauthenticated_lab"])]
+    rq_cdc_delta: bool,
     /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
     /// delta negotiation now runs inside authenticated framed control.
     #[arg(long, hide = true)]
@@ -1048,6 +1060,36 @@ fn rq_receive_options(
     transport_rq::RqReceiveOptions::new()
         .with_allow_special_files(allow_special_files)
         .with_sparse_files(sparse_files)
+}
+
+fn rq_cli_receive_options(args: &RecvArgs) -> transport_rq::RqReceiveOptions {
+    rq_receive_options(args.allow_special_files, args.sparse_files)
+        .with_cdc_delta(args.rq_cdc_delta)
+}
+
+fn validate_rq_cdc_delta_options(
+    transport: Transport,
+    enabled: bool,
+    no_delta: bool,
+    unauthenticated_lab: bool,
+) -> Result<(), String> {
+    if !enabled {
+        return Ok(());
+    }
+    if transport != Transport::Rq {
+        return Err("--rq-cdc-delta requires --transport rq".to_string());
+    }
+    if no_delta {
+        return Err("--rq-cdc-delta conflicts with --no-delta".to_string());
+    }
+    if unauthenticated_lab {
+        return Err(
+            "--rq-cdc-delta requires a shared authentication key and conflicts with \
+             --rq-allow-unauthenticated-lab"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1939,6 +1981,12 @@ fn resolve(target: &str) -> Result<Vec<SocketAddr>, String> {
 }
 
 fn run_send(mut args: SendArgs) -> Result<(), String> {
+    validate_rq_cdc_delta_options(
+        args.transport,
+        args.rq_cdc_delta,
+        args.no_delta,
+        args.rq_allow_unauthenticated_lab,
+    )?;
     validate_transport_metadata_options(
         args.transport,
         args.preserve_xattrs,
@@ -1947,6 +1995,17 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
     )?;
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
     validate_requested_compression(args.transport, args.compress)?;
+    if args.rq_cdc_delta {
+        let metadata = fs::symlink_metadata(&args.source)
+            .map_err(|error| format!("inspect CDC source {}: {error}", args.source.display()))?;
+        if !metadata.is_file() {
+            return Err(
+                "--rq-cdc-delta requires one regular file; directories, symlinks, and special \
+                 files are not supported in this mode"
+                    .to_string(),
+            );
+        }
+    }
     validate_user_transfer_namespace(&args.source)?;
     // `--dry-run` computes the transfer plan from the source and prints it
     // without resolving the target or opening any socket (rsync `--dry-run`).
@@ -3579,6 +3638,12 @@ fn send_to_addr_with_transport(
     rq_config_override: Option<&RqConfig>,
     quic_auth_override: Option<&RqAuthChoice>,
 ) -> Result<serde_json::Value, SendTransportFailure> {
+    validate_rq_cdc_delta_options(
+        transport,
+        args.rq_cdc_delta,
+        args.no_delta,
+        args.rq_allow_unauthenticated_lab,
+    )?;
     let bwlimit_bps = normalize_bwlimit_bps(args.bwlimit_bps)?;
     if bwlimit_bps.is_some() && transport != Transport::Quic {
         return Err(SendTransportFailure::fatal(format!(
@@ -3659,11 +3724,17 @@ fn send_to_addr_with_transport(
                 None => rq_send_config(args)?,
             };
             let chosen_fanout = cfg.udp_fanout.max(1);
+            let cdc_delta = args.rq_cdc_delta;
             let start = Instant::now();
             let report = runtime
                 .block_on(runtime.handle().spawn(async move {
                     let cx = Cx::current().expect("sender cx");
-                    transport_rq::send_path(&cx, addr, &source, cfg, &peer_id).await
+                    if cdc_delta {
+                        transport_rq::send_path_with_cdc_delta(&cx, addr, &source, cfg, &peer_id)
+                            .await
+                    } else {
+                        transport_rq::send_path(&cx, addr, &source, cfg, &peer_id).await
+                    }
                 }))
                 .map_err(classify_rq_send_failure)?;
             let elapsed = start.elapsed();
@@ -7234,6 +7305,9 @@ fn probe_remote_tailscale_ipv4(
 }
 
 fn append_remote_receiver_options(args: &SendArgs, argv: &mut Vec<String>) {
+    if args.transport == Transport::Rq && args.rq_cdc_delta {
+        argv.push("--rq-cdc-delta".to_string());
+    }
     if matches!(args.transport, Transport::Rq | Transport::Quic) {
         if args.allow_special_files {
             argv.push("--allow-special-files".to_string());
@@ -9029,6 +9103,12 @@ async fn create_receive_destination(dest: &Path) -> Result<(), String> {
 }
 
 fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
+    validate_rq_cdc_delta_options(
+        args.transport,
+        args.rq_cdc_delta,
+        args.no_delta,
+        args.rq_allow_unauthenticated_lab,
+    )?;
     validate_transport_metadata_options(
         args.transport,
         args.preserve_xattrs,
@@ -9170,7 +9250,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
             cfg.metadata_policy = selected_cli_opt_in_metadata_policy(args.preserve_xattrs);
             cfg.enable_delta = !args.no_delta;
             cfg.accept_timeout = recv_listen_timeout(&args)?;
-            let receive_options = rq_receive_options(args.allow_special_files, args.sparse_files);
+            let receive_options = rq_cli_receive_options(&args);
             let chosen_fanout = cfg.udp_fanout.max(1);
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("receiver cx");
@@ -10135,6 +10215,300 @@ mod tests {
         assert!(from_args.metadata_policy.preserve_extended_attributes);
         assert_eq!(from_args.preserve_hardlinks, direct.preserve_hardlinks);
         assert_eq!(from_args.symbol_auth_mode(), direct.symbol_auth_mode());
+    }
+
+    #[test]
+    fn rq_cdc_delta_cli_is_explicit_authenticated_and_forwarded() {
+        for enabled in [false, true] {
+            let mut argv = vec![
+                "atp-send",
+                "payload.bin",
+                "user@receiver:/destination",
+                "--transport",
+                "rq",
+                "--rq-auth-key-hex",
+                VALID_KEY_HEX,
+            ];
+            if enabled {
+                argv.push("--rq-cdc-delta");
+            }
+            let send = SendArgs::try_parse_from(argv).expect("parse RQ delta sender");
+            let config = rq_send_config(&send).expect("authenticated RQ config");
+            assert_eq!(send.rq_cdc_delta, enabled);
+            assert!(config.enable_delta);
+            assert!(config.symbol_auth_context.is_some());
+            assert!(config.metadata_policy.preserve_timestamps);
+            let mut remote_options = Vec::new();
+            append_remote_receiver_options(&send, &mut remote_options);
+            assert_eq!(
+                remote_options,
+                if enabled {
+                    vec!["--rq-cdc-delta".to_string()]
+                } else {
+                    Vec::new()
+                }
+            );
+
+            for command in ["recv", "serve"] {
+                let mut argv = vec!["atp", command, "destination", "--transport", "rq"];
+                if enabled {
+                    argv.push("--rq-cdc-delta");
+                }
+                let parsed = Cli::try_parse_from(argv).expect("parse RQ delta receiver");
+                let recv = match parsed.command {
+                    Command::Recv(args) | Command::Serve(args) => args,
+                    _ => panic!("expected receiver"),
+                };
+                let options = rq_cli_receive_options(&recv);
+                assert_eq!(options.cdc_delta(), enabled);
+                assert_eq!(options.delta_chunks(), enabled);
+                assert_eq!(options.authenticated_control(), enabled);
+                assert!(!options.allow_special_files());
+                assert!(!options.sparse_files());
+            }
+        }
+    }
+
+    #[test]
+    fn rq_cdc_delta_cli_rejects_conflicting_modes_before_io() {
+        for command in ["send", "recv", "serve"] {
+            for conflict in ["--no-delta", "--rq-allow-unauthenticated-lab"] {
+                let mut argv = vec!["atp", command, "payload"];
+                if command == "send" {
+                    argv.push("127.0.0.1:8472");
+                }
+                argv.extend(["--transport", "rq", "--rq-cdc-delta", conflict]);
+                let error = Cli::try_parse_from(argv)
+                    .err()
+                    .expect("contradictory mode must fail during parsing")
+                    .to_string();
+                assert!(error.contains("--rq-cdc-delta"), "{error}");
+                assert!(error.contains(conflict), "{error}");
+            }
+        }
+        for transport in ["tcp", "quic", "auto"] {
+            let send = SendArgs::try_parse_from([
+                "atp-send",
+                "missing-source-must-not-be-read",
+                "unresolved-target-must-not-be-contacted",
+                "--transport",
+                transport,
+                "--rq-cdc-delta",
+                "--rq-auth-key-stdin",
+            ])
+            .expect("parse transport mismatch");
+            assert_eq!(
+                run_send(send).expect_err("refuse before stdin, source walk, or DNS"),
+                "--rq-cdc-delta requires --transport rq"
+            );
+            let recv = RecvArgs::try_parse_from([
+                "atp-recv",
+                "unused-destination",
+                "--transport",
+                transport,
+                "--rq-cdc-delta",
+                "--rq-auth-key-stdin",
+            ])
+            .expect("parse receiver transport mismatch");
+            assert_eq!(
+                run_recv(recv, false).expect_err("refuse before stdin, bind, or destination create"),
+                "--rq-cdc-delta requires --transport rq"
+            );
+        }
+        let directory = tempfile::tempdir().expect("source directory");
+        for dry_run in [false, true] {
+            let mut argv = vec![
+                "atp-send",
+                directory.path().to_str().expect("UTF-8 temporary path"),
+                "unresolved-target-must-not-be-contacted",
+                "--transport",
+                "rq",
+                "--rq-cdc-delta",
+                "--rq-auth-key-stdin",
+            ];
+            if dry_run {
+                argv.push("--dry-run");
+            }
+            let args = SendArgs::try_parse_from(argv).expect("parse directory CDC request");
+            let error = run_send(args).expect_err("CDC requires one regular source file");
+            assert!(
+                error.contains("--rq-cdc-delta requires one regular file"),
+                "{error}"
+            );
+        }
+    }
+
+    /// asupersync-sizeku: exercise the same dispatch and receiver options as
+    /// the CLI, including authenticated full fallback, shifted-tail reuse, and
+    /// a live no-op. Payload counts must show CDC was selected, while the
+    /// installed file retains the CLI's ordinary metadata policy.
+    #[test]
+    fn rq_cdc_delta_cli_loopback_transfers_changed_content_and_metadata() {
+        let temp = tempfile::tempdir().expect("temporary transfer directory");
+        let source_dir = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(&source_dir).expect("source directory");
+        fs::create_dir_all(&destination).expect("destination directory");
+        let source = source_dir.join("payload.bin");
+        let mut state = 0x6a09_e667_f3bc_c909u64;
+        let baseline: Vec<u8> = (0..2 * 1024 * 1024 + 197)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let write_source = |bytes: &[u8], modified_secs| {
+            fs::write(&source, bytes).expect("source bytes");
+            fs::File::options()
+                .write(true)
+                .open(&source)
+                .expect("open source metadata")
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(UNIX_EPOCH + Duration::from_secs(modified_secs)),
+                )
+                .expect("set source mtime");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&source, fs::Permissions::from_mode(0o640))
+                    .expect("set source permissions");
+            }
+        };
+        let transfer = || {
+            let mut args = SendArgs::try_parse_from([
+                "atp-send",
+                source.to_str().expect("UTF-8 source"),
+                "127.0.0.1:1",
+                "--transport",
+                "rq",
+                "--rq-cdc-delta",
+                "--streams",
+                "1",
+                "--rq-auth-key-hex",
+                VALID_KEY_HEX,
+            ])
+            .expect("parse actual CLI sender mode");
+            let recv = RecvArgs::try_parse_from([
+                "atp-recv",
+                destination.to_str().expect("UTF-8 destination"),
+                "--transport",
+                "rq",
+                "--rq-cdc-delta",
+                "--rq-auth-key-hex",
+                VALID_KEY_HEX,
+            ])
+            .expect("parse actual CLI receiver mode");
+            let options = rq_cli_receive_options(&recv);
+            let mut config = rq_send_config(&args).expect("CLI authentication and metadata config");
+            config.accept_timeout = Duration::from_secs(15);
+            config.delta_control_timeout = Duration::from_secs(15);
+            let receive_config = config.clone();
+            let dest = destination.clone();
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let receiver = thread::spawn(move || {
+                let runtime = build_runtime(2).expect("receiver runtime");
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().expect("receiver Cx");
+                    let listener = TcpListener::bind("127.0.0.1:0")
+                        .await
+                        .expect("receiver listener");
+                    ready_tx
+                        .send(listener.local_addr().expect("receiver address"))
+                        .expect("publish bound receiver");
+                    asupersync::time::timeout(
+                        cx.now(),
+                        Duration::from_secs(30),
+                        transport_rq::receive_once_with_options(
+                            &cx,
+                            &listener,
+                            "127.0.0.1",
+                            &dest,
+                            receive_config,
+                            "cdc-cli-receiver",
+                            options,
+                        ),
+                    )
+                    .await
+                    .expect("receiver terminates")
+                }))
+            });
+            let address = ready_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("receiver readiness");
+            args.target = address.to_string();
+            let runtime = build_runtime(2).expect("sender runtime");
+            let sent = send_to_addr_with_transport(
+                &runtime,
+                &args,
+                Transport::Rq,
+                address,
+                Some(&config),
+                None,
+            )
+            .expect("CLI dispatch transfers successfully");
+            let received = receiver
+                .join()
+                .expect("receiver thread")
+                .expect("receiver commits");
+            assert_eq!(sent["committed"], true);
+            assert_eq!(sent["sha_ok"], true);
+            assert_eq!(sent["merkle_ok"], true);
+            assert!(received.committed);
+            (sent, received)
+        };
+
+        write_source(&baseline, 1_700_000_000);
+        let (sent, received) = transfer();
+        assert_eq!(sent["bytes_sent"], baseline.len() as u64);
+        assert_eq!(received.bytes_received, baseline.len() as u64);
+
+        let insertion = 512 * 1024 + 123;
+        let mut updated = baseline[..insertion].to_vec();
+        updated.extend_from_slice(&[0x5a; 713]);
+        updated.extend_from_slice(&baseline[insertion..]);
+        write_source(&updated, 1_700_000_010);
+        let (sent, received) = transfer();
+        let changed_bytes = sent["bytes_sent"].as_u64().expect("transmitted byte count");
+        assert!(
+            changed_bytes > 0,
+            "the inserted content must cross the connection"
+        );
+        assert!(
+            changed_bytes < updated.len() as u64 / 4,
+            "CDC must reuse the shifted tail; sent {changed_bytes} bytes"
+        );
+        assert_eq!(received.bytes_received, changed_bytes);
+        assert_eq!(sent["symbols_sent"], 0);
+        let installed = destination.join("payload.bin");
+        assert_eq!(fs::read(&installed).expect("installed content"), updated);
+        assert_eq!(
+            fs::metadata(&installed).unwrap().modified().unwrap(),
+            fs::metadata(&source).unwrap().modified().unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&installed).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+
+        let (sent, received) = transfer();
+        assert_eq!(sent["bytes_sent"], 0);
+        assert_eq!(received.bytes_received, 0);
+        assert_eq!(
+            fs::read(&installed).expect("unchanged installed content"),
+            updated
+        );
+        let remaining: Vec<_> = fs::read_dir(&destination)
+            .expect("destination entries")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(remaining, vec![std::ffi::OsString::from("payload.bin")]);
     }
 
     #[test]
