@@ -1982,7 +1982,9 @@ async fn native_h2_unary(
             let permit = admission.acquire(&cx).await?;
             // The outer timeout includes the queue. Refresh the wire budget
             // after admission so a server does not receive the time spent
-            // waiting as additional execution time.
+            // waiting as additional execution time. Replace, not append: the
+            // request already carries the pre-queue `grpc-timeout`, and a
+            // second entry would follow it onto the wire.
             let mut metadata = metadata;
             if let Some(timeout) = timeout {
                 let elapsed = Duration::from_nanos(native_now().duration_since(now));
@@ -1992,7 +1994,7 @@ async fn native_h2_unary(
                         "native HTTP/2 gRPC deadline elapsed during unary admission",
                     ));
                 }
-                let _ = metadata.insert("grpc-timeout", encode_grpc_timeout(remaining));
+                let _ = metadata.insert_or_replace("grpc-timeout", encode_grpc_timeout(remaining));
             }
             let io = native_h2_unary_io(
                 target, config, tls_connector, pool, path, &metadata, body,
