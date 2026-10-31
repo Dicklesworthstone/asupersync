@@ -768,10 +768,15 @@ impl RequestControl {
         if let Some(ambient) = &mut self.ambient {
             ambient.register(task.waker());
         }
-        let now = self
-            .driver
-            .as_ref()
-            .map_or_else(crate::time::wall_now, |driver| driver.now());
+        let now = self.driver.as_ref().map_or_else(
+            || {
+                // `wall_now` reads the current task's timer first, and a
+                // response can move to a task on an unrelated clock.
+                let _owner = self.caller.cx.clone().set_current_restricted();
+                crate::time::wall_now()
+            },
+            |driver| driver.now(),
+        );
         if now >= self.deadline {
             return Err(Http2ClientError::DeadlineExceeded);
         }
