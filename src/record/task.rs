@@ -41,6 +41,10 @@ pub type TaskOutcome = Outcome<(), crate::error::Error>;
 pub(crate) struct CheckpointCancelAck {
     pub(crate) effective_reason: CancelReason,
     pub(crate) cleanup_priority: u8,
+    /// A new cancellation state or cleanup budget needs a follow-up poll.
+    /// Repeated checkpoint observations still produce receipts for replay,
+    /// but are not themselves a source of runnable work.
+    reschedule: bool,
     pub(crate) request_transition: Option<(TaskState, TaskState)>,
     pub(crate) acknowledge_transition: Option<(TaskState, TaskState)>,
     pub(crate) region_id: RegionId,
@@ -52,6 +56,12 @@ impl CheckpointCancelAck {
     #[must_use]
     pub(crate) const fn newly_materialized(&self) -> bool {
         self.request_transition.is_some()
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) const fn needs_reschedule(&self) -> bool {
+        self.reschedule
     }
 }
 
@@ -1207,10 +1217,12 @@ impl TaskRecord {
     /// Consumes a cancellation acknowledgement already published by this
     /// task's `Cx` and reconciles it into the authoritative task state.
     ///
-    /// Callers that observe a receipt after `Poll::Pending` must publish a
-    /// cancel-lane entry before dispatching the returned Wakers or parking the
-    /// task. Callers completing the same poll dispatch only after terminal
-    /// state and dependent queue publication.
+    /// After `Poll::Pending`, callers publish a cancel-lane entry when the
+    /// receipt needs rescheduling, before dispatching the returned Wakers or
+    /// parking the task. Repeated observations preserve their replay receipt
+    /// without forcing another poll of unchanged cancellation cleanup.
+    /// Callers completing the same poll dispatch only after terminal state
+    /// and dependent queue publication.
     pub(crate) fn consume_checkpoint_cancel_ack(
         &mut self,
     ) -> CancellationEffects<Option<CheckpointCancelAck>> {
@@ -1247,7 +1259,7 @@ impl TaskRecord {
 
         let request_from = self.state.clone();
         let was_unmaterialized = matches!(request_from, TaskState::Created | TaskState::Running);
-        let _ = self.reconcile_checkpoint_cancel(observed_reason.clone());
+        let mut cancellation_changed = self.reconcile_checkpoint_cancel(observed_reason.clone());
         let request_transition = was_unmaterialized.then(|| (request_from, self.state.clone()));
 
         let acknowledge_from = self.state.clone();
@@ -1267,7 +1279,7 @@ impl TaskRecord {
                 let mut merged_reason = effective_reason.clone();
                 if merged_reason.strengthen(&latest_reason) {
                     drop(guard);
-                    let _ = self.reconcile_checkpoint_cancel(latest_reason);
+                    cancellation_changed |= self.reconcile_checkpoint_cancel(latest_reason);
                     effective_reason = self.cancel_reason().cloned().unwrap_or(merged_reason);
                     continue;
                 }
@@ -1292,6 +1304,7 @@ impl TaskRecord {
             Some(CheckpointCancelAck {
                 effective_reason,
                 cleanup_priority,
+                reschedule: cancellation_changed || acknowledge_transition.is_some(),
                 request_transition,
                 acknowledge_transition,
                 region_id: self.owner,

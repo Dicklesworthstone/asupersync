@@ -5258,6 +5258,9 @@ impl LabRuntime {
             }
             self.notify_cancellation_oracle_cancel_ack(task_id);
         }
+        let needs_cancel_poll = cancel_ack
+            .as_ref()
+            .is_some_and(|receipt| receipt.needs_reschedule());
         let cancel_priority = cancel_ack.as_ref().map(|receipt| receipt.cleanup_priority);
         let cancel_ack = cancel_ack.is_some();
 
@@ -5462,9 +5465,12 @@ impl LabRuntime {
                     // The queued handle command may now coalesce against the
                     // reconciled TaskRecord, so this poll owns the replacement
                     // cancel-lane publication before any auxiliary Waker runs.
-                    self.scheduler
-                        .lock()
-                        .schedule_cancel(task_id, cancel_priority);
+                    // An unchanged checkpoint only promotes work already made
+                    // runnable by a real wake; it must not requeue itself.
+                    let mut scheduler = self.scheduler.lock();
+                    if needs_cancel_poll || scheduler.scheduled.contains(&task_id) {
+                        scheduler.schedule_cancel(task_id, cancel_priority);
+                    }
                 }
                 cancel_wakes.dispatch();
 

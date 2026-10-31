@@ -9527,10 +9527,13 @@ impl ThreeLaneWorker {
                         );
                     }
                 }
+                let needs_cancel_poll = cancel_ack
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.needs_reschedule());
                 let acknowledged_priority =
                     cancel_ack.as_ref().map(|receipt| receipt.cleanup_priority);
 
-                if wake_state.finish_poll() || cancel_ack.is_some() {
+                if wake_state.finish_poll() || needs_cancel_poll {
                     let mut cancel_priority = acknowledged_priority.unwrap_or(priority);
                     let mut schedule_cancel = acknowledged_priority.is_some();
                     // cx_inner may be None if we skipped the Arc clone (both wakers
