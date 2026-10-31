@@ -35,19 +35,6 @@ fn runtime(current_thread: bool) -> Runtime {
         .unwrap()
 }
 
-/// State-threaded stop and failed-boot paths park cancellation batches for a
-/// worker turn (acd3c2ee6); the runtime is quiescent once one publishes them.
-fn assert_becomes_quiescent(runtime: &Runtime) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !runtime.is_quiescent() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "runtime did not publish its deferred cancellation work"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-}
-
 #[test]
 fn app_authority_native_children_keep_limits_and_inherited_handles() {
     for current_thread in [true, false] {
@@ -168,7 +155,10 @@ fn app_authority_native_children_keep_limits_and_inherited_handles() {
                 RootDrainOutcome::Quiescent
             );
             app.join(&runtime.inner.state.lock().unwrap()).unwrap();
-            assert_becomes_quiescent(&runtime);
+            assert!(
+                runtime.is_quiescent(),
+                "a completed root drain must publish deferred app-stop cancellation"
+            );
         }
     }
 }
@@ -209,7 +199,38 @@ fn app_authority_native_denied_spawn_cannot_be_laundered_by_bootstrap() {
         assert!(boot.blocking_pool_handle().is_none());
         assert!(probe.task.lock().unwrap().is_none());
         assert!(probe.polled.lock().unwrap().is_none());
-        assert_becomes_quiescent(&runtime);
+        assert_eq!(
+            runtime.drain_root_region(Duration::from_secs(5)),
+            RootDrainOutcome::Quiescent
+        );
+        assert!(
+            runtime.is_quiescent(),
+            "a completed root drain must publish deferred failed-bootstrap cancellation"
+        );
+    }
+}
+
+#[test]
+fn app_stop_root_drain_is_immediately_quiescent_on_native_workers() {
+    for iteration in 0..100 {
+        let runtime = runtime(false);
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let mut app = {
+            let mut state = runtime.inner.state.lock().unwrap();
+            AppSpec::new("stop-drain-quiescence")
+                .start(&mut state, &cx, runtime.inner.root_region)
+                .expect("start native app")
+        };
+        app.stop(&mut runtime.inner.state.lock().unwrap())
+            .expect("stop native app");
+        let report = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+        assert!(
+            runtime.is_quiescent(),
+            "app-stop drain left parked cancellation at iteration {iteration}: {report:?}"
+        );
+        app.join(&runtime.inner.state.lock().unwrap())
+            .expect("stopped app finished its close protocol");
     }
 }
 

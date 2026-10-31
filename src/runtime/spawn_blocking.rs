@@ -718,6 +718,174 @@ where
     spawn_blocking(f).await
 }
 
+/// Runs I/O without ever moving the syscall onto the polling thread.
+///
+/// Standard streams can block indefinitely, so the compatibility bridge's
+/// inline fallback is not suitable for them. A closed or failed pool reports
+/// an I/O error; a missing pool uses the same bounded, joined thread path as
+/// other blocking work, but thread-creation failure is an error too.
+pub(crate) async fn spawn_blocking_io_off_worker<F, T>(
+    pool: Option<BlockingPoolHandle>,
+    f: F,
+) -> std::io::Result<T>
+where
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    if let Some(pool) = pool {
+        let (tx, rx) = BlockingOneshot::new();
+        let rx = rx.with_closed_fallback(|| {
+            Err(std::io::Error::other(
+                "the blocking pool stopped before the I/O operation could run",
+            ))
+        });
+        let priority = Cx::current().map_or(128, |cx| cx.budget().priority);
+        let admission = pool.submit_with_priority(
+            move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+                tx.send(result);
+            },
+            priority,
+        );
+        let handle = match admission.await {
+            Ok(handle) => handle,
+            Err(refused) => {
+                // Returning the unstarted work retires its result sender.
+                // The receiver then reports refusal, never executing f.
+                drop(refused);
+                return rx.await;
+            }
+        };
+        let mut guard = CancelOnDrop::new(handle);
+        let result = rx.await;
+        guard.mark_done();
+        return result;
+    }
+
+    spawn_blocking_io_on_thread_with(f, spawn_fallback_thread).await
+}
+
+async fn spawn_blocking_io_on_thread_with<F, T, Spawn>(f: F, spawn: Spawn) -> std::io::Result<T>
+where
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+    T: Send + 'static,
+    Spawn: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<thread::JoinHandle<()>>,
+{
+    join_finished_fallback_threads();
+    FallbackAdmission::new(
+        &FALLBACK_THREAD_COUNT,
+        MAX_FALLBACK_THREADS,
+        &FALLBACK_WAITERS,
+    )
+    .await;
+
+    start_blocking_io_thread_with(f, spawn, FallbackGuard)?.await
+}
+
+/// Starts committed I/O before reporting acceptance to a write-behind caller.
+/// Unlike a read, an accepted write cannot remain in cancellable admission:
+/// dropping its handle must leave an actual worker owning the bytes.
+pub(crate) fn try_spawn_blocking_io_on_thread<F, T>(
+    f: F,
+) -> std::io::Result<impl std::future::Future<Output = std::io::Result<T>> + Send>
+where
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    try_spawn_blocking_io_on_thread_with(f, spawn_fallback_thread, MAX_FALLBACK_THREADS)
+}
+
+fn try_spawn_blocking_io_on_thread_with<F, T, Spawn>(
+    f: F,
+    spawn: Spawn,
+    limit: usize,
+) -> std::io::Result<impl std::future::Future<Output = std::io::Result<T>> + Send>
+where
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+    T: Send + 'static,
+    Spawn: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<thread::JoinHandle<()>>,
+{
+    join_finished_fallback_threads();
+    if !try_claim_fallback_slot(&FALLBACK_THREAD_COUNT, limit) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "the standard stream operation has no available blocking thread",
+        ));
+    }
+    start_blocking_io_thread_with(f, spawn, FallbackGuard)
+}
+
+fn start_blocking_io_thread_with<F, T, Spawn>(
+    f: F,
+    spawn: Spawn,
+    slot: FallbackGuard,
+) -> std::io::Result<impl std::future::Future<Output = std::io::Result<T>> + Send>
+where
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+    T: Send + 'static,
+    Spawn: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<thread::JoinHandle<()>>,
+{
+    // Transfer the reservation into the closure before attempting to spawn.
+    // Both a failed spawn and a finished worker drop it exactly once.
+    let (tx, rx) = BlockingOneshot::new();
+    let handle = spawn(Box::new(move || {
+        let _slot = slot;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        tx.send(result);
+    }))?;
+    let worker = FallbackThread(Some(handle));
+    Ok(async move {
+        let result = rx.await;
+        drop(worker);
+        result
+    })
+}
+
+#[cfg(test)]
+mod io_off_worker_tests {
+    use super::*;
+
+    #[test]
+    fn io_thread_spawn_refusal_never_executes_the_operation_inline() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = Arc::clone(&calls);
+        let result = futures_lite::future::block_on(spawn_blocking_io_on_thread_with(
+            move || {
+                called.fetch_add(1, Ordering::SeqCst);
+                Ok(17)
+            },
+            |work| {
+                drop(work);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "injected thread creation refusal",
+                ))
+            },
+        ));
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn committed_io_thread_capacity_refusal_never_accepts_work() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = Arc::clone(&calls);
+        let result = try_spawn_blocking_io_on_thread_with(
+            move || {
+                called.fetch_add(1, Ordering::SeqCst);
+                Ok(17)
+            },
+            |_| panic!("a saturated fallback must not attempt thread creation"),
+            0,
+        );
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+
 pub(crate) async fn spawn_blocking_on_pool<F, T>(pool: BlockingPoolHandle, f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
@@ -774,6 +942,14 @@ impl Drop for FallbackGuard {
     fn drop(&mut self) {
         release_fallback_slot(&FALLBACK_THREAD_COUNT, &FALLBACK_WAITERS);
     }
+}
+
+fn spawn_fallback_thread(
+    work: impl FnOnce() + Send + 'static,
+) -> std::io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("asupersync-blocking".to_string())
+        .spawn(work)
 }
 
 /// Owns a fallback thread's handle so the thread is joined, never detached.
@@ -887,17 +1063,15 @@ where
     // This keeps `spawn_blocking` usable under resource pressure.
     let f_cell = Arc::new(Mutex::new(Some(f)));
     let f_for_thread = Arc::clone(&f_cell);
-    let thread_result = thread::Builder::new()
-        .name("asupersync-blocking".to_string())
-        .spawn(move || {
-            let _guard = FallbackGuard;
-            let f = f_for_thread
-                .lock()
-                .take()
-                .expect("spawn_blocking_on_thread fn missing");
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-            tx.send(result);
-        });
+    let thread_result = spawn_fallback_thread(move || {
+        let _guard = FallbackGuard;
+        let f = f_for_thread
+            .lock()
+            .take()
+            .expect("spawn_blocking_on_thread fn missing");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        tx.send(result);
+    });
 
     match thread_result {
         Ok(handle) => {

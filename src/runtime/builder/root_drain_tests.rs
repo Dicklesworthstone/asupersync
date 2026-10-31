@@ -3,6 +3,7 @@
 use super::*;
 use crate::cx::Cx;
 use crate::record::{ObligationAbortReason, ObligationKind};
+use crate::sync::ContendedMutex;
 use crate::types::{
     CancelKind, CapabilityBudget, CapabilityBudgetDimension, CapabilityBudgetRefusal,
     CapabilityBudgetRequirements, Outcome, TaskId,
@@ -276,6 +277,215 @@ fn handle_drain_of_an_already_closed_root_preserves_bounded_teardown() {
             "borrowed root drain must preserve teardown-reaper ownership"
         );
     }
+}
+
+/// Keeps native workers outside their dispatch loops so the caller's progress
+/// cannot be supplied accidentally by a worker winning the state-lock race.
+/// Release precedes Runtime field teardown even when a test assertion unwinds.
+struct HeldDrainWorkers {
+    runtime: Runtime,
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl HeldDrainWorkers {
+    fn new(workers: usize, sharded: bool) -> Self {
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let worker_gate = Arc::clone(&gate);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .with_sharded_state(sharded)
+            .on_thread_start(move || {
+                started_tx.send(()).expect("publish held worker startup");
+                let (released, changed) = &*worker_gate;
+                let released = released.lock().unwrap();
+                // A later worker spawn can fail before HeldDrainWorkers is
+                // constructed. Build then joins already-started workers, so
+                // they must not depend solely on the not-yet-created Drop guard.
+                let (released, _) = changed
+                    .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+                    .unwrap();
+                assert!(
+                    *released,
+                    "held drain worker was not released within its bound"
+                );
+            })
+            .build()
+            .expect("build native runtime with held workers");
+        let held = Self { runtime, gate };
+        for _ in 0..workers {
+            started_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("each native worker is held before its dispatch loop");
+        }
+        held
+    }
+}
+
+impl Drop for HeldDrainWorkers {
+    fn drop(&mut self) {
+        let (released, changed) = &*self.gate;
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        changed.notify_all();
+    }
+}
+
+struct RootDrainCancelWake {
+    state: Arc<ContendedMutex<RuntimeState>>,
+    caller: std::thread::ThreadId,
+    calls: AtomicUsize,
+    lock_was_available: AtomicBool,
+    ran_on_caller: AtomicBool,
+}
+
+impl std::task::Wake for RootDrainCancelWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        // Callback panics are intentionally contained by CancelWakeEffects;
+        // store observations for assertions outside that containment boundary.
+        self.lock_was_available
+            .store(self.state.try_lock().is_ok(), Ordering::Release);
+        self.ran_on_caller.store(
+            std::thread::current().id() == self.caller,
+            Ordering::Release,
+        );
+        self.calls.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[test]
+fn root_drain_publishes_parked_cancellation_without_a_worker_turn() {
+    use crate::types::task_context::{CancelWakeEffects, CancelWaker, CancellationEffects};
+
+    for workers in [1, 2] {
+        for sharded in [false, true] {
+            let held = HeldDrainWorkers::new(workers, sharded);
+            let runtime = &held.runtime;
+            assert_eq!(
+                runtime.shutdown_drained(Duration::ZERO).outcome,
+                RootDrainOutcome::Quiescent,
+                "an empty root closes without polling any worker"
+            );
+            let probe = Arc::new(RootDrainCancelWake {
+                state: Arc::clone(&runtime.inner.state),
+                caller: std::thread::current().id(),
+                calls: AtomicUsize::new(0),
+                lock_was_available: AtomicBool::new(false),
+                ran_on_caller: AtomicBool::new(false),
+            });
+            {
+                let mut state = runtime.inner.state.lock().unwrap();
+                assert!(state.region(runtime.inner.root_region).is_none());
+                assert_eq!(state.live_task_count(), 0);
+                state.defer_cancel_dispatch(CancellationEffects::new(
+                    Vec::new(),
+                    CancelWakeEffects::new(smallvec::smallvec![Arc::new(CancelWaker::new(
+                        Waker::from(Arc::clone(&probe)),
+                    ))]),
+                ));
+                assert!(state.has_deferred_cancel_dispatches());
+            }
+            assert_eq!(probe.calls.load(Ordering::Acquire), 0);
+            assert!(!runtime.is_quiescent(), "the parked batch is live residue");
+            assert_eq!(
+                runtime.root_drain_snapshot(Duration::ZERO).outcome,
+                RootDrainOutcome::TimedOut,
+                "a root-close snapshot must not overlook parked cancellation"
+            );
+
+            let report = runtime.shutdown_drained(Duration::ZERO);
+            assert_eq!(
+                report.outcome,
+                RootDrainOutcome::Quiescent,
+                "zero-bound shutdown must finish residual publication without a worker turn"
+            );
+            assert!(runtime.is_quiescent());
+            assert_eq!(probe.calls.load(Ordering::Acquire), 1);
+            assert!(probe.lock_was_available.load(Ordering::Acquire));
+            assert!(probe.ran_on_caller.load(Ordering::Acquire));
+            assert_eq!(
+                runtime.shutdown_drained(Duration::ZERO).outcome,
+                RootDrainOutcome::Quiescent
+            );
+            assert_eq!(probe.calls.load(Ordering::Acquire), 1, "dispatch is one-shot");
+            eprintln!(
+                "ROOT_DRAIN bead=asupersync-wcc1f5 workers={workers} sharded={sharded} parked_batch=true caller_published=true report={report:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn root_drain_contains_a_residual_cancellation_clock_panic() {
+    use crate::types::task_context::{
+        CancelReportStamp, CancelWakeEffects, CancelWaker, CancellationEffects,
+    };
+
+    #[derive(Debug, Default)]
+    struct PanicClock {
+        armed: AtomicBool,
+        panics: AtomicUsize,
+    }
+
+    impl crate::time::TimeSource for PanicClock {
+        fn now(&self) -> crate::types::Time {
+            if self.armed.load(Ordering::Acquire) {
+                self.panics.fetch_add(1, Ordering::AcqRel);
+                panic!("residual cancellation clock panic");
+            }
+            crate::types::Time::ZERO
+        }
+    }
+
+    let held = HeldDrainWorkers::new(1, false);
+    let runtime = &held.runtime;
+    assert_eq!(
+        runtime.shutdown_drained(Duration::ZERO).outcome,
+        RootDrainOutcome::Quiescent
+    );
+    let probe = Arc::new(RootDrainCancelWake {
+        state: Arc::clone(&runtime.inner.state),
+        caller: std::thread::current().id(),
+        calls: AtomicUsize::new(0),
+        lock_was_available: AtomicBool::new(false),
+        ran_on_caller: AtomicBool::new(false),
+    });
+    let clock = Arc::new(PanicClock::default());
+    let timer = crate::time::TimerDriverHandle::new(Arc::new(
+        crate::time::TimerDriver::with_clock(Arc::clone(&clock)),
+    ));
+    clock.armed.store(true, Ordering::Release);
+    let mut wakes = CancelWakeEffects::new(smallvec::smallvec![Arc::new(CancelWaker::new(
+        Waker::from(Arc::clone(&probe)),
+    ))]);
+    wakes.push_region_cancellation_metric(
+        Arc::new(crate::observability::metrics::NoOpMetrics),
+        runtime.inner.root_region,
+        CancelKind::Shutdown,
+        Some(CancelReportStamp {
+            stamp: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            timer: Some(timer),
+            fallback_now: crate::types::Time::ZERO,
+        }),
+    );
+    runtime
+        .inner
+        .state
+        .lock()
+        .unwrap()
+        .defer_cancel_dispatch(CancellationEffects::new(Vec::new(), wakes));
+
+    let report = runtime.shutdown_drained(Duration::ZERO);
+    assert_eq!(clock.panics.load(Ordering::Acquire), 1);
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+    assert_eq!(probe.calls.load(Ordering::Acquire), 1);
+    assert!(probe.lock_was_available.load(Ordering::Acquire));
+    assert!(runtime.is_quiescent());
 }
 
 #[test]

@@ -4078,7 +4078,8 @@ fn scheduler_adaptive_ready_batch_profile(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootDrainOutcome {
     /// The root and its descendants closed after their tasks, obligations,
-    /// and finalizers completed the close protocol.
+    /// and finalizers completed the close protocol, with no reserved admission
+    /// or parked cancellation batch remaining.
     Quiescent,
     /// The bound elapsed before close completed. The borrowed drain call
     /// retains unfinished work; subsequent teardown is a separate operation.
@@ -4789,7 +4790,8 @@ impl Runtime {
     ///
     /// Returns [`RootDrainOutcome::Quiescent`] only after the root region and
     /// its descendants have closed, including synchronous and asynchronous
-    /// finalizers. Unrelated I/O registrations are outside this predicate.
+    /// finalizers, with no reserved admission or parked cancellation batch
+    /// remaining. Unrelated I/O registrations are outside this predicate.
     /// A timeout leaves unfinished work alive; ordinary runtime teardown still
     /// has its established abort-by-drop semantics. Use
     /// [`Self::shutdown_drained`] to receive counts and a terminal trace record.
@@ -4802,7 +4804,10 @@ impl Runtime {
     /// Every region-owned task receives shutdown cancellation, and the workers
     /// keep progressing children, obligations, and finalizers until the root
     /// closes or `bound` expires. Closing the root rejects new work admitted to
-    /// that region. The report is also recorded as a `root_drain` user trace.
+    /// that region. Before reporting quiescence, the caller also publishes any
+    /// residual cancellation callbacks parked by state-threaded stop or failed
+    /// bootstrap paths, even when no worker can take another turn. The report
+    /// is also recorded as a `root_drain` user trace.
     ///
     /// This borrowed API keeps worker threads and runtime ownership alive. A
     /// timeout neither drops unfinished tasks nor claims they were cleaned up;
@@ -4888,14 +4893,65 @@ impl Runtime {
 
     /// True after root close, including all finalizers, with no live task
     /// (embedded or dispatch-table resident), pending obligation, or reserved
-    /// admission remaining.
+    /// admission or parked cancellation batch remaining.
     ///
     /// Spawns travel through the admission mailbox, so a task spawned just
     /// before `block_on` returned may not have a record yet; counting only
     /// live records would report an empty runtime while work is still
     /// queued for admission (observed under parallel test load).
     fn work_is_drained(&self) -> bool {
+        self.dispatch_completed_root_cancellations();
         self.root_drain_snapshot(Duration::ZERO).outcome == RootDrainOutcome::Quiescent
+    }
+
+    /// Completes the callback half of cancellation after every root-owned task
+    /// has retired. A state-threaded stop can close an empty region while its
+    /// cancellation effects are still parked for a later worker turn. Waiting
+    /// for that turn would make an otherwise complete drain depend on worker
+    /// availability (br-asupersync-wcc1f5).
+    ///
+    /// Live-task batches remain scheduler-owned: their cancel lanes must be
+    /// published before their Wakers run, including pinned `!Send` routes. Once
+    /// the root is gone and both task tables have no live work, every route in
+    /// the batch is already terminal and needs no lane insertion. The remaining
+    /// observers and Wakers still require their normal, panic-contained dispatch
+    /// outside both RuntimeState and task-table locks.
+    fn dispatch_completed_root_cancellations(&self) {
+        let batches = {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !guard.has_deferred_cancel_dispatches()
+                || guard.region(self.inner.root_region).is_some()
+                || guard.live_task_count() != 0
+            {
+                return;
+            }
+            if self
+                .inner
+                .scheduler
+                .dispatch_task_table()
+                .is_some_and(|table| {
+                    table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .live_task_count()
+                        != 0
+                })
+            {
+                return;
+            }
+            guard.take_deferred_cancel_dispatches()
+        };
+        for batch in batches {
+            let (_terminal_tasks, wakes) = batch.into_parts();
+            // No task is being made runnable here, so dispatch can stamp each
+            // observer inside its unwind boundary. A separate stamp_drains()
+            // would call a user-supplied clock outside that containment.
+            wakes.dispatch();
+        }
     }
 
     fn root_drain_snapshot(&self, elapsed: Duration) -> RootDrainReport {
@@ -4948,6 +5004,7 @@ impl Runtime {
             && report.queued_finalizers == 0
             && report.pending_spawns == 0
             && !report.has_pending_obligation_posts
+            && !guard.has_deferred_cancel_dispatches()
         {
             report.outcome = RootDrainOutcome::Quiescent;
         }
