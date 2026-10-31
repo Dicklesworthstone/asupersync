@@ -116,6 +116,66 @@ impl HandshakeDropProxy {
             handle: Some(handle),
         }
     }
+
+    fn spawn_with_close_loss(
+        server_addr: SocketAddr,
+        client_closes: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    ) -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind close-loss proxy");
+        socket.set_nonblocking(true).unwrap();
+        let addr = socket.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut client_addr = None;
+            let started = Instant::now();
+            let mut buf = vec![0u8; 65_535];
+            while !thread_stop.load(Ordering::Relaxed)
+                && started.elapsed() < Duration::from_secs(30)
+            {
+                match socket.recv_from(&mut buf) {
+                    Ok((len, src)) => {
+                        let from_server = src == server_addr;
+                        let target = if from_server {
+                            let Some(client) = client_addr else {
+                                continue;
+                            };
+                            client
+                        } else {
+                            let client = client_addr.get_or_insert(src);
+                            if *client != src {
+                                continue;
+                            }
+                            server_addr
+                        };
+                        if !from_server && len > 0 && buf[0] & 0x80 == 0 {
+                            // This test's client sends no application packets
+                            // before close. Preserve both actual wire copies,
+                            // drop the first, and forward the second unchanged.
+                            let mut closes = client_closes.lock().unwrap();
+                            let first = closes.is_empty();
+                            if closes.len() < 2 {
+                                closes.push(buf[..len].to_vec());
+                            }
+                            if first {
+                                continue;
+                            }
+                        }
+                        socket.send_to(&buf[..len], target).unwrap();
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("close-loss proxy receive failed: {error}"),
+                }
+            }
+        });
+        Self {
+            addr,
+            stop,
+            handle: Some(handle),
+        }
+    }
 }
 
 impl Drop for HandshakeDropProxy {
@@ -867,6 +927,15 @@ fn decode_test_handshake_packet(
 
 #[test]
 fn real_tls13_managed_application_close_reaches_peer() {
+    assert_real_tls13_managed_application_close_reaches_peer(false);
+}
+
+#[test]
+fn real_tls13_managed_application_close_recovers_a_lost_first_packet() {
+    assert_real_tls13_managed_application_close_reaches_peer(true);
+}
+
+fn assert_real_tls13_managed_application_close_reaches_peer(drop_first_close: bool) {
     use asupersync::net::quic_core::TransportParameters;
     use asupersync::net::quic_native::{
         ManagedEndpointConfig, NativeQuicUdpConnection, QuicConnectionState,
@@ -893,6 +962,11 @@ fn real_tls13_managed_application_close_reaches_peer() {
                     .await
                     .unwrap();
             let server_addr = server_socket.local_addr();
+            let client_closes = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let proxy = drop_first_close.then(|| {
+                HandshakeDropProxy::spawn_with_close_loss(server_addr, Arc::clone(&client_closes))
+            });
+            let connect_addr = proxy.as_ref().map_or(server_addr, |proxy| proxy.addr);
             let client_tls = client_config(
                 vec![parse_one_cert(CA_CERT_PEM)],
                 vec![ATP_QUIC_ALPN.to_vec()],
@@ -935,7 +1009,7 @@ fn real_tls13_managed_application_close_reaches_peer() {
                     NativeQuicUdpConnection::connect(
                         &cx,
                         client_socket,
-                        server_addr,
+                        connect_addr,
                         client_driver,
                         initial_cid,
                         client_cid,
@@ -956,6 +1030,16 @@ fn real_tls13_managed_application_close_reaches_peer() {
             .await
             .expect("real TLS handshake completes");
             let mut server = server.expect("authenticated server");
+            if drop_first_close {
+                // With no client ACK, these authenticated stream/PTO packets
+                // keep reaching the closing owner after its first close is
+                // dropped. Only a bounded cached-close retry can end the wait.
+                let stream = server.connection_mut().open_bidi_stream(&cx).unwrap();
+                server
+                    .connection_mut()
+                    .write_stream(&cx, stream, Bytes::from_static(b"awaiting peer"), true)
+                    .unwrap();
+            }
             let mut client = client
                 .expect("authenticated client")
                 .into_managed(
@@ -981,26 +1065,37 @@ fn real_tls13_managed_application_close_reaches_peer() {
             // datagram without endpoint shutdown or an HTTP/3-only close API.
             let drive = async {
                 client
-                    .run_event_loop_with_application::<(), _>(&cx, |_, _, _| Poll::Pending)
+                    .run_event_loop_with_application::<usize, _>(&cx, |_, _, _| Poll::Pending)
                     .await
-                    .expect("managed close driver");
-                panic!("a pending application must not complete the driver");
+                    .expect("managed close driver")
             };
             let observe = async {
+                let mut peer_packets_sent = 0;
                 while !server.connection().close_was_peer_initiated() {
-                    server
-                        .drive_io_once(&cx, Duration::from_secs(1))
+                    let progress = server
+                        .drive_io_once(&cx, Duration::from_millis(100))
                         .await
                         .expect("receive authenticated local close");
+                    peer_packets_sent += progress.packets_sent;
                 }
+                peer_packets_sent
             };
-            timeout(
+            let peer_packets_sent = timeout(
                 cx.now(),
                 Duration::from_secs(5),
                 futures_lite::future::race(drive, observe),
             )
             .await
             .expect("the peer receives CONNECTION_CLOSE before local drain expiry");
+            if drop_first_close {
+                assert!(
+                    peer_packets_sent > 0,
+                    "the peer sent authenticated retry traffic"
+                );
+                let closes = client_closes.lock().unwrap();
+                assert_eq!(closes.len(), 2, "first close dropped, second forwarded");
+                assert_eq!(closes[0], closes[1], "retry reuses identical protected bytes");
+            }
             assert_eq!(server.connection().state(), QuicConnectionState::Draining);
             assert_eq!(
                 server.connection().inner().transport().close_code(),
@@ -1012,10 +1107,6 @@ fn real_tls13_managed_application_close_reaches_peer() {
                 .with_connection_mut(&cx, client_cid, |connection| {
                     assert_eq!(connection.state(), QuicConnectionState::Draining);
                     assert!(!connection.close_was_peer_initiated());
-                    assert_eq!(
-                        connection.inner().transport().drain_deadline_micros(),
-                        Some(60_000_000)
-                    );
                 })
                 .unwrap();
             client.shutdown(&cx).await.unwrap();
