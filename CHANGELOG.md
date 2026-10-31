@@ -257,6 +257,11 @@ symlink, where it used to fail on whichever came first.
   decisions:
   - CONNECT confirmation is opt-in, through `NatsClient::connect_with_policy`;
   - the per-consumer 50 ms pull limiter is unchanged.
+- **`drain_root_region` can report `Quiescent` while a parked cancel batch is
+  unpublished.** `AppHandle::stop` and a failed supervisor boot park one for a
+  worker turn, and on a multi-thread runtime the drain can return first. If you
+  need the runtime fully quiescent, wait on `is_quiescent()`. The fix is
+  planned for 0.6.1 (asupersync-wcc1f5).
 - **`cargo fmt --check`** reports formatting drift on `main` that was not there at
   v0.5.0 (GitHub #76). It now also covers the 941 inline test modules that
   moved out of their source files (c5012547e) and kept their indentation. It is
