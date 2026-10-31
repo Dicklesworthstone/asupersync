@@ -65,8 +65,10 @@ fn pair() -> (PgConnection, std::net::TcpStream) {
         prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
         deallocate_retry_queue: VecDeque::new(), consecutive_deallocate_failures: 0,
         unhealthy: false, subscribed_channels: BTreeSet::new(), notifications: NotificationBuffer::default(),
-        backend_frame: BackendFrame::default(), statement_timeout_override: Some(Duration::ZERO),
-        applied_statement_timeout_ms: Some(0), statement_timeout_uncertain: false,
+        // Every wire timeout is floored at 1 ms (`statement_timeout_millis`: the server reads 0 as
+        // "disabled"), so this session is already reconciled whatever deadline a test's Cx has.
+        backend_frame: BackendFrame::default(), statement_timeout_override: Some(Duration::from_millis(1)),
+        applied_statement_timeout_ms: Some(1), statement_timeout_uncertain: false,
         statement_timeout_set_in_block: false, pending_session_reset: false,
     } }, peer)
 }

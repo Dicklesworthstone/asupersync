@@ -19,6 +19,23 @@ fn runtime(workers: usize) -> Runtime {
     builder.with_reactor(crate::runtime::reactor::create_reactor().unwrap()).build().unwrap()
 }
 
+/// The owned cancellation-Waker registrations on `cx`, by token.
+///
+/// `Runtime::block_on` registers its caller's cancellation wake on the root
+/// it drives for exactly the length of the drive. Inside a drive, a stream
+/// that leaks nothing therefore leaves that one entry, not an empty registry.
+fn cancel_waker_tokens(cx: &Cx) -> Vec<u64> {
+    let mut tokens: Vec<u64> = cx
+        .inner
+        .read()
+        .cancel_waker_registrations
+        .iter()
+        .map(|registration| registration.token)
+        .collect();
+    tokens.sort_unstable();
+    tokens
+}
+
 fn listener() -> (TcpListener, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -272,8 +289,10 @@ fn native_replication_negotiates_mode_decodes_changes_and_acknowledges_only_conf
             finish_peer(&mut socket);
         });
         let runtime = runtime(workers);
-        runtime.block_on(async {
+        let cx = runtime.block_on(async {
             let cx = Cx::current().unwrap();
+            let driver_wake = cancel_waker_tokens(&cx);
+            assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
             let connection = ok(PgReplicationConnection::connect(&cx, &url).await);
             let mut stream = ok(connection.start(&cx, config()).await);
             let event = ok(stream.next(&cx).await).unwrap();
@@ -286,8 +305,11 @@ fn native_replication_negotiates_mode_decodes_changes_and_acknowledges_only_conf
             assert_eq!(stream.feedback(), feedback);
             assert!(matches!(stream.send_feedback(&cx, PgReplicationFeedback::default()).await, Outcome::Err(PgError::Protocol(_))));
             ok(stream.finish(&cx).await);
-            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(cancel_waker_tokens(&cx), driver_wake);
+            cx
         });
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        drop(cx);
         peer.join().unwrap();
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
     }
@@ -307,8 +329,10 @@ fn native_partial_wal_wait_can_be_dropped_to_send_feedback_then_resumed() {
             finish_peer(&mut socket);
         });
         let runtime = runtime(workers);
-        runtime.block_on(async {
+        let cx = runtime.block_on(async {
             let cx = Cx::current().unwrap();
+            let driver_wake = cancel_waker_tokens(&cx);
+            assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
             let connection = ok(PgReplicationConnection::connect(&cx, &url).await);
             let mut stream = ok(connection.start(&cx, config()).await);
             let progress = Arc::new(AtomicUsize::new(0));
@@ -320,12 +344,16 @@ fn native_partial_wal_wait_can_be_dropped_to_send_feedback_then_resumed() {
                     if progress.load(Ordering::Acquire) == 7 { Poll::Ready(()) } else { Poll::Pending }
                 }).await;
             }
-            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(cancel_waker_tokens(&cx), driver_wake);
             ok(stream.send_feedback(&cx, PgReplicationFeedback::default()).await);
             let event = ok(stream.next(&cx).await).unwrap();
             assert!(matches!(event.pgoutput().unwrap(), Some(PgOutputMessage::Begin { xid: 42, .. })));
             ok(stream.finish(&cx).await);
+            assert_eq!(cancel_waker_tokens(&cx), driver_wake);
+            cx
         });
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        drop(cx);
         peer.join().unwrap();
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
     }
@@ -359,8 +387,10 @@ fn native_parked_replication_retains_original_owner_cancellation_and_delivers_ca
                 owner.cancel_with_reason(reason);
             })
         };
-        runtime.block_on(async {
+        let poller = runtime.block_on(async {
             let poller = Cx::current().unwrap();
+            let driver_wake = cancel_waker_tokens(&poller);
+            assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
             let connection = ok(PgReplicationConnection::connect(&owner, &url).await);
             let mut stream = ok(connection.start(&owner, config()).await);
             let mut witnessed = false;
@@ -384,8 +414,11 @@ fn native_parked_replication_retains_original_owner_cancellation_and_delivers_ca
             assert!(matches!(stream.next(&poller).await, Outcome::Err(PgError::Protocol(_))));
             drop(stream);
             assert!(owner.inner.read().cancel_waker_registrations.is_empty());
-            assert!(poller.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(cancel_waker_tokens(&poller), driver_wake);
+            poller
         });
+        assert!(poller.inner.read().cancel_waker_registrations.is_empty());
+        drop(poller);
         controller.join().unwrap();
         peer.join().unwrap();
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
@@ -477,8 +510,10 @@ fn native_replication_bounds_protocol_errors_and_unconsumed_drop_close_the_socke
                 closed(&mut socket);
             });
             let runtime = runtime(workers);
-            runtime.block_on(async {
+            let cx = runtime.block_on(async {
                 let cx = Cx::current().unwrap();
+                let driver_wake = cancel_waker_tokens(&cx);
+                assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
                 let connection = ok(PgReplicationConnection::connect(&cx, &url).await);
                 let mut stream = ok(connection.start(&cx, config().with_max_message_bytes(128).unwrap()).await);
                 if case < 3 {
@@ -493,8 +528,11 @@ fn native_replication_bounds_protocol_errors_and_unconsumed_drop_close_the_socke
                     }
                 }
                 drop(stream);
-                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(cancel_waker_tokens(&cx), driver_wake);
+                cx
             });
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            drop(cx);
             peer.join().unwrap();
             assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
         }
