@@ -16,7 +16,19 @@
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
-    use tempfile::tempdir;
+
+    /// A fresh directory for a test socket, under `/tmp` rather than `TMPDIR`.
+    ///
+    /// `sun_path` holds 108 bytes on Linux (104 on macOS) including the
+    /// terminating NUL. rch workers set `TMPDIR` to `<project root>/.rch-tmp`,
+    /// 70 or more bytes, and `tempdir()` appends `/.tmpXXXXXX`, so a 26-byte
+    /// socket name no longer fit there.
+    fn socket_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("asu")
+            .tempdir_in("/tmp")
+            .expect("create socket dir")
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -38,7 +50,7 @@
                 Cx::current().is_none(),
                 "test must run without an ambient Cx"
             );
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let path = dir.path().join("driverless_accept.sock");
             let std_listener = net::UnixListener::bind(&path).expect("bind listener");
             std_listener
@@ -335,7 +347,7 @@
     fn test_bind_and_local_addr() {
         init_test("test_bind_and_local_addr");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let path = dir.path().join("test.sock");
 
             let listener = UnixListener::bind(&path).await.expect("bind failed");
@@ -359,7 +371,7 @@
     fn test_bind_refuses_non_socket_path() {
         init_test("test_bind_refuses_non_socket_path");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let path = dir.path().join("non_socket_target");
             std::fs::write(&path, b"not a socket").expect("write file");
 
@@ -384,7 +396,7 @@
     fn test_bind_refuses_stale_socket_file() {
         init_test("test_bind_refuses_stale_socket_file");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let path = dir.path().join("stale_socket.sock");
 
             let stale = net::UnixListener::bind(&path).expect("create stale socket");
@@ -413,7 +425,7 @@
     fn test_bind_refuses_live_socket_file() {
         init_test("test_bind_refuses_live_socket_file");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let path = dir.path().join("live_socket.sock");
 
             let original = net::UnixListener::bind(&path).expect("create live socket");
@@ -439,7 +451,7 @@
     fn test_accept() {
         init_test("test_accept");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let path = dir.path().join("accept_test.sock");
 
             let listener = UnixListener::bind(&path).await.expect("bind failed");
@@ -467,7 +479,7 @@
     #[test]
     fn incoming_registers_on_wouldblock() {
         init_test("incoming_registers_on_wouldblock");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("incoming_register.sock");
 
         let std_listener = net::UnixListener::bind(&path).expect("bind failed");
@@ -506,7 +518,7 @@
     #[test]
     fn listener_fanout_wakes_all_pending_accept_waiters() {
         init_test("listener_fanout_wakes_all_pending_accept_waiters");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("listener_fanout.sock");
 
         let std_listener = net::UnixListener::bind(&path).expect("bind failed");
@@ -566,7 +578,7 @@
     #[test]
     fn many_pending_accepts_neither_wake_each_other_nor_outlive_their_futures() {
         init_test("many_pending_accepts_neither_wake_each_other_nor_outlive_their_futures");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("many_accepts.sock");
         let std_listener = net::UnixListener::bind(&path).expect("bind failed");
         std_listener
@@ -612,7 +624,7 @@
     #[test]
     fn incoming_recovers_after_registration_lock_panic() {
         init_test("incoming_recovers_after_registration_lock_panic");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("incoming_poisoned_lock.sock");
 
         let std_listener = net::UnixListener::bind(&path).expect("bind failed");
@@ -663,7 +675,7 @@
     #[test]
     fn test_socket_cleanup_on_drop() {
         init_test("test_socket_cleanup_on_drop");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("cleanup_test.sock");
 
         futures_lite::future::block_on(async {
@@ -681,7 +693,7 @@
     #[test]
     fn test_from_std_no_cleanup() {
         init_test("test_from_std_no_cleanup");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("from_std_test.sock");
 
         // Create with std
@@ -707,7 +719,7 @@
     #[test]
     fn test_take_path_prevents_cleanup() {
         init_test("test_take_path_prevents_cleanup");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("take_path_test.sock");
 
         futures_lite::future::block_on(async {
@@ -734,7 +746,7 @@
     #[test]
     fn replacement_socket_path_survives_old_listener_drop() {
         init_test("replacement_socket_path_survives_old_listener_drop");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("listener_rebind.sock");
 
         let original =
@@ -762,7 +774,7 @@
     #[test]
     fn test_bind_cleanup_on_post_bind_init_failure() {
         init_test("test_listener_bind_cleanup_on_post_bind_init_failure");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("listener_init_failure.sock");
 
         remove_stale_socket_file(&path).expect("clear stale socket");

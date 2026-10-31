@@ -301,14 +301,16 @@ fn noncanonical_record_lengths_refuse_before_creating_a_replacement() {
     let entry = JournalEntry::new(0, accept("first", "original").with_signature(&key()));
     let mut encoded = entry.encode();
     encoded[12..16].copy_from_slice(&(entry.entry_size + 1).to_le_bytes());
-    encoded.push(0); // Old payload decoding accepts a trailing byte.
+    encoded.push(0);
     let mut bytes = Vec::new();
     storage::write_frame(&mut bytes, &encoded).unwrap();
     let path = journal_file_path(root.path(), 0);
     std::fs::write(&path, &bytes).unwrap();
-    let mut journal = AppendJournal::new(cfg, key()).unwrap();
-    assert!(matches!(journal.compact(), Outcome::Err(JournalError::CompactionFailed(message))
-        if message.contains("canonical payload")));
+    // Since c88218815 (fw1eg1) payload decoding must consume the whole declared
+    // length, so recovery refuses the padded record when the journal opens and
+    // no journal exists that could compact it.
+    assert!(matches!(AppendJournal::new(cfg, key()), Outcome::Err(JournalError::Deserialization(message))
+        if message == TRAILING_JOURNAL_BYTES));
     assert_eq!(std::fs::read(path).unwrap(), bytes);
     assert!(!journal_file_path(root.path(), 1).exists());
 }

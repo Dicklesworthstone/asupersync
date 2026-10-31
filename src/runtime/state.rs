@@ -5725,6 +5725,7 @@ impl RuntimeState {
             request.requirements,
             request.priority,
             request.principal_task_id,
+            request.opener_task_id,
         );
         (request.slot, outcome)
     }
@@ -5964,6 +5965,7 @@ impl RuntimeState {
         requirements: crate::types::CapabilityBudgetRequirements,
         priority: RegionPriority,
         principal_task_id: TaskId,
+        opener_task_id: TaskId,
     ) -> Result<crate::runtime::spawn_mailbox::AdmittedRegion, RegionCreateError> {
         let child_region = self.create_child_region_with_capability_budget_and_priority(
             parent,
@@ -5979,10 +5981,12 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(child_region, principal_task_id));
-        // A child-region principal borrows the caller's task identity, so it
-        // must share that task's clock rather than restart its component.
+        // The principal has its own provisional mailbox id that no task record
+        // carries (CreateRegionRequest::principal_task_id), so it shares the
+        // live opener's clock, looked up by the opener's id. Looking it up by
+        // the provisional id never matched (ea5a02c57).
         let principal_clock = self
-            .task(principal_task_id)
+            .task(opener_task_id)
             .and_then(|task| task.cx.as_ref())
             .filter(|cx| {
                 self.task_causality && cx.task_causality_runtime() == Some(self.instance_id)
@@ -6033,7 +6037,7 @@ impl RuntimeState {
         // observes and records exactly what an admitted task context would:
         // trace events flow to the runtime trace buffer, and cancellation
         // loser-drain history stays attributable.
-        // This child-region principal borrows the caller's task id; it does
+        // This child-region principal carries a provisional mailbox id; it does
         // not mint a task owned by the child. Do not manufacture checked
         // holder authority here. Actual child tasks receive their own handle
         // at the two task-minting seams above.

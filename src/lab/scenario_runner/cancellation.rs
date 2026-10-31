@@ -329,6 +329,9 @@ impl ScenarioRunner {
     ///
     /// Honors the scenario's fatal obligation-leak and futurelock settings,
     /// like ordinary runs. Those configured panics are not converted to reports.
+    /// Cancellation-protocol violations, including a request left unfinished
+    /// by the step budget, are reported in the run's invariant violations
+    /// instead of panicking.
     pub fn run_cancellation_campaign(
         scenario: &Scenario,
         seed_override: Option<u64>,
@@ -364,6 +367,11 @@ impl ScenarioRunner {
                 .unwrap_or(limits.max_steps_per_run)
                 .min(limits.max_steps_per_run),
         );
+        // An unfinished cancellation is a nonpassing trial ("unfinished cleanup
+        // cannot pass", f69e4cdc1), not a reason to abort the campaign. Keep
+        // the cancellation oracle enabled, in warning mode, so its verdict lands
+        // in invariant_violations instead of panicking from LabRuntime::report.
+        config.panic_on_cancellation_violation = false;
 
         let mut runtime = LabRuntime::new(config.clone());
         runtime.start_forced_schedule_recording(limits.max_poll_points)?;

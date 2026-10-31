@@ -109,7 +109,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── Spawn ───────────────────────────────────────────────────────────
     AmbientFinding {
         file: "time/sleep.rs",
-        line: 1044,
+        line: 1087,
         evidence_pattern: "std::thread::spawn",
         category: AmbientCategory::Spawn,
         severity: Severity::Medium,
@@ -119,7 +119,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
-        line: 1314,
+        line: 1451,
         evidence_pattern: "thread::Builder::new()",
         category: AmbientCategory::Spawn,
         severity: Severity::Low,
@@ -145,7 +145,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── IO ──────────────────────────────────────────────────────────────
     AmbientFinding {
         file: "web/debug.rs",
-        line: 166,
+        line: 261,
         evidence_pattern: "TcpListener::bind",
         category: AmbientCategory::Io,
         severity: Severity::Medium,
@@ -155,7 +155,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "net/atp/transport_common/metadata.rs",
-        line: 2633,
+        line: 2863,
         evidence_pattern: "std::fs::metadata",
         category: AmbientCategory::Io,
         severity: Severity::Low,

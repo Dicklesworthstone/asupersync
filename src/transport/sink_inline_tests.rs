@@ -100,10 +100,13 @@
         assert!(!sink.update_path_quality(PathId(99), multipath_quality(0)));
         let mut data = Vec::with_capacity(4096);
         data.push(7);
-        let spare_capacity = AuthenticatedSymbol::new_verified(
-            Symbol::new(SymbolId::new_for_test(1, 0, 0), data, SymbolKind::Source),
-            AuthenticationTag::zero(),
-        );
+        // Since f1f086db6 (br-asupersync-srqosl) new_verified reports the zero
+        // sentinel tag as unverified. Use a real tag so the retained copy can
+        // show that it keeps the verified state.
+        let spare = Symbol::new(SymbolId::new_for_test(1, 0, 0), data, SymbolKind::Source);
+        let tag = AuthenticationTag::compute(&crate::security::AuthKey::from_seed(0x3bb2), &spare);
+        let spare_capacity = AuthenticatedSymbol::new_verified(spare, tag);
+        assert!(spare_capacity.is_verified());
         assert!(matches!(
             Pin::new(&mut sink).poll_send(&mut cx, spare_capacity),
             Poll::Ready(Ok(()))

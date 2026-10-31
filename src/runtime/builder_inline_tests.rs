@@ -2265,8 +2265,14 @@
                 drop(runtime);
                 let final_stats = queue.stats();
                 assert!(final_stats.closed);
-                assert_eq!(final_stats.accepted_completions, 4);
-                assert_eq!(final_stats.processed_completions, 4);
+                // Four children plus block_on's root, a registered task on both
+                // shapes (current-thread accounting task since b07a58fd7,
+                // multi-thread CallerTaskRegistration since d8e81f2cd); 26dc2f713
+                // observes every registered completion. The root has no deadline,
+                // so it adds no deadline_remaining callback: `callback_panics` and
+                // `observed` below stay at four.
+                assert_eq!(final_stats.accepted_completions, 5);
+                assert_eq!(final_stats.processed_completions, 5);
                 assert_eq!(final_stats.queued_completions, 0);
                 assert_eq!(final_stats.dropped_completions, 0);
                 assert_eq!(final_stats.rejected_after_shutdown, 0);

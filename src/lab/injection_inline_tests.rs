@@ -800,7 +800,13 @@
         // a terminal run, even though the snapshot task-leak oracle permits
         // live work in a region that has not closed.
         let report = runner.run_owned_with_lab(|injector, runtime, _oracles, owned| {
+            // RuntimeState admits one root: create_root_region debug-asserts
+            // (5ab82329a). Mint the escaped root through the normal path, then
+            // restore `owned` as the recorded root.
+            let owned_root = runtime.state.root_region.take();
+            assert_eq!(owned_root, Some(owned));
             let escaped = runtime.state.create_root_region(Budget::INFINITE);
+            runtime.state.root_region = owned_root;
             assert_ne!(escaped, owned);
             let (task, _join) = runtime
                 .state

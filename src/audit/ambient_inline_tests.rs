@@ -406,6 +406,9 @@ fn test_function() {
     //
     // **Escape hatches for tests:**
     // - Code inside `#[cfg(test)] mod tests { ... }` is excluded from scanning.
+    //   For the pristine-module rule, so is a `tests.rs` file that its parent
+    //   declares as `#[cfg(test)] mod tests;` (the same module, out of line).
+    //   Such files stay in the inventory and its count.
     // - Files listed in EXEMPT_PREFIXES are skipped entirely (these ARE the
     //   capability providers or process-boundary tools).
     // - CLI and benchmark adapters are process boundaries: they may read env,
@@ -601,7 +604,21 @@ fn test_function() {
     // occurrence in native_stream/connect/tests.rs, offsetting that removal.
     // The new black-hole fixture is explicitly cfg(test); no scanner
     // exemption, detection pattern, or numerical threshold changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 810;
+    // 2026-10-30 (w1030, 0.6.0 lib gate): 810 -> 841 after reviewing every
+    // site added since f22886099. Production (+13), each inside its owning
+    // subsystem with an inventoried precedent: ATP data and directory syncs
+    // and delta files (e55b90af5 metadata.rs OpenOptions +3 / File::open -1,
+    // c155c28b0 scoped finalize, ddcba5e53 native checkpoint, 0672ace4c TCP
+    // delta storage, delta_cas.rs and RQ delta_chunks.rs); the owned DNS
+    // resolver's TCP fallback (3ba921417) and the owned H1/H2 streaming
+    // server's async bind (79eeecb44), like the h1/h2 listener binds; and the
+    // PostgreSQL standby-status client clock (50e5b927a), a protocol field
+    // like jetstream's and nats.rs's SystemTime. Test fixtures (+18): std TCP
+    // peers, harness threads and wait deadlines in grpc native_stream/tests,
+    // grpc/web_client/tests.rs, cx saga tests.rs and spork event_manager
+    // tests.rs. No scanner exemption, detection pattern, or numerical
+    // threshold changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 841;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -1021,6 +1038,25 @@ fn test_function() {
         })
     }
 
+    /// Whether `rel` is a `tests.rs` file that its parent module declares only
+    /// as `#[cfg(test)] mod tests;`, so that it compiles only under cfg(test).
+    fn is_cfg_test_module_file(root: &Path, rel: &str) -> bool {
+        let Some(dir) = rel.strip_suffix("/tests.rs") else {
+            return false;
+        };
+        [format!("{dir}.rs"), format!("{dir}/mod.rs")]
+            .iter()
+            .find_map(|parent| std::fs::read_to_string(root.join(parent)).ok())
+            .is_some_and(|parent| {
+                parent
+                    .lines()
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|pair| pair == ["#[cfg(test)]", "mod tests;"])
+            })
+    }
+
     #[test]
     fn pristine_modules_have_no_ambient_authority() {
         let root = src_root();
@@ -1033,6 +1069,10 @@ fn test_function() {
                 "pristine module contains no Rust files: {}",
                 module_dir.display()
             );
+            let violations = violations
+                .into_iter()
+                .filter(|violation| !is_cfg_test_module_file(&root, &violation.file))
+                .collect::<Vec<_>>();
             assert!(
                 violations.is_empty(),
                 "Pristine module '{module}' has {} ambient authority violation(s):\n{}",

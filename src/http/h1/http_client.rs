@@ -3566,9 +3566,15 @@ struct PooledStreamDeadline {
 impl PooledStreamDeadline {
     fn capture(cx: &Cx, configured: Option<std::time::Duration>) -> Self {
         let clock = cx.timer_driver();
-        let now = clock
-            .as_ref()
-            .map_or_else(crate::time::wall_now, |clock| clock.now());
+        let now = clock.as_ref().map_or_else(
+            || {
+                // `wall_now` reads the ambient task's clock; measure a
+                // driverless owner's timeout on its own wall clock.
+                let _owner = Cx::set_current(Some(cx.clone()));
+                crate::time::wall_now()
+            },
+            |clock| clock.now(),
+        );
         let at = cx
             .budget()
             .deadline
@@ -3623,18 +3629,20 @@ impl PooledStreamOwner {
             return Some(ClientError::Io(error));
         }
         self.cancel_waker = Some(self.cx.refresh_cancel_waker(self.cancel_waker, task.waker()));
-        if let Some(timer) = self.deadline.as_mut() {
-            // Install the actual driverless owner: set_current(None) installs
-            // no frame and cannot hide a foreign polling task's timer driver.
-            let _ambient = self
-                .standalone_clock
-                .then(|| Cx::set_current(Some(self.cx.clone())));
-            if Pin::new(timer).poll_deadline(task).is_ready() {
-                // Record an expired owner budget, while retaining the client's
-                // typed timeout verdict for the configured absolute deadline.
-                let _ = self.cx.checkpoint();
-                return Some(ClientError::DeadlineExceeded);
-            }
+        // Install the actual driverless owner: set_current(None) installs no
+        // frame and cannot hide a foreign polling task's timer driver. Keep it
+        // installed through `check_cx` too: a driverless owner's checkpoint
+        // reads the ambient clock through `wall_now`.
+        let _ambient = self
+            .standalone_clock
+            .then(|| Cx::set_current(Some(self.cx.clone())));
+        if let Some(timer) = self.deadline.as_mut()
+            && Pin::new(timer).poll_deadline(task).is_ready()
+        {
+            // Record an expired owner budget, while retaining the client's
+            // typed timeout verdict for the configured absolute deadline.
+            let _ = self.cx.checkpoint();
+            return Some(ClientError::DeadlineExceeded);
         }
         check_cx(&self.cx).err()
     }

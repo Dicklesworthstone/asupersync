@@ -9,7 +9,19 @@
     use super::*;
     use std::sync::Arc;
     use std::task::{Context, Waker};
-    use tempfile::tempdir;
+
+    /// A fresh directory for a test socket, under `/tmp` rather than `TMPDIR`.
+    ///
+    /// `sun_path` holds 108 bytes on Linux (104 on macOS) including the
+    /// terminating NUL. rch workers set `TMPDIR` to `<project root>/.rch-tmp`,
+    /// 70 or more bytes, and `tempdir()` appends `/.tmpXXXXXX`, so a 26-byte
+    /// socket name no longer fit there.
+    fn socket_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("asu")
+            .tempdir_in("/tmp")
+            .expect("create socket dir")
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -93,7 +105,7 @@
     fn test_bind_and_send_to() {
         init_test("test_datagram_bind_send_to");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let server_path = dir.path().join("server.sock");
 
             let mut server = UnixDatagram::bind(&server_path).expect("bind failed");
@@ -119,7 +131,7 @@
     fn test_peek_from_reports_peer_and_preserves_data() {
         init_test("test_datagram_peek_from");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let server_path = dir.path().join("server.sock");
             let client_path = dir.path().join("client.sock");
 
@@ -168,7 +180,7 @@
     fn test_peek_from_unbound_sender_reports_unnamed_addr() {
         init_test("test_datagram_peek_from_unbound_sender_reports_unnamed_addr");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let server_path = dir.path().join("server.sock");
 
             let mut server = UnixDatagram::bind(&server_path).expect("bind server failed");
@@ -226,7 +238,7 @@
     fn test_recv_from_rejects_empty_buffer_without_consuming_datagram() {
         init_test("test_datagram_recv_from_empty_buffer");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let server_path = dir.path().join("server.sock");
             let client_path = dir.path().join("client.sock");
 
@@ -272,7 +284,7 @@
     fn test_connect() {
         init_test("test_datagram_connect");
         futures_lite::future::block_on(async {
-            let dir = tempdir().expect("create temp dir");
+            let dir = socket_dir();
             let server_path = dir.path().join("server.sock");
             let client_path = dir.path().join("client.sock");
 
@@ -300,7 +312,7 @@
     #[test]
     fn test_socket_cleanup_on_drop() {
         init_test("test_datagram_cleanup_on_drop");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("cleanup_test.sock");
 
         {
@@ -317,7 +329,7 @@
     #[test]
     fn test_from_std_no_cleanup() {
         init_test("test_datagram_from_std_no_cleanup");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("from_std_test.sock");
 
         // Create with std
@@ -340,7 +352,7 @@
     #[test]
     fn test_take_path_prevents_cleanup() {
         init_test("test_datagram_take_path");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("take_path_test.sock");
 
         {
@@ -363,7 +375,7 @@
     #[test]
     fn test_bind_refuses_stale_socket_file() {
         init_test("test_datagram_bind_refuses_stale_socket_file");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("stale_datagram.sock");
 
         let stale = net::UnixDatagram::bind(&path).expect("create stale socket");
@@ -385,7 +397,7 @@
     #[test]
     fn test_bind_refuses_live_socket_file() {
         init_test("test_datagram_bind_refuses_live_socket_file");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("live_datagram.sock");
 
         let original = net::UnixDatagram::bind(&path).expect("create live socket");
@@ -407,7 +419,7 @@
     #[test]
     fn replacement_socket_path_survives_old_datagram_drop() {
         init_test("replacement_socket_path_survives_old_datagram_drop");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("datagram_rebind.sock");
 
         let original = UnixDatagram::bind(&path).expect("bind failed");
@@ -434,7 +446,7 @@
     #[test]
     fn test_bind_cleanup_on_post_bind_init_failure() {
         init_test("test_datagram_bind_cleanup_on_post_bind_init_failure");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("datagram_init_failure.sock");
 
         crate::net::unix::listener::remove_stale_socket_file(&path).expect("clear stale socket");
@@ -463,7 +475,7 @@
     #[test]
     fn test_local_addr() {
         init_test("test_datagram_local_addr");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("local_addr_test.sock");
 
         let socket = UnixDatagram::bind(&path).expect("bind failed");
@@ -650,7 +662,7 @@
 
         init_test("test_cancelled_datagram_ops_return_interrupted_without_registration");
 
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let server_path = dir.path().join("cancel-server.sock");
         let client_path = dir.path().join("cancel-client.sock");
 
@@ -880,7 +892,7 @@
     #[test]
     fn test_bind_refuses_non_socket_path() {
         init_test("test_datagram_bind_refuses_non_socket_path");
-        let dir = tempdir().expect("create temp dir");
+        let dir = socket_dir();
         let path = dir.path().join("not_a_socket");
         std::fs::write(&path, b"important data").expect("write file");
 

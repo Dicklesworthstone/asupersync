@@ -190,8 +190,18 @@
                         .with_cleanup_budget(Budget::INFINITE),
                 );
                 for spec in [ChildRegionSpec::inherit(), relaxed] {
+                    // Since 7b7e852f9 the driver behind block_on_with_cx charges
+                    // `parent` one poll-quota unit per root poll, and a child
+                    // inherits the caller's remaining budget. Sample that live
+                    // budget in the same poll that opens the child.
+                    let caller_budget = parent.budget();
+                    assert!(caller_budget.poll_quota < parent_budget.poll_quota);
+                    assert_eq!(
+                        caller_budget,
+                        parent_budget.with_poll_quota(caller_budget.poll_quota)
+                    );
                     let child = parent.open_child_region(spec).await.unwrap();
-                    assert_eq!(child.cx().budget(), parent_budget);
+                    assert_eq!(child.cx().budget(), caller_budget);
                     assert_eq!(child.cx().capability_budget(), envelope);
                     let mut body = child
                         .cx()
@@ -210,7 +220,11 @@
                     assert_eq!(body.join(child.cx()).await.unwrap(), 7);
                     child.close().await.unwrap();
                     assert_eq!(parent.capability_budget(), envelope);
-                    assert_eq!(parent.budget(), parent_budget);
+                    // Root polls (7b7e852f9) are the only spend: the child
+                    // neither replenishes the quota nor replaces another limit.
+                    let after_close = parent.budget();
+                    assert!(after_close.poll_quota <= caller_budget.poll_quota);
+                    assert_eq!(after_close, parent_budget.with_poll_quota(after_close.poll_quota));
                 }
                 let tighter_budget = deadline_budget_in(300)
                     .with_poll_quota(2048)

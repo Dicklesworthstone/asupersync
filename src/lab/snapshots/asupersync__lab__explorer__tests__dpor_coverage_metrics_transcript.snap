@@ -24,9 +24,9 @@ expression: transcript
   },
   "efficiency": 0.3333333333333333,
   "estimated_class_trend": [
-    2,
-    2,
-    2
+    1,
+    1,
+    1
   ],
   "pruned_backtrack_points": 0,
   "sleep_pruned": 4,

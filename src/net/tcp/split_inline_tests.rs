@@ -17,6 +17,7 @@
     mod gh85_runtime_handoff {
         use super::*;
         use crate::runtime::LabReactor;
+        use std::io::Write as _;
 
         fn split_pair() -> (OwnedReadHalf, OwnedWriteHalf, std::net::TcpStream) {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
@@ -40,7 +41,7 @@
         }
 
         fn assert_survivor_reclaims_driver(departing_read: bool, cancelled: bool) {
-            let (mut read_half, mut write_half, peer) = split_pair();
+            let (mut read_half, mut write_half, mut peer) = split_pair();
             let inner = Arc::clone(&read_half.inner);
             let backend_a = Arc::new(LabReactor::new());
             let backend_b = Arc::new(LabReactor::new());
@@ -121,14 +122,38 @@
                 departing_tokens.write
             };
 
-            // Empty reads and flushes finish synchronously. Cancellation is
-            // checked first by each public poll path, before the socket call.
+            // A one-byte read of a queued byte and a flush finish
+            // synchronously. An empty read does not on Linux: a zero-length
+            // recv() with nothing queued fails with EAGAIN there (macOS
+            // returns 0), so the half would park. Loopback delivery can lag
+            // the peer's write, so wait until the byte is queued.
+            // Cancellation is checked first by each public poll path, before
+            // the socket call, so a cancelled read leaves the byte unread.
+            if departing_read {
+                peer.write_all(b"x").expect("peer writes one byte");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    match inner.stream.peek(&mut [0; 1]) {
+                        Ok(1) => break,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "the peer's byte reaches the socket"
+                            );
+                            std::thread::yield_now();
+                        }
+                        other => panic!("peek for the peer's byte: {other:?}"),
+                    }
+                }
+            }
             ambient_b.set_cancel_requested(cancelled);
             let mut task_cx = Context::from_waker(&departing_waker);
             let terminal = if departing_read {
-                let mut empty = [];
-                let mut read_buf = ReadBuf::new(&mut empty);
-                Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf)
+                let mut byte = [0];
+                let mut read_buf = ReadBuf::new(&mut byte);
+                let terminal = Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf);
+                assert_eq!(read_buf.filled().len(), usize::from(!cancelled));
+                terminal
             } else {
                 Pin::new(&mut write_half).poll_flush(&mut task_cx)
             };

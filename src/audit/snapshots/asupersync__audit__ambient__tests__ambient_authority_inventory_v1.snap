@@ -44,9 +44,11 @@ expression: inventory
 1	Io	atp/cache/storage.rs	std::fs::read(
 1	Io	atp/cache/storage.rs	std::fs::write(
 2	Io	atp/journal/append_journal.rs	File::open(
+2	Io	atp/journal/delta_cas.rs	File::open(
 1	Io	atp/journal/platform_caps.rs	std::fs::OpenOptions
 1	Io	atp/journal/sparse_writer.rs	File::open(
 1	Io	atp/journal/sparse_writer/copy_commit.rs	File::open(
+1	Io	atp/journal/sparse_writer/scoped/finalize.rs	File::open(
 2	Io	atp/journal/sparse_writer/scoped/restore.rs	File::open(
 1	Io	atp/journal/sparse_writer/scoped/restore/tests.rs	std::fs::write(
 1	Io	atp/mailbox/relay.rs	TcpStream::
@@ -68,6 +70,9 @@ expression: inventory
 2	Io	grpc/native_stream/duplex/tests.rs	TcpListener::
 1	Io	grpc/native_stream/duplex/tests.rs	TcpStream::
 2	Io	grpc/native_stream/duplex/tests.rs	std::net::TcpStream
+1	Io	grpc/native_stream/tests/keepalive_backoff.rs	TcpListener::
+4	Io	grpc/native_stream/tests/keepalive_backoff.rs	std::net::TcpStream
+1	Io	grpc/native_stream/tests/native.rs	std::net::TcpListener
 4	Io	grpc/native_stream/tests/native.rs	std::net::TcpStream
 1	Io	grpc/native_upload/client_streaming/tests.rs	TcpListener::
 2	Io	grpc/native_upload/client_streaming/tests.rs	std::net::TcpStream
@@ -77,7 +82,9 @@ expression: inventory
 1	Io	grpc/server/duplex/tests.rs	TcpStream::
 2	Io	grpc/server/duplex/tests.rs	std::net::TcpStream
 1	Io	grpc/server/server_streaming/tests.rs	TcpStream::
+1	Io	grpc/web_client/tests.rs	TcpListener::
 1	Io	http/auto.rs	TcpListener::
+1	Io	http/auto/streaming.rs	TcpListener::
 2	Io	http/h1/http_client.rs	TcpStream::
 4	Io	http/h1/listener.rs	TcpListener::
 1	Io	http/h2/client.rs	TcpStream::
@@ -87,7 +94,7 @@ expression: inventory
 1	Io	messaging/redis.rs	TcpStream::
 1	Io	messaging/stream.rs	File::open(
 1	Io	net/atp/sdk/bonded.rs	TcpListener::
-4	Io	net/atp/sdk/native/checkpoint.rs	File::open(
+5	Io	net/atp/sdk/native/checkpoint.rs	File::open(
 1	Io	net/atp/sdk/native_live.rs	TcpListener::
 1	Io	net/atp/sdk/native_live.rs	TcpStream::
 1	Io	net/atp/sdk/native_live/commit/file.rs	std::fs::File::open
@@ -103,8 +110,8 @@ expression: inventory
 1	Io	net/atp/sdk/session.rs	std::net::TcpStream
 1	Io	net/atp/sdk/transfer.rs	std::net::TcpStream
 1	Io	net/atp/transport_common/file_hash.rs	File::open(
-2	Io	net/atp/transport_common/metadata.rs	std::fs::File::open
-7	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions
+1	Io	net/atp/transport_common/metadata.rs	std::fs::File::open
+10	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions
 1	Io	net/atp/transport_common/mirror.rs	std::fs::OpenOptions
 1	Io	net/atp/transport_common/streaming.rs	std::fs::File::open
 4	Io	net/atp/transport_quic/mod.rs	File::open(
@@ -114,17 +121,20 @@ expression: inventory
 2	Io	net/atp/transport_quic/native_link.rs	std::fs::File::open
 2	Io	net/atp/transport_quic/native_link.rs	std::fs::OpenOptions
 1	Io	net/atp/transport_rq/bonded.rs	TcpStream::
+3	Io	net/atp/transport_rq/delta_chunks.rs	File::open(
 3	Io	net/atp/transport_rq/mod.rs	File::create(
 12	Io	net/atp/transport_rq/mod.rs	File::open(
 2	Io	net/atp/transport_rq/mod.rs	TcpStream::
 1	Io	net/atp/transport_rq/mod.rs	std::fs::File::create
 1	Io	net/atp/transport_rq/mod.rs	std::fs::File::open
 1	Io	net/atp/transport_rq/mod.rs	std::fs::write(
+1	Io	net/atp/transport_tcp/delta_storage.rs	std::fs::OpenOptions
 1	Io	net/atp/transport_tcp/mod.rs	File::create(
 7	Io	net/atp/transport_tcp/mod.rs	File::open(
 1	Io	net/atp/transport_tcp/mod.rs	TcpStream::
 1	Io	net/atp/transport_tcp/mod.rs	std::fs::OpenOptions
 1	Io	net/dns/resolver.rs	TcpStream::
+1	Io	net/dns/resolver/native.rs	TcpStream::
 2	Io	net/happy_eyeballs.rs	TcpStream::
 3	Io	net/quic_native/forensic_log.rs	std::fs::File::create
 1	Io	net/stun.rs	std::net::UdpSocket
@@ -166,10 +176,13 @@ expression: inventory
 4	Output	net/atp/transport_rq/mod.rs	eprintln!(
 1	Output	net/quic_native/connection.rs	eprintln!(
 1	Output	net/quic_native/endpoint_api.rs	eprintln!(
+2	Spawn	cx/resource_bracket/saga/tests.rs	std::thread::spawn
 1	Spawn	database/mysql.rs	std::thread::Builder
 1	Spawn	grpc/health_rpc/tests/native.rs	std::thread::spawn
 1	Spawn	grpc/native_stream/connect/tests.rs	std::thread::spawn
 4	Spawn	grpc/native_stream/duplex/tests.rs	std::thread::spawn
+1	Spawn	grpc/native_stream/tests/keepalive_backoff.rs	std::thread::spawn
+1	Spawn	grpc/native_stream/tests/native.rs	std::thread::spawn
 2	Spawn	grpc/native_upload/client_streaming/tests.rs	std::thread::spawn
 2	Spawn	grpc/native_upload/tests.rs	std::thread::spawn
 2	Spawn	grpc/server/duplex/tests.rs	std::thread::spawn
@@ -183,6 +196,7 @@ expression: inventory
 1	Spawn	runtime/spawn_blocking.rs	thread::Builder
 2	Spawn	signal/shutdown.rs	std::thread::Builder
 2	Spawn	signal/signal.rs	thread::Builder
+1	Spawn	spork/event_manager/tests.rs	std::thread::spawn
 1	Spawn	time/sleep.rs	std::thread::Builder
 1	Spawn	time/sleep.rs	std::thread::spawn
 10	Time	agent_swarm/control_plane.rs	SystemTime::now()
@@ -235,15 +249,19 @@ expression: inventory
 1	Time	atp/writer.rs	std::time::SystemTime::now()
 2	Time	cancel/protocol_validator_test_suite.rs	Instant::now()
 2	Time	channel/verification_suite.rs	Instant::now()
+1	Time	database/postgres/replication.rs	SystemTime::now()
 4	Time	database/sqlite.rs	std::time::Instant::now()
 1	Time	decoding.rs	Instant::now()
 2	Time	grpc/native_stream/connect/tests.rs	std::time::Instant::now()
 4	Time	grpc/native_stream/duplex/tests.rs	Instant::now()
+2	Time	grpc/native_stream/tests/keepalive_backoff.rs	std::time::Instant::now()
+2	Time	grpc/native_stream/tests/native.rs	std::time::Instant::now()
 2	Time	grpc/native_upload/client_streaming/tests.rs	Instant::now()
 2	Time	grpc/native_upload/tests.rs	Instant::now()
 1	Time	grpc/server.rs	Instant::now()
 2	Time	grpc/server/duplex/tests.rs	std::time::Instant::now()
 1	Time	grpc/server/server_streaming.rs	Instant::now()
+2	Time	grpc/web_client/tests.rs	Instant::now()
 1	Time	messaging/jetstream.rs	SystemTime::now()
 1	Time	messaging/nats.rs	std::time::SystemTime::now()
 3	Time	net/atp/chunk/dedupe.rs	std::time::SystemTime::now()
@@ -378,9 +396,12 @@ expression: inventory
 1	Io	atp/cache/storage.rs	std::fs::write(	std::fs::write(&file_path, content_to_store)
 1	Io	atp/journal/append_journal.rs	File::open(	let dir = File::open(path).map_err(|err| JournalError::SyncFailure(err.to_string()))?;
 1	Io	atp/journal/append_journal.rs	File::open(	let file = match File::open(file_path) {
+1	Io	atp/journal/delta_cas.rs	File::open(	fs::File::open(path)?.sync_all()
+1	Io	atp/journal/delta_cas.rs	File::open(	let mut file = fs::File::open(path)?;
 1	Io	atp/journal/platform_caps.rs	std::fs::OpenOptions	match std::fs::OpenOptions::new()
 1	Io	atp/journal/sparse_writer.rs	File::open(	File::open(parent)
 1	Io	atp/journal/sparse_writer/copy_commit.rs	File::open(	File::open(path)
+1	Io	atp/journal/sparse_writer/scoped/finalize.rs	File::open(	File::open(path.parent().ok_or_else(|| io::Error::other())?)?.sync_all()?;
 1	Io	atp/journal/sparse_writer/scoped/restore.rs	File::open(	File::open(parent)?.sync_all()?;
 1	Io	atp/journal/sparse_writer/scoped/restore.rs	File::open(	let source = match File::open(&request.source_path) {
 1	Io	atp/journal/sparse_writer/scoped/restore/tests.rs	std::fs::write(	std::fs::write(&source, data).unwrap();
@@ -410,6 +431,12 @@ expression: inventory
 1	Io	grpc/native_stream/duplex/tests.rs	TcpStream::	let io = TcpStream::connect_timeout(address, LIMIT).await.unwrap();
 1	Io	grpc/native_stream/duplex/tests.rs	std::net::TcpStream	fn write_pending(socket: &mut std::net::TcpStream, connection: &mut Connection) {
 1	Io	grpc/native_stream/duplex/tests.rs	std::net::TcpStream	fn write_ping(socket: &mut std::net::TcpStream, ping: PingFrame) {
+1	Io	grpc/native_stream/tests/keepalive_backoff.rs	TcpListener::	let listener = TcpListener::bind().unwrap();
+1	Io	grpc/native_stream/tests/keepalive_backoff.rs	std::net::TcpStream	fn accept(listener: &TcpListener) -> std::net::TcpStream {
+1	Io	grpc/native_stream/tests/keepalive_backoff.rs	std::net::TcpStream	fn peer_eof(socket: &mut std::net::TcpStream) {
+1	Io	grpc/native_stream/tests/keepalive_backoff.rs	std::net::TcpStream	fn peer_frame(socket: &mut std::net::TcpStream) -> (u8, u8, u32, Vec<u8>) {
+1	Io	grpc/native_stream/tests/keepalive_backoff.rs	std::net::TcpStream	fn request_head(socket: &mut std::net::TcpStream) {
+1	Io	grpc/native_stream/tests/native.rs	std::net::TcpListener	let listener = std::net::TcpListener::bind().unwrap();
 1	Io	grpc/native_stream/tests/native.rs	std::net::TcpStream	fn duplex_peer_frame(socket: &mut std::net::TcpStream) -> (u8, u8, Vec<u8>) {
 1	Io	grpc/native_stream/tests/native.rs	std::net::TcpStream	fn duplex_peer_request_body(socket: &mut std::net::TcpStream) {
 1	Io	grpc/native_stream/tests/native.rs	std::net::TcpStream	fn duplex_peer_request_head(socket: &mut std::net::TcpStream) {
@@ -425,11 +452,13 @@ expression: inventory
 1	Io	grpc/server/duplex/tests.rs	std::net::TcpStream	let socket = std::net::TcpStream::connect_timeout(&address, LIMIT).unwrap();
 1	Io	grpc/server/duplex/tests.rs	std::net::TcpStream	socket: std::net::TcpStream,
 1	Io	grpc/server/server_streaming/tests.rs	TcpStream::	let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+1	Io	grpc/web_client/tests.rs	TcpListener::	let listener = TcpListener::bind().unwrap();
 1	Io	http/auto.rs	TcpListener::	let listener = TcpListener::bind(addr).await?;
+1	Io	http/auto/streaming.rs	TcpListener::	let listener = TcpListener::bind(addr).await?;
 1	Io	http/h1/http_client.rs	TcpStream::	return TcpStream::connect_socket_addr(SocketAddr::new(ip, port))
 1	Io	http/h1/http_client.rs	TcpStream::	return TcpStream::connect_socket_addr(socket_addr)
 4	Io	http/h1/listener.rs	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
-1	Io	http/h2/client.rs	TcpStream::	TcpStream::connect(SocketAddr::new(ip, request.url.port)).await?
+1	Io	http/h2/client.rs	TcpStream::	TcpStream::connect(SocketAddr::new(ip, url.port)).await?
 4	Io	http/h2/listener.rs	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 1	Io	io/replay_group_session/connect/tcp.rs	TcpStream::	TcpStream::connect_socket_addr(address)
 1	Io	messaging/nats.rs	TcpStream::	let new_stream = nats_io(cx, TcpStream::connect(addr)).await?;
@@ -437,6 +466,7 @@ expression: inventory
 1	Io	messaging/redis.rs	TcpStream::	let tcp_stream = TcpStream::connect(addr).await?;
 1	Io	messaging/stream.rs	File::open(	let file = File::open(path).map_err(|error| StreamError::wal_io(, path, &error))?;
 1	Io	net/atp/sdk/bonded.rs	TcpListener::	let listener = TcpListener::bind(self.listen).await?;
+1	Io	net/atp/sdk/native/checkpoint.rs	File::open(	File::open(&owner.directory)?.sync_all()
 1	Io	net/atp/sdk/native/checkpoint.rs	File::open(	File::open(&path)?.sync_all()?;
 1	Io	net/atp/sdk/native/checkpoint.rs	File::open(	File::open(&payload)?.sync_all()?;
 1	Io	net/atp/sdk/native/checkpoint.rs	File::open(	File::open(directory)?.sync_all()
@@ -456,10 +486,11 @@ expression: inventory
 1	Io	net/atp/sdk/session.rs	std::net::TcpStream	std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
 1	Io	net/atp/sdk/transfer.rs	std::net::TcpStream	std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
 1	Io	net/atp/transport_common/file_hash.rs	File::open(	file: Some(File::open(path)?),
-1	Io	net/atp/transport_common/metadata.rs	std::fs::File::open	crate::runtime::spawn_blocking_io(move || std::fs::File::open(parent)?.sync_all()).await
 1	Io	net/atp/transport_common/metadata.rs	std::fs::File::open	std::fs::File::open(out_path)
 1	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	let mut file = std::fs::OpenOptions::new()
-6	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
+7	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
+1	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	let opened = std::fs::OpenOptions::new()
+1	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	std::fs::OpenOptions::new()
 1	Io	net/atp/transport_common/mirror.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
 1	Io	net/atp/transport_common/streaming.rs	std::fs::File::open	let file = std::fs::File::open(path)
 2	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
@@ -472,14 +503,18 @@ expression: inventory
 2	Io	net/atp/transport_quic/native_link.rs	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
 2	Io	net/atp/transport_quic/native_link.rs	std::fs::OpenOptions	let mut out = std::fs::OpenOptions::new()
 1	Io	net/atp/transport_rq/bonded.rs	TcpStream::	TcpStream::connect(control_addr),
+1	Io	net/atp/transport_rq/delta_chunks.rs	File::open(	let file = crate::fs::File::open(&baseline).await?;
+1	Io	net/atp/transport_rq/delta_chunks.rs	File::open(	let mut file = crate::fs::File::open(&plan.baseline).await?;
+1	Io	net/atp/transport_rq/delta_chunks.rs	File::open(	let mut file = crate::fs::File::open(&source.abs_path).await?;
 1	Io	net/atp/transport_rq/mod.rs	File::create(	let mut out = crate::fs::File::create(&member.write_path).await?;
 1	Io	net/atp/transport_rq/mod.rs	File::create(	let mut out = crate::fs::File::create(out_path).await?;
 1	Io	net/atp/transport_rq/mod.rs	File::create(	let mut pack_file = crate::fs::File::create(&pack_path)
 1	Io	net/atp/transport_rq/mod.rs	File::open(	let Ok(mut reader) = crate::fs::File::open(&dec.staging_path).await else {
 1	Io	net/atp/transport_rq/mod.rs	File::open(	let Some(mut reader) = crate::fs::File::open(&dec.staging_path).await.ok() else {
+1	Io	net/atp/transport_rq/mod.rs	File::open(	let file = crate::fs::File::open(path)
 1	Io	net/atp/transport_rq/mod.rs	File::open(	let mut file = crate::fs::File::open(&enc.abs_path)
 2	Io	net/atp/transport_rq/mod.rs	File::open(	let mut file = crate::fs::File::open(&shard.staging_path)
-3	Io	net/atp/transport_rq/mod.rs	File::open(	let mut file = crate::fs::File::open(path)
+2	Io	net/atp/transport_rq/mod.rs	File::open(	let mut file = crate::fs::File::open(path)
 1	Io	net/atp/transport_rq/mod.rs	File::open(	let mut file = crate::fs::File::open(staging_path)
 1	Io	net/atp/transport_rq/mod.rs	File::open(	let mut source = crate::fs::File::open(source_path)
 1	Io	net/atp/transport_rq/mod.rs	File::open(	let mut source = crate::fs::File::open(staging_path)
@@ -488,6 +523,7 @@ expression: inventory
 1	Io	net/atp/transport_rq/mod.rs	std::fs::File::create	let mut out = std::fs::File::create(&member.write_path)?;
 1	Io	net/atp/transport_rq/mod.rs	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
 1	Io	net/atp/transport_rq/mod.rs	std::fs::write(	std::fs::write(&member.write_path, &staged[start..end])?;
+1	Io	net/atp/transport_tcp/delta_storage.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
 1	Io	net/atp/transport_tcp/mod.rs	File::create(	let file = crate::fs::File::create(staging_path).await?;
 3	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
 1	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(&path)
@@ -495,6 +531,7 @@ expression: inventory
 1	Io	net/atp/transport_tcp/mod.rs	TcpStream::	with_transport_timeout(cx, config.idle_timeout, , TcpStream::connect(addr))
 1	Io	net/atp/transport_tcp/mod.rs	std::fs::OpenOptions	let file = std::fs::OpenOptions::new()
 1	Io	net/dns/resolver.rs	TcpStream::	TcpStream::connect_timeout_with_time_getter,
+1	Io	net/dns/resolver/native.rs	TcpStream::	let mut stream = TcpStream::connect(nameserver).await.map_err(|error| dns_io_error(&error))?;
 1	Io	net/happy_eyeballs.rs	TcpStream::	let attempt = Box::pin(TcpStream::connect(addr));
 1	Io	net/happy_eyeballs.rs	TcpStream::	return TcpStream::connect(*only).await;
 3	Io	net/quic_native/forensic_log.rs	std::fs::File::create	let file = std::fs::File::create(path)?;
@@ -545,11 +582,15 @@ expression: inventory
 2	Output	net/atp/transport_rq/mod.rs	eprintln!(	eprintln!(, format!($($arg)*));
 1	Output	net/quic_native/connection.rs	eprintln!(	eprintln!(, format!($($arg)*));
 1	Output	net/quic_native/endpoint_api.rs	eprintln!(	eprintln!(, format!($($arg)*));
+1	Spawn	cx/resource_bracket/saga/tests.rs	std::thread::spawn	let external = std::thread::spawn(move || {
+1	Spawn	cx/resource_bracket/saga/tests.rs	std::thread::spawn	let thread = std::thread::spawn(move || {
 1	Spawn	database/mysql.rs	std::thread::Builder	let _ = std::thread::Builder::new()
 1	Spawn	grpc/health_rpc/tests/native.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
 1	Spawn	grpc/native_stream/connect/tests.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
 3	Spawn	grpc/native_stream/duplex/tests.rs	std::thread::spawn	let thread = std::thread::spawn(move || {
 1	Spawn	grpc/native_stream/duplex/tests.rs	std::thread::spawn	let worker = std::thread::spawn(move || {
+1	Spawn	grpc/native_stream/tests/keepalive_backoff.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
+1	Spawn	grpc/native_stream/tests/native.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
 2	Spawn	grpc/native_upload/client_streaming/tests.rs	std::thread::spawn	let worker = std::thread::spawn(move || {
 2	Spawn	grpc/native_upload/tests.rs	std::thread::spawn	let worker = std::thread::spawn(move || {
 1	Spawn	grpc/server/duplex/tests.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
@@ -568,6 +609,7 @@ expression: inventory
 2	Spawn	signal/shutdown.rs	std::thread::Builder	std::thread::Builder::new()
 1	Spawn	signal/signal.rs	thread::Builder	let poller_handle = thread::Builder::new()
 1	Spawn	signal/signal.rs	thread::Builder	thread::Builder::new()
+1	Spawn	spork/event_manager/tests.rs	std::thread::spawn	let runner = std::thread::spawn(move || {
 1	Spawn	time/sleep.rs	std::thread::Builder	let handle = std::thread::Builder::new()
 1	Spawn	time/sleep.rs	std::thread::spawn	let handle = std::thread::spawn(move || {
 1	Time	agent_swarm/control_plane.rs	SystemTime::now()	SystemTime::now()
@@ -719,6 +761,7 @@ expression: inventory
 1	Time	cancel/protocol_validator_test_suite.rs	Instant::now()	let start_time = Instant::now();
 1	Time	channel/verification_suite.rs	Instant::now()	self.start_time = Instant::now();
 1	Time	channel/verification_suite.rs	Instant::now()	start_time: Instant::now(),
+1	Time	database/postgres/replication.rs	SystemTime::now()	let unix = match SystemTime::now().duration_since(UNIX_EPOCH) {
 2	Time	database/sqlite.rs	std::time::Instant::now()	if std::time::Instant::now() < deadline {
 2	Time	database/sqlite.rs	std::time::Instant::now()	let deadline = std::time::Instant::now() + limit;
 1	Time	decoding.rs	Instant::now()	let started = Instant::now();
@@ -726,6 +769,10 @@ expression: inventory
 1	Time	grpc/native_stream/connect/tests.rs	std::time::Instant::now()	let until = std::time::Instant::now() + Duration::from_secs(5);
 2	Time	grpc/native_stream/duplex/tests.rs	Instant::now()	assert!(Instant::now() < until, );
 2	Time	grpc/native_stream/duplex/tests.rs	Instant::now()	let until = Instant::now() + LIMIT;
+1	Time	grpc/native_stream/tests/keepalive_backoff.rs	std::time::Instant::now()	assert!(std::time::Instant::now() < until, );
+1	Time	grpc/native_stream/tests/keepalive_backoff.rs	std::time::Instant::now()	let until = std::time::Instant::now() + Duration::from_secs(5);
+1	Time	grpc/native_stream/tests/native.rs	std::time::Instant::now()	assert!(std::time::Instant::now() < until, );
+1	Time	grpc/native_stream/tests/native.rs	std::time::Instant::now()	let until = std::time::Instant::now() + Duration::from_secs(5);
 1	Time	grpc/native_upload/client_streaming/tests.rs	Instant::now()	assert!(Instant::now() < deadline, );
 1	Time	grpc/native_upload/client_streaming/tests.rs	Instant::now()	let deadline = Instant::now() + LIMIT;
 1	Time	grpc/native_upload/tests.rs	Instant::now()	assert!(Instant::now() < deadline, );
@@ -734,6 +781,8 @@ expression: inventory
 1	Time	grpc/server/duplex/tests.rs	std::time::Instant::now()	let deadline = std::time::Instant::now() + LIMIT;
 1	Time	grpc/server/duplex/tests.rs	std::time::Instant::now()	std::time::Instant::now() < deadline,
 1	Time	grpc/server/server_streaming.rs	Instant::now()	let wall_now = Instant::now();
+1	Time	grpc/web_client/tests.rs	Instant::now()	assert!(Instant::now() < deadline, );
+1	Time	grpc/web_client/tests.rs	Instant::now()	let deadline = Instant::now() + Duration::from_secs(5);
 1	Time	messaging/jetstream.rs	SystemTime::now()	let now_ns = SystemTime::now()
 1	Time	messaging/nats.rs	std::time::SystemTime::now()	let now_secs = std::time::SystemTime::now()
 1	Time	net/atp/chunk/dedupe.rs	std::time::SystemTime::now()	chunk.last_accessed = std::time::SystemTime::now();

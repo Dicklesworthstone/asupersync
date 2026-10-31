@@ -883,7 +883,6 @@ mod native {
                     .open_child_region(ChildRegionSpec::inherit())
                     .await
                     .unwrap();
-                let boundary_id = boundary.region_id();
                 let (body_parked, mut wait_body) = oneshot::channel();
                 let undos = Arc::new(AtomicUsize::new(0));
                 let observed = Arc::clone(&undos);
@@ -950,9 +949,12 @@ mod native {
                         .collect::<Vec<_>>(),
                     [1, 0]
                 );
-                let denial = SpawnError::RegionClosed(boundary_id).to_string();
+                // Native and Lab admission resolve a RegionClosed denial as a
+                // bare ParentCancelled reason (three_lane.rs drain paths, since
+                // 31516236f), with no SpawnError message; factories == 0 below
+                // proves the undo's task was refused rather than admitted.
                 assert!(matches!(&cleanup.entries[0].phase.outcome,
-                    Outcome::Err(JoinError::Cancelled(reason)) if reason.message.as_deref() == Some(denial.as_str())));
+                    Outcome::Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::ParentCancelled));
                 assert!(cleanup.entries[1].phase.is_success());
                 assert_eq!(undos.load(Ordering::SeqCst), 1);
                 assert_eq!(factories.load(Ordering::SeqCst), 0);

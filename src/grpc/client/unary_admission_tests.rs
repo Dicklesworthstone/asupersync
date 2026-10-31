@@ -174,13 +174,16 @@ fn peer(listener: &TcpListener, calls: usize) -> (Vec<PeerStep>, std::thread::Jo
                         headers,
                         end_stream,
                     }) => {
+                        let mut timeouts = headers
+                            .iter()
+                            .filter(|header| header.name == "grpc-timeout");
                         deadlines.insert(
                             stream_id,
-                            headers
-                                .iter()
-                                .find(|header| header.name == "grpc-timeout")
+                            timeouts
+                                .next()
                                 .and_then(|header| crate::grpc::parse_grpc_timeout(&header.value)),
                         );
+                        assert!(timeouts.next().is_none(), "one grpc-timeout per request");
                         bodies.entry(stream_id).or_default();
                         (stream_id, end_stream)
                     }
