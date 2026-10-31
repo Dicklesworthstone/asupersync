@@ -678,6 +678,69 @@
         crate::test_complete!("cancel_last_timer_purges_stale_storage");
     }
 
+    #[test]
+    fn cancel_last_timer_purges_every_level_and_bitmap_word() {
+        init_test("cancel_last_timer_purges_every_level_and_bitmap_word");
+        let mut wheel = TimerWheel::new().with_deferred_waker_drops();
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut handles = Vec::new();
+        // A slot in each bitmap word of each level, and a second slot in the
+        // first word, so that a walk losing a bit leaves a timer stored. The
+        // top level's later deadlines pass the wheel's 24-hour limit and land
+        // in overflow.
+        for resolution in LEVEL_RESOLUTIONS_NS {
+            for slot in [1, 2, 64, 128, 192] {
+                let deadline = Time::from_nanos(resolution * slot);
+                handles.push(wheel.register(deadline, counter_waker(Arc::clone(&counter))));
+            }
+        }
+        for level in &wheel.levels[..LEVEL_COUNT - 1] {
+            let every_word = level.occupied.iter().all(|&word| word != 0);
+            crate::assert_with_log!(every_word, "a timer in every word", true, every_word);
+            let bits = level.occupied[0].count_ones();
+            crate::assert_with_log!(bits == 2, "two timers in the first word", 2, bits);
+        }
+        let overflowed = !wheel.overflow.is_empty();
+        crate::assert_with_log!(overflowed, "a timer in overflow", true, overflowed);
+
+        for handle in &handles {
+            crate::assert_with_log!(wheel.cancel(handle), "cancel succeeds", true, true);
+        }
+
+        let stored = wheel.ready.len()
+            + wheel.overflow.len()
+            + wheel
+                .levels
+                .iter()
+                .flat_map(|level| &level.slots)
+                .map(Vec::len)
+                .sum::<usize>();
+        crate::assert_with_log!(stored == 0, "no entry is left stored", 0, stored);
+        for level in &wheel.levels {
+            crate::assert_with_log!(
+                level.occupied == [0u64; BITMAP_WORDS],
+                "occupied bitmap cleared",
+                [0u64; BITMAP_WORDS],
+                level.occupied
+            );
+        }
+        let dropped = wheel.take_dropped_wakers();
+        crate::assert_with_log!(
+            dropped.len() == handles.len(),
+            "every waker comes back for dropping",
+            handles.len(),
+            dropped.len()
+        );
+        drop(dropped);
+        crate::assert_with_log!(
+            Arc::strong_count(&counter) == 1,
+            "no waker is left behind",
+            1,
+            Arc::strong_count(&counter)
+        );
+        crate::test_complete!("cancel_last_timer_purges_every_level_and_bitmap_word");
+    }
+
     // =========================================================================
     // OVERFLOW AND MAX DURATION TESTS
     // =========================================================================
