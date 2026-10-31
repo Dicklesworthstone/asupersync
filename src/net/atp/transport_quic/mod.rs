@@ -2909,7 +2909,7 @@ struct QuicDeltaObjectRequest {
     request: DeltaObjectRequest,
 }
 
-/// Terminal proof for an authenticated QUIC delta no-op.
+/// Terminal proof for an authenticated QUIC delta no-op or pre-data refusal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg(any(feature = "tls", test))]
@@ -4256,6 +4256,8 @@ enum QuicBuildItem {
 
 const QUIC_DELTA_MAX_MANIFEST_CHUNKS: u64 = 4_096;
 const QUIC_DELTA_ENVELOPE_WIRE_BUDGET: usize = 2 * 1024;
+#[cfg(any(feature = "tls", test))]
+const QUIC_REFUSAL_REASON_MAX_BYTES: usize = 512;
 
 fn quic_delta_control_auth_context(config: &QuicConfig) -> Option<&SecurityContext> {
     config
@@ -7642,15 +7644,7 @@ fn validate_quic_delta_proof(
     session: QuicDeltaSessionContext,
     manifest: &TransferManifest,
 ) -> Result<ReceiveReceipt, QuicTransportError> {
-    if proof.control_seq != 1
-        || proof.session_id != session.session_id
-        || proof.transfer_id != manifest.transfer_id
-        || proof.destination_root != session.destination_root
-    {
-        return Err(QuicTransportError::Control(
-            "QUIC delta Proof binding mismatch".to_string(),
-        ));
-    }
+    validate_quic_delta_proof_binding(&proof, session, manifest)?;
     if !proof.receipt.committed
         || !proof.receipt.sha_ok
         || !proof.receipt.merkle_ok
@@ -7673,6 +7667,59 @@ fn validate_quic_delta_proof(
         ));
     }
     Ok(proof.receipt)
+}
+
+#[cfg(any(feature = "tls", test))]
+fn validate_quic_delta_proof_binding(
+    proof: &QuicDeltaProof,
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<(), QuicTransportError> {
+    if proof.control_seq != 1
+        || proof.session_id != session.session_id
+        || proof.transfer_id != manifest.transfer_id
+        || proof.destination_root != session.destination_root
+    {
+        return Err(QuicTransportError::Control(
+            "QUIC delta Proof binding mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Before the receiver selects a transfer mode, only a bound failure is a
+/// terminal response. A successful no-op proof cannot skip ObjectRequest and
+/// the sender's source revalidation/ObjectComplete handshake.
+#[cfg(any(feature = "tls", test))]
+fn validate_quic_delta_refusal(
+    proof: QuicDeltaProof,
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<String, QuicTransportError> {
+    validate_quic_delta_proof_binding(&proof, session, manifest)?;
+    if proof.receipt.committed
+        || proof.receipt.sha_ok
+        || proof.receipt.merkle_ok
+        || proof.receipt.bytes_received != 0
+        || proof.receipt.files != 0
+        || proof.receipt.symbols_accepted != 0
+        || proof.receipt.feedback_rounds != 0
+        || proof.receipt.decode_count != 0
+        || proof.receipt.decode_micros != 0
+        || !proof.receipt.committed_paths.is_empty()
+    {
+        return Err(QuicTransportError::Control(
+            "QUIC delta refusal made an early commit or data claim".to_string(),
+        ));
+    }
+    match proof.receipt.reason {
+        Some(reason) if !reason.is_empty() && reason.len() <= QUIC_REFUSAL_REASON_MAX_BYTES => {
+            Ok(reason)
+        }
+        _ => Err(QuicTransportError::Control(
+            "QUIC delta refusal requires a bounded nonempty reason".to_string(),
+        )),
+    }
 }
 
 #[allow(dead_code)]

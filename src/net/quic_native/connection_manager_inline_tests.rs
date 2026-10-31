@@ -2578,9 +2578,10 @@
                     router
                         .with_authenticated_connection(&cx, cid, |connection| {
                             connection.begin_close(&cx, 7_000_000, 42).unwrap();
-                            if unwind_after_close {
-                                panic!("application panicked after beginning close");
-                            }
+                            assert!(
+                                !unwind_after_close,
+                                "application panicked after beginning close"
+                            );
                         })
                         .unwrap();
                 }));

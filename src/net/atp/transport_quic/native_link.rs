@@ -1534,8 +1534,6 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
     }
 }
 
-/// Longest refusal reason sent back to the sender, in bytes.
-const MANIFEST_REFUSAL_REASON_MAX_BYTES: usize = 512;
 /// Rounds a refusing receiver spends waiting for the sender's Close, each one
 /// PTO (`NEEDMORE_PTO`) long, counted whether or not packets arrive.
 const REFUSAL_CLOSE_WAIT_ROUNDS: u32 = 4;
@@ -1553,7 +1551,9 @@ fn manifest_refusal_reason(error: &QuicTransportError) -> String {
 
 /// Tells the sender why the receiver will not take the transfer, with the
 /// failed-commit Proof it already understands (`committed: false` plus a
-/// reason). Before this the receiver returned the error and dropped the
+/// reason). Before a negotiated delta request, that receipt uses the existing
+/// session-bound delta envelope; after FullObject admission it stays plain.
+/// Before this the receiver returned the error and dropped the
 /// connection, and the sender saw only silence until its idle timeout (360 s
 /// by default, br-asupersync-nnm3gw). No Close follows the Proof: it could
 /// only arrive behind the Proof, and a spray sender that read both in one
@@ -1564,9 +1564,10 @@ async fn refuse_transfer_in_band(
     link: &mut QuicLink,
     control: &mut NativeQuicFrameTransport,
     mut reason: String,
+    delta: Option<(super::QuicDeltaSessionContext, &TransferManifest)>,
 ) {
-    if reason.len() > MANIFEST_REFUSAL_REASON_MAX_BYTES {
-        let mut end = MANIFEST_REFUSAL_REASON_MAX_BYTES;
+    if reason.len() > super::QUIC_REFUSAL_REASON_MAX_BYTES {
+        let mut end = super::QUIC_REFUSAL_REASON_MAX_BYTES;
         while !reason.is_char_boundary(end) {
             end -= 1;
         }
@@ -1586,7 +1587,15 @@ async fn refuse_transfer_in_band(
         reason: Some(reason),
         committed_paths: Vec::new(),
     };
-    let Ok(proof_frame) = super::json_frame(FrameType::Proof, &receipt) else {
+    let proof_frame = if let Some((session, manifest)) = delta {
+        super::json_frame(
+            FrameType::Proof,
+            &super::make_quic_delta_proof(session, manifest, receipt),
+        )
+    } else {
+        super::json_frame(FrameType::Proof, &receipt)
+    };
+    let Ok(proof_frame) = proof_frame else {
         return;
     };
     if control.send(cx, &mut link.conn, &proof_frame).is_err() || link.flush(cx).await.is_err() {
@@ -9055,10 +9064,20 @@ async fn run_sender_session(
             match frame.frame_type() {
                 FrameType::ObjectRequest => break frame,
                 FrameType::KeepAlive => {}
+                FrameType::Proof => {
+                    let proof = super::parse_json::<super::QuicDeltaProof>(&frame)?;
+                    let reason = super::validate_quic_delta_refusal(proof, session, manifest)?;
+                    // This acknowledges a refused transfer, never a commit.
+                    // A failed best-effort Close cannot erase the peer's
+                    // already authenticated, session-bound refusal reason.
+                    let _ = super::send_native_close(cx, &mut link.conn, &mut control);
+                    let _ = link.flush(cx).await;
+                    return Err(QuicTransportError::Integrity(reason));
+                }
                 got => {
                     return Err(QuicTransportError::Unexpected {
                         got,
-                        expected: "ObjectRequest | KeepAlive",
+                        expected: "ObjectRequest | refusal Proof | KeepAlive",
                     });
                 }
             }
@@ -11647,7 +11666,6 @@ async fn run_receiver_session(
             FrameType::ObjectManifest,
             "authenticated QUIC delta ObjectManifest",
         )?;
-        super::validate_quic_manifest(&envelope.manifest, config)?;
         let session = super::derive_quic_delta_session(
             handshake,
             &hello.peer_id,
@@ -11660,12 +11678,27 @@ async fn run_receiver_session(
             )
         })?;
         super::validate_quic_delta_manifest_envelope(context, session, &envelope)?;
+        // Prove possession of the challenged delta authority before replying
+        // about policy or consulting receiver state. A policy refusal still
+        // has this session identity even though no request mode was admitted.
+        if let Err(error) = super::validate_quic_manifest(&envelope.manifest, config) {
+            refuse_transfer_in_band(
+                cx,
+                link,
+                &mut control,
+                manifest_refusal_reason(&error),
+                Some((session, &envelope.manifest)),
+            )
+            .await;
+            return Err(error);
+        }
         (envelope.manifest, Some(session))
     } else {
         let manifest: TransferManifest =
             super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
         if let Err(error) = super::validate_quic_manifest(&manifest, config) {
-            refuse_transfer_in_band(cx, link, &mut control, manifest_refusal_reason(&error)).await;
+            refuse_transfer_in_band(cx, link, &mut control, manifest_refusal_reason(&error), None)
+                .await;
             return Err(error);
         }
         (manifest, None)
@@ -11679,16 +11712,31 @@ async fn run_receiver_session(
         config.max_block_size
     ));
     link.flush(cx).await?;
-    // A delta sender expects a delta proof, so only a plain transfer gets the
-    // in-band refusal below.
-    let plain_transfer = delta_session.is_none();
-
     let mut delta_full_request_frame = None;
     if let Some(session) = delta_session {
         let request =
             super::build_quic_receiver_delta_request(cx, dest_dir, config, session, &manifest)
-                .await?;
-        let request_mode = super::validate_quic_delta_request(&request, session, &manifest)?;
+                .await
+                .and_then(|request| {
+                    let mode = super::validate_quic_delta_request(&request, session, &manifest)?;
+                    Ok((request, mode))
+                });
+        let (request, request_mode) = match request {
+            Ok(request) => request,
+            Err(error) => {
+                if !matches!(&error, QuicTransportError::Cancelled) {
+                    refuse_transfer_in_band(
+                        cx,
+                        link,
+                        &mut control,
+                        "receiver could not prepare its delta request".to_string(),
+                        Some((session, &manifest)),
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
         let request_frame = super::json_frame(FrameType::ObjectRequest, &request)?;
         control.send(cx, &mut link.conn, &request_frame)?;
         link.flush(cx).await?;
@@ -11799,20 +11847,18 @@ async fn run_receiver_session(
     let mut decoders = match super::decoders_from_manifest(&manifest, config) {
         Ok(decoders) => decoders,
         Err(error) => {
-            if plain_transfer {
-                let reason = manifest_refusal_reason(&error);
-                refuse_transfer_in_band(cx, link, &mut control, reason).await;
-            }
+            // A negotiated FullObject delta request switches back to the
+            // existing full-transfer proof format, just like a plain send.
+            let reason = manifest_refusal_reason(&error);
+            refuse_transfer_in_band(cx, link, &mut control, reason, None).await;
             return Err(error);
         }
     };
     if let Err(error) = super::prepare_quic_destination_root(dest_dir).await {
         // The error names receiver-side paths; the sender only learns that the
         // destination was unusable.
-        if plain_transfer {
-            let reason = "receiver could not prepare its destination".to_string();
-            refuse_transfer_in_band(cx, link, &mut control, reason).await;
-        }
+        let reason = "receiver could not prepare its destination".to_string();
+        refuse_transfer_in_band(cx, link, &mut control, reason, None).await;
         return Err(error);
     }
     let mut staging_guard = None;
