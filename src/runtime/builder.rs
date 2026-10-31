@@ -4605,6 +4605,9 @@ impl Runtime {
     /// including the exit of every blocking-pool thread. Ordinary drop waits
     /// for those threads at most five seconds; this method waits for them up
     /// to its bound, so a blocking job that is still running yields `false`.
+    /// So does a strong handle the caller itself keeps across this call, such
+    /// as one from [`Runtime::handle`]: it is never released in time, so drop
+    /// it first.
     ///
     /// On a multi-thread runtime the reaper does not wait for those owners to
     /// retire the tasks. Once the workers have exited, it drops the task
