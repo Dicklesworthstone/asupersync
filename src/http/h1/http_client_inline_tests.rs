@@ -1488,69 +1488,115 @@
 
         #[test]
         fn streaming_driverless_pool_wait_does_not_adopt_a_foreign_virtual_clock() {
-            let (listener, url) = listener();
-            let peer = std::thread::spawn(move || {
-                let mut socket = accept(&listener);
-                request_head(&mut socket);
-                socket
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
-                    .unwrap();
-                expect_closed(&mut socket);
-            });
-            let runtime = runtime(false);
-            let driver = runtime.request_cx_with_budget(Budget::INFINITE);
-            let owner = Cx::for_testing();
-            let clock = Arc::new(crate::time::VirtualClock::starting_at(
-                crate::time::wall_now() + Duration::from_secs(86400),
-            ));
-            let timer = crate::time::TimerDriverHandle::with_virtual_clock(clock);
-            let foreign = Cx::new_with_drivers(
-                RegionId::new_for_test(0, 1),
-                TaskId::new_for_test(82, 0),
-                Budget::INFINITE,
-                None,
-                None,
-                None,
-                Some(timer.clone()),
-                None,
-            );
-            let client = HttpClient::builder()
-                .max_connections_per_host(1)
-                .max_total_connections(1)
-                .pool_wait_timeout(Duration::from_secs(3600))
-                .request_timeout(Duration::from_secs(7200))
-                .build();
-            runtime.block_on_with_cx(driver.clone(), async {
-                let first = client
-                    .request_streaming_pooled(&driver, Method::Get, &url, Vec::new(), Vec::new())
-                    .await
-                    .unwrap();
-                {
-                    let _ambient = Cx::set_current(Some(foreign));
-                    let mut waiting = Box::pin(client.request_streaming_pooled(
-                        &owner,
-                        Method::Get,
-                        &url,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
-                    let mut task = Context::from_waker(std::task::Waker::noop());
-                    assert!(
-                        waiting.as_mut().poll(&mut task).is_pending(),
-                        "pool wait must use wall time while the driverless owner remains live"
-                    );
-                    assert_eq!(client.pool_released.waiter_count(), 1);
-                    assert_eq!(timer.process_timers(), 0);
-                    drop(waiting);
+            struct WakeWaitingThread(std::thread::Thread);
+
+            impl std::task::Wake for WakeWaitingThread {
+                fn wake(self: Arc<Self>) {
+                    self.0.unpark();
                 }
-                assert_eq!(client.pool_released.waiter_count(), 0);
-                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
-                assert_eq!(client.pool_stats().total_connections, 1);
-                drop(first);
-                assert_eq!(client.pool_stats().total_connections, 0);
-            });
-            peer.join().unwrap();
-            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+
+            // The driverless owner necessarily uses real time. Establish that
+            // Time::ZERO is far enough behind it to expose an immediately
+            // expired, wrongly sourced deadline even when this test runs first.
+            let wait = Duration::from_millis(250);
+            if let Some(remaining) = wait.checked_sub(crate::time::process_epoch().elapsed()) {
+                std::thread::sleep(remaining);
+            }
+            for foreign_is_ahead in [false, true] {
+                let (listener, url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut socket = accept(&listener);
+                    request_head(&mut socket);
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                        .unwrap();
+                    expect_closed(&mut socket);
+                });
+                let runtime = runtime(false);
+                let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+                let owner = Cx::for_testing();
+                assert!(owner.timer_driver().is_none());
+                let foreign_now = if foreign_is_ahead {
+                    crate::time::wall_now() + Duration::from_secs(86400)
+                } else {
+                    Time::ZERO
+                };
+                let clock = Arc::new(crate::time::VirtualClock::starting_at(foreign_now));
+                let timer = crate::time::TimerDriverHandle::with_virtual_clock(clock);
+                let foreign_id = TaskId::new_for_test(82, 0);
+                let foreign = Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1),
+                    foreign_id,
+                    Budget::INFINITE,
+                    None,
+                    None,
+                    None,
+                    Some(timer.clone()),
+                    None,
+                );
+                let client = HttpClient::builder()
+                    .max_connections_per_host(1)
+                    .max_total_connections(1)
+                    .pool_wait_timeout(wait)
+                    .request_timeout(Duration::from_secs(4))
+                    .build();
+                runtime.block_on_with_cx(driver.clone(), async {
+                    let first = client
+                        .request_streaming_pooled(&driver, Method::Get, &url, Vec::new(), Vec::new())
+                        .await
+                        .unwrap();
+                    {
+                        let _ambient = Cx::set_current(Some(foreign));
+                        let mut waiting = Box::pin(client.request_streaming_pooled(
+                            &owner,
+                            Method::Get,
+                            &url,
+                            Vec::new(),
+                            Vec::new(),
+                        ));
+                        let waker = std::task::Waker::from(Arc::new(WakeWaitingThread(std::thread::current())));
+                        let mut task = Context::from_waker(&waker);
+                        let started = Instant::now();
+                        assert!(
+                            waiting.as_mut().poll(&mut task).is_pending(),
+                            "the driverless owner's pool wait cannot expire on a foreign clock (ahead={foreign_is_ahead})"
+                        );
+                        assert_eq!(client.pool_released.waiter_count(), 1, "the request reached pool admission");
+                        assert_eq!(Cx::current().unwrap().task_id(), foreign_id);
+                        assert_eq!(timer.pending_count(), 0, "neither request nor pool timers may bind the foreign clock");
+
+                        // A notification with no slot available makes admission
+                        // recompute the remaining duration. It must retain the
+                        // same absolute owner deadline, not switch timelines.
+                        client.pool_released.notify_waiters();
+                        let bound = Instant::now() + Duration::from_secs(3);
+                        let result = loop {
+                            if let Poll::Ready(result) = waiting.as_mut().poll(&mut task) {
+                                break result;
+                            }
+                            assert_eq!(client.pool_released.waiter_count(), 1);
+                            assert_eq!(Cx::current().unwrap().task_id(), foreign_id);
+                            let remaining = bound.saturating_duration_since(Instant::now());
+                            assert!(!remaining.is_zero(), "foreign time extended the owner's pool wait (ahead={foreign_is_ahead})");
+                            std::thread::park_timeout(remaining);
+                        };
+                        assert!(matches!(result, Err(ClientError::PoolExhausted { .. })), "pool expiry keeps its typed outcome");
+                        assert!(started.elapsed() >= wait, "pool admission cannot time out early");
+                        assert_eq!(Cx::current().unwrap().task_id(), foreign_id);
+                        assert_eq!(timer.pending_count(), 0);
+                        drop(waiting);
+                    }
+                    assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+                    assert_eq!(client.pool_released.waiter_count(), 0);
+                    assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                    assert_eq!(client.pool_stats().total_connections, 1, "timeout cannot retire the active response's connection");
+                    drop(first);
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                });
+                peer.join().unwrap();
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
         }
 
         #[test]

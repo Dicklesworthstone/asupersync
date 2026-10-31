@@ -3340,7 +3340,7 @@ impl HttpClient {
             let Some(wait) = self.config.pool_wait_timeout else {
                 return Err(exhausted());
             };
-            let timer_now = clock.map_or_else(|| client_timer_now(cx), PooledStreamDeadline::now);
+            let timer_now = clock.map_or_else(|| client_timer_now(cx), |clock| clock.now(cx));
             let until = *wait_until.get_or_insert(timer_now + wait);
             let remaining = std::time::Duration::from_nanos(until.duration_since(timer_now));
             if remaining.is_zero() {
@@ -3584,10 +3584,17 @@ impl PooledStreamDeadline {
         Self { at, clock }
     }
 
-    fn now(&self) -> Time {
-        self.clock
-            .as_ref()
-            .map_or_else(crate::time::wall_now, |clock| clock.now())
+    fn now(&self, owner: &Cx) -> Time {
+        self.clock.as_ref().map_or_else(
+            || {
+                // Admission must measure the wait on the same timeline as
+                // its timer. A driverless owner still has its own wall clock;
+                // a foreign polling task must not lend it a virtual instant.
+                let _owner = Cx::set_current(Some(owner.clone()));
+                crate::time::wall_now()
+            },
+            |clock| clock.now(),
+        )
     }
 
     fn timer(&self, at: Time) -> crate::time::Sleep {
