@@ -2017,59 +2017,85 @@
         );
     }
 
-    /// dfdwyt DF4: a commit batch stops at its first failure. The files
-    /// before it stay committed and recorded; the files after it are not
-    /// touched.
-    #[cfg(unix)]
-    #[test]
-    fn a_regular_commit_batch_stops_at_its_first_failure() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let root = temp.path().canonicalize().expect("canonical temp dir");
-        let base = root.join("dest");
-        let file = |name: &str, staged: Option<&[u8]>| {
-            let staging_path = root.join(format!("{name}.part"));
-            if let Some(bytes) = staged {
-                std::fs::write(&staging_path, bytes).expect("write a staged file");
-            }
-            RegularCommit {
-                out_path: base.join(name),
-                staging_path,
-                metadata: None,
-            }
-        };
-        let files = vec![
-            file("a.bin", Some(b"a")),
-            file("b.bin", None),
-            file("c.bin", Some(b"c")),
-        ];
-        let mut parent_syncs = DeferredParentSyncs::default();
-        let mut committed = Vec::new();
+/// k2hshs: every file must sync before any file in its batch is published.
+#[cfg(unix)]
+#[test]
+fn a_sync_failure_prevents_every_regular_commit_in_its_batch() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical temp dir");
+    let base = root.join("dest");
+    let file = |name: &str, staged: Option<&[u8]>| {
+        let staging_path = root.join(format!("{name}.part"));
+        if let Some(bytes) = staged {
+            std::fs::write(&staging_path, bytes).expect("write a staged file");
+        }
+        RegularCommit {
+            out_path: base.join(name),
+            staging_path,
+            metadata: None,
+        }
+    };
+    let files = vec![
+        file("a.bin", Some(b"a")),
+        file("b.bin", None),
+        file("c.bin", Some(b"c")),
+    ];
+    let mut parent_syncs = DeferredParentSyncs::default();
+    let mut committed = Vec::new();
 
-        let error = futures_lite::future::block_on(commit_regular_entries(
-            &Cx::for_testing(),
-            &base,
-            files,
-            &mut parent_syncs,
-            &mut committed,
-        ))
-        .expect_err("b.bin has no staged file");
+    let error = futures_lite::future::block_on(commit_regular_entries(
+        &Cx::for_testing(),
+        &base,
+        files,
+        &mut parent_syncs,
+        &mut committed,
+    ))
+    .expect_err("b.bin has no staged file");
 
-        assert!(
-            error.to_string().contains("wrong filesystem kind"),
-            "{error}"
-        );
-        assert_eq!(committed, vec![base.join("a.bin")]);
-        assert_eq!(std::fs::read(base.join("a.bin")).expect("read a.bin"), b"a");
-        assert!(
-            !base.join("c.bin").exists(),
-            "a file after the failure is not committed"
-        );
-        assert!(
-            root.join("c.bin.part").exists(),
-            "its staged file is untouched"
-        );
-        futures_lite::future::block_on(parent_syncs.sync()).expect("sync the recorded parent");
-    }
+    assert!(
+        error.to_string().contains("wrong filesystem kind"),
+        "{error}"
+    );
+    assert!(committed.is_empty(), "a sync failure publishes no prefix");
+    assert!(!base.join("a.bin").exists());
+    assert!(root.join("a.bin.part").exists());
+    assert!(
+        !base.join("c.bin").exists(),
+        "a file after the failure is not committed"
+    );
+    assert!(
+        root.join("c.bin.part").exists(),
+        "its staged file is untouched"
+    );
+    futures_lite::future::block_on(parent_syncs.sync()).expect("sync the recorded parent");
+}
+
+/// Publication still stops at its first failure and records its prefix.
+#[cfg(unix)]
+#[test]
+fn a_regular_commit_batch_stops_at_its_first_publication_failure() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical temp dir");
+    let (base, files) = regular_commit_test_files(&root, 3);
+    std::fs::create_dir_all(base.join("001.bin")).expect("unreplaceable destination");
+    let mut parent_syncs = DeferredParentSyncs::default();
+    let mut committed = Vec::new();
+    let error = futures_lite::future::block_on(commit_regular_entries(
+        &Cx::for_testing(),
+        &base,
+        files,
+        &mut parent_syncs,
+        &mut committed,
+    ))
+    .expect_err("a directory cannot be replaced by a regular file");
+    assert!(error.to_string().contains("real directory"), "{error}");
+    assert_eq!(committed, vec![base.join("000.bin")]);
+    assert_eq!(std::fs::read(base.join("000.bin")).unwrap(), b"file 0");
+    assert!(root.join("001.part").exists());
+    assert!(root.join("002.part").exists());
+    assert!(!base.join("002.bin").exists());
+    futures_lite::future::block_on(parent_syncs.sync()).expect("sync the committed prefix");
+}
 
     #[cfg(unix)]
     #[test]
@@ -3062,4 +3088,792 @@ fn a_baseline_finer_than_the_chunk_budget_falls_back_to_a_full_transfer() {
     assert_eq!(scan(1), None);
     // Two 64-byte chunks fit.
     assert_eq!(scan(64), Some(2));
+}
+
+#[cfg(unix)]
+fn regular_commit_test_files(root: &Path, count: usize) -> (PathBuf, Vec<RegularCommit>) {
+    let base = root.join("dest");
+    let files = (0..count)
+        .map(|index| {
+            let staging_path = root.join(format!("{index:03}.part"));
+            std::fs::write(&staging_path, format!("file {index}")).expect("stage test file");
+            RegularCommit {
+                out_path: base.join(format!("{index:03}.bin")),
+                staging_path,
+                metadata: None,
+            }
+        })
+        .collect();
+    (base, files)
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct RegularCommitTestGate {
+    released: parking_lot::Mutex<bool>,
+    changed: parking_lot::Condvar,
+}
+
+#[cfg(unix)]
+impl RegularCommitTestGate {
+    fn wait(&self) {
+        let mut released = self.released.lock();
+        while !*released {
+            self.changed.wait(&mut released);
+        }
+    }
+
+    fn release(&self) {
+        *self.released.lock() = true;
+        self.changed.notify_all();
+    }
+}
+
+// Release parked workers even when an assertion fails, before the pool drops.
+#[cfg(unix)]
+struct ReleaseRegularCommitGate(Arc<RegularCommitTestGate>);
+
+#[cfg(unix)]
+impl Drop for ReleaseRegularCommitGate {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_regular_commit_event<F, T>(
+    future: &mut std::pin::Pin<Box<F>>,
+    event: &std::sync::mpsc::Receiver<T>,
+) -> T
+where
+    F: Future<Output = Result<(), TransportError>>,
+{
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut task = std::task::Context::from_waker(&waker);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(message) = event.try_recv() {
+            return message;
+        }
+        assert!(
+            future.as_mut().poll(&mut task).is_pending(),
+            "commit finished before its probe"
+        );
+        if let Ok(message) = event.try_recv() {
+            return message;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "commit worker never reached its probe"
+        );
+        std::thread::park_timeout(remaining);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn regular_commit_syncs_overlap_with_at_most_sixteen_open_files() {
+    use crate::net::atp::transport_common::metadata::StagedFileSync;
+    use crate::runtime::BlockingPool;
+    use std::sync::atomic::AtomicUsize;
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical root");
+    let (base, files) = regular_commit_test_files(&root, REGULAR_COMMIT_BATCH);
+    // A seventeenth available worker makes exceeding the per-batch cap observable.
+    let pool = BlockingPool::new(REGULAR_SYNC_CONCURRENCY + 1, REGULAR_SYNC_CONCURRENCY + 1);
+    let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+    let gate = Arc::new(RegularCommitTestGate::default());
+    let _release = ReleaseRegularCommitGate(Arc::clone(&gate));
+    let open = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let mut parents = DeferredParentSyncs::default();
+    let mut committed = Vec::new();
+    let caller = std::thread::current().id();
+    let mut commit = Box::pin(commit_regular_entries_with(
+        &cx,
+        &base,
+        files,
+        &mut parents,
+        &mut committed,
+        {
+            let gate = Arc::clone(&gate);
+            let open = Arc::clone(&open);
+            let peak = Arc::clone(&peak);
+            let completed = Arc::clone(&completed);
+            move |path| {
+                assert_ne!(
+                    std::thread::current().id(),
+                    caller,
+                    "sync runs off the polling thread"
+                );
+                let pending = StagedFileSync::from_file(
+                    path.to_path_buf(),
+                    std::fs::File::open(path).expect("open staging descriptor"),
+                )
+                .expect("regular staging file");
+                let active = open.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(active, Ordering::SeqCst);
+                started_tx
+                    .send(path.to_path_buf())
+                    .expect("report open descriptor");
+                gate.wait();
+                let synced = pending.sync_sync();
+                open.fetch_sub(1, Ordering::SeqCst);
+                completed.fetch_add(1, Ordering::SeqCst);
+                synced.map_err(|error| StreamingError::new(error.to_string()))
+            }
+        },
+        move |_| {
+            assert_ne!(
+                std::thread::current().id(),
+                caller,
+                "publication also runs off worker"
+            )
+        },
+    ));
+    assert!(
+        commit
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            .is_pending()
+    );
+    for _ in 0..REGULAR_SYNC_CONCURRENCY {
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("all sixteen sync workers overlap");
+    }
+    assert_eq!(open.load(Ordering::SeqCst), REGULAR_SYNC_CONCURRENCY);
+    assert_eq!(peak.load(Ordering::SeqCst), REGULAR_SYNC_CONCURRENCY);
+    assert_eq!(
+        pool.pending_count(),
+        0,
+        "one bounded slice per worker, not 64 jobs"
+    );
+    assert!(!base.exists(), "no publication while a sync is parked");
+    gate.release();
+    futures_lite::future::block_on(commit).expect("commit the synced batch");
+    assert_eq!(open.load(Ordering::SeqCst), 0);
+    assert_eq!(completed.load(Ordering::SeqCst), REGULAR_COMMIT_BATCH);
+    assert_eq!(peak.load(Ordering::SeqCst), REGULAR_SYNC_CONCURRENCY);
+    assert_eq!(committed.len(), REGULAR_COMMIT_BATCH);
+    for index in 0..REGULAR_COMMIT_BATCH {
+        assert_eq!(
+            std::fs::read_to_string(base.join(format!("{index:03}.bin"))).unwrap(),
+            format!("file {index}")
+        );
+    }
+    futures_lite::future::block_on(parents.sync()).expect("sync published parents");
+    assert!(pool.shutdown_and_wait(Duration::from_secs(10)));
+}
+
+#[cfg(unix)]
+#[test]
+fn regular_commit_reports_the_first_manifest_sync_error_after_all_jobs_complete() {
+    use crate::runtime::BlockingPool;
+    use std::sync::atomic::AtomicUsize;
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical root");
+    let (base, files) = regular_commit_test_files(&root, 3);
+    let pool = BlockingPool::new(3, 3);
+    let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+    let gate = Arc::new(RegularCommitTestGate::default());
+    let _release = ReleaseRegularCommitGate(Arc::clone(&gate));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let (later_tx, later_rx) = std::sync::mpsc::channel();
+    let mut parents = DeferredParentSyncs::default();
+    let mut committed = Vec::new();
+    let mut commit = Box::pin(commit_regular_entries_with(
+        &cx,
+        &base,
+        files,
+        &mut parents,
+        &mut committed,
+        {
+            let gate = Arc::clone(&gate);
+            let completed = Arc::clone(&completed);
+            move |path| {
+                let result = match path.file_stem().unwrap().to_str().unwrap() {
+                    "000" => {
+                        gate.wait();
+                        Err(StreamingError::new("first manifest sync failed"))
+                    }
+                    "001" => {
+                        later_tx.send(()).expect("later error happens first");
+                        Err(StreamingError::new("second manifest sync failed"))
+                    }
+                    _ => sync_staged_regular_file_sync(path),
+                };
+                completed.fetch_add(1, Ordering::SeqCst);
+                result
+            }
+        },
+        |_| panic!("a sync failure must prevent every rename"),
+    ));
+    let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(commit.as_mut().poll(&mut task).is_pending());
+    later_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("later sync failed");
+    assert!(
+        commit.as_mut().poll(&mut task).is_pending(),
+        "an outstanding sync must finish before returning an error"
+    );
+    gate.release();
+    let error = futures_lite::future::block_on(commit)
+        .expect_err("both failing syncs are reported in manifest order");
+    assert!(
+        error.to_string().contains("first manifest sync failed"),
+        "{error}"
+    );
+    assert_eq!(completed.load(Ordering::SeqCst), 3);
+    assert!(committed.is_empty());
+    assert!(!base.exists());
+    for index in 0..3 {
+        assert!(root.join(format!("{index:03}.part")).exists());
+    }
+    assert!(pool.shutdown_and_wait(Duration::from_secs(10)));
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_or_dropping_regular_syncs_never_publishes_their_batch() {
+    use crate::runtime::BlockingPool;
+    use std::sync::atomic::AtomicUsize;
+
+    for drop_future in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical root");
+        let (base, files) = regular_commit_test_files(&root, 3);
+        let pool = BlockingPool::new(3, 3);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let gate = Arc::new(RegularCommitTestGate::default());
+        let _release = ReleaseRegularCommitGate(Arc::clone(&gate));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let mut parents = DeferredParentSyncs::default();
+        let mut committed = Vec::new();
+        let mut commit = Box::pin(commit_regular_entries_with(
+            &cx,
+            &base,
+            files,
+            &mut parents,
+            &mut committed,
+            {
+                let gate = Arc::clone(&gate);
+                let completed = Arc::clone(&completed);
+                move |path| {
+                    started_tx.send(()).expect("report started sync");
+                    gate.wait();
+                    let result = sync_staged_regular_file_sync(path);
+                    completed.fetch_add(1, Ordering::SeqCst);
+                    result
+                }
+            },
+            |_| panic!("cancelled syncs cannot start publication"),
+        ));
+        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(commit.as_mut().poll(&mut task).is_pending());
+        for _ in 0..3 {
+            started_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("sync started");
+        }
+        if drop_future {
+            drop(commit);
+            gate.release();
+        } else {
+            cx.set_cancel_requested(true);
+            assert!(
+                commit.as_mut().poll(&mut task).is_pending(),
+                "cancellation waits for started syncs"
+            );
+            gate.release();
+            assert!(matches!(
+                futures_lite::future::block_on(commit),
+                Err(TransportError::Cancelled)
+            ));
+            assert_eq!(
+                completed.load(Ordering::SeqCst),
+                3,
+                "all sync calls completed before cancellation returned"
+            );
+        }
+        assert!(pool.shutdown_and_wait(Duration::from_secs(10)));
+        assert_eq!(completed.load(Ordering::SeqCst), 3);
+        assert!(committed.is_empty());
+        assert!(!base.exists());
+        for index in 0..3 {
+            assert!(root.join(format!("{index:03}.part")).exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_or_dropping_publication_fences_its_next_rename_and_keeps_the_prefix() {
+    use crate::runtime::BlockingPool;
+
+    for drop_future in [false, true] {
+        for stopped_before in [0, 1] {
+            let temp = tempfile::tempdir().expect("temporary directory");
+            let root = temp.path().canonicalize().expect("canonical root");
+            let (base, files) = regular_commit_test_files(&root, 3);
+            let pool = BlockingPool::new(2, 2);
+            let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+            let gate = Arc::new(RegularCommitTestGate::default());
+            let _release = ReleaseRegularCommitGate(Arc::clone(&gate));
+            let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+            let caller = std::thread::current();
+            let mut parents = DeferredParentSyncs::default();
+            let mut committed = Vec::new();
+            let mut commit = Box::pin(commit_regular_entries_with(
+                &cx,
+                &base,
+                files,
+                &mut parents,
+                &mut committed,
+                sync_staged_regular_file_sync,
+                {
+                    let gate = Arc::clone(&gate);
+                    move |index| {
+                        if index == stopped_before {
+                            reached_tx.send(()).expect("report publication boundary");
+                            caller.unpark();
+                            gate.wait();
+                        }
+                    }
+                },
+            ));
+            wait_for_regular_commit_event(&mut commit, &reached_rx);
+            if drop_future {
+                drop(commit);
+                gate.release();
+            } else {
+                cx.set_cancel_requested(true);
+                let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+                assert!(
+                    commit.as_mut().poll(&mut task).is_pending(),
+                    "acknowledged cancellation still waits for the running publication"
+                );
+                // A mask installed after acknowledgement must not revive
+                // the worker's permission to publish its next entry.
+                let result = cx.masked(|| {
+                    gate.release();
+                    futures_lite::future::block_on(commit)
+                });
+                assert!(matches!(result, Err(TransportError::Cancelled)));
+                assert_eq!(committed.len(), stopped_before);
+                futures_lite::future::block_on(parents.sync()).expect("sync the committed prefix");
+            }
+            assert!(pool.shutdown_and_wait(Duration::from_secs(10)));
+            for index in 0..3 {
+                let out = base.join(format!("{index:03}.bin"));
+                let staged = root.join(format!("{index:03}.part"));
+                if index < stopped_before {
+                    assert_eq!(
+                        std::fs::read_to_string(out).unwrap(),
+                        format!("file {index}")
+                    );
+                    assert!(!staged.exists());
+                } else {
+                    assert!(!out.exists(), "entry {index} was fenced before rename");
+                    assert!(staged.exists());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn regular_commit_uses_the_explicit_owners_pool_and_never_falls_back_inline() {
+    use crate::runtime::BlockingPool;
+
+    let foreign_pool = BlockingPool::new(0, 1);
+    foreign_pool.shutdown();
+    let foreign = Cx::for_testing().with_blocking_pool_handle(Some(foreign_pool.handle()));
+    let _ambient = Cx::set_current(Some(foreign));
+    let caller = std::thread::current().id();
+    for closed_owner_pool in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical root");
+        let (base, files) = regular_commit_test_files(&root, 2);
+        let owner = Cx::for_testing()
+            .with_blocking_pool_handle(closed_owner_pool.then(|| foreign_pool.handle()));
+        let mut parents = DeferredParentSyncs::default();
+        let mut committed = Vec::new();
+        let result = futures_lite::future::block_on(commit_regular_entries_with(
+            &owner,
+            &base,
+            files,
+            &mut parents,
+            &mut committed,
+            move |path| {
+                assert!(!closed_owner_pool, "refused work must never execute");
+                assert_ne!(std::thread::current().id(), caller);
+                sync_staged_regular_file_sync(path)
+            },
+            move |_| assert_ne!(std::thread::current().id(), caller),
+        ));
+        if closed_owner_pool {
+            assert!(matches!(result, Err(TransportError::Io(_))));
+            assert!(committed.is_empty());
+            assert!(!base.exists());
+        } else {
+            result.expect("an owner with no pool uses bounded off-worker fallback");
+            assert_eq!(committed.len(), 2);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn regular_commit_dispatch_refusal_still_waits_for_accepted_syncs() {
+    use crate::runtime::{
+        BlockingAdmissionPolicy, BlockingPool, BlockingPoolOptions, BlockingQueuePolicy,
+    };
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical root");
+    let (base, files) = regular_commit_test_files(&root, 4);
+    let pool = BlockingPool::with_config_and_policies(
+        1,
+        1,
+        BlockingPoolOptions::default(),
+        BlockingQueuePolicy::Fifo,
+        BlockingAdmissionPolicy::Bounded {
+            max_queued: std::num::NonZeroUsize::new(1).unwrap(),
+        },
+    );
+    let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+    let gate = Arc::new(RegularCommitTestGate::default());
+    let _release = ReleaseRegularCommitGate(Arc::clone(&gate));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let mut parents = DeferredParentSyncs::default();
+    let mut committed = Vec::new();
+    let mut commit = Box::pin(commit_regular_entries_with(
+        &cx,
+        &base,
+        files,
+        &mut parents,
+        &mut committed,
+        {
+            let gate = Arc::clone(&gate);
+            move |path| {
+                started_tx.send(()).expect("accepted sync started");
+                gate.wait();
+                sync_staged_regular_file_sync(path)
+            }
+        },
+        |_| panic!("dispatch refusal prevents publication"),
+    ));
+    let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(commit.as_mut().poll(&mut task).is_pending());
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("one sync is running");
+    // Fill the sole queue slot after the first job is definitely running.
+    assert!(commit.as_mut().poll(&mut task).is_pending());
+    assert_eq!(pool.pending_count(), 1);
+    pool.shutdown();
+    assert!(
+        commit.as_mut().poll(&mut task).is_pending(),
+        "refused submissions cannot abandon the accepted sync"
+    );
+    gate.release();
+    assert!(matches!(
+        futures_lite::future::block_on(commit),
+        Err(TransportError::Io(_))
+    ));
+    assert!(committed.is_empty());
+    assert!(!base.exists());
+    assert!(pool.shutdown_and_wait(Duration::from_secs(10)));
+}
+
+#[cfg(unix)]
+#[test]
+fn regular_commit_rejects_oversized_batches_before_starting_any_work() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical root");
+    let (base, files) = regular_commit_test_files(&root, REGULAR_COMMIT_BATCH + 1);
+    let mut parents = DeferredParentSyncs::default();
+    let mut committed = Vec::new();
+    let error = futures_lite::future::block_on(commit_regular_entries_with(
+        &Cx::for_testing(),
+        &base,
+        files,
+        &mut parents,
+        &mut committed,
+        |_| panic!("oversized batch cannot start sync work"),
+        |_| panic!("oversized batch cannot publish"),
+    ))
+    .expect_err("private batch bound is enforced");
+    assert!(error.to_string().contains("exceeds 64 files"));
+    assert!(committed.is_empty());
+    assert!(!base.exists());
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct RegularCommitWakeCount(std::sync::atomic::AtomicUsize);
+
+#[cfg(unix)]
+impl std::task::Wake for RegularCommitWakeCount {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
+fn regular_commit_capacity_one_pool() -> crate::runtime::BlockingPool {
+    crate::runtime::BlockingPool::with_config_and_policies(
+        1,
+        1,
+        crate::runtime::BlockingPoolOptions::default(),
+        crate::runtime::BlockingQueuePolicy::Fifo,
+        crate::runtime::BlockingAdmissionPolicy::Bounded {
+            max_queued: std::num::NonZeroUsize::new(1).unwrap(),
+        },
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn queued_regular_syncs_cancel_or_drop_without_waiting_for_unrelated_capacity() {
+    use std::sync::atomic::AtomicUsize;
+
+    for drop_future in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical root");
+        let (base, files) = regular_commit_test_files(&root, 4);
+        let pool = regular_commit_capacity_one_pool();
+        let gate = Arc::new(RegularCommitTestGate::default());
+        let _release = ReleaseRegularCommitGate(Arc::clone(&gate));
+        let (occupied_tx, occupied_rx) = std::sync::mpsc::channel();
+        let occupier = pool.spawn({
+            let gate = Arc::clone(&gate);
+            move || {
+                occupied_tx.send(()).expect("occupy the only worker");
+                gate.wait();
+            }
+        });
+        occupied_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("worker occupied");
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let wakes = Arc::new(RegularCommitWakeCount::default());
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut parents = DeferredParentSyncs::default();
+        let mut committed = Vec::new();
+        let mut commit = Box::pin(commit_regular_entries_with(
+            &cx,
+            &base,
+            files,
+            &mut parents,
+            &mut committed,
+            {
+                let calls = Arc::clone(&calls);
+                move |path| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    sync_staged_regular_file_sync(path)
+                }
+            },
+            |_| panic!("unstarted cancelled work cannot publish"),
+        ));
+        assert!(commit.as_mut().poll(&mut task).is_pending());
+        assert_eq!(
+            pool.pending_count(),
+            1,
+            "one queued sync, three waiting for admission"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        if !drop_future {
+            let before_cancel = wakes.0.load(Ordering::SeqCst);
+            cx.cancel_fast(crate::types::CancelKind::User);
+            assert!(
+                wakes.0.load(Ordering::SeqCst) > before_cancel,
+                "owner cancellation wakes the parked capacity wait"
+            );
+            assert!(
+                matches!(
+                    commit.as_mut().poll(&mut task),
+                    std::task::Poll::Ready(Err(TransportError::Cancelled))
+                ),
+                "cancellation must return before the unrelated occupier is released"
+            );
+        }
+        drop(commit);
+        assert!(committed.is_empty());
+        assert!(!base.exists());
+        gate.release();
+        occupier.wait();
+        assert!(pool.shutdown_and_wait(Duration::from_secs(10)));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a queued or admission-waiting sync must remain fenced after capacity returns"
+        );
+        for index in 0..4 {
+            assert!(root.join(format!("{index:03}.part")).exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn regular_sync_cancellation_drains_only_the_job_that_already_started() {
+    use std::sync::atomic::AtomicUsize;
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical root");
+    let (base, files) = regular_commit_test_files(&root, 4);
+    let pool = regular_commit_capacity_one_pool();
+    let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+    let gate = Arc::new(RegularCommitTestGate::default());
+    let _release = ReleaseRegularCommitGate(Arc::clone(&gate));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let mut parents = DeferredParentSyncs::default();
+    let mut committed = Vec::new();
+    let mut commit = Box::pin(commit_regular_entries_with(
+        &cx,
+        &base,
+        files,
+        &mut parents,
+        &mut committed,
+        {
+            let gate = Arc::clone(&gate);
+            let calls = Arc::clone(&calls);
+            let completed = Arc::clone(&completed);
+            move |path| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                started_tx
+                    .send(path.to_path_buf())
+                    .expect("report started sync");
+                gate.wait();
+                let result = sync_staged_regular_file_sync(path);
+                completed.fetch_add(1, Ordering::SeqCst);
+                result
+            }
+        },
+        |_| panic!("cancelled sync batch cannot publish"),
+    ));
+    let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(commit.as_mut().poll(&mut task).is_pending());
+    assert_eq!(
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        root.join("000.part")
+    );
+    assert!(commit.as_mut().poll(&mut task).is_pending());
+    assert_eq!(pool.pending_count(), 1);
+    cx.cancel_fast(crate::types::CancelKind::User);
+    assert!(
+        commit.as_mut().poll(&mut task).is_pending(),
+        "the one started sync still has to finish"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(completed.load(Ordering::SeqCst), 0);
+    gate.release();
+    assert!(matches!(
+        futures_lite::future::block_on(commit),
+        Err(TransportError::Cancelled)
+    ));
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        1,
+        "started I/O completed before cancellation returned"
+    );
+    assert!(pool.shutdown_and_wait(Duration::from_secs(10)));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "queued and unadmitted jobs never ran"
+    );
+    assert!(committed.is_empty());
+    assert!(!base.exists());
+    for index in 0..4 {
+        assert!(root.join(format!("{index:03}.part")).exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn regular_publication_cancellation_does_not_wait_for_unrelated_capacity() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let root = temp.path().canonicalize().expect("canonical root");
+    let (base, files) = regular_commit_test_files(&root, 1);
+    let pool = regular_commit_capacity_one_pool();
+    let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+    let gate = Arc::new(RegularCommitTestGate::default());
+    let _release = ReleaseRegularCommitGate(Arc::clone(&gate));
+    let (occupied_tx, occupied_rx) = std::sync::mpsc::channel();
+    let wakes = Arc::new(RegularCommitWakeCount::default());
+    let waker = std::task::Waker::from(Arc::clone(&wakes));
+    let mut task = std::task::Context::from_waker(&waker);
+    let mut parents = DeferredParentSyncs::default();
+    let mut committed = Vec::new();
+    let mut commit = Box::pin(commit_regular_entries_with(
+        &cx,
+        &base,
+        files,
+        &mut parents,
+        &mut committed,
+        {
+            let gate = Arc::clone(&gate);
+            let pool = pool.handle();
+            move |path| {
+                let synced = sync_staged_regular_file_sync(path)?;
+                // Run this occupier immediately after the single sync job,
+                // before the async owner can admit its publication job.
+                let gate = Arc::clone(&gate);
+                let occupied_tx = occupied_tx.clone();
+                let _occupier = pool.spawn(move || {
+                    occupied_tx.send(()).expect("occupy publication capacity");
+                    gate.wait();
+                });
+                Ok(synced)
+            }
+        },
+        |_| panic!("cancelled publication must never reach a rename"),
+    ));
+    assert!(commit.as_mut().poll(&mut task).is_pending());
+    occupied_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("sync finished and unrelated work owns the only worker");
+    assert!(commit.as_mut().poll(&mut task).is_pending());
+    assert_eq!(
+        pool.pending_count(),
+        1,
+        "publication is queued behind unrelated work"
+    );
+    let before_cancel = wakes.0.load(Ordering::SeqCst);
+    cx.cancel_fast(crate::types::CancelKind::User);
+    assert!(wakes.0.load(Ordering::SeqCst) > before_cancel);
+    assert!(
+        matches!(
+            commit.as_mut().poll(&mut task),
+            std::task::Poll::Ready(Err(TransportError::Cancelled))
+        ),
+        "unstarted publication must not wait for unrelated pool work"
+    );
+    drop(commit);
+    gate.release();
+    assert!(pool.shutdown_and_wait(Duration::from_secs(10)));
+    assert!(committed.is_empty());
+    assert!(!base.exists());
+    assert_eq!(std::fs::read(root.join("000.part")).unwrap(), b"file 0");
 }

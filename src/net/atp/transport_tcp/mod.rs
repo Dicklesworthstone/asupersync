@@ -37,6 +37,11 @@ use std::io::SeekFrom;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(windows))]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU8},
+};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -65,7 +70,9 @@ use crate::net::atp::transport_common::metadata::{
 #[cfg(not(windows))]
 use crate::net::atp::transport_common::apply_entry_metadata_sync;
 #[cfg(not(windows))]
-use crate::net::atp::transport_common::metadata::install_staged_regular_file_sync;
+use crate::net::atp::transport_common::metadata::{
+    SyncedStagedFile, sync_staged_regular_file_sync,
+};
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
@@ -5318,6 +5325,10 @@ fn reject_regular_destination_link_prefixes_sync(
 #[cfg(not(windows))]
 const REGULAR_COMMIT_BATCH: usize = 64;
 
+/// At most this many blocking jobs (and open staging descriptors) per batch.
+#[cfg(not(windows))]
+const REGULAR_SYNC_CONCURRENCY: usize = 16;
+
 /// A plain regular entry waiting to commit with the others of its batch.
 #[cfg(not(windows))]
 struct RegularCommit {
@@ -5335,27 +5346,32 @@ struct RegularCommit {
 fn commit_regular_entry_sync(
     base: &Path,
     file: &RegularCommit,
+    synced: SyncedStagedFile,
     parent_syncs: &mut DeferredParentSyncs,
+    before_install: impl FnOnce() -> Result<(), TransportError>,
 ) -> Result<Option<Result<MetadataApplyReport, StreamingError>>, TransportError> {
     reject_regular_destination_link_prefixes_sync(base, &file.out_path)?;
     if let Some(parent) = file.out_path.parent() {
         parent_syncs.create_dir_all_sync(parent)?;
     }
     reject_regular_destination_link_prefixes_sync(base, &file.out_path)?;
-    install_staged_regular_file_sync(&file.staging_path, &file.out_path)?;
+    before_install()?;
+    synced.install_sync(&file.out_path)?;
     Ok(file
         .metadata
         .as_ref()
         .map(|meta| apply_entry_metadata_sync(&file.out_path, meta)))
 }
 
-/// Commits a run of plain regular files in one blocking call
-/// (br-asupersync-dfdwyt). Each file was one call of its own, after eight
-/// separate handoffs per file before that. The files commit in order, and
-/// the first failure stops the run: the files before it stay committed, are
-/// recorded for the deferred parent sync and pushed to `committed_paths`,
-/// exactly as one-by-one commits leave them, and the error is returned. A
-/// receive dropped while the call runs lets the rest of its run commit.
+/// Syncs a bounded batch concurrently, then publishes its files in order.
+/// Every started sync job completes its slice (at most four files) before a
+/// sync error or cancellation returns; cancellation fences unclaimed jobs
+/// without waiting for pool capacity.
+/// Any sync failure prevents publication of the whole batch. Concurrent sync
+/// failures are reported in manifest order, irrespective of completion order.
+/// Publication preserves its committed prefix on failure or cancellation.
+/// Dropping the future fences subsequent entries; an entry already installing
+/// may finish, but the worker checks the fence again before the next rename.
 #[cfg(not(windows))]
 async fn commit_regular_entries(
     cx: &Cx,
@@ -5364,22 +5380,276 @@ async fn commit_regular_entries(
     parent_syncs: &mut DeferredParentSyncs,
     committed_paths: &mut Vec<PathBuf>,
 ) -> Result<(), TransportError> {
+    commit_regular_entries_with(
+        cx,
+        base,
+        files,
+        parent_syncs,
+        committed_paths,
+        sync_staged_regular_file_sync,
+        |_| {},
+    )
+    .await
+}
+
+#[cfg(not(windows))]
+struct RegularCommitDropFence(Arc<AtomicBool>);
+
+#[cfg(not(windows))]
+impl Drop for RegularCommitDropFence {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// The claim is independent of pool admission: cancellation can fence a
+/// queued closure even after a worker has dequeued it, before it starts I/O.
+#[cfg(not(windows))]
+struct RegularCommitClaim(AtomicU8);
+
+#[cfg(not(windows))]
+impl RegularCommitClaim {
+    const UNCLAIMED: u8 = 0;
+    const RUNNING: u8 = 1;
+    const FINISHED: u8 = 2;
+    const CANCELLED: u8 = 3;
+
+    fn new() -> Self {
+        Self(AtomicU8::new(Self::UNCLAIMED))
+    }
+
+    fn start(&self) -> bool {
+        self.0
+            .compare_exchange(
+                Self::UNCLAIMED,
+                Self::RUNNING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn finish(&self) {
+        self.0.store(Self::FINISHED, Ordering::Release);
+    }
+
+    fn cancel_unstarted(&self) -> bool {
+        self.0
+            .compare_exchange(
+                Self::UNCLAIMED,
+                Self::CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+#[cfg(not(windows))]
+struct RegularCommitJob<F> {
+    claim: Arc<RegularCommitClaim>,
+    future: Option<std::pin::Pin<Box<F>>>,
+}
+
+#[cfg(not(windows))]
+impl<F> Drop for RegularCommitJob<F> {
+    fn drop(&mut self) {
+        // Runs before the future field's destructor can cancel a pool handle
+        // or release fallback admission. A racing worker must win the same
+        // claim before it is permitted to touch the staging files.
+        self.claim.cancel_unstarted();
+    }
+}
+
+#[cfg(not(windows))]
+fn check_regular_commit(cx: &Cx, dropped: &AtomicBool) -> Result<(), TransportError> {
+    if dropped.load(Ordering::Acquire) {
+        return Err(TransportError::Cancelled);
+    }
+    // A driverless owner's checkpoint must not use another polling task's
+    // virtual clock through the process-clock fallback.
+    let _owner = cx
+        .timer_driver()
+        .is_none()
+        .then(|| Cx::set_current(Some(cx.clone())));
+    cx.checkpoint().map_err(|_| TransportError::Cancelled)
+}
+
+// Per-call operation hooks let the tests hold real worker/file boundaries
+// without a global fault switch or a replacement concurrency implementation.
+#[cfg(not(windows))]
+async fn commit_regular_entries_with<SyncFile, BeforePublish>(
+    cx: &Cx,
+    base: &Path,
+    files: Vec<RegularCommit>,
+    parent_syncs: &mut DeferredParentSyncs,
+    committed_paths: &mut Vec<PathBuf>,
+    sync_file: SyncFile,
+    mut before_publish: BeforePublish,
+) -> Result<(), TransportError>
+where
+    SyncFile: Fn(&Path) -> Result<SyncedStagedFile, StreamingError> + Send + Sync + 'static,
+    BeforePublish: FnMut(usize) + Send + 'static,
+{
     if files.is_empty() {
         return Ok(());
     }
-    let base_path = base.to_path_buf();
-    let (committed, created_directories, failure) = crate::runtime::spawn_blocking(move || {
-        let mut committed = Vec::with_capacity(files.len());
-        let mut created_directories = DeferredParentSyncs::default();
-        for file in files {
-            match commit_regular_entry_sync(&base_path, &file, &mut created_directories) {
-                Ok(applied) => committed.push((file.out_path, applied)),
-                Err(error) => return (committed, created_directories, Some(error)),
+    if files.len() > REGULAR_COMMIT_BATCH {
+        return Err(TransportError::Source(format!(
+            "regular commit batch exceeds {REGULAR_COMMIT_BATCH} files"
+        )));
+    }
+    let dropped = Arc::new(AtomicBool::new(false));
+    check_regular_commit(cx, &dropped)?;
+    let _drop_fence = RegularCommitDropFence(Arc::clone(&dropped));
+    let pool = cx.blocking_pool_handle_for_inheritance();
+    let files = Arc::new(files);
+    let sync_file = Arc::new(sync_file);
+    // Contiguous slices bound handoffs at 16 and keep result order identical
+    // to manifest order. Each worker opens, sync_all's, and closes one file
+    // at a time, so a 64-file batch never retains 64 descriptors.
+    let chunk_size = files.len().div_ceil(REGULAR_SYNC_CONCURRENCY);
+    let mut jobs = Vec::new();
+    for start in (0..files.len()).step_by(chunk_size) {
+        let end = (start + chunk_size).min(files.len());
+        let files = Arc::clone(&files);
+        let sync_file = Arc::clone(&sync_file);
+        let claim = Arc::new(RegularCommitClaim::new());
+        let worker_claim = Arc::clone(&claim);
+        let future = Box::pin(
+            crate::runtime::spawn_blocking::spawn_blocking_io_off_worker(pool.clone(), move || {
+                if !worker_claim.start() {
+                    return Ok(Ok(Vec::new()));
+                }
+                let result = files[start..end]
+                    .iter()
+                    .map(|file| sync_file(&file.staging_path))
+                    .collect::<Result<Vec<_>, _>>();
+                worker_claim.finish();
+                Ok(result)
+            }),
+        );
+        jobs.push(RegularCommitJob {
+            claim,
+            future: Some(future),
+        });
+    }
+    let mut results = (0..jobs.len()).map(|_| None).collect::<Vec<_>>();
+    let mut remaining = jobs.len();
+    let mut cancellation = Box::pin(cx.cancelled());
+    let mut cancelled = false;
+    std::future::poll_fn(|task| {
+        // Register before inspecting cancellation so a parked capacity wait
+        // is woken by the explicit owner. A checkpoint preserves masking and
+        // also notices an exhausted budget whenever this future is polled.
+        let _ = cancellation.as_mut().poll(task);
+        cancelled |= check_regular_commit(cx, &dropped).is_err();
+        for (job, result) in jobs.iter_mut().zip(&mut results) {
+            if job.future.is_none() {
+                continue;
+            }
+            if cancelled && job.claim.cancel_unstarted() {
+                // No job can start after this claim wins. Dropping pending
+                // admission or a queued helper does not wait for the pool.
+                job.future = None;
+                remaining -= 1;
+            } else if let std::task::Poll::Ready(completed) = job
+                .future
+                .as_mut()
+                .expect("pending sync helper")
+                .as_mut()
+                .poll(task)
+            {
+                *result = Some(completed);
+                job.future = None;
+                remaining -= 1;
             }
         }
-        (committed, created_directories, None)
+        if remaining == 0 {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
     })
     .await;
+    drop(jobs);
+    // Every job that won its start claim has completed its slice. Cancelled
+    // unclaimed helpers deliberately have no result and cannot publish.
+    if cancelled {
+        return Err(TransportError::Cancelled);
+    }
+    check_regular_commit(cx, &dropped)?;
+    let mut synced = Vec::with_capacity(files.len());
+    for result in results {
+        synced.extend(result.expect("every sync job completed")??);
+    }
+
+    let base_path = base.to_path_buf();
+    let worker_cx = cx.clone();
+    let claim = Arc::new(RegularCommitClaim::new());
+    let worker_claim = Arc::clone(&claim);
+    let publication_dropped = Arc::clone(&dropped);
+    let future = Box::pin(
+        crate::runtime::spawn_blocking::spawn_blocking_io_off_worker(pool, move || {
+            let mut committed = Vec::with_capacity(files.len());
+            let mut created_directories = DeferredParentSyncs::default();
+            if !worker_claim.start() {
+                return Ok((
+                    committed,
+                    created_directories,
+                    Some(TransportError::Cancelled),
+                ));
+            }
+            for (index, (file, synced)) in files.iter().zip(synced).enumerate() {
+                let result =
+                    check_regular_commit(&worker_cx, &publication_dropped).and_then(|()| {
+                        commit_regular_entry_sync(
+                            &base_path,
+                            file,
+                            synced,
+                            &mut created_directories,
+                            || {
+                                before_publish(index);
+                                check_regular_commit(&worker_cx, &publication_dropped)
+                            },
+                        )
+                    });
+                match result {
+                    Ok(applied) => committed.push((file.out_path.clone(), applied)),
+                    Err(error) => {
+                        worker_claim.finish();
+                        return Ok((committed, created_directories, Some(error)));
+                    }
+                }
+            }
+            worker_claim.finish();
+            Ok((committed, created_directories, None))
+        }),
+    );
+    let mut publication = RegularCommitJob {
+        claim,
+        future: Some(future),
+    };
+    let (committed, created_directories, failure) = std::future::poll_fn(|task| {
+        let _ = cancellation.as_mut().poll(task);
+        if check_regular_commit(cx, &dropped).is_err() {
+            // Once the caller acknowledges cancellation, later mask changes
+            // cannot let a running publication continue to another entry.
+            dropped.store(true, Ordering::Release);
+            if publication.claim.cancel_unstarted() {
+                publication.future = None;
+                return std::task::Poll::Ready(Err(TransportError::Cancelled));
+            }
+        }
+        publication
+            .future
+            .as_mut()
+            .expect("pending publication helper")
+            .as_mut()
+            .poll(task)
+            .map_err(TransportError::from)
+    })
+    .await?;
     parent_syncs.merge(created_directories);
     for (out_path, applied) in committed {
         parent_syncs.record(&out_path);
