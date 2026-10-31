@@ -276,6 +276,9 @@ fn exercise_owned(workers: usize, case: Case) {
         assert!(serving.task.join(&cx).await.unwrap().is_ok());
     });
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    // A strong RuntimeHandle keeps the runtime alive, and shutdown_timeout
+    // reports teardown complete only once every one is released.
+    drop(runtime_handle);
     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
 }
 
