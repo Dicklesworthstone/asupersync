@@ -488,13 +488,13 @@ where
 
             if !self.write_buf.is_empty() {
                 let deadline = self.heartbeat.write_deadline();
-                match super::heartbeat::wait_until(
+                let flush_result = super::heartbeat::wait_until(
                     cx,
                     deadline,
-                    self.flush_write_buf_with_cx(Some(cx)),
+                    std::pin::pin!(self.flush_write_buf_with_cx(Some(cx))),
                 )
-                .await
-                {
+                .await;
+                match flush_result {
                     Ok(Some(())) => {}
                     Ok(None) => {
                         self.heartbeat.fail();
@@ -551,10 +551,14 @@ where
                         // Handle close handshake
                         if let Some(response) = self.close_handshake.receive_close(&frame)? {
                             let deadline = self.heartbeat.write_deadline();
-                            let send_result = super::heartbeat::wait_until(cx, deadline, async {
-                                self.encode_frame(response)?;
-                                self.flush_write_buf_with_cx(Some(cx)).await
-                            })
+                            let send_result = super::heartbeat::wait_until(
+                                cx,
+                                deadline,
+                                std::pin::pin!(async {
+                                    self.encode_frame(response)?;
+                                    self.flush_write_buf_with_cx(Some(cx)).await
+                                }),
+                            )
                             .await;
                             if send_result?.is_none() {
                                 self.heartbeat.fail();
@@ -597,7 +601,13 @@ where
                 }
 
                 let deadline = self.heartbeat.deadline();
-                let n = match super::heartbeat::wait_until(cx, deadline, self.read_more(cx)).await {
+                let read_result = super::heartbeat::wait_until(
+                    cx,
+                    deadline,
+                    std::pin::pin!(self.read_more(cx)),
+                )
+                .await;
+                let n = match read_result {
                     Ok(Some(n)) => n,
                     Ok(None) => continue,
                     Err(WsError::Io(e))

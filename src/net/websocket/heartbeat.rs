@@ -7,6 +7,7 @@ use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::Time;
 use std::future::{Future, poll_fn};
 use std::io;
+use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -182,15 +183,16 @@ pub(super) fn timeout_error() -> WsError {
 /// Timer completion is distinct from I/O completion so an idle read can wake
 /// to send its scheduled Ping. A dropped wait retains no timer registration;
 /// its absolute deadline remains in the connection's Heartbeat.
+/// The caller pins the operation so this wrapper stores only its borrow,
+/// instead of retaining both an owned argument and a pinned copy across await.
 pub(super) async fn wait_until<T, F>(
     cx: &Cx,
     deadline: Option<HeartbeatDeadline>,
-    future: F,
+    mut future: Pin<&mut F>,
 ) -> Result<Option<T>, WsError>
 where
-    F: Future<Output = Result<T, WsError>>,
+    F: Future<Output = Result<T, WsError>> + ?Sized,
 {
-    let mut future = std::pin::pin!(future);
     let mut cancelled = std::pin::pin!(cx.cancelled());
     let wall_clock = deadline
         .as_ref()
