@@ -2169,8 +2169,10 @@ impl<P: Policy> Scope<'_, P> {
     /// `TimedResult::TimedOut`, also when it was the caller's cancellation,
     /// not the deadline, that ended the wait.
     ///
-    /// The deadline is measured on the scope's clock (`cx.now()`), so lab
-    /// virtual time drives it deterministically.
+    /// The deadline and wake registration use the explicit `cx`'s timer driver,
+    /// so lab virtual time drives them deterministically. Without a driver,
+    /// they use the wall-clock fallback, even when a different context polls
+    /// this future.
     ///
     /// # Errors
     ///
@@ -2189,8 +2191,22 @@ impl<P: Policy> Scope<'_, P> {
     {
         use crate::combinator::timeout::make_timed_result;
 
-        let mut sleep = std::pin::pin!(crate::time::sleep(cx.now(), duration));
-        let deadline = sleep.deadline();
+        let timer = cx.timer_driver();
+        let driverless = timer.is_none();
+        let (deadline, sleep) = if let Some(timer) = timer {
+            let deadline = timer.now() + duration;
+            (
+                deadline,
+                crate::time::Sleep::with_timer_driver(deadline, timer),
+            )
+        } else {
+            // The fallback clock also consults the ambient Cx. Hide a foreign
+            // polling context while choosing this owner's wall-clock deadline.
+            let _owner = Cx::set_current(Some(cx.clone()));
+            let deadline = crate::time::wall_now() + duration;
+            (deadline, crate::time::Sleep::new(deadline))
+        };
+        let mut sleep = std::pin::pin!(sleep);
         let mut operation_handle = AbortUnfinishedOnDrop(vec![cx.spawn_in(self, operation)?]);
         let handle = &mut operation_handle[0];
         let task = handle.task_id();
@@ -2208,6 +2224,10 @@ impl<P: Policy> Scope<'_, P> {
                 // poll_deadline only registers a timer, which might otherwise
                 // be the next wake even when the owner was cancelled earlier.
                 let _ = cancelled.as_mut().poll(poll_cx);
+                // A driverless owner must retain its wall-clock fallback for
+                // both budget checks and timer registration on every poll.
+                // The child's join above keeps the actual polling context.
+                let _owner = driverless.then(|| Cx::set_current(Some(cx.clone())));
                 // The caller's cancellation is checked before the timer, and the
                 // timer is polled for its deadline only. The cancel-aware poll
                 // also completed on the caller's cancellation, so that was

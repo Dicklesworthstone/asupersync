@@ -543,7 +543,8 @@ mod explicit_owner_cancellation {
     use asupersync::combinator::timeout::TimedResult;
     use asupersync::runtime::JoinError;
     use asupersync::sync::Notify;
-    use asupersync::types::Outcome;
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+    use asupersync::types::{Budget, Outcome, Time};
     use std::future::poll_fn;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
@@ -855,6 +856,162 @@ mod explicit_owner_cancellation {
         for workers in [1, 2] {
             for form in [Combinator::Quorum, Combinator::FirstOk, Combinator::Timeout] {
                 native_explicit_owner(form, workers, true);
+            }
+        }
+    }
+
+    struct ReleaseCleanup(Arc<BranchWitness>);
+
+    impl Drop for ReleaseCleanup {
+        fn drop(&mut self) {
+            self.0.release_cleanup.notify_one();
+        }
+    }
+
+    fn poll_under<F: Future>(
+        future: Pin<&mut F>,
+        ambient: &Cx,
+        task: &mut Context<'_>,
+    ) -> Poll<F::Output> {
+        let caller = Cx::current().map(|cx| cx.task_id());
+        let result = {
+            let _foreign = Cx::set_current(Some(ambient.clone()));
+            let result = future.poll(task);
+            assert_eq!(Cx::current().unwrap().task_id(), ambient.task_id());
+            result
+        };
+        assert_eq!(Cx::current().map(|cx| cx.task_id()), caller);
+        result
+    }
+
+    async fn timeout_clock_scenario(
+        owner: Cx,
+        foreign: Cx,
+        clock: Arc<VirtualClock>,
+        timer: TimerDriverHandle,
+        foreign_timer: TimerDriverHandle,
+        abandon: bool,
+    ) {
+        let seen = Arc::new(BranchWitness::default());
+        let _release_on_drop = ReleaseCleanup(Arc::clone(&seen));
+        let (_sender, receiver) = mpsc::channel(1);
+        let branch_seen = Arc::clone(&seen);
+        let scope = owner.scope();
+        let mut wait = Box::pin(
+            scope.timeout(&owner, Duration::from_millis(100), move |child| {
+                parked_branch(child, receiver, branch_seen)
+            }),
+        );
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        assert!(poll_under(wait.as_mut(), &foreign, &mut Context::from_waker(&waker)).is_pending());
+        assert_eq!(timer.pending_count(), 1, "the owner owns the deadline");
+        assert_eq!(
+            foreign_timer.pending_count(),
+            0,
+            "the poller lends no timer"
+        );
+        seen.wait_for(&seen.parked).await;
+
+        if abandon {
+            drop(wait);
+            assert_eq!(timer.pending_count(), 0, "drop retires the owner's timer");
+            seen.wait_for(&seen.cleanup_parked).await;
+            seen.release_cleanup.notify_one();
+            seen.wait_for(&seen.retired).await;
+        } else {
+            clock.advance(Time::from_millis(99).as_nanos());
+            assert_eq!(timer.process_timers(), 0);
+            assert!(
+                poll_under(wait.as_mut(), &foreign, &mut Context::from_waker(&waker)).is_pending()
+            );
+            assert!(!seen.cleanup_parked.load(Ordering::Acquire));
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(foreign_timer.pending_count(), 0);
+
+            let before = wakes.count.load(Ordering::Acquire);
+            clock.advance(Time::from_millis(1).as_nanos());
+            // The native worker may process the owner timer concurrently.
+            // Its callback, not the process_timers return count, is the witness.
+            let _ = timer.process_timers();
+            wakes
+                .changed
+                .wait_until(|| wakes.count.load(Ordering::Acquire) > before)
+                .await;
+            assert!(
+                poll_under(wait.as_mut(), &foreign, &mut Context::from_waker(&waker)).is_pending()
+            );
+            seen.wait_for(&seen.cleanup_parked).await;
+            assert_eq!(
+                seen.reason
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|reason| reason.kind),
+                Some(CancelKind::Timeout)
+            );
+            assert!(
+                poll_under(wait.as_mut(), &foreign, &mut Context::from_waker(&waker)).is_pending()
+            );
+            seen.release_cleanup.notify_one();
+            let result = poll_fn(|task| poll_under(wait.as_mut(), &foreign, task))
+                .await
+                .expect("operation admitted");
+            assert!(matches!(
+                result,
+                TimedResult::Completed(Outcome::Err("cleanup completed"))
+            ));
+            assert!(seen.retired.load(Ordering::Acquire));
+        }
+        assert_eq!(timer.pending_count(), 0);
+        assert_eq!(foreign_timer.pending_count(), 0);
+        assert!(!owner.is_cancel_requested(), "only the operation times out");
+    }
+
+    #[test]
+    fn scope_timeout_keeps_its_owner_timer_under_foreign_virtual_clocks() {
+        for foreign_now in [Time::ZERO, Time::from_secs(1_000_000)] {
+            for abandon in [false, true] {
+                let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let owner_runtime = RuntimeBuilder::new()
+                    .worker_threads(1)
+                    .with_timer_driver(timer.clone())
+                    .build()
+                    .unwrap();
+                let owner = owner_runtime.request_cx_with_budget(Budget::INFINITE);
+                let foreign_clock = Arc::new(VirtualClock::starting_at(foreign_now));
+                let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock);
+                let foreign_runtime = RuntimeBuilder::current_thread()
+                    .with_timer_driver(foreign_timer.clone())
+                    .build()
+                    .unwrap();
+                let foreign = foreign_runtime.request_cx_with_budget(Budget::INFINITE);
+
+                // This third runtime has a wall-clock watchdog. Neither frozen
+                // virtual clock can keep a broken test waiting indefinitely.
+                run_on_production(move |poller| async move {
+                    asupersync::time::timeout(
+                        poller.now(),
+                        Duration::from_secs(10),
+                        timeout_clock_scenario(
+                            owner,
+                            foreign,
+                            clock,
+                            timer,
+                            foreign_timer,
+                            abandon,
+                        ),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "foreign_now={foreign_now:?} abandon={abandon}: owner timer watchdog"
+                        )
+                    });
+                });
+                assert!(owner_runtime.shutdown_timeout(Duration::from_secs(3)));
+                assert!(foreign_runtime.shutdown_timeout(Duration::from_secs(3)));
             }
         }
     }
