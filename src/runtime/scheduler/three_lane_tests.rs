@@ -12102,6 +12102,168 @@ fn scheduler_worker_dispatch_quantum_polls_pending_task_once() {
 }
 
 #[test]
+fn repeated_checkpoint_cleanup_parks_until_a_real_wake_in_both_task_tables() {
+    for external_table in [false, true] {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let root = state
+            .lock()
+            .expect("lock state")
+            .create_root_region(Budget::INFINITE);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let cleanup_ready = Arc::new(AtomicBool::new(false));
+        let cleanup_done = Arc::new(AtomicBool::new(false));
+        let wake_during_poll = Arc::new(AtomicBool::new(false));
+        let saved_waker = Arc::new(std::sync::Mutex::new(None::<Waker>));
+        let task_polls = Arc::clone(&polls);
+        let task_cleanup_ready = Arc::clone(&cleanup_ready);
+        let task_cleanup_done = Arc::clone(&cleanup_done);
+        let task_wake_during_poll = Arc::clone(&wake_during_poll);
+        let task_waker = Arc::clone(&saved_waker);
+        let (task_id, mut handle, task_cx) = {
+            let mut runtime = state.lock().expect("lock state");
+            let (task_id, handle) = runtime
+                .create_task(
+                    root,
+                    Budget::INFINITE,
+                    std::future::poll_fn(move |poll_cx| {
+                        let poll = task_polls.fetch_add(1, Ordering::SeqCst);
+                        let cx = crate::cx::Cx::current().expect("worker installs the task Cx");
+                        let checkpoint = if poll % 2 == 0 {
+                            cx.checkpoint()
+                        } else {
+                            cx.checkpoint_with("waiting for cleanup I/O")
+                        };
+                        assert_eq!(checkpoint.is_err(), cx.is_cancel_requested());
+                        *task_waker.lock().expect("lock task Waker") = Some(poll_cx.waker().clone());
+                        if task_wake_during_poll.swap(false, Ordering::SeqCst) {
+                            poll_cx.waker().wake_by_ref();
+                        }
+                        if task_cleanup_ready.load(Ordering::SeqCst) {
+                            task_cleanup_done.store(true, Ordering::SeqCst);
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    }),
+                )
+                .expect("create pending cleanup task");
+            let task_cx = runtime
+                .task(task_id)
+                .and_then(|record| record.cx.clone())
+                .expect("task Cx");
+            (task_id, handle, task_cx)
+        };
+        let task_table = external_table
+            .then(|| Arc::new(ContendedMutex::new("task_table", TaskTable::new())));
+        if let Some(task_table) = task_table.as_ref() {
+            move_runtime_task_to_shard(&state, task_table, task_id);
+        }
+        let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+            1,
+            &state,
+            task_table.clone(),
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            false,
+            32,
+        );
+        scheduler.inject_ready(task_id, 0);
+        let mut worker = scheduler.take_workers().remove(0);
+        assert_eq!(worker.next_task(), Some(task_id));
+        worker.execute(task_id);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert_eq!(worker.next_task(), None, "healthy task parks");
+
+        for (kind, expected_polls) in [(CancelKind::RaceLost, 3), (CancelKind::Shutdown, 5)] {
+            task_cx.cancel_fast(kind);
+            assert_eq!(
+                worker.next_task(),
+                Some(task_id),
+                "cancellation wakes the task"
+            );
+            worker.execute(task_id);
+            assert_eq!(
+                worker.next_task(),
+                Some(task_id),
+                "a first or strengthened acknowledgement preserves its follow-up poll"
+            );
+            worker.execute(task_id);
+            assert_eq!(polls.load(Ordering::SeqCst), expected_polls);
+            assert_eq!(
+                worker.next_task(),
+                None,
+                "unchanged checkpoint must park; external_table={external_table}"
+            );
+            assert!(
+                !handle.is_finished(),
+                "pending asynchronous cleanup stays alive"
+            );
+            assert!(!cleanup_done.load(Ordering::SeqCst));
+        }
+
+        let waker = saved_waker
+            .lock()
+            .expect("lock saved Waker")
+            .as_ref()
+            .expect("task registered its I/O Waker")
+            .clone();
+        waker.wake_by_ref();
+        assert_eq!(
+            worker.next_task(),
+            Some(task_id),
+            "ordinary cleanup wake is retained"
+        );
+        worker.execute(task_id);
+        assert_eq!(polls.load(Ordering::SeqCst), 6);
+        assert_eq!(worker.next_task(), None, "the real wake buys one poll");
+        assert!(!handle.is_finished());
+
+        wake_during_poll.store(true, Ordering::SeqCst);
+        waker.wake_by_ref();
+        assert_eq!(worker.next_task(), Some(task_id));
+        worker.execute(task_id);
+        assert_eq!(
+            worker.next_task(),
+            Some(task_id),
+            "a wake during cleanup is retained"
+        );
+        worker.execute(task_id);
+        assert_eq!(polls.load(Ordering::SeqCst), 8);
+        assert_eq!(
+            worker.next_task(),
+            None,
+            "self-wake buys exactly one additional poll"
+        );
+        assert!(!handle.is_finished());
+
+        cleanup_ready.store(true, Ordering::SeqCst);
+        waker.wake_by_ref();
+        assert_eq!(worker.next_task(), Some(task_id));
+        worker.execute(task_id);
+        assert_eq!(polls.load(Ordering::SeqCst), 9);
+        assert!(cleanup_done.load(Ordering::SeqCst));
+        assert!(
+            handle.is_finished(),
+            "completion waits for cleanup readiness"
+        );
+        assert!(matches!(
+            handle.try_join(),
+            Err(crate::runtime::JoinError::Cancelled(reason)) if reason.is_kind(CancelKind::Shutdown)
+        ));
+        assert_eq!(worker.next_task(), None);
+        assert!(state.lock().expect("lock state").task(task_id).is_none());
+        if let Some(task_table) = task_table {
+            assert!(
+                task_table
+                    .lock()
+                    .expect("lock task table")
+                    .task(task_id)
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[test]
 fn test_edf_starves_fifo_lane_defect() {
     // REGRESSION TEST: EDF lane starvation of FIFO lane under deadline pressure
     //

@@ -10,7 +10,7 @@
 //! OS snapshot. Replay checks the content fingerprint again at its end, but that
 //! cannot retract events already returned if another process rewrites the file.
 
-use super::file::{MAX_EVENT_LEN, TraceFileError, TraceReader};
+use super::file::{MAX_EVENT_LEN, TraceContainerLimits, TraceFileError, TraceReader};
 use super::replay::{ReplayEvent, TraceMetadata};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -29,8 +29,10 @@ const HASH_DOMAIN: &[u8] = b"asupersync-verified-replay-content-v1\0";
 /// additionally bounds metadata, individual input frames and LZ4 chunks. One
 /// decoded event and codec buffers are needed even when its cumulative admission
 /// fails. Use [`VerifiedTraceReader::open_with_frame_limit`] to additionally
-/// reject large raw event frames before allocation or deserialization. No
-/// collection is preallocated from the untrusted declared event count.
+/// reject large raw event frames before allocation or deserialization, or
+/// [`VerifiedTraceReader::open_with_container_limits`] to also bound metadata
+/// and compressed/expanded chunk buffers. No collection is preallocated from
+/// the untrusted declared event count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TraceReadLimits {
     /// Maximum declared events admitted to verification.
@@ -306,7 +308,31 @@ impl VerifiedTraceReader {
         limits: TraceReadLimits,
         max_frame_bytes: usize,
     ) -> Result<Self, VerifiedTraceError> {
-        let mut reader = TraceReader::open(path)?.with_max_event_len(max_frame_bytes);
+        Self::open_with_container_limits(
+            path,
+            limits,
+            TraceContainerLimits::new().with_max_event_bytes(max_frame_bytes),
+        )
+    }
+
+    /// Verify with explicit bounds on metadata, raw events and LZ4 chunks.
+    ///
+    /// Container limits are checked before payload allocation and decoding;
+    /// the same limits remain in force throughout verification and replay.
+    /// The canonical byte and event budgets in `limits` are independent and
+    /// still apply. Encoded-size limits do not bound decoded Rust object
+    /// overhead or fixed I/O buffering.
+    ///
+    /// # Errors
+    /// Returns the usual verification errors and [`TraceFileError::OversizedField`]
+    /// when metadata, an event, a stored chunk, or an expanded chunk exceeds
+    /// its effective container limit.
+    pub fn open_with_container_limits(
+        path: impl AsRef<Path>,
+        limits: TraceReadLimits,
+        container_limits: TraceContainerLimits,
+    ) -> Result<Self, VerifiedTraceError> {
+        let mut reader = TraceReader::open_with_limits(path, container_limits)?;
         if reader.event_count() > limits.max_events {
             return Err(VerifiedTraceError::EventLimit {
                 declared: reader.event_count(),
@@ -358,7 +384,30 @@ impl VerifiedTraceReader {
         limits: TraceReadLimits,
         max_frame_bytes: usize,
     ) -> Result<Self, VerifiedTraceError> {
-        let mut reader = Self::open_with_frame_limit(path, limits, max_frame_bytes)?;
+        Self::resume_with_container_limits(
+            path,
+            checkpoint,
+            limits,
+            TraceContainerLimits::new().with_max_event_bytes(max_frame_bytes),
+        )
+    }
+
+    /// Re-verify and resume under explicit container and canonical limits.
+    ///
+    /// The entire source, including the skipped prefix, must satisfy the
+    /// current caller's limits. A checkpoint never grants an exception to a
+    /// smaller metadata, frame, compressed-chunk, or expansion budget.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::open_with_container_limits`] and
+    /// [`Self::resume`].
+    pub fn resume_with_container_limits(
+        path: impl AsRef<Path>,
+        checkpoint: VerifiedReplayCheckpoint,
+        limits: TraceReadLimits,
+        container_limits: TraceContainerLimits,
+    ) -> Result<Self, VerifiedTraceError> {
+        let mut reader = Self::open_with_container_limits(path, limits, container_limits)?;
         if reader.total_events() != checkpoint.total_events
             || reader.content_digest != checkpoint.content_digest
             || checkpoint.position > checkpoint.total_events

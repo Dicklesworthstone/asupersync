@@ -518,6 +518,120 @@
     }
 
     #[test]
+    fn repeated_checkpoint_cleanup_parks_until_an_external_wake() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        init_test("repeated_checkpoint_cleanup_parks_until_an_external_wake");
+        let mut runtime = LabRuntime::new(LabConfig::new(47));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let cleanup_ready = Arc::new(AtomicBool::new(false));
+        let cleanup_done = Arc::new(AtomicBool::new(false));
+        let wake_during_poll = Arc::new(AtomicBool::new(false));
+        let saved_waker = Arc::new(std::sync::Mutex::new(None::<Waker>));
+        let task_polls = Arc::clone(&polls);
+        let task_cleanup_ready = Arc::clone(&cleanup_ready);
+        let task_cleanup_done = Arc::clone(&cleanup_done);
+        let task_wake_during_poll = Arc::clone(&wake_during_poll);
+        let task_waker = Arc::clone(&saved_waker);
+        let (task_id, mut handle) = runtime
+            .state
+            .create_task(
+                root,
+                Budget::INFINITE,
+                std::future::poll_fn(move |poll_cx| {
+                    let poll = task_polls.fetch_add(1, Ordering::SeqCst);
+                    let cx = crate::cx::Cx::current().expect("lab installs the task Cx");
+                    let checkpoint = if poll % 2 == 0 {
+                        cx.checkpoint()
+                    } else {
+                        cx.checkpoint_with("waiting for cleanup I/O")
+                    };
+                    assert_eq!(checkpoint.is_err(), cx.is_cancel_requested());
+                    *task_waker.lock().expect("lock task Waker") = Some(poll_cx.waker().clone());
+                    if task_wake_during_poll.swap(false, Ordering::SeqCst) {
+                        poll_cx.waker().wake_by_ref();
+                    }
+                    if task_cleanup_ready.load(Ordering::SeqCst) {
+                        task_cleanup_done.store(true, Ordering::SeqCst);
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                }),
+            )
+            .expect("create pending cleanup task");
+        let task_cx = runtime
+            .state
+            .task(task_id)
+            .and_then(|record| record.cx.clone())
+            .expect("task Cx");
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.step_for_test();
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert!(runtime.scheduler.lock().is_empty());
+
+        for (kind, expected_polls) in [(CancelKind::RaceLost, 3), (CancelKind::Shutdown, 5)] {
+            task_cx.cancel_fast(kind);
+            runtime.step_for_test();
+            assert!(
+                !runtime.scheduler.lock().is_empty(),
+                "first or strengthened acknowledgement still schedules cleanup"
+            );
+            runtime.step_for_test();
+            assert_eq!(polls.load(Ordering::SeqCst), expected_polls);
+            assert!(
+                runtime.scheduler.lock().is_empty(),
+                "repeating the same checkpoint must let cleanup park"
+            );
+            assert!(!handle.is_finished());
+            assert!(!cleanup_done.load(Ordering::SeqCst));
+        }
+
+        let waker = saved_waker
+            .lock()
+            .expect("lock saved Waker")
+            .as_ref()
+            .expect("task registered its I/O Waker")
+            .clone();
+        waker.wake_by_ref();
+        runtime.step_for_test();
+        assert_eq!(polls.load(Ordering::SeqCst), 6);
+        assert!(runtime.scheduler.lock().is_empty());
+        assert!(
+            !handle.is_finished(),
+            "ordinary wake does not truncate cleanup"
+        );
+
+        wake_during_poll.store(true, Ordering::SeqCst);
+        waker.wake_by_ref();
+        runtime.step_for_test();
+        assert!(
+            !runtime.scheduler.lock().is_empty(),
+            "wake during cleanup is retained"
+        );
+        runtime.step_for_test();
+        assert_eq!(polls.load(Ordering::SeqCst), 8);
+        assert!(runtime.scheduler.lock().is_empty());
+        assert!(!handle.is_finished());
+
+        cleanup_ready.store(true, Ordering::SeqCst);
+        waker.wake_by_ref();
+        runtime.step_for_test();
+        assert_eq!(polls.load(Ordering::SeqCst), 9);
+        assert!(cleanup_done.load(Ordering::SeqCst));
+        assert!(handle.is_finished());
+        assert!(matches!(
+            handle.try_join(),
+            Err(crate::runtime::JoinError::Cancelled(reason)) if reason.is_kind(CancelKind::Shutdown)
+        ));
+        assert!(runtime.state.task(task_id).is_none());
+        assert!(runtime.scheduler.lock().is_empty());
+        assert!(runtime.check_invariants().is_empty());
+        crate::test_complete!("repeated_checkpoint_cleanup_parks_until_an_external_wake");
+    }
+
+    #[test]
     fn handle_cancel_command_blocks_lab_quiescence_until_drained() {
         init_test("handle_cancel_command_blocks_lab_quiescence_until_drained");
         let mut runtime = LabRuntime::new(LabConfig::new(11));

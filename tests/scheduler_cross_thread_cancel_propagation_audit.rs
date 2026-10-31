@@ -203,9 +203,10 @@ fn cx_checkpoint_observes_stable_envelope_with_acquire_load() {
 #[test]
 fn pending_checkpoint_ack_republishes_cancel_lane_before_wakers() {
     // A task may acknowledge cancellation inside the poll that returns
-    // Pending before the queued handle command reaches a worker. That receipt
-    // must itself make the cancel lane visible before auxiliary Wakers run;
+    // Pending before the queued handle command reaches a worker. The first
+    // receipt must make the cancel lane visible before auxiliary Wakers run;
     // otherwise a reentrant Waker can observe a parked, unpublished task.
+    // A repeated, unchanged checkpoint must not manufacture runnable work.
     let task = read("src/record/task.rs");
     let scheduler = read("src/runtime/scheduler/three_lane.rs");
     let start = scheduler
@@ -230,8 +231,9 @@ fn pending_checkpoint_ack_republishes_cancel_lane_before_wakers() {
         .expect("post-publication Waker dispatch");
 
     assert!(
-        task.contains("Callers that observe a receipt after `Poll::Pending` must publish a")
-            && body.contains("if wake_state.finish_poll() || cancel_ack.is_some()")
+        task.contains("reschedule: cancellation_changed || acknowledge_transition.is_some()")
+            && body.contains(".is_some_and(|receipt| receipt.needs_reschedule())")
+            && body.contains("if wake_state.finish_poll() || needs_cancel_poll")
             && receipt < local_publication
             && receipt < global_publication
             && local_publication < dispatch

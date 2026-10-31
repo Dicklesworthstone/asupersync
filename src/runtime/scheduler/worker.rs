@@ -841,7 +841,11 @@ impl Worker {
                 };
                 let (cancel_ack, cancel_wakes) = cancel_effects.into_parts();
 
-                if wake_state.finish_poll() || cancel_ack.is_some() {
+                if wake_state.finish_poll()
+                    || cancel_ack
+                        .as_ref()
+                        .is_some_and(|receipt| receipt.needs_reschedule())
+                {
                     // Local tasks must stay on their owning worker. We reschedule
                     // local tasks to the local queue and global tasks to the global queue.
                     // WorkStealingWaker also routes cross-thread wakes for local tasks

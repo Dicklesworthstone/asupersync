@@ -841,6 +841,87 @@
     }
 
     #[test]
+    fn container_limits_reject_metadata_before_reading_its_payload() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let mut file = std::fs::File::create(temp.path()).expect("create trace");
+        file.write_all(TRACE_MAGIC).expect("write magic");
+        file.write_all(&2u16.to_le_bytes()).expect("write version");
+        file.write_all(&0u16.to_le_bytes()).expect("write flags");
+        file.write_all(&[0]).expect("write compression");
+        file.write_all(&65_536u32.to_le_bytes())
+            .expect("declare absent metadata");
+        file.flush().expect("flush trace header");
+
+        // There is no metadata payload. Reading or decoding it first would
+        // report truncation instead of this admission refusal.
+        assert!(matches!(
+            TraceReader::open_with_limits(
+                temp.path(),
+                TraceContainerLimits::new().with_max_metadata_bytes(64),
+            ),
+            Err(TraceFileError::OversizedField {
+                field: "meta_len",
+                actual: 65_536,
+                max: 64,
+            })
+        ));
+    }
+
+    #[test]
+    fn container_limits_accept_exact_plain_boundaries_and_survive_rewind() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let metadata = TraceMetadata::new(7);
+        let event = ReplayEvent::RngSeed { seed: 7 };
+        let metadata_len = rmp_serde::to_vec(&metadata).expect("encode metadata").len();
+        let event_len = rmp_serde::to_vec(&event).expect("encode event").len();
+        write_trace(temp.path(), &metadata, std::slice::from_ref(&event))
+            .expect("write trace");
+        let limits = TraceContainerLimits::new()
+            .with_max_metadata_bytes(metadata_len)
+            .with_max_event_bytes(event_len)
+            .with_max_compressed_chunk_bytes(0)
+            .with_max_decompressed_chunk_bytes(0);
+        let mut reader = TraceReader::open_with_limits(temp.path(), limits)
+            .expect("admit exact metadata size");
+        for _ in 0..2 {
+            assert_eq!(reader.read_event().expect("read event"), Some(event.clone()));
+            assert!(reader.read_event().expect("read end").is_none());
+            reader.rewind().expect("rewind");
+            assert_eq!(reader.limits, limits);
+        }
+        assert!(matches!(
+            TraceReader::open_with_limits(
+                temp.path(),
+                limits.with_max_metadata_bytes(metadata_len - 1),
+            ),
+            Err(TraceFileError::OversizedField { field: "meta_len", .. })
+        ));
+        let mut smaller = TraceReader::open_with_limits(
+            temp.path(),
+            limits.with_max_event_bytes(event_len - 1),
+        )
+        .expect("metadata still admitted");
+        assert!(matches!(
+            smaller.read_event(),
+            Err(TraceFileError::OversizedField { field: "event_len", .. })
+        ));
+    }
+
+    #[test]
+    fn container_limits_cannot_raise_format_ceilings() {
+        let limits = TraceContainerLimits::new()
+            .with_max_metadata_bytes(usize::MAX)
+            .with_max_event_bytes(usize::MAX)
+            .with_max_compressed_chunk_bytes(usize::MAX)
+            .with_max_decompressed_chunk_bytes(usize::MAX);
+        assert_eq!(limits, TraceContainerLimits::default());
+        assert_eq!(limits.max_metadata_bytes(), MAX_META_LEN);
+        assert_eq!(limits.max_event_bytes(), MAX_EVENT_LEN);
+        assert_eq!(limits.max_compressed_chunk_bytes(), MAX_COMPRESSED_CHUNK_LEN);
+        assert_eq!(limits.max_decompressed_chunk_bytes(), MAX_COMPRESSED_CHUNK_LEN);
+    }
+
+    #[test]
     fn raw_frame_limit_is_checked_before_payload_read_and_decode() {
         let temp = NamedTempFile::new().expect("create temp file");
         write_v2_trace(temp.path(), &TraceMetadata::new(7), &[], 1);
@@ -883,7 +964,7 @@
         let reader = TraceReader::open(temp.path())
             .expect("open trace")
             .with_max_event_len(usize::MAX);
-        assert_eq!(reader.max_event_len, MAX_EVENT_LEN);
+        assert_eq!(reader.limits.max_event_bytes(), MAX_EVENT_LEN);
     }
 
     #[test]
@@ -1483,6 +1564,41 @@
             );
             assert!(iter.next().is_none());
             assert!(iter.next().is_none());
+        }
+
+        #[test]
+        fn container_limits_refuse_compressed_sizes_before_reading_chunk_bodies() {
+            for expanded in [false, true] {
+                let temp = NamedTempFile::new().expect("create temp file");
+                let mut file = std::fs::File::create(temp.path()).expect("create trace");
+                write_header_with_metadata(&mut file, CompressionMode::Lz4 { level: 1 });
+                file.write_all(&1u64.to_le_bytes()).expect("declare one event");
+                if expanded {
+                    file.write_all(&32u32.to_le_bytes()).expect("declare stored chunk");
+                    file.write_all(&65_536u32.to_le_bytes()).expect("declare expansion");
+                } else {
+                    file.write_all(&65_536u32.to_le_bytes()).expect("declare stored chunk");
+                }
+                file.flush().expect("flush headers without chunk body");
+                let limits = TraceContainerLimits::new()
+                    .with_max_compressed_chunk_bytes(64)
+                    .with_max_decompressed_chunk_bytes(64);
+                let mut reader = TraceReader::open_with_limits(temp.path(), limits)
+                    .expect("admit metadata");
+                let error = reader.read_event().expect_err("refuse before missing payload");
+                let expected_field = if expanded {
+                    "decompressed_chunk_len"
+                } else {
+                    "compressed_chunk_len"
+                };
+                assert!(matches!(
+                    error,
+                    TraceFileError::OversizedField { field, actual: 65_536, max: 64 }
+                        if field == expected_field
+                ));
+                assert_eq!(reader.events_read(), 0);
+                assert!(reader.try_events().next().is_none(), "failure is terminal");
+            }
         }
 
         #[test]

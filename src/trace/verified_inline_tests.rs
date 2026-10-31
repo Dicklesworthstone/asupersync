@@ -56,6 +56,142 @@
     }
 
     #[test]
+    fn container_limits_apply_to_metadata_before_verified_admission() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut file = File::create(temp.path()).unwrap();
+        file.write_all(TRACE_MAGIC).unwrap();
+        file.write_all(&2u16.to_le_bytes()).unwrap();
+        file.write_all(&0u16.to_le_bytes()).unwrap();
+        file.write_all(&[0]).unwrap();
+        file.write_all(&65_536u32.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+        // Metadata is deliberately absent: the size gate must run before read/decode.
+        assert!(matches!(
+            VerifiedTraceReader::open_with_container_limits(
+                temp.path(),
+                limits(),
+                TraceContainerLimits::new().with_max_metadata_bytes(64),
+            ),
+            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+                field: "meta_len", actual: 65_536, max: 64,
+            }))
+        ));
+    }
+
+    #[test]
+    fn container_limits_preserve_canonical_admission_and_bound_resume() {
+        let temp = NamedTempFile::new().unwrap();
+        let event = ReplayEvent::RngSeed { seed: 7 };
+        let event_len = rmp_serde::to_vec(&event).unwrap().len();
+        let metadata_len = rmp_serde::to_vec(&metadata()).unwrap().len();
+        write_trace(temp.path(), &metadata(), std::slice::from_ref(&event)).unwrap();
+        let canonical = TraceReadLimits::new(1, event_len as u64);
+        let container = TraceContainerLimits::new()
+            .with_max_metadata_bytes(metadata_len)
+            .with_max_event_bytes(event_len)
+            .with_max_compressed_chunk_bytes(0)
+            .with_max_decompressed_chunk_bytes(0);
+        let mut reader =
+            VerifiedTraceReader::open_with_container_limits(temp.path(), canonical, container)
+                .unwrap();
+        for position in 0..=1 {
+            let checkpoint = reader.checkpoint().unwrap();
+            let mut resumed = VerifiedTraceReader::resume_with_container_limits(
+                temp.path(), checkpoint, canonical, container,
+            )
+            .unwrap();
+            let expected = if position == 0 { Some(event.clone()) } else { None };
+            assert_eq!(resumed.next_event().unwrap(), expected);
+            assert!(resumed.is_complete());
+            for (smaller, expected_field) in [
+                (container.with_max_metadata_bytes(metadata_len - 1), "meta_len"),
+                (container.with_max_event_bytes(event_len - 1), "event_len"),
+            ] {
+                assert!(matches!(
+                    VerifiedTraceReader::resume_with_container_limits(
+                        temp.path(), checkpoint, canonical, smaller,
+                    ),
+                    Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+                        field, ..
+                    })) if field == expected_field
+                ));
+            }
+            let _ = reader.next_event().unwrap();
+        }
+        assert!(matches!(
+            VerifiedTraceReader::open_with_container_limits(
+                temp.path(), TraceReadLimits::new(1, event_len as u64 - 1), container,
+            ),
+            Err(VerifiedTraceError::ByteLimit { event_index: 0, .. })
+        ));
+    }
+
+    #[cfg(feature = "trace-compression")]
+    #[test]
+    fn container_chunk_limits_accept_exact_sizes_and_cannot_be_bypassed_by_resume() {
+        use crate::trace::file::{
+            CompressionMode, TRACE_CHECKSUM_LEN, TraceFileConfig, write_trace_with_config,
+        };
+        let temp = NamedTempFile::new().unwrap();
+        let source = events();
+        write_trace_with_config(
+            temp.path(), &metadata(), &source,
+            TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 }),
+        )
+        .unwrap();
+        let metadata_len = rmp_serde::to_vec(&metadata()).unwrap().len();
+        let stored = std::fs::read(temp.path()).unwrap();
+        let chunk_offset = HEADER_SIZE + metadata_len + 8 + TRACE_CHECKSUM_LEN;
+        let compressed_len = u32::from_le_bytes(
+            stored[chunk_offset..chunk_offset + 4].try_into().unwrap(),
+        ) as usize;
+        let expanded_len = u32::from_le_bytes(
+            stored[chunk_offset + 4..chunk_offset + 8].try_into().unwrap(),
+        ) as usize;
+        assert_eq!(stored.len(), chunk_offset + 4 + compressed_len);
+        let event_len = source.iter().map(|event| rmp_serde::to_vec(event).unwrap().len())
+            .max().unwrap();
+        let container = TraceContainerLimits::new()
+            .with_max_metadata_bytes(metadata_len)
+            .with_max_event_bytes(event_len)
+            .with_max_compressed_chunk_bytes(compressed_len)
+            .with_max_decompressed_chunk_bytes(expanded_len);
+        let mut reader =
+            VerifiedTraceReader::open_with_container_limits(temp.path(), limits(), container)
+                .unwrap();
+        assert_eq!(reader.next_event().unwrap(), Some(source[0].clone()));
+        let checkpoint = reader.checkpoint().unwrap();
+        assert_eq!(reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), source[1..]);
+        assert!(reader.is_complete());
+        let mut resumed = VerifiedTraceReader::resume_with_container_limits(
+            temp.path(), checkpoint, limits(), container,
+        )
+        .unwrap();
+        assert_eq!(resumed.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), source[1..]);
+        assert!(resumed.is_complete());
+        for (smaller, expected_field) in [
+            (container.with_max_compressed_chunk_bytes(compressed_len - 1), "compressed_chunk_len"),
+            (container.with_max_decompressed_chunk_bytes(expanded_len - 1), "decompressed_chunk_len"),
+        ] {
+            assert!(matches!(
+                VerifiedTraceReader::open_with_container_limits(temp.path(), limits(), smaller),
+                Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { field, .. }))
+                    if field == expected_field
+            ));
+            assert!(matches!(
+                VerifiedTraceReader::resume_with_container_limits(
+                    temp.path(), checkpoint, limits(), smaller,
+                ),
+                Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { field, .. }))
+                    if field == expected_field
+            ));
+        }
+        // Existing constructors retain format defaults and the same checkpoint identity.
+        let mut legacy = VerifiedTraceReader::resume(temp.path(), checkpoint, limits()).unwrap();
+        assert_eq!(legacy.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), source[1..]);
+    }
+
+    #[test]
     fn frame_limit_rejects_before_reading_or_decoding_a_large_payload() {
         let temp = NamedTempFile::new().unwrap();
         write_legacy(temp.path(), &[], 1);

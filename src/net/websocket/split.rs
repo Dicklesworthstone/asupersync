@@ -160,14 +160,18 @@ fn split_close_deadline<IO>(shared: &Arc<Mutex<WebSocketShared<IO>>>) -> Option<
 /// Watch for the first Close as well as its deadline. A read or DATA write
 /// may already be parked when the other half starts closing, so a snapshot
 /// taken only at operation entry is insufficient.
-async fn watch_split_close<IO, T>(
+/// Borrow the caller's pinned operation to avoid duplicating its state inside
+/// the outer read/write future (br-asupersync-zsjgkg).
+async fn watch_split_close<IO, T, F>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
     op_cx: Option<&Cx>,
-    future: impl Future<Output = Result<T, WsError>>,
-) -> Result<Option<T>, WsError> {
+    mut future: Pin<&mut F>,
+) -> Result<Option<T>, WsError>
+where
+    F: Future<Output = Result<T, WsError>> + ?Sized,
+{
     let changed = Arc::clone(&shared.lock().close_changed);
     let mut notification = std::pin::pin!(changed.notified());
-    let mut future = std::pin::pin!(future);
     let mut timer: Option<(CloseDeadline, crate::time::Sleep)> = None;
     std::future::poll_fn(|task| {
         let is_open = shared.lock().close_handshake.is_open();
@@ -390,10 +394,14 @@ async fn flush_write_buf_with_cx<IO: AsyncWrite + Unpin>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
     op_cx: Option<&Cx>,
 ) -> Result<(), WsError> {
-    watch_split_close(shared, op_cx, async {
-        let _permit = acquire_write_permit_with_cx(shared, op_cx).await?;
-        flush_shared_write_buf_with_permit(shared, op_cx).await
-    })
+    watch_split_close(
+        shared,
+        op_cx,
+        std::pin::pin!(async {
+            let _permit = acquire_write_permit_with_cx(shared, op_cx).await?;
+            flush_shared_write_buf_with_permit(shared, op_cx).await
+        }),
+    )
     .await?
     .ok_or_else(close_timeout_error)
 }
@@ -486,7 +494,12 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     watch_split_close(
         shared,
         op_cx,
-        write_owned_buf_with_permit_inner(shared, op_cx, buf, require_open),
+        std::pin::pin!(write_owned_buf_with_permit_inner(
+            shared,
+            op_cx,
+            buf,
+            require_open,
+        )),
     )
     .await?
     .ok_or_else(close_timeout_error)
@@ -766,7 +779,7 @@ where
     /// This method is cancel-safe. If cancelled, no data is lost.
     pub async fn recv(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
         let shared = Arc::clone(&self.shared);
-        watch_split_close(&shared, Some(cx), self.recv_inner(cx))
+        watch_split_close(&shared, Some(cx), std::pin::pin!(self.recv_inner(cx)))
             .await
             .map(Option::flatten)
     }
@@ -821,40 +834,42 @@ where
                 // inserting a Ping before its retained tail corrupts the wire.
                 // The heartbeat retains a not-yet-encoded Ping if this permit
                 // wait is dropped, including across split/reunite.
-                let flush = async {
-                    let _permit = acquire_write_permit_with_cx(&self.shared, Some(cx)).await?;
-                    {
-                        let shared = &mut *self.shared.lock();
-                        if let Some(payload) = ping {
-                            let mut encoded = BytesMut::new();
-                            shared.codec.encode_with_entropy(
-                                &Frame::ping(payload),
-                                &mut encoded,
-                                cx.entropy(),
-                            )?;
-                            shared.config.check_outbound_write_budget(
-                                shared.write_buf.len(),
-                                encoded.len(),
-                            )?;
-                            shared.write_buf.extend_from_slice(&encoded);
-                            shared.heartbeat.ping_queued();
-                            shared.pending_pong_flush = true;
+                let flushed = super::heartbeat::wait_until(
+                    cx,
+                    deadline,
+                    std::pin::pin!(async {
+                        let _permit = acquire_write_permit_with_cx(&self.shared, Some(cx)).await?;
+                        {
+                            let shared = &mut *self.shared.lock();
+                            if let Some(payload) = ping {
+                                let mut encoded = BytesMut::new();
+                                shared.codec.encode_with_entropy(
+                                    &Frame::ping(payload),
+                                    &mut encoded,
+                                    cx.entropy(),
+                                )?;
+                                shared.config.check_outbound_write_budget(
+                                    shared.write_buf.len(),
+                                    encoded.len(),
+                                )?;
+                                shared.write_buf.extend_from_slice(&encoded);
+                                shared.heartbeat.ping_queued();
+                                shared.pending_pong_flush = true;
+                            }
+                            while let Some(payload) = shared.pending_pongs.pop_front() {
+                                shared.codec.encode_with_entropy(
+                                    &Frame::pong(payload),
+                                    &mut shared.write_buf,
+                                    cx.entropy(),
+                                )?;
+                                shared.pending_pong_flush = true;
+                            }
                         }
-                        while let Some(payload) = shared.pending_pongs.pop_front() {
-                            shared.codec.encode_with_entropy(
-                                &Frame::pong(payload),
-                                &mut shared.write_buf,
-                                cx.entropy(),
-                            )?;
-                            shared.pending_pong_flush = true;
-                        }
-                    }
-                    flush_shared_write_buf_with_permit(&self.shared, Some(cx)).await
-                };
-                if super::heartbeat::wait_until(cx, deadline, flush)
-                    .await?
-                    .is_none()
-                {
+                        flush_shared_write_buf_with_permit(&self.shared, Some(cx)).await
+                    }),
+                )
+                .await?;
+                if flushed.is_none() {
                     self.fail_heartbeat();
                     return Err(super::heartbeat::timeout_error());
                 }
@@ -952,7 +967,7 @@ where
                             let send_result = super::heartbeat::wait_until(
                                 cx,
                                 deadline,
-                                flush_write_buf_with_cx(&self.shared, Some(cx)),
+                                std::pin::pin!(flush_write_buf_with_cx(&self.shared, Some(cx))),
                             )
                             .await;
                             if send_result?.is_none() {
@@ -1009,7 +1024,7 @@ where
                     let send_result = super::heartbeat::wait_until(
                         cx,
                         deadline,
-                        flush_write_buf_with_cx(&self.shared, Some(cx)),
+                        std::pin::pin!(flush_write_buf_with_cx(&self.shared, Some(cx))),
                     )
                     .await;
                     if send_result?.is_none() {
@@ -1032,9 +1047,13 @@ where
 
                 // Need more data - read from socket
                 let deadline = self.shared.lock().heartbeat.deadline();
-                let Some(n) =
-                    super::heartbeat::wait_until(cx, deadline, self.read_more(cx)).await?
-                else {
+                let read = super::heartbeat::wait_until(
+                    cx,
+                    deadline,
+                    std::pin::pin!(self.read_more(cx)),
+                )
+                .await?;
+                let Some(n) = read else {
                     continue;
                 };
                 if n == 0 {
