@@ -643,6 +643,8 @@ mod tests {
 
     struct FinishOnDrop(Weak<Completion>);
 
+    // `Waker::noop()` cannot stand in: this waker's Drop is what the test exercises.
+    #[allow(clippy::manual_noop_waker)]
     impl Wake for FinishOnDrop {
         fn wake(self: Arc<Self>) {}
     }
