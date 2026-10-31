@@ -203,6 +203,7 @@ fn request_head(socket: &mut std::net::TcpStream) {
     let mut preface = [0_u8; 24];
     socket.read_exact(&mut preface).unwrap();
     assert_eq!(&preface, CLIENT_PREFACE);
+    let mut window_updates = 0;
     for _ in 0..16 {
         let (kind, flags, stream, payload) = peer_frame(socket);
         if kind == 1 {
@@ -213,7 +214,14 @@ fn request_head(socket: &mut std::net::TcpStream) {
             assert!(fields.iter().any(|header| header.name == ":path" && header.value == "/test.Service/Watch"));
             return;
         }
-        assert_eq!(kind, 4, "only SETTINGS precedes request HEADERS");
+        // A Channel opens its connection window above 65535 with one
+        // stream-0 WINDOW_UPDATE after SETTINGS (initial_connection_window_size).
+        if kind == 8 {
+            window_updates += 1;
+            assert_eq!((stream, payload.len(), window_updates), (0, 4, 1), "one connection WINDOW_UPDATE");
+            continue;
+        }
+        assert_eq!(kind, 4, "only SETTINGS and the connection WINDOW_UPDATE precede request HEADERS");
     }
     panic!("missing native keepalive request HEADERS");
 }
