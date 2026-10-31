@@ -35,7 +35,7 @@
         }
 
         fn assert_survivor_reclaims_driver(departing_read: bool, cancelled: bool) {
-            let (mut read_half, mut write_half, peer) = split_pair();
+            let (mut read_half, mut write_half, mut peer) = split_pair();
             let inner = Arc::clone(&read_half.inner);
             let backend_a = Arc::new(LabReactor::new());
             let backend_b = Arc::new(LabReactor::new());
@@ -116,14 +116,24 @@
                 departing_tokens.write
             };
 
-            // Empty reads and flushes finish synchronously. Cancellation is
-            // checked first by each public poll path, before the socket call.
+            // A one-byte read of a queued byte and a flush finish
+            // synchronously. An empty read does not on Linux: a zero-length
+            // recv() with nothing queued fails with EAGAIN there (macOS
+            // returns 0), so the half would park. A Unix stream queues the
+            // peer's byte before write returns. Cancellation is checked first
+            // by each public poll path, before the socket call, so a
+            // cancelled read leaves the byte unread.
+            if departing_read {
+                peer.write_all(b"x").expect("peer writes one byte");
+            }
             ambient_b.set_cancel_requested(cancelled);
             let mut task_cx = Context::from_waker(&departing_waker);
             let terminal = if departing_read {
-                let mut empty = [];
-                let mut read_buf = ReadBuf::new(&mut empty);
-                Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf)
+                let mut byte = [0];
+                let mut read_buf = ReadBuf::new(&mut byte);
+                let terminal = Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf);
+                assert_eq!(read_buf.filled().len(), usize::from(!cancelled));
+                terminal
             } else {
                 Pin::new(&mut write_half).poll_flush(&mut task_cx)
             };
