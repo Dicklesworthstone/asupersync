@@ -3473,10 +3473,10 @@ mod tests {
             let address = parked_rx
                 .recv_timeout(Duration::from_secs(20))
                 .expect("accept must be parked before startup fails");
-            let startup: Result<()> = (|| {
+            let startup: Result<()> = {
                 let _drain = ListenerDrain::new(Arc::clone(&stats), 20);
                 Err(cli_error("later startup step failed"))
-            })();
+            };
             assert_eq!(
                 startup
                     .expect_err("preserve the startup failure")

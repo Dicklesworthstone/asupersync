@@ -6,7 +6,7 @@ use asupersync::distributed::membership::{SwimConfig, UdpMembershipTransport};
 use asupersync::runtime::TaskHandle;
 use std::net::SocketAddr;
 
-pub(super) struct Detectors {
+pub struct Detectors {
     pub(super) observer: SwimObserver,
     stop_local: Arc<Notify>,
     stop_peer: Arc<Notify>,

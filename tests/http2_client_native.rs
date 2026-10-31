@@ -1300,7 +1300,7 @@ mod streaming {
                     let cx = Cx::current().unwrap();
                     let drops = Arc::new(AtomicUsize::new(0));
                     let frames = match case {
-                        0 | 1 | 2 => VecDeque::from([data("abcd")]),
+                        0..=2 => VecDeque::from([data("abcd")]),
                         3 => VecDeque::from([Err(std::io::Error::other("source failed"))]),
                         _ => VecDeque::from([trailers("x-upload", "done"), data("late")]),
                     };
