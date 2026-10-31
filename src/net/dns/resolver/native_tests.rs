@@ -336,7 +336,14 @@ fn native_dns_refuses_missing_owner_or_poller_authority_before_sending() {
             assert!(owner.inner.read().cancel_waker_registrations.is_empty());
         }
         let mut bytes = [0; 1024];
-        let error = socket.recv_from(&mut bytes).unwrap_err();
+        // A receive with a read timeout returns EINTR rather than restarting, so only a
+        // datagram or the timeout may end this wait.
+        let error = loop {
+            match socket.recv_from(&mut bytes) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                other => break other.unwrap_err(),
+            }
+        };
         assert!(matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut));
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
     }
