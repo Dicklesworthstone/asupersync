@@ -96,7 +96,7 @@
     },
     {
       "path": "src/trace/file.rs",
-      "sha256": "67d22662b847644524e088edf08d05eeeb59aa670c99be725d016ed825d456d9",
+      "sha256": "fd90d72a5f273f757edbd820b9a13f06dba5851c58fd5c5fe707185b8e5602bd",
       "role": "CAP-TRACE-LZ4 production format, writer, readers, migration, errors, and limits"
     },
     {

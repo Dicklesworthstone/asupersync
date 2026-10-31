@@ -134,8 +134,8 @@ pub use event_structure::{
 };
 pub use file::{
     CompressionMode, FLAG_CHECKSUMMED, TRACE_CHECKSUM_LEN, TRACE_FILE_VERSION, TRACE_MAGIC,
-    TraceEventIterator, TraceFileConfig, TraceFileError, TraceFileMigrationReceipt, TraceReader,
-    TraceRecovery, TraceRecoveryStatus, TraceWriter, migrate_trace_file, read_trace,
+    TraceContainerLimits, TraceEventIterator, TraceFileConfig, TraceFileError, TraceFileMigrationReceipt,
+    TraceReader, TraceRecovery, TraceRecoveryStatus, TraceWriter, migrate_trace_file, read_trace,
     recover_trace_prefix, write_trace,
 };
 pub use filter::{EventCategory, FilterBuilder, FilterableEvent, TraceFilter};
