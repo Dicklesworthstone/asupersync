@@ -145,12 +145,35 @@ struct AuthenticatedRouting {
 }
 
 #[cfg(feature = "tls")]
-struct MarkApplicationOutput<'a>(&'a mut bool);
+struct MarkApplicationOutput<'a> {
+    connection: &'a mut super::QuicConnection,
+    deferred_spaces: &'a mut [bool; 3],
+    next_timer_deadline: &'a mut Option<Instant>,
+    local_close_output: &'a mut Option<LocalCloseOutput>,
+}
 
 #[cfg(feature = "tls")]
 impl Drop for MarkApplicationOutput<'_> {
     fn drop(&mut self) {
-        *self.0 = true;
+        let connection = self.connection.inner();
+        if matches!(
+            connection.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
+            // begin_close is also exposed through the public application
+            // callback. Remember that transition even if the callback unwinds;
+            // ordinary deferred STREAM output cannot send from Draining.
+            if connection.state() == QuicConnectionState::Draining
+                && !connection.close_was_peer_initiated()
+                && self.local_close_output.is_none()
+            {
+                *self.local_close_output = Some(LocalCloseOutput::Requested);
+            }
+            *self.deferred_spaces = [false; 3];
+            *self.next_timer_deadline = None;
+        } else {
+            self.deferred_spaces[2] = true;
+        }
     }
 }
 
@@ -476,8 +499,13 @@ impl ConnectionRouter {
         };
         // An application callback may queue output and then unwind. Its caller
         // can resume the same owned endpoint without stranding that output.
-        let _mark = MarkApplicationOutput(&mut handle.deferred_spaces[2]);
-        Ok(operation(connection))
+        let mark = MarkApplicationOutput {
+            connection,
+            deferred_spaces: &mut handle.deferred_spaces,
+            next_timer_deadline: &mut handle.next_timer_deadline,
+            local_close_output: &mut handle.local_close_output,
+        };
+        Ok(operation(&mut *mark.connection))
     }
 
     /// Start one authenticated route's local drain in its original clock
