@@ -737,12 +737,12 @@ fn swim_route_journey(stop_observer: bool) {
             services: vec![service.operator.clone()],
             witness: Arc::clone(&witness),
         };
-        let remote = cx.with_remote_cap(
+        let remote = cx.clone().with_remote_cap(
             RemoteCap::new()
                 .with_local_node(NodeId::new("origin"))
                 .with_runtime(native.clone()),
         );
-        let legacy_cx = cx.with_remote_cap(
+        let legacy_cx = cx.clone().with_remote_cap(
             RemoteCap::new()
                 .with_local_node(NodeId::new("origin"))
                 .with_runtime(legacy.clone()),
@@ -853,8 +853,11 @@ fn swim_route_journey(stop_observer: bool) {
         )
         .await;
 
-        let reason = CancelReason::user("drain after SWIM admission withdrawal");
-        let mut closing = Box::pin(active.close(&remote, &reason));
+        // RemoteHandle::close takes no reason: it sends the closing context's
+        // cancel reason, or this default when that context is not cancelled.
+        // `remote` shares the test's cancellation state, so it stays uncancelled.
+        let reason = CancelReason::user("remote handle close");
+        let mut closing = Box::pin(active.close(&remote));
         poll_fn(|task| {
             assert!(closing.as_mut().poll(task).is_pending());
             Poll::Ready(())
@@ -862,7 +865,7 @@ fn swim_route_journey(stop_observer: bool) {
         .await;
         eventually(&cx, || witness.cancelled.load(Ordering::Acquire)).await;
         witness.release();
-        assert!(matches!(closing.await.unwrap(),
+        assert!(matches!(closing.await,
             Outcome::Ok(RemoteOutcome::Cancelled(received)) if received == reason));
         assert!(witness.retired.load(Ordering::Acquire));
 

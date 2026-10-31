@@ -3274,6 +3274,8 @@ impl NatsConnection {
     }
 
     /// Dispatch a message to the appropriate subscription.
+    // `message` is read only by the warn! macro, which is a no-op without tracing.
+    #[cfg_attr(not(feature = "tracing-integration"), allow(unused_variables))]
     pub(crate) fn dispatch_message(&self, msg: Message) {
         let delivery = self
             .state
