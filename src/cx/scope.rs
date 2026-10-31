@@ -1884,34 +1884,40 @@ impl<P: Policy> Scope<'_, P> {
         // Phase 1: collect terminal outcomes as they land until the quorum is
         // met, provably impossible, or the caller is cancelled. Every branch is
         // polled each round so same-round terminals are never lost.
-        std::future::poll_fn(|poll_cx| {
-            for (index, handle) in handles.iter_mut().enumerate() {
-                if outcomes[index].is_some() {
-                    continue;
-                }
-                if let Poll::Ready(joined) = handle.poll_join(poll_cx) {
-                    let outcome = branch_join_to_outcome(joined);
-                    if outcome.is_ok() {
-                        successes += 1;
-                    } else {
-                        failures += 1;
+        {
+            // The explicit owner need not be the task polling this future.
+            // Join handles wake on branch completion, not owner cancellation.
+            let mut cancelled = std::pin::pin!(cx.cancelled());
+            std::future::poll_fn(|poll_cx| {
+                for (index, handle) in handles.iter_mut().enumerate() {
+                    if outcomes[index].is_some() {
+                        continue;
                     }
-                    Self::record_loser_drain_task_complete(cx, participants[index]);
-                    outcomes[index] = Some(outcome);
+                    if let Poll::Ready(joined) = handle.poll_join(poll_cx) {
+                        let outcome = branch_join_to_outcome(joined);
+                        if outcome.is_ok() {
+                            successes += 1;
+                        } else {
+                            failures += 1;
+                        }
+                        Self::record_loser_drain_task_complete(cx, participants[index]);
+                        outcomes[index] = Some(outcome);
+                    }
                 }
-            }
-            if quorum_achieved(needed, successes)
-                || !quorum_still_possible(needed, total, successes, failures)
-            {
-                return Poll::Ready(());
-            }
-            if cx.checkpoint().is_err() {
-                caller_cancelled = true;
-                return Poll::Ready(());
-            }
-            Poll::Pending
-        })
-        .await;
+                if quorum_achieved(needed, successes)
+                    || !quorum_still_possible(needed, total, successes, failures)
+                {
+                    return Poll::Ready(());
+                }
+                let _ = cancelled.as_mut().poll(poll_cx);
+                if cx.checkpoint().is_err() {
+                    caller_cancelled = true;
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            })
+            .await;
+        }
 
         // Phase 2: protocol-cancel every branch that is still running, then
         // join each one to termination. Already-finished branches are joined
@@ -2103,17 +2109,25 @@ impl<P: Policy> Scope<'_, P> {
             // once and keep joining: the attempt is drained, not abandoned.
             let handle = &mut attempt[0];
             let mut abort_requested = false;
-            let joined = std::future::poll_fn(|poll_cx| {
-                if !abort_requested && cx.checkpoint().is_err() {
-                    let reason = cx
-                        .cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("first_ok cancelled"));
-                    handle.abort_with_reason(reason);
-                    abort_requested = true;
-                }
-                handle.poll_join(poll_cx)
-            })
-            .await;
+            let joined = {
+                let mut cancelled = std::pin::pin!(cx.cancelled());
+                std::future::poll_fn(|poll_cx| {
+                    if !abort_requested {
+                        // Register before the checkpoint so cancellation of a
+                        // different owner task wakes this parked fallback chain.
+                        let _ = cancelled.as_mut().poll(poll_cx);
+                        if cx.checkpoint().is_err() {
+                            let reason = cx
+                                .cancel_reason()
+                                .unwrap_or_else(|| CancelReason::user("first_ok cancelled"));
+                            handle.abort_with_reason(reason);
+                            abort_requested = true;
+                        }
+                    }
+                    handle.poll_join(poll_cx)
+                })
+                .await
+            };
 
             match branch_join_to_outcome(joined) {
                 Outcome::Ok(value) => return Ok(value),
@@ -2184,25 +2198,32 @@ impl<P: Policy> Scope<'_, P> {
 
         // Phase 1: wait for the operation, the deadline, or caller cancellation.
         let mut caller_cancelled = false;
-        let early = std::future::poll_fn(|poll_cx| {
-            if let Poll::Ready(joined) = handle.poll_join(poll_cx) {
-                return Poll::Ready(Some(branch_join_to_outcome(joined)));
-            }
-            // The caller's cancellation is checked before the timer, and the
-            // timer is polled for its deadline only. The cancel-aware poll
-            // also completed on the caller's cancellation, so that was
-            // reported as a timeout and the operation aborted with Timeout
-            // instead of the caller's reason.
-            if cx.checkpoint().is_err() {
-                caller_cancelled = true;
-                return Poll::Ready(None);
-            }
-            if sleep.as_mut().poll_deadline(poll_cx).is_ready() {
-                return Poll::Ready(None);
-            }
-            Poll::Pending
-        })
-        .await;
+        let early = {
+            let mut cancelled = std::pin::pin!(cx.cancelled());
+            std::future::poll_fn(|poll_cx| {
+                if let Poll::Ready(joined) = handle.poll_join(poll_cx) {
+                    return Poll::Ready(Some(branch_join_to_outcome(joined)));
+                }
+                // Observe the explicit owner before checking cancellation:
+                // poll_deadline only registers a timer, which might otherwise
+                // be the next wake even when the owner was cancelled earlier.
+                let _ = cancelled.as_mut().poll(poll_cx);
+                // The caller's cancellation is checked before the timer, and the
+                // timer is polled for its deadline only. The cancel-aware poll
+                // also completed on the caller's cancellation, so that was
+                // reported as a timeout and the operation aborted with Timeout
+                // instead of the caller's reason.
+                if cx.checkpoint().is_err() {
+                    caller_cancelled = true;
+                    return Poll::Ready(None);
+                }
+                if sleep.as_mut().poll_deadline(poll_cx).is_ready() {
+                    return Poll::Ready(None);
+                }
+                Poll::Pending
+            })
+            .await
+        };
 
         let (outcome, completed_in_time) = match early {
             Some(outcome) => (outcome, true),

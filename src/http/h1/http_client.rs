@@ -178,6 +178,12 @@ impl ClientError {
 
 /// Check if the Cx has been cancelled and return `ClientError::Cancelled` if so.
 fn check_cx(cx: &Cx) -> Result<(), ClientError> {
+    // A driverless owner still measures its budget on the process clock.
+    // `checkpoint` must not borrow a foreign polling task's virtual clock.
+    let _owner = cx
+        .timer_driver()
+        .is_none()
+        .then(|| Cx::set_current(Some(cx.clone())));
     if cx.checkpoint().is_err() {
         Err(ClientError::Cancelled)
     } else {
@@ -202,39 +208,112 @@ async fn drive_with_budget_deadline<T>(
     per_call: Option<std::time::Duration>,
     fut: impl std::future::Future<Output = Result<T, ClientError>>,
 ) -> Result<T, ClientError> {
-    let now = client_timer_now(cx);
+    let configured = configured.into_iter().chain(per_call).min();
+    let deadline = PooledStreamDeadline::capture(cx, configured);
+    let now = deadline.now(cx);
     let remaining = cx
         .budget()
         .deadline
         .map(|deadline| std::time::Duration::from_nanos(deadline.duration_since(now)));
-    let effective = [remaining, configured, per_call]
-        .into_iter()
-        .flatten()
-        .min();
-    let Some(effective) = effective else {
-        return cancellation_reported_as_cancelled(cx, fut.await);
+    let mut cancellation = ClientCancelGuard { cx, token: None };
+    let mut fut = std::pin::pin!(fut);
+    let guarded = poll_fn(|task| {
+        // Retain the polling task's reactor, but require both authorities.
+        // Installing the owner around the inner I/O would replace that reactor.
+        let permission =
+            crate::cx::io_gate::require_ambient_io("http::h1::client").and_then(|()| {
+                let _owner = cx.clone().set_current_restricted();
+                crate::cx::io_gate::require_ambient_io("http::h1::client")
+            });
+        if let Err(error) = permission {
+            return Poll::Ready(Err(ClientError::Io(error)));
+        }
+        if let Err(error) = cancellation.poll_cancel(task) {
+            return Poll::Ready(Err(error));
+        }
+        fut.as_mut().poll(task)
+    });
+    let result = if let Some(at) = deadline.at {
+        let effective = std::time::Duration::from_nanos(at.duration_since(now));
+        if effective.is_zero() {
+            return Err(ClientError::DeadlineExceeded);
+        }
+        cx.trace(&format!(
+            "client.budget_forwarded proto=h1 remaining_ns={} total_timeout_ns={}",
+            remaining.map_or_else(|| "none".to_string(), |r| r.as_nanos().to_string()),
+            effective.as_nanos(),
+        ));
+        timeout_on_owner_clock(cx, &deadline, at, guarded)
+            .await
+            .unwrap_or(Err(ClientError::DeadlineExceeded))
+    } else {
+        guarded.await
     };
-    if effective.is_zero() {
-        return Err(ClientError::DeadlineExceeded);
-    }
-    cx.trace(&format!(
-        "client.budget_forwarded proto=h1 remaining_ns={} total_timeout_ns={}",
-        remaining.map_or_else(|| "none".to_string(), |r| r.as_nanos().to_string()),
-        effective.as_nanos(),
-    ));
-    match crate::time::timeout(now, effective, std::pin::pin!(fut)).await {
-        Ok(result) => cancellation_reported_as_cancelled(cx, result),
-        Err(_elapsed) => Err(ClientError::DeadlineExceeded),
+    cancellation_reported_as_cancelled(cx, result)
+}
+
+/// The clock of the explicit request owner, independent of the polling task.
+fn client_timer_now(cx: &Cx) -> Time {
+    cx.timer_driver().map_or_else(
+        || {
+            let _owner = Cx::set_current(Some(cx.clone()));
+            crate::time::wall_now()
+        },
+        |timer| timer.now(),
+    )
+}
+
+/// Keep an explicit owner's cancellation wake alive even when DNS, TLS,
+/// retry backoff, or another inner operation is parked on a different context.
+struct ClientCancelGuard<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
+
+impl ClientCancelGuard<'_> {
+    fn poll_cancel(&mut self, task: &mut Context<'_>) -> Result<(), ClientError> {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, task.waker()));
+        // Register before checking, and retain the registration while masked.
+        // Do not checkpoint a healthy owner here: the timeout gives a ready
+        // exchange precedence at the exact deadline, before expiring its budget.
+        if self.cx.is_cancel_requested() {
+            check_cx(self.cx)
+        } else {
+            Ok(())
+        }
     }
 }
 
-/// The clock client timeouts are measured on: the caller's timer driver, then
-/// the ambient one, so `now` shares a timeline with the `Sleep` inside
-/// `timeout` (which binds the ambient driver); wall clock is the last resort.
-fn client_timer_now(cx: &Cx) -> Time {
-    cx.timer_driver()
-        .or_else(|| Cx::with_current(|ambient| ambient.timer_driver()).flatten())
-        .map_or_else(crate::time::wall_now, |timer| timer.now())
+impl Drop for ClientCancelGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
+/// Match `TimeoutFuture`'s boundary ordering while binding the deadline and
+/// its wake registration to the same explicit owner clock.
+async fn timeout_on_owner_clock<F: Future>(
+    cx: &Cx,
+    clock: &PooledStreamDeadline,
+    at: Time,
+    future: F,
+) -> Result<F::Output, ()> {
+    let mut timer = clock.timer(at);
+    let mut future = std::pin::pin!(future);
+    poll_fn(|task| {
+        if clock.now(cx) > at && clock.poll_timer(cx, &mut timer, task).is_ready() {
+            return Poll::Ready(Err(()));
+        }
+        // Ready work wins at the exact boundary; strictly overdue work above
+        // is never polled again, so it cannot begin another retry or exchange.
+        if let Poll::Ready(output) = future.as_mut().poll(task) {
+            return Poll::Ready(Ok(output));
+        }
+        clock.poll_timer(cx, &mut timer, task).map(|()| Err(()))
+    })
+    .await
 }
 
 /// Cancelling the `Cx` interrupts a socket operation parked on it, which
@@ -252,7 +331,7 @@ fn cancellation_reported_as_cancelled<T>(
         ) => error.kind() == io::ErrorKind::Interrupted,
         _ => false,
     };
-    if interrupted && cx.checkpoint().is_err() {
+    if interrupted && check_cx(cx).is_err() {
         return Err(ClientError::Cancelled);
     }
     result
@@ -3374,9 +3453,8 @@ impl HttpClient {
                 })
                 .await
             } else {
-                crate::time::timeout(timer_now, remaining, std::pin::pin!(woken))
-                    .await
-                    .map_err(|_| ())
+                let owner_clock = PooledStreamDeadline::capture(cx, None);
+                timeout_on_owner_clock(cx, &owner_clock, until, woken).await
             };
             match wake {
                 // A connection released while this request waited has just
@@ -3602,6 +3680,19 @@ impl PooledStreamDeadline {
             Some(clock) => crate::time::Sleep::with_timer_driver(at, clock.clone()),
             None => crate::time::Sleep::new(at),
         }
+    }
+
+    fn poll_timer(
+        &self,
+        owner: &Cx,
+        timer: &mut crate::time::Sleep,
+        task: &mut Context<'_>,
+    ) -> Poll<()> {
+        let _owner = self
+            .clock
+            .is_none()
+            .then(|| Cx::set_current(Some(owner.clone())));
+        Pin::new(timer).poll_deadline(task)
     }
 }
 
@@ -4358,18 +4449,21 @@ fn parse_retry_after_delta(value: &str) -> Option<std::time::Duration> {
     Some(std::time::Duration::from_secs(seconds))
 }
 
-fn cx_timer_now(cx: &Cx) -> Time {
-    cx.timer_driver()
-        .or_else(|| Cx::with_current(|ambient| ambient.timer_driver()).flatten())
-        .map_or_else(crate::time::wall_now, |timer| timer.now())
-}
-
 async fn sleep_before_retry(cx: &Cx, delay: std::time::Duration) -> Result<(), ClientError> {
     if delay.is_zero() {
         return Ok(());
     }
     check_cx(cx)?;
-    crate::time::sleep(cx_timer_now(cx), delay).await;
+    let clock = PooledStreamDeadline::capture(cx, None);
+    let mut timer = clock.timer(clock.now(cx) + delay);
+    let mut cancellation = ClientCancelGuard { cx, token: None };
+    poll_fn(|task| {
+        if let Err(error) = cancellation.poll_cancel(task) {
+            return Poll::Ready(Err(error));
+        }
+        clock.poll_timer(cx, &mut timer, task).map(|()| Ok(()))
+    })
+    .await?;
     check_cx(cx)
 }
 
