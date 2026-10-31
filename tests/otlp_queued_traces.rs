@@ -66,17 +66,16 @@ fn reply(stream: &mut TcpStream, body: &[u8]) {
 }
 
 #[test]
-fn queued_traces_preserve_order_timestamps_and_admission_credentials_over_http() {
+fn queued_traces_preserve_order_timestamps_and_admission_config_over_http() {
     for workers in [1, 2] {
         native(workers, |runtime| {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let exporter = OtlpHttpExporter::new(format!("http://{}/v1/traces", listener.local_addr().unwrap()))
-                .with_bearer_token("test-original-credential");
+            let exporter = OtlpHttpExporter::new(format!("http://{}/v1/traces", listener.local_addr().unwrap()));
             let peer = std::thread::spawn(move || {
                 let mut spans = Vec::new();
                 for _ in 0..2 {
                     let (mut socket, head, request) = request(&listener);
-                    assert!(head.lines().any(|line| line.eq_ignore_ascii_case("authorization: Bearer test-original-credential")));
+                    assert!(!head.lines().any(|line| line.to_ascii_lowercase().starts_with("authorization:")));
                     spans.extend(request.resource_spans[0].scope_spans[0].spans.clone());
                     reply(&mut socket, &[]);
                 }
@@ -85,7 +84,16 @@ fn queued_traces_preserve_order_timestamps_and_admission_credentials_over_http()
             let traces = OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new().with_max_spans_per_request(1)).unwrap();
             let parent = OtlpTraceSpanInput::new([1; 16], [1; 8], "parent", 100, 500);
             let child = OtlpTraceSpanInput::new([1; 16], [2; 8], "child", 200, 400).with_parent_span_id([1; 8]);
+            // Credentials on a plaintext endpoint are refused before admission
+            // (d0303fdeb), so a credentialed clone of the queue admits nothing.
+            let credentialed = exporter.clone().with_bearer_token("test-original-credential");
+            let refused = credentialed.enqueue_owned_traces(&traces, &[child, parent]).unwrap_err();
+            assert!(refused.to_string().contains("otlp.config.insecure_auth_transport"));
+            assert_eq!(exporter.queue_stats().queued_batches, 0);
+            assert_eq!(exporter.queue_stats().retained_bytes, 0);
             assert_eq!(exporter.enqueue_owned_traces(&traces, &[child, parent]).unwrap(), 2);
+            // Delivery uses the configuration captured at admission, so a
+            // credential added after admission never reaches the collector.
             let changed = exporter.clone().with_bearer_token("test-later-credential");
             runtime.block_on(async {
                 assert_eq!(changed.flush_queued(&Cx::current().unwrap(), 999).await.unwrap(), 2);
