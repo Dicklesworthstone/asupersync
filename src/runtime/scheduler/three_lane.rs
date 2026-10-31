@@ -6195,6 +6195,7 @@ impl ThreeLaneWorker {
                 // must consume the empty backoff budget instead of keeping the
                 // worker out of the park branch forever.
                 if !self.fast_queue.is_empty()
+                    || !self.global_ready_buffer.is_empty()
                     || self.global.has_cancel_work()
                     || self.global.has_ready_work()
                     || self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
@@ -7902,6 +7903,13 @@ impl ThreeLaneWorker {
             if drained > 0 {
                 self.preemption_metrics.global_ready_batch_drains += 1;
                 self.preemption_metrics.global_ready_batch_tasks += drained as u64;
+                // With no peer, nobody can steal the rest of the batch, so it
+                // stays in the private buffer: the stealable queue costs a
+                // lock and a presence-set update per task.
+                if self.fast_stealers.is_empty() {
+                    self.global_ready_buffer.reverse();
+                    return self.global_ready_buffer.pop();
+                }
                 // The rest of the batch goes to this worker's stealable queue,
                 // not a private buffer: held privately it was invisible to idle
                 // peers, which parked while this worker ran a long poll
