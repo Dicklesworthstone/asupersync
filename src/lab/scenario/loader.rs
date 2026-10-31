@@ -1,6 +1,8 @@
 //! Explicit filesystem composition for scenario documents.
 
 use super::{IncludeRef, SCENARIO_SCHEMA_VERSION, Scenario};
+use serde::Deserialize;
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Unexpected, Visitor};
 use serde_yaml::{Mapping, Value};
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -146,7 +148,11 @@ impl Scenario {
     /// Mappings merge recursively, while sequences, scalars and explicit nulls
     /// replace the inherited value. Thus a local empty list clears an inherited
     /// workload, and `cancellation: null` disables an inherited strategy.
-    /// Missing fields receive typed defaults only after composition.
+    /// Missing fields receive typed defaults only after composition. As in a
+    /// single document, a null is accepted only where a field is optional: a
+    /// null section, mapping or list is refused instead of reset to defaults.
+    /// Because YAML reads an empty value as null, `lab:` with nothing after it
+    /// is refused here too.
     ///
     /// Only the root's explicit `id` is used; ids on included full scenarios
     /// are ignored. Every declared schema version must be supported. Include
@@ -195,7 +201,8 @@ impl Scenario {
             bytes_read: 0,
         };
         let composed = loader.resolve(&path, 0)?;
-        serde_yaml::from_value(composed).map_err(|source| ScenarioLoadError::Parse { path, source })
+        Self::deserialize(NullStrict(composed))
+            .map_err(|source| ScenarioLoadError::Parse { path, source })
     }
 }
 
@@ -277,7 +284,7 @@ impl Loader {
 
         let includes: Vec<IncludeRef> = match local.remove(Value::String("include".into())) {
             Some(value) => {
-                serde_yaml::from_value(value).map_err(|source| ScenarioLoadError::Parse {
+                Vec::deserialize(NullStrict(value)).map_err(|source| ScenarioLoadError::Parse {
                     path: path.to_path_buf(),
                     source,
                 })?
@@ -392,6 +399,184 @@ fn merge(inherited: &mut Value, local: Value) {
             }
         }
         (inherited, local) => *inherited = local,
+    }
+}
+
+/// Typed deserialization of a composed document with single-document null
+/// rules. `serde_yaml::Value` reads a null as an empty mapping or sequence, so
+/// `lab: null` would silently become the default lab section. This wrapper
+/// refuses a null wherever a mapping, struct or sequence is required, accepts
+/// it where an `Option` is deserialized, and forwards everything else to
+/// `Value` unchanged, recursively for nested values. Internally tagged enums
+/// (`ChaosSection`, `LatencySpec`) buffer their fields through serde's own
+/// content deserializer instead; it reaches the same answers on its own, since
+/// it refuses a null mapping, struct or sequence and reads a null `Option` as
+/// `None`, with or without this wrapper.
+struct NullStrict(Value);
+
+fn null_refused<'de, V: Visitor<'de>>(visitor: &V) -> serde_yaml::Error {
+    de::Error::invalid_type(Unexpected::Other("null"), visitor)
+}
+
+macro_rules! forward_to_value {
+    ($($method:ident)*) => {$(
+        fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            self.0.$method(visitor)
+        }
+    )*};
+}
+
+impl<'de> Deserializer<'de> for NullStrict {
+    type Error = serde_yaml::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        match self.0 {
+            Value::Mapping(mapping) => visitor.visit_map(StrictMapping::new(mapping)),
+            Value::Sequence(sequence) => visitor.visit_seq(StrictSequence(sequence.into_iter())),
+            other => other.deserialize_any(visitor),
+        }
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        match self.0 {
+            Value::Null => visitor.visit_none(),
+            value => visitor.visit_some(Self(value)),
+        }
+    }
+
+    fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        match self.0 {
+            Value::Mapping(mapping) => visitor.visit_map(StrictMapping::new(mapping)),
+            Value::Null => Err(null_refused(&visitor)),
+            other => other.deserialize_map(visitor),
+        }
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_map(visitor)
+    }
+
+    fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        match self.0 {
+            Value::Sequence(sequence) => visitor.visit_seq(StrictSequence(sequence.into_iter())),
+            Value::Null => Err(null_refused(&visitor)),
+            other => other.deserialize_seq(visitor),
+        }
+    }
+
+    fn deserialize_tuple<V: Visitor<'de>>(
+        self,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_tuple_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_unit_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.0.deserialize_unit_struct(name, visitor)
+    }
+
+    // Scenario enums are unit-only or internally tagged (`deserialize_any`).
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.0.deserialize_enum(name, variants, visitor)
+    }
+
+    forward_to_value! {
+        deserialize_bool deserialize_i8 deserialize_i16 deserialize_i32 deserialize_i64
+        deserialize_i128 deserialize_u8 deserialize_u16 deserialize_u32 deserialize_u64
+        deserialize_u128 deserialize_f32 deserialize_f64 deserialize_char deserialize_str
+        deserialize_string deserialize_bytes deserialize_byte_buf deserialize_unit
+        deserialize_identifier deserialize_ignored_any
+    }
+}
+
+struct StrictMapping {
+    entries: <Mapping as IntoIterator>::IntoIter,
+    value: Option<Value>,
+}
+
+impl StrictMapping {
+    fn new(mapping: Mapping) -> Self {
+        Self {
+            entries: mapping.into_iter(),
+            value: None,
+        }
+    }
+}
+
+impl<'de> MapAccess<'de> for StrictMapping {
+    type Error = serde_yaml::Error;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        let Some((key, value)) = self.entries.next() else {
+            return Ok(None);
+        };
+        self.value = Some(value);
+        seed.deserialize(NullStrict(key)).map(Some)
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        let Some(value) = self.value.take() else {
+            return Err(de::Error::custom("mapping value requested before its key"));
+        };
+        seed.deserialize(NullStrict(value))
+    }
+}
+
+struct StrictSequence(std::vec::IntoIter<Value>);
+
+impl<'de> SeqAccess<'de> for StrictSequence {
+    type Error = serde_yaml::Error;
+
+    fn next_element_seed<T: DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>, Self::Error> {
+        self.0
+            .next()
+            .map(|value| seed.deserialize(NullStrict(value)))
+            .transpose()
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.0.len())
     }
 }
 

@@ -86,7 +86,9 @@
 //! Includes are resolved relative to the containing document, within the root
 //! document's directory. Earlier includes supply defaults for later includes,
 //! and explicit local fields take precedence. Mappings merge recursively;
-//! sequences, scalars and explicit nulls replace inherited values. In
+//! sequences, scalars and explicit nulls replace inherited values. A null is
+//! accepted only for an optional field: a null or empty section, mapping or
+//! list is refused, not reset to its defaults. In
 //! particular, participant and fault lists are never concatenated. Only the
 //! root document supplies the scenario `id`. Resolved scenarios have an empty
 //! `include` list and can be serialized or replayed without reopening sources.

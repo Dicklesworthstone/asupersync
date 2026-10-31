@@ -105,6 +105,49 @@ fn explicit_null_clears_options_and_never_restores_an_inherited_value() {
 }
 
 #[test]
+fn a_null_section_mapping_or_list_is_refused_as_in_a_single_document() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "base.yaml",
+        "lab: {seed: 7}\nparticipants: [{name: local, role: receiver}]\n",
+    );
+    let cases = [
+        ("network: null", "id: section\ninclude: [{path: base.yaml}]\nnetwork: null\n"),
+        (
+            "network: {links: null}",
+            "id: nested\ninclude: [{path: base.yaml}]\nnetwork: {links: null}\n",
+        ),
+        ("participants: null", "id: list\ninclude: [{path: base.yaml}]\nparticipants: null\n"),
+        ("include: null", "id: no-includes\ninclude: null\n"),
+    ];
+    for (index, (field, resolved)) in cases.into_iter().enumerate() {
+        assert!(
+            serde_yaml::from_str::<Scenario>(&format!("id: single\n{field}\n")).is_err(),
+            "a single document accepts {field}"
+        );
+        let path = write(dir.path(), &format!("case{index}.yaml"), resolved);
+        assert!(
+            matches!(
+                Scenario::load_resolved(&path, ScenarioLoadLimits::default()),
+                Err(ScenarioLoadError::Parse { .. })
+            ),
+            "resolution accepts {field}"
+        );
+    }
+
+    // An optional field still takes an explicit null.
+    let path = write(
+        dir.path(),
+        "optional.yaml",
+        "id: optional\ninclude: [{path: base.yaml}]\nlab: {entropy_seed: null}\n",
+    );
+    let scenario = load(&path);
+    assert_eq!(scenario.lab.seed, 7);
+    assert_eq!(scenario.lab.entropy_seed, None);
+}
+
+#[test]
 fn identity_must_be_declared_by_the_root() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "base.yaml", "id: inherited-identity\n");
