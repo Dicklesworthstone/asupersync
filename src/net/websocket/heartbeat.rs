@@ -204,6 +204,17 @@ where
         // Timer cancellation checks and transport effects belong to the
         // explicit receiver context, never a different ambient caller.
         let _ambient = Cx::set_current(Some(cx.clone()));
+        if cx.is_cancel_requested() && cx.checkpoint().is_err() {
+            return Poll::Ready(Err(WsError::Io(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "cancelled",
+            ))));
+        }
+        // I/O that finishes at once needs no cancel waiter and no timer. The
+        // caller's next `Heartbeat::update` still enforces a passed deadline.
+        if let Poll::Ready(result) = future.as_mut().poll(task) {
+            return Poll::Ready(result.map(Some));
+        }
         if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
             return Poll::Ready(Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -220,7 +231,7 @@ where
                 return Poll::Ready(Ok(None));
             }
         }
-        future.as_mut().poll(task).map(|result| result.map(Some))
+        Poll::Pending
     })
     .await
 }
