@@ -535,3 +535,484 @@ fn production_quorum_rejects_zero_and_oversized_needed_without_spawning() {
 fn lab_quorum_rejects_zero_and_oversized_needed_without_spawning() {
     assert_quorum_rejections(run_on_lab(quorum_rejections));
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod explicit_owner_cancellation {
+    use super::*;
+    use asupersync::channel::{mpsc, oneshot};
+    use asupersync::combinator::timeout::TimedResult;
+    use asupersync::runtime::JoinError;
+    use asupersync::sync::Notify;
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+    use asupersync::types::{Budget, Outcome, Time};
+    use std::future::poll_fn;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::task::{Context, Wake, Waker};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Combinator {
+        Quorum,
+        FirstOk,
+        Timeout,
+    }
+
+    #[derive(Default)]
+    struct WakeCount {
+        count: AtomicUsize,
+        changed: Notify,
+    }
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.count.fetch_add(1, Ordering::Release);
+            self.changed.notify_waiters();
+        }
+    }
+
+    #[derive(Default)]
+    struct BranchWitness {
+        parked: AtomicBool,
+        cleanup_parked: AtomicBool,
+        retired: AtomicBool,
+        reason: Mutex<Option<CancelReason>>,
+        changed: Notify,
+        release_cleanup: Notify,
+    }
+
+    impl BranchWitness {
+        fn mark(&self, flag: &AtomicBool) {
+            flag.store(true, Ordering::Release);
+            self.changed.notify_waiters();
+        }
+
+        async fn wait_for(&self, flag: &AtomicBool) {
+            self.changed
+                .wait_until(|| flag.load(Ordering::Acquire))
+                .await;
+        }
+    }
+
+    struct Retire(Arc<BranchWitness>);
+
+    impl Drop for Retire {
+        fn drop(&mut self) {
+            self.0.mark(&self.0.retired);
+        }
+    }
+
+    // Unblock all cleanup on a failed assertion or the watchdog, too.
+    struct ReleaseGates {
+        owner: Arc<Notify>,
+        branches: Vec<Arc<BranchWitness>>,
+    }
+
+    impl Drop for ReleaseGates {
+        fn drop(&mut self) {
+            self.owner.notify_one();
+            for branch in &self.branches {
+                branch.release_cleanup.notify_one();
+            }
+        }
+    }
+
+    async fn parked_branch(
+        child: Cx,
+        mut receiver: mpsc::Receiver<()>,
+        seen: Arc<BranchWitness>,
+    ) -> Result<u32, &'static str> {
+        let _retire = Retire(Arc::clone(&seen));
+        {
+            let mut receive = std::pin::pin!(receiver.recv(&child));
+            let result = poll_fn(|task| {
+                let progress = receive.as_mut().poll(task);
+                if progress.is_pending() && !seen.parked.load(Ordering::Acquire) {
+                    seen.mark(&seen.parked);
+                }
+                progress
+            })
+            .await;
+            assert!(result.is_err() && child.is_cancel_requested());
+        }
+        *seen.reason.lock().unwrap() = child.cancel_reason();
+        let mut cleanup = std::pin::pin!(seen.release_cleanup.notified());
+        poll_fn(|task| {
+            let progress = cleanup.as_mut().poll(task);
+            if progress.is_pending() && !seen.cleanup_parked.load(Ordering::Acquire) {
+                seen.mark(&seen.cleanup_parked);
+            }
+            progress
+        })
+        .await;
+        Err("cleanup completed")
+    }
+
+    async fn run_combinator(
+        form: Combinator,
+        owner: &Cx,
+        branches: Vec<Branch<u32, &'static str>>,
+    ) {
+        let scope = owner.scope();
+        match form {
+            Combinator::Quorum => match scope.quorum(owner, 2, branches).await {
+                Err(QuorumError::Cancelled(reason)) => {
+                    assert_eq!(Some(reason), owner.cancel_reason());
+                }
+                other => panic!("the explicit owner's cancellation ends the quorum: {other:?}"),
+            },
+            Combinator::FirstOk => match scope.first_ok(owner, branches).await {
+                Err(FirstOkError::Cancelled {
+                    reason,
+                    errors_before_cancel,
+                    attempted_before_cancel,
+                }) => {
+                    assert_eq!(Some(reason), owner.cancel_reason());
+                    assert!(errors_before_cancel.is_empty());
+                    assert_eq!(attempted_before_cancel, 0);
+                }
+                other => panic!("the explicit owner's cancellation ends the fallback: {other:?}"),
+            },
+            Combinator::Timeout => {
+                let operation = branches.into_iter().next().unwrap();
+                let result = scope
+                    .timeout(owner, Duration::from_secs(60), operation)
+                    .await
+                    .expect("operation admitted");
+                assert!(
+                    matches!(
+                        result,
+                        TimedResult::Completed(Outcome::Err("cleanup completed"))
+                    ),
+                    "acknowledged cancellation preserves the operation's cleanup result: {result:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_pending<F: Future>(future: Pin<&mut F>, waker: &Waker) {
+        assert!(future.poll(&mut Context::from_waker(waker)).is_pending());
+    }
+
+    async fn explicit_owner_scenario(poller: Cx, form: Combinator, drop_wait: bool) {
+        let release_owner = Arc::new(Notify::new());
+        let mut release_on_drop = ReleaseGates {
+            owner: Arc::clone(&release_owner),
+            branches: Vec::new(),
+        };
+        let held_owner = Arc::clone(&release_owner);
+        let (owner_sender, mut owner_receiver) = oneshot::channel();
+        let mut owner_task = poller
+            .spawn(move |owner| async move {
+                owner_sender.send(&owner, owner.clone()).unwrap();
+                // Keep the context's cancellation registry live, without
+                // completing the owner when its cancellation is requested.
+                held_owner.notified().await;
+            })
+            .unwrap();
+        let owner = owner_receiver.recv(&poller).await.unwrap();
+        assert_ne!(owner.task_id(), poller.task_id());
+
+        let branch_count = if matches!(form, Combinator::Quorum) {
+            2
+        } else {
+            1
+        };
+        let witnesses: Vec<_> = (0..branch_count)
+            .map(|_| Arc::new(BranchWitness::default()))
+            .collect();
+        release_on_drop.branches = witnesses.clone();
+        // Keeping every sender alive rules out channel closure as a wake or
+        // completion source. No branch wakes itself or has a deadline.
+        let mut senders = Vec::new();
+        let mut branches: Vec<Branch<u32, &'static str>> = Vec::new();
+        for seen in &witnesses {
+            let (sender, receiver) = mpsc::channel(1);
+            senders.push(sender);
+            let seen = Arc::clone(seen);
+            branches.push(Box::new(move |child| {
+                Box::pin(parked_branch(child, receiver, seen))
+            }));
+        }
+        let fallback_started = Arc::new(AtomicBool::new(false));
+        if matches!(form, Combinator::FirstOk) {
+            let started = Arc::clone(&fallback_started);
+            branches.push(Box::new(move |_| {
+                started.store(true, Ordering::Release);
+                Box::pin(async { Ok(99) })
+            }));
+        }
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut wait = Box::pin(run_combinator(form, &owner, branches));
+        assert_pending(wait.as_mut(), &waker);
+        for seen in &witnesses {
+            seen.wait_for(&seen.parked).await;
+        }
+
+        if drop_wait {
+            drop(wait);
+            for seen in &witnesses {
+                seen.wait_for(&seen.cleanup_parked).await;
+            }
+            let before = wakes.count.load(Ordering::Acquire);
+            // This public publication dispatches observers synchronously.
+            // The dropped combinator must have removed its own registration.
+            owner.cancel_with(
+                CancelKind::User,
+                Some("owner cancelled after scope wait dropped"),
+            );
+            assert_eq!(
+                wakes.count.load(Ordering::Acquire),
+                before,
+                "{form:?}: dropping the wait must unregister its owner observer"
+            );
+            for seen in &witnesses {
+                seen.release_cleanup.notify_one();
+                seen.wait_for(&seen.retired).await;
+            }
+        } else {
+            let before = wakes.count.load(Ordering::Acquire);
+            let reason = CancelReason::user("explicit scope owner cancelled");
+            owner_task.abort_with_reason(reason.clone());
+            // Do not repoll the combinator to discover cancellation. Only its
+            // registered Waker may release this wait; the children are still
+            // parked and the timeout's 60-second timer cannot beat our watchdog.
+            wakes
+                .changed
+                .wait_until(|| wakes.count.load(Ordering::Acquire) > before)
+                .await;
+            assert_eq!(owner.cancel_reason(), Some(reason.clone()));
+            assert_pending(wait.as_mut(), &waker);
+            for seen in &witnesses {
+                seen.wait_for(&seen.cleanup_parked).await;
+                assert_eq!(*seen.reason.lock().unwrap(), Some(reason.clone()));
+            }
+            assert_pending(wait.as_mut(), &waker);
+            for seen in &witnesses {
+                seen.release_cleanup.notify_one();
+            }
+            wait.await;
+            assert!(
+                witnesses
+                    .iter()
+                    .all(|seen| seen.retired.load(Ordering::Acquire)),
+                "{form:?}: every branch must retire before the combinator returns"
+            );
+        }
+        assert!(!fallback_started.load(Ordering::Acquire));
+        assert!(
+            !poller.is_cancel_requested(),
+            "the polling task is a different owner"
+        );
+        release_owner.notify_one();
+        assert!(matches!(
+            owner_task.join(&poller).await,
+            Ok(()) | Err(JoinError::Cancelled(_))
+        ));
+        drop(senders);
+    }
+
+    fn native_explicit_owner(form: Combinator, workers: usize, drop_wait: bool) {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
+        };
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("native polling task");
+            asupersync::time::timeout(
+                cx.now(),
+                Duration::from_secs(10),
+                explicit_owner_scenario(cx.clone(), form, drop_wait),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{form:?}: workers={workers} drop_wait={drop_wait} owner wake/drain watchdog"
+                )
+            });
+        }));
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn parked_scope_combinators_wake_on_their_explicit_owners_cancellation() {
+        for workers in [1, 2] {
+            for form in [Combinator::Quorum, Combinator::FirstOk, Combinator::Timeout] {
+                native_explicit_owner(form, workers, false);
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_parked_scope_combinators_unregisters_their_owner_observers() {
+        for workers in [1, 2] {
+            for form in [Combinator::Quorum, Combinator::FirstOk, Combinator::Timeout] {
+                native_explicit_owner(form, workers, true);
+            }
+        }
+    }
+
+    struct ReleaseCleanup(Arc<BranchWitness>);
+
+    impl Drop for ReleaseCleanup {
+        fn drop(&mut self) {
+            self.0.release_cleanup.notify_one();
+        }
+    }
+
+    fn poll_under<F: Future>(
+        future: Pin<&mut F>,
+        ambient: &Cx,
+        task: &mut Context<'_>,
+    ) -> Poll<F::Output> {
+        let caller = Cx::current().map(|cx| cx.task_id());
+        let result = {
+            let _foreign = Cx::set_current(Some(ambient.clone()));
+            let result = future.poll(task);
+            assert_eq!(Cx::current().unwrap().task_id(), ambient.task_id());
+            result
+        };
+        assert_eq!(Cx::current().map(|cx| cx.task_id()), caller);
+        result
+    }
+
+    async fn timeout_clock_scenario(
+        owner: Cx,
+        foreign: Cx,
+        clock: Arc<VirtualClock>,
+        timer: TimerDriverHandle,
+        foreign_timer: TimerDriverHandle,
+        abandon: bool,
+    ) {
+        let seen = Arc::new(BranchWitness::default());
+        let _release_on_drop = ReleaseCleanup(Arc::clone(&seen));
+        let (_sender, receiver) = mpsc::channel(1);
+        let branch_seen = Arc::clone(&seen);
+        let scope = owner.scope();
+        let mut wait = Box::pin(
+            scope.timeout(&owner, Duration::from_millis(100), move |child| {
+                parked_branch(child, receiver, branch_seen)
+            }),
+        );
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        assert!(poll_under(wait.as_mut(), &foreign, &mut Context::from_waker(&waker)).is_pending());
+        assert_eq!(timer.pending_count(), 1, "the owner owns the deadline");
+        assert_eq!(
+            foreign_timer.pending_count(),
+            0,
+            "the poller lends no timer"
+        );
+        seen.wait_for(&seen.parked).await;
+
+        if abandon {
+            drop(wait);
+            assert_eq!(timer.pending_count(), 0, "drop retires the owner's timer");
+            seen.wait_for(&seen.cleanup_parked).await;
+            seen.release_cleanup.notify_one();
+            seen.wait_for(&seen.retired).await;
+        } else {
+            clock.advance(Time::from_millis(99).as_nanos());
+            assert_eq!(timer.process_timers(), 0);
+            assert!(
+                poll_under(wait.as_mut(), &foreign, &mut Context::from_waker(&waker)).is_pending()
+            );
+            assert!(!seen.cleanup_parked.load(Ordering::Acquire));
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(foreign_timer.pending_count(), 0);
+
+            let before = wakes.count.load(Ordering::Acquire);
+            clock.advance(Time::from_millis(1).as_nanos());
+            // The native worker may process the owner timer concurrently.
+            // Its callback, not the process_timers return count, is the witness.
+            let _ = timer.process_timers();
+            wakes
+                .changed
+                .wait_until(|| wakes.count.load(Ordering::Acquire) > before)
+                .await;
+            assert!(
+                poll_under(wait.as_mut(), &foreign, &mut Context::from_waker(&waker)).is_pending()
+            );
+            seen.wait_for(&seen.cleanup_parked).await;
+            assert_eq!(
+                seen.reason
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|reason| reason.kind),
+                Some(CancelKind::Timeout)
+            );
+            assert!(
+                poll_under(wait.as_mut(), &foreign, &mut Context::from_waker(&waker)).is_pending()
+            );
+            seen.release_cleanup.notify_one();
+            let result = poll_fn(|task| poll_under(wait.as_mut(), &foreign, task))
+                .await
+                .expect("operation admitted");
+            assert!(matches!(
+                result,
+                TimedResult::Completed(Outcome::Err("cleanup completed"))
+            ));
+            assert!(seen.retired.load(Ordering::Acquire));
+        }
+        assert_eq!(timer.pending_count(), 0);
+        assert_eq!(foreign_timer.pending_count(), 0);
+        assert!(!owner.is_cancel_requested(), "only the operation times out");
+    }
+
+    #[test]
+    fn scope_timeout_keeps_its_owner_timer_under_foreign_virtual_clocks() {
+        for foreign_now in [Time::ZERO, Time::from_secs(1_000_000)] {
+            for abandon in [false, true] {
+                let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let owner_runtime = RuntimeBuilder::new()
+                    .worker_threads(1)
+                    .with_timer_driver(timer.clone())
+                    .build()
+                    .unwrap();
+                let owner = owner_runtime.request_cx_with_budget(Budget::INFINITE);
+                let foreign_clock = Arc::new(VirtualClock::starting_at(foreign_now));
+                let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock);
+                let foreign_runtime = RuntimeBuilder::current_thread()
+                    .with_timer_driver(foreign_timer.clone())
+                    .build()
+                    .unwrap();
+                let foreign = foreign_runtime.request_cx_with_budget(Budget::INFINITE);
+
+                // This third runtime has a wall-clock watchdog. Neither frozen
+                // virtual clock can keep a broken test waiting indefinitely.
+                run_on_production(move |poller| async move {
+                    asupersync::time::timeout(
+                        poller.now(),
+                        Duration::from_secs(10),
+                        timeout_clock_scenario(
+                            owner,
+                            foreign,
+                            clock,
+                            timer,
+                            foreign_timer,
+                            abandon,
+                        ),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "foreign_now={foreign_now:?} abandon={abandon}: owner timer watchdog"
+                        )
+                    });
+                });
+                assert!(owner_runtime.shutdown_timeout(Duration::from_secs(3)));
+                assert!(foreign_runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+    }
+}

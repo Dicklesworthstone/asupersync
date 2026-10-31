@@ -3449,23 +3449,44 @@ fn replaceable_leaf_kind_sync(path: &Path) -> Result<Option<ReplaceableLeafKind>
 /// errors. The caller then records the parent with
 /// [`DeferredParentSyncs::record`]. Not on Windows, where a refused
 /// replacement of a read-only destination takes the async path's retry.
-#[cfg(not(windows))]
+#[cfg(all(test, not(windows)))]
 pub(crate) fn install_staged_regular_file_sync(
     staging_path: &Path,
     out_path: &Path,
 ) -> Result<(), StreamingError> {
+    validate_staged_regular_leaf_sync(staging_path)?;
+    // Preserve the serial installer's error ordering for its compatibility
+    // tests. The batched path validates the destination at publication time.
+    replaceable_leaf_kind_sync(out_path)?;
+    sync_staged_regular_file_sync(staging_path)?.install_sync(out_path)
+}
+
+#[cfg(not(windows))]
+fn validate_staged_regular_leaf_sync(staging_path: &Path) -> Result<(), StreamingError> {
     if !matches!(
         replaceable_leaf_kind_sync(staging_path)?,
         Some(ReplaceableLeafKind::RegularFile)
-    ) {
+    ) || !std::fs::symlink_metadata(staging_path)
+        .map_err(|error| StreamingError::new(format!("{}: {error}", staging_path.display())))?
+        .is_file()
+    {
+        // A destination may be a replaceable FIFO/socket/device, but the
+        // staged source must still be a regular file after the sync phase.
         return Err(StreamingError::new(format!(
             "{}: staged commit leaf has the wrong filesystem kind",
             staging_path.display()
         )));
     }
-    // The async path inspects the destination too (only Windows uses the
-    // result), so a destination it cannot inspect is refused here as well.
-    replaceable_leaf_kind_sync(out_path)?;
+    Ok(())
+}
+
+/// Finish a regular staging file's mandatory data and metadata sync on a
+/// blocking worker, without publishing it or retaining an open descriptor.
+#[cfg(not(windows))]
+pub(crate) fn sync_staged_regular_file_sync(
+    staging_path: &Path,
+) -> Result<SyncedStagedFile, StreamingError> {
+    validate_staged_regular_leaf_sync(staging_path)?;
     StagedFileSync::open_sync(staging_path.to_path_buf())
         .and_then(StagedFileSync::sync_sync)
         .map_err(|error| {
@@ -3473,13 +3494,24 @@ pub(crate) fn install_staged_regular_file_sync(
                 "{}: sync staged file before commit: {error}",
                 staging_path.display()
             ))
-        })?;
-    std::fs::rename(staging_path, out_path).map_err(|error| {
-        StreamingError::new(format!(
-            "{}: atomic staged replacement: {error}",
-            out_path.display()
-        ))
-    })
+        })
+}
+
+#[cfg(not(windows))]
+impl SyncedStagedFile {
+    /// Publish a previously synced file from a blocking worker. Recheck both
+    /// leaves immediately before the rename; the caller keeps the staging path
+    /// and its contents unchanged between sync and installation.
+    pub(crate) fn install_sync(self, out_path: &Path) -> Result<(), StreamingError> {
+        validate_staged_regular_leaf_sync(&self.path)?;
+        replaceable_leaf_kind_sync(out_path)?;
+        std::fs::rename(&self.path, out_path).map_err(|error| {
+            StreamingError::new(format!(
+                "{}: atomic staged replacement: {error}",
+                out_path.display()
+            ))
+        })
+    }
 }
 
 #[cfg(test)]

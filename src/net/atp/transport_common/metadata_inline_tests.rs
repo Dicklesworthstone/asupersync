@@ -1457,4 +1457,86 @@
         install_staged_regular_file_sync(&staged, &out).expect("replace the destination");
         assert_eq!(std::fs::read(&out).expect("installed file"), b"payload");
         assert!(!staged.exists(), "the staged file is renamed into place");
+}
+
+#[cfg(unix)]
+#[test]
+fn presynced_regular_install_rechecks_staged_and_destination_leaves() {
+    for replace_staging in [false, true] {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let staged = root.path().join("staged");
+        let out = root.path().join("out");
+        std::fs::write(&staged, b"synced payload").unwrap();
+        let synced = sync_staged_regular_file_sync(&staged).expect("sync before publication");
+        if replace_staging {
+            std::fs::write(&out, b"old destination").unwrap();
+            std::fs::rename(&staged, root.path().join("retained")).unwrap();
+            std::os::unix::fs::symlink("retained", &staged).unwrap();
+        } else {
+            std::fs::create_dir(&out).unwrap();
+        }
+        let error = synced
+            .install_sync(&out)
+            .expect_err("changed leaves must be checked again");
+        if replace_staging {
+            assert!(
+                error.to_string().contains("wrong filesystem kind"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&out).unwrap(), b"old destination");
+            assert!(std::fs::symlink_metadata(&staged).unwrap().is_symlink());
+        } else {
+            assert!(error.to_string().contains("real directory"), "{error}");
+            assert!(out.is_dir());
+            assert_eq!(std::fs::read(&staged).unwrap(), b"synced payload");
+        }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn presynced_regular_install_preserves_restrictive_metadata_without_reopening() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().expect("temporary directory");
+    let staged = root.path().join("staged");
+    let out = root.path().join("out");
+    std::fs::write(&staged, b"durable payload").unwrap();
+    let pending = StagedFileSync::open_sync(staged.clone()).unwrap();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0)).unwrap();
+    let synced = pending.sync_sync().expect("sync the retained open handle");
+    synced
+        .install_sync(&out)
+        .expect("publish without reopening or syncing again");
+    assert!(!staged.exists());
+    let metadata = std::fs::metadata(&out).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o7777, 0);
+    assert_eq!(metadata.len(), 15);
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"durable payload");
+}
+
+#[cfg(unix)]
+#[test]
+fn presynced_regular_install_rejects_a_socket_substituted_after_sync() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let staged = root.path().join("staged");
+    let retained = root.path().join("retained");
+    let out = root.path().join("out");
+    std::fs::write(&staged, b"synced payload").unwrap();
+    std::fs::write(&out, b"old destination").unwrap();
+    let synced = sync_staged_regular_file_sync(&staged).expect("sync regular staging file");
+    std::fs::rename(&staged, &retained).unwrap();
+    let _listener =
+        std::os::unix::net::UnixListener::bind(&staged).expect("replace stage with socket");
+    let error = synced
+        .install_sync(&out)
+        .expect_err("a socket is not a synced regular file");
+    assert!(
+        error.to_string().contains("wrong filesystem kind"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), b"old destination");
+    assert_eq!(std::fs::read(&retained).unwrap(), b"synced payload");
+    assert!(!std::fs::symlink_metadata(&staged).unwrap().is_file());
+}
