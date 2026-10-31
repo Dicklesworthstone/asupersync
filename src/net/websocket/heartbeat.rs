@@ -36,13 +36,9 @@ pub(super) struct HeartbeatDeadline {
 
 impl Heartbeat {
     fn now(&self) -> Time {
-        self.clock.as_ref().map_or_else(
-            || {
-                let _ambient = Cx::set_current(None);
-                crate::time::wall_now()
-            },
-            TimerDriverHandle::now,
-        )
+        self.clock
+            .as_ref()
+            .map_or_else(crate::time::raw_wall_now, TimerDriverHandle::now)
     }
 
     pub(super) fn failed(&self) -> bool {
@@ -194,14 +190,7 @@ where
     F: Future<Output = Result<T, WsError>> + ?Sized,
 {
     let mut cancelled = std::pin::pin!(cx.cancelled());
-    let wall_clock = deadline
-        .as_ref()
-        .is_some_and(|deadline| deadline.clock.is_none());
-    let timer = deadline.map(|deadline| match deadline.clock {
-        Some(clock) => Sleep::with_timer_driver(deadline.at, clock),
-        None => Sleep::new(deadline.at),
-    });
-    let mut timer = std::pin::pin!(timer);
+    let mut timer = None;
     poll_fn(|task| {
         // Timer cancellation checks and transport effects belong to the
         // explicit receiver context, never a different ambient caller.
@@ -212,13 +201,15 @@ where
                 "cancelled",
             ))));
         }
-        if let Some(timer) = timer.as_mut().as_pin_mut() {
-            // A capability-free first receive chose the process wall clock.
-            // Keep that domain even if a later wait runs under another Cx.
-            // Sleep then reuses the existing shared fallback timer; no
-            // per-connection timer task or custom-clock polling thread exists.
-            let _ambient = wall_clock.then(|| Cx::set_current(None));
-            if timer.poll(task).is_ready() {
+        if let Some(deadline) = deadline.as_ref() {
+            // Initialize only after checking cancellation. A driverless first
+            // receive chose the process wall clock, including its shared timer
+            // pump; neither time reads nor registration may follow a later Cx.
+            let timer = timer.get_or_insert_with(|| match deadline.clock.as_ref() {
+                Some(clock) => Sleep::with_timer_driver(deadline.at, clock.clone()),
+                None => Sleep::with_wall_clock(deadline.at),
+            });
+            if Pin::new(timer).poll(task).is_ready() {
                 return Poll::Ready(Ok(None));
             }
         }

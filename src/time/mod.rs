@@ -75,6 +75,7 @@ pub use elapsed::Elapsed;
 pub use interval::{Interval, IntervalTickError, MissedTickBehavior, interval, interval_at};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use sleep::process_epoch;
+pub(crate) use sleep::raw_wall_now;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use sleep::wasm_monotonic_nanos;
 pub use sleep::{Sleep, sleep, sleep_until, wall_now};
