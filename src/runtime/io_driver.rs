@@ -3670,7 +3670,21 @@ mod tests {
                     });
                     let (mut peer, _) = listener.accept().unwrap();
                     assert!(registration.is_active());
-                    assert!(runtime.is_quiescent());
+                    // The root has finished, so no task remains. Its parked
+                    // stream and the observer are live I/O registrations, which
+                    // keep a runtime non-quiescent by contract
+                    // (RuntimeState::is_quiescent, 29f4cdd7d).
+                    assert!(
+                        runtime
+                            .task_inspector(Default::default())
+                            .list_active_tasks()
+                            .is_empty(),
+                        "the root task retired (multi_worker={multi_worker})"
+                    );
+                    assert!(
+                        !runtime.is_quiescent(),
+                        "live registrations are I/O work (multi_worker={multi_worker})"
+                    );
                     drop(runtime);
                     assert!(
                         !registration.is_active(),
@@ -3851,8 +3865,11 @@ mod tests {
         init_test("a_panicking_waker_does_not_strand_the_rest_of_a_handle_turn");
         let reactor = Arc::new(LabReactor::new());
         let driver = IoDriverHandle::new(reactor.clone());
+        let mut tokens = Vec::new();
         let states = ready_batch_around_a_panicking_waker(&reactor, &mut |waker| {
-            driver.lock().register_waker(waker)
+            let token = driver.lock().register_waker(waker);
+            tokens.push(token);
+            token
         });
 
         let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3861,6 +3878,12 @@ mod tests {
         assert!(turn.is_err(), "the waker's panic still reaches the caller");
         for state in &states {
             assert!(state.flag.load(Ordering::SeqCst), "every other waker fired");
+        }
+        // Since 8ff71ca3e (GH#85) retiring the last handle wakes every waker
+        // still registered and re-raises the first panic. Deregister this
+        // test's wakers so the deliberate panic stays inside the turn under test.
+        for token in tokens {
+            driver.lock().deregister_waker(token);
         }
         crate::test_complete!("a_panicking_waker_does_not_strand_the_rest_of_a_handle_turn");
     }

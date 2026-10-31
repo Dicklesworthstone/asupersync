@@ -43,7 +43,20 @@ fn encoded_bytes_and_configuration_are_reserved_for_every_request() {
     assert_eq!(exporter.queue_stats(), OtlpExportQueueStats::default());
 
     let span = OtlpTraceSpanInput::new([1; 16], [1; 8], "captured", 10, 20);
-    exporter.enqueue_owned_traces(&traces(), &[span]).unwrap();
+    // d0303fdeb refuses authentication headers on a plain-HTTP endpoint before
+    // any encoding or admission, and this lane has no `tls` feature for an
+    // https:// endpoint. Pin that refusal, then reserve the same encoded
+    // collection through the queue admission enqueue_owned_traces delegates to.
+    let refused = exporter.enqueue_owned_traces(&traces(), &[span]).unwrap_err();
+    assert!(refused.message.contains("otlp.config.insecure_auth_transport"));
+    assert_eq!(exporter.queue_stats(), OtlpExportQueueStats::default());
+    let attributes = exporter
+        .resource_attributes
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let requests = traces().collect(&[span], &attributes).unwrap().into_requests();
+    assert_eq!(exporter.export_queue.admit_traces(&exporter, requests).unwrap(), 1);
     let later = exporter.clone().with_bearer_token("later-token");
     let delivery = later.export_queue.take().unwrap();
     let batch = delivery.batch.as_ref().unwrap();

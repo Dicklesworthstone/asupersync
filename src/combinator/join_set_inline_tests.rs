@@ -302,8 +302,14 @@
             let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
             set.spawn_all(&cx, (0..4).map(move |value| {
                 let started = Arc::clone(&factory_started);
-                move |_| async move {
-                    started.fetch_add(1, Ordering::SeqCst);
+                move |member_cx: Cx| async move {
+                    // Cancellation is cooperative (6b24c8f30): a pre-admission
+                    // abort is replayed into the member's Cx at admission and
+                    // the member is still polled, so its first checkpoint must
+                    // observe the cancellation before any user work runs.
+                    if member_cx.checkpoint().is_ok() {
+                        started.fetch_add(1, Ordering::SeqCst);
+                    }
                     Ok(value)
                 }
             }))
@@ -315,7 +321,10 @@
             (outcomes, started.load(Ordering::SeqCst))
         });
 
-        assert_eq!(started, 0, "cancelled provisional tasks never poll user work");
+        assert_eq!(
+            started, 0,
+            "pre-admission cancellation is visible at every member's first checkpoint"
+        );
         assert_eq!(outcomes.len(), 4);
         assert!(outcomes.iter().all(is_race_lost_or_stronger));
         let losers = outcomes.iter().collect::<Vec<_>>();

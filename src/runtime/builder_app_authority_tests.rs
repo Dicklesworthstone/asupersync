@@ -35,6 +35,19 @@ fn runtime(current_thread: bool) -> Runtime {
         .unwrap()
 }
 
+/// State-threaded stop and failed-boot paths park cancellation batches for a
+/// worker turn (acd3c2ee6); the runtime is quiescent once one publishes them.
+fn assert_becomes_quiescent(runtime: &Runtime) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !runtime.is_quiescent() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "runtime did not publish its deferred cancellation work"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn app_authority_native_children_keep_limits_and_inherited_handles() {
     for current_thread in [true, false] {
@@ -155,7 +168,7 @@ fn app_authority_native_children_keep_limits_and_inherited_handles() {
                 RootDrainOutcome::Quiescent
             );
             app.join(&runtime.inner.state.lock().unwrap()).unwrap();
-            assert!(runtime.is_quiescent());
+            assert_becomes_quiescent(&runtime);
         }
     }
 }
@@ -196,7 +209,7 @@ fn app_authority_native_denied_spawn_cannot_be_laundered_by_bootstrap() {
         assert!(boot.blocking_pool_handle().is_none());
         assert!(probe.task.lock().unwrap().is_none());
         assert!(probe.polled.lock().unwrap().is_none());
-        assert!(runtime.is_quiescent());
+        assert_becomes_quiescent(&runtime);
     }
 }
 

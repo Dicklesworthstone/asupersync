@@ -2046,13 +2046,25 @@
                         (write, result)
                     })
                     .expect("spawn native writer");
+                // Since 11dc047e7 a Close published by the write half wakes
+                // operations already parked on the transport so they arm the
+                // shared close deadline. The reader's stalled Pong flush is
+                // therefore polled once more when the writer starts closing,
+                // before the cancellation below; that poll is close initiation.
+                let parked_write_polls = if send_close { 2 } else { 1 };
                 for _ in 0..512 {
-                    if shared.lock().writer_waiters.len() == 1 {
+                    let parked = {
+                        let state = shared.lock();
+                        state.writer_waiters.len() == 1
+                            && state.io.write_polls == parked_write_polls
+                    };
+                    if parked {
                         break;
                     }
                     crate::runtime::yield_now().await;
                 }
                 assert_eq!(shared.lock().writer_waiters.len(), 1);
+                assert_eq!(shared.lock().io.write_polls, parked_write_polls);
                 let registrations_while_queued =
                     operation_cx.inner.read().cancel_waker_registrations.len();
                 let canceller = operation_cx.clone();
@@ -2075,7 +2087,7 @@
                     let state = shared.lock();
                     state.writer_active
                         && state.writer_waiters.is_empty()
-                        && state.io.write_polls == 1
+                        && state.io.write_polls == parked_write_polls
                         && state.io.written.is_empty()
                 };
 

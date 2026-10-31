@@ -258,8 +258,11 @@
             producer.enqueue(&cx, topic, None, b"too large", Some(0)),
             Err(KafkaError::MessageTooLarge { .. })
         ));
+        // validate_topic (e7a92040b) is trim-nonempty; broker-legal characters
+        // are left to the broker (docs/kafka_incumbent_semantics_matrix.md), so
+        // the locally invalid topic is a blank one.
         assert!(matches!(
-            producer.enqueue(&cx, "bad topic", None, b"a", Some(0)),
+            producer.enqueue(&cx, "   ", None, b"a", Some(0)),
             Err(KafkaError::InvalidTopic(_))
         ));
         assert_eq!(deterministic_broker_end_offset(topic, 0), 0);

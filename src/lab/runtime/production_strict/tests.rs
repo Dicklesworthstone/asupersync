@@ -1066,7 +1066,18 @@ fn due_cancellation_cannot_escape_driver_or_configured_step_limits() {
 fn injected_cancellation_keeps_native_provenance_and_effective_cleanup_budget() {
     let source = source_with_cancel(1, &[0, 0]);
     let request = &source.cancellation_events().unwrap()[0];
-    let mut fx = fixture(&[2]);
+    // max_work_units = 2 stops between the injected request and the target's
+    // next poll. The receipt's Lab report runs check_invariants at that
+    // boundary, where the oracle's end-of-run CancelNotCompleted check would
+    // panic in the default enforce mode before the receipt exists (oracle
+    // panics propagate unchanged, b33a3aee3). Keep the oracle on in warning
+    // mode so the in-flight request is reported, not raised.
+    let mut fx = Fixture::new(
+        &[2],
+        LabConfig::new(71)
+            .max_steps(128)
+            .panic_on_cancellation_violation(false),
+    );
     let report = fx
         .runtime
         .run_production_schedule_strict(
@@ -1089,7 +1100,17 @@ fn injected_cancellation_keeps_native_provenance_and_effective_cleanup_budget() 
     assert_eq!(record.context_cancel_requested(), Some(true));
     assert_eq!(record.cancel_reason(), Some(request.reason()));
     assert_eq!(record.cleanup_budget(), Some(request.cleanup_budget()));
+    assert!(
+        report.lab.invariant_violations.iter().any(|violation| {
+            violation.starts_with("cancellation protocol violation:")
+                && violation.contains("stuck in CancelRequested")
+        }),
+        "{:?}",
+        report.lab.invariant_violations
+    );
     fx.drain();
+    let protocol = fx.runtime.check_cancellation_protocol();
+    assert!(protocol.is_ok(), "drained cancellation completes: {protocol:?}");
 }
 
 #[test]

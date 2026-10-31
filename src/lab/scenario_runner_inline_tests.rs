@@ -2016,7 +2016,16 @@
         assert_eq!(result.lab_report.now_nanos, u64::MAX);
         let worker = &supervisor_state(&tasks, "sup").workers[0];
         assert_eq!(count(&worker.state.crashes), 1);
-        assert_eq!(count(&worker.state.unexpected), 1);
+        // Generation 2 resumes at u64::MAX and exhausts the clock. The derived
+        // budget (one restart) is per one-minute sliding window (4d28c9992), and
+        // the t=0 crash restart has aged out of it by then, so the supervisor
+        // admits exactly one more generation, which exhausts the clock too; its
+        // own restart at u64::MAX then fills the window and stops the worker.
+        assert_eq!(count(&worker.state.unexpected), 2);
+        let summary = supervisor_summary(&tasks, "sup");
+        assert_eq!(summary.restart_batches, 2);
+        assert_eq!(summary.children[0].generations, 3);
+        assert_eq!(summary.children[0].exit, ChildExit::Failed(3));
         assert!(result.lab_report.invariant_violations.iter().any(|v|
             v.starts_with("workload:worker:worker:unexpected_outcome:")));
         crate::test_complete!("lifecycle_exhausted_virtual_clock_fails_instead_of_spinning_inside_a_poll");
