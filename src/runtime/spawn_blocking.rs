@@ -724,6 +724,7 @@ where
 /// inline fallback is not suitable for them. A closed or failed pool reports
 /// an I/O error; a missing pool uses the same bounded, joined thread path as
 /// other blocking work, but thread-creation failure is an error too.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) async fn spawn_blocking_io_off_worker<F, T>(
     pool: Option<BlockingPoolHandle>,
     f: F,
@@ -785,6 +786,7 @@ where
 /// Starts committed I/O before reporting acceptance to a write-behind caller.
 /// Unlike a read, an accepted write cannot remain in cancellable admission:
 /// dropping its handle must leave an actual worker owning the bytes.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn try_spawn_blocking_io_on_thread<F, T>(
     f: F,
 ) -> std::io::Result<impl std::future::Future<Output = std::io::Result<T>> + Send>
