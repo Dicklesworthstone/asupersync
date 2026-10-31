@@ -1,5 +1,7 @@
     use super::*;
     use crate::time::VirtualClock;
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::time::{TimeSource, WallClock};
     use crate::types::{Budget, RegionId, TaskId};
     use std::sync::Arc;
     use std::task::{Context, Waker};
@@ -146,6 +148,7 @@
         assert_eq!(drops.get(), 1);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn heartbeat_retains_wall_clock_under_foreign_ambient_and_resumed_context() {
         let explicit = Cx::for_testing();
@@ -154,7 +157,8 @@
         ))));
         let interval = Duration::from_secs(60);
         let mut heartbeat = Heartbeat::default();
-        let before = heartbeat.now();
+        let wall = WallClock::new();
+        let before = wall.now();
         let _ambient = Cx::set_current(Some(foreign.clone()));
         assert!(
             heartbeat
@@ -162,8 +166,9 @@
                 .unwrap()
                 .is_none()
         );
-        let after = heartbeat.now();
+        let after = wall.now();
         let deadline = heartbeat.deadline().unwrap();
+        assert!(foreign.timer_driver().unwrap().now() > after + interval);
         assert!(deadline.at >= before + interval && deadline.at <= after + interval);
         assert!(
             heartbeat
@@ -172,6 +177,9 @@
                 .is_none()
         );
         assert!(heartbeat.clock.is_none(), "first receive chose wall clock");
+        heartbeat.note_read();
+        assert!(heartbeat.last_read.unwrap() >= before);
+        assert!(heartbeat.last_read.unwrap() <= wall.now());
         let mut operation = std::pin::pin!(std::future::pending::<Result<(), WsError>>());
         let mut wait = std::pin::pin!(wait_until(
             &foreign,
@@ -184,6 +192,119 @@
                 .is_pending(),
             "a foreign virtual clock cannot expire the retained wall deadline"
         );
+        assert_eq!(foreign.timer_driver().unwrap().pending_count(), 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn heartbeat_wall_wait_ignores_later_timer_epochs_but_honors_its_cancellation_owner() {
+        let wall = WallClock::new();
+        let ahead = Time::from_secs(1_000_000);
+        for (owner_epoch, ambient_epoch) in [(Time::ZERO, ahead), (ahead, Time::ZERO)] {
+            let owner = timed_cx(&Arc::new(VirtualClock::starting_at(owner_epoch)));
+            let ambient = timed_cx(&Arc::new(VirtualClock::starting_at(ambient_epoch)));
+            let owner_timer = owner.timer_driver().unwrap();
+            let ambient_timer = ambient.timer_driver().unwrap();
+            let deadline = HeartbeatDeadline {
+                at: wall.now() + Duration::from_secs(60),
+                clock: None,
+            };
+            assert!(deadline.at < ahead, "virtual epochs straddle the wall deadline");
+            ambient.set_cancel_requested(true);
+            let _ambient = Cx::set_current(Some(ambient.clone()));
+            let mut operation = std::pin::pin!(std::future::pending::<Result<(), WsError>>());
+            let mut wait = std::pin::pin!(wait_until(
+                &owner,
+                Some(deadline),
+                operation.as_mut()
+            ));
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(
+                wait.as_mut().poll(&mut task).is_pending(),
+                "neither a foreign epoch nor ambient cancellation ends the wall wait"
+            );
+            assert_eq!(owner_timer.pending_count(), 0);
+            assert_eq!(ambient_timer.pending_count(), 0);
+
+            owner.set_cancel_requested(true);
+            assert!(matches!(
+                wait.as_mut().poll(&mut task),
+                Poll::Ready(Err(WsError::Io(error)))
+                    if error.kind() == io::ErrorKind::Interrupted
+            ));
+            assert_eq!(owner_timer.pending_count(), 0);
+            assert_eq!(ambient_timer.pending_count(), 0);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn heartbeat_wall_deadline_expires_while_a_later_virtual_clock_is_behind() {
+        let owner = timed_cx(&Arc::new(VirtualClock::new()));
+        let foreign = timed_cx(&Arc::new(VirtualClock::starting_at(Time::from_secs(
+            1_000_000,
+        ))));
+        let wall = WallClock::new();
+        let at = wall.now();
+        assert!(at > owner.timer_driver().unwrap().now());
+        let _ambient = Cx::set_current(Some(foreign.clone()));
+        let mut operation = std::pin::pin!(std::future::pending::<Result<(), WsError>>());
+        let mut wait = std::pin::pin!(wait_until(
+            &owner,
+            Some(HeartbeatDeadline { at, clock: None }),
+            operation.as_mut()
+        ));
+        assert!(matches!(
+            wait.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(None))
+        ));
+        assert_eq!(owner.timer_driver().unwrap().pending_count(), 0);
+        assert_eq!(foreign.timer_driver().unwrap().pending_count(), 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn heartbeat_wall_clock_survives_split_reunite_and_changed_receivers() {
+        use crate::net::websocket::{WebSocket, WebSocketConfig};
+
+        let original = Cx::for_testing();
+        let ahead = timed_cx(&Arc::new(VirtualClock::starting_at(Time::from_secs(
+            1_000_000,
+        ))));
+        let behind = timed_cx(&Arc::new(VirtualClock::new()));
+        let (io, _peer) = crate::io::duplex(64);
+        let mut websocket = WebSocket::from_upgraded(
+            io,
+            WebSocketConfig {
+                ping_interval: Some(Duration::from_secs(60)),
+                ..WebSocketConfig::default()
+            },
+        );
+        let mut task = Context::from_waker(Waker::noop());
+        {
+            let _ambient = Cx::set_current(Some(original.clone()));
+            let mut recv = std::pin::pin!(websocket.recv(&original));
+            assert!(recv.as_mut().poll(&mut task).is_pending());
+        }
+        let at = websocket.heartbeat.deadline().unwrap().at;
+        let (mut read, write) = websocket.split();
+        {
+            let _ambient = Cx::set_current(Some(ahead.clone()));
+            let mut recv = std::pin::pin!(read.recv(&ahead));
+            assert!(recv.as_mut().poll(&mut task).is_pending());
+            assert_eq!(ahead.timer_driver().unwrap().pending_count(), 0);
+        }
+        let mut websocket = read.reunite(write).expect("the dropped receive releases its borrow");
+        assert!(websocket.heartbeat.clock.is_none());
+        assert_eq!(websocket.heartbeat.deadline().unwrap().at, at);
+        {
+            let _ambient = Cx::set_current(Some(behind.clone()));
+            let mut recv = std::pin::pin!(websocket.recv(&behind));
+            assert!(recv.as_mut().poll(&mut task).is_pending());
+            assert_eq!(behind.timer_driver().unwrap().pending_count(), 0);
+        }
+        assert!(websocket.heartbeat.clock.is_none());
+        assert_eq!(websocket.heartbeat.deadline().unwrap().at, at);
     }
 
     #[test]
@@ -217,11 +338,15 @@
                     .poll(&mut Context::from_waker(Waker::noop()))
                     .is_pending()
             );
+            assert_eq!(cx.timer_driver().unwrap().pending_count(), 1);
+            assert_eq!(foreign.timer_driver().unwrap().pending_count(), 0);
             clock.advance(1_000_000);
             assert!(matches!(
                 wait.as_mut().poll(&mut Context::from_waker(Waker::noop())),
                 Poll::Ready(Ok(None))
             ));
+            assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+            assert_eq!(foreign.timer_driver().unwrap().pending_count(), 0);
         }
         let payload = heartbeat
             .update(&foreign, Some(Duration::ZERO), true, false)
