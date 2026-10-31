@@ -33,6 +33,49 @@
         )
     }
 
+    fn shutdown_waker(
+        inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+        state: std::sync::Weak<GenServerStateCell>,
+        wakes: Arc<AtomicUsize>,
+        panic_on_wake: bool,
+    ) -> Waker {
+        struct ShutdownWake {
+            inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+            state: std::sync::Weak<GenServerStateCell>,
+            wakes: Arc<AtomicUsize>,
+            panic_on_wake: bool,
+        }
+
+        impl std::task::Wake for ShutdownWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                let cancelled = self.inner.upgrade().is_some_and(|inner| {
+                    inner
+                        .try_read()
+                        .is_some_and(|guard| guard.is_cancel_requested())
+                });
+                let stopping = self
+                    .state
+                    .upgrade()
+                    .is_some_and(|state| state.load() == ActorState::Stopping);
+                if cancelled && stopping {
+                    self.wakes.fetch_add(1, Ordering::SeqCst);
+                }
+                assert!(!self.panic_on_wake, "server shutdown wake panic");
+            }
+        }
+
+        Waker::from(Arc::new(ShutdownWake {
+            inner,
+            state,
+            wakes,
+            panic_on_wake,
+        }))
+    }
+
     fn terminal_state_waker(state: Arc<GenServerStateCell>, counter: Arc<AtomicUsize>) -> Waker {
         struct TerminalStateWaker {
             state: Arc<GenServerStateCell>,
@@ -1208,6 +1251,153 @@
         assert!(!server_ref.is_closed());
 
         crate::test_complete!("gen_server_handle_accessors");
+    }
+
+    #[test]
+    fn gen_server_abort_and_join_drop_complete_hostile_cancellation_fanout() {
+        init_test("gen_server_abort_and_join_drop_complete_hostile_cancellation_fanout");
+
+        for route in 0..3 {
+            let mut state = RuntimeState::new();
+            let root = state.create_root_region(Budget::INFINITE);
+            let parent_cx = Cx::for_testing();
+            let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+            let (mut handle, mut stored) = scope
+                .spawn_gen_server(&mut state, &parent_cx, Counter { count: 0 }, 1)
+                .expect("spawn gen_server");
+            let server_cx: Cx = Cx::from_inner(handle.inner.upgrade().expect("server Cx"));
+            let mailbox_wakes = Arc::new(AtomicUsize::new(0));
+            let mailbox_waker = shutdown_waker(
+                handle.inner.clone(),
+                Arc::downgrade(&handle.state),
+                Arc::clone(&mailbox_wakes),
+                false,
+            );
+            assert!(
+                stored
+                    .poll(&mut Context::from_waker(&mailbox_waker))
+                    .is_pending()
+            );
+            let hostile = shutdown_waker(
+                handle.inner.clone(),
+                Arc::downgrade(&handle.state),
+                Arc::new(AtomicUsize::new(0)),
+                true,
+            );
+            server_cx.register_cancel_waker(&hostile);
+            let healthy_wakes = Arc::new(AtomicUsize::new(0));
+            let healthy = shutdown_waker(
+                handle.inner.clone(),
+                Arc::downgrade(&handle.state),
+                Arc::clone(&healthy_wakes),
+                false,
+            );
+            let token = server_cx.refresh_cancel_waker(None, &healthy);
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match route {
+                    0 => handle.abort(),
+                    1 => drop(handle.join(&parent_cx)),
+                    _ => {
+                        let join = handle.join(&parent_cx);
+                        std::hint::black_box(&join);
+                        panic!("original server unwind");
+                    }
+                }
+            }));
+            if route == 2 {
+                let payload = result.expect_err("the original unwind must survive");
+                assert_eq!(
+                    payload.downcast_ref::<&str>(),
+                    Some(&"original server unwind")
+                );
+            } else {
+                assert!(result.is_ok(), "cancellation callbacks must be isolated");
+            }
+            assert_eq!(healthy_wakes.load(Ordering::SeqCst), 1);
+            assert!(mailbox_wakes.load(Ordering::SeqCst) > 0);
+            assert!(server_cx.is_cancel_requested());
+            server_cx.clear_cancel_waker(token);
+            assert!(
+                stored
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_ready()
+            );
+            assert_eq!(handle.state.load(), ActorState::Stopped);
+        }
+
+        crate::test_complete!(
+            "gen_server_abort_and_join_drop_complete_hostile_cancellation_fanout"
+        );
+    }
+
+    #[test]
+    fn gen_server_mailbox_wake_panic_preserves_cancellation_and_original_unwind() {
+        init_test("gen_server_mailbox_wake_panic_preserves_cancellation_and_original_unwind");
+
+        for route in 0..3 {
+            let mut state = RuntimeState::new();
+            let root = state.create_root_region(Budget::INFINITE);
+            let parent_cx = Cx::for_testing();
+            let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+            let (mut handle, mut stored) = scope
+                .spawn_gen_server(&mut state, &parent_cx, Counter { count: 0 }, 1)
+                .expect("spawn gen_server");
+            let server_cx: Cx = Cx::from_inner(handle.inner.upgrade().expect("server Cx"));
+            let mailbox_wakes = Arc::new(AtomicUsize::new(0));
+            let hostile = shutdown_waker(
+                handle.inner.clone(),
+                Arc::downgrade(&handle.state),
+                Arc::clone(&mailbox_wakes),
+                true,
+            );
+            assert!(
+                stored
+                    .poll(&mut Context::from_waker(&hostile))
+                    .is_pending()
+            );
+            let healthy_wakes = Arc::new(AtomicUsize::new(0));
+            let healthy = shutdown_waker(
+                handle.inner.clone(),
+                Arc::downgrade(&handle.state),
+                Arc::clone(&healthy_wakes),
+                false,
+            );
+            let token = server_cx.refresh_cancel_waker(None, &healthy);
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match route {
+                    0 => handle.abort(),
+                    1 => drop(handle.join(&parent_cx)),
+                    _ => {
+                        let join = handle.join(&parent_cx);
+                        std::hint::black_box(&join);
+                        panic!("original server unwind");
+                    }
+                }
+            }));
+            let payload = result.expect_err("preserve the original panic");
+            let expected = if route == 2 {
+                "original server unwind"
+            } else {
+                "server shutdown wake panic"
+            };
+            assert_eq!(payload.downcast_ref::<&str>(), Some(&expected));
+            assert!(mailbox_wakes.load(Ordering::SeqCst) > 0);
+            assert_eq!(healthy_wakes.load(Ordering::SeqCst), 1);
+            assert!(server_cx.is_cancel_requested());
+            server_cx.clear_cancel_waker(token);
+            assert!(
+                stored
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_ready()
+            );
+            assert_eq!(handle.state.load(), ActorState::Stopped);
+        }
+
+        crate::test_complete!(
+            "gen_server_mailbox_wake_panic_preserves_cancellation_and_original_unwind"
+        );
     }
 
     #[test]

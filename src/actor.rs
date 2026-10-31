@@ -52,6 +52,7 @@ use crate::channel::mpsc;
 use crate::channel::mpsc::SendError;
 use crate::cx::Cx;
 use crate::runtime::{JoinError, SpawnError};
+use crate::types::task_context::{CancelWakeEffects, CancelWaker};
 use crate::types::{CxInner, Outcome, RegionId, TaskId, Time};
 
 /// Unique identifier for an actor.
@@ -109,7 +110,7 @@ pub enum ActorState {
 struct ActorStateCell {
     state: AtomicU8,
     /// The task waiting out a supervised restart backoff, woken by a stop.
-    stop_waker: parking_lot::Mutex<Option<std::task::Waker>>,
+    stop_waker: parking_lot::Mutex<Option<Arc<CancelWaker>>>,
 }
 
 impl ActorStateCell {
@@ -121,24 +122,53 @@ impl ActorStateCell {
         }
     }
 
-    /// Stores `Stopping` and wakes a supervised restart backoff waiting on it.
-    fn request_stop(&self) {
-        self.store(ActorState::Stopping);
-        let waiter = self.stop_waker.lock().take();
-        if let Some(waker) = waiter {
-            waker.wake();
+    /// Publishes `Stopping` without reviving a stopped actor, and detaches the
+    /// restart-backoff wake for dispatch after the mailbox is sealed.
+    fn request_stop(&self) -> CancelWakeEffects {
+        let stopped = Self::encode(ActorState::Stopped);
+        let stopping = Self::encode(ActorState::Stopping);
+        let mut current = self.state.load(Ordering::Acquire);
+        while current != stopped {
+            match self.state.compare_exchange_weak(
+                current,
+                stopping,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
         }
+        let waiter = self.stop_waker.lock().take();
+        CancelWakeEffects::new(waiter.into_iter().collect())
     }
 
     /// Registers the task that a later [`Self::request_stop`] must wake.
     fn register_stop_waker(&self, waker: &std::task::Waker) {
-        let mut slot = self.stop_waker.lock();
-        if !slot
+        if self
+            .stop_waker
+            .lock()
             .as_ref()
             .is_some_and(|current| current.will_wake(waker))
         {
-            *slot = Some(waker.clone());
+            return;
         }
+
+        // RawWaker clone and final-drop callbacks may re-enter this state.
+        // Only Arc ownership moves occur under the registration mutex.
+        let incoming = Arc::new(CancelWaker::new(waker.clone()));
+        let retired = {
+            let mut slot = self.stop_waker.lock();
+            if slot
+                .as_ref()
+                .is_some_and(|current| current.will_wake(waker))
+            {
+                Some(incoming)
+            } else {
+                slot.replace(incoming)
+            }
+        };
+        CancelWakeEffects::new(retired.into_iter().collect()).retire_without_dispatch();
     }
 
     #[inline]
@@ -182,6 +212,59 @@ impl ActorStateCell {
             1 => ActorState::Running,
             2 => ActorState::Stopping,
             _ => ActorState::Stopped,
+        }
+    }
+}
+
+impl Drop for ActorStateCell {
+    fn drop(&mut self) {
+        let waiter = self.stop_waker.get_mut().take();
+        CancelWakeEffects::new(waiter.into_iter().collect()).retire_without_dispatch();
+    }
+}
+
+/// Publishes an actor or GenServer abort without running a wake callback.
+/// The caller seals or interrupts the mailbox before dispatching these effects.
+/// Keep actor entry points on the cancellation effect boundary established by
+/// br-asupersync-runtime-cancel-waker-outer-lock-118ayd.
+pub(crate) fn prepare_actor_abort(
+    inner: &std::sync::Weak<parking_lot::RwLock<CxInner>>,
+    task: Option<&crate::runtime::TaskHandle<()>>,
+    message: &'static str,
+) -> CancelWakeEffects {
+    if let Some(inner) = inner.upgrade() {
+        let mut guard = inner.write();
+        guard.set_cancel_requested(true);
+        if guard.cancel_reason.is_none() {
+            guard.cancel_reason = Some(crate::types::CancelReason::user(message));
+        }
+        let wakers = guard.cancel_waker_snapshot();
+        guard.cancel_wakers_pending = false;
+        CancelWakeEffects::new(wakers)
+    } else {
+        if let Some(task) = task {
+            // Native handles enqueue a callback-free runtime command, including
+            // when admission has not yet published the actor's final Cx.
+            task.abort_with_reason(crate::types::CancelReason::user(message));
+        }
+        CancelWakeEffects::empty()
+    }
+}
+
+/// Completes every shutdown notification even if the mailbox's Waker panics.
+/// Cancellation callbacks use the same isolation boundary as `Cx::cancel_with`;
+/// mailbox callbacks retain their original first-panic policy after fanout.
+pub(crate) fn dispatch_actor_shutdown_wakes(
+    effects: CancelWakeEffects,
+    notify_mailbox: impl FnOnce(),
+) {
+    let notified = std::panic::catch_unwind(std::panic::AssertUnwindSafe(notify_mailbox));
+    effects.dispatch();
+    if let Err(payload) = notified {
+        if std::thread::panicking() {
+            std::mem::forget(payload);
+        } else {
+            std::panic::resume_unwind(payload);
         }
     }
 }
@@ -359,8 +442,8 @@ impl<A: Actor> ActorHandle<A> {
     /// cancellation, allowing the actor to drain pending work. The mailbox is
     /// sealed immediately so new sends fail fast instead of extending shutdown.
     pub fn stop(&self) {
-        self.state.request_stop();
-        self.sender.close_receiver();
+        let effects = self.state.request_stop();
+        dispatch_actor_shutdown_wakes(effects, || self.sender.close_receiver());
     }
 
     /// Returns true if the actor has finished.
@@ -403,23 +486,13 @@ impl<A: Actor> ActorHandle<A> {
     /// to exit at the next cancellation check point. The actor will call
     /// `on_stop` before returning.
     pub fn abort(&self) {
-        self.state.request_stop();
-        self.sender.close_receiver();
-        if let Some(inner) = self.inner.upgrade() {
-            let cancel_wakers = {
-                let mut guard = inner.write();
-                guard.set_cancel_requested(true);
-                if guard.cancel_reason.is_none() {
-                    guard.cancel_reason = Some(crate::types::CancelReason::user("actor aborted"));
-                }
-                guard.cancel_waker_snapshot()
-            };
-            for waker in cancel_wakers {
-                waker.wake_by_ref();
-            }
-        } else if let Some(task) = &self.task {
-            task.abort_with_reason(crate::types::CancelReason::user("actor aborted"));
-        }
+        let mut effects = self.state.request_stop();
+        effects.merge(prepare_actor_abort(
+            &self.inner,
+            self.task.as_ref(),
+            "actor aborted",
+        ));
+        dispatch_actor_shutdown_wakes(effects, || self.sender.close_receiver());
     }
 }
 
@@ -449,23 +522,13 @@ impl<A: Actor> ActorJoinFuture<'_, A> {
     }
 
     fn abort(&self) {
-        self.state.request_stop();
-        self.sender.close_receiver();
-        if let Some(inner) = self.cx_inner.upgrade() {
-            let cancel_wakers = {
-                let mut guard = inner.write();
-                guard.set_cancel_requested(true);
-                if guard.cancel_reason.is_none() {
-                    guard.cancel_reason = Some(crate::types::CancelReason::user("actor aborted"));
-                }
-                guard.cancel_waker_snapshot()
-            };
-            for waker in cancel_wakers {
-                waker.wake_by_ref();
-            }
-        } else if let Some(task) = self.task.as_deref() {
-            task.abort_with_reason(crate::types::CancelReason::user("actor aborted"));
-        }
+        let mut effects = self.state.request_stop();
+        effects.merge(prepare_actor_abort(
+            &self.cx_inner,
+            self.task.as_deref(),
+            "actor aborted",
+        ));
+        dispatch_actor_shutdown_wakes(effects, || self.sender.close_receiver());
     }
 }
 

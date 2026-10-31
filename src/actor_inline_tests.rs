@@ -58,6 +58,18 @@
         Waker::from(Arc::new(CountingWaker { counter }))
     }
 
+    struct PanickingShutdownWaker;
+
+    impl std::task::Wake for PanickingShutdownWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            panic!("actor shutdown wake panic");
+        }
+    }
+
     fn terminal_state_waker(
         state: Arc<ActorStateCell>,
         counter: Arc<std::sync::atomic::AtomicUsize>,
@@ -351,6 +363,255 @@
             "ActorHandle cancellation must publish through the actor Cx envelope"
         );
         crate::test_complete!("actor_handle_abort_publishes_to_child_cx");
+    }
+
+    #[test]
+    fn actor_abort_and_join_drop_complete_hostile_cancellation_fanout() {
+        init_test("actor_abort_and_join_drop_complete_hostile_cancellation_fanout");
+
+        struct BackoffWake {
+            inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+            sender: mpsc::Sender<u64>,
+            state: std::sync::Weak<ActorStateCell>,
+            published: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl std::task::Wake for BackoffWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                let cancelled = self.inner.upgrade().is_some_and(|inner| {
+                    inner
+                        .try_read()
+                        .is_some_and(|guard| guard.is_cancel_requested())
+                });
+                let stopping = self
+                    .state
+                    .upgrade()
+                    .is_some_and(|state| state.load() == ActorState::Stopping);
+                if cancelled && stopping && self.sender.is_closed() {
+                    self.published.fetch_add(1, Ordering::SeqCst);
+                }
+                panic!("backoff wake panic");
+            }
+        }
+
+        // The third route exercises join-drop while another panic is unwinding.
+        for route in 0..3 {
+            let mut state = RuntimeState::new();
+            let root = state.create_root_region(Budget::INFINITE);
+            let parent_cx = Cx::for_testing();
+            let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+            let (mut handle, mut stored) = scope
+                .spawn_actor(&mut state, &parent_cx, Counter::new(), 1)
+                .expect("spawn actor");
+            let actor_cx: Cx = Cx::from_inner(handle.inner.upgrade().expect("actor Cx"));
+            let published = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let backoff_waker = Waker::from(Arc::new(BackoffWake {
+                inner: handle.inner.clone(),
+                sender: handle.sender.clone(),
+                state: Arc::downgrade(&handle.state),
+                published: Arc::clone(&published),
+            }));
+            handle.state.register_stop_waker(&backoff_waker);
+            let hostile = Waker::from(Arc::new(PanickingShutdownWaker));
+            actor_cx.register_cancel_waker(&hostile);
+            let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let healthy = counting_waker(Arc::clone(&wakes));
+            let token = actor_cx.refresh_cancel_waker(None, &healthy);
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match route {
+                    0 => handle.abort(),
+                    1 => drop(handle.join(&parent_cx)),
+                    _ => {
+                        let join = handle.join(&parent_cx);
+                        std::hint::black_box(&join);
+                        panic!("original actor unwind");
+                    }
+                }
+            }));
+            if route == 2 {
+                let payload = result.expect_err("the original unwind must survive");
+                assert_eq!(
+                    payload.downcast_ref::<&str>(),
+                    Some(&"original actor unwind")
+                );
+            } else {
+                assert!(result.is_ok(), "cancellation callbacks must be isolated");
+            }
+            assert_eq!(published.load(Ordering::SeqCst), 1);
+            assert_eq!(wakes.load(Ordering::SeqCst), 1, "later waiter must wake");
+            assert!(actor_cx.is_cancel_requested());
+            assert!(handle.sender.is_closed());
+            actor_cx.clear_cancel_waker(token);
+            assert!(
+                stored
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_ready()
+            );
+            assert_eq!(handle.state.load(), ActorState::Stopped);
+        }
+
+        crate::test_complete!("actor_abort_and_join_drop_complete_hostile_cancellation_fanout");
+    }
+
+    #[test]
+    fn actor_abort_publishes_and_wakes_before_resuming_mailbox_panic() {
+        init_test("actor_abort_publishes_and_wakes_before_resuming_mailbox_panic");
+
+        for drop_join in [false, true] {
+            let mut state = RuntimeState::new();
+            let root = state.create_root_region(Budget::INFINITE);
+            let parent_cx = Cx::for_testing();
+            let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+            let (mut handle, mut stored) = scope
+                .spawn_actor(&mut state, &parent_cx, Counter::new(), 1)
+                .expect("spawn actor");
+            let actor_cx: Cx = Cx::from_inner(handle.inner.upgrade().expect("actor Cx"));
+            let hostile = Waker::from(Arc::new(PanickingShutdownWaker));
+            assert!(
+                stored
+                    .poll(&mut Context::from_waker(&hostile))
+                    .is_pending()
+            );
+            let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let healthy = counting_waker(Arc::clone(&wakes));
+            let token = actor_cx.refresh_cancel_waker(None, &healthy);
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if drop_join {
+                    drop(handle.join(&parent_cx));
+                } else {
+                    handle.abort();
+                }
+            }));
+            let payload = result.expect_err("mailbox wake panic retains its policy");
+            assert_eq!(
+                payload.downcast_ref::<&str>(),
+                Some(&"actor shutdown wake panic")
+            );
+            assert!(
+                actor_cx.is_cancel_requested(),
+                "publish before mailbox callbacks"
+            );
+            assert!(handle.sender.is_closed());
+            assert_eq!(
+                wakes.load(Ordering::SeqCst),
+                1,
+                "panic must not strand cancellation"
+            );
+            actor_cx.clear_cancel_waker(token);
+            assert!(
+                stored
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_ready()
+            );
+            assert_eq!(handle.state.load(), ActorState::Stopped);
+        }
+
+        crate::test_complete!("actor_abort_publishes_and_wakes_before_resuming_mailbox_panic");
+    }
+
+    #[test]
+    fn actor_backoff_waker_replacement_retires_outside_lock() {
+        init_test("actor_backoff_waker_replacement_retires_outside_lock");
+
+        struct DropProbe {
+            state: std::sync::Weak<ActorStateCell>,
+            unlocked_drops: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                if self
+                    .state
+                    .upgrade()
+                    .is_some_and(|state| state.stop_waker.try_lock().is_some())
+                {
+                    self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+                }
+                panic!("backoff waker retirement panic");
+            }
+        }
+
+        let state = Arc::new(ActorStateCell::new(ActorState::Running));
+        let unlocked_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(DropProbe {
+            state: Arc::downgrade(&state),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        state.register_stop_waker(&waker);
+        drop(waker);
+        state.register_stop_waker(Waker::noop());
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        state.request_stop().dispatch();
+
+        crate::test_complete!("actor_backoff_waker_replacement_retires_outside_lock");
+    }
+
+    #[test]
+    fn actor_stop_seals_mailbox_and_preserves_terminal_state() {
+        init_test("actor_stop_seals_mailbox_and_preserves_terminal_state");
+
+        struct SealedBackoffWake {
+            sender: mpsc::Sender<u64>,
+            sealed_wakes: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl std::task::Wake for SealedBackoffWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                if self.sender.is_closed() {
+                    self.sealed_wakes.fetch_add(1, Ordering::SeqCst);
+                }
+                panic!("graceful stop backoff wake panic");
+            }
+        }
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+        let (handle, mut stored) = scope
+            .spawn_actor(&mut state, &cx, Counter::new(), 1)
+            .expect("spawn actor");
+        let actor_cx: Cx = Cx::from_inner(handle.inner.upgrade().expect("actor Cx"));
+        let actor_ref = handle.sender();
+        let sealed_wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(SealedBackoffWake {
+            sender: handle.sender.clone(),
+            sealed_wakes: Arc::clone(&sealed_wakes),
+        }));
+        handle.state.register_stop_waker(&waker);
+        handle.stop();
+        assert_eq!(sealed_wakes.load(Ordering::SeqCst), 1);
+        assert!(
+            !actor_cx.is_cancel_requested(),
+            "graceful stop is not an abort"
+        );
+        assert!(
+            stored
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
+        assert!(!actor_ref.is_alive());
+        handle.stop();
+        assert_eq!(handle.state.load(), ActorState::Stopped);
+        handle.abort();
+        assert_eq!(handle.state.load(), ActorState::Stopped);
+        assert!(!actor_ref.is_alive());
+        crate::test_complete!("actor_stop_seals_mailbox_and_preserves_terminal_state");
     }
 
     #[test]
