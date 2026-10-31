@@ -1319,6 +1319,10 @@
                 None,
             );
             let _ambient = Cx::set_current(Some(foreign));
+            // A configured timeout starts from the owner's wall clock, not
+            // from the foreign task's virtual 1_000_000 s.
+            let configured = PooledStreamDeadline::capture(&Cx::for_request(), Some(Duration::from_secs(60)));
+            assert!(configured.at.is_some_and(|at| at < now + Duration::from_secs(120)), "driverless timeout uses the owner's clock");
             let deadline = PooledStreamDeadline::capture(&owner, Some(Duration::from_secs(60)));
             let mut retained = PooledStreamOwner::new(owner.clone(), &deadline);
             let wakes = Arc::new(WakeCount::default());
