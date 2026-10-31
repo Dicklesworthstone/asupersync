@@ -28,7 +28,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
 use asupersync::atp::object::MetadataPolicy;
 use asupersync::cx::Cx;
 #[cfg(feature = "zstd")]
@@ -213,6 +212,22 @@ fn transport_authenticated_configs() -> Configs {
     recv.server_tls = Some(server_tls());
     tighten_timeouts(&mut recv);
     Configs { send, recv }
+}
+
+fn delta_authenticated_configs() -> Configs {
+    let mut configs = transport_authenticated_configs();
+    configs.send = configs
+        .send
+        .with_delta_control_auth(SecurityContext::for_testing(0xD3_17_A0));
+    configs.recv = configs
+        .recv
+        .with_delta_control_auth(SecurityContext::for_testing(0xD3_17_A0));
+    for config in [&mut configs.send, &mut configs.recv] {
+        config.enable_delta = true;
+        config.chunk_size = 1024;
+        config.metadata_policy = MetadataPolicy::portable();
+    }
+    configs
 }
 
 /// Run a full send_path -> receive_on_endpoint transfer over real loopback UDP.
@@ -893,6 +908,128 @@ fn receiver_destination_refusal_reaches_the_sender_without_its_paths() {
         !real.join("inbox").exists(),
         "a refused destination must stay untouched"
     );
+}
+
+/// Delta policy refusals use the challenged session before a transfer mode is
+/// selected. First exercise full and already-in-sync transfers with the same
+/// public configuration so the refusal cannot pass through a disabled-delta
+/// fallback. The original code silently dropped this authenticated refusal.
+#[test]
+fn authenticated_delta_refusal_preserves_full_and_noop_transfer_paths() {
+    const REFUSAL_BOUND: Duration = Duration::from_secs(60);
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src
+        .path()
+        .canonicalize()
+        .expect("canonical source")
+        .join("payload.bin");
+    let destination = dst.path().canonicalize().expect("canonical destination");
+    let payload = vec![37_u8; 4096];
+    std::fs::write(&source, &payload).expect("write source");
+    let mut configs = delta_authenticated_configs();
+    configs.send.idle_timeout = Duration::from_secs(120);
+    configs.recv.idle_timeout = Duration::from_secs(120);
+
+    let (sent, received) = run_transfer(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &source,
+        &destination,
+    );
+    let sent = sent.expect("missing destination selects full transfer");
+    let received = received.expect("full delta fallback commits");
+    assert_eq!(sent.bytes_sent, payload.len() as u64);
+    assert_eq!(received.bytes_received, payload.len() as u64);
+    assert!(sent.receipt.committed && received.committed);
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        payload
+    );
+
+    let (sent, received) = run_transfer(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &source,
+        &destination,
+    );
+    let sent = sent.expect("unchanged destination selects authenticated no-op");
+    let received = received.expect("bound no-op proof commits");
+    assert_eq!(sent.bytes_sent, 0, "the public path really negotiated delta");
+    assert_eq!(received.bytes_received, 0);
+    assert!(sent.receipt.committed && received.committed);
+    assert_no_staging_residue(&destination);
+
+    configs.send.metadata_policy.preserve_timestamps = true;
+    let started = Instant::now();
+    let (sent, received) = run_transfer(configs.send, configs.recv, &source, &destination);
+    let elapsed = started.elapsed();
+    let received = received.expect_err("receiver refuses the new metadata policy");
+    assert!(
+        matches!(received, QuicTransportError::Source(ref message)
+            if message.contains("timestamps are denied by receiver metadata policy")),
+        "receiver error: {received:?}"
+    );
+    let sent = sent.expect_err("delta refusal must reach the waiting sender");
+    assert!(
+        matches!(sent, QuicTransportError::Integrity(ref reason)
+            if reason.starts_with("receiver refused the manifest: ")
+                && reason.contains("timestamps are denied by receiver metadata policy")),
+        "sender error: {sent:?}"
+    );
+    assert!(elapsed < REFUSAL_BOUND, "delta refusal took {elapsed:?}");
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert_no_staging_residue(&destination);
+}
+
+/// A failure to inspect the receiver's destination happens before ObjectRequest
+/// and must carry a bound refusal, with no receiver filesystem paths disclosed.
+#[cfg(unix)]
+#[test]
+fn authenticated_delta_destination_refusal_reaches_sender_without_paths() {
+    const REFUSAL_BOUND: Duration = Duration::from_secs(60);
+    let src = tempfile::tempdir().expect("source directory");
+    let source = src
+        .path()
+        .canonicalize()
+        .expect("canonical source")
+        .join("payload.bin");
+    std::fs::write(&source, vec![19_u8; 4096]).expect("write source");
+    let root = tempfile::tempdir().expect("receiver root");
+    let root_path = root.path().canonicalize().expect("canonical receiver root");
+    let real = root_path.join("real");
+    std::fs::create_dir(&real).expect("real destination");
+    let linked = root_path.join("linked");
+    std::os::unix::fs::symlink(&real, &linked).expect("destination symlink");
+    let destination = linked.join("inbox");
+    let mut configs = delta_authenticated_configs();
+    configs.send.idle_timeout = Duration::from_secs(120);
+    configs.recv.idle_timeout = Duration::from_secs(120);
+
+    let started = Instant::now();
+    let (sent, received) = run_transfer(configs.send, configs.recv, &source, &destination);
+    let elapsed = started.elapsed();
+    let received = received.expect_err("receiver refuses a symlinked destination");
+    assert!(
+        matches!(received, QuicTransportError::Source(ref message) if message.contains("symlink")),
+        "receiver error: {received:?}"
+    );
+    let sent = sent.expect_err("sender hears the pre-request refusal");
+    assert!(
+        matches!(sent, QuicTransportError::Integrity(ref reason)
+            if reason == "receiver could not prepare its delta request"),
+        "sender error: {sent:?}"
+    );
+    assert!(!format!("{sent:?}").contains(&root_path.display().to_string()));
+    assert!(elapsed < REFUSAL_BOUND, "delta refusal took {elapsed:?}");
+    assert!(
+        !real.join("inbox").exists(),
+        "refusal must not publish a destination"
+    );
+    assert_no_staging_residue(&real);
 }
 
 /// asupersync-nnm3gw: a refusing receiver does not wait on a sender that is

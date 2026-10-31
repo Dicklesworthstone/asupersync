@@ -866,6 +866,164 @@ fn decode_test_handshake_packet(
 }
 
 #[test]
+fn real_tls13_managed_application_close_reaches_peer() {
+    use asupersync::net::quic_core::TransportParameters;
+    use asupersync::net::quic_native::{
+        ManagedEndpointConfig, NativeQuicUdpConnection, QuicConnectionState,
+    };
+    use std::task::Poll;
+
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
+        .build()
+        .unwrap();
+    let parent: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(async move {
+            let cx = Cx::current().unwrap();
+            let udp_config = QuicUdpEndpointConfig {
+                max_packet_size: 16_384,
+                ..QuicUdpEndpointConfig::default()
+            };
+            let client_socket =
+                QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
+                    .await
+                    .unwrap();
+            let server_socket =
+                QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+                    .await
+                    .unwrap();
+            let server_addr = server_socket.local_addr();
+            let client_tls = client_config(
+                vec![parse_one_cert(CA_CERT_PEM)],
+                vec![ATP_QUIC_ALPN.to_vec()],
+            )
+            .unwrap();
+            let server_tls = server_config(
+                vec![parse_one_cert(LEAF_CERT_PEM)],
+                leaf_key(),
+                vec![ATP_QUIC_ALPN.to_vec()],
+            )
+            .unwrap();
+            let mut parameters = Vec::new();
+            TransportParameters {
+                initial_max_data: Some(1 << 20),
+                initial_max_stream_data_bidi_remote: Some(1 << 18),
+                initial_max_streams_bidi: Some(4),
+                ..TransportParameters::default()
+            }
+            .encode(&mut parameters)
+            .unwrap();
+            let client_driver = QuicHandshakeDriver::client(
+                client_tls,
+                ServerName::try_from("localhost").unwrap(),
+                parameters.clone(),
+            )
+            .unwrap();
+            let server_driver = QuicHandshakeDriver::server(server_tls, parameters).unwrap();
+            let initial_cid = ConnectionId::new(b"close-initial").unwrap();
+            let client_cid = ConnectionId::new(b"close-client").unwrap();
+            let config = NativeQuicConnectionConfig {
+                // The public close below follows the handoff immediately.
+                // Keep a slow runner's finite drain beyond the wire-test bound.
+                drain_timeout_micros: 60_000_000,
+                ..NativeQuicConnectionConfig::default()
+            };
+            let (client, server) = timeout(
+                cx.now(),
+                Duration::from_secs(10),
+                zip(
+                    NativeQuicUdpConnection::connect(
+                        &cx,
+                        client_socket,
+                        server_addr,
+                        client_driver,
+                        initial_cid,
+                        client_cid,
+                        config,
+                        ATP_QUIC_ALPN,
+                    ),
+                    NativeQuicUdpConnection::accept(
+                        &cx,
+                        server_socket,
+                        server_driver,
+                        initial_cid,
+                        ConnectionId::new(b"close-server").unwrap(),
+                        config,
+                        ATP_QUIC_ALPN,
+                    ),
+                ),
+            )
+            .await
+            .expect("real TLS handshake completes");
+            let mut server = server.expect("authenticated server");
+            let mut client = client
+                .expect("authenticated client")
+                .into_managed(
+                    &cx,
+                    ManagedEndpointConfig {
+                        is_server: false,
+                        packet_batch_size: 1,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .unwrap();
+            client
+                .with_connection_mut(&cx, client_cid, |connection| {
+                    let stream = connection.open_bidi_stream(&cx).unwrap();
+                    connection
+                        .write_stream(&cx, stream, Bytes::from_static(b"unsent"), true)
+                        .unwrap();
+                    connection.begin_close(&cx, 0, 0x177).unwrap();
+                })
+                .unwrap();
+
+            // The ordinary public callback must produce a protected terminal
+            // datagram without endpoint shutdown or an HTTP/3-only close API.
+            let drive = async {
+                client
+                    .run_event_loop_with_application::<(), _>(&cx, |_, _, _| Poll::Pending)
+                    .await
+                    .expect("managed close driver");
+                panic!("a pending application must not complete the driver");
+            };
+            let observe = async {
+                while !server.connection().close_was_peer_initiated() {
+                    server
+                        .drive_io_once(&cx, Duration::from_secs(1))
+                        .await
+                        .expect("receive authenticated local close");
+                }
+            };
+            timeout(
+                cx.now(),
+                Duration::from_secs(5),
+                futures_lite::future::race(drive, observe),
+            )
+            .await
+            .expect("the peer receives CONNECTION_CLOSE before local drain expiry");
+            assert_eq!(server.connection().state(), QuicConnectionState::Draining);
+            assert_eq!(
+                server.connection().inner().transport().close_code(),
+                Some(0x177)
+            );
+            assert_eq!(server.flush(&cx).await.unwrap(), 0, "peer close is silent");
+            assert_eq!(client.connection_stats().active_connections, 1);
+            client
+                .with_connection_mut(&cx, client_cid, |connection| {
+                    assert_eq!(connection.state(), QuicConnectionState::Draining);
+                    assert!(!connection.close_was_peer_initiated());
+                    assert_eq!(
+                        connection.inner().transport().drain_deadline_micros(),
+                        Some(60_000_000)
+                    );
+                })
+                .unwrap();
+            client.shutdown(&cx).await.unwrap();
+        });
+    runtime.block_on(runtime.handle().spawn(parent));
+}
+
+#[test]
 fn real_tls13_final_ack_does_not_retransmit_client_finished() {
     use asupersync::net::quic_core::TransportParameters;
     use asupersync::net::quic_native::NativeQuicUdpConnection;

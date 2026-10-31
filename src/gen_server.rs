@@ -74,7 +74,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-use crate::actor::{ActorId, ActorState};
+use crate::actor::{ActorId, ActorState, dispatch_actor_shutdown_wakes, prepare_actor_abort};
 use crate::channel::mpsc;
 use crate::channel::oneshot;
 use crate::channel::session::{self, TrackedOneshotPermit};
@@ -1487,22 +1487,8 @@ impl<S: GenServer> GenServerHandle<S> {
     /// to exit at the next cancellation check point.
     pub fn abort(&self) {
         self.state.request_stop();
-        if let Some(inner) = self.inner.upgrade() {
-            let cancel_wakers = {
-                let mut guard = inner.write();
-                guard.set_cancel_requested(true);
-                if guard.cancel_reason.is_none() {
-                    guard.cancel_reason = Some(crate::types::CancelReason::user("server aborted"));
-                }
-                guard.cancel_waker_snapshot()
-            };
-            for waker in cancel_wakers {
-                waker.wake_by_ref();
-            }
-        } else if let Some(task) = &self.task {
-            task.abort_with_reason(crate::types::CancelReason::user("server aborted"));
-        }
-        self.sender.wake_receiver();
+        let effects = prepare_actor_abort(&self.inner, self.task.as_ref(), "server aborted");
+        dispatch_actor_shutdown_wakes(effects, || self.sender.wake_receiver());
     }
 
     /// Wait for the server to finish and return its final state.
@@ -1554,22 +1540,8 @@ impl<S: GenServer> GenServerJoinFuture<'_, S> {
 
     fn abort(&self) {
         self.state.request_stop();
-        if let Some(inner) = self.cx_inner.upgrade() {
-            let cancel_wakers = {
-                let mut guard = inner.write();
-                guard.set_cancel_requested(true);
-                if guard.cancel_reason.is_none() {
-                    guard.cancel_reason = Some(crate::types::CancelReason::user("server aborted"));
-                }
-                guard.cancel_waker_snapshot()
-            };
-            for waker in cancel_wakers {
-                waker.wake_by_ref();
-            }
-        } else if let Some(task) = self.task.as_deref() {
-            task.abort_with_reason(crate::types::CancelReason::user("server aborted"));
-        }
-        self.sender.wake_receiver();
+        let effects = prepare_actor_abort(&self.cx_inner, self.task.as_deref(), "server aborted");
+        dispatch_actor_shutdown_wakes(effects, || self.sender.wake_receiver());
     }
 }
 

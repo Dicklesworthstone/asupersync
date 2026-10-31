@@ -3539,6 +3539,109 @@ mod tests {
     }
 
     #[test]
+    fn quic_delta_refusal_requires_bound_failure_without_early_commit_claims() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_source, _config, prepared) =
+            prepare_delta_test_source(&cx, temp.path(), b"abcdefghijklmnop");
+        let session = derive_quic_delta_session(
+            delta_test_handshake(temp.path()),
+            "sender",
+            "receiver",
+            &prepared.manifest,
+        )
+        .expect("derive delta session");
+        let reason = "receiver refused the manifest: timestamps denied".to_string();
+        let proof = make_quic_delta_proof(
+            session,
+            &prepared.manifest,
+            ReceiveReceipt {
+                committed: false,
+                bytes_received: 0,
+                files: 0,
+                sha_ok: false,
+                merkle_ok: false,
+                symbols_accepted: 0,
+                feedback_rounds: 0,
+                decode_count: 0,
+                decode_micros: 0,
+                reason: Some(reason.clone()),
+                committed_paths: Vec::new(),
+            },
+        );
+        assert_eq!(
+            validate_quic_delta_refusal(proof.clone(), session, &prepared.manifest)
+                .expect("bound refusal"),
+            reason
+        );
+        assert!(matches!(
+            validate_quic_delta_proof(proof.clone(), session, &prepared.manifest),
+            Err(QuicTransportError::Integrity(_))
+        ));
+
+        for changed_field in 0..17 {
+            let mut malformed = proof.clone();
+            match changed_field {
+                0 => malformed.session_id = SessionId::from_digest([0x44; 32]),
+                1 => malformed.destination_root[0] ^= 1,
+                2 => malformed.transfer_id.push('0'),
+                3 => malformed.control_seq = 0,
+                4 => malformed.receipt.committed = true,
+                5 => malformed.receipt.sha_ok = true,
+                6 => malformed.receipt.merkle_ok = true,
+                7 => malformed.receipt.bytes_received = 1,
+                8 => malformed.receipt.files = 1,
+                9 => malformed.receipt.symbols_accepted = 1,
+                10 => malformed.receipt.feedback_rounds = 1,
+                11 => malformed.receipt.decode_count = 1,
+                12 => malformed.receipt.decode_micros = 1,
+                13 => malformed
+                    .receipt
+                    .committed_paths
+                    .push("/destination".to_string()),
+                14 => malformed.receipt.reason = None,
+                15 => malformed.receipt.reason = Some(String::new()),
+                16 => {
+                    malformed.receipt.reason = Some("x".repeat(QUIC_REFUSAL_REASON_MAX_BYTES + 1));
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    validate_quic_delta_refusal(malformed, session, &prepared.manifest),
+                    Err(QuicTransportError::Control(_))
+                ),
+                "changed refusal field {changed_field} must be rejected"
+            );
+        }
+
+        let mut exact_limit = proof.clone();
+        let utf8_reason = "é".repeat(QUIC_REFUSAL_REASON_MAX_BYTES / 2);
+        exact_limit.receipt.reason = Some(utf8_reason.clone());
+        assert_eq!(
+            validate_quic_delta_refusal(exact_limit, session, &prepared.manifest)
+                .expect("reason limit counts bytes, not characters"),
+            utf8_reason
+        );
+
+        let mut early_success = proof;
+        early_success.receipt.committed = true;
+        early_success.receipt.sha_ok = true;
+        early_success.receipt.merkle_ok = true;
+        early_success.receipt.files = 1;
+        early_success.receipt.reason = None;
+        early_success.receipt.committed_paths = vec!["/destination/payload.bin".to_string()];
+        assert!(
+            validate_quic_delta_proof(early_success.clone(), session, &prepared.manifest).is_ok(),
+            "this proof is valid only after no-op admission and ObjectComplete"
+        );
+        assert!(matches!(
+            validate_quic_delta_refusal(early_success, session, &prepared.manifest),
+            Err(QuicTransportError::Control(_))
+        ));
+    }
+
+    #[test]
     fn quic_control_need_more_defaults_missing_source_symbols() {
         let frame = Frame::new(
             ProtocolVersion::CURRENT,
