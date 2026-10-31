@@ -156,6 +156,24 @@
             }
         }
 
+        /// The owned cancellation-Waker registrations on `cx`, by token.
+        ///
+        /// A direct drive registers its caller's cancellation wake on the
+        /// context it drives for exactly the length of the drive (7b7e852f9
+        /// for `block_on_with_cx`). Inside a drive, a client that leaks
+        /// nothing therefore leaves that one entry, not an empty registry.
+        fn cancel_waker_tokens(cx: &Cx) -> Vec<u64> {
+            let mut tokens: Vec<u64> = cx
+                .inner
+                .read()
+                .cancel_waker_registrations
+                .iter()
+                .map(|registration| registration.token)
+                .collect();
+            tokens.sort_unstable();
+            tokens
+        }
+
         struct UploadBody {
             frames: std::collections::VecDeque<Frame<crate::bytes::BytesCursor>>,
             exact: Option<u64>,
@@ -222,6 +240,8 @@
                     .request_timeout(Duration::from_secs(4))
                     .build();
                 runtime.block_on_with_cx(cx.clone(), async {
+                    let driver_wake = cancel_waker_tokens(&cx);
+                    assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
                     let body = UploadBody {
                         frames: [upload_data(b"abc"), upload_data(b"def")].into(),
                         exact: Some(6),
@@ -250,8 +270,9 @@
                     assert_eq!(client.pool_stats().idle_connections, 1);
                     assert_eq!(client.send_get(&cx, &format!("{url}/after")).await.unwrap().body, b"ok");
                     assert_eq!(client.pool_stats().total_connections, 0);
-                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                    assert_eq!(cancel_waker_tokens(&cx), driver_wake);
                 });
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
                 peer.join().unwrap();
                 assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
                 assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
@@ -538,6 +559,8 @@
                         .request_timeout(Duration::from_secs(4))
                         .build();
                     runtime.block_on_with_cx(cx.clone(), async {
+                        let driver_wake = cancel_waker_tokens(&cx);
+                        assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
                         for (index, token) in ["first", "second"].into_iter().enumerate() {
                             let body = UploadBody {
                                 frames: [upload_data(b"abc"), upload_data(b"def")].into(),
@@ -563,8 +586,9 @@
                             assert_eq!(client.pool_stats().total_connections, 0);
                             assert_eq!(client.pool_stats().idle_connections, 0);
                         }
-                        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                        assert_eq!(cancel_waker_tokens(&cx), driver_wake);
                     });
+                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
                     peer.join().unwrap();
                     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
                     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
@@ -602,6 +626,8 @@
                     .max_total_connections(1)
                     .request_timeout(Duration::from_secs(4)).build();
                 runtime.block_on_with_cx(cx.clone(), async {
+                    let driver_wake = cancel_waker_tokens(&cx);
+                    assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
                     let mut response = client.request_streaming_pooled(
                         &cx, Method::Get, "http://first.invalid/start",
                         vec![("Proxy-Authorization".into(), "Bearer proxy-only".into())],
@@ -610,8 +636,9 @@
                     assert_eq!(response.head.status, 200);
                     assert_eq!(drain(&mut response.body).await.unwrap(), b"ok");
                     assert_eq!(client.pool_stats().total_connections, 0);
-                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                    assert_eq!(cancel_waker_tokens(&cx), driver_wake);
                 });
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
                 peer.join().unwrap();
                 assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
                 assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
@@ -721,6 +748,8 @@
             let runtime = runtime(false);
             let owner = runtime.request_cx_with_budget(Budget::INFINITE);
             runtime.block_on_with_cx(owner.clone(), async {
+                let driver_wake = cancel_waker_tokens(&owner);
+                assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
                 let restricted = {
                     let _restriction = Cx::push_restriction(crate::cx::cap::CapMask::none());
                     Cx::current().unwrap()
@@ -741,8 +770,9 @@
                     assert_eq!(client.pool_stats().total_connections, 0);
                     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
                 }
-                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(cancel_waker_tokens(&owner), driver_wake);
             });
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
             assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
         }
 
@@ -800,6 +830,8 @@
                         .request_timeout(Duration::from_secs(4))
                         .build();
                     runtime.block_on_with_cx(cx.clone(), async {
+                        let driver_wake = cancel_waker_tokens(&cx);
+                        assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
                         let source = ReaderBody::with_capacity(crate::fs::File::from_std(file), 1024);
                         let part = MultipartBodyPart::stream("asset", source)
                             .filename("payload.bin")
@@ -837,8 +869,9 @@
                         assert_eq!(client.pool_stats().idle_connections, 1);
                         assert_eq!(client.send_get(&cx, &format!("{url}/after")).await.unwrap().status, 204);
                         assert_eq!(client.pool_stats().total_connections, 0);
-                        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                        assert_eq!(cancel_waker_tokens(&cx), driver_wake);
                     });
+                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
                     peer.join().unwrap();
                     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
                     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
@@ -994,6 +1027,8 @@
                     .request_timeout(Duration::from_secs(4))
                     .build();
                 runtime.block_on_with_cx(cx.clone(), async {
+                    let driver_wake = cancel_waker_tokens(&cx);
+                    assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
                     let mut first = client.request_streaming_pooled(&cx, Method::Get, &format!("{url}/first"), Vec::new(), Vec::new()).await.unwrap();
                     assert_eq!(client.pool_stats().total_connections, 1);
                     assert_eq!(client.pool_stats().idle_connections, 0);
@@ -1038,9 +1073,10 @@
                     assert_eq!(client.send_get(&cx, &format!("{url}/buffered")).await.unwrap().body, b"ok");
                     assert_eq!(client.pool_stats().total_connections, 1);
                     assert_eq!(client.pool_released.waiter_count(), 0);
-                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                    assert_eq!(cancel_waker_tokens(&cx), driver_wake);
                 });
                 drop(client);
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
                 peer.join().unwrap();
                 assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
                 assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
@@ -1187,6 +1223,8 @@
                 .default_header("Cookie", "session=origin")
                 .build();
             runtime.block_on_with_cx(cx.clone(), async {
+                let driver_wake = cancel_waker_tokens(&cx);
+                assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
                 let mut response = client
                     .request_streaming_pooled(
                         &cx,
@@ -1200,9 +1238,10 @@
                 assert_eq!(response.head.status, 200);
                 assert_eq!(drain(&mut response.body).await.unwrap(), b"done");
                 assert_eq!(client.pool_stats().connections_created, 2);
-                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(cancel_waker_tokens(&cx), driver_wake);
             });
             drop(client);
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
             origin.join().unwrap();
             other.join().unwrap();
             assert!(runtime.shutdown_timeout(Duration::from_secs(3)));

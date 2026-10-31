@@ -16,6 +16,23 @@ fn runtime(workers: usize) -> Runtime {
     builder.with_reactor(crate::runtime::reactor::create_reactor().unwrap()).build().unwrap()
 }
 
+/// The owned cancellation-Waker registrations on `cx`, by token.
+///
+/// `Runtime::block_on` registers its caller's cancellation wake on the root
+/// context it drives for exactly the length of the drive (d2322f15a), so a
+/// lookup that leaks nothing leaves that one entry on the polling root.
+fn cancel_waker_tokens(cx: &Cx) -> Vec<u64> {
+    let mut tokens: Vec<u64> = cx
+        .inner
+        .read()
+        .cancel_waker_registrations
+        .iter()
+        .map(|registration| registration.token)
+        .collect();
+    tokens.sort_unstable();
+    tokens
+}
+
 fn resolver(address: SocketAddr) -> Resolver {
     Resolver::with_config(ResolverConfig {
         nameservers: vec![address],
@@ -129,8 +146,10 @@ fn native_records_reject_unrelated_replies_and_share_positive_negative_ip_cache(
         });
         let runtime = runtime(workers);
         let resolver = resolver(address);
-        runtime.block_on(async {
+        let root = runtime.block_on(async {
             let cx = Cx::current().unwrap();
+            let driver_wake = cancel_waker_tokens(&cx);
+            assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
             let found = resolver.lookup_ip_native(&cx, "dual.example").await.unwrap();
             assert_eq!(found.addresses(), &[IpAddr::V6(Ipv6Addr::LOCALHOST), IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42))]);
             assert_eq!(found.ttl(), Duration::from_secs(45));
@@ -156,8 +175,10 @@ fn native_records_reject_unrelated_replies_and_share_positive_negative_ip_cache(
             assert!(matches!(resolver.lookup_ip_native(&cx, "absent.example").await, Err(DnsError::NoRecords(_))));
             assert_eq!(queries.load(Ordering::SeqCst), count);
             assert_eq!(resolver.cache_stats().hits, hits + 1);
-            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(cancel_waker_tokens(&cx), driver_wake);
+            cx
         });
+        assert!(root.inner.read().cancel_waker_registrations.is_empty());
         peer.join().unwrap();
         assert_eq!(queries.load(Ordering::SeqCst), 7);
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
@@ -194,12 +215,16 @@ fn native_dns_tcp_fallback_reads_fragmented_length_and_payload_then_closes() {
             closed(&mut stream);
         });
         let runtime = runtime(workers);
-        runtime.block_on(async {
+        let root = runtime.block_on(async {
             let cx = Cx::current().unwrap();
+            let driver_wake = cancel_waker_tokens(&cx);
+            assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
             let result = resolver(address).lookup_txt_native(&cx, "large.example").await.unwrap();
             assert_eq!(result.records().collect::<Vec<_>>(), ["x".repeat(1000).as_str()]);
-            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(cancel_waker_tokens(&cx), driver_wake);
+            cx
         });
+        assert!(root.inner.read().cancel_waker_registrations.is_empty());
         peer.join().unwrap();
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
     }
@@ -247,7 +272,9 @@ fn native_dns_parked_tcp_cancel_deadline_drop_and_authority_loss_retire_socket()
                     }
                 }))
             } else { None };
-            runtime.block_on(async {
+            let root = runtime.block_on(async {
+                let driver_wake = cancel_waker_tokens(&Cx::current().unwrap());
+                assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
                 let resolver = resolver(address);
                 let mut lookup = Box::pin(resolver.lookup_txt_native(&owner, "parked.example"));
                 let mut witnessed = false;
@@ -275,9 +302,11 @@ fn native_dns_parked_tcp_cancel_deadline_drop_and_authority_loss_retire_socket()
                 }
                 drop(lookup);
                 assert!(owner.inner.read().cancel_waker_registrations.is_empty());
-                assert!(Cx::current().unwrap().inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(cancel_waker_tokens(&Cx::current().unwrap()), driver_wake);
                 assert!(Cx::current().unwrap().checkpoint().is_ok(), "cancelling DNS must not cancel its polling task");
+                Cx::current().unwrap()
             });
+            assert!(root.inner.read().cancel_waker_registrations.is_empty());
             if let Some(controller) = controller { controller.join().unwrap(); }
             peer.join().unwrap();
             assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
