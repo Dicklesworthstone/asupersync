@@ -887,14 +887,14 @@ mod manifest_sink {
             } else {
                 Err(ScopedFsError::CapabilityDenied)
             };
-            admission.map_err(|source| io::Error::other(ManifestFileCancellationError {
+            admission.map_err(|source| Failure(Arc::new(io::Error::other(ManifestFileCancellationError {
                 // This invocation has not started a cancellation attempt. In
                 // particular, do not relabel a previous attempt's observation
                 // as the result of this rejected retry.
                 observation: None,
                 publication: self.journal_publication().cloned(),
                 source: io::Error::other(source),
-            }))
+            }))).repeat())
         }
 
         fn cancellation_result(&self) -> Option<io::Result<ManifestFileCancellation>> {
