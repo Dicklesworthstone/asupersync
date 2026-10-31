@@ -282,8 +282,29 @@ mod framed {
     use crate::runtime::{RootDrainOutcome, RuntimeBuilder, RuntimeHandle};
     use crate::trace::TraceEvent;
     use crate::types::ObligationId;
+    use crate::web::request_region::{RequestBudgetSource, ServerHopOutcome, ServerRequestRegion};
     use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
     use std::time::Duration;
+
+    /// Runs the holder's work the way `execute_owned_h2_body` runs a request.
+    ///
+    /// Native cancellation is cooperative: `TaskHandle::abort` wakes and
+    /// repolls a parked task but never destroys its future. The drop that
+    /// these tests observe comes from `run_with_protocol_drain`, whose backstop
+    /// drops a handler still pending after its grace. A caught panic is raised
+    /// again, so the join reports it as it does without the region.
+    async fn owned_hop<F: Future<Output = ()>>(owner: &Cx, work: F) {
+        let region = ServerRequestRegion::from_body_cx("h2", owner.clone(), owner.now());
+        let hop = region.run_with_protocol_drain(
+            RequestBudgetSource::Inherited,
+            Some(owner.clone()),
+            Duration::from_millis(20),
+            work,
+        ).await;
+        if let ServerHopOutcome::Panicked(message) = hop {
+            panic!("{message}");
+        }
+    }
 
     fn native<F, Fut>(scenario: F)
     where
@@ -451,7 +472,7 @@ mod framed {
                     &owner, None, 1, 8, 8,
                 ).unwrap();
                 source_tx.send_blocking((owner.clone(), writer, body)).unwrap();
-                guard.run(async {
+                owned_hop(&owner, guard.run(async {
                     let mut parked = Some(parked_tx);
                     if matches!(exit, Exit::Cancel | Exit::FailureThenCancel) {
                         // Deliberately cancellation-blind after an actual
@@ -478,7 +499,7 @@ mod framed {
                             panic!("framed holder panic after body ownership");
                         }
                     }
-                }).await;
+                })).await;
             }).unwrap();
             let (owner, mut writer, mut body) = source_rx.recv(&cx).await.unwrap();
             parked_rx.recv(&cx).await.unwrap();
@@ -582,11 +603,11 @@ mod framed {
                 &owner, None, 1, 8, 8,
             ).unwrap();
             source_tx.send_blocking((owner.clone(), writer)).unwrap();
-            guard.run(BodyOwnedWork {
+            owned_hop(&owner, guard.run(BodyOwnedWork {
                 body: Some(body),
                 parked: Some(parked_tx),
                 drops: work_drops,
-            }).await;
+            })).await;
         }).unwrap();
         let (owner, mut writer) = source_rx.recv(&cx).await.unwrap();
         parked_rx.recv(&cx).await.unwrap();
