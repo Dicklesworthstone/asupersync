@@ -4675,46 +4675,127 @@
 
     #[test]
     fn request_cancelled_while_parked_on_the_socket_reports_cancelled() {
-        use std::io::Write;
+        use crate::runtime::RuntimeBuilder;
+        use crate::types::Budget;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, mpsc};
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let addr = listener.local_addr().expect("listener address");
-        let (seen_tx, seen_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel::<()>();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let _ = read_http_head(&mut stream);
-            seen_tx.send(()).expect("report the request");
-            // Answer nothing until the request is cancelled, then make its
-            // parked read runnable. The read checks the ambient Cx first.
-            let _ = release_rx.recv_timeout(Duration::from_secs(10));
-            let _ = stream.write_all(b"H");
-            let _ = stream.flush();
-        });
+        for multithread in [false, true] {
+            for mode in ["buffered", "streaming", "tunnel"] {
+                let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+                let addr = listener.local_addr().expect("listener address");
+                listener.set_nonblocking(true).unwrap();
+                let (seen_tx, seen_rx) = mpsc::channel();
+                let (release_tx, release_rx) = mpsc::channel::<()>();
+                let server = std::thread::spawn(move || {
+                    let watchdog = Instant::now() + Duration::from_secs(5);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < watchdog, "client did not connect");
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(error) => panic!("accept request: {error}"),
+                        }
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let _ = read_http_head(&mut stream);
+                    seen_tx.send(()).expect("report the request");
+                    // Keep the socket quiet and open until AFTER the client
+                    // reports cancellation. No peer byte or close can wake it.
+                    let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                });
 
-        let client = Arc::new(HttpClient::builder().build());
-        let cx = Cx::for_testing();
-        let request_cx = cx.clone();
-        let request_client = Arc::clone(&client);
-        let url = format!("http://{addr}/parked");
-        let (done_tx, done_rx) = mpsc::channel();
-        let request = std::thread::spawn(move || {
-            // Socket reads observe the ambient Cx, as inside a runtime task.
-            let _ambient = Cx::set_current(Some(request_cx.clone()));
-            let _ = done_tx.send(block_on(request_client.send_get(&request_cx, &url)));
-        });
-        seen_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the request reached the server");
-        cx.set_cancel_requested(true);
-        let _ = release_tx.send(());
-        let result = done_rx.recv_timeout(Duration::from_secs(5));
-        server.join().expect("server thread");
-        request.join().expect("request thread");
-        let result = result.expect("the woken request observes its cancellation");
-        assert!(matches!(result, Err(ClientError::Cancelled)), "{result:?}");
+                let client = Arc::new(HttpClient::new());
+                let cx = Cx::for_testing();
+                let request_cx = cx.clone();
+                let request_client = Arc::clone(&client);
+                let url = format!("http://{addr}/parked");
+                let state = Arc::new(AtomicUsize::new(0));
+                let request_state = state.clone();
+                let (done_tx, done_rx) = mpsc::channel();
+                let request = std::thread::spawn(move || {
+                    let runtime = if multithread {
+                        RuntimeBuilder::new()
+                            .worker_threads(2)
+                            .with_sharded_state(true)
+                    } else {
+                        RuntimeBuilder::current_thread()
+                    }
+                    .build()
+                    .expect("build runtime");
+                    // The actual runtime driver has its own uncancelled Cx.
+                    // The explicit owner must wake the parked request itself.
+                    let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+                    let result = runtime.block_on_with_cx(driver, async {
+                        let mut exchange = std::pin::pin!(async {
+                            match mode {
+                                "buffered" => {
+                                    request_client.send_get(&request_cx, &url).await.map(|_| ())
+                                }
+                                "streaming" => request_client
+                                    .request_streaming(
+                                        &request_cx,
+                                        Method::Get,
+                                        &url,
+                                        Vec::new(),
+                                        Vec::new(),
+                                    )
+                                    .await
+                                    .map(|_| ()),
+                                _ => request_client
+                                    .connect_tunnel(
+                                        &request_cx,
+                                        &url,
+                                        "example.com:443",
+                                        Vec::new(),
+                                    )
+                                    .await
+                                    .map(|_| ()),
+                            }
+                        });
+                        poll_fn(|task| {
+                            request_state.store(1, Ordering::SeqCst);
+                            let result = exchange.as_mut().poll(task);
+                            request_state
+                                .store(if result.is_pending() { 2 } else { 3 }, Ordering::SeqCst);
+                            result
+                        })
+                        .await
+                    });
+                    let _ = done_tx.send(result);
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+                });
+                seen_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the request reached the server");
+                let watchdog = Instant::now() + Duration::from_secs(5);
+                while state.load(Ordering::SeqCst) != 2 {
+                    assert!(
+                        Instant::now() < watchdog,
+                        "{mode} never parked after sending its head"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                cx.set_cancel_requested(true);
+                let result = done_rx.recv_timeout(Duration::from_secs(5));
+                // Release even on a failing control so the fixture can join.
+                let _ = release_tx.send(());
+                server.join().expect("server thread");
+                request.join().expect("request thread");
+                let result = result.expect("the explicit owner must wake a silent-peer request");
+                assert!(
+                    matches!(result, Err(ClientError::Cancelled)),
+                    "{mode}: {result:?}"
+                );
+                assert_eq!(client.pool_stats().total_connections, 0);
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -5242,6 +5323,386 @@
         use crate::trace::event::{TraceData, TraceEventKind};
         use crate::types::Budget;
         use std::time::Duration;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        mod request_owner {
+            use super::*;
+            use crate::time::{TimerDriverHandle, VirtualClock};
+            use crate::types::{RegionId, TaskId};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::task::{Wake, Waker};
+            use std::time::Instant;
+
+            fn virtual_owner(
+                now: Time,
+                budget: Budget,
+                id: u32,
+            ) -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
+                let clock = Arc::new(VirtualClock::starting_at(now));
+                let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+                let cx = Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(id, 0),
+                    budget,
+                    None,
+                    None,
+                    None,
+                    Some(timer.clone()),
+                    None,
+                );
+                (cx, clock, timer)
+            }
+
+            struct WakeCount {
+                count: AtomicUsize,
+                thread: std::thread::Thread,
+            }
+
+            impl WakeCount {
+                fn new() -> Arc<Self> {
+                    Arc::new(Self {
+                        count: AtomicUsize::new(0),
+                        thread: std::thread::current(),
+                    })
+                }
+            }
+
+            impl Wake for WakeCount {
+                fn wake(self: Arc<Self>) {
+                    self.count.fetch_add(1, Ordering::SeqCst);
+                    self.thread.unpark();
+                }
+            }
+
+            #[test]
+            fn owner_timeout_binds_its_clock_and_preserves_ready_boundary_order() {
+                for foreign_now in [Time::ZERO, Time::from_secs(1_000_000)] {
+                    // Pending at the boundary, ready at the boundary, ready
+                    // after the boundary, and abandoned while still pending.
+                    for finish in 0..4 {
+                        let (owner, clock, timer) = virtual_owner(
+                            Time::from_nanos(100),
+                            Budget::INFINITE.with_deadline(Time::from_nanos(130)),
+                            90,
+                        );
+                        let (foreign, _, foreign_timer) =
+                            virtual_owner(foreign_now, Budget::INFINITE, 91);
+                        let foreign_id = foreign.task_id();
+                        let _ambient = Cx::set_current(Some(foreign));
+                        let ready = Cell::new(false);
+                        let polls = Cell::new(0);
+                        let inner = poll_fn(|_| {
+                            assert_eq!(
+                                Cx::current().unwrap().task_id(),
+                                foreign_id,
+                                "inner I/O retains the polling context"
+                            );
+                            polls.set(polls.get() + 1);
+                            if ready.get() {
+                                Poll::Ready(Ok(7_u8))
+                            } else {
+                                Poll::Pending
+                            }
+                        });
+                        let mut request = Box::pin(drive_with_budget_deadline(
+                            &owner,
+                            Some(Duration::from_nanos(20)),
+                            Some(Duration::from_nanos(10)),
+                            inner,
+                        ));
+                        let wakes = WakeCount::new();
+                        let waker = Waker::from(wakes.clone());
+                        let mut task = Context::from_waker(&waker);
+                        assert!(request.as_mut().poll(&mut task).is_pending());
+                        assert_eq!(timer.pending_count(), 1);
+                        assert_eq!(foreign_timer.pending_count(), 0);
+                        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+                        clock.advance(9);
+                        assert_eq!(timer.process_timers(), 0);
+                        assert!(request.as_mut().poll(&mut task).is_pending());
+                        assert_eq!(polls.get(), 2);
+                        if finish == 3 {
+                            drop(request);
+                        } else {
+                            ready.set(finish != 0);
+                            clock.advance(if finish == 2 { 2 } else { 1 });
+                            assert!(
+                                timer.process_timers() > 0,
+                                "the owner's timer must wake the parked exchange"
+                            );
+                            assert!(wakes.count.load(Ordering::SeqCst) > 0);
+                            let result = request.as_mut().poll(&mut task);
+                            if finish == 1 {
+                                assert!(matches!(result, Poll::Ready(Ok(7))));
+                            } else {
+                                assert!(matches!(
+                                    result,
+                                    Poll::Ready(Err(ClientError::DeadlineExceeded))
+                                ));
+                            }
+                            assert_eq!(polls.get(), if finish == 2 { 2 } else { 3 });
+                            drop(request);
+                        }
+                        assert_eq!(timer.pending_count(), 0);
+                        assert_eq!(foreign_timer.pending_count(), 0);
+                        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                        assert_eq!(Cx::current().unwrap().task_id(), foreign_id);
+                    }
+                }
+            }
+
+            #[test]
+            fn driverless_request_deadline_and_checkpoint_ignore_a_foreign_clock() {
+                for foreign_now in [Time::ZERO, Time::from_secs(1_000_000)] {
+                    let owner = cx_with_remaining(Duration::from_secs(30));
+                    assert!(owner.timer_driver().is_none());
+                    let (foreign, _, foreign_timer) =
+                        virtual_owner(foreign_now, Budget::INFINITE, 92);
+                    let foreign_id = foreign.task_id();
+                    let _ambient = Cx::set_current(Some(foreign));
+                    assert!(
+                        check_cx(&owner).is_ok(),
+                        "a foreign instant must not exhaust the explicit owner's budget"
+                    );
+                    let timeout = Duration::from_millis(250);
+                    let mut request = Box::pin(drive_with_budget_deadline(
+                        &owner,
+                        Some(timeout),
+                        None,
+                        std::future::pending::<Result<(), ClientError>>(),
+                    ));
+                    let wakes = WakeCount::new();
+                    let waker = Waker::from(wakes.clone());
+                    let mut task = Context::from_waker(&waker);
+                    let started = Instant::now();
+                    assert!(request.as_mut().poll(&mut task).is_pending());
+                    let watchdog = started + Duration::from_secs(3);
+                    let result = loop {
+                        match request.as_mut().poll(&mut task) {
+                            Poll::Ready(result) => break result,
+                            Poll::Pending => {
+                                assert_eq!(Cx::current().unwrap().task_id(), foreign_id);
+                                let remaining = watchdog.saturating_duration_since(Instant::now());
+                                assert!(
+                                    !remaining.is_zero(),
+                                    "the owner's wall-clock deadline never fired"
+                                );
+                                std::thread::park_timeout(remaining);
+                            }
+                        }
+                    };
+                    assert!(matches!(result, Err(ClientError::DeadlineExceeded)));
+                    assert!(started.elapsed() >= timeout);
+                    assert!(
+                        wakes.count.load(Ordering::SeqCst) > 0,
+                        "the fallback timer must wake the parked request"
+                    );
+                    assert_eq!(foreign_timer.pending_count(), 0);
+                    assert!(!owner.is_cancel_requested());
+                    assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                    assert_eq!(Cx::current().unwrap().task_id(), foreign_id);
+                }
+            }
+
+            #[test]
+            fn owner_cancellation_wakes_an_unbounded_exchange_and_respects_masking() {
+                let (owner, _, timer) = virtual_owner(Time::from_nanos(100), Budget::INFINITE, 93);
+                let (foreign, _, foreign_timer) =
+                    virtual_owner(Time::from_secs(1_000_000), Budget::INFINITE, 94);
+                let foreign_id = foreign.task_id();
+                let _ambient = Cx::set_current(Some(foreign));
+                let mut request = Box::pin(drive_with_budget_deadline(
+                    &owner,
+                    None,
+                    None,
+                    std::future::pending::<Result<(), ClientError>>(),
+                ));
+                let wakes = WakeCount::new();
+                let waker = Waker::from(wakes.clone());
+                let mut task = Context::from_waker(&waker);
+                assert!(request.as_mut().poll(&mut task).is_pending());
+                assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+                owner.masked(|| {
+                    owner.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("explicit request owner"),
+                    );
+                    assert!(wakes.count.load(Ordering::SeqCst) > 0);
+                    assert!(request.as_mut().poll(&mut task).is_pending());
+                    assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+                });
+                assert!(matches!(
+                    request.as_mut().poll(&mut task),
+                    Poll::Ready(Err(ClientError::Cancelled))
+                ));
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(timer.pending_count(), 0);
+                assert_eq!(foreign_timer.pending_count(), 0);
+                assert_eq!(Cx::current().unwrap().task_id(), foreign_id);
+            }
+
+            #[test]
+            fn retry_backoff_keeps_the_original_total_deadline_on_the_owner_clock() {
+                let (owner, clock, timer) =
+                    virtual_owner(Time::from_nanos(100), Budget::INFINITE, 95);
+                let (foreign, _, foreign_timer) =
+                    virtual_owner(Time::from_secs(1_000_000), Budget::INFINITE, 96);
+                // A cancelled polling task must not make the owner's backoff
+                // sleep report success before its delay has elapsed.
+                foreign.cancel_with(crate::types::CancelKind::User, Some("unrelated task"));
+                let _ambient = Cx::set_current(Some(foreign));
+                let retries = Cell::new(0);
+                let exchange = async {
+                    sleep_before_retry(&owner, Duration::from_nanos(10)).await?;
+                    retries.set(retries.get() + 1);
+                    sleep_before_retry(&owner, Duration::from_nanos(10)).await?;
+                    retries.set(retries.get() + 1);
+                    Ok(())
+                };
+                let mut request = Box::pin(drive_with_budget_deadline(
+                    &owner,
+                    Some(Duration::from_nanos(15)),
+                    None,
+                    exchange,
+                ));
+                let wakes = WakeCount::new();
+                let waker = Waker::from(wakes.clone());
+                let mut task = Context::from_waker(&waker);
+                assert!(request.as_mut().poll(&mut task).is_pending());
+                assert_eq!(
+                    timer.pending_count(),
+                    2,
+                    "total deadline and backoff each retain a timer"
+                );
+                clock.advance(9);
+                assert_eq!(timer.process_timers(), 0);
+                assert!(request.as_mut().poll(&mut task).is_pending());
+                assert_eq!(retries.get(), 0);
+                clock.advance(1);
+                assert!(timer.process_timers() > 0);
+                assert!(request.as_mut().poll(&mut task).is_pending());
+                assert_eq!(retries.get(), 1);
+                clock.advance(5);
+                assert!(timer.process_timers() > 0);
+                assert!(matches!(
+                    request.as_mut().poll(&mut task),
+                    Poll::Ready(Err(ClientError::DeadlineExceeded))
+                ));
+                assert_eq!(
+                    retries.get(),
+                    1,
+                    "a retry must not reset the total deadline"
+                );
+                assert_eq!(timer.pending_count(), 0);
+                assert_eq!(foreign_timer.pending_count(), 0);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            }
+
+            #[test]
+            fn buffered_pool_wait_uses_owner_time_and_keeps_its_original_deadline() {
+                let client = HttpClient::builder()
+                    .max_connections_per_host(1)
+                    .pool_wait_timeout(Duration::from_nanos(10))
+                    .request_timeout(Duration::from_nanos(20))
+                    .build();
+                let url = "http://127.0.0.1:9/occupied";
+                let key = ParsedUrl::parse(url).unwrap().pool_key();
+                let holder =
+                    client
+                        .pool
+                        .lock()
+                        .register_connecting(key.clone(), client.pool_now(), 1);
+                let (owner, clock, timer) =
+                    virtual_owner(Time::from_nanos(100), Budget::INFINITE, 97);
+                let (foreign, _, foreign_timer) =
+                    virtual_owner(Time::from_secs(1_000_000), Budget::INFINITE, 98);
+                let foreign_id = foreign.task_id();
+                let _ambient = Cx::set_current(Some(foreign));
+                let mut request = Box::pin(client.send_get(&owner, url));
+                let wakes = WakeCount::new();
+                let waker = Waker::from(wakes.clone());
+                let mut task = Context::from_waker(&waker);
+                assert!(request.as_mut().poll(&mut task).is_pending());
+                assert_eq!(client.pool_released.waiter_count(), 1);
+                assert_eq!(timer.pending_count(), 2);
+                assert_eq!(foreign_timer.pending_count(), 0);
+                clock.advance(9);
+                assert_eq!(timer.process_timers(), 0);
+                client.pool_released.notify_waiters();
+                assert!(request.as_mut().poll(&mut task).is_pending());
+                assert_eq!(client.pool_released.waiter_count(), 1);
+                clock.advance(1);
+                assert!(timer.process_timers() > 0);
+                assert!(matches!(
+                    request.as_mut().poll(&mut task),
+                    Poll::Ready(Err(ClientError::PoolExhausted { .. }))
+                ));
+                assert_eq!(client.pool_released.waiter_count(), 0);
+                assert_eq!(
+                    client.pool_stats().total_connections,
+                    1,
+                    "the timed-out waiter cannot remove another request's slot"
+                );
+                assert!(
+                    client
+                        .pool
+                        .lock()
+                        .get_connection_meta(&key, holder)
+                        .is_some()
+                );
+                assert_eq!(timer.pending_count(), 0);
+                assert_eq!(foreign_timer.pending_count(), 0);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(Cx::current().unwrap().task_id(), foreign_id);
+            }
+
+            #[test]
+            fn legacy_requests_require_both_owner_and_polling_io_authority() {
+                let owner = Cx::for_testing();
+                let _ambient = Cx::set_current(Some(owner.clone()));
+                let restricted = {
+                    let _restriction = Cx::push_restriction(crate::cx::cap::CapMask::none());
+                    Cx::current().unwrap()
+                };
+                for restricted_owner in [false, true] {
+                    let (explicit, polling) = if restricted_owner {
+                        (&restricted, owner.clone())
+                    } else {
+                        (&owner, restricted.clone())
+                    };
+                    let _polling = Cx::set_current(Some(polling));
+                    for mode in ["buffered", "streaming", "tunnel"] {
+                        let client = HttpClient::new();
+                        let url = "http://127.0.0.1:9/unauthorized";
+                        let mut request = Box::pin(async {
+                            match mode {
+                                "buffered" => client.send_get(explicit, url).await.map(|_| ()),
+                                "streaming" => client
+                                    .request_streaming(
+                                        explicit,
+                                        Method::Get,
+                                        url,
+                                        Vec::new(),
+                                        Vec::new(),
+                                    )
+                                    .await
+                                    .map(|_| ()),
+                                _ => client
+                                    .connect_tunnel(explicit, url, "example.com:443", Vec::new())
+                                    .await
+                                    .map(|_| ()),
+                            }
+                        });
+                        let mut task = Context::from_waker(Waker::noop());
+                        assert!(
+                            matches!(request.as_mut().poll(&mut task), Poll::Ready(Err(ClientError::Io(error))) if error.kind() == io::ErrorKind::PermissionDenied)
+                        );
+                        assert_eq!(client.pool_stats().total_connections, 0);
+                        assert!(explicit.inner.read().cancel_waker_registrations.is_empty());
+                    }
+                }
+            }
+        }
 
         fn runtime_block_on<F: std::future::Future>(fut: F) -> F::Output {
             RuntimeBuilder::current_thread()
