@@ -605,7 +605,7 @@ expression: inventory
 1	Spawn	runtime/builder.rs	std::thread::Builder	let thread = std::thread::Builder::new()
 2	Spawn	runtime/builder.rs	std::thread::Builder	std::thread::Builder::new()
 1	Spawn	runtime/resource_monitor.rs	std::thread::Builder	let thread = std::thread::Builder::new()
-1	Spawn	runtime/spawn_blocking.rs	thread::Builder	let thread_result = thread::Builder::new()
+1	Spawn	runtime/spawn_blocking.rs	thread::Builder	thread::Builder::new()
 2	Spawn	signal/shutdown.rs	std::thread::Builder	std::thread::Builder::new()
 1	Spawn	signal/signal.rs	thread::Builder	let poller_handle = thread::Builder::new()
 1	Spawn	signal/signal.rs	thread::Builder	thread::Builder::new()
