@@ -4666,6 +4666,7 @@ impl<Caps> Cx<Caps> {
             requirements: spec.requirements,
             priority: spec.priority,
             principal_task_id,
+            opener_task_id: self.task_id(),
             slot: std::sync::Arc::clone(&slot),
             parent_fallback: self.inner.read().spawn_fallback_region,
         };

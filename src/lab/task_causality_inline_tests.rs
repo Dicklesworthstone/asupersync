@@ -256,7 +256,10 @@ fn child_region_principal_shares_its_live_tasks_clock() {
                 .open_child_region(crate::cx::ChildRegionSpec::inherit())
                 .await
                 .unwrap();
-            assert_eq!(cx.task_id(), child.cx().task_id());
+            // The principal carries a provisional mailbox id that no task record
+            // holds (CreateRegionRequest::principal_task_id, 383998796/9e07b33b6).
+            // It shares the live opener's clock, not its id.
+            assert_ne!(cx.task_id(), child.cx().task_id());
             let before = cx.logical_tick();
             let principal = child.cx().logical_tick();
             let after = cx.logical_tick();

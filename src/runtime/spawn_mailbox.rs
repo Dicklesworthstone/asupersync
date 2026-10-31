@@ -1529,6 +1529,10 @@ pub(crate) struct CreateRegionRequest {
     /// task record carries it; body work spawned through the child context
     /// mints its own canonical records at admission.
     pub(crate) principal_task_id: TaskId,
+    /// Task id of the context that opened the child. Under task causality
+    /// the principal shares that live task's logical clock; it is not the
+    /// principal's identity.
+    pub(crate) opener_task_id: TaskId,
     pub(crate) slot: Arc<AdmittedRegionSlot>,
     /// Where the child is minted once `parent` has closed: the caller's
     /// spawn fallback (`Cx::spawn_fallback_for`), so a race winner's context
