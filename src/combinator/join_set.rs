@@ -439,6 +439,9 @@ where
     /// joined so the caller observes the final [`Outcome`] for each child. This
     /// is the explicit counterpart to drop's best-effort cancellation request:
     /// `cancel_all` waits for the handles it owns before returning.
+    /// As with [`TaskHandle::abort`], cancellation is cooperative: a member
+    /// cancelled before its first poll, even one still awaiting admission, is
+    /// still polled and observes the request at its first checkpoint.
     pub async fn cancel_all(self, cx: &Cx) -> Vec<Outcome<T, E>> {
         self.cancel_all_with_reason(cx, CancelReason::user("abort"))
             .await
