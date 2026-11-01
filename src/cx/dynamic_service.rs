@@ -343,11 +343,33 @@ enum Work<E> {
     Tree(ManagedSupervisor<E>),
     Worker(DynamicWorkerConfig, Box<dyn ManagedChildFactory<E>>),
 }
+
+impl<E> Work<E> {
+    fn retire(self, panics: &mut ShutdownPanics) {
+        match self {
+            Self::Tree(supervisor) => {
+                supervisor.retire_unstarted(|payload| panics.record(payload));
+            }
+            Self::Worker(config, factory) => panics.run(move || drop((config, factory))),
+        }
+    }
+}
+
 enum Operation<E> {
     Ready,
     Start(ChildName, Work<E>),
     Wait(DynamicChildId),
 }
+
+impl<E> Operation<E> {
+    fn retire(self, panics: &mut ShutdownPanics) {
+        match self {
+            Self::Start(_, work) => work.retire(panics),
+            operation => panics.run(move || drop(operation)),
+        }
+    }
+}
+
 struct Route {
     info: DynamicServiceChildInfo,
     stop: Arc<AtomicBool>,
@@ -366,13 +388,17 @@ struct Shared<E> {
 }
 impl<E> Shared<E> {
     fn close(&self) {
+        let mut panics = ShutdownPanics::new();
+        self.close_with_panics(&mut panics);
+    }
+
+    fn close_with_panics(&self, panics: &mut ShutdownPanics) {
         self.signal.closed.store(true, Ordering::Release);
         let (queued, requests) = {
             let mut mailbox = self.mailbox.lock();
             let requests: Vec<_> = mailbox.requests.iter().filter_map(Weak::upgrade).collect();
             (std::mem::take(&mut mailbox.queue), requests)
         };
-        let mut panics = ShutdownPanics::new();
         // Also wake requests already removed from the queue (including a panic
         // during a wait or admission), not only those still in the mailbox.
         for request in requests {
@@ -385,12 +411,7 @@ impl<E> Shared<E> {
         // into another factory's destructor and abort before the remaining
         // requests or controller are notified (br-asupersync-pk44qd).
         for (operation, request) in queued {
-            match operation {
-                Operation::Start(_, Work::Tree(supervisor)) => {
-                    supervisor.retire_unstarted(|payload| panics.record(payload));
-                }
-                operation => panics.run(move || drop(operation)),
-            }
+            operation.retire(panics);
             // A last request Arc can independently retire a retained result or
             // Waker; never drop it while unwinding its operation's destructor.
             panics.run(move || drop(request));
@@ -590,8 +611,12 @@ impl Cx {
         let publication = Arc::clone(&report);
         let task = self.spawn(move |cx| async move {
             let _lifetime = lifetime;
-            let result = serve(&cx, config, &_lifetime.0).await;
-            _lifetime.0.close();
+            // Retiring an abandoned/refused queued factory can fail. Retain
+            // that panic until accepted children drain and their real shutdown
+            // report is published; the task still terminates as Panicked.
+            let mut panics = ShutdownPanics::new();
+            let result = serve(&cx, config, &_lifetime.0, &mut panics).await;
+            _lifetime.0.close_with_panics(&mut panics);
             *publication.lock() = Some(result);
         }).map_err(DynamicControlError::Spawn)?;
         Ok(DynamicServiceHandle { task, client: DynamicSupervisorClient { shared }, report })
@@ -610,6 +635,7 @@ struct Delivery<E> { id: DynamicChildId, request: Arc<Request<E>> }
 
 async fn serve<E: Send + 'static>(
     cx: &Cx, config: DynamicServiceConfig, shared: &Arc<Shared<E>>,
+    panics: &mut ShutdownPanics,
 ) -> Result<DynamicSupervisorReport<E>, Arc<DynamicSupervisorError>> {
     if shared.signal.stopping.load(Ordering::Acquire) {
         return Err(Arc::new(DynamicSupervisorError::Closing));
@@ -709,7 +735,13 @@ async fn serve<E: Send + 'static>(
             Poll::Pending
         }).await;
         let Some((operation, request)) = next else { break; };
-        if !request.disposition().0 {
+        if request.disposition().0 {
+            // An abandoned public start still owns its whole queued tree.
+            // Dispose it like shutdown, outside the mailbox lock and without
+            // unwinding across the other factories or its request credit.
+            operation.retire(panics);
+            panics.run(move || drop(request));
+        } else {
             match operation {
                 Operation::Ready => request.finish(Ok(Response::Ready(owner.region_id()))),
                 Operation::Wait(id) => {
@@ -717,32 +749,74 @@ async fn serve<E: Send + 'static>(
                     // The next iteration inspects the retained result before parking.
                 }
                 Operation::Start(name, work) => {
-                    let result = if records.contains_key(name.as_str()) {
-                        Err(DynamicSupervisorError::DuplicateName)
+                    let refusal = if name.is_empty() || name.len() > 255 {
+                        Some(DynamicSupervisorError::InvalidName)
+                    } else if records.contains_key(name.as_str()) {
+                        Some(DynamicSupervisorError::DuplicateName)
                     } else if records.len() >= owner.capacity() {
-                        Err(DynamicSupervisorError::Capacity)
+                        Some(DynamicSupervisorError::Capacity)
                     } else {
-                        match work {
-                            Work::Tree(supervisor) => owner.start_child(name.clone(), supervisor).await,
-                            Work::Worker(config, factory) => owner.start_worker(name.clone(), config,
-                                move |cx, generation| factory.start(cx, generation)).await,
-                        }
+                        None
                     };
-                    match result {
-                        Err(error) => request.finish(Err(DynamicControlError::Child(Arc::new(error)))),
-                        Ok(id) => {
-                            let stop = Arc::new(AtomicBool::new(false));
-                            shared.mailbox.lock().routes.insert(name.clone(), Route {
-                                info: DynamicServiceChildInfo { id: id.clone(), state: DynamicServiceChildState::Live(DynamicChildState::Submitted) },
-                                stop: Arc::clone(&stop),
-                            });
-                            records.insert(name, Record { id: id.clone(), stop, completion: None, failure: None, forgotten_start: false, stop_sent: false });
-                            request.finish(Ok(Response::Started(id.clone())));
-                            deliveries.push(Delivery { id, request });
+                    if let Some(error) = refusal {
+                        request.finish(Err(DynamicControlError::Child(Arc::new(error))));
+                        work.retire(panics);
+                        panics.run(move || drop(request));
+                    } else {
+                        let result = match work {
+                            Work::Tree(supervisor) => {
+                                owner.start_child(name.clone(), supervisor).await
+                            }
+                            Work::Worker(config, factory) => {
+                                owner
+                                    .start_worker(name.clone(), config, move |cx, generation| {
+                                        factory.start(cx, generation)
+                                    })
+                                    .await
+                            }
+                        };
+                        match result {
+                            Err(error) => {
+                                request.finish(Err(DynamicControlError::Child(Arc::new(error))));
+                            }
+                            Ok(id) => {
+                                let stop = Arc::new(AtomicBool::new(false));
+                                shared.mailbox.lock().routes.insert(
+                                    name.clone(),
+                                    Route {
+                                        info: DynamicServiceChildInfo {
+                                            id: id.clone(),
+                                            state: DynamicServiceChildState::Live(
+                                                DynamicChildState::Submitted,
+                                            ),
+                                        },
+                                        stop: Arc::clone(&stop),
+                                    },
+                                );
+                                records.insert(
+                                    name,
+                                    Record {
+                                        id: id.clone(),
+                                        stop,
+                                        completion: None,
+                                        failure: None,
+                                        forgotten_start: false,
+                                        stop_sent: false,
+                                    },
+                                );
+                                request.finish(Ok(Response::Started(id.clone())));
+                                deliveries.push(Delivery { id, request });
+                            }
                         }
                     }
                 }
             }
+        }
+        if panics.first.is_some() {
+            // No more admission after a disposal failure. The ordinary close
+            // path below notifies the remaining requests and drains accepted
+            // work before the controller's outer panic collector unwinds.
+            break;
         }
         commands += 1;
         if commands == 32 {
@@ -750,7 +824,7 @@ async fn serve<E: Send + 'static>(
             crate::runtime::yield_now().await;
         }
     }
-    shared.close();
+    shared.close_with_panics(panics);
     for (_, request) in waits { request.finish(Err(DynamicControlError::Closed)); }
     // Existing owner shutdown starts every stop before polling all boundary closes.
     let mut report = owner.shutdown().await;

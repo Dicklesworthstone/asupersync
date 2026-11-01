@@ -321,6 +321,7 @@ struct QueuedFactory {
     dropped: Arc<AtomicUsize>,
     shared: Weak<Shared<()>>,
     panic_on_drop: bool,
+    expect_shutdown: bool,
 }
 
 impl QueuedFactory {
@@ -337,6 +338,7 @@ impl QueuedFactory {
             dropped: Arc::clone(dropped),
             shared: Arc::downgrade(&client.shared),
             panic_on_drop,
+            expect_shutdown: true,
         }
     }
 
@@ -368,12 +370,14 @@ impl Drop for QueuedFactory {
     fn drop(&mut self) {
         self.dropped.fetch_add(1, Ordering::SeqCst);
         let shared = self.shared.upgrade().expect("service still owns shutdown");
-        assert!(shared.signal.closed.load(Ordering::Acquire));
         let mailbox = shared.mailbox.try_lock().expect("factory retires unlocked");
-        assert!(
-            mailbox.queue.is_empty(),
-            "detach the complete batch before callbacks"
-        );
+        if self.expect_shutdown {
+            assert!(shared.signal.closed.load(Ordering::Acquire));
+            assert!(
+                mailbox.queue.is_empty(),
+                "detach the complete batch before callbacks"
+            );
+        }
         drop(mailbox);
         assert!(!self.panic_on_drop, "queued factory {}", self.label);
     }
@@ -646,4 +650,154 @@ fn closing_contains_wake_and_final_waker_retirement_panics() {
     ));
     assert_eq!(client.outstanding_requests(), 0);
     eprintln!("dynamic_service_shutdown case=panicking_wakers wakes=2 retired=2 requests=0");
+}
+
+fn panicking_tree_for_dequeue(
+    client: &DynamicSupervisorClient<()>,
+    started: &Arc<AtomicUsize>,
+    dropped: &Arc<AtomicUsize>,
+) -> ManagedSupervisor<()> {
+    let mut builder =
+        SupervisorBuilder::new("dequeued-tree").with_restart_policy(RestartPolicy::OneForOne);
+    let mut bindings = Vec::new();
+    for (name, legacy, factory) in [
+        ("first", "legacy-first", "factory-first"),
+        ("second", "legacy-second", "factory-second"),
+    ] {
+        let mut legacy = QueuedFactory::new(client, started, dropped, legacy, true);
+        legacy.expect_shutdown = false;
+        builder = builder.child(ChildSpec::new(name, legacy));
+        let mut factory = QueuedFactory::new(client, started, dropped, factory, true);
+        factory.expect_shutdown = false;
+        bindings.push(ManagedChildBinding::new(
+            name,
+            ManagedRestartMode::Temporary,
+            factory,
+        ));
+    }
+    builder
+        .compile()
+        .unwrap()
+        .bind_managed(
+            bindings,
+            SupervisionConfig::new(0, Duration::from_secs(60))
+                .with_restart_policy(RestartPolicy::OneForOne),
+        )
+        .unwrap()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn abandoned_or_refused_queued_trees_drain_accepted_work_before_panicking() {
+    for case in [
+        "abandoned",
+        "capacity",
+        "duplicate",
+        "invalid-empty",
+        "invalid-long",
+    ] {
+        run_case(move |cx| async move {
+            let max_children = if matches!(case, "invalid-empty" | "invalid-long") {
+                2
+            } else {
+                1
+            };
+            let service = cx
+                .spawn_dynamic_supervisor_service::<()>(DynamicServiceConfig::new(max_children, 3))
+                .unwrap();
+            let client = service.client();
+            let running = Arc::new(AtomicBool::new(false));
+            let cleaned = Arc::new(AtomicBool::new(false));
+            let entered = Arc::clone(&running);
+            let completed = Arc::clone(&cleaned);
+            client
+                .start_worker(&cx, "live", config(), move |cx: Cx, _: ManagedGeneration| {
+                    let entered = Arc::clone(&entered);
+                    let completed = Arc::clone(&completed);
+                    async move {
+                        entered.store(true, Ordering::Release);
+                        cx.cancelled().await;
+                        // The controller must keep driving real asynchronous
+                        // cleanup before publishing its own disposal panic.
+                        crate::runtime::yield_now().await;
+                        completed.store(true, Ordering::Release);
+                        Outcome::<(), ()>::Cancelled(cx.cancel_reason().unwrap())
+                    }
+                })
+                .await
+                .unwrap();
+            eventually(|| running.load(Ordering::Acquire)).await;
+            let started = Arc::new(AtomicUsize::new(0));
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let tree = panicking_tree_for_dequeue(&client, &started, &dropped);
+            let name = match case {
+                "duplicate" => "live".to_owned(),
+                "invalid-empty" => String::new(),
+                "invalid-long" => "x".repeat(256),
+                _ => "queued".to_owned(),
+            };
+            let mut pending = Some(Box::pin(client.start_child(&cx, name, tree)));
+            let notified = Arc::new(CountWake::default());
+            let waker = Waker::from(Arc::clone(&notified));
+            assert!(
+                pending
+                    .as_mut()
+                    .unwrap()
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            if case == "abandoned" {
+                drop(pending.take());
+            }
+            let mut queued_ready = client.submit(&cx, Operation::Ready).unwrap();
+            assert!(
+                Pin::new(&mut queued_ready)
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+
+            // Unlike explicit shutdown, join never requests the stop. The
+            // controller itself must discover the disposal failure and drain.
+            let exit = service.join().await;
+            let Err(JoinError::Panicked(payload)) = exit.task_outcome else {
+                panic!("{case}: queued disposal must remain a controller panic");
+            };
+            assert_eq!(payload.message(), "queued factory legacy-first", "{case}");
+            assert!(
+                cleaned.load(Ordering::Acquire),
+                "{case}: cleanup crossed Pending"
+            );
+            let mut report = exit.report.expect("shutdown report precedes panic").unwrap();
+            assert!(report.close.is_ok(), "{case}");
+            assert_eq!(report.children.len(), 1, "{case}");
+            stopped(report.children.pop().unwrap());
+            assert_eq!(started.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(dropped.load(Ordering::SeqCst), 4, "{case}");
+            assert!(client.is_closed());
+            assert!(client.children().is_empty());
+            if let Some(mut pending) = pending {
+                let Poll::Ready(Err(DynamicControlError::Child(error))) =
+                    pending.as_mut().poll(&mut Context::from_waker(&waker))
+                else {
+                    panic!("{case}: preserve the queued admission refusal");
+                };
+                assert!(matches!(
+                    (case, error.as_ref()),
+                    ("capacity", DynamicSupervisorError::Capacity)
+                        | ("duplicate", DynamicSupervisorError::DuplicateName)
+                        | ("invalid-empty" | "invalid-long", DynamicSupervisorError::InvalidName)
+                ));
+            }
+            assert!(matches!(
+                Pin::new(&mut queued_ready).poll(&mut Context::from_waker(&waker)),
+                Poll::Ready(Err(DynamicControlError::Closed))
+            ));
+            assert_eq!(client.outstanding_requests(), 0, "{case}");
+            eprintln!(
+                "dynamic_service_dequeue case={case} queued_started=0 retired=4 \
+                 accepted_drained=1 requests=0"
+            );
+        });
+    }
 }
