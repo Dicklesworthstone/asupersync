@@ -119,6 +119,59 @@ fn callback(action: impl FnOnce()) {
     }
 }
 
+fn wake_callback(waker: Option<Waker>) {
+    if let Some(waker) = waker {
+        // Keep ownership until the wake callback has returned or unwound. A
+        // consuming wake can otherwise run a second panicking destructor while
+        // unwinding the first callback, before callback() can contain either.
+        callback(|| waker.wake_by_ref());
+        callback(|| drop(waker));
+    }
+}
+
+// As with checked pool cleanup, independent owned captures must all retire
+// before the first destructor panic is resumed. During an existing unwind,
+// cleanup failures cannot replace the original failure or abort the process.
+struct ShutdownPanics {
+    already_unwinding: bool,
+    first: Option<Box<dyn std::any::Any + Send>>,
+}
+
+impl ShutdownPanics {
+    fn new() -> Self {
+        Self {
+            already_unwinding: std::thread::panicking(),
+            first: None,
+        }
+    }
+
+    fn record(&mut self, payload: Box<dyn std::any::Any + Send>) {
+        if self.already_unwinding || self.first.is_some() {
+            std::mem::forget(payload);
+        } else {
+            self.first = Some(payload);
+        }
+    }
+
+    fn run(&mut self, action: impl FnOnce()) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+            self.record(payload);
+        }
+    }
+}
+
+impl Drop for ShutdownPanics {
+    fn drop(&mut self) {
+        if let Some(payload) = self.first.take() {
+            if std::thread::panicking() {
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct Signal {
     waker: Mutex<Option<Waker>>,
@@ -134,7 +187,7 @@ impl Signal {
     }
     fn notify(&self) {
         let wake = self.waker.lock().take();
-        callback(|| { if let Some(waker) = wake { waker.wake(); } });
+        wake_callback(wake);
     }
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
@@ -217,7 +270,7 @@ impl<E> Request<E> {
             }
         };
         drop(value);
-        callback(|| { if let Some(waker) = wake { waker.wake(); } });
+        wake_callback(wake);
     }
 }
 
@@ -319,11 +372,30 @@ impl<E> Shared<E> {
             let requests: Vec<_> = mailbox.requests.iter().filter_map(Weak::upgrade).collect();
             (std::mem::take(&mut mailbox.queue), requests)
         };
+        let mut panics = ShutdownPanics::new();
         // Also wake requests already removed from the queue (including a panic
         // during a wait or admission), not only those still in the mailbox.
-        for request in requests { request.finish(Err(DynamicControlError::Closed)); }
-        drop(queued);
-        self.signal.notify();
+        for request in requests {
+            panics.run(move || {
+                request.finish(Err(DynamicControlError::Closed));
+                drop(request);
+            });
+        }
+        // Each queued start owns application factories. A batch drop can unwind
+        // into another factory's destructor and abort before the remaining
+        // requests or controller are notified (br-asupersync-pk44qd).
+        for (operation, request) in queued {
+            match operation {
+                Operation::Start(_, Work::Tree(supervisor)) => {
+                    supervisor.retire_unstarted(|payload| panics.record(payload));
+                }
+                operation => panics.run(move || drop(operation)),
+            }
+            // A last request Arc can independently retire a retained result or
+            // Waker; never drop it while unwinding its operation's destructor.
+            panics.run(move || drop(request));
+        }
+        panics.run(|| self.signal.notify());
     }
 }
 
@@ -462,11 +534,12 @@ impl<E> DynamicServiceHandle<E> {
     pub fn task_id(&self) -> TaskId { self.task.task_id() }
     /// Out-of-band graceful shutdown; cannot be refused by a full request mailbox.
     pub fn request_shutdown(&self) {
-        self.client.shared.signal.stop();
-        self.client.shared.close();
+        let mut panics = ShutdownPanics::new();
+        panics.run(|| self.client.shared.signal.stop());
+        panics.run(|| self.client.shared.close());
         // Task abort is the runtime's cooperative cancellation protocol. It
         // also fences a region admission currently awaiting its mint result.
-        self.task.abort();
+        panics.run(|| self.task.abort());
     }
     /// Await the actual task terminal and preserve any report published before it.
     pub async fn join(mut self) -> DynamicServiceExit<E> {

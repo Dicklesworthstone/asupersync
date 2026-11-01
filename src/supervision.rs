@@ -3806,6 +3806,43 @@ mod managed {
         ) {
             self.shared_restarts = Some(domain);
         }
+
+        /// Retire an unsubmitted tree without unwinding across independent
+        /// factory captures. The caller owns the first-panic policy and still
+        /// owes its other queued requests and shutdown notifications.
+        ///
+        /// No start or retirement hook is invoked: queued ownership disposal
+        /// does not establish an admitted generation or a quiescence receipt.
+        pub(crate) fn retire_unstarted(
+            mut self,
+            mut on_panic: impl FnMut(Box<dyn std::any::Any + Send>),
+        ) {
+            fn retire<T>(value: T, on_panic: &mut impl FnMut(Box<dyn std::any::Any + Send>)) {
+                if let Err(payload) = catch_unwind(AssertUnwindSafe(move || drop(value))) {
+                    on_panic(payload);
+                }
+            }
+
+            // The compiled topology retains legacy start captures even though
+            // managed execution never invokes them. Each is independently owned.
+            for child in std::mem::take(&mut self.children) {
+                retire(child, &mut on_panic);
+            }
+            for binding in std::mem::take(&mut self.bindings) {
+                let ManagedChildBinding {
+                    factory,
+                    cleanup_observer,
+                    ..
+                } = binding;
+                retire(factory, &mut on_panic);
+                retire(cleanup_observer, &mut on_panic);
+            }
+            retire(self.registry.take(), &mut on_panic);
+            retire(self.shared_restarts.take(), &mut on_panic);
+            #[cfg(test)]
+            retire(self.terminal_publication_hook.take(), &mut on_panic);
+            retire(self, &mut on_panic);
+        }
     }
 
     impl<E: Send + 'static> ManagedSupervisor<E> {
