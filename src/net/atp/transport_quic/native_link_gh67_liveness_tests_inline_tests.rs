@@ -921,6 +921,7 @@
                 stream,
                 0,
                 &config,
+                None,
             )
             .await;
             let elapsed = started.elapsed();

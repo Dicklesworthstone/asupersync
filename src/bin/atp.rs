@@ -487,6 +487,15 @@ struct SendArgs {
     /// authenticated fixed-chunk/full fallback; legacy control is refused.
     #[arg(long, conflicts_with_all = ["no_delta", "rq_allow_unauthenticated_lab"])]
     rq_cdc_delta: bool,
+    /// Send only missing fixed chunks of one regular file over authenticated
+    /// QUIC. Requires --transport quic and a shared authentication key. Enable
+    /// this mode on the receiver too (forwarded for SSH targets); other peers
+    /// retain full/no-op fallback. Changed chunks currently require --compress off.
+    #[arg(
+        long,
+        conflicts_with_all = ["no_delta", "rq_allow_unauthenticated_lab", "rq_cdc_delta"]
+    )]
+    quic_delta_chunks: bool,
     /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
     /// delta negotiation now runs inside authenticated framed control.
     #[arg(long, hide = true)]
@@ -601,6 +610,14 @@ struct RecvArgs {
     /// legacy unauthenticated control and directory transfers are refused.
     #[arg(long, conflicts_with_all = ["no_delta", "rq_allow_unauthenticated_lab"])]
     rq_cdc_delta: bool,
+    /// Accept authenticated fixed-chunk reuse from --quic-delta-chunks senders.
+    /// Requires --transport quic and a shared authentication key. Full and
+    /// already-in-sync transfers from existing peers retain their ordinary path.
+    #[arg(
+        long,
+        conflicts_with_all = ["no_delta", "rq_allow_unauthenticated_lab", "rq_cdc_delta"]
+    )]
+    quic_delta_chunks: bool,
     /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
     /// delta negotiation now runs inside authenticated framed control.
     #[arg(long, hide = true)]
@@ -1092,6 +1109,69 @@ fn validate_rq_cdc_delta_options(
     Ok(())
 }
 
+fn validate_quic_delta_chunks_options(
+    transport: Transport,
+    enabled: bool,
+    no_delta: bool,
+    unauthenticated_lab: bool,
+    compression: Compress,
+) -> Result<(), String> {
+    if !enabled {
+        return Ok(());
+    }
+    if transport != Transport::Quic {
+        return Err("--quic-delta-chunks requires --transport quic".to_string());
+    }
+    if no_delta {
+        return Err("--quic-delta-chunks conflicts with --no-delta".to_string());
+    }
+    if unauthenticated_lab {
+        return Err(
+            "--quic-delta-chunks requires shared-key authentication and conflicts with \
+             --rq-allow-unauthenticated-lab"
+                .to_string(),
+        );
+    }
+    if compression != Compress::Off {
+        return Err("--quic-delta-chunks currently requires --compress off".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "tls")]
+fn validate_quic_delta_chunks_auth(
+    enabled: bool,
+    config: &asupersync::net::atp::transport_quic::QuicConfig,
+) -> Result<(), String> {
+    if enabled
+        && !config
+            .delta_control_auth_context
+            .as_ref()
+            .is_some_and(|context| context.mode() == asupersync::security::AuthMode::Strict)
+    {
+        return Err(format!(
+            "--quic-delta-chunks requires --rq-auth-key-hex, --rq-auth-key-stdin, or {RQ_AUTH_ENV}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "tls")]
+fn quic_cli_send_options(args: &SendArgs) -> asupersync::net::atp::transport_quic::QuicSendOptions {
+    asupersync::net::atp::transport_quic::QuicSendOptions::new()
+        .with_compression(args.compress.mode())
+        .with_delta_chunks(args.quic_delta_chunks)
+}
+
+#[cfg(feature = "tls")]
+fn quic_cli_receive_options(
+    args: &RecvArgs,
+) -> asupersync::net::atp::transport_quic::QuicReceiveOptions {
+    asupersync::net::atp::transport_quic::QuicReceiveOptions::new()
+        .with_sparse_files(args.sparse_files)
+        .with_delta_chunks(args.quic_delta_chunks)
+}
+
 #[cfg(test)]
 fn rq_config(
     max_bytes: u64,
@@ -1536,6 +1616,7 @@ fn quic_source_config(
             args.rq_allow_unauthenticated_lab,
         )?,
     };
+    validate_quic_delta_chunks_auth(args.quic_delta_chunks, &cfg)?;
     Ok(cfg)
 }
 
@@ -1616,6 +1697,7 @@ fn quic_config_recv(
             args.rq_allow_unauthenticated_lab,
         )?,
     };
+    validate_quic_delta_chunks_auth(args.quic_delta_chunks, &cfg)?;
     cfg.server_tls = Some(QuicServerTls { config });
     Ok(cfg)
 }
@@ -1987,6 +2069,13 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
         args.no_delta,
         args.rq_allow_unauthenticated_lab,
     )?;
+    validate_quic_delta_chunks_options(
+        args.transport,
+        args.quic_delta_chunks,
+        args.no_delta,
+        args.rq_allow_unauthenticated_lab,
+        args.compress,
+    )?;
     validate_transport_metadata_options(
         args.transport,
         args.preserve_xattrs,
@@ -1995,15 +2084,19 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
     )?;
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
     validate_requested_compression(args.transport, args.compress)?;
-    if args.rq_cdc_delta {
+    if args.rq_cdc_delta || args.quic_delta_chunks {
+        let option = if args.rq_cdc_delta {
+            "--rq-cdc-delta"
+        } else {
+            "--quic-delta-chunks"
+        };
         let metadata = fs::symlink_metadata(&args.source)
-            .map_err(|error| format!("inspect CDC source {}: {error}", args.source.display()))?;
+            .map_err(|error| format!("inspect delta source {}: {error}", args.source.display()))?;
         if !metadata.is_file() {
-            return Err(
-                "--rq-cdc-delta requires one regular file; directories, symlinks, and special \
+            return Err(format!(
+                "{option} requires one regular file; directories, symlinks, and special \
                  files are not supported in this mode"
-                    .to_string(),
-            );
+            ));
         }
     }
     validate_user_transfer_namespace(&args.source)?;
@@ -3644,6 +3737,13 @@ fn send_to_addr_with_transport(
         args.no_delta,
         args.rq_allow_unauthenticated_lab,
     )?;
+    validate_quic_delta_chunks_options(
+        transport,
+        args.quic_delta_chunks,
+        args.no_delta,
+        args.rq_allow_unauthenticated_lab,
+        args.compress,
+    )?;
     let bwlimit_bps = normalize_bwlimit_bps(args.bwlimit_bps)?;
     if bwlimit_bps.is_some() && transport != Transport::Quic {
         return Err(SendTransportFailure::fatal(format!(
@@ -3757,8 +3857,7 @@ fn send_to_addr_with_transport(
             {
                 let cfg = quic_config_send(args, quic_auth_override)?;
                 let chosen_fanout = cfg.datagram_fanout.max(1);
-                let options = asupersync::net::atp::transport_quic::QuicSendOptions::new()
-                    .with_compression(args.compress.mode());
+                let options = quic_cli_send_options(args);
                 print_compression_offer(args.compress);
                 let start = Instant::now();
                 let outcome = runtime
@@ -7305,6 +7404,9 @@ fn probe_remote_tailscale_ipv4(
 }
 
 fn append_remote_receiver_options(args: &SendArgs, argv: &mut Vec<String>) {
+    if args.transport == Transport::Quic && args.quic_delta_chunks {
+        argv.push("--quic-delta-chunks".to_string());
+    }
     if args.transport == Transport::Rq && args.rq_cdc_delta {
         argv.push("--rq-cdc-delta".to_string());
     }
@@ -9109,6 +9211,13 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
         args.no_delta,
         args.rq_allow_unauthenticated_lab,
     )?;
+    validate_quic_delta_chunks_options(
+        args.transport,
+        args.quic_delta_chunks,
+        args.no_delta,
+        args.rq_allow_unauthenticated_lab,
+        Compress::Off,
+    )?;
     validate_transport_metadata_options(
         args.transport,
         args.preserve_xattrs,
@@ -9335,9 +9444,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
             #[cfg(feature = "tls")]
             {
                 let cfg = quic_config_recv(&args, rq_auth.as_ref())?;
-                let receive_options =
-                    asupersync::net::atp::transport_quic::QuicReceiveOptions::new()
-                        .with_sparse_files(args.sparse_files);
+                let receive_options = quic_cli_receive_options(&args);
                 drop(rq_auth);
                 let chosen_fanout = cfg.datagram_fanout.max(1);
                 runtime.block_on(runtime.handle().spawn(async move {
@@ -10215,6 +10322,148 @@ mod tests {
         assert!(from_args.metadata_policy.preserve_extended_attributes);
         assert_eq!(from_args.preserve_hardlinks, direct.preserve_hardlinks);
         assert_eq!(from_args.symbol_auth_mode(), direct.symbol_auth_mode());
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn quic_delta_chunks_cli_maps_options_authentication_and_ssh_forwarding() {
+        for enabled in [false, true] {
+            let mut argv = vec![
+                "atp-send",
+                "payload.bin",
+                "user@receiver:/destination",
+                "--transport",
+                "quic",
+                "--rq-auth-key-hex",
+                VALID_KEY_HEX,
+            ];
+            if enabled {
+                argv.push("--quic-delta-chunks");
+            }
+            let send = SendArgs::try_parse_from(argv).expect("parse QUIC delta sender");
+            assert_eq!(quic_cli_send_options(&send).delta_chunks(), enabled);
+            let config = quic_source_config(&send, None).expect("configured delta authority");
+            assert!(config.delta_control_auth_context.is_some());
+            assert!(config.enable_delta);
+            let mut remote = Vec::new();
+            append_remote_receiver_options(&send, &mut remote);
+            assert_eq!(
+                remote,
+                if enabled {
+                    vec!["--quic-delta-chunks".to_string()]
+                } else {
+                    Vec::new()
+                }
+            );
+            for command in ["recv", "serve"] {
+                let mut argv = vec!["atp", command, "destination", "--transport", "quic"];
+                if enabled {
+                    argv.push("--quic-delta-chunks");
+                }
+                let parsed = Cli::try_parse_from(argv).expect("parse QUIC delta receiver");
+                let recv = match parsed.command {
+                    Command::Recv(args) | Command::Serve(args) => args,
+                    _ => panic!("expected receiver"),
+                };
+                let options = quic_cli_receive_options(&recv);
+                assert_eq!(options.delta_chunks(), enabled);
+                assert!(!options.sparse_files());
+            }
+        }
+        let unauthenticated = asupersync::net::atp::transport_quic::QuicConfig::default();
+        validate_quic_delta_chunks_auth(false, &unauthenticated)
+            .expect("legacy TLS-only mode remains available");
+        assert!(validate_quic_delta_chunks_auth(true, &unauthenticated).is_err());
+    }
+
+    #[test]
+    fn quic_delta_chunks_cli_rejects_conflicts_before_source_or_network_io() {
+        for command in ["send", "recv", "serve"] {
+            for conflict in [
+                "--no-delta",
+                "--rq-allow-unauthenticated-lab",
+                "--rq-cdc-delta",
+            ] {
+                let mut argv = vec!["atp", command, "payload"];
+                if command == "send" {
+                    argv.push("127.0.0.1:8472");
+                }
+                argv.extend(["--transport", "quic", "--quic-delta-chunks", conflict]);
+                let error = Cli::try_parse_from(argv)
+                    .err()
+                    .expect("incompatible modes fail during parsing")
+                    .to_string();
+                assert!(error.contains("--quic-delta-chunks"), "{error}");
+                assert!(error.contains(conflict), "{error}");
+            }
+        }
+        for transport in ["tcp", "rq", "auto"] {
+            let send = SendArgs::try_parse_from([
+                "atp-send",
+                "source-must-not-be-read",
+                "target-must-not-be-resolved",
+                "--transport",
+                transport,
+                "--quic-delta-chunks",
+                "--rq-auth-key-stdin",
+            ])
+            .expect("parse incompatible transport");
+            assert_eq!(
+                run_send(send).expect_err("reject before source/stdin/DNS"),
+                "--quic-delta-chunks requires --transport quic"
+            );
+            let recv = RecvArgs::try_parse_from([
+                "atp-recv",
+                "destination-must-not-be-created",
+                "--transport",
+                transport,
+                "--quic-delta-chunks",
+                "--rq-auth-key-stdin",
+            ])
+            .expect("parse incompatible receiver");
+            assert_eq!(
+                run_recv(recv, false).expect_err("reject before stdin or bind"),
+                "--quic-delta-chunks requires --transport quic"
+            );
+        }
+        for codec in ["zstd", "auto"] {
+            let send = SendArgs::try_parse_from([
+                "atp-send",
+                "source-must-not-be-read",
+                "target-must-not-be-resolved",
+                "--transport",
+                "quic",
+                "--quic-delta-chunks",
+                "--compress",
+                codec,
+            ])
+            .expect("parse incompatible compression");
+            assert_eq!(
+                run_send(send).expect_err("raw delta mode rejects compression"),
+                "--quic-delta-chunks currently requires --compress off"
+            );
+        }
+        let directory = tempfile::tempdir().expect("source directory");
+        for dry_run in [false, true] {
+            let mut argv = vec![
+                "atp-send",
+                directory.path().to_str().expect("UTF-8 path"),
+                "target-must-not-be-resolved",
+                "--transport",
+                "quic",
+                "--quic-delta-chunks",
+                "--rq-auth-key-stdin",
+            ];
+            if dry_run {
+                argv.push("--dry-run");
+            }
+            let args = SendArgs::try_parse_from(argv).expect("parse directory request");
+            assert!(
+                run_send(args)
+                    .expect_err("reject unsupported source before stdin")
+                    .contains("--quic-delta-chunks requires one regular file")
+            );
+        }
     }
 
     #[test]
