@@ -1,7 +1,7 @@
 //! Explicit, caller-owned execution over a durable idempotency journal.
 
 use super::{
-    DurableRemoteAdmission, DurableRemoteError, DurableRemoteJournal,
+    DurableRemoteAdmission, DurableRemoteCompactionReport, DurableRemoteError, DurableRemoteJournal,
     DurableRemoteJournalStatus, DurableRemoteLimits, DurableRemoteReconciliation,
 };
 use crate::cx::Cx;
@@ -11,7 +11,9 @@ use crate::remote::{
 };
 use parking_lot::Mutex;
 use std::fmt;
+use std::fs::File;
 use std::future::Future;
+use std::io;
 use std::sync::Arc;
 
 /// Opt-in restart-durable execution for one named computation and application version.
@@ -309,6 +311,52 @@ impl DurableRemoteComputation {
             })
             .map_err(|_| DurableRemoteError::Unavailable)?;
         let result = completion
+            .join()
+            .await
+            .map_err(|_| DurableRemoteError::Unavailable)?;
+        if cx.is_cancel_requested() {
+            let _ = cx.checkpoint();
+        }
+        result
+    }
+
+    /// Reclaim expired journal records on an explicitly owned blocking worker.
+    ///
+    /// This uses [`DurableRemoteJournal::compact`] and the same exclusive slot
+    /// as execution and reconciliation. The caller supplies the empty replacement
+    /// and an atomic, durable publication callback; their full contract is
+    /// described on that method. Neither file I/O nor publication runs inline on
+    /// an async worker, and concurrent invocations refuse `Busy`.
+    ///
+    /// Cancellation before the blocking job starts leaves the source unchanged.
+    /// Once claimed, compaction and publication form one non-preemptible boundary.
+    /// Dropping this future cannot release the journal while that job is still
+    /// queued or running. Publication failure or panic returns the poisoned owner
+    /// to its slot; the application must drop it and reopen the authoritative path.
+    /// A successfully published replacement remains committed after late cancel.
+    pub async fn compact<P>(
+        self: &Arc<Self>,
+        cx: &Cx,
+        replacement: File,
+        publish: P,
+    ) -> Result<DurableRemoteCompactionReport, DurableRemoteError>
+    where
+        P: FnOnce() -> io::Result<()> + Send + 'static,
+    {
+        if cx.checkpoint().is_err() || cx.blocking_pool_handle().is_none() {
+            return Err(DurableRemoteError::Unavailable);
+        }
+        let mut job = self.take_journal()?;
+        let mut compaction = cx
+            .spawn_blocking_drained(move |worker| {
+                if worker.checkpoint().is_err() {
+                    return Err(DurableRemoteError::Unavailable);
+                }
+                let now = (job.owner.clock)();
+                job.journal_mut().compact(replacement, now, publish)
+            })
+            .map_err(|_| DurableRemoteError::Unavailable)?;
+        let result = compaction
             .join()
             .await
             .map_err(|_| DurableRemoteError::Unavailable)?;
