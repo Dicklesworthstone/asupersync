@@ -40,10 +40,13 @@ where
     }
     .build()
     .expect("native unary admission runtime");
-    runtime.block_on(async move {
+    // Boxed: an unoptimized build copies a by-value root future into each
+    // `block_on` layer, and with this ~86 KB root those copies alone took over
+    // 1 MB of the 2 MiB test thread on `current_thread`.
+    runtime.block_on(Box::pin(async move {
         let cx = Cx::current().expect("runtime context");
         within(test(cx)).await;
-    });
+    }));
     assert!(runtime.shutdown_timeout(WATCHDOG), "runtime drains");
 }
 
