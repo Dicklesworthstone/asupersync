@@ -18,7 +18,11 @@ in `asupersync-v5fn1e`.
 
 ## Version Timeline
 
-- **v0.6.0 candidate (unreleased)**: durable ATP sender/receiver journaling and
+- **v0.6.1 (2026-11-01)**: packaging fix only. The crates.io package of
+  `asupersync` now ships the two feature-gated modules that 0.5.0 and 0.6.0
+  left out, so `channel-mpsc-select-e2e`, `obligation-cleanup-e2e` and the
+  features that enable them compile from crates.io. No code changes.
+- **v0.6.0 (2026-11-01)**: durable ATP sender/receiver journaling and
   resume across process loss, targeted resume-client revocation without peer
   restart, QUIC protected close and post-close accounting shutdown, bounded
   clock capture and replay, protected macaroon delegation, a `spawn_blocking`
@@ -26,8 +30,8 @@ in `asupersync-v5fn1e`.
   compression for ATP over TCP and QUIC, and an HTTP/1 fix that answers a
   rejected request head with `400`/`413`/`431` instead of a silent close. Also
   includes the TLS-enabled downstream `Cx: Send` compilation fix (GitHub #86).
-  The candidate contains ten publishable workspace crates, including the first
-  `asupersync-zstd`; publication and release artifacts are still pending.
+  Ten workspace crates are on crates.io, including the first
+  `asupersync-zstd`; the GitHub release binaries are still pending.
   Breaking changes are listed in the v0.6.0 section.
 - **v0.5.0 Release**: the approved capability-preserving context installation
   boundary, browser local-task isolation and shutdown, reentrant worker
@@ -107,7 +111,23 @@ explicit `DecodeLimits`. A dropped read or write future loses nothing as long
 as the adapter is kept. A truncated stream fails with `UnexpectedEof`, and any
 other decoding failure with `InvalidData`. (`br-asupersync-t1fblr.31`.)
 
-## [v0.6.0] - Unreleased
+## [v0.6.1] - 2026-11-01
+
+### Fixed: two feature-gated modules are in the crates.io package
+
+The published `asupersync` package now includes
+`src/real_channel_mpsc_combinator_select_integration_e2e_tests.rs` and
+`src/real_obligation_leak_check_e2e_tests.rs`. Before, enabling
+`channel-mpsc-select-e2e` or `obligation-cleanup-e2e` (directly, through
+`real-service-e2e`, `cross-subsystem-recovery-e2e` or `ci-cross-platform`, or
+with `--all-features`) on the published 0.5.0 or 0.6.0 failed with "file not
+found for module": the package rules left out the two modules these features
+compile. There are no code changes.
+
+Only `asupersync` is republished; the other workspace crates stay at 0.6.0
+(unchanged).
+
+## [v0.6.0] - 2026-11-01
 
 About 3,000 commits since v0.5.0. The theme is **durability**: ATP transfers now
 survive a process dying mid-send or mid-receive, QUIC closes cleanly and stops
@@ -290,8 +310,15 @@ symlink, where it used to fail on whichever came first.
   - the spawn check uses an empty `VerificationContext`, so every attenuated
     spawn token is denied. This fails closed (L5);
   - `SecurityConfig` derives `Debug`, which prints `auth_key_seed` (L6).
+- **From crates.io, two test-harness features do not compile.** Enabling
+  `channel-mpsc-select-e2e` or `obligation-cleanup-e2e` (directly, through
+  `real-service-e2e`, `cross-subsystem-recovery-e2e` or `ci-cross-platform`,
+  or with `--all-features`) fails with "file not found for module": the
+  package rules leave out the two feature-gated modules these features
+  compile. This was already true of 0.5.0. Default features and docs.rs are
+  unaffected, and builds from git work. Fixed in 0.6.1.
 - **The `zstd` feature is experimental, opt-in and off by default.**
-  `asupersync-zstd` 0.6.0 is planned as the codec's first crates.io release, and its
+  `asupersync-zstd` 0.6.0 is the codec's first crates.io release, and its
   encoder strategies are still being built (asupersync-t1fblr).
 - **JetStream and NATS:** every HIGH finding of the 10-03 messaging audit is
   fixed (asupersync-messaging-client-audit-k6pxks). Two items wait on owner
@@ -302,7 +329,7 @@ symlink, where it used to fail on whichever came first.
   unpublished.** `AppHandle::stop` and a failed supervisor boot park one for a
   worker turn, and on a multi-thread runtime the drain can return first. If you
   need the runtime fully quiescent, wait on `is_quiescent()`. The fix is
-  planned for 0.6.1 (asupersync-wcc1f5).
+  planned for a later release (asupersync-wcc1f5).
 - **`cargo fmt --check`** reports formatting drift on `main` that was not there at
   v0.5.0 (GitHub #76). It now also covers the 941 inline test modules that
   moved out of their source files (c5012547e) and kept their indentation. It is
@@ -519,7 +546,7 @@ Against an older receiver, a sender stays raw, and an older sender never
 offers. Default builds and `send_path`/`send_path_filtered` are unchanged.
 (`br-asupersync-t1fblr.14`, `.16`.)
 
-`asupersync-zstd` 0.6.0 is planned as the codec's first crates.io release, and it is
+`asupersync-zstd` 0.6.0 is the codec's first crates.io release, and it is
 experimental. It decodes every RFC 8878 frame without dictionaries, and
 encodes stored or `Level::Fast` frames, which compress slightly better than
 libzstd level 1. It has streaming encoder and decoder types, resumable async
