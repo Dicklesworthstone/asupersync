@@ -1,5 +1,6 @@
-//! Explicitly negotiated fixed-chunk reuse over the native QUIC control stream.
+//! Explicitly negotiated chunk reuse over the native QUIC control stream.
 //!
+//! Fixed and authenticated CDC manifests share the bounded transfer mechanics.
 //! The existing fixed manifest and bound request/proof envelopes stay unchanged.
 //! Only peers that opt in and verify the manifest capability may select this
 //! mode. Its raw ObjectData payload is chunk index, target offset, then bytes;
@@ -21,7 +22,16 @@ use serde::{Deserialize, Serialize};
 
 pub(super) const OFFER_EXTENSION: u16 = 0x5152;
 const OFFER_KEY: &[u8] = b"atp-quic-fixed-delta-chunks-256k-v1";
+const CDC_OFFER_KEY: &[u8] = b"atp-quic-cdc-delta-chunks-64k-v1";
 const SELECTOR: &str = "authenticated_fixed_delta_chunks_v1";
+
+fn offer_key(manifest: &TransferManifest) -> &'static [u8] {
+    if super::delta_cdc::is_cdc(manifest) { CDC_OFFER_KEY } else { OFFER_KEY }
+}
+
+fn selector(manifest: &TransferManifest) -> &'static str {
+    if super::delta_cdc::is_cdc(manifest) { super::delta_cdc::SELECTOR } else { SELECTOR }
+}
 pub(super) const DATA_FRAGMENT_BYTES: usize = 64 * 1024;
 #[cfg(feature = "tls")]
 pub(super) const STREAM_WINDOW_BYTES: u64 = 256 * 1024;
@@ -41,7 +51,7 @@ pub(super) fn advertise(
     // The existing canonical symbol commits both nonces, destination, transfer
     // and the complete manifest. A separate key commits this exact capability.
     let symbol = super::quic_delta_manifest_auth_symbol(session, manifest)?;
-    let tag = context.derive_context(OFFER_KEY).sign_symbol_tag(&symbol);
+    let tag = context.derive_context(offer_key(manifest)).sign_symbol_tag(&symbol);
     frame.header.extensions.insert(OFFER_EXTENSION, tag.as_bytes().to_vec());
     Ok(())
 }
@@ -65,7 +75,7 @@ pub(super) fn offered(
         symbol, AuthenticationTag::from_bytes(tag),
     );
     if context.mode() != AuthMode::Strict
-        || context.derive_context(OFFER_KEY)
+        || context.derive_context(offer_key(manifest))
             .verify_authenticated_symbol(&mut authenticated).is_err()
         || !authenticated.is_verified()
     {
@@ -85,7 +95,7 @@ pub(super) fn validate_request(
     })?;
     if quic_delta_manifest_entry(manifest).is_none()
         || request.mode != DeltaWireMode::DeltaChunks
-        || request.fallback_reason.as_deref() != Some(SELECTOR)
+        || request.fallback_reason.as_deref() != Some(selector(manifest))
         || request.sender_merkle_root_hex != delta.merkle_root_hex
         || request.receiver_merkle_root_hex.is_none()
         || request.shared_chunks == 0
@@ -194,14 +204,17 @@ pub(super) async fn plan(
     };
     let chunk_size = u64::try_from(delta.chunk_size)
         .map_err(|_| QuicTransportError::Control("delta chunk size overflow".to_string()))?;
+    let content_defined = super::delta_cdc::is_cdc(manifest);
     if chunk_size == 0 || !metadata.is_file() || metadata.len() == 0
         || metadata.len() > config.max_transfer_bytes
-        || metadata.len().div_ceil(chunk_size) > QUIC_DELTA_MAX_MANIFEST_CHUNKS
+        || (content_defined && !super::delta_cdc::size_may_fit(metadata.len()))
+        || (!content_defined
+            && metadata.len().div_ceil(chunk_size) > QUIC_DELTA_MAX_MANIFEST_CHUNKS)
     {
         return Ok(None);
     }
-    let mut file = crate::fs::File::open(&baseline).await.map_err(|error| io_error(cx, error))?;
-    let mut buffer = vec![0u8; delta.chunk_size];
+    let file = crate::fs::File::open(&baseline).await.map_err(|error| io_error(cx, error))?;
+    let mut reader = super::delta_cdc::ChunkReader::new(file, delta.chunk_size, content_defined);
     let mut chunks = Vec::new();
     let mut reusable = BTreeMap::new();
     let mut offset = 0u64;
@@ -209,12 +222,10 @@ pub(super) async fn plan(
     let mut whole_content_id = ContentId::streaming();
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let read = crate::net::atp::transport_common::delta::read_full_chunk(&mut file, &mut buffer)
-            .await.map_err(|error| io_error(cx, error))?;
-        if read == 0 {
+        let Some(bytes) = reader.next_chunk().await.map_err(|error| io_error(cx, error))? else {
             break;
-        }
-        let size_bytes = u64::try_from(read)
+        };
+        let size_bytes = u64::try_from(bytes.len())
             .map_err(|_| QuicTransportError::Control("baseline chunk size overflow".to_string()))?;
         let end = offset.checked_add(size_bytes)
             .ok_or_else(|| QuicTransportError::Control("baseline size overflow".to_string()))?;
@@ -223,7 +234,6 @@ pub(super) async fn plan(
         {
             return Ok(None);
         }
-        let bytes = &buffer[..read];
         sha256.update(bytes);
         whole_content_id.update(bytes);
         let content_id = ContentId::from_bytes(bytes);
@@ -256,7 +266,7 @@ pub(super) async fn plan(
     }
     let request = DeltaObjectRequest {
         mode: DeltaWireMode::DeltaChunks,
-        fallback_reason: Some(SELECTOR.to_string()),
+        fallback_reason: Some(selector(manifest).to_string()),
         sender_merkle_root_hex: delta.merkle_root_hex.clone(),
         receiver_merkle_root_hex: Some(receiver.merkle_root.to_hex()),
         missing_bytes: diff.missing_bytes,
