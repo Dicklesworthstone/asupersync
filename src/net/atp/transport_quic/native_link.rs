@@ -9162,6 +9162,9 @@ async fn run_sender_session(
         if options.delta_chunks() {
             super::delta_chunks::advertise(&mut frame, context, session, manifest)?;
         }
+        if options.resume() && super::resume::supported(manifest) {
+            super::resume::advertise(&mut frame, context, session, manifest)?;
+        }
         control.send(cx, &mut link.conn, &frame)?;
     } else {
         let mut full_manifest;
@@ -9258,7 +9261,9 @@ async fn run_sender_session(
                 });
             }
             super::DeltaWireMode::DeltaChunks => {
-                if !options.delta_chunks() {
+                if !options.delta_chunks()
+                    || (super::resume::selected(&request.request) && !options.resume())
+                {
                     return Err(QuicTransportError::Control(
                         "receiver requested unoffered QUIC changed-chunk mode".to_string(),
                     ));
@@ -11896,20 +11901,51 @@ async fn run_receiver_session(
     } else {
         false
     };
+    let resume_offered = if options.resume() {
+        match delta_session {
+            Some(session) => super::resume::offered(
+                &manifest_frame,
+                super::quic_delta_control_auth_context(config).ok_or_else(|| {
+                    QuicTransportError::Config(
+                        "QUIC resume lost its authentication context".to_string(),
+                    )
+                })?,
+                session,
+                &manifest,
+            )?,
+            None => false,
+        }
+    } else {
+        false
+    };
     let mut delta_full_request_frame = None;
     if let Some(session) = delta_session {
         let request = keep_peer_alive_while(cx, link, &mut control, async {
-            let mut request = super::build_quic_receiver_delta_request(
-                cx, dest_dir, config, session, &manifest,
-            ).await?;
-            let plan = if changed_chunks_offered && request.request.mode == super::DeltaWireMode::FullObject {
-                super::delta_chunks::plan(cx, dest_dir, config, &manifest).await?
+            let (request, plan) = if resume_offered {
+                // A correct final destination does not hide damaged retained
+                // recovery evidence. Even zero-payload resume reconstructs and
+                // verifies staging before the ordinary publication barrier.
+                let plan = super::resume::plan(cx, dest_dir, config, &manifest).await?;
+                let request = super::make_quic_delta_request(
+                    session, &manifest, plan.request.clone(),
+                );
+                (request, Some(plan))
             } else {
-                None
+                let mut request = super::build_quic_receiver_delta_request(
+                    cx, dest_dir, config, session, &manifest,
+                ).await?;
+                let plan = if changed_chunks_offered
+                    && request.request.mode == super::DeltaWireMode::FullObject
+                {
+                    super::delta_chunks::plan(cx, dest_dir, config, &manifest).await?
+                } else {
+                    None
+                };
+                if let Some(plan) = &plan {
+                    request = super::make_quic_delta_request(session, &manifest, plan.request.clone());
+                }
+                (request, plan)
             };
-            if let Some(plan) = &plan {
-                request = super::make_quic_delta_request(session, &manifest, plan.request.clone());
-            }
             let mode = super::validate_quic_delta_request(&request, session, &manifest)?;
             Ok((request, mode, plan))
         }).await;
@@ -12809,29 +12845,38 @@ pub async fn receive_on_endpoint_with_options(
     peer_id: &str,
     options: QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
-    options.validate()?;
-    super::validate_quic_delta_chunks_option(options.delta_chunks(), config)?;
-    let config = super::effective_quic_receiver_config(config)?;
-    let config = &config;
-    config.validate()?;
-    let server_tls = config.server_tls.as_ref().ok_or_else(|| {
-        QuicTransportError::Config(
-            "ATP-over-QUIC receive requires server TLS config; set QuicConfig::server_tls \
-             (certificate chain + private key)"
-                .to_string(),
-        )
-    })?;
-    let (mut link, early_data) = accept(cx, endpoint, server_tls, config).await?;
-    // Replay any 1-RTT packets that raced ahead of the handshake's completion
-    // (the client finishes first and may start the data plane immediately), so
-    // the receiver session sees the sender's Hello / early symbols. Keep them in
-    // the same bounded replay path as freshly received UDP packets instead of
-    // bulk-ingesting before manifest parsing creates decoders.
-    link.queue_received_packets(early_data);
-    erase_send(run_receiver_session(
-        cx, &mut link, dest_dir, config, peer_id, &options,
-    ))
-    .await
+    let work = async {
+        options.validate()?;
+        super::validate_quic_delta_chunks_option(options.delta_chunks(), config)?;
+        let config = super::effective_quic_receiver_config(config)?;
+        let config = &config;
+        config.validate()?;
+        let server_tls = config.server_tls.as_ref().ok_or_else(|| {
+            QuicTransportError::Config(
+                "ATP-over-QUIC receive requires server TLS config; set QuicConfig::server_tls \
+                 (certificate chain + private key)"
+                    .to_string(),
+            )
+        })?;
+        let (mut link, early_data) = accept(cx, endpoint, server_tls, config).await?;
+        // Replay any 1-RTT packets that raced ahead of the handshake's completion
+        // (the client finishes first and may start the data plane immediately), so
+        // the receiver session sees the sender's Hello / early symbols. Keep them in
+        // the same bounded replay path as freshly received UDP packets instead of
+        // bulk-ingesting before manifest parsing creates decoders.
+        link.queue_received_packets(early_data);
+        erase_send(run_receiver_session(
+            cx, &mut link, dest_dir, config, peer_id, &options,
+        ))
+        .await
+    };
+    if options.resume() {
+        // Include staging creation, reused-chunk reads, publication, and cleanup
+        // under the same owner as the durable cache, including legacy fallback.
+        cx.with_ambient(work).await
+    } else {
+        work.await
+    }
 }
 
 /// Bind a server UDP endpoint on `listen` for the native QUIC receive path.

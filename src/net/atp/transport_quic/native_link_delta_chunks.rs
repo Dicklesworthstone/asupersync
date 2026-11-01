@@ -379,6 +379,11 @@ pub(super) async fn receive(
 ) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     delta::validate_request(manifest, &plan.request)?;
+    if super::super::resume::selected(&plan.request) != plan.resume.is_some() {
+        return Err(QuicTransportError::Control(
+            "QUIC resume request lost its exclusively owned durable cache".to_string(),
+        ));
+    }
     let mut guard = match staging_guard(dest_dir, manifest).await {
         Ok(guard) => guard,
         Err(error) => {
@@ -424,6 +429,15 @@ pub(super) async fn receive(
                 filled += bytes.len() as u64;
             }
             verify_streamed(chunk, filled, content_id.finalize(), "received QUIC changed content")?;
+            if let Some(resume) = &plan.resume {
+                // A staged write may still be buffered. The persistent cache
+                // copies only a complete verified chunk and syncs its own data
+                // before the authenticated journal permits future reuse.
+                keep_peer_alive_while(cx, link, control, async {
+                    cx.with_ambient(staged_entry.flush_cached_staging_file()).await?;
+                    resume.checkpoint(cx, chunk, &staged_entry.staging_path).await
+                }).await?;
+            }
             received = received.checked_add(chunk.size_bytes)
                 .ok_or_else(|| QuicTransportError::Control("received chunk byte count overflow".to_string()))?;
         }

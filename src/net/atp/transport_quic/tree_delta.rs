@@ -368,7 +368,7 @@ pub(super) async fn plan(
         missing_chunks: diff.missing_chunks.iter().map(|chunk| delta.chunks[chunk.index as usize].clone()).collect(),
     };
     super::delta_chunks::validate_request(manifest, &request)?;
-    Ok(Some(ReceivePlan { request, baseline, reusable }))
+    Ok(Some(ReceivePlan { request, baseline, reusable, resume: None }))
 }
 
 #[cfg(any(feature = "tls", test))]
