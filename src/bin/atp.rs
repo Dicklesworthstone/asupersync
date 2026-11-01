@@ -510,6 +510,22 @@ struct SendArgs {
         ]
     )]
     quic_cdc_delta: bool,
+    /// Reuse unchanged regular files in a directory over authenticated QUIC,
+    /// including small files packed together for transport. Requires --transport
+    /// quic, a shared key, --compress off, and --quic-tree-delta on the receiver
+    /// (forwarded over SSH). Other peers retain full transfer fallback. Receiver-only
+    /// files are preserved; this option does not enable mirror deletions.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "no_delta",
+            "rq_allow_unauthenticated_lab",
+            "rq_cdc_delta",
+            "quic_delta_chunks",
+            "quic_cdc_delta"
+        ]
+    )]
+    quic_tree_delta: bool,
     /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
     /// delta negotiation now runs inside authenticated framed control.
     #[arg(long, hide = true)]
@@ -646,6 +662,20 @@ struct RecvArgs {
         ]
     )]
     quic_cdc_delta: bool,
+    /// Accept directory file reuse from --quic-tree-delta senders. Requires
+    /// --transport quic and a shared authentication key. Receiver-only files
+    /// remain intact; peers without this option retain full transfers.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "no_delta",
+            "rq_allow_unauthenticated_lab",
+            "rq_cdc_delta",
+            "quic_delta_chunks",
+            "quic_cdc_delta"
+        ]
+    )]
+    quic_tree_delta: bool,
     /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
     /// delta negotiation now runs inside authenticated framed control.
     #[arg(long, hide = true)]
@@ -1141,14 +1171,17 @@ fn validate_quic_delta_chunks_options(
     transport: Transport,
     enabled: bool,
     cdc_enabled: bool,
+    tree_enabled: bool,
     no_delta: bool,
     unauthenticated_lab: bool,
     compression: Compress,
 ) -> Result<(), String> {
-    if !enabled && !cdc_enabled {
+    if !enabled && !cdc_enabled && !tree_enabled {
         return Ok(());
     }
-    let option = if cdc_enabled {
+    let option = if tree_enabled {
+        "--quic-tree-delta"
+    } else if cdc_enabled {
         "--quic-cdc-delta"
     } else {
         "--quic-delta-chunks"
@@ -1175,15 +1208,18 @@ fn validate_quic_delta_chunks_options(
 fn validate_quic_delta_chunks_auth(
     enabled: bool,
     cdc_enabled: bool,
+    tree_enabled: bool,
     config: &asupersync::net::atp::transport_quic::QuicConfig,
 ) -> Result<(), String> {
-    if (enabled || cdc_enabled)
+    if (enabled || cdc_enabled || tree_enabled)
         && !config
             .delta_control_auth_context
             .as_ref()
             .is_some_and(|context| context.mode() == asupersync::security::AuthMode::Strict)
     {
-        let option = if cdc_enabled {
+        let option = if tree_enabled {
+            "--quic-tree-delta"
+        } else if cdc_enabled {
             "--quic-cdc-delta"
         } else {
             "--quic-delta-chunks"
@@ -1201,6 +1237,7 @@ fn quic_cli_send_options(args: &SendArgs) -> asupersync::net::atp::transport_qui
         .with_compression(args.compress.mode())
         .with_delta_chunks(args.quic_delta_chunks)
         .with_cdc_delta(args.quic_cdc_delta)
+        .with_tree_delta(args.quic_tree_delta)
 }
 
 #[cfg(feature = "tls")]
@@ -1211,6 +1248,7 @@ fn quic_cli_receive_options(
         .with_sparse_files(args.sparse_files)
         .with_delta_chunks(args.quic_delta_chunks)
         .with_cdc_delta(args.quic_cdc_delta)
+        .with_tree_delta(args.quic_tree_delta)
 }
 
 #[cfg(test)]
@@ -1657,7 +1695,12 @@ fn quic_source_config(
             args.rq_allow_unauthenticated_lab,
         )?,
     };
-    validate_quic_delta_chunks_auth(args.quic_delta_chunks, args.quic_cdc_delta, &cfg)?;
+    validate_quic_delta_chunks_auth(
+        args.quic_delta_chunks,
+        args.quic_cdc_delta,
+        args.quic_tree_delta,
+        &cfg,
+    )?;
     Ok(cfg)
 }
 
@@ -1738,7 +1781,12 @@ fn quic_config_recv(
             args.rq_allow_unauthenticated_lab,
         )?,
     };
-    validate_quic_delta_chunks_auth(args.quic_delta_chunks, args.quic_cdc_delta, &cfg)?;
+    validate_quic_delta_chunks_auth(
+        args.quic_delta_chunks,
+        args.quic_cdc_delta,
+        args.quic_tree_delta,
+        &cfg,
+    )?;
     cfg.server_tls = Some(QuicServerTls { config });
     Ok(cfg)
 }
@@ -2114,6 +2162,7 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
         args.transport,
         args.quic_delta_chunks,
         args.quic_cdc_delta,
+        args.quic_tree_delta,
         args.no_delta,
         args.rq_allow_unauthenticated_lab,
         args.compress,
@@ -2126,6 +2175,17 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
     )?;
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
     validate_requested_compression(args.transport, args.compress)?;
+    if args.quic_tree_delta {
+        let metadata = fs::symlink_metadata(&args.source)
+            .map_err(|error| format!("inspect delta source {}: {error}", args.source.display()))?;
+        if !metadata.is_dir() {
+            return Err(
+                "--quic-tree-delta requires a directory; regular files, symlinks, and special \
+                 files are not supported in this mode"
+                    .to_string(),
+            );
+        }
+    }
     if args.rq_cdc_delta || args.quic_delta_chunks || args.quic_cdc_delta {
         let option = if args.rq_cdc_delta {
             "--rq-cdc-delta"
@@ -3785,6 +3845,7 @@ fn send_to_addr_with_transport(
         transport,
         args.quic_delta_chunks,
         args.quic_cdc_delta,
+        args.quic_tree_delta,
         args.no_delta,
         args.rq_allow_unauthenticated_lab,
         args.compress,
@@ -7450,7 +7511,9 @@ fn probe_remote_tailscale_ipv4(
 
 fn append_remote_receiver_options(args: &SendArgs, argv: &mut Vec<String>) {
     if args.transport == Transport::Quic {
-        if args.quic_cdc_delta {
+        if args.quic_tree_delta {
+            argv.push("--quic-tree-delta".to_string());
+        } else if args.quic_cdc_delta {
             argv.push("--quic-cdc-delta".to_string());
         } else if args.quic_delta_chunks {
             argv.push("--quic-delta-chunks".to_string());
@@ -9264,6 +9327,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
         args.transport,
         args.quic_delta_chunks,
         args.quic_cdc_delta,
+        args.quic_tree_delta,
         args.no_delta,
         args.rq_allow_unauthenticated_lab,
         Compress::Off,
@@ -10377,7 +10441,12 @@ mod tests {
     #[test]
     #[cfg(feature = "tls")]
     fn quic_chunk_delta_cli_maps_options_authentication_and_ssh_forwarding() {
-        for flag in [None, Some("--quic-delta-chunks"), Some("--quic-cdc-delta")] {
+        for flag in [
+            None,
+            Some("--quic-delta-chunks"),
+            Some("--quic-cdc-delta"),
+            Some("--quic-tree-delta"),
+        ] {
             let mut argv = vec![
                 "atp-send",
                 "payload.bin",
@@ -10394,6 +10463,7 @@ mod tests {
             let options = quic_cli_send_options(&send);
             assert_eq!(options.delta_chunks(), flag.is_some());
             assert_eq!(options.cdc_delta(), flag == Some("--quic-cdc-delta"));
+            assert_eq!(options.tree_delta(), flag == Some("--quic-tree-delta"));
             let config = quic_source_config(&send, None).expect("configured delta authority");
             assert!(config.delta_control_auth_context.is_some());
             assert!(config.enable_delta);
@@ -10416,37 +10486,39 @@ mod tests {
                 let options = quic_cli_receive_options(&recv);
                 assert_eq!(options.delta_chunks(), flag.is_some());
                 assert_eq!(options.cdc_delta(), flag == Some("--quic-cdc-delta"));
+                assert_eq!(options.tree_delta(), flag == Some("--quic-tree-delta"));
                 assert!(!options.sparse_files());
             }
         }
         let unauthenticated = asupersync::net::atp::transport_quic::QuicConfig::default();
-        validate_quic_delta_chunks_auth(false, false, &unauthenticated)
+        validate_quic_delta_chunks_auth(false, false, false, &unauthenticated)
             .expect("legacy TLS-only mode remains available");
-        for (fixed, cdc, flag) in [
-            (true, false, "--quic-delta-chunks"),
-            (false, true, "--quic-cdc-delta"),
+        for (fixed, cdc, tree, flag) in [
+            (true, false, false, "--quic-delta-chunks"),
+            (false, true, false, "--quic-cdc-delta"),
+            (false, false, true, "--quic-tree-delta"),
         ] {
-            let error = validate_quic_delta_chunks_auth(fixed, cdc, &unauthenticated)
-                .expect_err("both chunk modes require explicit control authority");
+            let error = validate_quic_delta_chunks_auth(fixed, cdc, tree, &unauthenticated)
+                .expect_err("every delta mode requires explicit control authority");
             assert!(error.contains(flag), "{error}");
         }
     }
 
     #[test]
     fn quic_chunk_delta_cli_rejects_conflicts_before_source_or_network_io() {
-        for flag in ["--quic-delta-chunks", "--quic-cdc-delta"] {
-            let other_chunk_mode = if flag == "--quic-delta-chunks" {
-                "--quic-cdc-delta"
-            } else {
-                "--quic-delta-chunks"
-            };
+        for flag in ["--quic-delta-chunks", "--quic-cdc-delta", "--quic-tree-delta"] {
             for command in ["send", "recv", "serve"] {
                 for conflict in [
                     "--no-delta",
                     "--rq-allow-unauthenticated-lab",
                     "--rq-cdc-delta",
-                    other_chunk_mode,
+                    "--quic-delta-chunks",
+                    "--quic-cdc-delta",
+                    "--quic-tree-delta",
                 ] {
+                    if conflict == flag {
+                        continue;
+                    }
                     let mut argv = vec!["atp", command, "payload"];
                     if command == "send" {
                         argv.push("127.0.0.1:8472");
@@ -10507,10 +10579,17 @@ mod tests {
                 );
             }
             let directory = tempfile::tempdir().expect("source directory");
+            let file = directory.path().join("payload.bin");
+            std::fs::write(&file, b"regular file").expect("write incompatible tree source");
+            let (source, expected_shape) = if flag == "--quic-tree-delta" {
+                (file.as_path(), "a directory")
+            } else {
+                (directory.path(), "one regular file")
+            };
             for dry_run in [false, true] {
                 let mut argv = vec![
                     "atp-send",
-                    directory.path().to_str().expect("UTF-8 path"),
+                    source.to_str().expect("UTF-8 path"),
                     "target-must-not-be-resolved",
                     "--transport",
                     "quic",
@@ -10520,14 +10599,36 @@ mod tests {
                 if dry_run {
                     argv.push("--dry-run");
                 }
-                let args = SendArgs::try_parse_from(argv).expect("parse directory request");
+                let args = SendArgs::try_parse_from(argv).expect("parse incompatible source");
                 let error = run_send(args).expect_err("reject unsupported source before stdin");
                 assert!(
-                    error.contains(&format!("{flag} requires one regular file")),
+                    error.contains(&format!("{flag} requires {expected_shape}")),
                     "{error}"
                 );
             }
         }
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn quic_tree_delta_cli_accepts_an_offline_directory_plan() {
+        let directory = tempfile::tempdir().expect("source directory");
+        std::fs::write(directory.path().join("kept.txt"), b"tree contents")
+            .expect("write source member");
+        std::fs::write(directory.path().join("empty.txt"), b"").expect("write empty source member");
+        let args = SendArgs::try_parse_from([
+            "atp-send",
+            directory.path().to_str().expect("UTF-8 source path"),
+            "target-must-not-be-resolved",
+            "--transport",
+            "quic",
+            "--quic-tree-delta",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+            "--dry-run",
+        ])
+        .expect("parse directory delta plan");
+        run_send(args).expect("directory delta dry run needs no peer or TLS handshake");
     }
 
     #[test]

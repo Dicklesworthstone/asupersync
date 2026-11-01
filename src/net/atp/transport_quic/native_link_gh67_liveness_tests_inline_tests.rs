@@ -836,7 +836,7 @@
             let receiver = async {
                 let started = Instant::now();
                 let reason = "nnm3gw test refusal".to_string();
-                refuse_transfer_in_band(&cx, &mut server, &mut server_control, reason).await;
+                refuse_transfer_in_band(&cx, &mut server, &mut server_control, reason, None).await;
                 started.elapsed()
             };
             let busy_sender = async {

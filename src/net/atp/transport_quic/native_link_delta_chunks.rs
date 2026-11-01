@@ -1,4 +1,4 @@
-//! Native UDP session mechanics for negotiated fixed-chunk reconstruction.
+//! Native UDP session mechanics for negotiated chunk and whole-file reuse.
 
 use super::{
     AsyncReadExt, BTreeSet, Cx, Duration, Frame, FrameType, Instant,
@@ -12,7 +12,8 @@ use super::{
     refuse_transfer_in_band, wait_source_stream_send_admission,
 };
 use super::super::{
-    DeltaObjectRequest, QuicDeltaProof, QuicDeltaSessionContext, delta_chunks as delta,
+    ContentId, DeltaChunkWire, DeltaObjectRequest, QuicDeltaProof, QuicDeltaSessionContext,
+    delta_chunks as delta, tree_delta,
     json_frame, make_quic_delta_proof, parse_json, send_native_close,
     validate_quic_prepared_delta_source_unchanged,
 };
@@ -60,34 +61,69 @@ pub(super) async fn send(
         keep_peer_alive_while(cx, link, control,
             validate_quic_prepared_delta_source_unchanged(cx, prepared, config)).await?;
         check_source_stream_control(cx, link, control, &mut early, binding).await?;
-        let [source] = prepared.entries.as_slice() else {
-            return Err(QuicTransportError::Control("changed chunks lost their single source".to_string()));
-        };
-        let layout = manifest.delta_manifest.as_ref().expect("validated delta manifest");
-        let mut file = crate::fs::File::open(&source.abs_path)
-            .await.map_err(|error| delta::io_error(cx, error))?;
-        let mut buffer = vec![0u8; layout.chunk_size];
         let mut queued = 0u64;
-        for chunk in &request.missing_chunks {
-            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-            let len = usize::try_from(chunk.size_bytes)
-                .map_err(|_| QuicTransportError::Control("changed-chunk size overflow".to_string()))?;
-            keep_peer_alive_while(cx, link, control, async {
-                file.seek(std::io::SeekFrom::Start(chunk.entry_offset))
-                    .await.map_err(|error| delta::io_error(cx, error))?;
-                file.read_exact(&mut buffer[..len]).await.map_err(|error| delta::io_error(cx, error))?;
-                delta::verify_bytes(chunk, &buffer[..len], "QUIC source before sending")
-            }).await?;
-            for (part, bytes) in buffer[..len].chunks(delta::DATA_FRAGMENT_BYTES).enumerate() {
+        if tree_delta::is_tree(manifest) {
+            // One tree reference can name a multi-gigabyte logical file. Only
+            // one wire fragment and one open source descriptor are retained.
+            let mut buffer = vec![0u8; delta::DATA_FRAGMENT_BYTES];
+            for chunk in &request.missing_chunks {
                 cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-                let frame = delta::data_frame(chunk, (part * delta::DATA_FRAGMENT_BYTES) as u64, bytes)?;
-                queue_source_stream_frame(cx, link, control, &mut early, stream, config,
-                    &frame, 16 * 1024, &mut queued, binding).await?;
-                check_source_stream_control(cx, link, control, &mut early, binding).await?;
+                let (path, source_offset) = tree_delta::source_for_chunk(prepared, chunk)?;
+                let mut file = keep_peer_alive_while(cx, link, control, async {
+                    let mut file = crate::fs::File::open(path)
+                        .await.map_err(|error| delta::io_error(cx, error))?;
+                    file.seek(std::io::SeekFrom::Start(source_offset))
+                        .await.map_err(|error| delta::io_error(cx, error))?;
+                    Ok(file)
+                }).await?;
+                let mut offset = 0u64;
+                let mut content_id = ContentId::streaming();
+                while offset < chunk.size_bytes {
+                    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                    let len = usize::try_from(
+                        (chunk.size_bytes - offset).min(delta::DATA_FRAGMENT_BYTES as u64),
+                    ).expect("one data fragment fits usize");
+                    keep_peer_alive_while(cx, link, control, async {
+                        file.read_exact(&mut buffer[..len])
+                            .await.map_err(|error| delta::io_error(cx, error))?;
+                        Ok(())
+                    }).await?;
+                    content_id.update(&buffer[..len]);
+                    let frame = delta::data_frame(chunk, offset, &buffer[..len])?;
+                    queue_source_stream_frame(cx, link, control, &mut early, stream, config,
+                        &frame, 16 * 1024, &mut queued, binding).await?;
+                    check_source_stream_control(cx, link, control, &mut early, binding).await?;
+                    offset += len as u64;
+                }
+                verify_streamed(chunk, offset, content_id.finalize(), "QUIC tree source")?;
+            }
+        } else {
+            let [source] = prepared.entries.as_slice() else {
+                return Err(QuicTransportError::Control("changed chunks lost their single source".to_string()));
+            };
+            let layout = manifest.delta_manifest.as_ref().expect("validated delta manifest");
+            let mut file = crate::fs::File::open(&source.abs_path)
+                .await.map_err(|error| delta::io_error(cx, error))?;
+            let mut buffer = vec![0u8; layout.chunk_size];
+            for chunk in &request.missing_chunks {
+                cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                let len = usize::try_from(chunk.size_bytes)
+                    .map_err(|_| QuicTransportError::Control("changed-chunk size overflow".to_string()))?;
+                keep_peer_alive_while(cx, link, control, async {
+                    file.seek(std::io::SeekFrom::Start(chunk.entry_offset))
+                        .await.map_err(|error| delta::io_error(cx, error))?;
+                    file.read_exact(&mut buffer[..len]).await.map_err(|error| delta::io_error(cx, error))?;
+                    delta::verify_bytes(chunk, &buffer[..len], "QUIC source before sending")
+                }).await?;
+                for (part, bytes) in buffer[..len].chunks(delta::DATA_FRAGMENT_BYTES).enumerate() {
+                    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                    let frame = delta::data_frame(chunk, (part * delta::DATA_FRAGMENT_BYTES) as u64, bytes)?;
+                    queue_source_stream_frame(cx, link, control, &mut early, stream, config,
+                        &frame, 16 * 1024, &mut queued, binding).await?;
+                    check_source_stream_control(cx, link, control, &mut early, binding).await?;
+                }
             }
         }
-        drop(file);
-        drop(buffer);
         // Revalidate even locally reused source ranges before permitting the
         // receiver to commit. ObjectComplete is ordered after every fragment.
         keep_peer_alive_while(cx, link, control,
@@ -148,6 +184,7 @@ pub(super) async fn send(
             merkle_root_hex: manifest.merkle_root_hex.clone(), receipt, peer: link.peer,
         })
     }).await;
+    link.end_source_stream_rate_control();
     link.paced_source_stream = previous_stream;
     link.source_stream_send_window = previous_window;
     result.map_err(|error| {
@@ -220,35 +257,74 @@ async fn copy_reused(
     cx: &Cx,
     manifest: &TransferManifest,
     plan: &delta::ReceivePlan,
-    staged: &mut QuicStagedEntryReceive,
+    staged: &mut [QuicStagedEntryReceive],
 ) -> Result<u64, QuicTransportError> {
     let layout = manifest.delta_manifest.as_ref().expect("validated delta manifest");
-    let entry = &manifest.entries[0];
     super::super::reject_quic_destination_symlink_prefix(&plan.baseline, &plan.baseline).await?;
-    let mut file = crate::fs::File::open(&plan.baseline)
-        .await.map_err(|error| delta::io_error(cx, error))?;
-    let mut buffer = vec![0u8; layout.chunk_size];
+    let mut open_baseline: Option<(std::path::PathBuf, crate::fs::File)> = None;
+    let mut buffer = vec![0u8; delta::DATA_FRAGMENT_BYTES];
     let missing: BTreeSet<_> = plan.request.missing_chunks.iter().map(|chunk| chunk.index).collect();
     let mut copied = 0u64;
     for chunk in &layout.chunks {
         if missing.contains(&chunk.index) { continue; }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let &(offset, size) = plan.reusable.get(&chunk.content_id_hex).ok_or_else(|| {
+        let range = plan.reusable.get(&chunk.content_id_hex).ok_or_else(|| {
             QuicTransportError::Integrity("baseline no longer supplies a reused chunk".to_string())
         })?;
-        if size != chunk.size_bytes {
+        if range.size != chunk.size_bytes {
             return Err(QuicTransportError::Integrity("reused chunk length mismatch".to_string()));
         }
-        let len = usize::try_from(size)
-            .map_err(|_| QuicTransportError::Control("reused chunk size overflow".to_string()))?;
-        file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|error| delta::io_error(cx, error))?;
-        file.read_exact(&mut buffer[..len]).await.map_err(|error| delta::io_error(cx, error))?;
-        delta::verify_bytes(chunk, &buffer[..len], "QUIC baseline after planning")?;
-        staged.write_range(entry, chunk.entry_offset, &buffer[..len]).await?;
-        copied = copied.checked_add(size)
+        let index = usize::try_from(chunk.entry_index)
+            .map_err(|_| QuicTransportError::Control("reused entry index overflow".to_string()))?;
+        let entry = manifest.entries.get(index).ok_or_else(|| {
+            QuicTransportError::Integrity("reused chunk references an absent entry".to_string())
+        })?;
+        let staged_entry = staged.get_mut(index).ok_or_else(|| {
+            QuicTransportError::Integrity("reused chunk has no staged entry".to_string())
+        })?;
+        if open_baseline.as_ref().is_none_or(|(path, _)| path != &range.path) {
+            super::super::reject_quic_destination_symlink_prefix(&plan.baseline, &range.path).await?;
+            let file = crate::fs::File::open(&range.path)
+                .await.map_err(|error| delta::io_error(cx, error))?;
+            open_baseline = Some((range.path.clone(), file));
+        }
+        let (_, file) = open_baseline.as_mut().expect("opened verified baseline path");
+        file.seek(std::io::SeekFrom::Start(range.offset))
+            .await.map_err(|error| delta::io_error(cx, error))?;
+        let mut offset = 0u64;
+        let mut content_id = ContentId::streaming();
+        while offset < range.size {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let len = usize::try_from(
+                (range.size - offset).min(delta::DATA_FRAGMENT_BYTES as u64),
+            ).expect("one data fragment fits usize");
+            file.read_exact(&mut buffer[..len]).await.map_err(|error| delta::io_error(cx, error))?;
+            content_id.update(&buffer[..len]);
+            let target = chunk.entry_offset.checked_add(offset).ok_or_else(|| {
+                QuicTransportError::Integrity("reused target offset overflow".to_string())
+            })?;
+            staged_entry.write_range(entry, target, &buffer[..len]).await?;
+            offset += len as u64;
+        }
+        verify_streamed(chunk, offset, content_id.finalize(), "QUIC baseline after planning")?;
+        copied = copied.checked_add(range.size)
             .ok_or_else(|| QuicTransportError::Control("reused byte count overflow".to_string()))?;
     }
     Ok(copied)
+}
+
+fn verify_streamed(
+    chunk: &DeltaChunkWire,
+    size: u64,
+    content_id: ContentId,
+    label: &str,
+) -> Result<(), QuicTransportError> {
+    if size != chunk.size_bytes || content_id.to_hex() != chunk.content_id_hex {
+        return Err(QuicTransportError::Integrity(format!(
+            "{label} differs from its committed content",
+        )));
+    }
+    Ok(())
 }
 
 /// Close loss is bounded by wall time even when the peer sends unrelated
@@ -316,31 +392,41 @@ pub(super) async fn receive(
         }
     };
     let staging_dir = guard.dir.clone();
-    let entry = &manifest.entries[0];
-    let mut staged = QuicStagedEntryReceive::new_with_options(staging_dir.join("0"), entry.size, 1, options);
+    let mut staged: Vec<_> = manifest.entries.iter().map(|entry| {
+        QuicStagedEntryReceive::new_with_options(
+            staging_dir.join(entry.index.to_string()), entry.size, manifest.entries.len(), options,
+        )
+    }).collect();
     let mut commit_started = false;
     let result = async {
-        let layout = manifest.delta_manifest.as_ref().expect("validated delta manifest");
-        let mut buffer = vec![0u8; layout.chunk_size];
         let mut received = 0u64;
         for chunk in &plan.request.missing_chunks {
-            let len = usize::try_from(chunk.size_bytes)
-                .map_err(|_| QuicTransportError::Control("changed-chunk size overflow".to_string()))?;
-            let mut filled = 0usize;
-            while filled < len {
+            let index = usize::try_from(chunk.entry_index)
+                .map_err(|_| QuicTransportError::Control("changed entry index overflow".to_string()))?;
+            let entry = manifest.entries.get(index).ok_or_else(|| {
+                QuicTransportError::Integrity("changed chunk references an absent entry".to_string())
+            })?;
+            let staged_entry = staged.get_mut(index).ok_or_else(|| {
+                QuicTransportError::Integrity("changed chunk has no staged entry".to_string())
+            })?;
+            let mut filled = 0u64;
+            let mut content_id = ContentId::streaming();
+            while filled < chunk.size_bytes {
                 cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
                 let frame = next_data_frame(cx, link, control, manifest_frame, request_frame).await?;
-                let bytes = delta::checked_data(&frame, chunk, filled as u64)?;
-                buffer[filled..filled + bytes.len()].copy_from_slice(bytes);
-                filled += bytes.len();
+                let bytes = delta::checked_data(&frame, chunk, filled)?;
+                content_id.update(bytes);
+                let target = chunk.entry_offset.checked_add(filled).ok_or_else(|| {
+                    QuicTransportError::Integrity("changed target offset overflow".to_string())
+                })?;
+                keep_peer_alive_while(cx, link, control,
+                    staged_entry.write_range(entry, target, bytes)).await?;
+                filled += bytes.len() as u64;
             }
-            delta::verify_bytes(chunk, &buffer[..len], "received QUIC changed chunk")?;
-            keep_peer_alive_while(cx, link, control,
-                staged.write_range(entry, chunk.entry_offset, &buffer[..len])).await?;
+            verify_streamed(chunk, filled, content_id.finalize(), "received QUIC changed content")?;
             received = received.checked_add(chunk.size_bytes)
                 .ok_or_else(|| QuicTransportError::Control("received chunk byte count overflow".to_string()))?;
         }
-        drop(buffer);
         let frame = next_data_frame(cx, link, control, manifest_frame, request_frame).await?;
         if frame.frame_type() != FrameType::ObjectComplete {
             return Err(QuicTransportError::Unexpected {
@@ -350,14 +436,14 @@ pub(super) async fn receive(
         delta::validate_complete(&parse_json::<delta::Complete>(&frame)?, &plan.request)?;
         let reused = keep_peer_alive_while(cx, link, control, copy_reused(cx, manifest, &plan, &mut staged)).await?;
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        if received != plan.request.missing_bytes || received.checked_add(reused) != Some(entry.size) {
+        if received != plan.request.missing_bytes || received.checked_add(reused) != Some(manifest.total_bytes) {
             return Err(QuicTransportError::Integrity("changed chunks did not reconstruct the whole object".to_string()));
         }
         // Once publication begins, an error may follow an atomic rename. Do
         // not claim a pre-commit refusal if durability/proof delivery then fails.
         commit_started = true;
         let (mut receipt, committed_paths) = commit_staged_entries(
-            cx, link, control, dest_dir, manifest, std::slice::from_mut(&mut staged), config, options,
+            cx, link, control, dest_dir, manifest, &mut staged, config, options,
         ).await?;
         if !receipt.committed || !receipt.sha_ok || !receipt.merkle_ok {
             commit_started = false;

@@ -1501,12 +1501,12 @@ impl ConnectionRouter {
             return;
         }
         let origin = handle.clock_origin.unwrap_or(router_origin);
-        if !handle
+        if handle
             .connection
             .transport()
             .drain_deadline_micros()
             .and_then(|micros| origin.checked_add(Duration::from_micros(micros)))
-            .is_some_and(|deadline| packet.receive_time < deadline)
+            .is_none_or(|deadline| packet.receive_time >= deadline)
         {
             return;
         }

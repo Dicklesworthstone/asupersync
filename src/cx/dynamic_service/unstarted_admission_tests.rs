@@ -213,6 +213,10 @@ struct PanickingName {
     conversions: Arc<AtomicUsize>,
 }
 
+#[expect(
+    clippy::fallible_impl_from,
+    reason = "start_child takes `impl Into<ChildName>`; this test needs a conversion that panics"
+)]
 impl From<PanickingName> for ChildName {
     fn from(name: PanickingName) -> Self {
         name.conversions.fetch_add(1, Ordering::SeqCst);

@@ -963,6 +963,11 @@ path = "tests/distributed_hash_snapshot_recovery_e2e.rs"
 required-features = ["distributed-hash-snapshot-recovery-e2e"]
 
 [[test]]
+name = "distributed_node_native"
+path = "tests/distributed_node_native.rs"
+required-features = ["tls", "test-internals"]
+
+[[test]]
 name = "distribution_hedge_process"
 path = "tests/distribution_hedge_process.rs"
 required-features = ["test-internals", "tls"]

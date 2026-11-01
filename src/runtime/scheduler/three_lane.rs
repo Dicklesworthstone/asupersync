@@ -444,6 +444,77 @@ const LIFO_WATCH_REQUESTED: u8 = 1;
 /// An idle worker watches the slots.
 const LIFO_WATCH_ACTIVE: u8 = 2;
 
+/// How long a released reactor may stay unwatched before the standby
+/// follower takes it, in nanoseconds (GH #83 bounded standby). A worker that
+/// leaves the reactor to run a task wakes nobody while a standby covers it,
+/// so one busy connection no longer bounces between threads on every hop.
+/// The price is the bound: a task poll that starts right after a reactor
+/// turn can hold back other connections' readiness by up to this long plus
+/// the standby's wake latency, instead of only that wake latency. Zero keeps
+/// the immediate handoff (wake a follower on every release).
+const REACTOR_STANDBY_NANOS: u64 = 250_000;
+
+/// [`WorkerCoordinator::standby`]: no follower stands by.
+const STANDBY_NONE: usize = 0;
+/// The standby sleeps until the latest release is `T` old (`index << 2 | TIMED`).
+const STANDBY_TIMED: usize = 1;
+/// The standby saw a reactor turn in progress and sleeps until a release
+/// wakes it (`index << 2 | WAITING`).
+const STANDBY_WAITING: usize = 2;
+const STANDBY_KIND_MASK: usize = 0b11;
+const STANDBY_INDEX_SHIFT: u32 = 2;
+
+/// Monotonic nanoseconds for the reactor standby: real time, whatever clock
+/// the runtime's timers read (the standby parks for real durations).
+#[inline]
+fn reactor_standby_clock_nanos() -> u64 {
+    lifo_watch_nanos()
+}
+
+/// How a follower left the standby role (GH #83).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StandbyExit {
+    /// The latest release went unwatched for `T`: this worker now enters
+    /// reactor election and is responsible for the reactor until it does.
+    TakeOver,
+    /// Work, its deadline, the LIFO watch, a stop request or shutdown; the
+    /// role was handed on (`WorkerCoordinator::leave_standby`).
+    Left,
+}
+
+/// Points in the standby loop where a test can land a concurrent release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StandbyPoint {
+    /// It read `is_polling == true` and has not stored WAITING yet.
+    SawTurn,
+    /// It decided to leave and has not stored NONE yet.
+    BeforeLeave,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STANDBY_TEST_HOOK: RefCell<Option<Box<dyn FnMut(StandbyPoint)>>> =
+        const { RefCell::new(None) };
+}
+
+/// Installs (or with `None` removes) this thread's standby test hook.
+#[cfg(test)]
+pub(crate) fn set_standby_test_hook(hook: Option<Box<dyn FnMut(StandbyPoint)>>) {
+    STANDBY_TEST_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+#[inline]
+fn standby_test_point(point: StandbyPoint) {
+    #[cfg(test)]
+    STANDBY_TEST_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(point);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = point;
+}
+
 thread_local! {
     /// While this worker executes a task in its dispatch loop: its runtime's
     /// coordinator (by address), the worker's index and the task
@@ -1421,6 +1492,17 @@ pub(crate) struct WorkerCoordinator {
     /// Who watches the LIFO slots: [`LIFO_WATCH_NONE`],
     /// [`LIFO_WATCH_REQUESTED`] or [`LIFO_WATCH_ACTIVE`].
     lifo_watch: CachePadded<AtomicU8>,
+    /// Bumped by every reactor release while the standby is enabled (GH #83).
+    release_epoch: CachePadded<AtomicU64>,
+    /// [`reactor_standby_clock_nanos`] of the latest release.
+    released_at: CachePadded<AtomicU64>,
+    /// Which follower watches a released reactor: [`STANDBY_NONE`], or a
+    /// worker index with [`STANDBY_TIMED`] or [`STANDBY_WAITING`]. Only the
+    /// standby itself changes a non-NONE word; a follower claims NONE by CAS.
+    standby: CachePadded<AtomicUsize>,
+    /// `T` for this runtime's tests; production reads [`REACTOR_STANDBY_NANOS`].
+    #[cfg(test)]
+    standby_nanos_for_test: AtomicU64,
 }
 
 impl WorkerCoordinator {
@@ -1440,6 +1522,123 @@ impl WorkerCoordinator {
             lifo_slots: (0..count).map(|_| CachePadded::default()).collect(),
             idle_workers: CachePadded::new(AtomicUsize::new(0)),
             lifo_watch: CachePadded::new(AtomicU8::new(LIFO_WATCH_NONE)),
+            release_epoch: CachePadded::new(AtomicU64::new(0)),
+            released_at: CachePadded::new(AtomicU64::new(0)),
+            standby: CachePadded::new(AtomicUsize::new(STANDBY_NONE)),
+            #[cfg(test)]
+            standby_nanos_for_test: AtomicU64::new(REACTOR_STANDBY_NANOS),
+        }
+    }
+
+    /// `T`: how long a released reactor may stay unwatched (GH #83).
+    #[inline]
+    fn standby_nanos(&self) -> u64 {
+        #[cfg(test)]
+        {
+            self.standby_nanos_for_test.load(Ordering::Relaxed)
+        }
+        #[cfg(not(test))]
+        {
+            REACTOR_STANDBY_NANOS
+        }
+    }
+
+    /// Runs this runtime's handoff with another `T`; zero restores the
+    /// immediate follower handoff. Set before the workers start.
+    #[cfg(test)]
+    pub(crate) fn set_standby_nanos_for_test(&self, nanos: u64) {
+        self.standby_nanos_for_test.store(nanos, Ordering::Relaxed);
+    }
+
+    /// Whether released reactors are covered by a standby follower instead of
+    /// an immediate wake. One parker has no follower to stand by.
+    #[inline]
+    fn standby_enabled(&self) -> bool {
+        self.standby_nanos() != 0 && self.parkers.len() >= 2
+    }
+
+    /// A worker left the reactor (its own turn) and will run a task, or its
+    /// dispatch loop ends (GH #83). With `T = 0` this is the immediate handoff.
+    ///
+    /// With a standby: record the release, then the Dekker pair with the
+    /// standby's WAITING store and with a leaving standby's NONE store.
+    /// Release side: store `released_at`, bump `release_epoch`, fence R, load
+    /// `standby`. Standby side: store `standby`, fence S or L, load
+    /// `release_epoch` / `is_polling`. R and S/L are SeqCst fences, each
+    /// between a store and a load of the other side's variable, so in their
+    /// total order one side sees the other's store: either this load reads
+    /// WAITING and unparks the standby (or NONE and promotes a follower), or
+    /// the standby reads the new epoch and re-arms without sleeping (a leaving
+    /// standby reads the cleared `is_polling` and promotes a follower itself).
+    /// A TIMED standby needs no wake: its deadline is re-derived from
+    /// `released_at` each time it wakes, and a later release only moves it
+    /// later, never past that release plus `T`.
+    #[inline]
+    fn release_reactor(&self) {
+        if !self.standby_enabled() {
+            self.promote_follower();
+            return;
+        }
+        self.released_at
+            .store(reactor_standby_clock_nanos(), Ordering::Relaxed);
+        self.release_epoch.fetch_add(1, Ordering::Release);
+        std::sync::atomic::fence(Ordering::SeqCst); // R
+        self.cover_released_reactor();
+    }
+
+    /// After fence R: make sure someone watches the released reactor.
+    #[inline]
+    fn cover_released_reactor(&self) {
+        let word = self.standby.load(Ordering::Relaxed);
+        match word & STANDBY_KIND_MASK {
+            STANDBY_TIMED => {}
+            STANDBY_WAITING => self.parkers[word >> STANDBY_INDEX_SHIFT].unpark(),
+            _ => {
+                self.promote_follower();
+            }
+        }
+    }
+
+    /// A follower that found the reactor free, or a standby that took it over,
+    /// is about to run a task before it reaches election: the reactor must
+    /// not stay unwatched behind that task (GH #83). The standby, a reactor
+    /// turn or a promoted follower covers it.
+    #[inline]
+    fn cover_free_reactor(&self, io: &IoDriverHandle) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.standby.load(Ordering::Relaxed) == STANDBY_NONE && !io.is_polling() {
+            self.promote_follower();
+        }
+    }
+
+    /// Makes `worker` the standby if no follower is.
+    #[inline]
+    fn claim_standby(&self, worker: usize) -> bool {
+        self.standby
+            .compare_exchange(
+                STANDBY_NONE,
+                (worker << STANDBY_INDEX_SHIFT) | STANDBY_TIMED,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    }
+
+    /// The standby leaves for work, shutdown or a stop request, before its
+    /// deadline (GH #83). It abandons the release it was covering, and a
+    /// release may race this exit having read TIMED, so it hands the role on
+    /// through the pairing with fence R: store NONE, fence L, then promote a
+    /// follower unless a turn is running (its release will read NONE) or
+    /// another follower already claimed the role. A turn's release clears
+    /// `is_polling` before its fence R, so either that release reads NONE and
+    /// promotes, or this load reads the cleared flag and promotes.
+    #[cold]
+    #[inline(never)]
+    fn leave_standby(&self, io: &IoDriverHandle) {
+        self.standby.store(STANDBY_NONE, Ordering::Relaxed);
+        std::sync::atomic::fence(Ordering::SeqCst); // L
+        if !io.is_polling() && self.standby.load(Ordering::Relaxed) == STANDBY_NONE {
+            self.promote_follower();
         }
     }
 
@@ -5925,6 +6124,182 @@ impl ThreeLaneWorker {
         }
     }
 
+    /// The follower park when the reactor standby is enabled (GH #83, T > 0).
+    ///
+    /// Claims the standby role when no follower holds it. Otherwise parks as
+    /// an idle loop does, without the `!is_polling` predicate: only the
+    /// standby watches a free reactor. A wake with nothing to run tries the
+    /// role again before reactor election, so a promote (from a release that
+    /// read NONE, or from a leaving standby) produces a standby, not an
+    /// immediate poller. Returns whether this worker leaves responsible for a
+    /// free reactor (`carried_reactor`): it took the reactor over, or woke to
+    /// work with the reactor free.
+    fn follow_with_standby(
+        &mut self,
+        io: &IoDriverHandle,
+        next_deadline: Option<Time>,
+        watch_cap: Option<Duration>,
+        lifo_idle: &LifoIdle,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) -> bool {
+        let coordinator = Arc::clone(&self.coordinator);
+        let capped = |wait: Duration| watch_cap.map_or(wait, |cap| wait.min(cap));
+        loop {
+            if coordinator.claim_standby(self.id) {
+                return matches!(
+                    self.stand_by(io, next_deadline, watch_cap, lifo_idle, should_stop),
+                    StandbyExit::TakeOver
+                );
+            }
+            // Another follower stands by.
+            let io_phase = IoPhaseOutcome::Follower;
+            if let Some(deadline) = next_deadline {
+                let now = self.current_scheduler_time();
+                let nanos = if deadline > now {
+                    deadline.duration_since(now)
+                } else {
+                    STALE_DUE_DEADLINE_PARK_NANOS
+                };
+                record_backoff_timeout_park(&mut self.preemption_metrics, io_phase, nanos);
+                self.parker
+                    .park_timeout_unless(capped(Duration::from_nanos(nanos)), || {
+                        coordinator.lifo_watch_requested()
+                    });
+            } else if let Some(cap) = watch_cap {
+                record_backoff_timeout_park(
+                    &mut self.preemption_metrics,
+                    io_phase,
+                    u64::try_from(cap.as_nanos()).unwrap_or(u64::MAX),
+                );
+                self.parker.park_timeout(cap);
+            } else {
+                record_backoff_indefinite_park(&mut self.preemption_metrics, io_phase);
+                self.parker
+                    .park_unless(|| coordinator.lifo_watch_requested());
+            }
+            // Woken by work, a promote, the LIFO watch, its deadline or
+            // shutdown. Back to dispatch unless there is nothing to run and
+            // the standby role may be free.
+            if watch_cap.is_some()
+                || self.standby_must_return(next_deadline, lifo_idle, should_stop)
+            {
+                return !io.is_polling();
+            }
+        }
+    }
+
+    /// Whether the standby, or a follower about to re-park, must go back to
+    /// dispatch: shutdown, a stop request, the LIFO watch, its own deadline,
+    /// or queued work. The queue checks are the idle loop's (the lock-free
+    /// probe, then the mutex-backed checks it makes before parking); a
+    /// merely-due global timed entry is the reactor leader's to drive.
+    fn standby_must_return(
+        &self,
+        next_deadline: Option<Time>,
+        lifo_idle: &LifoIdle,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) -> bool {
+        if self.shutdown.load(Ordering::Relaxed)
+            || should_stop()
+            || lifo_idle.must_look()
+            || self.coordinator.lifo_watch_requested()
+        {
+            return true;
+        }
+        let now = self.current_scheduler_time();
+        next_deadline.is_some_and(|deadline| deadline <= now)
+            || !self.fast_queue.is_empty()
+            || !self.global_ready_buffer.is_empty()
+            || self.global.has_cancel_work()
+            || self.global.has_ready_work()
+            || self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
+            || self
+                .spawn_mailbox
+                .as_ref()
+                .is_some_and(|mailbox| !mailbox.is_empty())
+            || self.obligation_posts_queued()
+            || !crate::runtime::spawn_mailbox::local_spawn_lane_is_empty()
+            || !self.local_ready.lock().is_empty()
+            || self.local.lock().has_runnable_work(now)
+    }
+
+    /// The reactor standby (GH #83): one follower watches a released reactor
+    /// and takes it over once the latest release is `T` old with no turn
+    /// running. It leaves before that, handing the role on, for work, its
+    /// deadline, the LIFO watch, a stop request or shutdown.
+    ///
+    /// TIMED: sleeps until `released_at + T`, re-derived after every wake, so
+    /// a later release only moves the deadline later and never past that
+    /// release plus `T`; a stale read only makes it earlier. WAITING: a turn
+    /// is running, so it sleeps until a release; the store of WAITING, fence
+    /// S and the epoch re-read pair with the releaser's fence R (see
+    /// [`WorkerCoordinator::release_reactor`]): either the releaser reads
+    /// WAITING and unparks it, or this re-read sees the new epoch.
+    fn stand_by(
+        &self,
+        io: &IoDriverHandle,
+        next_deadline: Option<Time>,
+        watch_cap: Option<Duration>,
+        lifo_idle: &LifoIdle,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) -> StandbyExit {
+        let coordinator = &*self.coordinator;
+        let timed = (self.id << STANDBY_INDEX_SHIFT) | STANDBY_TIMED;
+        let waiting = (self.id << STANDBY_INDEX_SHIFT) | STANDBY_WAITING;
+        let standby_nanos = coordinator.standby_nanos();
+        let deadline_cap = |wait: Option<Duration>| {
+            let own = next_deadline.map(|deadline| {
+                let now = self.current_scheduler_time();
+                Duration::from_nanos(if deadline > now {
+                    deadline.duration_since(now)
+                } else {
+                    STALE_DUE_DEADLINE_PARK_NANOS
+                })
+            });
+            [wait, own, watch_cap].into_iter().flatten().min()
+        };
+        loop {
+            if self.standby_must_return(next_deadline, lifo_idle, should_stop) {
+                standby_test_point(StandbyPoint::BeforeLeave);
+                coordinator.leave_standby(io);
+                return StandbyExit::Left;
+            }
+            let epoch = coordinator.release_epoch.load(Ordering::Acquire);
+            if io.is_polling() {
+                standby_test_point(StandbyPoint::SawTurn);
+                coordinator.standby.store(waiting, Ordering::Relaxed);
+                std::sync::atomic::fence(Ordering::SeqCst); // S
+                if coordinator.release_epoch.load(Ordering::Relaxed) != epoch {
+                    continue;
+                }
+                match deadline_cap(None) {
+                    Some(wait) => self
+                        .parker
+                        .park_timeout_unless(wait, || coordinator.lifo_watch_requested()),
+                    None => self
+                        .parker
+                        .park_unless(|| coordinator.lifo_watch_requested()),
+                }
+                continue;
+            }
+            let due = coordinator
+                .released_at
+                .load(Ordering::Relaxed)
+                .saturating_add(standby_nanos);
+            let now = reactor_standby_clock_nanos();
+            if now >= due {
+                // The latest release has been unwatched for T: take it over.
+                coordinator.standby.store(STANDBY_NONE, Ordering::Relaxed);
+                return StandbyExit::TakeOver;
+            }
+            coordinator.standby.store(timed, Ordering::Relaxed);
+            let wait = deadline_cap(Some(Duration::from_nanos(due - now)))
+                .unwrap_or_else(|| Duration::from_nanos(due - now));
+            self.parker
+                .park_timeout_unless(wait, || coordinator.lifo_watch_requested());
+        }
+    }
+
     /// `quick_poll` (GH#58, idle-return mode) turns the reactor without
     /// blocking so already-arrived readiness becomes runnable work. A
     /// `wait_cap` bounds how long the turn may block: the LIFO watcher's next
@@ -6108,6 +6483,12 @@ impl ThreeLaneWorker {
         // Also carried by a promoted follower while the reactor is free:
         // its next dispatch can select owner-local work before re-election.
         let mut left_reactor = false;
+        // With the reactor standby (GH #83, T > 0): this follower found the
+        // reactor free, or took it over as the standby, and has not reached
+        // election yet. Owner-local work selected first must not leave the
+        // reactor unwatched behind its poll. `left_reactor` stays this
+        // worker's own released turn.
+        let mut carried_reactor = false;
         // This loop's part in watching the LIFO slots (GH #84).
         let mut lifo_idle = LifoIdle::new(Arc::clone(&self.coordinator), self.id);
 
@@ -6132,7 +6513,11 @@ impl ThreeLaneWorker {
                     // The selected task can spend arbitrarily long in poll.
                     // Keeping its first wake locally must not strand I/O or
                     // shared timers behind that task (GH #83).
-                    self.coordinator.promote_follower();
+                    self.coordinator.release_reactor();
+                } else if std::mem::take(&mut carried_reactor) {
+                    if let Some(io) = self.io_driver.as_ref() {
+                        self.coordinator.cover_free_reactor(io);
+                    }
                 }
                 self.execute(task);
                 self.publish_preemption_fairness_certificate_if_due();
@@ -6162,6 +6547,8 @@ impl ThreeLaneWorker {
             // the idle probe. Only a follower knows another poller owns I/O.
             left_reactor = self.io_driver.is_some()
                 && !matches!(io_phase, IoPhaseOutcome::Follower);
+            // Election ran: a turn of its own, or another poller owns I/O.
+            carried_reactor = false;
             if matches!(io_phase, IoPhaseOutcome::Progress) {
                 // We polled I/O, so we might have woken tasks. Continue loop.
                 continue;
@@ -6311,6 +6698,24 @@ impl ThreeLaneWorker {
                             } else {
                                 self.reset_empty_backoff();
                             }
+                            break;
+                        }
+
+                        if matches!(io_phase, IoPhaseOutcome::Follower)
+                            && coordinator.standby_enabled()
+                        {
+                            // GH #83 bounded standby (T > 0): one follower
+                            // watches a free reactor for at most T; the others
+                            // sleep until work or a promote wakes them.
+                            let io = self.io_driver.clone().expect("follower has an I/O driver");
+                            carried_reactor = self.follow_with_standby(
+                                &io,
+                                next_deadline,
+                                watch_cap,
+                                &lifo_idle,
+                                should_stop,
+                            );
+                            self.reset_empty_backoff();
                             break;
                         }
 
@@ -6482,7 +6887,11 @@ impl ThreeLaneWorker {
         }
         lifo_idle.leave();
         if left_reactor {
-            self.coordinator.promote_follower();
+            self.coordinator.release_reactor();
+        } else if carried_reactor {
+            if let Some(io) = self.io_driver.as_ref() {
+                self.coordinator.cover_free_reactor(io);
+            }
         }
         // The loop can stop between an execution and the next dispatch. A
         // task still in this worker's LIFO slot then goes to the global lane,
@@ -8587,7 +8996,7 @@ impl ThreeLaneWorker {
                 // even when it returns no events. Pass the released reactor
                 // on before the next task poll; no idle-loop flag exists on
                 // the single-step root-pump path (GH #83).
-                self.coordinator.promote_follower();
+                self.coordinator.release_reactor();
             }
         }
     }

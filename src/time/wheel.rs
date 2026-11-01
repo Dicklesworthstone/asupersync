@@ -495,15 +495,27 @@ impl TimerWheel {
             ready.clear();
             overflow.clear();
         }
+        // A wheel with one timer gets here on every cancel, so only the slots
+        // the bitmap marks are visited, a word at a time.
         for level in levels.iter_mut() {
-            for slot in &mut level.slots {
-                match dropped_wakers.as_mut() {
-                    Some(dropped) => dropped.extend(slot.drain(..).map(|entry| entry.waker)),
-                    None => slot.clear(),
+            for (word, occupied) in level.occupied.iter_mut().enumerate() {
+                let mut bits = std::mem::take(occupied);
+                while bits != 0 {
+                    let slot = &mut level.slots[word * 64 + bits.trailing_zeros() as usize];
+                    bits &= bits - 1;
+                    match dropped_wakers.as_mut() {
+                        Some(dropped) => dropped.extend(slot.drain(..).map(|entry| entry.waker)),
+                        None => slot.clear(),
+                    }
                 }
             }
-            level.occupied = [0u64; BITMAP_WORDS];
         }
+        debug_assert!(
+            levels
+                .iter()
+                .all(|level| level.slots.iter().all(Vec::is_empty)),
+            "every entry's slot has its occupied bit set"
+        );
     }
 
     /// Returns the timer wheel configuration.

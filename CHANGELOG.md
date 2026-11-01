@@ -130,6 +130,12 @@ blocking-pool submission and HTTP client lifecycle checks. Source inclusion,
 packaged-byte checks, successful qualification, and registry/release delivery
 are separate requirements; this changelog entry does not claim publication.
 
+### Fixed: native OTLP export futures keep downstream recursion-limit headroom
+
+Native OTLP export futures (`send_otlp_protobuf`, `send_owned_*`,
+`flush_queued`) are proven `Send` inside the crate, so downstream crates keep
+their recursion-limit headroom.
+
 ### Security — third-party macaroon caveats (asupersync-s45073)
 
 - **Legacy third-party caveats can be stripped by the third party.**
@@ -211,6 +217,41 @@ program observes.
     left over after a timed-out shutdown (7e04f79b3).
 - A census test fails when a new thread spawn site has no recorded answer for
   its handle (c12042185).
+
+### Fixed: a long task poll no longer stalls other connections' I/O (GitHub #83)
+
+In 0.5.0 the worker that turned the reactor also ran the tasks that turn woke,
+and no other worker turned the reactor until it came back. So one task poll
+that kept its worker busy (a CPU-bound loop, a blocking call) held back every
+other connection's readiness and every shared timer for as long as it ran,
+even with idle workers available.
+
+A released reactor is now always covered (99321a449, 3d0151aec, and the
+standby described below). When a worker leaves a reactor turn to run tasks,
+one idle worker stands by. If no worker has turned the reactor for `T`
+(250 µs) since that release, the standby takes the reactor over and polls it.
+A task poll that starts right after a reactor turn therefore delays other
+connections' readiness by at most `T` plus the standby's wake latency, instead
+of by the whole poll. The same bound holds when no worker is standing by at
+the release: the release wakes an idle worker, which stands by in turn. When
+every other worker is busy, nothing is woken, and the first worker to go idle
+polls the reactor.
+
+The standby also keeps a busy connection on one worker. A reactor handoff
+happens only when the reactor goes unturned for `T`, not on every release, so
+round trips stop bouncing between threads. On a one-connection TCP round-trip
+benchmark, this costs about 167k CPU cycles per round trip against 0.5.0's
+273k, at about 13,900 round trips per second against 11,500.
+
+`T` is a constant (`REACTOR_STANDBY_NANOS`). A runtime with one worker has no
+standby, so this change doesn't affect current-thread runtimes.
+
+Tests cover the bound directly. A task poll that busy-runs for 50 ms must not
+delay another connection's readiness by more than `T` plus 1 ms. Each test
+also runs at `T = 0`, the immediate handoff. Hook-driven tests land a release
+inside each standby race window: after the standby saw a turn running, and
+while it leaves for work. Loom models cover the same races, with planted
+negatives that must fail.
 
 ### Performance note — runtime shutdown retires every task
 

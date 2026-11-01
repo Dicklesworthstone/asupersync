@@ -1503,7 +1503,7 @@ fn presynced_regular_install_preserves_restrictive_metadata_without_reopening() 
     let out = root.path().join("out");
     std::fs::write(&staged, b"durable payload").unwrap();
     let pending = StagedFileSync::open_sync(staged.clone()).unwrap();
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o0)).unwrap();
     let synced = pending.sync_sync().expect("sync the retained open handle");
     synced
         .install_sync(&out)

@@ -292,7 +292,7 @@
             .create_child_region(root, Budget::INFINITE)
             .expect("child region");
         let pending = state.region(child).expect("child").pending_spawn_handle();
-        let state = Arc::new(ContendedMutex::new("orphaned_local_request", state));
+        let state = Arc::new(ContendedMutex::new("test_runtime_state", state));
         let mailbox = Arc::new(SpawnMailbox::new());
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
         scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));

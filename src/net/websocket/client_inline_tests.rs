@@ -1758,3 +1758,17 @@
             "connect timed out after {elapsed:?} for a {limit:?} bound"
         );
     }
+
+    // `wait_until` and `CloseDeadline::wait` own the future they are given and
+    // pin it again, so a future passed by value is stored twice. Nested around
+    // `read_more`'s 4 KiB buffer, they made every pending receive 17.9 KB. The
+    // bound leaves room for layout changes and catches a wrapper's copy coming
+    // back.
+    #[test]
+    fn a_pending_receive_stores_its_read_buffer_once() {
+        let mut ws = WebSocket::from_upgraded(TestIo::new(), WebSocketConfig::default());
+        let cx = Cx::for_testing();
+        let receive = ws.recv(&cx);
+        let size = std::mem::size_of_val(&receive);
+        assert!(size <= 6 * 1024, "a pending receive holds {size} bytes");
+    }

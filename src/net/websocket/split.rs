@@ -157,9 +157,91 @@ fn split_close_deadline<IO>(shared: &Arc<Mutex<WebSocketShared<IO>>>) -> Option<
     }
 }
 
+/// The close state one poll of a split operation needs, read under one lock.
+#[derive(Clone, Copy)]
+struct SplitCloseView {
+    /// The handshake is still open, so ambient cancellation keeps priority.
+    is_open: bool,
+    /// Open, with no close deadline to arm and none expired: the only state
+    /// in which an operation is polled before its close watch is registered.
+    quiet: bool,
+}
+
+impl SplitCloseView {
+    fn of<IO>(state: &WebSocketShared<IO>) -> Self {
+        let handshake = &state.close_handshake;
+        let is_open = handshake.is_open();
+        Self {
+            is_open,
+            // `deadline()` clones only a present deadline, never a quiet one.
+            quiet: is_open && !handshake.timed_out() && handshake.deadline().is_none(),
+        }
+    }
+}
+
+/// Registers this operation's close watch, or refreshes its Waker. Returns
+/// true when a close broadcast has completed the watch since it was armed.
+fn register_split_close_watch<'a>(
+    notification: &mut Pin<&mut crate::sync::Notified<'a>>,
+    changed: &'a crate::sync::Notify,
+    task: &mut Context<'_>,
+) -> bool {
+    let mut fired = false;
+    loop {
+        let _ = notification.as_mut().enable();
+        if notification.as_mut().poll(task).is_pending() {
+            return fired;
+        }
+        fired = true;
+        notification.set(changed.notified());
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only interleaving point: runs once, on this thread, after a quiet
+    /// operation's Pending poll and before its close watch is registered.
+    static BEFORE_SPLIT_CLOSE_WATCH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Test-only interleaving point: runs once, on this thread, after a
+    /// write-path wait has parked and before its cancellation Waker registers.
+    static BEFORE_WRITE_WAIT_REGISTRATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn before_split_close_watch() {
+    if let Some(hook) = BEFORE_SPLIT_CLOSE_WATCH.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+const fn before_split_close_watch() {}
+
+#[cfg(test)]
+fn before_write_wait_registration() {
+    if let Some(hook) = BEFORE_WRITE_WAIT_REGISTRATION.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+const fn before_write_wait_registration() {}
+
 /// Watch for the first Close as well as its deadline. A read or DATA write
 /// may already be parked when the other half starts closing, so a snapshot
 /// taken only at operation entry is insufficient.
+///
+/// While the connection is quiet (open, no close deadline), the operation is
+/// polled first and its watch is registered only if it parks, so a ready
+/// operation pays for neither a Notify waiter nor a deadline lookup. A close
+/// publishes its state under the shared lock before it broadcasts
+/// `close_changed`, and the watch is armed against the broadcast generation
+/// read under the same lock as the entry snapshot. A close that a quiet
+/// snapshot missed therefore completes the watch when it is registered after
+/// the Pending poll, and the operation polls again to arm the deadline.
+///
 /// Borrow the caller's pinned operation to avoid duplicating its state inside
 /// the outer read/write future (br-asupersync-zsjgkg).
 async fn watch_split_close<IO, T, F>(
@@ -170,29 +252,53 @@ async fn watch_split_close<IO, T, F>(
 where
     F: Future<Output = Result<T, WsError>> + ?Sized,
 {
-    let changed = Arc::clone(&shared.lock().close_changed);
-    let mut notification = std::pin::pin!(changed.notified());
+    let changed;
+    // The notification is created under the snapshot's lock and armed below
+    // against the generation it read: it completes for every broadcast the
+    // snapshot cannot have seen. The guard lives only in this block; a guard
+    // that is borrowed stays in the future's state until its scope ends, even
+    // after `drop`, and would make every watched operation `!Send`.
+    let (notification, entry_view) = {
+        let state = shared.lock();
+        changed = Arc::clone(&state.close_changed);
+        (changed.notified(), SplitCloseView::of(&state))
+    };
+    let mut entry_view = Some(entry_view);
+    let mut notification = std::pin::pin!(notification);
+    let _ = notification.as_mut().enable();
     let mut timer: Option<(CloseDeadline, crate::time::Sleep)> = None;
     std::future::poll_fn(|task| {
-        let is_open = shared.lock().close_handshake.is_open();
+        let view = entry_view
+            .take()
+            .unwrap_or_else(|| SplitCloseView::of(&shared.lock()));
         // Pending transport/permit waits already own their cancellation
         // registrations. Keep priority here without registering a second one.
-        if write_path_cancelled(op_cx, is_open) {
+        if write_path_cancelled(op_cx, view.is_open) {
             return Poll::Ready(Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancelled",
             ))));
         }
 
-        // Register before inspecting shared state. A notification between the
-        // snapshot and a pending transport poll must still wake this operation.
-        loop {
-            let _ = notification.as_mut().enable();
-            if notification.as_mut().poll(task).is_pending() {
-                break;
+        if view.quiet && timer.is_none() {
+            let result = future.as_mut().poll(task);
+            if result.is_pending() {
+                before_split_close_watch();
+                // Parked: register now. A close since the snapshot has already
+                // completed the armed watch, so poll again to arm its deadline
+                // instead of waiting on transport I/O that may never wake.
+                if register_split_close_watch(&mut notification, &changed, task) {
+                    task.waker().wake_by_ref();
+                }
+                return Poll::Pending;
             }
-            notification.set(changed.notified());
+            return split_close_watch_result(shared, result);
         }
+
+        // Closing. Register before inspecting shared state: a notification
+        // between the snapshot and a pending transport poll must still wake
+        // this operation.
+        let _ = register_split_close_watch(&mut notification, &changed, task);
         if let Some(deadline) = split_close_deadline(shared) {
             if timer.is_none() {
                 let sleep = deadline.sleep();
@@ -225,17 +331,25 @@ where
                 timer = None;
             }
         }
-        let result = future.as_mut().poll(task);
-        let interrupted = matches!(&result, Poll::Ready(Err(WsError::Io(error)))
-            if error.kind() == io::ErrorKind::Interrupted);
-        if shared.lock().close_handshake.timed_out() && !interrupted {
-            // A nested close flush may have observed the same deadline first.
-            Poll::Ready(Ok(None))
-        } else {
-            result.map(|result| result.map(Some))
-        }
+        split_close_watch_result(shared, future.as_mut().poll(task))
     })
     .await
+}
+
+/// One poll's result of a watched operation. An expired close wins over the
+/// operation's own result, except cancellation.
+fn split_close_watch_result<IO, T>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    result: Poll<Result<T, WsError>>,
+) -> Poll<Result<Option<T>, WsError>> {
+    let interrupted = matches!(&result, Poll::Ready(Err(WsError::Io(error)))
+        if error.kind() == io::ErrorKind::Interrupted);
+    if shared.lock().close_handshake.timed_out() && !interrupted {
+        // A nested close flush may have observed the same deadline first.
+        Poll::Ready(Ok(None))
+    } else {
+        result.map(|result| result.map(Some))
+    }
 }
 
 impl<IO> Drop for SplitWritePermit<IO> {
@@ -348,22 +462,46 @@ async fn acquire_write_permit_with_cx<IO>(
     };
     std::future::poll_fn(|task| {
         let is_open = shared.lock().close_handshake.is_open();
-        if is_open || op_cx.is_some() {
-            if let Some(guard) = cancel_wake.as_mut() {
-                // Register before checking: cancellation between the check
-                // and parking must not strand this waiter behind a writer.
-                guard.refresh(task.waker());
-            }
-        }
         if write_path_cancelled(op_cx, is_open) {
-            return Poll::Ready(Err(WsError::Io(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "cancelled",
-            ))));
+            return Poll::Ready(Err(WsError::Io(write_wait_cancelled())));
         }
-        Pin::new(&mut acquire).poll(task).map(Ok)
+        let acquired = Pin::new(&mut acquire).poll(task);
+        if acquired.is_pending()
+            && park_write_wait_for_cancel(cancel_wake.as_mut(), op_cx, is_open, task.waker())
+        {
+            return Poll::Ready(Err(WsError::Io(write_wait_cancelled())));
+        }
+        acquired.map(Ok)
     })
     .await
+}
+
+fn write_wait_cancelled() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "cancelled")
+}
+
+/// Registers a write-path wait that has just parked for cancellation wakes,
+/// then checks cancellation again. A wait registers only once it parks: an
+/// uncontended permit or a write that completes at once never touches the
+/// context's cancellation registry. Rechecking after the registration means a
+/// cancellation between the caller's first check and this registration cannot
+/// strand the waiter behind a writer or on a stalled transport.
+/// Returns true when the wait must end as cancelled.
+fn park_write_wait_for_cancel(
+    cancel_wake: Option<&mut WsCancelWakerGuard<'_>>,
+    op_cx: Option<&Cx>,
+    is_open: bool,
+    waker: &Waker,
+) -> bool {
+    if !is_open && op_cx.is_none() {
+        return false;
+    }
+    let Some(guard) = cancel_wake else {
+        return false;
+    };
+    before_write_wait_registration();
+    guard.refresh(waker);
+    write_path_cancelled(op_cx, is_open)
 }
 
 #[cfg(test)]
@@ -420,24 +558,24 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
     } {
         let is_open = shared.lock().close_handshake.is_open();
         let n = poll_fn(|poll_cx| {
-            if is_open || op_cx.is_some() {
-                if let Some(guard) = cancel_wake.as_mut() {
-                    guard.refresh(poll_cx.waker());
-                }
-            }
             if write_path_cancelled(op_cx, is_open) {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "cancelled",
-                )));
+                return Poll::Ready(Err(write_wait_cancelled()));
             }
-            let mut guard = shared.lock();
-            guard.check_write_heartbeat(poll_cx)?;
-            if guard.write_buf.is_empty() {
-                return Poll::Ready(Ok(0));
+            let written = {
+                let mut guard = shared.lock();
+                guard.check_write_heartbeat(poll_cx)?;
+                if guard.write_buf.is_empty() {
+                    return Poll::Ready(Ok(0));
+                }
+                let WebSocketShared { io, write_buf, .. } = &mut *guard;
+                Pin::new(io).poll_write(poll_cx, &write_buf[..])
+            };
+            if written.is_pending()
+                && park_write_wait_for_cancel(cancel_wake.as_mut(), op_cx, is_open, poll_cx.waker())
+            {
+                return Poll::Ready(Err(write_wait_cancelled()));
             }
-            let WebSocketShared { io, write_buf, .. } = &mut *guard;
-            Pin::new(io).poll_write(poll_cx, &write_buf[..])
+            written
         })
         .await?;
 
@@ -458,27 +596,27 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
     // Ensure the underlying I/O stream is flushed
     let is_open = shared.lock().close_handshake.is_open();
     poll_fn(|poll_cx| {
-        if is_open || op_cx.is_some() {
-            if let Some(guard) = cancel_wake.as_mut() {
-                guard.refresh(poll_cx.waker());
-            }
-        }
         if write_path_cancelled(op_cx, is_open) {
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(write_wait_cancelled()));
         }
-        let mut guard = shared.lock();
-        guard.check_write_heartbeat(poll_cx)?;
-        let result = Pin::new(&mut guard.io).poll_flush(poll_cx);
-        // The reader can queue a Close without the permit. Clear only while
-        // holding this same lock, after the transport flush succeeds and no
-        // newly queued bytes remain; otherwise that Close still needs I/O.
-        if matches!(&result, Poll::Ready(Ok(()))) && guard.write_buf.is_empty() {
-            guard.close_flush_pending = false;
+        let flushed = {
+            let mut guard = shared.lock();
+            guard.check_write_heartbeat(poll_cx)?;
+            let result = Pin::new(&mut guard.io).poll_flush(poll_cx);
+            // The reader can queue a Close without the permit. Clear only while
+            // holding this same lock, after the transport flush succeeds and no
+            // newly queued bytes remain; otherwise that Close still needs I/O.
+            if matches!(&result, Poll::Ready(Ok(()))) && guard.write_buf.is_empty() {
+                guard.close_flush_pending = false;
+            }
+            result
+        };
+        if flushed.is_pending()
+            && park_write_wait_for_cancel(cancel_wake.as_mut(), op_cx, is_open, poll_cx.waker())
+        {
+            return Poll::Ready(Err(write_wait_cancelled()));
         }
-        result
+        flushed
     })
     .await?;
 
@@ -535,20 +673,20 @@ async fn write_owned_buf_with_permit_inner<IO: AsyncWrite + Unpin>(
     let ambient = op_cx.is_none().then(Cx::current).flatten();
     let mut cancel_wake = op_cx.or(ambient.as_ref()).map(WsCancelWakerGuard::new);
     let n = poll_fn(|poll_cx| {
-        if is_open || op_cx.is_some() {
-            if let Some(guard) = cancel_wake.as_mut() {
-                guard.refresh(poll_cx.waker());
-            }
-        }
         if write_path_cancelled(op_cx, is_open) {
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(write_wait_cancelled()));
         }
-        let mut guard = shared.lock();
-        guard.check_write_heartbeat(poll_cx)?;
-        Pin::new(&mut guard.io).poll_write(poll_cx, &buf[..])
+        let written = {
+            let mut guard = shared.lock();
+            guard.check_write_heartbeat(poll_cx)?;
+            Pin::new(&mut guard.io).poll_write(poll_cx, &buf[..])
+        };
+        if written.is_pending()
+            && park_write_wait_for_cancel(cancel_wake.as_mut(), op_cx, is_open, poll_cx.waker())
+        {
+            return Poll::Ready(Err(write_wait_cancelled()));
+        }
+        written
     })
     .await?;
 
@@ -583,24 +721,24 @@ async fn write_owned_buf_with_permit_inner<IO: AsyncWrite + Unpin>(
 
     let is_open = shared.lock().close_handshake.is_open();
     poll_fn(|poll_cx| {
-        if is_open || op_cx.is_some() {
-            if let Some(guard) = cancel_wake.as_mut() {
-                guard.refresh(poll_cx.waker());
-            }
-        }
         if write_path_cancelled(op_cx, is_open) {
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(write_wait_cancelled()));
         }
-        let mut guard = shared.lock();
-        guard.check_write_heartbeat(poll_cx)?;
-        let result = Pin::new(&mut guard.io).poll_flush(poll_cx);
-        if matches!(&result, Poll::Ready(Ok(()))) && guard.write_buf.is_empty() {
-            guard.close_flush_pending = false;
+        let flushed = {
+            let mut guard = shared.lock();
+            guard.check_write_heartbeat(poll_cx)?;
+            let result = Pin::new(&mut guard.io).poll_flush(poll_cx);
+            if matches!(&result, Poll::Ready(Ok(()))) && guard.write_buf.is_empty() {
+                guard.close_flush_pending = false;
+            }
+            result
+        };
+        if flushed.is_pending()
+            && park_write_wait_for_cancel(cancel_wake.as_mut(), op_cx, is_open, poll_cx.waker())
+        {
+            return Poll::Ready(Err(write_wait_cancelled()));
         }
-        result
+        flushed
     })
     .await?;
 

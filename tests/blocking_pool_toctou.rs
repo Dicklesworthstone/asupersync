@@ -159,6 +159,7 @@ fn blocking_helper_boundary_census_requires_classification() {
     // drained variants mint the owning runtime's request Cx and delegate to
     // that same SPAWN-checked Cx gateway.
     // The two private free-helper dispatchers preserve pool/thread fallbacks.
+    // stdio's `spawn_blocking_io_off_worker` is a third: pool or thread, never the polling thread.
     // The crate-private `cx/io_gate.rs` `spawn_blocking_io` is the fs entry
     // points' capability gate: it refuses without IO, then delegates to the
     // free helper unchanged, so placement is the free helper's
@@ -169,6 +170,7 @@ fn blocking_helper_boundary_census_requires_classification() {
         ("runtime/spawn_blocking.rs", "spawn_blocking_io", 1),
         ("runtime/spawn_blocking.rs", "spawn_blocking_on_pool", 1),
         ("runtime/spawn_blocking.rs", "spawn_blocking_on_thread", 1),
+        ("runtime/spawn_blocking.rs", "spawn_blocking_io_off_worker", 1),
         ("cx/cx.rs", "spawn_blocking", 1),
         ("cx/cx.rs", "spawn_blocking_in", 1),
         ("cx/cx.rs", "spawn_blocking_drained", 1),

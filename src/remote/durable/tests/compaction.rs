@@ -121,13 +121,13 @@ fn compaction_refuses_live_permits_and_cannot_spend_pending_completion_reserve()
         Ok(())
     };
     assert!(matches!(
-        log.compact(FaultFile::default(), 2, &publish),
+        log.compact(FaultFile::default(), 2, publish),
         Err(DurableRemoteError::Busy)
     ));
     drop(reservation);
     let permit = reconciliation(log.prepare_reconciliation(&peer, key(1), b"input", 2));
     assert!(matches!(
-        log.compact(FaultFile::default(), 3, &publish),
+        log.compact(FaultFile::default(), 3, publish),
         Err(DurableRemoteError::Busy)
     ));
     drop(permit);

@@ -653,7 +653,10 @@ where
         let Some(deadline) = self.active_close_deadline() else {
             return self.recv_inner(cx).await;
         };
-        match deadline.wait(Some(cx), self.recv_inner(cx)).await? {
+        let waited = deadline
+            .wait(Some(cx), std::pin::pin!(self.recv_inner(cx)))
+            .await;
+        match waited? {
             Some(message) => Ok(message),
             None => {
                 self.force_close(CloseReason::going_away());
@@ -852,12 +855,9 @@ where
                 }
 
                 let deadline = self.heartbeat.deadline();
-                let read_result = super::heartbeat::wait_until(
-                    cx,
-                    deadline,
-                    std::pin::pin!(self.read_more(cx)),
-                )
-                .await;
+                let read_result =
+                    super::heartbeat::wait_until(cx, deadline, std::pin::pin!(self.read_more(cx)))
+                        .await;
                 let n = match read_result {
                     Ok(Some(n)) => n,
                     Ok(None) => continue,

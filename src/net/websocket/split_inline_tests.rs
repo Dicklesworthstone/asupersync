@@ -885,6 +885,74 @@
         assert!(read.is_closed());
     }
 
+    /// Clears the close-watch interleaving hook even when an assertion fails
+    /// first, so a leftover hook cannot fire inside a later test on this thread.
+    struct CloseWatchHookReset;
+
+    impl Drop for CloseWatchHookReset {
+        fn drop(&mut self) {
+            BEFORE_SPLIT_CLOSE_WATCH.with(|hook| hook.borrow_mut().take());
+        }
+    }
+
+    #[test]
+    fn split_close_between_a_reader_park_and_its_watch_registration_still_wakes_it() {
+        // Poll-first opens a window that register-first did not have: the
+        // reader's quiet snapshot and its Pending poll both come before its
+        // close watch is registered. The writer's close lands exactly there,
+        // so `close_changed` broadcasts while the reader is not yet a waiter.
+        let (clock, timer, cx) = close_timer_context(100);
+        let ws = websocket_with_close_timeout(TestIo::new(vec![]).with_stalled_reads());
+        let (mut read, write) = ws.split();
+        let shared = Arc::clone(&read.shared);
+        let write = std::rc::Rc::new(std::cell::RefCell::new(write));
+        let _reset = CloseWatchHookReset;
+        {
+            let write = std::rc::Rc::clone(&write);
+            let cx = cx.clone();
+            BEFORE_SPLIT_CLOSE_WATCH.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let mut write = write.borrow_mut();
+                    let mut close = std::pin::pin!(write.send(&cx, Message::Close(None)));
+                    assert!(matches!(
+                        close.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                        Poll::Ready(Ok(()))
+                    ));
+                }));
+            });
+        }
+        let reader_counter = CountingWake::new();
+        let reader_waker = Waker::from(Arc::clone(&reader_counter));
+        let mut reader_task = Context::from_waker(&reader_waker);
+        let mut recv = Box::pin(read.recv(&cx));
+        assert!(recv.as_mut().poll(&mut reader_task).is_pending());
+        assert!(
+            BEFORE_SPLIT_CLOSE_WATCH.with(|hook| hook.borrow().is_none()),
+            "the close must land after the reader's Pending poll, before its watch"
+        );
+        assert_eq!(shared.lock().close_handshake.state(), CloseState::CloseSent);
+        assert!(
+            reader_counter.count() > 0,
+            "a close that the parked reader's snapshot missed must still wake it"
+        );
+        assert!(recv.as_mut().poll(&mut reader_task).is_pending());
+        clock.set(Time::from_secs(109));
+        assert_eq!(timer.process_timers(), 0, "close must not expire early");
+        let before = reader_counter.count();
+        clock.set(Time::from_secs(110));
+        assert!(
+            timer.process_timers() > 0,
+            "the woken reader must have armed the close deadline"
+        );
+        assert!(reader_counter.count() > before);
+        assert!(matches!(
+            recv.as_mut().poll(&mut reader_task),
+            Poll::Ready(Ok(None))
+        ));
+        drop(recv);
+        assert!(read.is_closed());
+    }
+
     #[test]
     fn split_close_timeout_bounds_never_ready_writes_and_flushes() {
         for explicit_cx in [false, true] {
@@ -2200,6 +2268,73 @@
             cx.clear_cancel_waker(unrelated);
             drop(permit);
             assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        });
+    }
+
+    /// Clears the write-wait interleaving hook even when an assertion fails
+    /// first, so a leftover hook cannot fire inside a later test on this thread.
+    struct WriteWaitHookReset;
+
+    impl Drop for WriteWaitHookReset {
+        fn drop(&mut self) {
+            BEFORE_WRITE_WAIT_REGISTRATION.with(|hook| hook.borrow_mut().take());
+        }
+    }
+
+    #[test]
+    fn split_cancel_between_a_writer_park_and_its_cancel_registration_ends_the_wait() {
+        // A write-path wait registers its cancellation Waker only once it has
+        // parked, after its first cancellation check. A cancel that lands in
+        // between finds no registered Waker to wake, so only the recheck after
+        // the registration can end the wait.
+        let _reset = WriteWaitHookReset;
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, mut write) = ws.split();
+            let cx = Cx::for_testing();
+            let permit = acquire_write_permit(&read.shared).await;
+            let counter = CountingWake::new();
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+            {
+                let fired = std::rc::Rc::clone(&fired);
+                let canceller = cx.clone();
+                BEFORE_WRITE_WAIT_REGISTRATION.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        canceller.cancel_with(
+                            crate::types::CancelKind::User,
+                            Some("cancel between a writer's park and its registration"),
+                        );
+                        fired.set(true);
+                    }));
+                });
+            }
+            let mut send = Box::pin(write.send(&cx, Message::text("never admitted")));
+            let polled = send.as_mut().poll(&mut task);
+            assert!(
+                fired.get(),
+                "the cancel must land while the writer parks behind the permit"
+            );
+            assert_eq!(
+                counter.count(),
+                0,
+                "the cancel came before any registration, so it woke nothing"
+            );
+            assert!(
+                matches!(polled, Poll::Ready(Err(WsError::Io(ref err))) if err.kind() == io::ErrorKind::Interrupted),
+                "the recheck after the registration must end the wait as cancelled, got {polled:?}"
+            );
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            drop(send);
+            {
+                let state = read.shared.lock();
+                assert!(state.writer_active);
+                assert!(state.writer_waiters.is_empty());
+                assert!(state.write_buf.is_empty());
+                assert!(state.io.written.is_empty());
+            }
+            drop(permit);
         });
     }
 

@@ -1077,3 +1077,171 @@ fn loom_local_queue_lifo_vs_fifo() {
         }
     });
 }
+
+// ============================================================================
+// Reactor standby (GH #83 bounded standby)
+// ============================================================================
+//
+// Models `WorkerCoordinator::release_reactor`, the standby's WAITING step in
+// `ThreeLaneWorker::stand_by` and `WorkerCoordinator::leave_standby`
+// (src/runtime/scheduler/three_lane.rs). A reactor turn is in progress
+// (`is_polling`) and one follower is the standby. The turn's release clears
+// `is_polling` before its fence R, as `PollingGuard::drop` does before the
+// worker calls `release_reactor`. "Covered" means the released reactor is
+// watched: the standby re-armed without sleeping, the releaser unparked it, or
+// someone promoted a follower. The `#[should_panic]` runs remove one fence and
+// show that the model then finds the lost cover (planted negatives).
+
+use loom::sync::atomic::{AtomicU64, AtomicUsize, fence};
+
+const SB_NONE: usize = 0;
+const SB_TIMED: usize = 1;
+const SB_WAITING: usize = 2;
+
+struct StandbyModel {
+    is_polling: AtomicBool,
+    release_epoch: AtomicU64,
+    standby: AtomicUsize,
+    promotes: AtomicU32,
+    standby_parker: LoomParker,
+}
+
+impl StandbyModel {
+    fn new(standby: usize) -> Arc<Self> {
+        Arc::new(Self {
+            is_polling: AtomicBool::new(true),
+            release_epoch: AtomicU64::new(0),
+            standby: AtomicUsize::new(standby),
+            promotes: AtomicU32::new(0),
+            standby_parker: LoomParker::new(),
+        })
+    }
+
+    /// The turn ends and its worker leaves the reactor to run a task.
+    fn release(&self) {
+        self.is_polling.store(false, Ordering::Release);
+        self.release_epoch.fetch_add(1, Ordering::Release);
+        fence(Ordering::SeqCst); // R
+        match self.standby.load(Ordering::Relaxed) {
+            SB_TIMED => {}
+            SB_WAITING => self.standby_parker.unpark(),
+            _ => {
+                self.promotes.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The standby read `epoch`, then saw the turn running: WAITING, fence S,
+    /// epoch re-read, park. Returns whether it re-armed without sleeping.
+    fn standby_saw_turn(&self, epoch: u64, fence_s: bool) -> bool {
+        self.standby.store(SB_WAITING, Ordering::Relaxed);
+        if fence_s {
+            fence(Ordering::SeqCst); // S
+        }
+        if self.release_epoch.load(Ordering::Relaxed) != epoch {
+            return true;
+        }
+        self.standby_parker.park();
+        false
+    }
+
+    /// The standby leaves for work before its deadline: NONE, fence L, then
+    /// promote unless a turn runs or another follower took the role.
+    fn leave(&self, fence_l: bool) {
+        self.standby.store(SB_NONE, Ordering::Relaxed);
+        if fence_l {
+            fence(Ordering::SeqCst); // L
+        }
+        if !self.is_polling.load(Ordering::Relaxed)
+            && self.standby.load(Ordering::Relaxed) == SB_NONE
+        {
+            self.promotes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// A release lands between the standby's `is_polling` read and its WAITING
+/// store. Either the release reads WAITING and unparks it, or the standby's
+/// re-read sees the new epoch; a lost wake shows as a loom deadlock.
+fn standby_waiting_race(fence_s: bool) {
+    loom::model(move || {
+        let model = StandbyModel::new(SB_TIMED);
+        let releaser = model.clone();
+        let release = thread::spawn(move || releaser.release());
+        let epoch = model.release_epoch.load(Ordering::Acquire);
+        if model.is_polling.load(Ordering::Relaxed) {
+            model.standby_saw_turn(epoch, fence_s);
+        }
+        release.join().unwrap();
+    });
+}
+
+#[test]
+fn loom_standby_waiting_store_pairs_with_the_release() {
+    standby_waiting_race(true);
+}
+
+#[test]
+#[should_panic]
+fn loom_standby_plant_without_fence_s_sleeps_through_the_release() {
+    standby_waiting_race(false);
+}
+
+/// A release races the standby leaving for work. The release may read TIMED
+/// and wake nobody, so the leaver must see the cleared `is_polling` then.
+fn standby_leave_race(fence_l: bool) {
+    loom::model(move || {
+        let model = StandbyModel::new(SB_TIMED);
+        let releaser = model.clone();
+        let release = thread::spawn(move || releaser.release());
+        model.leave(fence_l);
+        release.join().unwrap();
+        assert!(
+            model.promotes.load(Ordering::Relaxed) >= 1,
+            "released reactor left without a watcher"
+        );
+    });
+}
+
+#[test]
+fn loom_standby_leaving_races_a_release_and_one_side_promotes() {
+    standby_leave_race(true);
+}
+
+#[test]
+#[should_panic]
+fn loom_standby_plant_without_fence_l_leaves_the_release_unwatched() {
+    standby_leave_race(false);
+}
+
+/// No concurrent release: the standby covered the latest release (TIMED, epoch
+/// unchanged) and leaves for work before its deadline. It abandons that
+/// release, so it must promote. A rule that promotes only when the epoch moved
+/// past the one it covered would leave this release unwatched.
+#[test]
+fn loom_standby_leaving_hands_on_the_release_it_covered() {
+    loom::model(|| {
+        let model = StandbyModel::new(SB_NONE);
+        model.release();
+        assert_eq!(
+            model.promotes.load(Ordering::Relaxed),
+            1,
+            "the release read NONE"
+        );
+        let covered = model.release_epoch.load(Ordering::Acquire);
+        model.standby.store(SB_TIMED, Ordering::Relaxed);
+        // The promoted follower stood by (TIMED); now it leaves for work.
+        let epoch_rule_promotes = model.release_epoch.load(Ordering::Relaxed) != covered
+            && !model.is_polling.load(Ordering::Relaxed);
+        assert!(
+            !epoch_rule_promotes,
+            "the epoch rule would leave this release unwatched"
+        );
+        model.leave(true);
+        assert_eq!(
+            model.promotes.load(Ordering::Relaxed),
+            2,
+            "leaving promoted a new standby"
+        );
+    });
+}

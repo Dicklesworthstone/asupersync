@@ -271,7 +271,7 @@ pub fn wall_now() -> Time {
 /// retain their clock domain when later called under another task's `Cx`.
 #[must_use]
 #[inline]
-pub(crate) fn raw_wall_now() -> Time {
+pub fn raw_wall_now() -> Time {
     // This fallback also serves owners that selected it before being polled
     // under another Cx. The shared process epoch keeps it comparable with
     // the production `WallClock` timer driver (see `process_epoch`).

@@ -69,6 +69,7 @@
 //! path.
 
 mod delta_cdc;
+mod tree_delta;
 #[cfg(any(feature = "tls", test))]
 mod delta_chunks;
 #[cfg(feature = "tls")]
@@ -1038,6 +1039,7 @@ pub struct QuicReceiveOptions {
     sparse_files: bool,
     delta_chunks: bool,
     cdc_delta: bool,
+    tree_delta: bool,
 }
 
 impl QuicReceiveOptions {
@@ -1048,6 +1050,7 @@ impl QuicReceiveOptions {
             sparse_files: false,
             delta_chunks: false,
             cdc_delta: false,
+            tree_delta: false,
         }
     }
 
@@ -1083,7 +1086,7 @@ impl QuicReceiveOptions {
     /// Whether native UDP transfers may negotiate changed-chunk reconstruction.
     #[must_use]
     pub const fn delta_chunks(&self) -> bool {
-        self.delta_chunks || self.cdc_delta
+        self.delta_chunks || self.cdc_delta || self.tree_delta
     }
 
     /// Accept authenticated content-defined chunks on the native UDP path.
@@ -1101,6 +1104,23 @@ impl QuicReceiveOptions {
     #[must_use]
     pub const fn cdc_delta(&self) -> bool {
         self.cdc_delta
+    }
+
+    /// Accept authenticated whole-file reuse within directory transfers.
+    ///
+    /// Reused files are rehashed into staging before the complete manifest is
+    /// verified and published. Receiver-only paths retain the ordinary
+    /// directory transfer behavior; this option does not enable deletion.
+    #[must_use]
+    pub const fn with_tree_delta(mut self, enabled: bool) -> Self {
+        self.tree_delta = enabled;
+        self
+    }
+
+    /// Whether native directory transfers may negotiate whole-file reuse.
+    #[must_use]
+    pub const fn tree_delta(&self) -> bool {
+        self.tree_delta
     }
 
     fn validate_detached(&self) -> Result<(), QuicTransportError> {
@@ -1135,6 +1155,7 @@ pub struct QuicSendOptions {
     compression_parallelism: usize,
     delta_chunks: bool,
     cdc_delta: bool,
+    tree_delta: bool,
 }
 
 impl Default for QuicSendOptions {
@@ -1152,6 +1173,7 @@ impl QuicSendOptions {
             compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
             delta_chunks: false,
             cdc_delta: false,
+            tree_delta: false,
         }
     }
 
@@ -1206,7 +1228,7 @@ impl QuicSendOptions {
     /// Whether the sender advertises authenticated changed-chunk support.
     #[must_use]
     pub const fn delta_chunks(&self) -> bool {
-        self.delta_chunks || self.cdc_delta
+        self.delta_chunks || self.cdc_delta || self.tree_delta
     }
 
     /// Offer authenticated content-defined chunks for insertion-resistant reuse.
@@ -1225,6 +1247,23 @@ impl QuicSendOptions {
     #[must_use]
     pub const fn cdc_delta(&self) -> bool {
         self.cdc_delta
+    }
+
+    /// Offer bounded, authenticated whole-file reuse for directory transfers.
+    ///
+    /// Packing and metadata remain intact. Both peers must opt in; unsupported
+    /// trees and older peers retain the ordinary full-transfer behavior. This
+    /// implies changed-chunk authority requirements and requires compression off.
+    #[must_use]
+    pub const fn with_tree_delta(mut self, enabled: bool) -> Self {
+        self.tree_delta = enabled;
+        self
+    }
+
+    /// Whether the sender offers whole-file reuse within directory transfers.
+    #[must_use]
+    pub const fn tree_delta(&self) -> bool {
+        self.tree_delta
     }
 
     fn validate(&self, config: &QuicConfig) -> Result<(), QuicTransportError> {
@@ -4612,6 +4651,9 @@ async fn validate_quic_prepared_delta_source_unchanged(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
 ) -> Result<(), QuicTransportError> {
+    if tree_delta::is_tree(&prepared.manifest) {
+        return tree_delta::revalidate_source(cx, prepared, config).await;
+    }
     let manifest = &prepared.manifest;
     let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
         QuicTransportError::Control(
@@ -7636,6 +7678,15 @@ async fn build_quic_receiver_delta_request(
             "cannot build a bound QUIC delta request without a delta manifest".to_string(),
         )
     })?;
+    if tree_delta::is_tree(manifest) {
+        return Ok(make_quic_delta_request(
+            session,
+            manifest,
+            DeltaObjectRequest::full(
+                delta.merkle_root_hex.clone(), None, "tree_reconstruction_required",
+            ),
+        ));
+    }
     let entry = quic_delta_manifest_entry(manifest).ok_or_else(|| {
         QuicTransportError::Control(
             "cannot build a bound QUIC delta request for this transfer shape".to_string(),
@@ -7764,6 +7815,11 @@ fn validate_quic_delta_request(
             }
         }
         DeltaWireMode::AlreadyInSync => {
+            if tree_delta::is_tree(manifest) {
+                return Err(QuicTransportError::Control(
+                    "QUIC tree reuse requires staged reconstruction, including metadata".to_string(),
+                ));
+            }
             let expected_shared = u64::try_from(delta_manifest.chunks.len()).unwrap_or(u64::MAX);
             if request.fallback_reason.is_some()
                 || request.receiver_merkle_root_hex.as_deref()
@@ -9561,6 +9617,15 @@ fn validate_quic_manifest_with_cdc(
     config: &QuicConfig,
     cdc_negotiated: bool,
 ) -> Result<(), QuicTransportError> {
+    validate_quic_manifest_with_layouts(manifest, config, cdc_negotiated, false)
+}
+
+fn validate_quic_manifest_with_layouts(
+    manifest: &TransferManifest,
+    config: &QuicConfig,
+    cdc_negotiated: bool,
+    tree_negotiated: bool,
+) -> Result<(), QuicTransportError> {
     const MAX_QUIC_LOGICAL_MANIFEST_ENTRIES: usize = 4 * 1024 * 1024;
     // The off-wire `transfer_id` is interpolated directly into the receiver's
     // on-disk staging-directory path (native_link.rs:
@@ -9859,7 +9924,14 @@ fn validate_quic_manifest_with_cdc(
             "manifest metadata commitment mismatch".to_string(),
         ));
     }
-    if cdc_negotiated {
+    if tree_delta::is_tree(manifest) {
+        if !tree_negotiated {
+            return Err(QuicTransportError::Source(
+                "QUIC tree delta manifest was not negotiated".to_string(),
+            ));
+        }
+        tree_delta::validate_manifest(manifest)?;
+    } else if cdc_negotiated {
         validate_quic_delta_manifest_with_cdc(manifest, true)?;
     } else {
         validate_quic_delta_manifest(manifest)?;
