@@ -1697,6 +1697,287 @@ fn real_udp_quic_cdc_preserves_fixed_and_legacy_peer_fallback() {
     }
 }
 
+// The 2 MiB file stays plain; the three smaller files and empty file form a
+// pack. Editing the 256 KiB member changes exactly 10% of logical tree bytes,
+// and must not force the unchanged members of its pack onto the wire.
+fn write_tree_delta_fixture(root: &Path) -> Vec<(String, Vec<u8>)> {
+    std::fs::create_dir_all(root.join("small")).expect("create tree source");
+    let files = vec![
+        ("00-large.bin".to_string(), changed_chunk_payload(8, 0)),
+        ("small/changed.bin".to_string(), changed_chunk_payload(1, 0)),
+        (
+            "small/kept-a.bin".to_string(),
+            changed_chunk_payload(0, DELTA_TEST_CHUNK_BYTES / 2),
+        ),
+        (
+            "small/kept-b.bin".to_string(),
+            changed_chunk_payload(0, DELTA_TEST_CHUNK_BYTES / 2)
+                .into_iter()
+                .map(|byte| byte ^ 0x37)
+                .collect(),
+        ),
+        ("small/empty.bin".to_string(), Vec::new()),
+    ];
+    for (path, bytes) in &files {
+        std::fs::write(root.join(path), bytes).expect("write tree source member");
+    }
+    files
+}
+
+fn assert_tree_delta_reports(send: &SendReport, receive: &ReceiveReport, missing_bytes: u64) {
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert!(receive.committed);
+    assert_eq!(send.transfer_id, receive.transfer_id);
+    assert_eq!(send.files, receive.files);
+    assert_eq!(send.bytes_sent, missing_bytes);
+    assert_eq!(send.receipt.bytes_received, missing_bytes);
+    assert_eq!(receive.bytes_received, missing_bytes);
+}
+
+fn assert_tree_delta_destination(destination: &Path, files: &[(String, Vec<u8>)]) {
+    for (path, bytes) in files {
+        assert_eq!(
+            std::fs::read(destination.join("tree").join(path))
+                .unwrap_or_else(|error| panic!("read committed {path}: {error}")),
+            *bytes,
+            "committed tree member {path}"
+        );
+    }
+    assert_no_staging_residue(destination);
+}
+
+/// I3: re-sync a directory containing both packed and plain files. Receipt
+/// counters and independently counted encrypted UDP packets must both shrink
+/// when only one packed member changes; receiver-only files remain intact.
+#[test]
+fn real_udp_quic_tree_delta_reuses_plain_and_packed_files_and_noops() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let root = src.path().join("tree");
+    let mut files = write_tree_delta_fixture(&root);
+    let total_bytes = files.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
+    let mut configs = changed_chunk_configs();
+    configs.send.metadata_policy.preserve_unix_permissions = cfg!(unix);
+    configs.recv.metadata_policy.preserve_unix_permissions = cfg!(unix);
+    let send_options = QuicSendOptions::new().with_tree_delta(true);
+    let receive_options = QuicReceiveOptions::new().with_tree_delta(true);
+
+    let (send, receive, full_wire_bytes) = run_counted_transfer_with_options(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &root,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_tree_delta_reports(
+        &send.expect("initial tree sender completes"),
+        &receive.expect("initial tree receiver commits"),
+        total_bytes,
+    );
+    assert_tree_delta_destination(dst.path(), &files);
+    assert!(full_wire_bytes > total_bytes);
+    let extra = dst.path().join("tree/receiver-only.txt");
+    std::fs::write(&extra, b"keep this independent file").expect("write receiver-only file");
+
+    let (_, changed) = files
+        .iter_mut()
+        .find(|(path, _)| path == "small/changed.bin")
+        .expect("changed packed member");
+    changed[71] ^= 0xA5;
+    std::fs::write(root.join("small/changed.bin"), changed).expect("edit one packed member");
+    let missing_bytes = DELTA_TEST_CHUNK_BYTES as u64;
+    assert_eq!(missing_bytes * 10, total_bytes);
+    let (send, receive, delta_wire_bytes) = run_counted_transfer_with_options(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &root,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_tree_delta_reports(
+        &send.expect("directory delta sender completes"),
+        &receive.expect("directory delta receiver commits"),
+        missing_bytes,
+    );
+    assert!(
+        delta_wire_bytes < full_wire_bytes / 2,
+        "one changed member used {delta_wire_bytes} wire bytes versus {full_wire_bytes} for full tree"
+    );
+    assert_tree_delta_destination(dst.path(), &files);
+    assert_eq!(
+        std::fs::read(&extra).expect("receiver-only file"),
+        b"keep this independent file"
+    );
+
+    // Reusing every content byte still needs publication: a missing empty file
+    // and a permission-only change cannot be skipped as an already-synced tree.
+    std::fs::remove_file(dst.path().join("tree/small/empty.bin"))
+        .expect("remove only the test destination's empty member");
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(
+            root.join("small/changed.bin"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("change source permissions without changing content");
+        std::fs::set_permissions(
+            dst.path().join("tree/small/changed.bin"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("set different destination permissions");
+    }
+    let (send, receive, noop_wire_bytes) = run_counted_transfer_with_options(
+        configs.send,
+        configs.recv,
+        &root,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_tree_delta_reports(
+        &send.expect("unchanged tree sender receives proof"),
+        &receive.expect("unchanged tree receiver commits"),
+        0,
+    );
+    assert!(
+        noop_wire_bytes < delta_wire_bytes / 2,
+        "tree no-op used {noop_wire_bytes} wire bytes versus {delta_wire_bytes} for a changed member"
+    );
+    assert_tree_delta_destination(dst.path(), &files);
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(dst.path().join("tree/small/changed.bin"))
+            .expect("read committed permissions")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "all-content-reused transfer must apply current source metadata"
+    );
+    assert_eq!(
+        std::fs::read(&extra).expect("receiver-only file"),
+        b"keep this independent file"
+    );
+}
+
+#[test]
+fn real_udp_quic_tree_delta_preserves_legacy_peer_fallback() {
+    for (sender_tree, receiver_tree) in [(true, false), (false, true)] {
+        let src = tempfile::tempdir().expect("source directory");
+        let dst = tempfile::tempdir().expect("destination directory");
+        let root = src.path().join("tree");
+        let mut files = write_tree_delta_fixture(&root);
+        write_tree_delta_fixture(&dst.path().join("tree"));
+        let (_, changed) = files
+            .iter_mut()
+            .find(|(path, _)| path == "small/changed.bin")
+            .expect("changed member");
+        changed[19] ^= 0x3C;
+        std::fs::write(root.join("small/changed.bin"), changed).expect("change tree source");
+        let total_bytes = files.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
+        let configs = changed_chunk_configs();
+        let (send, receive, _) = run_counted_transfer_with_options(
+            configs.send,
+            configs.recv,
+            &root,
+            dst.path(),
+            QuicSendOptions::new().with_tree_delta(sender_tree),
+            QuicReceiveOptions::new().with_tree_delta(receiver_tree),
+        );
+        assert_tree_delta_reports(
+            &send.expect("mixed-version directory sender completes"),
+            &receive.expect("mixed-version directory receiver commits"),
+            total_bytes,
+        );
+        assert_tree_delta_destination(dst.path(), &files);
+    }
+}
+
+#[test]
+fn real_udp_quic_tree_delta_cancel_after_staging_preserves_baseline() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let root = src.path().join("tree");
+    let baseline_root = dst.path().join("tree");
+    std::fs::create_dir_all(&root).expect("create source tree");
+    std::fs::create_dir_all(&baseline_root).expect("create baseline tree");
+    let baseline = changed_chunk_payload(32, 0);
+    let updated = baseline.iter().map(|byte| byte ^ 0xC3).collect::<Vec<_>>();
+    let kept = changed_chunk_payload(0, 128 * 1024);
+    std::fs::write(root.join("changed.bin"), &updated).expect("write updated member");
+    std::fs::write(root.join("kept.bin"), &kept).expect("write reusable member");
+    std::fs::write(baseline_root.join("changed.bin"), &baseline).expect("write baseline member");
+    std::fs::write(baseline_root.join("kept.bin"), &kept).expect("write reusable baseline");
+    let extra = baseline_root.join("receiver-only.txt");
+    std::fs::write(&extra, b"preserve receiver-only data").expect("write receiver-only file");
+    let configs = changed_chunk_configs();
+    let probe_offset = 1024 * 1024 + 17;
+    let fired = Arc::new(AtomicBool::new(false));
+    let (send, receive) = block_on(async {
+        let cx = Cx::for_testing();
+        let endpoint = bind_server_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind directory receiver");
+        let proxy = CountingUdpProxy::spawn_with_cancellation(
+            endpoint.local_addr(),
+            Some(StagedTransferCancellation {
+                cx: cx.clone(),
+                minimum_wire_bytes: 1024 * 1024,
+                dest_dir: dst.path().to_path_buf(),
+                staged_probe_offset: probe_offset as u64,
+                expected_staged_bytes: updated[probe_offset..probe_offset + 32]
+                    .try_into()
+                    .expect("staged probe width"),
+                fired: Arc::clone(&fired),
+            }),
+        );
+        zip(
+            send_path_with_options(
+                &cx,
+                proxy.addr,
+                &root,
+                configs.send,
+                "tree-sender",
+                QuicSendOptions::new().with_tree_delta(true),
+            ),
+            receive_on_endpoint_with_options(
+                &cx,
+                endpoint,
+                dst.path(),
+                &configs.recv,
+                "tree-receiver",
+                QuicReceiveOptions::new().with_tree_delta(true),
+            ),
+        )
+        .await
+    });
+    assert!(
+        fired.load(Ordering::Relaxed),
+        "cancellation must observe changed directory payload in staging"
+    );
+    assert!(
+        matches!(&send, Err(QuicTransportError::Cancelled)),
+        "sender: {send:?}"
+    );
+    assert!(
+        matches!(&receive, Err(QuicTransportError::Cancelled)),
+        "receiver: {receive:?}"
+    );
+    assert_tree_delta_destination(
+        dst.path(),
+        &[
+            ("changed.bin".to_string(), baseline),
+            ("kept.bin".to_string(), kept),
+        ],
+    );
+    assert_eq!(
+        std::fs::read(&extra).expect("receiver-only file"),
+        b"preserve receiver-only data"
+    );
+}
+
 #[test]
 fn real_udp_quic_changed_chunks_reuse_reordered_and_repeated_content() {
     let src = tempfile::tempdir().expect("source directory");

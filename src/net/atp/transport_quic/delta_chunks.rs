@@ -23,14 +23,27 @@ use serde::{Deserialize, Serialize};
 pub(super) const OFFER_EXTENSION: u16 = 0x5152;
 const OFFER_KEY: &[u8] = b"atp-quic-fixed-delta-chunks-256k-v1";
 const CDC_OFFER_KEY: &[u8] = b"atp-quic-cdc-delta-chunks-64k-v1";
+const TREE_OFFER_KEY: &[u8] = b"atp-quic-whole-file-tree-delta-v1";
 const SELECTOR: &str = "authenticated_fixed_delta_chunks_v1";
 
 fn offer_key(manifest: &TransferManifest) -> &'static [u8] {
-    if super::delta_cdc::is_cdc(manifest) { CDC_OFFER_KEY } else { OFFER_KEY }
+    if super::tree_delta::is_tree(manifest) {
+        TREE_OFFER_KEY
+    } else if super::delta_cdc::is_cdc(manifest) {
+        CDC_OFFER_KEY
+    } else {
+        OFFER_KEY
+    }
 }
 
 fn selector(manifest: &TransferManifest) -> &'static str {
-    if super::delta_cdc::is_cdc(manifest) { super::delta_cdc::SELECTOR } else { SELECTOR }
+    if super::tree_delta::is_tree(manifest) {
+        super::tree_delta::SELECTOR
+    } else if super::delta_cdc::is_cdc(manifest) {
+        super::delta_cdc::SELECTOR
+    } else {
+        SELECTOR
+    }
 }
 pub(super) const DATA_FRAGMENT_BYTES: usize = 64 * 1024;
 #[cfg(feature = "tls")]
@@ -90,10 +103,14 @@ pub(super) fn validate_request(
     manifest: &TransferManifest,
     request: &DeltaObjectRequest,
 ) -> Result<(), QuicTransportError> {
+    let tree = super::tree_delta::is_tree(manifest);
+    if tree {
+        super::tree_delta::validate_manifest(manifest)?;
+    }
     let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
         QuicTransportError::Control("changed-chunk request has no delta manifest".to_string())
     })?;
-    if quic_delta_manifest_entry(manifest).is_none()
+    if (!tree && quic_delta_manifest_entry(manifest).is_none())
         || request.mode != DeltaWireMode::DeltaChunks
         || request.fallback_reason.as_deref() != Some(selector(manifest))
         || request.sender_merkle_root_hex != delta.merkle_root_hex
@@ -141,11 +158,18 @@ pub(super) fn validate_request(
 }
 
 #[cfg(feature = "tls")]
+pub(super) struct ReusableRange {
+    pub(super) path: PathBuf,
+    pub(super) offset: u64,
+    pub(super) size: u64,
+}
+
+#[cfg(feature = "tls")]
 pub(super) struct ReceivePlan {
     pub(super) request: DeltaObjectRequest,
     pub(super) baseline: PathBuf,
     // Repeated target chunks may use the same verified baseline range.
-    pub(super) reusable: BTreeMap<String, (u64, u64)>,
+    pub(super) reusable: BTreeMap<String, ReusableRange>,
 }
 
 #[cfg(feature = "tls")]
@@ -188,6 +212,9 @@ pub(super) async fn plan(
     config: &QuicConfig,
     manifest: &TransferManifest,
 ) -> Result<Option<ReceivePlan>, QuicTransportError> {
+    if super::tree_delta::is_tree(manifest) {
+        return super::tree_delta::plan(cx, dest_dir, config, manifest).await;
+    }
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
         QuicTransportError::Control("cannot plan changed chunks without a manifest".to_string())
@@ -237,7 +264,9 @@ pub(super) async fn plan(
         sha256.update(bytes);
         whole_content_id.update(bytes);
         let content_id = ContentId::from_bytes(bytes);
-        reusable.entry(content_id.to_hex()).or_insert((offset, size_bytes));
+        reusable.entry(content_id.to_hex()).or_insert(ReusableRange {
+            path: baseline.clone(), offset, size: size_bytes,
+        });
         chunks.push(CasChunkRef {
             index: u32::try_from(chunks.len())
                 .map_err(|_| QuicTransportError::Control("baseline chunk count overflow".to_string()))?,
@@ -377,12 +406,20 @@ pub(super) fn validate_proof(
         ));
     }
     let receipt = proof.receipt;
+    let files = if super::tree_delta::is_tree(manifest) {
+        super::manifest_logical_files(manifest)
+    } else {
+        1
+    };
+    let expected_paths = usize::try_from(files).unwrap_or(usize::MAX);
     if !receipt.sha_ok || !receipt.merkle_ok
-        || receipt.bytes_received != request.missing_bytes || receipt.files != 1
+        || receipt.bytes_received != request.missing_bytes || receipt.files != files
         || receipt.symbols_accepted != 0 || receipt.feedback_rounds != 0
         || receipt.decode_count != 0 || receipt.decode_micros != 0
-        || receipt.reason.is_some() || receipt.committed_paths.len() != 1
-        || receipt.committed_paths[0].is_empty()
+        || receipt.reason.is_some() || receipt.committed_paths.len() != expected_paths
+        || receipt.committed_paths.iter().any(String::is_empty)
+        || receipt.committed_paths.iter().collect::<std::collections::BTreeSet<_>>().len()
+            != expected_paths
     {
         return Err(QuicTransportError::Integrity(
             "receiver did not prove the complete QUIC changed-chunk reconstruction".to_string(),

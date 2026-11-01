@@ -8972,6 +8972,7 @@ async fn run_sender_session(
     cx: &Cx,
     link: &mut QuicLink,
     prepared: &QuicPreparedSource,
+    tree_candidate: Option<&QuicPreparedSource>,
     config: &QuicConfig,
     peer_id: &str,
     options: super::QuicSendOptions,
@@ -8988,6 +8989,13 @@ async fn run_sender_session(
         && super::quic_delta_control_auth_context(config).is_some()
     {
         Some(super::fresh_quic_delta_nonce(cx, b"sender", None)?)
+    } else {
+        None
+    };
+    // Keep the legacy JSON nonce absent for directory offers. Old receivers
+    // interpret that field as a promise of a single-file delta envelope.
+    let tree_sender_nonce = if tree_candidate.is_some() {
+        Some(super::fresh_quic_delta_nonce(cx, b"tree-sender", None)?)
     } else {
         None
     };
@@ -9029,6 +9037,14 @@ async fn run_sender_session(
         })?;
         super::delta_cdc::advertise_cdc(&mut hello_frame, context, &hello)?;
     }
+    if let Some(nonce) = tree_sender_nonce {
+        let context = super::quic_delta_control_auth_context(config).ok_or_else(|| {
+            QuicTransportError::Config(
+                "QUIC tree reuse requires strict delta authentication".to_string(),
+            )
+        })?;
+        super::tree_delta::advertise(&mut hello_frame, context, &hello, nonce)?;
+    }
     control.send(cx, &mut link.conn, &hello_frame)?;
     link.flush(cx).await?;
     let hello_frames = link.last_flushed_stream_frames();
@@ -9042,7 +9058,17 @@ async fn run_sender_session(
         )
         .await?;
     let ack = parse_hello_ack(&ack_frame)?;
-    let delta_handshake = super::validate_quic_delta_ack(delta_sender_nonce, &ack)?;
+    let negotiated_tree = super::tree_delta::acknowledged(
+        &ack_frame,
+        super::quic_delta_control_auth_context(config),
+        &hello,
+        &ack,
+        tree_sender_nonce,
+    )?;
+    let delta_handshake = super::validate_quic_delta_ack(
+        if negotiated_tree { tree_sender_nonce } else { delta_sender_nonce },
+        &ack,
+    )?;
     let negotiated_cdc = super::delta_cdc::cdc_acknowledged(
         &ack_frame,
         super::quic_delta_control_auth_context(config),
@@ -9097,7 +9123,13 @@ async fn run_sender_session(
         .await?;
         super::validate_quic_manifest_with_cdc(&candidate.manifest, config, true)?;
     }
-    let prepared = selected.as_ref().unwrap_or(prepared);
+    let prepared = if negotiated_tree {
+        tree_candidate.ok_or_else(|| QuicTransportError::Control(
+            "accepted QUIC tree capability lost its prepared manifest".to_string(),
+        ))?
+    } else {
+        selected.as_ref().unwrap_or(prepared)
+    };
     let manifest = &prepared.manifest;
     let delta_session = delta_handshake
         .map(|handshake| {
@@ -11598,11 +11630,19 @@ async fn run_receiver_session(
     let hello: QuicHello = super::parse_json(&hello_frame)?;
     let reason = super::reject_hello_reason(&hello, &config, symbol_auth_enabled);
     let accepted = reason.is_none();
+    let tree_sender_nonce = if accepted && options.tree_delta() && config.enable_delta {
+        match super::quic_delta_control_auth_context(&config) {
+            Some(context) => super::tree_delta::offered(&hello_frame, context, &hello)?,
+            None => None,
+        }
+    } else {
+        None
+    };
     let delta_handshake = if accepted
         && config.enable_delta
         && super::quic_delta_control_auth_context(&config).is_some()
     {
-        match hello.delta_transfer_nonce {
+        match tree_sender_nonce.or(hello.delta_transfer_nonce) {
             Some(sender_nonce) => {
                 let receiver_nonce =
                     super::fresh_quic_delta_nonce(cx, b"receiver", Some(sender_nonce))?;
@@ -11642,6 +11682,15 @@ async fn run_receiver_session(
         delta_destination_root: delta_handshake.map(|binding| binding.destination_root),
     };
     let mut ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
+    let negotiated_tree = tree_sender_nonce.is_some() && delta_handshake.is_some();
+    if let Some(nonce) = tree_sender_nonce {
+        let context = super::quic_delta_control_auth_context(&config).ok_or_else(|| {
+            QuicTransportError::Config(
+                "QUIC tree reuse requires strict delta authentication".to_string(),
+            )
+        })?;
+        super::tree_delta::acknowledge(&mut ack_frame, context, &hello, &ack, nonce)?;
+    }
     let negotiated_cdc = if options.cdc_delta() && delta_handshake.is_some() {
         let context = super::quic_delta_control_auth_context(&config).ok_or_else(|| {
             QuicTransportError::Config(
@@ -11781,10 +11830,11 @@ async fn run_receiver_session(
         // Prove possession of the challenged delta authority before replying
         // about policy or consulting receiver state. A policy refusal still
         // has this session identity even though no request mode was admitted.
-        if let Err(error) = super::validate_quic_manifest_with_cdc(
+        if let Err(error) = super::validate_quic_manifest_with_layouts(
             &envelope.manifest,
             config,
             negotiated_cdc,
+            negotiated_tree,
         ) {
             refuse_transfer_in_band(
                 cx,
@@ -12687,6 +12737,19 @@ pub(crate) async fn send_prepared_over_udp(
                 .to_string(),
         )
     })?;
+    // Directory hashing happens before any network handshake. The receiver
+    // must not time out waiting for Hello while a large local tree is scanned.
+    // Retain the original source for peers that do not acknowledge this layout.
+    let mut tree_candidate = if options.tree_delta() && super::tree_delta::may_offer(prepared) {
+        Some(prepared.clone())
+    } else {
+        None
+    };
+    if let Some(candidate) = &mut tree_candidate {
+        if !super::tree_delta::select_manifest(cx, candidate, &config).await? {
+            tree_candidate = None;
+        }
+    }
     // The session bodies are boxed behind `dyn Future + Send` (one allocation
     // per transfer) so a caller that spawns `send_path` / `receive_path` keeps
     // its `Send` proof within rustc's default recursion depth
@@ -12694,7 +12757,7 @@ pub(crate) async fn send_prepared_over_udp(
     // sessions are erased the same way.
     let mut link = erase_send(connect(cx, addr, client_tls, &config)).await?;
     let report = erase_send(run_sender_session(
-        cx, &mut link, prepared, &config, peer_id, options,
+        cx, &mut link, prepared, tree_candidate.as_ref(), &config, peer_id, options,
     ))
     .await?;
     let limiter = link.limiter_report();
