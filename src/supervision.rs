@@ -2180,7 +2180,7 @@ mod managed {
     // first poll. Only Controller::new transfers its tree to admitted execution.
     // Keeping the guard through queues and spawn factories also protects every
     // refusal and cancellation path before that ownership transfer.
-    pub(crate) struct UnstartedManagedSupervisor<E> {
+    pub struct UnstartedManagedSupervisor<E> {
         supervisor: Option<ManagedSupervisor<E>>,
     }
 

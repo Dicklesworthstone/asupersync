@@ -39,8 +39,8 @@ struct LogicalFile<'a> {
     sha256_hex: &'a str,
 }
 
-fn regular(metadata: &Option<EntryMetadata>) -> bool {
-    let metadata = metadata.clone().unwrap_or_default();
+fn regular(metadata: Option<&EntryMetadata>) -> bool {
+    let metadata = metadata.cloned().unwrap_or_default();
     matches!(metadata.file_kind, FileKind::Regular)
         && metadata.hardlink_target.is_none()
         && metadata.symlink_target.is_none()
@@ -63,7 +63,7 @@ fn logical_files(manifest: &TransferManifest) -> Result<Vec<LogicalFile<'_>>, Qu
             {
                 continue;
             }
-            if !regular(&entry.metadata) {
+            if !regular(entry.metadata.as_ref()) {
                 return Err(QuicTransportError::Source("tree delta supports regular files and directories".to_string()));
             }
             if entry.size != 0 {
@@ -76,7 +76,7 @@ fn logical_files(manifest: &TransferManifest) -> Result<Vec<LogicalFile<'_>>, Qu
             }
         } else {
             for member in &entry.members {
-                if !regular(&member.metadata) {
+                if !regular(member.metadata.as_ref()) {
                     return Err(QuicTransportError::Source("tree delta pack contains a non-regular member".to_string()));
                 }
                 if member.len != 0 {

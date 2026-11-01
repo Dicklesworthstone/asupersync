@@ -1,6 +1,11 @@
 //! Explicit replacement-file compaction with an application-owned publication boundary.
 
-use super::*;
+use super::{
+    Arc, CLOCK_FLOOR, COMMON_BYTES, COMPLETE, Digest, DurableRemoteError, DurableRemoteJournal,
+    DurableRemoteJournalStatus, Entry, EntryState, File, HasSchema, IdempotencyKey, Journal,
+    JournalIo, NodeId, RESERVATION_BYTES, RESERVE, Read, Seek, TERMINAL_BYTES, Write, add, add64,
+    buffer, io, lock, record_size, size64,
+};
 
 /// The authenticated journal state installed by a successful compaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
