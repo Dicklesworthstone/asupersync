@@ -9003,18 +9003,33 @@ async fn run_sender_session(
     // that offers no source stream offers no codec either.
     let codec_offer = offered_source_stream
         .and_then(|_| codec::local_offer(options.compression(), source_stream_codec_chunk(config)));
-    super::send_native_sender_hello(
-        cx,
-        &mut link.conn,
-        &mut control,
-        config,
+    let hello = super::sender_hello_with_source_stream(
         peer_id,
+        config,
         symbol_auth_enabled,
         offered_source_stream,
         manifest.total_bytes,
         delta_sender_nonce,
-        codec_offer.as_ref(),
-    )?;
+    );
+    let mut hello_frame = super::json_frame(FrameType::Handshake, &hello)?;
+    if let Some(offer) = &codec_offer {
+        hello_frame
+            .header
+            .extensions
+            .insert(codec::CODEC_OFFER_EXTENSION, offer.to_bytes());
+    }
+    let offered_cdc = options.cdc_delta()
+        && delta_sender_nonce.is_some()
+        && super::delta_cdc::size_may_fit(manifest.total_bytes);
+    if offered_cdc {
+        let context = super::quic_delta_control_auth_context(config).ok_or_else(|| {
+            QuicTransportError::Config(
+                "QUIC CDC requires strict delta authentication".to_string(),
+            )
+        })?;
+        super::delta_cdc::advertise_cdc(&mut hello_frame, context, &hello)?;
+    }
+    control.send(cx, &mut link.conn, &hello_frame)?;
     link.flush(cx).await?;
     let hello_frames = link.last_flushed_stream_frames();
     let ack_frame = link
@@ -9028,6 +9043,13 @@ async fn run_sender_session(
         .await?;
     let ack = parse_hello_ack(&ack_frame)?;
     let delta_handshake = super::validate_quic_delta_ack(delta_sender_nonce, &ack)?;
+    let negotiated_cdc = super::delta_cdc::cdc_acknowledged(
+        &ack_frame,
+        super::quic_delta_control_auth_context(config),
+        &hello,
+        &ack,
+        offered_cdc,
+    )?;
     let source_stream = match (offered_source_stream, ack.source_stream) {
         (Some(stream), true) => Some(stream),
         (None, true) => {
@@ -9060,6 +9082,23 @@ async fn run_sender_session(
         link.source_stream_send_window = Some(window);
     }
 
+    // The authenticated ACK selects the chunk layout before the manifest is
+    // bound to this session. A peer without CDC continues with the exact fixed
+    // manifest prepared by the existing path. Cloning here copies metadata and
+    // path records, not file contents; chunking itself uses bounded buffers.
+    let mut selected = negotiated_cdc.then(|| prepared.clone());
+    if let Some(candidate) = &mut selected {
+        keep_peer_alive_while(
+            cx,
+            link,
+            &mut control,
+            super::delta_cdc::select_manifest(cx, candidate),
+        )
+        .await?;
+        super::validate_quic_manifest_with_cdc(&candidate.manifest, config, true)?;
+    }
+    let prepared = selected.as_ref().unwrap_or(prepared);
+    let manifest = &prepared.manifest;
     let delta_session = delta_handshake
         .map(|handshake| {
             super::derive_quic_delta_session(handshake, peer_id, &ack.peer_id, manifest)
@@ -11603,6 +11642,20 @@ async fn run_receiver_session(
         delta_destination_root: delta_handshake.map(|binding| binding.destination_root),
     };
     let mut ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
+    let negotiated_cdc = if options.cdc_delta() && delta_handshake.is_some() {
+        let context = super::quic_delta_control_auth_context(&config).ok_or_else(|| {
+            QuicTransportError::Config(
+                "QUIC CDC requires strict delta authentication".to_string(),
+            )
+        })?;
+        let offered = super::delta_cdc::cdc_offered(&hello_frame, context, &hello)?;
+        if offered {
+            super::delta_cdc::acknowledge_cdc(&mut ack_frame, context, &hello, &ack)?;
+        }
+        offered
+    } else {
+        false
+    };
     // Accept a compression offer this build can decode, for the source stream
     // only. Senders that predate compression make no offer and get no accept,
     // so their stream stays raw (br-asupersync-t1fblr.29).
@@ -11728,7 +11781,11 @@ async fn run_receiver_session(
         // Prove possession of the challenged delta authority before replying
         // about policy or consulting receiver state. A policy refusal still
         // has this session identity even though no request mode was admitted.
-        if let Err(error) = super::validate_quic_manifest(&envelope.manifest, config) {
+        if let Err(error) = super::validate_quic_manifest_with_cdc(
+            &envelope.manifest,
+            config,
+            negotiated_cdc,
+        ) {
             refuse_transfer_in_band(
                 cx,
                 link,

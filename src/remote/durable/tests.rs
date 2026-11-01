@@ -4,6 +4,8 @@ use std::io::Cursor as IoCursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod compaction;
+
 #[derive(Default)]
 struct FaultFile {
     bytes: IoCursor<Vec<u8>>,

@@ -1574,6 +1574,129 @@ fn real_udp_quic_changed_chunks_full_partial_and_noop() {
     assert_changed_chunk_destination(dst.path(), &payload);
 }
 
+/// The sender and receiver negotiate CDC on the public native path. Inserts and
+/// deletes shift later offsets, so the unchanged suffix must be reused by content
+/// identity rather than retransmitted as fixed blocks. Counts below are measured
+/// by the encrypted UDP proxy, independently of the transfer receipts.
+#[test]
+fn real_udp_quic_cdc_reuses_content_after_insert_delete_and_noop() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    let baseline = changed_chunk_payload(12, 131);
+    std::fs::write(&source, &baseline).expect("write initial source");
+    let configs = changed_chunk_configs();
+    let send_options = QuicSendOptions::new().with_cdc_delta(true);
+    let receive_options = QuicReceiveOptions::new().with_cdc_delta(true);
+
+    let (send, receive, full_wire_bytes) = run_counted_transfer_with_options(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_changed_chunk_reports(
+        &send.expect("first CDC transfer sends all content"),
+        &receive.expect("first CDC transfer commits"),
+        baseline.len(),
+    );
+    assert_changed_chunk_destination(dst.path(), &baseline);
+    assert!(full_wire_bytes > baseline.len() as u64);
+
+    let insertion = vec![0xA7; 2017];
+    let inserted = [&baseline[..90_001], &insertion, &baseline[90_001..]].concat();
+    let deleted = [&inserted[..1_600_013], &inserted[1_608_050..]].concat();
+    for (operation, updated) in [("insert", &inserted), ("delete", &deleted)] {
+        std::fs::write(&source, updated).expect("write shifted source");
+        let (send, receive, wire_bytes) = run_counted_transfer_with_options(
+            configs.send.clone(),
+            configs.recv.clone(),
+            &source,
+            dst.path(),
+            send_options,
+            receive_options,
+        );
+        let send = send.unwrap_or_else(|error| panic!("{operation} sender: {error:?}"));
+        let receive = receive.unwrap_or_else(|error| panic!("{operation} receiver: {error:?}"));
+        assert!(
+            send.bytes_sent > 0 && send.bytes_sent < DELTA_TEST_CHUNK_BYTES as u64,
+            "{operation} must transfer a bounded changed region, not the shifted suffix: {send:?}"
+        );
+        assert_changed_chunk_reports(
+            &send,
+            &receive,
+            usize::try_from(send.bytes_sent).expect("bounded missing bytes"),
+        );
+        assert!(
+            wire_bytes < full_wire_bytes / 2,
+            "{operation} used {wire_bytes} wire bytes versus {full_wire_bytes} for the first copy"
+        );
+        assert_changed_chunk_destination(dst.path(), updated);
+    }
+
+    let (send, receive, noop_wire_bytes) = run_counted_transfer_with_options(
+        configs.send,
+        configs.recv,
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_changed_chunk_reports(
+        &send.expect("unchanged CDC sender receives a bound proof"),
+        &receive.expect("unchanged CDC receiver commits a no-op"),
+        0,
+    );
+    assert!(noop_wire_bytes < full_wire_bytes / 2);
+    assert_changed_chunk_destination(dst.path(), &deleted);
+}
+
+#[test]
+fn real_udp_quic_cdc_preserves_fixed_and_legacy_peer_fallback() {
+    // CDC implies chunk reuse, but a peer that only knows fixed chunks must see
+    // the unchanged fixed schema. A peer with no chunk opt-in gets the full file.
+    for (sender_cdc, receiver_cdc, sender_fixed, receiver_fixed, expected_chunks) in [
+        (true, false, false, true, 1),
+        (false, true, true, false, 1),
+        (true, false, false, false, 0),
+        (false, true, false, false, 0),
+    ] {
+        let src = tempfile::tempdir().expect("source directory");
+        let dst = tempfile::tempdir().expect("destination directory");
+        let source = src.path().join("payload.bin");
+        let baseline = changed_chunk_payload(3, 23);
+        let mut updated = baseline.clone();
+        updated[DELTA_TEST_CHUNK_BYTES + 19] ^= 0x3C;
+        std::fs::write(&source, &updated).expect("write changed source");
+        std::fs::write(dst.path().join("payload.bin"), &baseline).expect("write baseline");
+        let configs = changed_chunk_configs();
+        let (send, receive, _) = run_counted_transfer_with_options(
+            configs.send,
+            configs.recv,
+            &source,
+            dst.path(),
+            QuicSendOptions::new()
+                .with_delta_chunks(sender_fixed)
+                .with_cdc_delta(sender_cdc),
+            QuicReceiveOptions::new()
+                .with_delta_chunks(receiver_fixed)
+                .with_cdc_delta(receiver_cdc),
+        );
+        assert_changed_chunk_reports(
+            &send.expect("mixed-version sender completes"),
+            &receive.expect("mixed-version receiver commits"),
+            if expected_chunks == 1 {
+                DELTA_TEST_CHUNK_BYTES
+            } else {
+                updated.len()
+            },
+        );
+        assert_changed_chunk_destination(dst.path(), &updated);
+    }
+}
+
 #[test]
 fn real_udp_quic_changed_chunks_reuse_reordered_and_repeated_content() {
     let src = tempfile::tempdir().expect("source directory");
@@ -1861,13 +1984,22 @@ fn real_udp_quic_changed_chunks_deliver_metadata_policy_refusal() {
 
 #[test]
 fn real_udp_quic_changed_chunks_cancel_after_staging_preserves_baseline() {
+    assert_quic_chunk_cancellation_preserves_baseline(false);
+}
+
+#[test]
+fn real_udp_quic_cdc_cancel_after_staging_preserves_baseline() {
+    assert_quic_chunk_cancellation_preserves_baseline(true);
+}
+
+fn assert_quic_chunk_cancellation_preserves_baseline(cdc: bool) {
     let src = tempfile::tempdir().expect("source directory");
     let dst = tempfile::tempdir().expect("destination directory");
     let source = src.path().join("payload.bin");
     let baseline = changed_chunk_payload(32, 0);
     let mut updated = baseline.clone();
-    for chunk in 16..32 {
-        updated[chunk * DELTA_TEST_CHUNK_BYTES + 17] ^= 0xC3;
+    for byte in &mut updated[16 * DELTA_TEST_CHUNK_BYTES..] {
+        *byte ^= 0xC3;
     }
     std::fs::write(&source, &updated).expect("write changed source");
     std::fs::write(dst.path().join("payload.bin"), &baseline).expect("write baseline");
@@ -1899,7 +2031,9 @@ fn real_udp_quic_changed_chunks_cancel_after_staging_preserves_baseline() {
                 &source,
                 configs.send,
                 "delta-sender",
-                QuicSendOptions::new().with_delta_chunks(true),
+                QuicSendOptions::new()
+                    .with_delta_chunks(!cdc)
+                    .with_cdc_delta(cdc),
             ),
             receive_on_endpoint_with_options(
                 &cx,
@@ -1907,7 +2041,9 @@ fn real_udp_quic_changed_chunks_cancel_after_staging_preserves_baseline() {
                 dst.path(),
                 &configs.recv,
                 "delta-receiver",
-                QuicReceiveOptions::new().with_delta_chunks(true),
+                QuicReceiveOptions::new()
+                    .with_delta_chunks(!cdc)
+                    .with_cdc_delta(cdc),
             ),
         )
         .await
