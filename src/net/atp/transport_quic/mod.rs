@@ -72,6 +72,8 @@ mod delta_cdc;
 mod tree_delta;
 #[cfg(any(feature = "tls", test))]
 mod delta_chunks;
+#[cfg(any(feature = "tls", test))]
+mod resume;
 #[cfg(feature = "tls")]
 pub mod native_link;
 pub mod symbol_datagram;
@@ -1040,6 +1042,7 @@ pub struct QuicReceiveOptions {
     delta_chunks: bool,
     cdc_delta: bool,
     tree_delta: bool,
+    resume: bool,
 }
 
 impl QuicReceiveOptions {
@@ -1051,6 +1054,7 @@ impl QuicReceiveOptions {
             delta_chunks: false,
             cdc_delta: false,
             tree_delta: false,
+            resume: false,
         }
     }
 
@@ -1086,7 +1090,7 @@ impl QuicReceiveOptions {
     /// Whether native UDP transfers may negotiate changed-chunk reconstruction.
     #[must_use]
     pub const fn delta_chunks(&self) -> bool {
-        self.delta_chunks || self.cdc_delta || self.tree_delta
+        self.delta_chunks || self.cdc_delta || self.tree_delta || self.resume
     }
 
     /// Accept authenticated content-defined chunks on the native UDP path.
@@ -1123,6 +1127,38 @@ impl QuicReceiveOptions {
         self.tree_delta
     }
 
+    /// Retain authenticated, durable fixed chunks across interrupted transfers.
+    ///
+    /// Both peers must opt in. A fresh authenticated connection rehashes retained
+    /// chunks before requesting only the missing ranges. This profile supports
+    /// single regular files with at most 4096 fixed 256 KiB chunks (1 GiB).
+    /// The receiver requires Unix directory synchronization; other platforms
+    /// reject this option. The sender must use a [`QuicConfig::chunk_size`] of
+    /// 256 KiB to negotiate resume.
+    /// It retains a private `.atp-quic-resume-*` cache beneath the destination;
+    /// the application owns its retention. Each cache bounds journal history to
+    /// 8 MiB and 16,385 records. The final destination is published only after
+    /// the existing whole-file verification and durability checks.
+    /// Applications must protect destination/cache ancestry against concurrent
+    /// replacement and retain the same strict authentication key for recovery.
+    ///
+    /// This implies changed-chunk support, requires strict delta authority,
+    /// and cannot be combined with another delta selector. Unsupported chunk
+    /// sizes, file shapes, manifests exceeding control-frame limits, and older
+    /// peers retain the existing full/no-op transfer behavior. Filesystem work
+    /// uses the supplied [`Cx`], including this fallback path.
+    #[must_use]
+    pub const fn with_resume(mut self, enabled: bool) -> Self {
+        self.resume = enabled;
+        self
+    }
+
+    /// Whether native UDP receivers may retain resumable fixed chunks.
+    #[must_use]
+    pub const fn resume(&self) -> bool {
+        self.resume
+    }
+
     fn validate_detached(&self) -> Result<(), QuicTransportError> {
         self.validate()?;
         if self.delta_chunks() {
@@ -1134,6 +1170,16 @@ impl QuicReceiveOptions {
     }
 
     fn validate(&self) -> Result<(), QuicTransportError> {
+        if self.resume && !cfg!(unix) {
+            return Err(QuicTransportError::Config(
+                "QUIC durable resume currently requires Unix directory synchronization".to_string(),
+            ));
+        }
+        if self.resume && (self.delta_chunks || self.cdc_delta || self.tree_delta) {
+            return Err(QuicTransportError::Config(
+                "QUIC resume cannot be combined with another delta selector".to_string(),
+            ));
+        }
         if self.sparse_files() && !cfg!(unix) {
             return Err(QuicTransportError::Config(
                 "QUIC sparse-file reconstruction currently requires Unix; Windows needs an \
@@ -1143,6 +1189,16 @@ impl QuicReceiveOptions {
         }
         Ok(())
     }
+}
+
+/// Durable retained bytes in a currently active resumable receive.
+///
+/// This diagnostic state witness advances only after both the payload and
+/// authenticated journal barriers. It is scoped by the explicit destination.
+#[cfg(all(feature = "tls", feature = "test-internals"))]
+#[must_use]
+pub fn resume_checkpoint_bytes_for_testing(destination: &Path) -> Option<u64> {
+    resume::checkpoint_bytes(destination)
 }
 
 /// Sender-only options for ATP-over-QUIC ([`send_path_with_options`]).
@@ -1156,6 +1212,7 @@ pub struct QuicSendOptions {
     delta_chunks: bool,
     cdc_delta: bool,
     tree_delta: bool,
+    resume: bool,
 }
 
 impl Default for QuicSendOptions {
@@ -1174,6 +1231,7 @@ impl QuicSendOptions {
             delta_chunks: false,
             cdc_delta: false,
             tree_delta: false,
+            resume: false,
         }
     }
 
@@ -1228,7 +1286,7 @@ impl QuicSendOptions {
     /// Whether the sender advertises authenticated changed-chunk support.
     #[must_use]
     pub const fn delta_chunks(&self) -> bool {
-        self.delta_chunks || self.cdc_delta || self.tree_delta
+        self.delta_chunks || self.cdc_delta || self.tree_delta || self.resume
     }
 
     /// Offer authenticated content-defined chunks for insertion-resistant reuse.
@@ -1266,7 +1324,35 @@ impl QuicSendOptions {
         self.tree_delta
     }
 
+    /// Offer authenticated fixed-chunk resume after disconnect or re-invocation.
+    ///
+    /// A supporting receiver may request every chunk on the first attempt and
+    /// only the uncommitted chunks on later attempts. Requires strict delta
+    /// authority, compression off, and a single regular file of at most 1 GiB
+    /// (4096 fixed 256 KiB chunks), with [`QuicConfig::chunk_size`] set to 256 KiB.
+    /// Resume receivers require Unix directory synchronization. Old receivers,
+    /// unsupported chunk sizes or file shapes, and manifests exceeding control-
+    /// frame limits retain their existing behavior. Cannot accompany another
+    /// delta selector. Filesystem work uses the supplied [`Cx`], including the
+    /// fallback path.
+    #[must_use]
+    pub const fn with_resume(mut self, enabled: bool) -> Self {
+        self.resume = enabled;
+        self
+    }
+
+    /// Whether native UDP senders advertise resumable fixed chunks.
+    #[must_use]
+    pub const fn resume(&self) -> bool {
+        self.resume
+    }
+
     fn validate(&self, config: &QuicConfig) -> Result<(), QuicTransportError> {
+        if self.resume && (self.delta_chunks || self.cdc_delta || self.tree_delta) {
+            return Err(QuicTransportError::Config(
+                "QUIC resume cannot be combined with another delta selector".to_string(),
+            ));
+        }
         validate_quic_delta_chunks_option(self.delta_chunks(), config)?;
         if self.delta_chunks() && self.compression() != CompressionMode::Off {
             return Err(QuicTransportError::Config(
@@ -11530,31 +11616,40 @@ async fn send_path_outcome(
     peer_id: &str,
     options: QuicSendOptions,
 ) -> Result<QuicSendOutcome, QuicTransportError> {
-    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    options.validate(&config)?;
-    config.validate()?;
-    trace_config_summary(cx, "send_path", &config, peer_id, None);
-    let prepared = prepare_source_manifest(cx, source, &config).await?;
-    let config = prepared.effective_config(&config);
-    config.validate()?;
-    let fanout_plan =
-        quic_plan_initial_fanout_dispatch(&config, usize::MAX, &prepared.manifest, &[])?;
-    trace_quic_fanout_dispatch_plan(cx, 0, &fanout_plan);
-    #[cfg(feature = "tls")]
-    {
-        let (report, limiter) =
-            native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id, options)
-                .await?;
-        Ok(QuicSendOutcome { report, limiter })
-    }
-    #[cfg(not(feature = "tls"))]
-    {
-        let _ = (addr, prepared, options);
-        Err(QuicTransportError::Config(
-            "ATP-over-QUIC send requires the `tls` feature for the native QUIC/TLS-1.3 \
-             handshake; there is no insecure transport path"
-                .to_string(),
-        ))
+    let work = async {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        options.validate(&config)?;
+        config.validate()?;
+        trace_config_summary(cx, "send_path", &config, peer_id, None);
+        let prepared = prepare_source_manifest(cx, source, &config).await?;
+        let config = prepared.effective_config(&config);
+        config.validate()?;
+        let fanout_plan =
+            quic_plan_initial_fanout_dispatch(&config, usize::MAX, &prepared.manifest, &[])?;
+        trace_quic_fanout_dispatch_plan(cx, 0, &fanout_plan);
+        #[cfg(feature = "tls")]
+        {
+            let (report, limiter) =
+                native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id, options)
+                    .await?;
+            Ok(QuicSendOutcome { report, limiter })
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = (addr, prepared, options);
+            Err(QuicTransportError::Config(
+                "ATP-over-QUIC send requires the `tls` feature for the native QUIC/TLS-1.3 \
+                 handshake; there is no insecure transport path"
+                    .to_string(),
+            ))
+        }
+    };
+    if options.resume() {
+        // Source preparation, native session work, and future destruction must
+        // all retain this transfer's authority even under a different poller.
+        cx.with_ambient(work).await
+    } else {
+        work.await
     }
 }
 

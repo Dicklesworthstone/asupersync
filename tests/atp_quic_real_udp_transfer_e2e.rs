@@ -1503,6 +1503,318 @@ fn assert_changed_chunk_destination(destination: &Path, expected: &[u8]) {
     );
 }
 
+#[cfg(unix)]
+struct NativeResumeTransfer {
+    send: Result<SendReport, QuicTransportError>,
+    receive: Result<ReceiveReport, QuicTransportError>,
+    wire_bytes: u64,
+    cancelled_after: Option<u64>,
+}
+
+/// Each invocation owns a fresh native runtime and connection. Resume storage
+/// must obtain real drained blocking admission; a detached testing Cx cannot
+/// provide it. Cancellation observes a durable checkpoint before the receiver
+/// is polled again, rather than guessing from elapsed time or file length.
+#[cfg(unix)]
+fn run_native_resume_transfer(
+    configs: Configs,
+    source: &Path,
+    destination: &Path,
+    send_options: QuicSendOptions,
+    receive_options: QuicReceiveOptions,
+    cancel_after: Option<u64>,
+) -> NativeResumeTransfer {
+    use asupersync::net::atp::transport_quic::resume_checkpoint_bytes_for_testing;
+    use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use std::future::{Future as _, poll_fn};
+
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 2)
+        .build()
+        .expect("native resume runtime");
+    let result = runtime.block_on(async {
+        let cx = Cx::current().expect("native root authority");
+        let endpoint = bind_server_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind resume receiver");
+        let proxy = CountingUdpProxy::spawn(endpoint.local_addr());
+        let mut cancelled_after = None;
+        let mut receiver = std::pin::pin!(receive_on_endpoint_with_options(
+            &cx,
+            endpoint,
+            destination,
+            &configs.recv,
+            "resume-receiver",
+            receive_options,
+        ));
+        let observed_receiver = poll_fn(|context| {
+            if cancelled_after.is_none()
+                && let Some(target) = cancel_after
+                && let Some(bytes) = resume_checkpoint_bytes_for_testing(destination)
+                && bytes >= target
+            {
+                cancelled_after = Some(bytes);
+                cx.set_cancel_requested(true);
+            }
+            receiver.as_mut().poll(context)
+        });
+        let (send, receive) = zip(
+            send_path_with_options(
+                &cx,
+                proxy.addr,
+                source,
+                configs.send,
+                "resume-sender",
+                send_options,
+            ),
+            observed_receiver,
+        )
+        .await;
+        NativeResumeTransfer {
+            send,
+            receive,
+            wire_bytes: proxy.sent.load(Ordering::Relaxed),
+            cancelled_after,
+        }
+    });
+    let drained = runtime.shutdown_drained(Duration::from_secs(5));
+    assert_eq!(drained.outcome, RootDrainOutcome::Quiescent, "{drained:?}");
+    assert_eq!(drained.live_tasks, 0);
+    assert_eq!(drained.live_regions, 0);
+    assert_eq!(drained.pending_spawns, 0);
+    assert_eq!(drained.pending_obligations, 0);
+    assert_eq!(drained.queued_finalizers, 0);
+    assert!(!drained.has_pending_obligation_posts);
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    result
+}
+
+#[cfg(unix)]
+fn retained_resume_cache(destination: &Path) -> PathBuf {
+    let caches = std::fs::read_dir(destination)
+        .expect("read resume destination")
+        .map(|entry| entry.expect("read destination entry"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".atp-quic-resume-")
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert_eq!(caches.len(), 1, "one retained cache for this source identity");
+    let cache = caches.into_iter().next().unwrap();
+    let name = cache.file_name().unwrap().to_str().unwrap();
+    let identity = name.strip_prefix(".atp-quic-resume-").unwrap();
+    assert_eq!(identity.len(), 64);
+    assert!(identity.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(cache.join("journal").is_dir());
+    assert!(cache.join("payload").is_file());
+    cache
+}
+
+/// I1: cancel after half the chunks have crossed both durability barriers,
+/// retire the native owner, then reconnect with entirely fresh runtime state.
+/// Only unreceipted bytes may cross the wire on that second connection.
+#[cfg(unix)]
+#[test]
+fn real_udp_quic_resume_reopens_durable_prefix_after_cancellation() {
+    let src = tempfile::tempdir().expect("resume source");
+    let dst = tempfile::tempdir().expect("resume destination");
+    let source = src.path().join("payload.bin");
+    let final_path = dst.path().join("payload.bin");
+    let payload = changed_chunk_payload(16, 0);
+    let baseline = vec![0x5D; payload.len()];
+    std::fs::write(&source, &payload).unwrap();
+    std::fs::write(&final_path, &baseline).unwrap();
+    let half = (payload.len() / 2) as u64;
+    let send_options = QuicSendOptions::new().with_resume(true);
+    let receive_options = QuicReceiveOptions::new().with_resume(true);
+
+    let interrupted = run_native_resume_transfer(
+        changed_chunk_configs(),
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+        Some(half),
+    );
+    let durable = interrupted
+        .cancelled_after
+        .expect("durable halfway checkpoint was reached");
+    assert_eq!(
+        durable, half,
+        "cancel before the next receiver checkpoint is admitted"
+    );
+    assert!(
+        matches!(&interrupted.send, Err(QuicTransportError::Cancelled)),
+        "interrupted sender: {:?}",
+        interrupted.send
+    );
+    assert!(
+        matches!(&interrupted.receive, Err(QuicTransportError::Cancelled)),
+        "interrupted receiver: {:?}",
+        interrupted.receive
+    );
+    assert_eq!(
+        std::fs::read(&final_path).unwrap(),
+        baseline,
+        "cancellation must not publish a partial destination"
+    );
+    assert_no_staging_residue(dst.path());
+    let cache = retained_resume_cache(dst.path());
+    let cached = std::fs::read(cache.join("payload")).unwrap();
+    assert_eq!(&cached[..durable as usize], &payload[..durable as usize]);
+
+    let resumed = run_native_resume_transfer(
+        changed_chunk_configs(),
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+        None,
+    );
+    assert_changed_chunk_reports(
+        &resumed.send.expect("fresh sender resumes the journaled transfer"),
+        &resumed
+            .receive
+            .expect("fresh receiver reopens and commits the cache"),
+        payload.len() - durable as usize,
+    );
+    assert!(
+        resumed.wire_bytes < payload.len() as u64 * 3 / 4,
+        "resuming half an object sent {} encrypted UDP bytes for {} payload bytes",
+        resumed.wire_bytes,
+        payload.len()
+    );
+    assert_eq!(std::fs::read(&final_path).unwrap(), payload);
+    assert_eq!(retained_resume_cache(dst.path()), cache);
+    assert_no_staging_residue(dst.path());
+
+    let reused = run_native_resume_transfer(
+        changed_chunk_configs(),
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+        None,
+    );
+    assert_changed_chunk_reports(
+        &reused
+            .send
+            .expect("all-reused sender receives an authenticated proof"),
+        &reused
+            .receive
+            .expect("all-reused cache is revalidated and committed"),
+        0,
+    );
+    assert!(
+        reused.wire_bytes < resumed.wire_bytes / 4,
+        "all-reused wire bytes={} versus resumed={}",
+        reused.wire_bytes,
+        resumed.wire_bytes
+    );
+    assert_eq!(std::fs::read(&final_path).unwrap(), payload);
+    assert_eq!(retained_resume_cache(dst.path()), cache);
+    assert_no_staging_residue(dst.path());
+}
+
+/// A signed receipt cannot authorize reuse after its payload is modified.
+/// Even an already-correct final file must not hide corrupt retained state.
+#[cfg(unix)]
+#[test]
+fn real_udp_quic_resume_refuses_corrupt_receipted_payload_without_publication() {
+    let src = tempfile::tempdir().expect("resume source");
+    let dst = tempfile::tempdir().expect("resume destination");
+    let source = src.path().join("payload.bin");
+    let final_path = dst.path().join("payload.bin");
+    let payload = changed_chunk_payload(5, 97);
+    std::fs::write(&source, &payload).unwrap();
+    let send_options = QuicSendOptions::new().with_resume(true);
+    let receive_options = QuicReceiveOptions::new().with_resume(true);
+    let initial = run_native_resume_transfer(
+        changed_chunk_configs(),
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+        None,
+    );
+    assert_changed_chunk_reports(
+        &initial.send.expect("initial resumable copy sends every chunk"),
+        &initial.receive.expect("initial resumable copy commits"),
+        payload.len(),
+    );
+    let cache = retained_resume_cache(dst.path());
+    let mut cached = std::fs::OpenOptions::new()
+        .write(true)
+        .open(cache.join("payload"))
+        .unwrap();
+    cached.seek(std::io::SeekFrom::Start(23)).unwrap();
+    cached.write_all(&[payload[23] ^ 0xA5]).unwrap();
+    cached.sync_all().unwrap();
+    drop(cached);
+    let corrupted = std::fs::read(cache.join("payload")).unwrap();
+
+    let refused = run_native_resume_transfer(
+        changed_chunk_configs(),
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+        None,
+    );
+    assert!(
+        matches!(&refused.receive, Err(QuicTransportError::Io(error))
+            if error.kind() == ErrorKind::InvalidData
+                && error.to_string() == "QUIC resume payload differs from its authenticated chunk"),
+        "corrupt cache receiver: {:?}",
+        refused.receive
+    );
+    assert!(
+        matches!(&refused.send, Err(QuicTransportError::Integrity(reason))
+            if reason == "receiver could not prepare its delta request"),
+        "corrupt cache sender receives a bound refusal: {:?}",
+        refused.send
+    );
+    assert_eq!(std::fs::read(&final_path).unwrap(), payload);
+    assert_eq!(
+        std::fs::read(cache.join("payload")).unwrap(),
+        corrupted,
+        "refusal preserves the corrupt evidence instead of overwriting it"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn real_udp_quic_resume_preserves_legacy_peer_fallback() {
+    for (sender_resume, receiver_resume) in [(true, false), (false, true)] {
+        let src = tempfile::tempdir().expect("resume source");
+        let dst = tempfile::tempdir().expect("resume destination");
+        let source = src.path().join("payload.bin");
+        let payload = changed_chunk_payload(2, 17);
+        std::fs::write(&source, &payload).unwrap();
+        let copied = run_native_resume_transfer(
+            changed_chunk_configs(),
+            &source,
+            dst.path(),
+            QuicSendOptions::new().with_resume(sender_resume),
+            QuicReceiveOptions::new().with_resume(receiver_resume),
+            None,
+        );
+        assert_changed_chunk_reports(
+            &copied
+                .send
+                .expect("mixed-version sender falls back to a full transfer"),
+            &copied.receive.expect("mixed-version receiver commits"),
+            payload.len(),
+        );
+        assert!(copied.wire_bytes > payload.len() as u64);
+        assert_changed_chunk_destination(dst.path(), &payload);
+    }
+}
+
 /// I3/B8: the public API must perform a full first copy, send only one changed
 /// chunk next, and then negotiate an authenticated no-op. Wire counts come
 /// from real encrypted UDP packets, independently of the receipt counters.

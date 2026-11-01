@@ -104,6 +104,7 @@ pub(super) fn validate_request(
     request: &DeltaObjectRequest,
 ) -> Result<(), QuicTransportError> {
     let tree = super::tree_delta::is_tree(manifest);
+    let resume = super::resume::selected(request);
     if tree {
         super::tree_delta::validate_manifest(manifest)?;
     }
@@ -112,11 +113,20 @@ pub(super) fn validate_request(
     })?;
     if (!tree && quic_delta_manifest_entry(manifest).is_none())
         || request.mode != DeltaWireMode::DeltaChunks
-        || request.fallback_reason.as_deref() != Some(selector(manifest))
+        || (resume && !super::resume::supported(manifest))
+        || request.fallback_reason.as_deref() != Some(if resume {
+            super::resume::SELECTOR
+        } else {
+            selector(manifest)
+        })
         || request.sender_merkle_root_hex != delta.merkle_root_hex
         || request.receiver_merkle_root_hex.is_none()
-        || request.shared_chunks == 0
-        || request.missing_bytes >= delta.total_size_bytes
+        || (!resume && request.shared_chunks == 0)
+        || (if resume {
+            request.missing_bytes > delta.total_size_bytes
+        } else {
+            request.missing_bytes >= delta.total_size_bytes
+        })
         || request.stale_chunks > QUIC_DELTA_MAX_MANIFEST_CHUNKS
     {
         return Err(QuicTransportError::Control(
@@ -170,6 +180,7 @@ pub(super) struct ReceivePlan {
     pub(super) baseline: PathBuf,
     // Repeated target chunks may use the same verified baseline range.
     pub(super) reusable: BTreeMap<String, ReusableRange>,
+    pub(super) resume: Option<std::sync::Arc<super::resume::Store>>,
 }
 
 #[cfg(feature = "tls")]
@@ -308,7 +319,7 @@ pub(super) async fn plan(
         }).collect::<Result<Vec<_>, _>>()?,
     };
     validate_request(manifest, &request)?;
-    Ok(Some(ReceivePlan { request, baseline, reusable }))
+    Ok(Some(ReceivePlan { request, baseline, reusable, resume: None }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
