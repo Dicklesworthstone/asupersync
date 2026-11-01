@@ -6920,9 +6920,15 @@ impl OtlpHttpExporter {
         cx: &crate::cx::Cx,
         request_body: Vec<u8>,
     ) -> Result<OtlpHttpResponse, ExportError> {
-        let body = self
-            .send_otlp_protobuf_response_body(cx, request_body)
-            .await?;
+        // Every native export path reaches the HTTP send through here. Boxing
+        // it as `dyn Future + Send` proves `Send` once, inside this crate, so a
+        // downstream crate's `Send` proof of an export future stops at the box
+        // instead of walking the whole send chain into its own recursion limit
+        // (the future-incompatible `recursion_depth_exceeding_limit` lint).
+        let body: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<u8>, ExportError>> + Send + '_>,
+        > = Box::pin(self.send_otlp_protobuf_response_body(cx, request_body));
+        let body = body.await?;
         let response = decode_otlp_http_response(&body).map_err(ExportError::from)?;
         if response.is_partial_success() {
             let rejected = response.rejected_items().to_string();

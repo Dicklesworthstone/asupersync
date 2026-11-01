@@ -130,6 +130,12 @@ blocking-pool submission and HTTP client lifecycle checks. Source inclusion,
 packaged-byte checks, successful qualification, and registry/release delivery
 are separate requirements; this changelog entry does not claim publication.
 
+### Fixed: native OTLP export futures keep downstream recursion-limit headroom
+
+Native OTLP export futures (`send_otlp_protobuf`, `send_owned_*`,
+`flush_queued`) are proven `Send` inside the crate, so downstream crates keep
+their recursion-limit headroom.
+
 ### Security — third-party macaroon caveats (asupersync-s45073)
 
 - **Legacy third-party caveats can be stripped by the third party.**
