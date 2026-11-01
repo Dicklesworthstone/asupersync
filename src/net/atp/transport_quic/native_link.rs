@@ -6303,6 +6303,8 @@ impl QuicLink {
         reason: &'static str,
     ) -> Result<(), QuicTransportError> {
         let deadline = cx.now() + self.idle_timeout;
+        let mut retransmit_after = NEEDMORE_PTO;
+        let mut retransmit_at = cx.now() + retransmit_after;
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             if cx.now() >= deadline {
@@ -6326,12 +6328,25 @@ impl QuicLink {
                 return Ok(());
             }
 
+            // An inbound data packet or an ACK for an earlier flight is not
+            // evidence that this request was lost. Requeueing after every
+            // successful pump discards its packet record before the peer's
+            // ACK can arrive. Both sides then exchange packets indefinitely
+            // while the receiver never starts consuming the source stream.
+            if cx.now() < retransmit_at {
+                continue;
+            }
             let retransmit_frames = self.drain_in_flight_stream_frames_for_retransmit();
             if retransmit_frames.is_empty() {
                 continue;
             }
             self.retransmit_stream_frames(cx, &retransmit_frames, reason)
                 .await?;
+            // A path whose RTT exceeds the initial PTO must eventually get a
+            // full RTT to acknowledge one flight. Otherwise each fixed-rate
+            // retry can make the preceding flight's delayed ACK obsolete.
+            retransmit_after = retransmit_after.saturating_mul(2).min(self.idle_timeout);
+            retransmit_at = cx.now() + retransmit_after;
         }
     }
 
