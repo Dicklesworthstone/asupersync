@@ -470,13 +470,17 @@
     }
 
     #[test]
-    fn io_ready_at_once_arms_no_timer() {
+    fn a_ready_wait_releases_its_deadline_timer() {
         let clock = Arc::new(VirtualClock::new());
         let cx = timed_cx(&clock);
         let driver = cx.timer_driver().expect("timer driver");
         let probe = driver.clone();
         let io = std::pin::pin!(poll_fn(move |_| {
-            assert_eq!(probe.pending_count(), 0, "I/O comes before the timer");
+            assert_eq!(
+                probe.pending_count(),
+                1,
+                "the deadline is armed before the I/O"
+            );
             Poll::Ready(Ok::<_, WsError>(7_u8))
         }));
         let wait = std::pin::pin!(wait_until(&cx, deadline_at(&cx, 10), io));
@@ -499,13 +503,13 @@
     }
 
     #[test]
-    fn ready_io_wins_over_a_due_deadline() {
+    fn a_due_deadline_wins_over_ready_io() {
         let clock = Arc::new(VirtualClock::new());
         let cx = timed_cx(&clock);
         clock.advance(20_000_000);
         let io = std::pin::pin!(std::future::ready(Ok::<_, WsError>(7_u8)));
         let wait = std::pin::pin!(wait_until(&cx, deadline_at(&cx, 10), io));
-        assert!(matches!(poll_once(wait), Poll::Ready(Ok(Some(7)))));
+        assert!(matches!(poll_once(wait), Poll::Ready(Ok(None))));
     }
 
     #[test]
