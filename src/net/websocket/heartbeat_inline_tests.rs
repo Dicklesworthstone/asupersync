@@ -238,7 +238,7 @@
         assert!(poll_once(wait.as_mut()).is_pending());
         assert_eq!(driver.pending_count(), 1);
         clock.advance(20_000_000);
-        driver.process_timers();
+        assert_eq!(driver.process_timers(), 1, "the heartbeat deadline fires");
         assert!(matches!(poll_once(wait.as_mut()), Poll::Ready(Ok(None))));
     }
 
