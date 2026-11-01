@@ -12,7 +12,7 @@ fn config() -> QuicConfig {
         enable_delta: true,
         chunk_size: DATA_FRAGMENT_BYTES,
         metadata_policy: super::super::MetadataPolicy::portable(),
-        ..QuicConfig::default()
+        ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
     }.with_delta_control_auth(SecurityContext::for_testing(173))
 }
 
