@@ -271,6 +271,12 @@
 
     impl<T> Drop for CheckedPanicRetirementWaker<T> {
         fn drop(&mut self) {
+            // A failing assertion unwinds through this final owner's drop. A
+            // second panic there would abort the test binary instead of
+            // reporting that assertion.
+            if std::thread::panicking() {
+                return;
+            }
             assert!(self.channel.upgrade().unwrap().inner.try_lock().is_some());
             self.drops.fetch_add(1, AtomicOrdering::SeqCst);
             panic!("planted broadcast final-owner retirement panic");
@@ -443,6 +449,11 @@
 
     impl Drop for CheckedPanicPayload {
         fn drop(&mut self) {
+            // As for the retirement waker: never a second panic while a failing
+            // assertion unwinds.
+            if std::thread::panicking() {
+                return;
+            }
             if self.armed.swap(false, AtomicOrdering::SeqCst) {
                 assert!(self.channel.upgrade().unwrap().inner.try_lock().is_some());
                 panic!("planted broadcast eviction drop panic");
@@ -555,10 +566,14 @@
                 let mut context = Context::from_waker(&waker);
                 assert!(first_recv.as_mut().poll(&mut context).is_pending());
             }
+            // Since 021dfdbfb a parked receive also registers for cancellation
+            // wakes (`mpsc_cancel_registration.rs:12-14`): the registration
+            // keeps a strong owner outside the Cx registry, and the registry
+            // holds its own clone, beside the channel's stored waiter.
             assert_eq!(
                 observer.strong_count(),
-                1,
-                "only the stored waiter owns the payload"
+                3,
+                "the stored waiter, the registration's owner and the Cx registry's clone"
             );
             let second_calls = CountingWaker::new();
             let second_waker = Waker::from(Arc::clone(&second_calls));
@@ -593,13 +608,39 @@
             }
             assert_eq!(notifications.load(AtomicOrdering::SeqCst), 2);
             assert_eq!(wakes.load(AtomicOrdering::SeqCst), 1);
-            assert_eq!(drops.load(AtomicOrdering::SeqCst), 1);
-            assert_eq!(observer.strong_count(), 0);
+            // The send dropped only the stored waiter. The registration still
+            // owns the final owner, so the send no longer retires it.
+            assert_eq!(drops.load(AtomicOrdering::SeqCst), 0);
+            assert_eq!(observer.strong_count(), 2);
             assert_eq!(second_calls.wake_count(), 1);
             assert_eq!(tx.channel.inner.lock().wakers.len(), 0);
             let mut first_context = Context::from_waker(Waker::noop());
+            // Pinned current behavior after 021dfdbfb: a waker whose Drop
+            // panics costs its own receiver the completed value; see bead
+            // asupersync-7l3xma. Completing `first` clears its cancellation
+            // registration, which drops the final owner inside this poll, so the
+            // planted Drop panic unwinds out of it and drops the Ready(Ok(83)).
+            // Fixing the bead flips this assertion back to `Ok(83)`.
+            let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                first_recv.as_mut().poll(&mut first_context)
+            }));
+            let Err(payload) = completion else {
+                panic!("first's completing poll must retire the final owner");
+            };
+            assert_eq!(
+                payload.downcast_ref::<&str>(),
+                Some(&"planted broadcast final-owner retirement panic")
+            );
+            assert_eq!(drops.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(observer.strong_count(), 0);
+            assert!(matches!(
+                first_recv.as_mut().poll(&mut first_context),
+                Poll::Ready(Err(RecvError::PolledAfterCompletion))
+            ));
+            drop(first_recv);
             assert!(
-                matches!(first_recv.as_mut().poll(&mut first_context), Poll::Ready(Ok(value)) if value.value == 83)
+                matches!(first.try_recv(), Err(TryRecvError::Empty)),
+                "the lost completion consumed first's 83"
             );
             assert!(
                 matches!(second_recv.as_mut().poll(&mut second_context), Poll::Ready(Ok(value)) if value.value == 83)
