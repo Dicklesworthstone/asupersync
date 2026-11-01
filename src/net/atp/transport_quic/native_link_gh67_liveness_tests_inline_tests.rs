@@ -632,6 +632,93 @@
         (client_control, server_control)
     }
 
+    /// asupersync-io5r88: a packet that arrives before the request's ACK must
+    /// not retire that request's flight. The peer withholds its ACK until its
+    /// earlier KeepAlive has been acknowledged, proving the delivery gate
+    /// consumed unrelated traffic first. Its explicit clock never reaches PTO.
+    #[test]
+    fn request_delivery_does_not_retransmit_on_unrelated_inbound_traffic() {
+        use crate::observability::{LogCollector, LogLevel};
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+
+        block_on(async {
+            let watchdog = Cx::for_testing();
+            let config = QuicConfig {
+                idle_timeout: Duration::from_secs(3),
+                ..QuicConfig::default()
+            };
+            let (mut client, mut server) = established_loopback_links(&watchdog, &config).await;
+            let (mut client_control, mut server_control) =
+                opened_control_streams(&watchdog, &mut client, &mut server).await;
+            let keep_alive = Frame::empty(FrameType::KeepAlive).unwrap();
+            client_control.send(&watchdog, &mut client.conn, &keep_alive).unwrap();
+            client.flush(&watchdog).await.unwrap();
+            let ping_frames = client.last_flushed_stream_frames();
+            assert!(!ping_frames.is_empty(), "the earlier ping is in flight");
+
+            let request = Frame::empty(FrameType::ObjectRequest).unwrap();
+            server_control.send(&watchdog, &mut server.conn, &request).unwrap();
+            server.flush(&watchdog).await.unwrap();
+            let mut request_frames = server.last_flushed_stream_frames();
+            assert!(!request_frames.is_empty(), "the request is in flight");
+
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer),
+                None,
+            );
+            let collector = LogCollector::new(512).with_min_level(LogLevel::Trace);
+            cx.set_log_collector(collector.clone());
+            let _current = Cx::set_current(Some(cx.clone()));
+            let receiver = server.wait_for_stream_frames_acked(
+                &cx,
+                &mut request_frames,
+                "io5r88 request delivery",
+                "io5r88_delivery_pto",
+            );
+            let peer = async {
+                // Pump without flushing: the request is received, but its ACK
+                // cannot reach the receiver until the state witness below.
+                while client.stream_frames_still_in_flight(&ping_frames) {
+                    client.pump_inbound_for(&cx, Duration::ZERO).await.unwrap();
+                    crate::runtime::yield_now().await;
+                }
+                assert!(
+                    collector.peek().iter().all(|entry| {
+                        entry.message() != "atp_quic.control_stream.retransmit"
+                            || entry.get_field("reason") != Some("io5r88_delivery_pto")
+                    }),
+                    "unrelated traffic must not expire the request's PTO"
+                );
+                assert_eq!(
+                    client_control.try_recv(&cx, &mut client.conn).unwrap(),
+                    Some(request),
+                    "the peer received the original request"
+                );
+                client.flush(&cx).await.unwrap();
+            };
+            let wall_deadline = Instant::now() + Duration::from_secs(5);
+            let (result, ()) = futures_lite::future::or(zip(receiver, peer), async {
+                // This deadline only bounds a broken test. The request's PTO
+                // is controlled by the frozen clock, not by scheduling speed.
+                while Instant::now() < wall_deadline {
+                    crate::runtime::yield_now().await;
+                }
+                panic!("request delivery did not consume the peer's real UDP ACK");
+            })
+            .await;
+            result.expect("the original request ACK completes delivery");
+            assert!(!server.stream_frames_still_in_flight(&request_frames));
+        });
+    }
+
     /// Sender side, pure-stream path (asupersync-ybczmx): the source-stream
     /// proof wait measured its idle budget from the start of the wait, so a
     /// receiver that pinged every 200 ms through a long packed-tree commit
