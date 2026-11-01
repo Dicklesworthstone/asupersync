@@ -9,6 +9,9 @@ use std::sync::atomic::AtomicUsize;
 use std::task::Wake;
 use std::time::Duration;
 
+#[path = "unstarted_admission_tests.rs"]
+mod unstarted_admission_tests;
+
 fn config() -> DynamicWorkerConfig {
     DynamicWorkerConfig::new(
         ManagedRestartMode::Temporary,

@@ -28,8 +28,10 @@ use super::{CancelWakerToken, ChildRegion, ChildRegionError, ChildRegionSpec, Cx
 use crate::record::region::RegionCloseOutcome;
 use crate::record::task::TaskOutcome;
 use crate::runtime::{JoinError, SpawnError};
-use crate::supervision::{BackoffStrategy, BudgetRefusal, ChildName, ManagedSupervisor, ManagedSupervisorHandle,
-    ManagedSupervisorReport, RestartConfig, RestartTracker, RestartVerdict};
+use crate::supervision::{
+    BackoffStrategy, BudgetRefusal, ChildName, ManagedSupervisor, ManagedSupervisorHandle,
+    ManagedSupervisorReport, RestartConfig, RestartTracker, RestartVerdict, UnstartedManagedSupervisor,
+};
 use crate::types::{CancelReason, RegionId};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -661,10 +663,18 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     /// are ready. Use application-specific readiness and the typed completion.
     /// No existing topology or restart tracker is mutated. A reused name receives
     /// a new owner-local generation AND a new generational region identity.
-    pub async fn start_child(
-        &mut self, name: impl Into<ChildName>, mut supervisor: ManagedSupervisor<E>,
+    pub fn start_child(
+        &mut self, name: impl Into<ChildName>, supervisor: ManagedSupervisor<E>,
+    ) -> impl Future<Output = Result<DynamicChildId, DynamicSupervisorError>> {
+        let supervisor = UnstartedManagedSupervisor::new(supervisor);
+        async move { self.start_child_guarded(name.into(), supervisor).await }
+    }
+
+    pub(super) async fn start_child_guarded(
+        &mut self,
+        name: ChildName,
+        mut supervisor: UnstartedManagedSupervisor<E>,
     ) -> Result<DynamicChildId, DynamicSupervisorError> {
-        let name = name.into();
         self.check_admission(&name)?;
         let generation = self.generation.checked_add(1)
             .ok_or(DynamicSupervisorError::GenerationExhausted)?;

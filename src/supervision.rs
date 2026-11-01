@@ -1807,6 +1807,7 @@ pub struct StartedChild {
 
 // The managed entry point is additive: the state-threaded ChildStart and the
 // declarative restart planners above keep their original contracts.
+pub(crate) use managed::UnstartedManagedSupervisor;
 pub use managed::{
     ManagedChildBinding, ManagedChildCompletion, ManagedChildFactory, ManagedChildFuture,
     ManagedGeneration, ManagedRestartMode, ManagedSupervisor, ManagedSupervisorBindError,
@@ -2175,6 +2176,62 @@ mod managed {
         terminal_publication_hook: Option<Arc<TerminalPublicationHook>>,
     }
 
+    // Public start/run futures own this guard from construction, before their
+    // first poll. Only Controller::new transfers its tree to admitted execution.
+    // Keeping the guard through queues and spawn factories also protects every
+    // refusal and cancellation path before that ownership transfer.
+    pub(crate) struct UnstartedManagedSupervisor<E> {
+        supervisor: Option<ManagedSupervisor<E>>,
+    }
+
+    impl<E> UnstartedManagedSupervisor<E> {
+        pub(crate) fn new(supervisor: ManagedSupervisor<E>) -> Self {
+            Self {
+                supervisor: Some(supervisor),
+            }
+        }
+
+        fn take(&mut self) -> ManagedSupervisor<E> {
+            self.supervisor.take().expect("unstarted supervisor is owned")
+        }
+
+        pub(crate) fn set_shared_restarts(
+            &mut self,
+            domain: Arc<crate::cx::dynamic_supervisor::SharedRestartDomain>,
+        ) {
+            self.supervisor
+                .as_mut()
+                .expect("unstarted supervisor is owned")
+                .set_shared_restarts(domain);
+        }
+
+        pub(crate) fn retire(mut self, on_panic: impl FnMut(Box<dyn std::any::Any + Send>)) {
+            self.take().retire_unstarted(on_panic);
+        }
+    }
+
+    impl<E> Drop for UnstartedManagedSupervisor<E> {
+        fn drop(&mut self) {
+            let Some(supervisor) = self.supervisor.take() else {
+                return;
+            };
+            let already_unwinding = std::thread::panicking();
+            let mut first = None;
+            supervisor.retire_unstarted(|payload| {
+                if already_unwinding || first.is_some() {
+                    // A panic payload can itself have a panicking destructor.
+                    // Preserve an existing unwind and isolate later failures.
+                    std::mem::forget(payload);
+                } else {
+                    first = Some(payload);
+                }
+            });
+            if let Some(payload) = first {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+
     impl<E> std::fmt::Debug for ManagedSupervisor<E> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("ManagedSupervisor")
@@ -2449,7 +2506,11 @@ mod managed {
     }
 
     impl<E: Send + 'static> Controller<E> {
-        fn new(supervisor: ManagedSupervisor<E>, cx: &Cx) -> Self {
+        fn new(mut unstarted: UnstartedManagedSupervisor<E>, cx: &Cx) -> Self {
+            let supervisor = unstarted
+                .supervisor
+                .as_ref()
+                .expect("unstarted supervisor is owned");
             let count = supervisor.children.len();
             let tracker = supervisor.config.restart_tracker();
             let tap = cx
@@ -2485,7 +2546,6 @@ mod managed {
                 restart_storm_detected: false,
             };
             Self {
-                supervisor,
                 cx: cx.clone(),
                 control: None,
                 root: None,
@@ -2500,6 +2560,9 @@ mod managed {
                 terminated: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 joins_observed: 0,
                 tap,
+                // Extract only after all controller metadata/allocation work.
+                // No user factory or callback runs during the transfer itself.
+                supervisor: unstarted.take(),
             }
         }
 
@@ -3858,10 +3921,50 @@ mod managed {
         /// escalation even under [`EscalationPolicy::Stop`] or
         /// [`EscalationPolicy::ResetCounter`]. Those policies govern restart
         /// budget exhaustion, not failure to clean up a retired generation.
-        pub async fn run(self, cx: &Cx) -> ManagedSupervisorReport<E> {
-            self.run_with_control(cx, None).await
+        pub fn run(self, cx: &Cx) -> impl Future<Output = ManagedSupervisorReport<E>> {
+            UnstartedManagedSupervisor::new(self).run_with_control(cx, None)
         }
 
+        /// Spawn a retained controller in the caller's current parent region.
+        /// The returned handle owns cancellation; all child work lives below a
+        /// distinct supervisor region, never around the controller itself.
+        pub fn spawn(self, cx: &Cx) -> Result<ManagedSupervisorHandle<E>, SpawnError> {
+            UnstartedManagedSupervisor::new(self).spawn(cx)
+        }
+
+        /// Spawn a supervisor that retains deferred bindings for live activation.
+        ///
+        /// The returned control shares one bounded mailbox among its clones.
+        /// A configured deferred child is activated at most once, then uses the
+        /// same generation regions, dependencies, restart policy and intensity
+        /// as eager children. Dormant bindings do not join sibling restart sets.
+        ///
+        /// An idle controlled supervisor waits while a control handle exists.
+        /// Dropping the last control closes activation; existing children keep
+        /// their normal lifecycle. Aborting the supervisor handle or cancelling
+        /// its parent closes activation and drains the entire tree before join.
+        /// The existing `run` and `spawn` entry points still retire deferred
+        /// bindings at boot.
+        pub fn spawn_controlled(
+            self,
+            cx: &Cx,
+            pending_capacity: std::num::NonZeroUsize,
+        ) -> Result<(ManagedSupervisorHandle<E>, ManagedSupervisorControl), SpawnError> {
+            let supervisor = UnstartedManagedSupervisor::new(self);
+            let (control, incoming) = super::managed_control::channel(pending_capacity);
+            let report = Arc::new(Mutex::new(None));
+            let publication = Arc::clone(&report);
+            let task = cx.spawn(move |controller_cx| async move {
+                let result = supervisor
+                    .run_with_control(&controller_cx, Some(incoming))
+                    .await;
+                *publication.lock() = Some(result);
+            })?;
+            Ok((ManagedSupervisorHandle { task, report }, control))
+        }
+    }
+
+    impl<E: Send + 'static> UnstartedManagedSupervisor<E> {
         async fn run_with_control(
             self,
             cx: &Cx,
@@ -3887,47 +3990,15 @@ mod managed {
             std::mem::replace(&mut controller.report, empty)
         }
 
-        /// Spawn a retained controller in the caller's current parent region.
-        /// The returned handle owns cancellation; all child work lives below a
-        /// distinct supervisor region, never around the controller itself.
-        pub fn spawn(self, cx: &Cx) -> Result<ManagedSupervisorHandle<E>, SpawnError> {
+        pub(crate) fn spawn(self, cx: &Cx) -> Result<ManagedSupervisorHandle<E>, SpawnError> {
             let report = Arc::new(Mutex::new(None));
             let publication = Arc::clone(&report);
             let task = cx.spawn(move |controller_cx| async move {
-                let result = self.run(&controller_cx).await;
+                let result = self.run_with_control(&controller_cx, None).await;
                 *publication.lock() = Some(result);
             })?;
             Ok(ManagedSupervisorHandle { task, report })
         }
-
-        /// Spawn a supervisor that retains deferred bindings for live activation.
-        ///
-        /// The returned control shares one bounded mailbox among its clones.
-        /// A configured deferred child is activated at most once, then uses the
-        /// same generation regions, dependencies, restart policy and intensity
-        /// as eager children. Dormant bindings do not join sibling restart sets.
-        ///
-        /// An idle controlled supervisor waits while a control handle exists.
-        /// Dropping the last control closes activation; existing children keep
-        /// their normal lifecycle. Aborting the supervisor handle or cancelling
-        /// its parent closes activation and drains the entire tree before join.
-        /// The existing `run` and `spawn` entry points still retire deferred
-        /// bindings at boot.
-        pub fn spawn_controlled(
-            self,
-            cx: &Cx,
-            pending_capacity: std::num::NonZeroUsize,
-        ) -> Result<(ManagedSupervisorHandle<E>, ManagedSupervisorControl), SpawnError> {
-            let (control, incoming) = super::managed_control::channel(pending_capacity);
-            let report = Arc::new(Mutex::new(None));
-            let publication = Arc::clone(&report);
-            let task = cx.spawn(move |controller_cx| async move {
-                let result = self.run_with_control(&controller_cx, Some(incoming)).await;
-                *publication.lock() = Some(result);
-            })?;
-            Ok((ManagedSupervisorHandle { task, report }, control))
-        }
-
     }
 
     #[cfg(test)]
@@ -4593,7 +4664,7 @@ mod managed {
                 let managed = topology(&["child"], RestartPolicy::OneForOne)
                     .bind_managed(vec![binding], config(RestartPolicy::OneForOne, 2))
                     .unwrap();
-                let mut controller = Controller::new(managed, &cx);
+                let mut controller = Controller::new(UnstartedManagedSupervisor::new(managed), &cx);
                 controller.root = Some(
                     cx.open_child_region(ChildRegionSpec::inherit())
                         .await

@@ -22,7 +22,9 @@ use super::{
     DynamicSupervisorReport, DynamicWorkerConfig,
 };
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
-use crate::supervision::{ChildName, ManagedChildFactory, ManagedSupervisor};
+use crate::supervision::{
+    ChildName, ManagedChildFactory, ManagedSupervisor, UnstartedManagedSupervisor,
+};
 use crate::types::{CancelReason, RegionId, TaskId};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
@@ -340,7 +342,7 @@ fn cancelled(cx: &Cx) -> DynamicControlError {
 }
 
 enum Work<E> {
-    Tree(ManagedSupervisor<E>),
+    Tree(UnstartedManagedSupervisor<E>),
     Worker(DynamicWorkerConfig, Box<dyn ManagedChildFactory<E>>),
 }
 
@@ -348,7 +350,7 @@ impl<E> Work<E> {
     fn retire(self, panics: &mut ShutdownPanics) {
         match self {
             Self::Tree(supervisor) => {
-                supervisor.retire_unstarted(|payload| panics.record(payload));
+                supervisor.retire(|payload| panics.record(payload));
             }
             Self::Worker(config, factory) => panics.run(move || drop((config, factory))),
         }
@@ -498,10 +500,11 @@ impl<E: Send + 'static> DynamicSupervisorClient<E> {
         }
     }
     /// Submit a managed tree. Abandonment before receipt acceptance cancels/drains it.
-    pub async fn start_child(
+    pub fn start_child(
         &self, cx: &Cx, name: impl Into<ChildName>, supervisor: ManagedSupervisor<E>,
-    ) -> Result<DynamicChildId, DynamicControlError> {
-        self.start(cx, name.into(), Work::Tree(supervisor)).await
+    ) -> impl Future<Output = Result<DynamicChildId, DynamicControlError>> {
+        let supervisor = UnstartedManagedSupervisor::new(supervisor);
+        async move { self.start(cx, name.into(), Work::Tree(supervisor)).await }
     }
     /// Submit a retained worker factory using the existing managed restart engine.
     pub async fn start_worker(
@@ -765,7 +768,7 @@ async fn serve<E: Send + 'static>(
                     } else {
                         let result = match work {
                             Work::Tree(supervisor) => {
-                                owner.start_child(name.clone(), supervisor).await
+                                owner.start_child_guarded(name.clone(), supervisor).await
                             }
                             Work::Worker(config, factory) => {
                                 owner
