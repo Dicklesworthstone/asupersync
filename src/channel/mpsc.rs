@@ -843,9 +843,7 @@ impl<T> Sender<T> {
         inner.recv_wake_epoch = inner.recv_wake_epoch.wrapping_add(1);
         let waker = inner.recv_waker.take();
         drop(inner);
-        if let Some(waker) = waker {
-            waker.wake_by_ref();
-        }
+        wake_detached(waker);
     }
 
     /// Seals the receiver side of the channel from the sender side.

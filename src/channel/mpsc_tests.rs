@@ -1521,6 +1521,105 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wake_receiver_preserves_wake_panic_and_isolates_final_drop_panic() {
+        init_test("wake_receiver_preserves_wake_panic_and_isolates_final_drop_panic");
+
+        struct WakeAndDropPanic {
+            shared: Weak<ChannelShared<()>>,
+            unlocked_drops: Arc<AtomicUsize>,
+        }
+
+        impl std::task::Wake for WakeAndDropPanic {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                panic!("receiver wake panic");
+            }
+        }
+
+        impl Drop for WakeAndDropPanic {
+            fn drop(&mut self) {
+                if self
+                    .shared
+                    .upgrade()
+                    .is_some_and(|shared| shared.inner.try_lock().is_some())
+                {
+                    self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+                }
+                panic!("receiver waker final-drop panic");
+            }
+        }
+
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(WakeAndDropPanic {
+            shared: Arc::downgrade(&tx.shared),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        assert!(
+            rx.poll_recv(&cx, &mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        drop(waker);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tx.wake_receiver();
+        }));
+        let payload = result.expect_err("the first wake panic must be resumed");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"receiver wake panic"));
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        tx.try_send(()).expect("channel remains usable");
+        assert_eq!(
+            rx.poll_recv(&cx, &mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(()))
+        );
+
+        crate::test_complete!("wake_receiver_preserves_wake_panic_and_isolates_final_drop_panic");
+    }
+
+    #[test]
+    fn wake_receiver_during_unwind_preserves_the_original_panic() {
+        init_test("wake_receiver_during_unwind_preserves_the_original_panic");
+
+        struct WakeReceiverOnDrop(Sender<()>);
+
+        impl Drop for WakeReceiverOnDrop {
+            fn drop(&mut self) {
+                self.0.wake_receiver();
+            }
+        }
+
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        let hostile = Waker::from(Arc::new(PanickingMpscWaker));
+        assert!(
+            rx.poll_recv(&cx, &mut Context::from_waker(&hostile))
+                .is_pending()
+        );
+        let sender = tx.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let guard = WakeReceiverOnDrop(sender);
+            std::hint::black_box(&guard);
+            panic!("original receiver unwind");
+        }));
+        let payload = result.expect_err("the original unwind must survive");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"original receiver unwind")
+        );
+        tx.try_send(()).expect("channel remains usable");
+        assert_eq!(
+            rx.poll_recv(&cx, &mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(()))
+        );
+
+        crate::test_complete!("wake_receiver_during_unwind_preserves_the_original_panic");
+    }
+
     type ParkedReserve<'a> = Pin<Box<Reserve<'a, u32>>>;
 
     /// Parks two senders on a full channel: the first with a Waker that panics,

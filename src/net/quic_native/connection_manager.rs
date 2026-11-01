@@ -76,6 +76,15 @@ enum LocalCloseOutput {
     Sent,
 }
 
+/// Keep one protected close until the route's original drain deadline. A
+/// response to later peer traffic reuses ciphertext without a new encryption
+/// operation, packet number or recovery flight.
+#[derive(Debug)]
+struct RetainedLocalClose {
+    packet: OutgoingPacket,
+    last_sent: Option<Instant>,
+}
+
 /// Handle to a managed QUIC connection with timing and lifecycle state.
 #[derive(Debug)]
 pub struct ConnectionHandle {
@@ -97,6 +106,7 @@ pub struct ConnectionHandle {
     deferred_spaces: [bool; 3],
     next_deferred_space: usize,
     local_close_output: Option<LocalCloseOutput>,
+    retained_local_close: Option<RetainedLocalClose>,
     /// Imported connections keep their negotiated peer CID and recovery epoch.
     peer_connection_id: Option<ConnectionId>,
     clock_origin: Option<Instant>,
@@ -145,12 +155,35 @@ struct AuthenticatedRouting {
 }
 
 #[cfg(feature = "tls")]
-struct MarkApplicationOutput<'a>(&'a mut bool);
+struct MarkApplicationOutput<'a> {
+    connection: &'a mut super::QuicConnection,
+    deferred_spaces: &'a mut [bool; 3],
+    next_timer_deadline: &'a mut Option<Instant>,
+    local_close_output: &'a mut Option<LocalCloseOutput>,
+}
 
 #[cfg(feature = "tls")]
 impl Drop for MarkApplicationOutput<'_> {
     fn drop(&mut self) {
-        *self.0 = true;
+        let connection = self.connection.inner();
+        if matches!(
+            connection.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
+            // begin_close is also exposed through the public application
+            // callback. Remember that transition even if the callback unwinds;
+            // ordinary deferred STREAM output cannot send from Draining.
+            if connection.state() == QuicConnectionState::Draining
+                && !connection.close_was_peer_initiated()
+                && self.local_close_output.is_none()
+            {
+                *self.local_close_output = Some(LocalCloseOutput::Requested);
+            }
+            *self.deferred_spaces = [false; 3];
+            *self.next_timer_deadline = None;
+        } else {
+            self.deferred_spaces[2] = true;
+        }
     }
 }
 
@@ -375,6 +408,7 @@ impl ConnectionRouter {
                 deferred_spaces: [false, false, true],
                 next_deferred_space: 0,
                 local_close_output: None,
+                retained_local_close: None,
                 peer_connection_id: Some(parts.peer_cid),
                 clock_origin: Some(now),
                 authenticated: Some(AuthenticatedRouting {
@@ -442,6 +476,7 @@ impl ConnectionRouter {
                 deferred_spaces: [false, false, true],
                 next_deferred_space: 0,
                 local_close_output: None,
+                retained_local_close: None,
                 peer_connection_id: Some(peer_cid),
                 clock_origin: Some(clock_origin),
                 authenticated: Some(AuthenticatedRouting {
@@ -476,8 +511,13 @@ impl ConnectionRouter {
         };
         // An application callback may queue output and then unwind. Its caller
         // can resume the same owned endpoint without stranding that output.
-        let _mark = MarkApplicationOutput(&mut handle.deferred_spaces[2]);
-        Ok(operation(connection))
+        let mark = MarkApplicationOutput {
+            connection,
+            deferred_spaces: &mut handle.deferred_spaces,
+            next_timer_deadline: &mut handle.next_timer_deadline,
+            local_close_output: &mut handle.local_close_output,
+        };
+        Ok(operation(&mut *mark.connection))
     }
 
     /// Start one authenticated route's local drain in its original clock
@@ -588,6 +628,11 @@ impl ConnectionRouter {
                 // The close request removed all ordinary packets for this CID
                 // before its sole terminal packet was assembled.
                 handle.local_close_output = Some(LocalCloseOutput::Sent);
+                if let Some(close) = &mut handle.retained_local_close {
+                    // A sent prefix remains committed if clock validation
+                    // fails. Without its send time, do not schedule retries.
+                    close.last_sent = now;
+                }
             }
             if let Some(now) = now.filter(|_| packet.ack_eliciting && !handle.sent_since_receive) {
                 handle.last_activity = handle.last_activity.max(now);
@@ -679,6 +724,12 @@ impl ConnectionRouter {
                 handle.connection.state(),
                 QuicConnectionState::Closed | QuicConnectionState::Draining
             ) {
+                Self::request_local_close_retransmission(
+                    handle,
+                    &packet,
+                    routing_info.kind,
+                    self.clock_origin,
+                );
                 return Ok(RoutingResult::Drop {
                     reason: "connection is draining or closed".to_string(),
                 });
@@ -1089,6 +1140,7 @@ impl ConnectionRouter {
             deferred_spaces: [false; 3],
             next_deferred_space: 0,
             local_close_output: None,
+            retained_local_close: None,
             peer_connection_id: None,
             clock_origin: None,
             #[cfg(feature = "tls")]
@@ -1431,6 +1483,46 @@ impl ConnectionRouter {
             handle.local_close_output = Some(LocalCloseOutput::Requested);
             handle.deferred_spaces = [false; 3];
             handle.next_timer_deadline = None;
+        }
+    }
+
+    fn request_local_close_retransmission(
+        handle: &mut ConnectionHandle,
+        packet: &ReceivedPacket,
+        kind: PacketRoutingKind,
+        router_origin: Instant,
+    ) {
+        if handle.connection.state() != QuicConnectionState::Draining
+            || handle.connection.close_was_peer_initiated()
+            || handle.local_close_output != Some(LocalCloseOutput::Sent)
+            || packet.src_addr != handle.peer_addr
+            || kind != PacketRoutingKind::OneRtt
+        {
+            return;
+        }
+        let origin = handle.clock_origin.unwrap_or(router_origin);
+        if !handle
+            .connection
+            .transport()
+            .drain_deadline_micros()
+            .and_then(|micros| origin.checked_add(Duration::from_micros(micros)))
+            .is_some_and(|deadline| packet.receive_time < deadline)
+        {
+            return;
+        }
+        let interval = Duration::from_micros(
+            handle.connection.transport().idle_timeout_floor_micros() / 3,
+        )
+        .max(Duration::from_millis(1));
+        if handle
+            .retained_local_close
+            .as_ref()
+            .and_then(|close| close.last_sent)
+            .is_some_and(|last| packet.receive_time.saturating_duration_since(last) >= interval)
+        {
+            // Deferred pumping coalesces repeated input, even while the send
+            // queue is full. No application/ACK/handshake output is admitted.
+            handle.local_close_output = Some(LocalCloseOutput::Requested);
         }
     }
 
@@ -2015,8 +2107,9 @@ fn packet_space_index(space: PacketNumberSpace) -> usize {
     }
 }
 
-/// Protect the already-recorded local close without admitting any application
-/// output. Both endpoint shutdown and per-route retirement use this path.
+/// Protect the already-recorded local close once, then reuse its ciphertext
+/// without admitting application output. Shutdown and deferred retries share
+/// the same deadline and packet ownership path.
 async fn prepare_local_close_packet(
     cx: &Cx,
     connection_id: ConnectionId,
@@ -2024,9 +2117,6 @@ async fn prepare_local_close_packet(
     origin: Instant,
     now: Instant,
 ) -> Result<Option<(OutgoingPacket, Instant)>, ConnectionRouterError> {
-    let Some(protection) = handle.packet_protection.as_mut() else {
-        return Ok(None);
-    };
     let Some(code) = handle.connection.transport().close_code() else {
         return Ok(None);
     };
@@ -2053,6 +2143,12 @@ async fn prepare_local_close_packet(
     else {
         return Ok(None);
     };
+    if let Some(close) = &handle.retained_local_close {
+        return Ok(Some((close.packet.clone(), deadline)));
+    }
+    let Some(protection) = handle.packet_protection.as_mut() else {
+        return Ok(None);
+    };
     let mut payload = crate::bytes::BytesMut::new();
     NativeQuicConnection::encode_frames(&frames, &mut payload).map_err(|error| {
         ConnectionRouterError::PacketProcessingFailed {
@@ -2072,14 +2168,16 @@ async fn prepare_local_close_packet(
         false,
     )
     .await?;
-    Ok(Some((
-        OutgoingPacket {
-            dst_addr: handle.peer_addr,
-            data,
-            send_time: Some(now),
-        },
-        deadline,
-    )))
+    let packet = OutgoingPacket {
+        dst_addr: handle.peer_addr,
+        data,
+        send_time: Some(now),
+    };
+    handle.retained_local_close = Some(RetainedLocalClose {
+        packet: packet.clone(),
+        last_sent: None,
+    });
+    Ok(Some((packet, deadline)))
 }
 
 async fn drain_connection_frames(

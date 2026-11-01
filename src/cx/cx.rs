@@ -2785,6 +2785,13 @@ impl<Caps> Cx<Caps> {
     /// returns `Ok(())` even when cancellation is pending, deferring the
     /// cancellation until the mask is released.
     ///
+    /// If the task returns [`std::task::Poll::Pending`] after acknowledging
+    /// cancellation, the runtime schedules a follow-up poll for the first
+    /// acknowledgement, a newly stronger reason, or a tighter cleanup budget.
+    /// Repeating the same checkpoint during cleanup preserves its observation
+    /// record but does not itself wake the task. Cleanup waiting for I/O or
+    /// another event must register its waker and resume when that event wakes it.
+    ///
     /// # Errors
     ///
     /// Returns an `Err` with kind `ErrorKind::Cancelled` if cancellation is

@@ -458,7 +458,7 @@ impl Http2RequestBuilder {
                 // Stale idle connections are dropped; a request the server
                 // provably did not process on a reused connection is retried
                 // once, on a fresh one.
-                while let Some(mut conn) = pool.take(&origin, pool_now(cx)) {
+                while let Some(mut conn) = pool.take(&origin, context_now(cx)) {
                     conn.max_overhead_frames = self.client.max_overhead_frames;
                     if conn.refresh().await.is_err() {
                         continue;
@@ -469,7 +469,7 @@ impl Http2RequestBuilder {
                     {
                         Ok((response, closed)) => {
                             if closed && conn.reusable() {
-                                pool.put(origin, conn, pool_now(cx));
+                                pool.put(origin, conn, context_now(cx));
                             }
                             return Ok(response);
                         }
@@ -489,7 +489,7 @@ impl Http2RequestBuilder {
                 && closed
                 && conn.reusable()
             {
-                pool.put(origin, conn, pool_now(cx));
+                pool.put(origin, conn, context_now(cx));
             }
             Ok(response)
         })
@@ -691,6 +691,9 @@ impl Cancellation {
     }
 
     fn check(&self) -> Result<(), Http2ClientError> {
+        // A context without a timer driver still owns a wall-clock budget.
+        // Its checkpoint must not read a different polling task's clock.
+        let _owner = (!self.cx.has_timer()).then(|| self.cx.clone().set_current_restricted());
         self.cx.checkpoint().map_err(|_| {
             Http2ClientError::Cancelled(
                 self.cx
@@ -731,20 +734,13 @@ impl RequestControl {
     fn new(cx: &Cx, timeout: Duration) -> Self {
         let caller = Cancellation::new(cx.clone());
         let ambient = Cx::current().map(Cancellation::new);
-        let driver = cx
-            .timer_driver()
-            .or_else(|| ambient.as_ref().and_then(|guard| guard.cx.timer_driver()));
-        let now = driver
-            .as_ref()
-            .map_or_else(crate::time::wall_now, |driver| driver.now());
+        let driver = cx.timer_driver();
+        let now = context_now(cx);
         let nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
         let mut deadline = now.saturating_add_nanos(nanos);
         for context in std::iter::once(cx).chain(ambient.as_ref().map(|guard| &guard.cx)) {
             if let Some(budget) = context.budget().deadline {
-                let context_now = context
-                    .timer_driver()
-                    .map_or_else(crate::time::wall_now, |driver| driver.now());
-                let remaining = budget.as_nanos().saturating_sub(context_now.as_nanos());
+                let remaining = budget.as_nanos().saturating_sub(budget_now(context).as_nanos());
                 deadline = deadline.min(now.saturating_add_nanos(remaining));
             }
         }
@@ -761,6 +757,12 @@ impl RequestControl {
         }
     }
 
+    fn now(&self) -> Time {
+        self.driver
+            .as_ref()
+            .map_or_else(|| context_now(&self.caller.cx), TimerDriverHandle::now)
+    }
+
     fn check(&mut self, task: &mut std::task::Context<'_>) -> Result<(), Http2ClientError> {
         // Registration precedes checkpoint: cancellation can occur during a
         // custom Waker's clone callback, before its registry entry is visible.
@@ -768,15 +770,7 @@ impl RequestControl {
         if let Some(ambient) = &mut self.ambient {
             ambient.register(task.waker());
         }
-        let now = self.driver.as_ref().map_or_else(
-            || {
-                // `wall_now` reads the current task's timer first, and a
-                // response can move to a task on an unrelated clock.
-                let _owner = self.caller.cx.clone().set_current_restricted();
-                crate::time::wall_now()
-            },
-            |driver| driver.now(),
-        );
+        let now = self.now();
         if now >= self.deadline {
             return Err(Http2ClientError::DeadlineExceeded);
         }
@@ -1408,10 +1402,20 @@ where
     }
 }
 
-/// The clock pooled connections age on: the context's timer, else wall time.
-fn pool_now(cx: &Cx) -> Time {
+/// Read the permitted operation clock without borrowing a foreign ambient timer.
+fn context_now(cx: &Cx) -> Time {
     cx.timer_driver()
-        .map_or_else(crate::time::wall_now, |driver| driver.now())
+        .map_or_else(crate::time::raw_wall_now, |driver| driver.now())
+}
+
+/// A budget keeps its context's clock even when TIME authority is restricted.
+/// Sampling that clock does not authorize registering operation timers on it.
+fn budget_now(cx: &Cx) -> Time {
+    if cx.has_timer() {
+        cx.now_for_observability()
+    } else {
+        crate::time::raw_wall_now()
+    }
 }
 
 /// How long an idle pooled connection is kept. Shorter than common proxy and
@@ -1825,7 +1829,7 @@ mod streaming {
                     .drive(async {
                         self.client.validate_native_target(&cx, &request.url)?;
                         if let Some(pool) = &self.client.pool {
-                            while let Some(mut conn) = pool.take(&origin, pool_now(&cx)) {
+                            while let Some(mut conn) = pool.take(&origin, context_now(&cx)) {
                                 conn.max_overhead_frames = self.client.max_overhead_frames;
                                 if conn.refresh().await.is_ok() {
                                     return Ok(conn);
@@ -1988,10 +1992,8 @@ mod streaming {
                     // Budget deadlines belong to their context's clock. A
                     // body transferred across runtimes can only shorten its
                     // original allowance by the new poller's remaining time.
-                    let poller_now = poller.cx.timer_driver()
-                        .map_or_else(crate::time::wall_now, |driver| driver.now());
-                    let now = control.driver.as_ref()
-                        .map_or_else(crate::time::wall_now, |driver| driver.now());
+                    let poller_now = budget_now(&poller.cx);
+                    let now = control.now();
                     let remaining = deadline.as_nanos().saturating_sub(poller_now.as_nanos());
                     let deadline = now.saturating_add_nanos(remaining);
                     if deadline < control.deadline {
@@ -2012,7 +2014,7 @@ mod streaming {
             let upload = self.upload.take();
             let control = self.control.take();
             let poller = self.poller.take();
-            let now = control.as_ref().map(|control| pool_now(&control.caller.cx));
+            let now = control.as_ref().map(|control| context_now(&control.caller.cx));
             match (conn, pool) {
                 (Some(conn), Some((pool, origin))) if reuse && conn.reusable() => {
                     // A producer destructor that panics cannot publish a

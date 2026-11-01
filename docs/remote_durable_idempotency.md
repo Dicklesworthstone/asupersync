@@ -155,9 +155,10 @@ The retained-entry and per-peer limits bound index metadata. The retained-byte
 limit counts cached encoded allocation capacity and pending outcome allowances;
 transient record buffers, decoded/returned outcomes, and caller-owned tokens have
 separate lifetimes. Expiring a completed result frees its retained key and cache charge.
-It does not reclaim append-only disk space. The journal has no compaction,
-rotation, deletion, or truncation operation; reaching the disk bound refuses
-new reservations while preserving capacity already reserved for completion.
+It does not automatically reclaim append-only disk space. Reaching the disk
+bound refuses new reservations while preserving capacity already reserved for
+completion. Explicit replacement-file compaction can recover space occupied by
+expired results without removing unresolved requests or retained replay state.
 
 The clock must return trusted milliseconds from a consistent epoch across
 restarts. A backward observation refuses work. Completion time starts the
@@ -182,12 +183,77 @@ current owner, including cached replay, until it is reopened. A failed append
 is not evidence of rollback; reopening can recover a complete synced result or
 an unresolved reservation.
 
+## Reclaiming journal capacity
+
+`DurableRemoteJournal::compact(replacement, now_millis, publish)` writes a fresh
+authenticated journal into a caller-supplied empty regular read/write file. It
+retains every unresolved reservation and every unexpired terminal outcome,
+including the original input digest, outcome bytes, and expiry. It preserves
+the reserved disk and memory allowance for completing each pending request.
+Compaction never grants another execution permission or resolves an uncertain
+effect. Live execution or reconciliation permits return `Busy`; incomplete-tail
+and poisoned journals refuse compaction.
+
+The caller retains pathname authority. Provision a distinct replacement on a
+filesystem that supports atomic replacement of the authoritative journal path,
+with the intended permissions. The module locks both files, completely writes
+and syncs the replacement, then invokes the supplied callback exactly once.
+That callback must atomically publish that exact file and durably sync its
+directory linkage before returning `Ok(())`. It must not publish the replacement
+early, alter either file, or leave another service writing the old journal.
+For example, a Unix application can rename an exclusively provisioned sibling
+file over its journal path and then sync the parent directory. Filesystem and
+platform guarantees remain part of the application's provisioning contract.
+
+Preparation failure leaves the source file unchanged. Normal clock observation
+can still advance the in-process floor and expire its terminal cache. A failed
+source-length check poisons the owner. Before invoking the publication callback,
+the module also poisons the old owner: a callback error or panic may happen
+after the rename succeeded. In that case, drop the owner and reopen the
+authoritative path to discover the durable state; do not continue appending to
+the old handle or assume publication rolled back. After a successful callback,
+the new owner is installed without a further fallible operation. A crash around
+atomic publication can recover the original complete journal or the complete
+replacement, both of which preserve every pending fence and retained outcome.
+
+The replacement persists the trusted clock floor even if all completed entries
+expired. This uses an authenticated, canonical clock record with no request
+identity or payload. Older library versions reject compacted journals; ordinary
+journals written without compaction retain their existing encoding. Compaction
+does not change the remote V1–V3 protocol or the journal's authenticated identity
+and limits. Rebuilt terminal records keep their original expiry rather than
+starting a fresh retention window.
+
+The immutable file limit also bounds the candidate, including its clock record
+and all reserved completions. If retained work cannot fit with that record,
+compaction returns `Limit` without publishing. A journal containing only retained
+work may not become smaller. Provision temporary disk capacity for both files;
+preparation also holds a second bounded entry/outcome cache, so peak retained
+memory can approach twice `max_retained_bytes`, plus bounded metadata and record
+buffers. There is no automatic rotation, deletion, repair, or truncation.
+
+For a journal already owned by `DurableRemoteComputation`, use
+`owner.compact(&cx, replacement, publish).await`. It takes the same exclusive
+slot as execution and reconciliation and runs all preparation and publication
+on `spawn_blocking_drained`. Missing blocking capability refuses before I/O.
+Cancellation before the worker claims the job leaves both files unchanged;
+after claim, the operation and publication are a single non-preemptible
+boundary. Dropping its async waiter cannot release the slot, files, or region
+obligation before that worker retires. A committed replacement survives late
+cancellation, while publication uncertainty returns a poisoned owner to the slot.
+
 ## Validation targets
 
 The journal unit module covers authenticated reopen, exact replay identity,
 retention and in-doubt fences, reserved completion capacity, and injected
-write/sync uncertainty using the same journal engine. Adapter tests exercise
-real native pool ownership and task cancellation. `remote_durable_process`
+write/sync uncertainty using the same journal engine. Compaction regressions
+cover exhausted capacity, exact retained expiry and identity, same-clock
+completion ordering, indefinite pending fences, live permit refusal, canonical
+clock records, failed preparation, and error/panic after publication starts.
+Unix tests rename and reopen actual files, including a rename followed by a
+reported failure. Adapter tests exercise real native pool ownership and task
+cancellation, including queued cancellation and a dropped waiter during blocked
+compaction publication on one and two async workers. `remote_durable_process`
 terminates and restarts an actual authenticated service process at two distinct
 boundaries: after durable completion but before its response, and after an
 effect but before durable completion. Process termination establishes restart

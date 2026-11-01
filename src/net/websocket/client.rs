@@ -726,13 +726,13 @@ where
 
             if !self.write_buf.is_empty() {
                 let deadline = self.heartbeat.write_deadline();
-                match super::heartbeat::wait_until(
+                let flush_result = super::heartbeat::wait_until(
                     cx,
                     deadline,
-                    self.flush_write_buf_with_cx(Some(cx)),
+                    std::pin::pin!(self.flush_write_buf_with_cx(Some(cx))),
                 )
-                .await
-                {
+                .await;
+                match flush_result {
                     Ok(Some(())) => {}
                     Ok(None) => {
                         self.heartbeat.fail();
@@ -810,7 +810,7 @@ where
                                     super::heartbeat::wait_until(
                                         cx,
                                         heartbeat_deadline,
-                                        self.flush_write_buf_with_cx(Some(cx)),
+                                        std::pin::pin!(self.flush_write_buf_with_cx(Some(cx))),
                                     ),
                                 )
                                 .await?;
@@ -855,10 +855,10 @@ where
                 }
 
                 let deadline = self.heartbeat.deadline();
-                let waited =
+                let read_result =
                     super::heartbeat::wait_until(cx, deadline, std::pin::pin!(self.read_more(cx)))
                         .await;
-                let n = match waited {
+                let n = match read_result {
                     Ok(Some(n)) => n,
                     Ok(None) => continue,
                     Err(WsError::Io(e))

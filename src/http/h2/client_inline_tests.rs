@@ -52,6 +52,142 @@
         }
     }
 
+    fn foreign_clock_context(now: Time) -> (Cx, TimerDriverHandle) {
+        use crate::types::{Budget, RegionId, TaskId};
+
+        let clock = Arc::new(crate::time::VirtualClock::starting_at(now));
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(86, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        (cx, timer)
+    }
+
+    #[test]
+    fn driverless_request_capture_and_pool_age_ignore_foreign_clocks() {
+        for ahead in [false, true] {
+            let owner = Cx::for_testing();
+            let wall = {
+                let _owner = Cx::set_current(Some(owner.clone()));
+                crate::time::wall_now()
+            };
+            let budget_deadline = wall + Duration::from_secs(3600);
+            owner.inner.write().budget.deadline = Some(budget_deadline);
+            let foreign_now = if ahead {
+                wall + Duration::from_secs(86_400)
+            } else {
+                Time::ZERO
+            };
+            let (foreign, timer) = foreign_clock_context(foreign_now);
+            let _current = Cx::set_current(Some(foreign.clone()));
+            let mut control = RequestControl::new(&owner, Duration::from_secs(7200));
+
+            assert!(control.driver.is_none(), "a driverless owner keeps its own clock");
+            assert!(control.deadline > wall);
+            assert!(control.deadline <= budget_deadline, "the owner budget still tightens the timeout");
+            let age_now = context_now(&owner);
+            assert!(age_now >= wall && age_now < budget_deadline,
+                "pool aging must use wall time, not the foreign epoch");
+            let mut task = Context::from_waker(Waker::noop());
+            control.check(&mut task).expect("the owner's budget is live");
+            assert!(!owner.is_cancel_requested(), "checking a foreign clock must not cancel the owner");
+            assert_eq!(timer.pending_count(), 0, "the request cannot register on the foreign timer");
+            assert!(Arc::ptr_eq(&Cx::current().unwrap().inner, &foreign.inner),
+                "clock reads must restore the polling context");
+            drop(control);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(foreign.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    #[test]
+    fn retained_driverless_ambient_budget_is_checked_on_its_own_clock() {
+        let ambient = Cx::for_testing();
+        let wall = {
+            let _ambient = Cx::set_current(Some(ambient.clone()));
+            crate::time::wall_now()
+        };
+        ambient.inner.write().budget.deadline = Some(wall + Duration::from_secs(3600));
+        let (owner, owner_timer) = foreign_clock_context(Time::from_secs(10));
+        let mut control = {
+            let _ambient = Cx::set_current(Some(ambient.clone()));
+            RequestControl::new(&owner, Duration::from_secs(30))
+        };
+        assert_eq!(control.deadline, Time::from_secs(40));
+        let (later, later_timer) = foreign_clock_context(wall + Duration::from_secs(86_400));
+        let _later = Cx::set_current(Some(later));
+        let mut task = Context::from_waker(Waker::noop());
+
+        control.check(&mut task).expect("both captured budgets remain live");
+        assert!(!ambient.is_cancel_requested(), "a later poller cannot expire the captured ambient budget");
+        assert_eq!(owner_timer.pending_count(), 1);
+        assert_eq!(later_timer.pending_count(), 0);
+        drop(control);
+        assert_eq!(owner_timer.pending_count(), 0);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(ambient.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn restricted_time_budgets_keep_their_clock_without_granting_timer_authority() {
+        use crate::cx::cap::CapMask;
+        use crate::types::CancelKind;
+
+        for restricted_caller in [false, true] {
+            let hidden_origin = crate::time::raw_wall_now() + Duration::from_secs(86_400);
+            let (unrestricted, timer) = foreign_clock_context(hidden_origin);
+            unrestricted.inner.write().budget.deadline =
+                Some(hidden_origin + Duration::from_secs(60));
+            let restricted = {
+                let _owner = Cx::set_current(Some(unrestricted.clone()));
+                let _restriction = Cx::push_restriction(CapMask::none());
+                Cx::current().expect("restricted context")
+            };
+            assert!(restricted.timer_driver().is_none());
+            assert!(restricted.has_timer(), "its budget still has a virtual clock");
+            let (caller, ambient) = if restricted_caller {
+                (restricted.clone(), Cx::for_testing())
+            } else {
+                (Cx::for_testing(), restricted.clone())
+            };
+            let _ambient = Cx::set_current(Some(ambient.clone()));
+            let before = crate::time::raw_wall_now();
+            let mut control = RequestControl::new(&caller, Duration::from_secs(120));
+            let after = crate::time::raw_wall_now();
+
+            assert!(control.driver.is_none());
+            assert!(control.deadline >= before + Duration::from_secs(60));
+            assert!(
+                control.deadline <= after + Duration::from_secs(60),
+                "translate the hidden clock's remaining minute into the operation's wall clock"
+            );
+            let mut task = Context::from_waker(Waker::noop());
+            control.check(&mut task).expect("both budgets remain live");
+            assert!(!restricted.is_cancel_requested());
+            assert_eq!(timer.pending_count(), 0, "TIME remains unavailable for registration");
+            let current = Cx::current().expect("polling context restored");
+            assert!(Arc::ptr_eq(&current.inner, &ambient.inner));
+            assert_eq!(current.runtime_mask, ambient.runtime_mask);
+
+            unrestricted.inner.write().budget.deadline = Some(hidden_origin);
+            assert!(matches!(
+                control.check(&mut task),
+                Err(Http2ClientError::Cancelled(reason)) if reason.is_kind(CancelKind::Deadline)
+            ));
+            assert_eq!(timer.pending_count(), 0);
+            drop(control);
+            assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+            assert!(ambient.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
     struct SilentTransport(Arc<AtomicUsize>);
 
     impl Drop for SilentTransport {
@@ -182,6 +318,46 @@
             before,
             "completed request retained its ambient registration"
         );
+    }
+
+    #[test]
+    fn buffered_request_preserves_a_driverless_owner_after_poller_handoff() {
+        let owner = Cx::for_testing();
+        let _owner = Cx::set_current(Some(owner.clone()));
+        let wall = crate::time::wall_now();
+        owner.inner.write().budget.deadline = Some(wall + Duration::from_secs(3600));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let wake = Arc::new(CountWake::default());
+        let waker = Waker::from(wake.clone());
+        let mut task = Context::from_waker(&waker);
+        let mut future = Box::pin(
+            Http2Client::new()
+                .timeout(Duration::from_secs(3600))
+                .get("http://localhost/")
+                .send_on(&owner, SilentTransport(dropped.clone())),
+        );
+        assert!(future.as_mut().poll(&mut task).is_pending(), "the response read is parked");
+
+        let (foreign, timer) = foreign_clock_context(wall + Duration::from_secs(86_400));
+        let _foreign = Cx::set_current(Some(foreign.clone()));
+        assert!(future.as_mut().poll(&mut task).is_pending(),
+            "a live owner deadline cannot expire when the response moves to another clock");
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(timer.pending_count(), 0);
+        assert!(!owner.is_cancel_requested());
+
+        let reason = CancelReason::user("request owner stopped after handoff");
+        let before = wake.0.load(Ordering::SeqCst);
+        owner.cancel_with_reason(reason.clone());
+        assert!(wake.0.load(Ordering::SeqCst) > before, "the parked request retained its owner cancellation wake");
+        match future.as_mut().poll(&mut task) {
+            Poll::Ready(Err(Http2ClientError::Cancelled(actual))) => assert_eq!(actual, reason),
+            other => panic!("owner cancellation must survive the clock handoff: {other:?}"),
+        }
+        drop(future);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(foreign.inner.read().cancel_waker_registrations.is_empty());
     }
 
     #[test]
@@ -1174,6 +1350,60 @@
                 assert!(owner.inner.read().cancel_waker_registrations.is_empty());
                 assert!(ambient.inner.read().cancel_waker_registrations.is_empty());
             }
+        }
+
+        #[test]
+        fn streaming_body_keeps_driverless_owner_deadline_after_handoff() {
+            use crate::http::h2::frame::{HeadersFrame, SettingsFrame};
+
+            let owner = Cx::for_testing();
+            let _owner = Cx::set_current(Some(owner.clone()));
+            let wall = crate::time::wall_now();
+            owner.inner.write().budget.deadline = Some(wall + Duration::from_secs(3600));
+            let transport = ScriptedTransport::new(server_frames([
+                Frame::Settings(SettingsFrame::new(vec![])),
+                Frame::Headers(HeadersFrame::new(
+                    1,
+                    Bytes::from_static(&[0x88]),
+                    false,
+                    true,
+                )),
+            ]));
+            let mut response = complete(
+                Http2Client::new()
+                    .timeout(Duration::from_secs(3600))
+                    .get("http://localhost/stream")
+                    .send_streaming_on(&owner, transport),
+            )
+            .expect("response headers arrive before the body");
+            assert_eq!(response.status, 200);
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(Pin::new(&mut response.body).poll_frame(&mut task).is_pending(),
+                "the body has no DATA or END_STREAM and must park");
+
+            let (foreign, timer) = foreign_clock_context(wall + Duration::from_secs(86_400));
+            let _foreign = Cx::set_current(Some(foreign.clone()));
+            assert!(Pin::new(&mut response.body).poll_frame(&mut task).is_pending(),
+                "the foreign poller must not expire a live driverless deadline");
+            assert!(!owner.is_cancel_requested());
+            assert_eq!(timer.pending_count(), 0);
+
+            let reason = CancelReason::user("streaming owner stopped after handoff");
+            owner.cancel_with_reason(reason.clone());
+            match Pin::new(&mut response.body).poll_frame(&mut task) {
+                Poll::Ready(Some(Err(Http2ClientError::Cancelled(actual)))) => {
+                    assert_eq!(actual, reason);
+                }
+                other => panic!("the body must preserve its owner's cancellation: {other:?}"),
+            }
+            assert!(response.body.is_end_stream());
+            assert!(matches!(
+                Pin::new(&mut response.body).poll_frame(&mut task),
+                Poll::Ready(None)
+            ));
+            drop(response);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(foreign.inner.read().cancel_waker_registrations.is_empty());
         }
 
         struct CapturedTransport {

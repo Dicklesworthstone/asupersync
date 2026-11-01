@@ -16,19 +16,18 @@
 #![cfg(all(feature = "tls", feature = "test-internals"))]
 
 use std::collections::VecDeque;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read as _, Seek as _};
 #[cfg(unix)]
-use std::io::{Seek as _, Write as _};
+use std::io::Write as _;
 use std::net::{SocketAddr, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
 use asupersync::atp::object::MetadataPolicy;
 use asupersync::cx::Cx;
 #[cfg(feature = "zstd")]
@@ -40,20 +39,16 @@ use asupersync::net::atp::transport_quic::native_link::{
     receive_on_endpoint_with_options, set_receiver_member_path_delay_for_testing,
 };
 use asupersync::net::atp::transport_quic::{
-    DEFAULT_MAX_BLOCK_SIZE, DEFAULT_SYMBOL_SIZE, QuicConfig, QuicReceiveOptions,
-    QuicTransportError, ReceiveReport, SendReport, send_path,
+    DEFAULT_MAX_BLOCK_SIZE, DEFAULT_SYMBOL_SIZE, QuicConfig, QuicReceiveOptions, QuicSendOptions,
+    QuicTransportError, ReceiveReport, SendReport, send_path, send_path_with_options,
 };
-#[cfg(feature = "zstd")]
-use asupersync::net::atp::transport_quic::{QuicSendOptions, send_path_with_options};
 use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
 use asupersync::observability::{LogCollector, LogLevel};
-use asupersync::security::SecurityContext;
+use asupersync::security::{AuthMode, SecurityContext};
 use futures_lite::future::{block_on, zip};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime, pem::PemObject};
 use rustls::time_provider::TimeProvider;
 use rustls::{ClientConfig, RootCertStore};
-#[cfg(feature = "zstd")]
-use std::sync::atomic::AtomicU64;
 
 // Canonical CA + leaf chain (P-256), leaf has SAN DNS:localhost / IP:127.0.0.1
 // and the serverAuth EKU rustls-webpki requires; the client trusts the CA, so
@@ -213,6 +208,22 @@ fn transport_authenticated_configs() -> Configs {
     recv.server_tls = Some(server_tls());
     tighten_timeouts(&mut recv);
     Configs { send, recv }
+}
+
+fn delta_authenticated_configs() -> Configs {
+    let mut configs = transport_authenticated_configs();
+    configs.send = configs
+        .send
+        .with_delta_control_auth(SecurityContext::for_testing(0xD3_17_A0));
+    configs.recv = configs
+        .recv
+        .with_delta_control_auth(SecurityContext::for_testing(0xD3_17_A0));
+    for config in [&mut configs.send, &mut configs.recv] {
+        config.enable_delta = true;
+        config.chunk_size = 1024;
+        config.metadata_policy = MetadataPolicy::portable();
+    }
+    configs
 }
 
 /// Run a full send_path -> receive_on_endpoint transfer over real loopback UDP.
@@ -895,6 +906,128 @@ fn receiver_destination_refusal_reaches_the_sender_without_its_paths() {
     );
 }
 
+/// Delta policy refusals use the challenged session before a transfer mode is
+/// selected. First exercise full and already-in-sync transfers with the same
+/// public configuration so the refusal cannot pass through a disabled-delta
+/// fallback. The original code silently dropped this authenticated refusal.
+#[test]
+fn authenticated_delta_refusal_preserves_full_and_noop_transfer_paths() {
+    const REFUSAL_BOUND: Duration = Duration::from_secs(60);
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src
+        .path()
+        .canonicalize()
+        .expect("canonical source")
+        .join("payload.bin");
+    let destination = dst.path().canonicalize().expect("canonical destination");
+    let payload = vec![37_u8; 4096];
+    std::fs::write(&source, &payload).expect("write source");
+    let mut configs = delta_authenticated_configs();
+    configs.send.idle_timeout = Duration::from_secs(120);
+    configs.recv.idle_timeout = Duration::from_secs(120);
+
+    let (sent, received) = run_transfer(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &source,
+        &destination,
+    );
+    let sent = sent.expect("missing destination selects full transfer");
+    let received = received.expect("full delta fallback commits");
+    assert_eq!(sent.bytes_sent, payload.len() as u64);
+    assert_eq!(received.bytes_received, payload.len() as u64);
+    assert!(sent.receipt.committed && received.committed);
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        payload
+    );
+
+    let (sent, received) = run_transfer(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &source,
+        &destination,
+    );
+    let sent = sent.expect("unchanged destination selects authenticated no-op");
+    let received = received.expect("bound no-op proof commits");
+    assert_eq!(sent.bytes_sent, 0, "the public path really negotiated delta");
+    assert_eq!(received.bytes_received, 0);
+    assert!(sent.receipt.committed && received.committed);
+    assert_no_staging_residue(&destination);
+
+    configs.send.metadata_policy.preserve_timestamps = true;
+    let started = Instant::now();
+    let (sent, received) = run_transfer(configs.send, configs.recv, &source, &destination);
+    let elapsed = started.elapsed();
+    let received = received.expect_err("receiver refuses the new metadata policy");
+    assert!(
+        matches!(received, QuicTransportError::Source(ref message)
+            if message.contains("timestamps are denied by receiver metadata policy")),
+        "receiver error: {received:?}"
+    );
+    let sent = sent.expect_err("delta refusal must reach the waiting sender");
+    assert!(
+        matches!(sent, QuicTransportError::Integrity(ref reason)
+            if reason.starts_with("receiver refused the manifest: ")
+                && reason.contains("timestamps are denied by receiver metadata policy")),
+        "sender error: {sent:?}"
+    );
+    assert!(elapsed < REFUSAL_BOUND, "delta refusal took {elapsed:?}");
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert_no_staging_residue(&destination);
+}
+
+/// A failure to inspect the receiver's destination happens before ObjectRequest
+/// and must carry a bound refusal, with no receiver filesystem paths disclosed.
+#[cfg(unix)]
+#[test]
+fn authenticated_delta_destination_refusal_reaches_sender_without_paths() {
+    const REFUSAL_BOUND: Duration = Duration::from_secs(60);
+    let src = tempfile::tempdir().expect("source directory");
+    let source = src
+        .path()
+        .canonicalize()
+        .expect("canonical source")
+        .join("payload.bin");
+    std::fs::write(&source, vec![19_u8; 4096]).expect("write source");
+    let root = tempfile::tempdir().expect("receiver root");
+    let root_path = root.path().canonicalize().expect("canonical receiver root");
+    let real = root_path.join("real");
+    std::fs::create_dir(&real).expect("real destination");
+    let linked = root_path.join("linked");
+    std::os::unix::fs::symlink(&real, &linked).expect("destination symlink");
+    let destination = linked.join("inbox");
+    let mut configs = delta_authenticated_configs();
+    configs.send.idle_timeout = Duration::from_secs(120);
+    configs.recv.idle_timeout = Duration::from_secs(120);
+
+    let started = Instant::now();
+    let (sent, received) = run_transfer(configs.send, configs.recv, &source, &destination);
+    let elapsed = started.elapsed();
+    let received = received.expect_err("receiver refuses a symlinked destination");
+    assert!(
+        matches!(received, QuicTransportError::Source(ref message) if message.contains("symlink")),
+        "receiver error: {received:?}"
+    );
+    let sent = sent.expect_err("sender hears the pre-request refusal");
+    assert!(
+        matches!(sent, QuicTransportError::Integrity(ref reason)
+            if reason == "receiver could not prepare its delta request"),
+        "sender error: {sent:?}"
+    );
+    assert!(!format!("{sent:?}").contains(&root_path.display().to_string()));
+    assert!(elapsed < REFUSAL_BOUND, "delta refusal took {elapsed:?}");
+    assert!(
+        !real.join("inbox").exists(),
+        "refusal must not publish a destination"
+    );
+    assert_no_staging_residue(&real);
+}
+
 /// asupersync-nnm3gw: a refusing receiver does not wait on a sender that is
 /// still streaming. The source-stream sender queues an 8 MiB payload. It
 /// stalls on stream credit that the refusing receiver no longer grants, and
@@ -1134,7 +1267,6 @@ fn real_udp_quic_good_transport_auth_uses_reliable_source_stream() {
 
 /// A clean UDP forwarder between the sender and the receiver. It counts the
 /// bytes the sender sends: what crossed the wire, compressed or not.
-#[cfg(feature = "zstd")]
 struct CountingUdpProxy {
     addr: SocketAddr,
     sent: Arc<AtomicU64>,
@@ -1142,9 +1274,62 @@ struct CountingUdpProxy {
     handle: Option<JoinHandle<()>>,
 }
 
-#[cfg(feature = "zstd")]
+/// Cancel only after payload has crossed the wire and the receiver has staged
+/// a known changed range. Staging preallocates the whole file, so length alone
+/// cannot prove a write. This probe needs no delay or decrypted ATP frames.
+struct StagedTransferCancellation {
+    cx: Cx,
+    minimum_wire_bytes: u64,
+    dest_dir: PathBuf,
+    staged_probe_offset: u64,
+    expected_staged_bytes: [u8; 32],
+    fired: Arc<AtomicBool>,
+}
+
+impl StagedTransferCancellation {
+    fn trigger(&self, wire_bytes: u64) -> bool {
+        if wire_bytes < self.minimum_wire_bytes {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(&self.dest_dir) else {
+            return false;
+        };
+        let has_staged_bytes = entries.filter_map(Result::ok).any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".atp-quic-staging")
+                && std::fs::read_dir(entry.path()).is_ok_and(|files| {
+                    files.filter_map(Result::ok).any(|file| {
+                        let Ok(mut staged) = std::fs::File::open(file.path()) else {
+                            return false;
+                        };
+                        let mut probe = [0_u8; 32];
+                        staged
+                            .seek(std::io::SeekFrom::Start(self.staged_probe_offset))
+                            .is_ok()
+                            && staged.read_exact(&mut probe).is_ok()
+                            && probe == self.expected_staged_bytes
+                    })
+                })
+        });
+        if has_staged_bytes {
+            self.fired.store(true, Ordering::Relaxed);
+            self.cx.set_cancel_requested(true);
+        }
+        has_staged_bytes
+    }
+}
+
 impl CountingUdpProxy {
     fn spawn(server_addr: SocketAddr) -> Self {
+        Self::spawn_with_cancellation(server_addr, None)
+    }
+
+    fn spawn_with_cancellation(
+        server_addr: SocketAddr,
+        cancellation: Option<StagedTransferCancellation>,
+    ) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind counting proxy");
         socket
             .set_read_timeout(Some(Duration::from_millis(20)))
@@ -1155,6 +1340,7 @@ impl CountingUdpProxy {
         let (thread_sent, thread_stop) = (Arc::clone(&sent), Arc::clone(&stop));
         let handle = thread::spawn(move || {
             let mut client = None;
+            let mut cancelled = false;
             let mut buf = vec![0_u8; 65_536];
             while !thread_stop.load(Ordering::Relaxed) {
                 let Ok((len, from)) = socket.recv_from(&mut buf) else {
@@ -1166,8 +1352,19 @@ impl CountingUdpProxy {
                     }
                 } else {
                     client = Some(from);
-                    thread_sent.fetch_add(len as u64, Ordering::Relaxed);
-                    let _ = socket.send_to(&buf[..len], server_addr);
+                    let wire_bytes = thread_sent
+                        .fetch_add(len as u64, Ordering::Relaxed)
+                        .saturating_add(len as u64);
+                    if !cancelled
+                        && cancellation
+                            .as_ref()
+                            .is_some_and(|cancel| cancel.trigger(wire_bytes))
+                    {
+                        cancelled = true;
+                    }
+                    if !cancelled {
+                        let _ = socket.send_to(&buf[..len], server_addr);
+                    }
                 }
             }
         });
@@ -1180,7 +1377,6 @@ impl CountingUdpProxy {
     }
 }
 
-#[cfg(feature = "zstd")]
 impl Drop for CountingUdpProxy {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -1204,6 +1400,28 @@ fn run_counted_transfer(
     Result<ReceiveReport, QuicTransportError>,
     u64,
 ) {
+    run_counted_transfer_with_options(
+        send_cfg,
+        recv_cfg,
+        source,
+        dest_dir,
+        options,
+        QuicReceiveOptions::new(),
+    )
+}
+
+fn run_counted_transfer_with_options(
+    send_cfg: QuicConfig,
+    recv_cfg: QuicConfig,
+    source: &Path,
+    dest_dir: &Path,
+    send_options: QuicSendOptions,
+    receive_options: QuicReceiveOptions,
+) -> (
+    Result<SendReport, QuicTransportError>,
+    Result<ReceiveReport, QuicTransportError>,
+    u64,
+) {
     block_on(async {
         let cx = Cx::for_testing();
         let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1218,13 +1436,912 @@ fn run_counted_transfer(
                 source,
                 send_cfg,
                 "atp-quic-client",
-                options,
+                send_options,
             ),
-            receive_on_endpoint(&cx, server_endpoint, dest_dir, &recv_cfg, "atp-quic-server"),
+            receive_on_endpoint_with_options(
+                &cx,
+                server_endpoint,
+                dest_dir,
+                &recv_cfg,
+                "atp-quic-server",
+                receive_options,
+            ),
         )
         .await;
         (send, recv, proxy.sent.load(Ordering::Relaxed))
     })
+}
+
+// Deliberately larger than the async file read buffer: the chunk manifest and
+// payload must agree even when filling one chunk requires multiple reads.
+const DELTA_TEST_CHUNK_BYTES: usize = 256 * 1024;
+
+fn changed_chunk_configs() -> Configs {
+    let mut configs = delta_authenticated_configs();
+    for config in [&mut configs.send, &mut configs.recv] {
+        config.chunk_size = DELTA_TEST_CHUNK_BYTES;
+        config.round0_loss_target = 0.001;
+    }
+    configs
+}
+
+fn changed_chunk_payload(chunks: usize, tail: usize) -> Vec<u8> {
+    let mut noise = DeterministicLoss::new(0xD3_17_A0_26);
+    (0..chunks * DELTA_TEST_CHUNK_BYTES + tail)
+        .map(|_| noise.next_u32().to_le_bytes()[0])
+        .collect()
+}
+
+fn assert_changed_chunk_reports(send: &SendReport, receive: &ReceiveReport, bytes: usize) {
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert!(receive.committed);
+    assert_eq!(send.transfer_id, receive.transfer_id);
+    assert_eq!(send.files, 1);
+    assert_eq!(receive.files, 1);
+    assert_eq!(send.bytes_sent, bytes as u64);
+    assert_eq!(send.receipt.bytes_received, bytes as u64);
+    assert_eq!(receive.bytes_received, bytes as u64);
+    assert_eq!(send.symbols_sent, 0);
+    assert_eq!(receive.symbols_accepted, 0);
+    assert_eq!(send.feedback_rounds, 0);
+    assert_eq!(receive.feedback_rounds, 0);
+    assert_eq!(receive.decode_count, 0);
+    assert_eq!(receive.decode_micros, 0);
+    assert_eq!(receive.committed_paths.len(), 1);
+}
+
+fn assert_changed_chunk_destination(destination: &Path, expected: &[u8]) {
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).expect("read committed payload"),
+        expected
+    );
+    assert_no_staging_residue(destination);
+    assert_eq!(
+        std::fs::read_dir(destination).expect("read destination").count(),
+        1,
+        "only the destination file may survive a terminal transfer"
+    );
+}
+
+/// I3/B8: the public API must perform a full first copy, send only one changed
+/// chunk next, and then negotiate an authenticated no-op. Wire counts come
+/// from real encrypted UDP packets, independently of the receipt counters.
+#[test]
+fn real_udp_quic_changed_chunks_full_partial_and_noop() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    let mut payload = changed_chunk_payload(12, 131);
+    std::fs::write(&source, &payload).expect("write initial source");
+    let configs = changed_chunk_configs();
+    let send_options = QuicSendOptions::new().with_delta_chunks(true);
+    let receive_options = QuicReceiveOptions::new().with_delta_chunks(true);
+
+    let (send, receive, full_wire_bytes) = run_counted_transfer_with_options(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_changed_chunk_reports(
+        &send.expect("first copy sends the whole object"),
+        &receive.expect("first copy commits"),
+        payload.len(),
+    );
+    assert!(full_wire_bytes > payload.len() as u64);
+    assert_changed_chunk_destination(dst.path(), &payload);
+
+    payload[5 * DELTA_TEST_CHUNK_BYTES + 71] ^= 0xA5;
+    std::fs::write(&source, &payload).expect("write small edit");
+    let (send, receive, delta_wire_bytes) = run_counted_transfer_with_options(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_changed_chunk_reports(
+        &send.expect("changed chunk send completes"),
+        &receive.expect("changed chunk receive commits"),
+        DELTA_TEST_CHUNK_BYTES,
+    );
+    assert!(
+        delta_wire_bytes < full_wire_bytes / 2,
+        "one changed chunk used {delta_wire_bytes} wire bytes versus {full_wire_bytes} for full copy"
+    );
+    assert_changed_chunk_destination(dst.path(), &payload);
+
+    let (send, receive, noop_wire_bytes) = run_counted_transfer_with_options(
+        configs.send,
+        configs.recv,
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_changed_chunk_reports(
+        &send.expect("unchanged sender receives a bound proof"),
+        &receive.expect("unchanged destination commits a no-op"),
+        0,
+    );
+    assert!(
+        noop_wire_bytes < delta_wire_bytes / 2,
+        "no-op used {noop_wire_bytes} wire bytes versus {delta_wire_bytes} for one changed chunk"
+    );
+    assert_changed_chunk_destination(dst.path(), &payload);
+}
+
+/// The sender and receiver negotiate CDC on the public native path. Inserts and
+/// deletes shift later offsets, so the unchanged suffix must be reused by content
+/// identity rather than retransmitted as fixed blocks. Counts below are measured
+/// by the encrypted UDP proxy, independently of the transfer receipts.
+#[test]
+fn real_udp_quic_cdc_reuses_content_after_insert_delete_and_noop() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    let baseline = changed_chunk_payload(12, 131);
+    std::fs::write(&source, &baseline).expect("write initial source");
+    let configs = changed_chunk_configs();
+    let send_options = QuicSendOptions::new().with_cdc_delta(true);
+    let receive_options = QuicReceiveOptions::new().with_cdc_delta(true);
+
+    let (send, receive, full_wire_bytes) = run_counted_transfer_with_options(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_changed_chunk_reports(
+        &send.expect("first CDC transfer sends all content"),
+        &receive.expect("first CDC transfer commits"),
+        baseline.len(),
+    );
+    assert_changed_chunk_destination(dst.path(), &baseline);
+    assert!(full_wire_bytes > baseline.len() as u64);
+
+    let insertion = vec![0xA7; 2017];
+    let inserted = [&baseline[..90_001], &insertion, &baseline[90_001..]].concat();
+    let deleted = [&inserted[..1_600_013], &inserted[1_608_050..]].concat();
+    for (operation, updated) in [("insert", &inserted), ("delete", &deleted)] {
+        std::fs::write(&source, updated).expect("write shifted source");
+        let (send, receive, wire_bytes) = run_counted_transfer_with_options(
+            configs.send.clone(),
+            configs.recv.clone(),
+            &source,
+            dst.path(),
+            send_options,
+            receive_options,
+        );
+        let send = send.unwrap_or_else(|error| panic!("{operation} sender: {error:?}"));
+        let receive = receive.unwrap_or_else(|error| panic!("{operation} receiver: {error:?}"));
+        assert!(
+            send.bytes_sent > 0 && send.bytes_sent < DELTA_TEST_CHUNK_BYTES as u64,
+            "{operation} must transfer a bounded changed region, not the shifted suffix: {send:?}"
+        );
+        assert_changed_chunk_reports(
+            &send,
+            &receive,
+            usize::try_from(send.bytes_sent).expect("bounded missing bytes"),
+        );
+        assert!(
+            wire_bytes < full_wire_bytes / 2,
+            "{operation} used {wire_bytes} wire bytes versus {full_wire_bytes} for the first copy"
+        );
+        assert_changed_chunk_destination(dst.path(), updated);
+    }
+
+    let (send, receive, noop_wire_bytes) = run_counted_transfer_with_options(
+        configs.send,
+        configs.recv,
+        &source,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_changed_chunk_reports(
+        &send.expect("unchanged CDC sender receives a bound proof"),
+        &receive.expect("unchanged CDC receiver commits a no-op"),
+        0,
+    );
+    assert!(noop_wire_bytes < full_wire_bytes / 2);
+    assert_changed_chunk_destination(dst.path(), &deleted);
+}
+
+#[test]
+fn real_udp_quic_cdc_preserves_fixed_and_legacy_peer_fallback() {
+    // CDC implies chunk reuse, but a peer that only knows fixed chunks must see
+    // the unchanged fixed schema. A peer with no chunk opt-in gets the full file.
+    for (sender_cdc, receiver_cdc, sender_fixed, receiver_fixed, expected_chunks) in [
+        (true, false, false, true, 1),
+        (false, true, true, false, 1),
+        (true, false, false, false, 0),
+        (false, true, false, false, 0),
+    ] {
+        let src = tempfile::tempdir().expect("source directory");
+        let dst = tempfile::tempdir().expect("destination directory");
+        let source = src.path().join("payload.bin");
+        let baseline = changed_chunk_payload(3, 23);
+        let mut updated = baseline.clone();
+        updated[DELTA_TEST_CHUNK_BYTES + 19] ^= 0x3C;
+        std::fs::write(&source, &updated).expect("write changed source");
+        std::fs::write(dst.path().join("payload.bin"), &baseline).expect("write baseline");
+        let configs = changed_chunk_configs();
+        let (send, receive, _) = run_counted_transfer_with_options(
+            configs.send,
+            configs.recv,
+            &source,
+            dst.path(),
+            QuicSendOptions::new()
+                .with_delta_chunks(sender_fixed)
+                .with_cdc_delta(sender_cdc),
+            QuicReceiveOptions::new()
+                .with_delta_chunks(receiver_fixed)
+                .with_cdc_delta(receiver_cdc),
+        );
+        assert_changed_chunk_reports(
+            &send.expect("mixed-version sender completes"),
+            &receive.expect("mixed-version receiver commits"),
+            if expected_chunks == 1 {
+                DELTA_TEST_CHUNK_BYTES
+            } else {
+                updated.len()
+            },
+        );
+        assert_changed_chunk_destination(dst.path(), &updated);
+    }
+}
+
+// The 2 MiB file stays plain; the three smaller files and empty file form a
+// pack. Editing the 256 KiB member changes exactly 10% of logical tree bytes,
+// and must not force the unchanged members of its pack onto the wire.
+fn write_tree_delta_fixture(root: &Path) -> Vec<(String, Vec<u8>)> {
+    std::fs::create_dir_all(root.join("small")).expect("create tree source");
+    let files = vec![
+        ("00-large.bin".to_string(), changed_chunk_payload(8, 0)),
+        ("small/changed.bin".to_string(), changed_chunk_payload(1, 0)),
+        (
+            "small/kept-a.bin".to_string(),
+            changed_chunk_payload(0, DELTA_TEST_CHUNK_BYTES / 2),
+        ),
+        (
+            "small/kept-b.bin".to_string(),
+            changed_chunk_payload(0, DELTA_TEST_CHUNK_BYTES / 2)
+                .into_iter()
+                .map(|byte| byte ^ 0x37)
+                .collect(),
+        ),
+        ("small/empty.bin".to_string(), Vec::new()),
+    ];
+    for (path, bytes) in &files {
+        std::fs::write(root.join(path), bytes).expect("write tree source member");
+    }
+    files
+}
+
+fn assert_tree_delta_reports(send: &SendReport, receive: &ReceiveReport, missing_bytes: u64) {
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert!(receive.committed);
+    assert_eq!(send.transfer_id, receive.transfer_id);
+    assert_eq!(send.files, receive.files);
+    assert_eq!(send.bytes_sent, missing_bytes);
+    assert_eq!(send.receipt.bytes_received, missing_bytes);
+    assert_eq!(receive.bytes_received, missing_bytes);
+}
+
+fn assert_tree_delta_destination(destination: &Path, files: &[(String, Vec<u8>)]) {
+    for (path, bytes) in files {
+        assert_eq!(
+            std::fs::read(destination.join("tree").join(path))
+                .unwrap_or_else(|error| panic!("read committed {path}: {error}")),
+            *bytes,
+            "committed tree member {path}"
+        );
+    }
+    assert_no_staging_residue(destination);
+}
+
+/// I3: re-sync a directory containing both packed and plain files. Receipt
+/// counters and independently counted encrypted UDP packets must both shrink
+/// when only one packed member changes; receiver-only files remain intact.
+#[test]
+fn real_udp_quic_tree_delta_reuses_plain_and_packed_files_and_noops() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let root = src.path().join("tree");
+    let mut files = write_tree_delta_fixture(&root);
+    let total_bytes = files.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
+    let mut configs = changed_chunk_configs();
+    configs.send.metadata_policy.preserve_unix_permissions = cfg!(unix);
+    configs.recv.metadata_policy.preserve_unix_permissions = cfg!(unix);
+    let send_options = QuicSendOptions::new().with_tree_delta(true);
+    let receive_options = QuicReceiveOptions::new().with_tree_delta(true);
+
+    let (send, receive, full_wire_bytes) = run_counted_transfer_with_options(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &root,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_tree_delta_reports(
+        &send.expect("initial tree sender completes"),
+        &receive.expect("initial tree receiver commits"),
+        total_bytes,
+    );
+    assert_tree_delta_destination(dst.path(), &files);
+    assert!(full_wire_bytes > total_bytes);
+    let extra = dst.path().join("tree/receiver-only.txt");
+    std::fs::write(&extra, b"keep this independent file").expect("write receiver-only file");
+
+    let (_, changed) = files
+        .iter_mut()
+        .find(|(path, _)| path == "small/changed.bin")
+        .expect("changed packed member");
+    changed[71] ^= 0xA5;
+    std::fs::write(root.join("small/changed.bin"), changed).expect("edit one packed member");
+    let missing_bytes = DELTA_TEST_CHUNK_BYTES as u64;
+    assert_eq!(missing_bytes * 10, total_bytes);
+    let (send, receive, delta_wire_bytes) = run_counted_transfer_with_options(
+        configs.send.clone(),
+        configs.recv.clone(),
+        &root,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_tree_delta_reports(
+        &send.expect("directory delta sender completes"),
+        &receive.expect("directory delta receiver commits"),
+        missing_bytes,
+    );
+    assert!(
+        delta_wire_bytes < full_wire_bytes / 2,
+        "one changed member used {delta_wire_bytes} wire bytes versus {full_wire_bytes} for full tree"
+    );
+    assert_tree_delta_destination(dst.path(), &files);
+    assert_eq!(
+        std::fs::read(&extra).expect("receiver-only file"),
+        b"keep this independent file"
+    );
+
+    // Reusing every content byte still needs publication: a missing empty file
+    // and a permission-only change cannot be skipped as an already-synced tree.
+    std::fs::remove_file(dst.path().join("tree/small/empty.bin"))
+        .expect("remove only the test destination's empty member");
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(
+            root.join("small/changed.bin"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("change source permissions without changing content");
+        std::fs::set_permissions(
+            dst.path().join("tree/small/changed.bin"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("set different destination permissions");
+    }
+    let (send, receive, noop_wire_bytes) = run_counted_transfer_with_options(
+        configs.send,
+        configs.recv,
+        &root,
+        dst.path(),
+        send_options,
+        receive_options,
+    );
+    assert_tree_delta_reports(
+        &send.expect("unchanged tree sender receives proof"),
+        &receive.expect("unchanged tree receiver commits"),
+        0,
+    );
+    assert!(
+        noop_wire_bytes < delta_wire_bytes / 2,
+        "tree no-op used {noop_wire_bytes} wire bytes versus {delta_wire_bytes} for a changed member"
+    );
+    assert_tree_delta_destination(dst.path(), &files);
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(dst.path().join("tree/small/changed.bin"))
+            .expect("read committed permissions")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "all-content-reused transfer must apply current source metadata"
+    );
+    assert_eq!(
+        std::fs::read(&extra).expect("receiver-only file"),
+        b"keep this independent file"
+    );
+}
+
+#[test]
+fn real_udp_quic_tree_delta_preserves_legacy_peer_fallback() {
+    for (sender_tree, receiver_tree) in [(true, false), (false, true)] {
+        let src = tempfile::tempdir().expect("source directory");
+        let dst = tempfile::tempdir().expect("destination directory");
+        let root = src.path().join("tree");
+        let mut files = write_tree_delta_fixture(&root);
+        write_tree_delta_fixture(&dst.path().join("tree"));
+        let (_, changed) = files
+            .iter_mut()
+            .find(|(path, _)| path == "small/changed.bin")
+            .expect("changed member");
+        changed[19] ^= 0x3C;
+        std::fs::write(root.join("small/changed.bin"), changed).expect("change tree source");
+        let total_bytes = files.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
+        let configs = changed_chunk_configs();
+        let (send, receive, _) = run_counted_transfer_with_options(
+            configs.send,
+            configs.recv,
+            &root,
+            dst.path(),
+            QuicSendOptions::new().with_tree_delta(sender_tree),
+            QuicReceiveOptions::new().with_tree_delta(receiver_tree),
+        );
+        assert_tree_delta_reports(
+            &send.expect("mixed-version directory sender completes"),
+            &receive.expect("mixed-version directory receiver commits"),
+            total_bytes,
+        );
+        assert_tree_delta_destination(dst.path(), &files);
+    }
+}
+
+#[test]
+fn real_udp_quic_tree_delta_cancel_after_staging_preserves_baseline() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let root = src.path().join("tree");
+    let baseline_root = dst.path().join("tree");
+    std::fs::create_dir_all(&root).expect("create source tree");
+    std::fs::create_dir_all(&baseline_root).expect("create baseline tree");
+    let baseline = changed_chunk_payload(32, 0);
+    let updated = baseline.iter().map(|byte| byte ^ 0xC3).collect::<Vec<_>>();
+    let kept = changed_chunk_payload(0, 128 * 1024);
+    std::fs::write(root.join("changed.bin"), &updated).expect("write updated member");
+    std::fs::write(root.join("kept.bin"), &kept).expect("write reusable member");
+    std::fs::write(baseline_root.join("changed.bin"), &baseline).expect("write baseline member");
+    std::fs::write(baseline_root.join("kept.bin"), &kept).expect("write reusable baseline");
+    let extra = baseline_root.join("receiver-only.txt");
+    std::fs::write(&extra, b"preserve receiver-only data").expect("write receiver-only file");
+    let configs = changed_chunk_configs();
+    let probe_offset = 1024 * 1024 + 17;
+    let fired = Arc::new(AtomicBool::new(false));
+    let (send, receive) = block_on(async {
+        let cx = Cx::for_testing();
+        let endpoint = bind_server_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind directory receiver");
+        let proxy = CountingUdpProxy::spawn_with_cancellation(
+            endpoint.local_addr(),
+            Some(StagedTransferCancellation {
+                cx: cx.clone(),
+                minimum_wire_bytes: 1024 * 1024,
+                dest_dir: dst.path().to_path_buf(),
+                staged_probe_offset: probe_offset as u64,
+                expected_staged_bytes: updated[probe_offset..probe_offset + 32]
+                    .try_into()
+                    .expect("staged probe width"),
+                fired: Arc::clone(&fired),
+            }),
+        );
+        zip(
+            send_path_with_options(
+                &cx,
+                proxy.addr,
+                &root,
+                configs.send,
+                "tree-sender",
+                QuicSendOptions::new().with_tree_delta(true),
+            ),
+            receive_on_endpoint_with_options(
+                &cx,
+                endpoint,
+                dst.path(),
+                &configs.recv,
+                "tree-receiver",
+                QuicReceiveOptions::new().with_tree_delta(true),
+            ),
+        )
+        .await
+    });
+    assert!(
+        fired.load(Ordering::Relaxed),
+        "cancellation must observe changed directory payload in staging"
+    );
+    assert!(
+        matches!(&send, Err(QuicTransportError::Cancelled)),
+        "sender: {send:?}"
+    );
+    assert!(
+        matches!(&receive, Err(QuicTransportError::Cancelled)),
+        "receiver: {receive:?}"
+    );
+    assert_tree_delta_destination(
+        dst.path(),
+        &[
+            ("changed.bin".to_string(), baseline),
+            ("kept.bin".to_string(), kept),
+        ],
+    );
+    assert_eq!(
+        std::fs::read(&extra).expect("receiver-only file"),
+        b"preserve receiver-only data"
+    );
+}
+
+#[test]
+fn real_udp_quic_changed_chunks_reuse_reordered_and_repeated_content() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    let baseline = changed_chunk_payload(3, 0);
+    let updated = [
+        &baseline[2 * DELTA_TEST_CHUNK_BYTES..],
+        &baseline[..DELTA_TEST_CHUNK_BYTES],
+        &baseline[..DELTA_TEST_CHUNK_BYTES],
+    ]
+    .concat();
+    assert_ne!(baseline, updated);
+    std::fs::write(&source, &updated).expect("write reordered source");
+    std::fs::write(dst.path().join("payload.bin"), &baseline).expect("write baseline");
+    let configs = changed_chunk_configs();
+    let (send, receive, _) = run_counted_transfer_with_options(
+        configs.send,
+        configs.recv,
+        &source,
+        dst.path(),
+        QuicSendOptions::new().with_delta_chunks(true),
+        QuicReceiveOptions::new().with_delta_chunks(true),
+    );
+    assert_changed_chunk_reports(
+        &send.expect("reused chunks need no literal payload"),
+        &receive.expect("receiver reconstructs at the new offsets"),
+        0,
+    );
+    assert_changed_chunk_destination(dst.path(), &updated);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_udp_quic_changed_chunks_commit_metadata_without_literal_payload() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    let destination = dst.path().join("payload.bin");
+    let payload = changed_chunk_payload(2, 19);
+    std::fs::write(&source, &payload).expect("write source");
+    std::fs::write(&destination, &payload).expect("write baseline");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
+        .expect("set source permissions");
+    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o640))
+        .expect("set baseline permissions");
+    let mut configs = changed_chunk_configs();
+    configs.send.metadata_policy = MetadataPolicy::default();
+    configs.recv.metadata_policy = MetadataPolicy::default();
+    let (send, receive, _) = run_counted_transfer_with_options(
+        configs.send,
+        configs.recv,
+        &source,
+        dst.path(),
+        QuicSendOptions::new().with_delta_chunks(true),
+        QuicReceiveOptions::new().with_delta_chunks(true),
+    );
+    assert_changed_chunk_reports(
+        &send.expect("metadata-only send completes"),
+        &receive.expect("metadata-only reconstruction commits"),
+        0,
+    );
+    assert_eq!(
+        std::fs::metadata(destination).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_changed_chunk_destination(dst.path(), &payload);
+}
+
+/// Three new chunks exceed the bounded control-stream receive window several
+/// times. The existing proxy introduces loss, delay, duplication and reorder,
+/// so stream credit and retransmission must keep the changed-chunk path alive.
+#[test]
+fn real_udp_quic_changed_chunks_append_survives_loss_and_stream_credit() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    let baseline = changed_chunk_payload(3, 0);
+    let updated = changed_chunk_payload(6, 113);
+    std::fs::write(&source, &updated).expect("write appended source");
+    std::fs::write(dst.path().join("payload.bin"), &baseline).expect("write baseline");
+    let mut configs = changed_chunk_configs();
+    // Per-symbol authentication disables the ordinary reliable source stream.
+    // Changed chunks must still use their negotiated control-stream data path.
+    configs.send = configs
+        .send
+        .with_symbol_auth(SecurityContext::for_testing(0xD3_17_FE));
+    configs.recv = configs
+        .recv
+        .with_symbol_auth(SecurityContext::for_testing(0xD3_17_FE));
+    for config in [&mut configs.send, &mut configs.recv] {
+        config.round0_loss_target = 0.10;
+        config.idle_timeout = Duration::from_secs(45);
+    }
+    let (send, receive) = block_on(async {
+        let cx = Cx::for_testing();
+        let endpoint = bind_server_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind receiver");
+        let proxy = LossyUdpProxy::spawn_with_rate_timeout(
+            endpoint.local_addr(),
+            0xD3_17_A0_10,
+            None,
+            Duration::from_secs(60),
+        );
+        zip(
+            send_path_with_options(
+                &cx,
+                proxy.addr,
+                &source,
+                configs.send,
+                "delta-sender",
+                QuicSendOptions::new().with_delta_chunks(true),
+            ),
+            receive_on_endpoint_with_options(
+                &cx,
+                endpoint,
+                dst.path(),
+                &configs.recv,
+                "delta-receiver",
+                QuicReceiveOptions::new().with_delta_chunks(true),
+            ),
+        )
+        .await
+    });
+    let send = send.unwrap_or_else(|error| {
+        panic!("lossy changed-chunk sender failed: {error:?}; receiver={receive:?}")
+    });
+    assert_changed_chunk_reports(
+        &send,
+        &receive.expect("lossy changed-chunk receiver commits"),
+        updated.len() - baseline.len(),
+    );
+    assert_changed_chunk_destination(dst.path(), &updated);
+}
+
+#[test]
+fn real_udp_quic_changed_chunks_one_sided_opt_in_keeps_full_fallback() {
+    for (sender_opt_in, receiver_opt_in) in [(true, false), (false, true)] {
+        let src = tempfile::tempdir().expect("source directory");
+        let dst = tempfile::tempdir().expect("destination directory");
+        let source = src.path().join("payload.bin");
+        let baseline = changed_chunk_payload(3, 23);
+        let mut updated = baseline.clone();
+        updated[DELTA_TEST_CHUNK_BYTES + 19] ^= 0x3C;
+        std::fs::write(&source, &updated).expect("write changed source");
+        std::fs::write(dst.path().join("payload.bin"), &baseline).expect("write baseline");
+        let configs = changed_chunk_configs();
+        let (send, receive, _) = run_counted_transfer_with_options(
+            configs.send,
+            configs.recv,
+            &source,
+            dst.path(),
+            QuicSendOptions::new().with_delta_chunks(sender_opt_in),
+            QuicReceiveOptions::new().with_delta_chunks(receiver_opt_in),
+        );
+        assert_changed_chunk_reports(
+            &send.expect("one-sided offer preserves existing sender behavior"),
+            &receive.expect("one-sided offer preserves existing receiver behavior"),
+            updated.len(),
+        );
+        assert_changed_chunk_destination(dst.path(), &updated);
+    }
+}
+
+#[test]
+fn real_udp_quic_changed_chunks_require_enabled_delta_and_strict_control_auth() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    std::fs::write(&source, [7_u8; 1024]).expect("write source");
+    for invalid_case in ["disabled", "missing key", "permissive key"] {
+        let mut configs = changed_chunk_configs();
+        for config in [&mut configs.send, &mut configs.recv] {
+            match invalid_case {
+                "disabled" => config.enable_delta = false,
+                "missing key" => config.delta_control_auth_context = None,
+                _ => {
+                    config.delta_control_auth_context = Some(
+                        SecurityContext::for_testing_with_mode(0xD3_17_A0, AuthMode::Permissive),
+                    );
+                }
+            }
+        }
+        block_on(async {
+            let cx = Cx::for_testing();
+            let endpoint = bind_server_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .expect("bind receiver");
+            let send = send_path_with_options(
+                &cx,
+                endpoint.local_addr(),
+                &source,
+                configs.send,
+                "delta-sender",
+                QuicSendOptions::new().with_delta_chunks(true),
+            )
+            .await;
+            assert!(
+                matches!(&send, Err(QuicTransportError::Config(reason)) if reason.contains("delta")),
+                "{invalid_case}: sender must reject options before waiting for a peer: {send:?}"
+            );
+            let receive = receive_on_endpoint_with_options(
+                &cx,
+                endpoint,
+                dst.path(),
+                &configs.recv,
+                "delta-receiver",
+                QuicReceiveOptions::new().with_delta_chunks(true),
+            )
+            .await;
+            assert!(
+                matches!(&receive, Err(QuicTransportError::Config(reason)) if reason.contains("delta")),
+                "{invalid_case}: receiver must reject options before accepting a peer: {receive:?}"
+            );
+        });
+    }
+    assert_eq!(std::fs::read_dir(dst.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn real_udp_quic_changed_chunks_reject_wrong_client_key_before_destination_changes() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    let baseline = changed_chunk_payload(2, 29);
+    let mut updated = baseline.clone();
+    updated[17] ^= 0xD7;
+    std::fs::write(&source, &updated).expect("write source");
+    std::fs::write(dst.path().join("payload.bin"), &baseline).expect("write baseline");
+    let mut configs = changed_chunk_configs();
+    configs.send.delta_control_auth_context = Some(SecurityContext::for_testing(0xBA_D0));
+    configs.send.idle_timeout = Duration::from_secs(5);
+    configs.recv.idle_timeout = Duration::from_secs(5);
+    let (send, receive, _) = run_counted_transfer_with_options(
+        configs.send,
+        configs.recv,
+        &source,
+        dst.path(),
+        QuicSendOptions::new().with_delta_chunks(true),
+        QuicReceiveOptions::new().with_delta_chunks(true),
+    );
+    assert!(send.is_err(), "an unauthorized sender must receive no successful receipt");
+    assert!(
+        matches!(&receive, Err(QuicTransportError::HandshakeRejected(reason))
+            if reason.contains("authentication failed")),
+        "receiver must reject the client proof despite valid server TLS: {receive:?}"
+    );
+    assert_changed_chunk_destination(dst.path(), &baseline);
+}
+
+#[test]
+fn real_udp_quic_changed_chunks_deliver_metadata_policy_refusal() {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    let baseline = changed_chunk_payload(2, 17);
+    let mut updated = baseline.clone();
+    updated[DELTA_TEST_CHUNK_BYTES + 13] ^= 0x8D;
+    std::fs::write(&source, &updated).expect("write source");
+    std::fs::write(dst.path().join("payload.bin"), &baseline).expect("write baseline");
+    let mut configs = changed_chunk_configs();
+    configs.send.metadata_policy.preserve_timestamps = true;
+    let (send, receive, _) = run_counted_transfer_with_options(
+        configs.send,
+        configs.recv,
+        &source,
+        dst.path(),
+        QuicSendOptions::new().with_delta_chunks(true),
+        QuicReceiveOptions::new().with_delta_chunks(true),
+    );
+    assert!(
+        matches!(&receive, Err(QuicTransportError::Source(reason))
+            if reason.contains("timestamps are denied by receiver metadata policy")),
+        "receiver policy refusal: {receive:?}"
+    );
+    assert!(
+        matches!(&send, Err(QuicTransportError::Integrity(reason))
+            if reason.starts_with("receiver refused the manifest: ")
+                && reason.contains("timestamps are denied by receiver metadata policy")),
+        "bound refusal must reach the sender: {send:?}"
+    );
+    assert_changed_chunk_destination(dst.path(), &baseline);
+}
+
+#[test]
+fn real_udp_quic_changed_chunks_cancel_after_staging_preserves_baseline() {
+    assert_quic_chunk_cancellation_preserves_baseline(false);
+}
+
+#[test]
+fn real_udp_quic_cdc_cancel_after_staging_preserves_baseline() {
+    assert_quic_chunk_cancellation_preserves_baseline(true);
+}
+
+fn assert_quic_chunk_cancellation_preserves_baseline(cdc: bool) {
+    let src = tempfile::tempdir().expect("source directory");
+    let dst = tempfile::tempdir().expect("destination directory");
+    let source = src.path().join("payload.bin");
+    let baseline = changed_chunk_payload(32, 0);
+    let mut updated = baseline.clone();
+    for byte in &mut updated[16 * DELTA_TEST_CHUNK_BYTES..] {
+        *byte ^= 0xC3;
+    }
+    std::fs::write(&source, &updated).expect("write changed source");
+    std::fs::write(dst.path().join("payload.bin"), &baseline).expect("write baseline");
+    let configs = changed_chunk_configs();
+    let probe_offset = 16 * DELTA_TEST_CHUNK_BYTES + 17;
+    let fired = Arc::new(AtomicBool::new(false));
+    let (send, receive) = block_on(async {
+        let cx = Cx::for_testing();
+        let endpoint = bind_server_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind receiver");
+        let proxy = CountingUdpProxy::spawn_with_cancellation(
+            endpoint.local_addr(),
+            Some(StagedTransferCancellation {
+                cx: cx.clone(),
+                minimum_wire_bytes: 1024 * 1024,
+                dest_dir: dst.path().to_path_buf(),
+                staged_probe_offset: probe_offset as u64,
+                expected_staged_bytes: updated[probe_offset..probe_offset + 32]
+                    .try_into()
+                    .expect("staged probe width"),
+                fired: Arc::clone(&fired),
+            }),
+        );
+        zip(
+            send_path_with_options(
+                &cx,
+                proxy.addr,
+                &source,
+                configs.send,
+                "delta-sender",
+                QuicSendOptions::new()
+                    .with_delta_chunks(!cdc)
+                    .with_cdc_delta(cdc),
+            ),
+            receive_on_endpoint_with_options(
+                &cx,
+                endpoint,
+                dst.path(),
+                &configs.recv,
+                "delta-receiver",
+                QuicReceiveOptions::new()
+                    .with_delta_chunks(!cdc)
+                    .with_cdc_delta(cdc),
+            ),
+        )
+        .await
+    });
+    assert!(
+        fired.load(Ordering::Relaxed),
+        "cancellation must observe received payload in staging before it fires"
+    );
+    assert!(
+        matches!(&send, Err(QuicTransportError::Cancelled)),
+        "sender must stop at cancellation: {send:?}"
+    );
+    assert!(
+        matches!(&receive, Err(QuicTransportError::Cancelled)),
+        "receiver must stop at cancellation: {receive:?}"
+    );
+    assert_changed_chunk_destination(dst.path(), &baseline);
 }
 
 /// zstd over the reliable source stream (br-asupersync-t1fblr.29).

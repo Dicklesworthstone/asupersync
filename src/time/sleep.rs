@@ -262,9 +262,18 @@ pub fn wall_now() -> Time {
         // path. Calling `Cx::now()` here would recurse back through this helper.
     }
 
-    // Absolute fallback: no Cx context or capabilities available.
-    // This preserves compatibility for truly capability-free contexts. The
-    // epoch is the shared process epoch so this branch stays comparable with
+    raw_wall_now()
+}
+
+/// Reads the process wall clock without adopting a caller's timer driver.
+///
+/// Internal owners that already selected the driverless fallback use this to
+/// retain their clock domain when later called under another task's `Cx`.
+#[must_use]
+#[inline]
+pub(crate) fn raw_wall_now() -> Time {
+    // This fallback also serves owners that selected it before being polled
+    // under another Cx. The shared process epoch keeps it comparable with
     // the production `WallClock` timer driver (see `process_epoch`).
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -517,6 +526,15 @@ impl Sleep {
                 registered_partial: false,
             })),
         }
+    }
+
+    /// Binds a deadline in the process wall-clock domain to the existing shared
+    /// fallback timer. Later pollers cannot redirect it to their timer driver,
+    /// and all such waits share the same process-lifetime pump thread.
+    #[inline]
+    #[must_use]
+    pub(crate) fn with_wall_clock(deadline: Time) -> Self {
+        Self::with_timer_driver(deadline, global_fallback_timer().driver.clone())
     }
 
     /// Returns the deadline for this sleep.

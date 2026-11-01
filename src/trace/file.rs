@@ -138,6 +138,97 @@ pub const MAX_EVENT_LEN: usize = 16 * 1024 * 1024;
 /// Compressed chunks should not exceed this before decompression.
 pub const MAX_COMPRESSED_CHUNK_LEN: usize = 64 * 1024 * 1024;
 
+/// Admission limits for encoded trace data and compression buffers.
+///
+/// Each limit is checked before allocating or decoding the corresponding
+/// payload. Compressed input is checked against both its stored size and its
+/// advertised expansion before either chunk buffer is allocated. These are
+/// per-payload limits, not an exact heap bound: decoded Rust values, fixed I/O
+/// buffering, and codec bookkeeping also consume memory.
+///
+/// The defaults preserve the container's existing format limits. Builder
+/// methods can select smaller limits, including zero, but cannot raise a
+/// format limit. Metadata and event limits count raw MessagePack bytes rather
+/// than the canonical bytes admitted by [`super::TraceReadLimits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceContainerLimits {
+    max_metadata_bytes: usize,
+    max_event_bytes: usize,
+    max_compressed_chunk_bytes: usize,
+    max_decompressed_chunk_bytes: usize,
+}
+
+impl TraceContainerLimits {
+    /// Preserve the existing metadata, event, and compression format limits.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            max_metadata_bytes: MAX_META_LEN,
+            max_event_bytes: MAX_EVENT_LEN,
+            max_compressed_chunk_bytes: MAX_COMPRESSED_CHUNK_LEN,
+            max_decompressed_chunk_bytes: MAX_COMPRESSED_CHUNK_LEN,
+        }
+    }
+
+    /// Bound metadata before allocating its encoded bytes or deserializing it.
+    #[must_use]
+    pub fn with_max_metadata_bytes(mut self, limit: usize) -> Self {
+        self.max_metadata_bytes = limit.min(MAX_META_LEN);
+        self
+    }
+
+    /// Bound each raw MessagePack event before payload allocation or decoding.
+    #[must_use]
+    pub fn with_max_event_bytes(mut self, limit: usize) -> Self {
+        self.max_event_bytes = limit.min(MAX_EVENT_LEN);
+        self
+    }
+
+    /// Bound each stored LZ4 chunk, including its four-byte expansion header.
+    #[must_use]
+    pub fn with_max_compressed_chunk_bytes(mut self, limit: usize) -> Self {
+        self.max_compressed_chunk_bytes = limit.min(MAX_COMPRESSED_CHUNK_LEN);
+        self
+    }
+
+    /// Bound each LZ4 chunk's advertised expansion before allocating it.
+    #[must_use]
+    pub fn with_max_decompressed_chunk_bytes(mut self, limit: usize) -> Self {
+        self.max_decompressed_chunk_bytes = limit.min(MAX_COMPRESSED_CHUNK_LEN);
+        self
+    }
+
+    /// Effective encoded metadata limit.
+    #[must_use]
+    pub const fn max_metadata_bytes(self) -> usize {
+        self.max_metadata_bytes
+    }
+
+    /// Effective encoded event limit.
+    #[must_use]
+    pub const fn max_event_bytes(self) -> usize {
+        self.max_event_bytes
+    }
+
+    /// Effective stored LZ4 chunk limit.
+    #[must_use]
+    pub const fn max_compressed_chunk_bytes(self) -> usize {
+        self.max_compressed_chunk_bytes
+    }
+
+    /// Effective expanded LZ4 chunk limit.
+    #[must_use]
+    pub const fn max_decompressed_chunk_bytes(self) -> usize {
+        self.max_decompressed_chunk_bytes
+    }
+}
+
+impl Default for TraceContainerLimits {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(unix)]
 const DISK_FULL_OS_ERROR: i32 = 28;
 
@@ -1018,7 +1109,7 @@ pub struct TraceReader {
     metadata: TraceMetadata,
     event_count: u64,
     events_read: u64,
-    max_event_len: usize,
+    limits: TraceContainerLimits,
     failed: bool,
     events_start_pos: u64,
     compression: CompressionMode,
@@ -1051,7 +1142,31 @@ impl TraceReader {
         Self::open_with_lz4_codec(path, Lz4Codec::Incumbent)
     }
 
+    /// Opens a trace with explicit metadata, event, and compression-buffer limits.
+    ///
+    /// Limits apply before payload allocation and deserialization, including
+    /// metadata admission during opening. They remain in force after rewind.
+    /// This leaves the container format and checksum requirements unchanged.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::open`], and
+    /// [`TraceFileError::OversizedField`] when a payload exceeds its limit.
+    pub fn open_with_limits(
+        path: impl AsRef<Path>,
+        limits: TraceContainerLimits,
+    ) -> TraceFileResult<Self> {
+        Self::open_with_lz4_codec_and_limits(path, Lz4Codec::Incumbent, limits)
+    }
+
     fn open_with_lz4_codec(path: impl AsRef<Path>, lz4_codec: Lz4Codec) -> TraceFileResult<Self> {
+        Self::open_with_lz4_codec_and_limits(path, lz4_codec, TraceContainerLimits::default())
+    }
+
+    fn open_with_lz4_codec_and_limits(
+        path: impl AsRef<Path>,
+        lz4_codec: Lz4Codec,
+        limits: TraceContainerLimits,
+    ) -> TraceFileResult<Self> {
         #[cfg(not(feature = "trace-compression"))]
         let _ = lz4_codec;
         let file = File::open(path)?;
@@ -1132,11 +1247,11 @@ impl TraceReader {
         let meta_len = u32::from_le_bytes(meta_len_bytes) as usize;
 
         // Guard against oversized metadata (DoS mitigation — issues #8, #10)
-        if meta_len > MAX_META_LEN {
+        if meta_len > limits.max_metadata_bytes {
             return Err(TraceFileError::OversizedField {
                 field: "meta_len",
                 actual: meta_len as u64,
-                max: MAX_META_LEN as u64,
+                max: limits.max_metadata_bytes as u64,
             });
         }
 
@@ -1192,7 +1307,7 @@ impl TraceReader {
             metadata,
             event_count,
             events_read: 0,
-            max_event_len: MAX_EVENT_LEN,
+            limits,
             failed: false,
             events_start_pos,
             compression,
@@ -1247,11 +1362,11 @@ impl TraceReader {
     ///
     /// The effective limit never exceeds [`MAX_EVENT_LEN`]. It applies to raw
     /// MessagePack frame bytes, which can exceed the canonical serialized size.
-    /// Metadata and LZ4 chunk buffers retain their separate format limits; this
-    /// is not an overall heap bound. A zero limit admits only an empty stream.
+    /// Metadata and LZ4 chunk limits are unchanged by this method; this is not
+    /// an overall heap bound. A zero limit admits only an empty stream.
     #[must_use]
     pub fn with_max_event_len(mut self, max_event_len: usize) -> Self {
-        self.max_event_len = max_event_len.min(MAX_EVENT_LEN);
+        self.limits = self.limits.with_max_event_bytes(max_event_len);
         self
     }
 
@@ -1331,7 +1446,7 @@ impl TraceReader {
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         // Guard against oversized event length (DoS mitigation — issues #8, #10)
-        validate_event_len_with_limit(len, self.max_event_len)?;
+        validate_event_len_with_limit(len, self.limits.max_event_bytes)?;
 
         // Read event data
         let mut event_bytes = vec![0u8; len];
@@ -1366,7 +1481,7 @@ impl TraceReader {
             .try_into()
             .map_err(|_| TraceFileError::Truncated)?;
         let len = u32::from_le_bytes(len_bytes) as usize;
-        validate_event_len_with_limit(len, self.max_event_len)?;
+        validate_event_len_with_limit(len, self.limits.max_event_bytes)?;
         self.buffer_pos += 4;
 
         // Read event data from buffer
@@ -1397,6 +1512,11 @@ impl TraceReader {
     /// Refills the decompressed buffer from the next compressed chunk.
     #[cfg(feature = "trace-compression")]
     fn refill_decompressed_buffer(&mut self) -> TraceFileResult<()> {
+        // The previous chunk is exhausted. Release its allocation before
+        // admitting the next one rather than retaining two expanded chunks.
+        self.decompressed_buffer = Vec::new();
+        self.buffer_pos = 0;
+
         // Read chunk length
         let mut chunk_len_bytes = [0u8; 4];
         self.reader
@@ -1409,33 +1529,39 @@ impl TraceReader {
         }
 
         // Guard against oversized compressed chunks (DoS mitigation — issues #8, #10)
-        if chunk_len > MAX_COMPRESSED_CHUNK_LEN {
+        if chunk_len > self.limits.max_compressed_chunk_bytes {
             return Err(TraceFileError::OversizedField {
                 field: "compressed_chunk_len",
                 actual: chunk_len as u64,
-                max: MAX_COMPRESSED_CHUNK_LEN as u64,
+                max: self.limits.max_compressed_chunk_bytes as u64,
             });
         }
 
-        // Read compressed chunk
-        let mut compressed = vec![0u8; chunk_len];
-        self.reader
-            .read_exact(&mut compressed)
-            .map_err(truncated_or_io)?;
-
-        // Guard against decompression bombs (OOM mitigation)
-        if compressed.len() >= 4 {
-            let mut len_bytes = [0u8; 4];
-            len_bytes.copy_from_slice(&compressed[0..4]);
-            let uncompressed_len = u32::from_le_bytes(len_bytes) as usize;
-            if uncompressed_len > MAX_COMPRESSED_CHUNK_LEN {
+        // Inspect the fixed-size expansion header before allocating even the
+        // compressed body. A refused expansion need not read that body at all.
+        let mut expansion_header = [0u8; 4];
+        let header_len = if chunk_len >= expansion_header.len() {
+            self.reader
+                .read_exact(&mut expansion_header)
+                .map_err(truncated_or_io)?;
+            let uncompressed_len = u32::from_le_bytes(expansion_header) as usize;
+            if uncompressed_len > self.limits.max_decompressed_chunk_bytes {
                 return Err(TraceFileError::OversizedField {
                     field: "decompressed_chunk_len",
                     actual: uncompressed_len as u64,
-                    max: MAX_COMPRESSED_CHUNK_LEN as u64,
+                    max: self.limits.max_decompressed_chunk_bytes as u64,
                 });
             }
-        }
+            expansion_header.len()
+        } else {
+            0
+        };
+
+        let mut compressed = vec![0u8; chunk_len];
+        compressed[..header_len].copy_from_slice(&expansion_header[..header_len]);
+        self.reader
+            .read_exact(&mut compressed[header_len..])
+            .map_err(truncated_or_io)?;
 
         // Decompress through the selected integration backend.
         self.decompressed_buffer = self.lz4_codec.decode(&compressed)?;

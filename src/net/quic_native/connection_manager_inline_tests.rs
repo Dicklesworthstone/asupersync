@@ -2547,6 +2547,416 @@
 
     #[cfg(feature = "tls")]
     #[test]
+    fn authenticated_application_close_survives_unwind_and_deferred_backpressure() {
+        run_test_with_cx(|cx| async move {
+            for unwind_after_close in [false, true] {
+                let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+                router.set_idle_timeout_micros(0);
+                let cid = ConnectionId::new(b"app-close").unwrap();
+                let peer_cid = ConnectionId::new(b"app-peer").unwrap();
+                let peer = "127.0.0.1:4496".parse().unwrap();
+                let origin = router.clock_origin + Duration::from_secs(17);
+                let now = origin + Duration::from_secs(7);
+                let deadline = origin + Duration::from_secs(10);
+                add_authenticated_close_test_connection(
+                    &cx, &mut router, cid, peer_cid, peer, origin,
+                )
+                .await;
+                router
+                    .with_authenticated_connection(&cx, cid, |connection| {
+                        let stream = connection.open_bidi_stream(&cx).unwrap();
+                        connection
+                            .write_stream(&cx, stream, Bytes::from_static(b"unsent"), false)
+                            .unwrap();
+                    })
+                    .unwrap();
+                let application = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+                assert_eq!(application.len(), 1);
+                router.pending_deferred_packets.extend(application);
+
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    router
+                        .with_authenticated_connection(&cx, cid, |connection| {
+                            connection.begin_close(&cx, 7_000_000, 42).unwrap();
+                            assert!(
+                                !unwind_after_close,
+                                "application panicked after beginning close"
+                            );
+                        })
+                        .unwrap();
+                }));
+                assert_eq!(result.is_err(), unwind_after_close);
+                assert_eq!(router.next_timer_deadline(), Some(deadline));
+
+                // A full endpoint queue must discard stale application output
+                // without losing the close request or committing a packet.
+                assert!(
+                    router
+                        .drain_deferred_output(&cx, now, 0)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                assert_eq!(router.pending_datagram_count_for(cid), 0);
+                let cancelled = Cx::for_testing();
+                cancelled.set_cancel_requested(true);
+                assert!(matches!(
+                    router.drain_deferred_output(&cancelled, now, 1).await,
+                    Err(ConnectionRouterError::Cancelled)
+                ));
+                let close = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+                assert_eq!(close.len(), 1, "the close replaces unsent STREAM output");
+                assert!(!close[0].ack_eliciting);
+                let ciphertext = close[0].packet.data.clone();
+                let mut verifier = deterministic_one_rtt_protection(&cx).await;
+                let decoded = unprotect_1rtt_packet(&cx, peer_cid, &mut verifier, &ciphertext)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    NativeQuicConnection::decode_frames(&decoded.plaintext).unwrap(),
+                    vec![QuicFrame::ConnectionClose {
+                        error_code: VarInt(42),
+                        frame_type: None,
+                        reason_phrase: Bytes::new(),
+                    }]
+                );
+                assert_eq!(router.queued_local_close_deadline(cid), Some(deadline));
+                router.pending_deferred_packets.extend(close);
+                assert!(matches!(
+                    router.drain_deferred_output(&cancelled, now, 1).await,
+                    Err(ConnectionRouterError::Cancelled)
+                ));
+                let close = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+                assert_eq!(close.len(), 1);
+                assert_eq!(
+                    close[0].packet.data, ciphertext,
+                    "retain committed ciphertext"
+                );
+                router.packet_sent(&close[0], Some(now));
+
+                // Later callbacks, including another begin_close, cannot
+                // recreate a sent close or extend the original drain window.
+                router
+                    .with_authenticated_connection(&cx, cid, |connection| {
+                        connection.begin_close(&cx, 8_000_000, 99).unwrap();
+                    })
+                    .unwrap();
+                assert!(
+                    router
+                        .drain_deferred_output(&cx, now, 1)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                assert_eq!(router.next_timer_deadline(), Some(deadline));
+                assert_eq!(
+                    router.connections[&cid].connection.transport().close_code(),
+                    Some(42)
+                );
+                assert!(
+                    router
+                        .expired_connections(deadline - Duration::from_micros(1))
+                        .is_empty()
+                );
+                assert_eq!(router.expired_connections(deadline), vec![cid]);
+                assert!(
+                    router
+                        .process_managed_timer_events(&cx, deadline, &HashSet::new())
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(!router.connections.contains_key(&cid));
+            }
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_close_retry_reuses_ciphertext_and_is_peer_paced() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig {
+                drain_timeout_micros: 10_000_000,
+                ..NativeQuicConnectionConfig::default()
+            });
+            let cid = ConnectionId::new(b"retry-close").unwrap();
+            let peer_cid = ConnectionId::new(b"retry-peer").unwrap();
+            let peer = "127.0.0.1:4498".parse().unwrap();
+            let origin = router.clock_origin + Duration::from_secs(17);
+            let now = origin + Duration::from_secs(7);
+            let deadline = now + Duration::from_secs(10);
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+            router
+                .with_authenticated_connection(&cx, cid, |connection| {
+                    connection.begin_close(&cx, 7_000_000, 42).unwrap();
+                })
+                .unwrap();
+            let initial = router
+                .drain_deferred_output(&cx, now, 1)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            let ciphertext = initial.packet.data.clone();
+            router.packet_sent(&initial, Some(now));
+            let next_packet_number = router.connections[&cid]
+                .connection
+                .next_packet_number_for_protection(PacketNumberSpace::ApplicationData)
+                .unwrap();
+            let interval = Duration::from_micros(
+                router.connections[&cid]
+                    .connection
+                    .transport()
+                    .idle_timeout_floor_micros()
+                    / 3,
+            )
+            .max(Duration::from_millis(1));
+            let retry_at = now + interval;
+            // A locally closing route, like the standalone owner, responds to
+            // the matching peer/CID prefix without processing application data.
+            let mut data = vec![0x40];
+            data.extend_from_slice(cid.as_bytes());
+            data.extend_from_slice(&[0; 24]);
+            let matching = ReceivedPacket {
+                src_addr: peer,
+                data,
+                receive_time: retry_at,
+                transmit_time: None,
+            };
+            let mut early = matching.clone();
+            early.receive_time = retry_at.checked_sub(Duration::from_micros(1)).unwrap();
+            let mut wrong_peer = matching.clone();
+            wrong_peer.src_addr.set_port(4499);
+            let mut wrong_cid = matching.clone();
+            wrong_cid.data[1] ^= 1;
+            let mut long_header = matching.clone();
+            long_header.data =
+                encode_long_packet(cid, LongPacketType::Handshake, 0, QuicFrame::Ping);
+            for packet in [early, wrong_peer, wrong_cid, long_header] {
+                assert!(matches!(
+                    router
+                        .route_packet_with_output(&cx, packet, false)
+                        .await
+                        .unwrap(),
+                    RoutingResult::Drop { .. }
+                ));
+                assert!(
+                    router
+                        .drain_deferred_output(&cx, retry_at, 1)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            for _ in 0..8 {
+                router
+                    .route_packet_with_output(&cx, matching.clone(), false)
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                router
+                    .drain_deferred_output(&cx, retry_at, 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let cancelled = Cx::for_testing();
+            cancelled.set_cancel_requested(true);
+            assert!(matches!(
+                router.drain_deferred_output(&cancelled, retry_at, 1).await,
+                Err(ConnectionRouterError::Cancelled)
+            ));
+            let retries = router.drain_deferred_output(&cx, retry_at, 1).await.unwrap();
+            assert_eq!(retries.len(), 1, "peer traffic coalesces into one retry");
+            assert_eq!(retries[0].packet.data, ciphertext);
+            assert_eq!(router.queued_local_close_deadline(cid), Some(deadline));
+            assert_eq!(
+                router.connections[&cid]
+                    .connection
+                    .next_packet_number_for_protection(PacketNumberSpace::ApplicationData)
+                    .unwrap(),
+                next_packet_number,
+                "a retry does not encrypt or consume another packet number"
+            );
+            assert_eq!(
+                router.connections[&cid]
+                    .connection
+                    .transport()
+                    .bytes_in_flight(),
+                0
+            );
+
+            // A queued retry cannot multiply while the socket is blocked, and
+            // the rate limit starts at the actual later send, not its request.
+            let sent_at = retry_at + interval;
+            let mut later = matching.clone();
+            later.receive_time = sent_at;
+            for _ in 0..8 {
+                router
+                    .route_packet_with_output(&cx, later.clone(), false)
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                router
+                    .drain_deferred_output(&cx, sent_at, 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            router.pending_deferred_packets.extend(retries);
+            assert!(matches!(
+                router.drain_deferred_output(&cancelled, sent_at, 1).await,
+                Err(ConnectionRouterError::Cancelled)
+            ));
+            let retained = router.drain_deferred_output(&cx, sent_at, 1).await.unwrap();
+            assert_eq!(retained.len(), 1);
+            assert_eq!(retained[0].packet.data, ciphertext);
+            router.packet_sent(&retained[0], Some(sent_at));
+            later.receive_time = (sent_at + interval)
+                .checked_sub(Duration::from_micros(1))
+                .unwrap();
+            router
+                .route_packet_with_output(&cx, later.clone(), false)
+                .await
+                .unwrap();
+            assert!(
+                router
+                    .drain_deferred_output(&cx, later.receive_time, 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            later.receive_time = sent_at + interval;
+            router
+                .route_packet_with_output(&cx, later.clone(), false)
+                .await
+                .unwrap();
+
+            // Shutdown may take an already requested retry without rebuilding
+            // the original close, extending its deadline, or sending twice.
+            let shutdown = router
+                .prepare_shutdown_close_packets(&cx, later.receive_time)
+                .await
+                .unwrap();
+            assert_eq!(shutdown.len(), 1);
+            assert_eq!(shutdown[0].0.data, ciphertext);
+            assert_eq!(shutdown[0].1, deadline);
+            assert!(
+                router
+                    .prepare_shutdown_close_packets(&cx, later.receive_time)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                router.connections[&cid]
+                    .connection
+                    .next_packet_number_for_protection(PacketNumberSpace::ApplicationData)
+                    .unwrap(),
+                next_packet_number
+            );
+            let (packet, _) = shutdown.into_iter().next().unwrap();
+            router.packet_sent(
+                &RoutedOutgoingPacket {
+                    connection_id: cid,
+                    packet,
+                    final_handshake_flight: false,
+                    ack_eliciting: false,
+                },
+                Some(later.receive_time),
+            );
+            later.receive_time = deadline;
+            router
+                .route_packet_with_output(&cx, later, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                router.connections[&cid].local_close_output,
+                Some(LocalCloseOutput::Sent)
+            );
+            assert!(
+                router
+                    .drain_deferred_output(&cx, deadline, 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(router.next_timer_deadline(), Some(deadline));
+            assert!(
+                router
+                    .process_managed_timer_events(&cx, deadline, &HashSet::new())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                !router.connections.contains_key(&cid),
+                "expiry drops the retained close cache"
+            );
+            assert_eq!(router.pending_datagram_count_for(cid), 0);
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_application_callback_does_not_echo_peer_close() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let cid = ConnectionId::new(b"peer-closed").unwrap();
+            let peer_cid = ConnectionId::new(b"silent-peer").unwrap();
+            let peer = "127.0.0.1:4497".parse().unwrap();
+            let origin = router.clock_origin;
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+            router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .process_packet_frames(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    0,
+                    &[QuicFrame::ConnectionClose {
+                        error_code: VarInt(42),
+                        frame_type: None,
+                        reason_phrase: Bytes::new(),
+                    }],
+                    1_000_000,
+                )
+                .unwrap();
+            router
+                .with_authenticated_connection(&cx, cid, |connection| {
+                    assert!(connection.close_was_peer_initiated());
+                    connection.begin_close(&cx, 2_000_000, 99).unwrap();
+                })
+                .unwrap();
+            assert!(
+                router
+                    .drain_deferred_output(&cx, origin + Duration::from_secs(2), 1)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "a callback cannot turn peer-initiated draining into local close output"
+            );
+            assert_eq!(router.connections[&cid].local_close_output, None);
+            assert!(router.connections[&cid].retained_local_close.is_none());
+            assert_eq!(
+                router.connections[&cid].connection.transport().close_code(),
+                Some(42)
+            );
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(4))
+            );
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
     fn authenticated_close_waits_for_buffered_output_and_acknowledged_flight() {
         run_test_with_cx(|cx| async move {
             let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());

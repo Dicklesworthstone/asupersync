@@ -242,6 +242,33 @@
         out.to_vec()
     }
 
+    #[test]
+    fn split_recv_keeps_one_inline_copy_of_the_receive_operation() {
+        let websocket = WebSocket::from_upgraded(
+            TestIo::new(vec![]).with_stalled_reads(),
+            WebSocketConfig {
+                ping_interval: None,
+                ..WebSocketConfig::default()
+            },
+        );
+        let (mut read, _write) = websocket.split();
+        let cx = Cx::for_testing();
+        let inner_size = std::mem::size_of_val(&read.recv_inner(&cx));
+        let recv = read.recv(&cx);
+        let recv_size = std::mem::size_of_val(&recv);
+        assert!(
+            recv_size < 2 * inner_size,
+            "recv must borrow its pinned operation, not store it twice: outer={recv_size}, inner={inner_size}"
+        );
+        let mut recv = std::pin::pin!(recv);
+        assert!(
+            recv.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending(),
+            "the measured future must reach the parked transport read"
+        );
+    }
+
     // The read half echoes a peer Close while the write half's frame is parked
     // unsent. The writer appended its unsent tail after the queued echo, so
     // the wire carried X[..n], Close, X[n..] and the peer saw a corrupt frame

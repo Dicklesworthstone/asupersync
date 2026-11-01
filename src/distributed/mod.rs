@@ -34,6 +34,9 @@ pub mod distribution;
 pub mod encoding;
 pub mod global_names;
 pub mod membership;
+/// Structured ownership of prevalidated native distributed services.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub mod node;
 pub mod recovery;
 pub mod snapshot;
 pub mod symbol_service;
@@ -65,6 +68,13 @@ pub use encoding::{
 };
 pub use membership::{
     MemberState, MembershipEvent, MembershipKind, Swim, SwimConfig, SwimConfigError,
+};
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub use node::{
+    NativeDistributedComponent, NativeDistributedComponentResult, NativeDistributedNode,
+    NativeDistributedNodeReport,
+    NativeDistributedNodeStartError, NativeDistributedNodeStartFailure,
+    NativeDistributedNodeStopCause, NativeListenerResult, NativeMembershipResult,
 };
 pub use recovery::{
     CollectedSymbol, CollectionConsistency, CollectionMetrics, RecoveryCollector, RecoveryConfig,

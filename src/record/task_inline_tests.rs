@@ -1035,6 +1035,183 @@
     }
 
     #[test]
+    fn materialized_cancel_request_still_reschedules_first_checkpoint_ack() {
+        init_test("materialized_cancel_request_still_reschedules_first_checkpoint_ack");
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
+        let cx: crate::cx::Cx = crate::cx::Cx::from_inner(Arc::clone(&inner));
+        let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
+        record.set_cx_inner(Arc::clone(&inner));
+        assert!(record.start_running());
+        let reason = CancelReason::shutdown();
+        assert!(request_cancel(&mut record, reason.clone()));
+        assert!(matches!(record.state, TaskState::CancelRequested { .. }));
+        assert!(
+            !record.reconcile_checkpoint_cancel(reason.clone()),
+            "the owner already materialized the identical reason and cleanup budget"
+        );
+
+        for first_ack in [true, false] {
+            assert!(cx.checkpoint().is_err());
+            let (receipt, wakes) = record.consume_checkpoint_cancel_ack().into_parts();
+            let receipt = receipt.expect("every acknowledged checkpoint retains its receipt");
+            assert_eq!(
+                receipt.needs_reschedule(),
+                first_ack,
+                "only the first acknowledgement schedules an additional cleanup poll"
+            );
+            assert!(receipt.request_transition.is_none());
+            assert_eq!(receipt.acknowledge_transition.is_some(), first_ack);
+            assert_eq!(receipt.effective_reason, reason);
+            assert!(matches!(record.state, TaskState::Cancelling { .. }));
+            assert_eq!(record.cleanup_budget(), Some(reason.cleanup_budget()));
+            assert!(!inner.read().cancel_acknowledged);
+            assert!(wakes.is_empty());
+            wakes.dispatch();
+        }
+        crate::test_complete!("materialized_cancel_request_still_reschedules_first_checkpoint_ack");
+    }
+
+    #[test]
+    fn checkpoint_budget_tightening_reschedules_without_changing_reason() {
+        init_test("checkpoint_budget_tightening_reschedules_without_changing_reason");
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
+        let cx: crate::cx::Cx = crate::cx::Cx::from_inner(Arc::clone(&inner));
+        let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
+        record.set_cx_inner(Arc::clone(&inner));
+        assert!(record.start_running());
+        let reason = CancelReason::shutdown();
+        let cleanup_budget = reason.cleanup_budget();
+        let initial_budget = cleanup_budget.with_poll_quota(cleanup_budget.poll_quota + 1);
+        assert!(request_cancel_with_budget(
+            &mut record,
+            reason.clone(),
+            initial_budget,
+        ));
+        assert_eq!(record.acknowledge_cancel(), Some(reason.clone()));
+        assert_eq!(record.cleanup_budget(), Some(initial_budget));
+
+        for tightened in [true, false] {
+            assert!(cx.checkpoint().is_err());
+            let (receipt, wakes) = record.consume_checkpoint_cancel_ack().into_parts();
+            let receipt = receipt.expect("cleanup checkpoint receipt");
+            assert_eq!(
+                receipt.needs_reschedule(),
+                tightened,
+                "a newly tightened budget schedules once without a reason or phase change"
+            );
+            assert!(receipt.request_transition.is_none());
+            assert!(receipt.acknowledge_transition.is_none());
+            assert_eq!(receipt.effective_reason, reason);
+            assert!(matches!(record.state, TaskState::Cancelling { .. }));
+            assert_eq!(record.cleanup_budget(), Some(cleanup_budget));
+            assert_eq!(inner.read().budget, cleanup_budget);
+            assert!(wakes.is_empty());
+            wakes.dispatch();
+        }
+        crate::test_complete!("checkpoint_budget_tightening_reschedules_without_changing_reason");
+    }
+
+    #[test]
+    fn repeated_checkpoint_receipts_only_reschedule_new_cancellation_state() {
+        init_test("repeated_checkpoint_receipts_only_reschedule_new_cancellation_state");
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
+        let cx: crate::cx::Cx = crate::cx::Cx::from_inner(Arc::clone(&inner));
+        let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
+        record.set_cx_inner(Arc::clone(&inner));
+        assert!(record.start_running());
+
+        cx.cancel_fast(crate::types::CancelKind::RaceLost);
+        assert!(cx.checkpoint().is_err());
+        let (receipt, wakes) = record.consume_checkpoint_cancel_ack().into_parts();
+        let receipt = receipt.expect("first checkpoint receipt");
+        assert!(
+            receipt.needs_reschedule(),
+            "first acknowledgement drives cleanup"
+        );
+        assert!(receipt.request_transition.is_some());
+        assert!(receipt.acknowledge_transition.is_some());
+        assert!(wakes.is_empty());
+        wakes.dispatch();
+
+        for strengthened in [false, true] {
+            if strengthened {
+                cx.cancel_fast(crate::types::CancelKind::Shutdown);
+                assert!(cx.checkpoint().is_err());
+                let (receipt, wakes) = record.consume_checkpoint_cancel_ack().into_parts();
+                let receipt = receipt.expect("stronger cancellation receipt");
+                assert!(receipt.needs_reschedule(), "stronger reason drives cleanup");
+                assert!(
+                    receipt
+                        .effective_reason
+                        .is_kind(crate::types::CancelKind::Shutdown)
+                );
+                assert!(receipt.request_transition.is_none());
+                assert!(receipt.acknowledge_transition.is_none());
+                assert!(wakes.is_empty());
+                wakes.dispatch();
+            }
+
+            for with_message in [false, true] {
+                if with_message {
+                    assert!(cx.checkpoint_with("waiting for cleanup I/O").is_err());
+                } else {
+                    assert!(cx.checkpoint().is_err());
+                }
+                let (receipt, wakes) = record.consume_checkpoint_cancel_ack().into_parts();
+                let receipt =
+                    receipt.expect("every observed checkpoint retains its replay receipt");
+                assert!(!receipt.needs_reschedule(), "unchanged cleanup can park");
+                assert!(receipt.request_transition.is_none());
+                assert!(receipt.acknowledge_transition.is_none());
+                assert!(!inner.read().cancel_acknowledged);
+                assert!(wakes.is_empty());
+                wakes.dispatch();
+            }
+        }
+
+        // A repeated receipt must not discard callback debt. This Waker can
+        // independently make the task runnable after the owner releases locks.
+        struct CountWake(Arc<AtomicUsize>);
+        impl std::task::Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = std::task::Waker::from(Arc::new(CountWake(Arc::clone(&wake_count))));
+        {
+            let mut guard = inner.write();
+            guard.cancel_waker = Some(Arc::new(CancelWaker::new(waker)));
+            guard.cancel_wakers_pending = true;
+        }
+        assert!(cx.checkpoint().is_err());
+        let (receipt, wakes) = record.consume_checkpoint_cancel_ack().into_parts();
+        assert!(
+            !receipt
+                .expect("repeated checkpoint receipt")
+                .needs_reschedule()
+        );
+        assert!(!wakes.is_empty());
+        assert_eq!(wake_count.load(Ordering::SeqCst), 0);
+        wakes.dispatch();
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert!(!inner.read().cancel_wakers_pending);
+        crate::test_complete!("repeated_checkpoint_receipts_only_reschedule_new_cancellation_state");
+    }
+
+    #[test]
     fn delegated_publication_promotes_stronger_cx_reason_before_wakers() {
         init_test("delegated_publication_promotes_stronger_cx_reason_before_wakers");
 

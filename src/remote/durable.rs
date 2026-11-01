@@ -11,7 +11,9 @@
 //!
 //! The caller supplies a regular read/write file, its access policy and durable
 //! directory linkage. This module retains an exclusive lock and never opens a
-//! path, truncates, repairs, deletes or compacts the file. Do not retain cloned
+//! path, truncates, repairs or deletes a file. Explicit compaction writes a
+//! caller-supplied replacement and requires the caller to publish it durably.
+//! Do not retain cloned
 //! handles or permit writers that ignore the lock. Authentication is not
 //! encryption or an external rollback witness: replacing a file with an older
 //! authenticated prefix requires a separately retained head to detect.
@@ -46,6 +48,7 @@ const RESERVATION_BYTES: usize = 8 + 32;
 const TERMINAL_BYTES: usize = 8 + 8 + 8;
 const RESERVE: u8 = 0;
 const COMPLETE: u8 = 1;
+const CLOCK_FLOOR: u8 = 2;
 
 /// Immutable storage and admission limits, authenticated in the journal header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,7 +212,8 @@ impl fmt::Debug for DurableRemoteReconciliationPermit {
 /// Pending entries reserve both their full encoded outcome allowance and their
 /// maximum terminal record on disk before `Execute` is returned. Later requests
 /// cannot consume that completion capacity. Terminal expiry frees retained
-/// memory and key admission, but append-only disk bytes are never reclaimed.
+/// memory and key admission. Explicit [`Self::compact`] can reclaim expired
+/// records through a caller-owned replacement and durable publication boundary.
 /// A read-only incomplete tail preserves exact terminal replay; complete corrupt
 /// records fail the entire open. Poisoned owners refuse even cached replay.
 pub struct DurableRemoteJournal {
@@ -265,7 +269,7 @@ impl DurableRemoteJournal {
     /// End of the authenticated synced prefix, excluding an incomplete tail.
     #[must_use]
     pub fn committed_bytes(&self) -> u64 { self.core.offset }
-    /// Persisted reservation and terminal records; replay does not append.
+    /// Persisted records, including compaction clock floors; replay does not append.
     #[must_use]
     pub fn records(&self) -> u64 { self.core.sequence }
     /// Pending and unexpired terminal entries as of the last observed timestamp.
@@ -329,6 +333,7 @@ impl DurableRemoteJournal {
     }
 }
 
+#[derive(Clone)]
 struct Config {
     computation: String,
     schema: ComputationRegistryFingerprint,
@@ -379,7 +384,7 @@ impl Config {
 
 enum EntryState {
     Pending,
-    Terminal { expires_at: u64, outcome: Zeroizing<Vec<u8>> },
+    Terminal { expires_at: u64, completion_sequence: u64, outcome: Zeroizing<Vec<u8>> },
 }
 
 struct Entry {
@@ -572,7 +577,8 @@ impl<F: JournalIo> Journal<F> {
             if !length_tag.verify_domain_payload(&log.config.key, LENGTH_DOMAIN, &prefix_payload(body_len, next, log.last)) {
                 return Err(DurableRemoteError::Authentication);
             }
-            if body_len < (COMMON_BYTES + 1 + TERMINAL_BYTES) as u64
+            if (body_len != COMMON_BYTES as u64
+                && body_len < (COMMON_BYTES + 1 + TERMINAL_BYTES) as u64)
                 || body_len > size64(log.config.max_body_bytes()?)?
             { return Err(DurableRemoteError::Format); }
             let size = add64(body_len, (PREFIX_BYTES + TAG_BYTES) as u64)?;
@@ -602,7 +608,7 @@ impl<F: JournalIo> Journal<F> {
         self.last_time = now;
         let retained_bytes = &mut self.retained_bytes;
         self.entries.retain(|_, entry| {
-            if let EntryState::Terminal { expires_at, outcome } = &entry.state
+            if let EntryState::Terminal { expires_at, outcome, .. } = &entry.state
                 && now >= *expires_at
             {
                 *retained_bytes -= outcome.capacity();
@@ -741,7 +747,9 @@ impl<F: JournalIo> Journal<F> {
         payload.extend_from_slice(&size64(encoded.len())?.to_le_bytes());
         payload.extend_from_slice(&encoded);
         self.append_record(COMPLETE, &reservation.peer, reservation.key, &payload, now)?;
-        self.entries.get_mut(&id).expect("validated pending reservation").state = EntryState::Terminal { expires_at, outcome: encoded };
+        self.entries.get_mut(&id).expect("validated pending reservation").state = EntryState::Terminal {
+            expires_at, completion_sequence: self.sequence, outcome: encoded,
+        };
         self.retained_bytes = retained;
         self.reserved_terminal_bytes = reserved;
         Ok(decoded)
@@ -794,6 +802,21 @@ impl<F: JournalIo> Journal<F> {
         let peer_len = usize::from(cursor.take(1)?[0]);
         let key = IdempotencyKey::from_raw(u128::from_le_bytes(cursor.take(16)?.try_into().expect("key")));
         let peer = std::str::from_utf8(cursor.take(peer_len)?).map_err(|_| DurableRemoteError::Format)?;
+        if kind == CLOCK_FLOOR {
+            // A compaction floor has no request identity or payload. Accept
+            // only its canonical authenticated encoding, and preserve every
+            // pending request's reserved completion capacity.
+            if peer_len != 0 || key.raw() != 0 || !cursor.done() {
+                return Err(DurableRemoteError::Format);
+            }
+            self.observe(now)?;
+            if add64(add64(self.offset, size)?, self.reserved_terminal_bytes)?
+                > self.config.limits.max_journal_bytes
+            {
+                return Err(DurableRemoteError::Limit);
+            }
+            return Ok(());
+        }
         if !valid_label(peer) { return Err(DurableRemoteError::Format); }
         let peer = NodeId::new(peer);
         self.observe(now)?;
@@ -836,7 +859,9 @@ impl<F: JournalIo> Journal<F> {
                 if add64(add64(self.offset, size)?, reserved)? > self.config.limits.max_journal_bytes {
                     return Err(DurableRemoteError::Limit);
                 }
-                self.entries.get_mut(&id).expect("validated pending entry").state = EntryState::Terminal { expires_at, outcome: encoded };
+                self.entries.get_mut(&id).expect("validated pending entry").state = EntryState::Terminal {
+                    expires_at, completion_sequence: sequence, outcome: encoded,
+                };
                 self.retained_bytes = retained;
                 self.reserved_terminal_bytes = reserved;
             }
@@ -845,6 +870,9 @@ impl<F: JournalIo> Journal<F> {
         Ok(())
     }
 }
+
+mod compaction;
+pub use compaction::DurableRemoteCompactionReport;
 
 mod runtime;
 pub use runtime::DurableRemoteComputation;

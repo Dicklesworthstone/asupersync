@@ -204,6 +204,180 @@ impl Drop for Retired {
 }
 
 #[test]
+#[cfg(unix)]
+fn native_compaction_retains_publication_and_file_ownership_after_waiter_drop() {
+    for workers in [1, 2] {
+        let (file, journal) = JournalFile::create();
+        let replacement_path = file.path.with_file_name("replacement");
+        let replacement = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&replacement_path)
+            .unwrap();
+        let now = Arc::new(AtomicU64::new(1000));
+        let clock = Arc::clone(&now);
+        let owner = Arc::new(DurableRemoteComputation::new(journal, move || {
+            clock.load(Ordering::Acquire)
+        }));
+        let runtime = native_runtime(workers, true);
+        let gate = Arc::new(WorkerGate::default());
+        let _release_on_unwind = ReleaseOnDrop(Arc::clone(&gate));
+        let published = Arc::new(AtomicUsize::new(0));
+        let publish_count = Arc::clone(&published);
+        let publish_gate = Arc::clone(&gate);
+        let publish_path = file.path.clone();
+
+        run(&runtime, async {
+            let cx = Cx::current().unwrap();
+            for (key, timestamp) in [(1, 1000), (2, 20_000)] {
+                now.store(timestamp, Ordering::Release);
+                success(
+                    owner
+                        .call(&cx, invocation(&cx, key), |_, _| async {
+                            RemoteOutcome::Success(INPUT.to_vec())
+                        })
+                        .await
+                        .unwrap(),
+                    INPUT,
+                );
+            }
+            let old_bytes = owner.journal.lock().as_ref().unwrap().committed_bytes();
+            now.store(21_000, Ordering::Release);
+            let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let mut compacting = Box::pin(owner.compact(region.cx(), replacement, move || {
+                // This witness occurs after the entire candidate was synced and
+                // before either the pathname or active owner can be replaced.
+                publish_gate.block();
+                std::fs::rename(&replacement_path, &publish_path)?;
+                File::open(publish_path.parent().unwrap())?.sync_all()?;
+                publish_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+            let mut entered = Box::pin(gate.entered());
+            poll_fn(|task| {
+                assert!(compacting.as_mut().poll(task).is_pending());
+                entered.as_mut().poll(task)
+            })
+            .await;
+            drop(compacting);
+            assert!(owner.in_flight());
+            assert_eq!(owner.journal_status(), None);
+            assert_eq!(published.load(Ordering::SeqCst), 0);
+            assert!(matches!(file.reopen(), Err(DurableRemoteError::Locked)));
+            assert!(matches!(
+                owner
+                    .call(&cx, invocation(&cx, 2), |_, _| async {
+                        panic!("compaction owns the only invocation slot")
+                    })
+                    .await,
+                Err(DurableRemoteError::Busy)
+            ));
+            let mut closing = Box::pin(region.close());
+            poll_fn(|task| {
+                assert!(
+                    closing.as_mut().poll(task).is_pending(),
+                    "the region must retain the actual publication worker"
+                );
+                Poll::Ready(())
+            })
+            .await;
+            gate.release();
+            closing.await.unwrap();
+            assert!(!owner.in_flight());
+            assert_eq!(published.load(Ordering::SeqCst), 1);
+            assert_eq!(owner.journal_status(), Some(DurableRemoteJournalStatus::Writable));
+            assert!(owner.journal.lock().as_ref().unwrap().committed_bytes() < old_bytes);
+            assert_eq!(records(&owner), 3, "one retained pair and the clock floor");
+            success(
+                owner
+                    .call(&cx, invocation(&cx, 2), |_, _| async {
+                        panic!("retained completion must survive publication")
+                    })
+                    .await
+                    .unwrap(),
+                INPUT,
+            );
+        });
+        drop(owner);
+        drained(&runtime);
+        let mut restored = file.reopen().unwrap();
+        assert!(matches!(
+            restored.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(2), INPUT, 20_999),
+            Err(DurableRemoteError::ClockRegression)
+        ));
+        match restored.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(2), INPUT, 21_000).unwrap() {
+            DurableRemoteAdmission::Replay(outcome) => success(outcome, INPUT),
+            DurableRemoteAdmission::Execute(_) => panic!("reopen must not re-execute retained work"),
+        }
+    }
+}
+
+#[test]
+fn queued_compaction_cancellation_leaves_both_files_unchanged_and_drains() {
+    for workers in [1, 2] {
+        let (file, journal) = JournalFile::create();
+        let source_bytes = journal.committed_bytes();
+        let replacement_path = file.path.with_file_name("replacement");
+        let replacement = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&replacement_path)
+            .unwrap();
+        let clocks = Arc::new(AtomicUsize::new(0));
+        let clock_count = Arc::clone(&clocks);
+        let owner = Arc::new(DurableRemoteComputation::new(journal, move || {
+            clock_count.fetch_add(1, Ordering::SeqCst);
+            1000
+        }));
+        let runtime = native_runtime(workers, true);
+        let pool = runtime.blocking_handle().unwrap();
+        let gate = Arc::new(WorkerGate::default());
+        let _release_on_unwind = ReleaseOnDrop(Arc::clone(&gate));
+        let worker_gate = Arc::clone(&gate);
+        let blocker = pool.spawn(move || worker_gate.block());
+        run(&runtime, async {
+            let cx = Cx::current().unwrap();
+            gate.entered().await;
+            let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let mut compacting = Box::pin(owner.compact(region.cx(), replacement, || {
+                panic!("a cancelled queued compaction cannot publish")
+            }));
+            poll_fn(|task| {
+                assert!(compacting.as_mut().poll(task).is_pending());
+                if pool.pending_count() == 1 {
+                    Poll::Ready(())
+                } else {
+                    task.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            drop(compacting);
+            assert!(owner.in_flight());
+            let mut closing = Box::pin(region.close());
+            poll_fn(|task| {
+                assert!(closing.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            gate.release();
+            closing.await.unwrap();
+            assert!(!owner.in_flight());
+            assert_eq!(owner.journal_status(), Some(DurableRemoteJournalStatus::Writable));
+        });
+        assert!(blocker.wait_timeout(Duration::from_secs(5)));
+        assert_eq!(clocks.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::metadata(&file.path).unwrap().len(), source_bytes);
+        assert_eq!(std::fs::metadata(&replacement_path).unwrap().len(), 0);
+        drop(owner);
+        assert_eq!(file.reopen().unwrap().records(), 0);
+        drained(&runtime);
+    }
+}
+
+#[test]
 fn registration_rejects_mismatched_schema_and_duplicate_without_replacing_handler() {
     let (_file, journal) = JournalFile::create();
     let fingerprint = journal.schema_fingerprint();

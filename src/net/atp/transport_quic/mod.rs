@@ -68,6 +68,10 @@
 //! tests and scaffold-only drivers; they are not the B5 bounded-memory proof
 //! path.
 
+mod delta_cdc;
+mod tree_delta;
+#[cfg(any(feature = "tls", test))]
+mod delta_chunks;
 #[cfg(feature = "tls")]
 pub mod native_link;
 pub mod symbol_datagram;
@@ -1033,6 +1037,9 @@ pub struct QuicConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct QuicReceiveOptions {
     sparse_files: bool,
+    delta_chunks: bool,
+    cdc_delta: bool,
+    tree_delta: bool,
 }
 
 impl QuicReceiveOptions {
@@ -1041,6 +1048,9 @@ impl QuicReceiveOptions {
     pub const fn new() -> Self {
         Self {
             sparse_files: false,
+            delta_chunks: false,
+            cdc_delta: false,
+            tree_delta: false,
         }
     }
 
@@ -1058,6 +1068,69 @@ impl QuicReceiveOptions {
     #[must_use]
     pub const fn sparse_files(&self) -> bool {
         self.sparse_files
+    }
+
+    /// Enable authenticated fixed-chunk reuse for bounded single regular files
+    /// on the native UDP receive path and native UDP endpoint receiver.
+    ///
+    /// Requires [`QuicConfig::enable_delta`] and a strict delta control key.
+    /// Both peers must opt in; old peers and unsupported file shapes retain
+    /// the existing full/no-op behavior. Reused ranges are verified again and
+    /// staged with received chunks before whole-file integrity and publication.
+    #[must_use]
+    pub const fn with_delta_chunks(mut self, enabled: bool) -> Self {
+        self.delta_chunks = enabled;
+        self
+    }
+
+    /// Whether native UDP transfers may negotiate changed-chunk reconstruction.
+    #[must_use]
+    pub const fn delta_chunks(&self) -> bool {
+        self.delta_chunks || self.cdc_delta || self.tree_delta
+    }
+
+    /// Accept authenticated content-defined chunks on the native UDP path.
+    ///
+    /// Implies changed-chunk reconstruction. Both peers must opt in before the
+    /// distinct CDC manifest is admitted; fixed and older peers keep their
+    /// existing behavior. Actual chunk count and wire size remain bounded.
+    #[must_use]
+    pub const fn with_cdc_delta(mut self, enabled: bool) -> Self {
+        self.cdc_delta = enabled;
+        self
+    }
+
+    /// Whether native UDP transfers may negotiate content-defined delta chunks.
+    #[must_use]
+    pub const fn cdc_delta(&self) -> bool {
+        self.cdc_delta
+    }
+
+    /// Accept authenticated whole-file reuse within directory transfers.
+    ///
+    /// Reused files are rehashed into staging before the complete manifest is
+    /// verified and published. Receiver-only paths retain the ordinary
+    /// directory transfer behavior; this option does not enable deletion.
+    #[must_use]
+    pub const fn with_tree_delta(mut self, enabled: bool) -> Self {
+        self.tree_delta = enabled;
+        self
+    }
+
+    /// Whether native directory transfers may negotiate whole-file reuse.
+    #[must_use]
+    pub const fn tree_delta(&self) -> bool {
+        self.tree_delta
+    }
+
+    fn validate_detached(&self) -> Result<(), QuicTransportError> {
+        self.validate()?;
+        if self.delta_chunks() {
+            return Err(QuicTransportError::Config(
+                "QUIC changed chunks require the native UDP receive path; detached connection receivers do not negotiate this mode".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), QuicTransportError> {
@@ -1080,6 +1153,9 @@ impl QuicReceiveOptions {
 pub struct QuicSendOptions {
     compression: CompressionMode,
     compression_parallelism: usize,
+    delta_chunks: bool,
+    cdc_delta: bool,
+    tree_delta: bool,
 }
 
 impl Default for QuicSendOptions {
@@ -1095,6 +1171,9 @@ impl QuicSendOptions {
         Self {
             compression: CompressionMode::Off,
             compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
+            delta_chunks: false,
+            cdc_delta: false,
+            tree_delta: false,
         }
     }
 
@@ -1132,6 +1211,69 @@ impl QuicSendOptions {
     #[must_use]
     pub const fn compression(&self) -> CompressionMode {
         self.compression
+    }
+
+    /// Offer authenticated fixed-chunk reuse for bounded single regular files.
+    ///
+    /// Requires [`QuicConfig::enable_delta`], a strict delta control key, and
+    /// compression off. A receiver that also opts in requests only missing
+    /// chunks, carried raw on the reliable control stream. Legacy peers and
+    /// unsupported shapes retain the existing full/no-op transfer behavior.
+    #[must_use]
+    pub const fn with_delta_chunks(mut self, enabled: bool) -> Self {
+        self.delta_chunks = enabled;
+        self
+    }
+
+    /// Whether the sender advertises authenticated changed-chunk support.
+    #[must_use]
+    pub const fn delta_chunks(&self) -> bool {
+        self.delta_chunks || self.cdc_delta || self.tree_delta
+    }
+
+    /// Offer authenticated content-defined chunks for insertion-resistant reuse.
+    ///
+    /// Implies changed-chunk support and its strict-key, delta-enabled and
+    /// compression-off requirements. The sender selects CDC only after an
+    /// authenticated acknowledgement. Files exceeding the actual chunk-count
+    /// or manifest wire budget retain the fixed-chunk fallback.
+    #[must_use]
+    pub const fn with_cdc_delta(mut self, enabled: bool) -> Self {
+        self.cdc_delta = enabled;
+        self
+    }
+
+    /// Whether the sender offers content-defined delta chunks.
+    #[must_use]
+    pub const fn cdc_delta(&self) -> bool {
+        self.cdc_delta
+    }
+
+    /// Offer bounded, authenticated whole-file reuse for directory transfers.
+    ///
+    /// Packing and metadata remain intact. Both peers must opt in; unsupported
+    /// trees and older peers retain the ordinary full-transfer behavior. This
+    /// implies changed-chunk authority requirements and requires compression off.
+    #[must_use]
+    pub const fn with_tree_delta(mut self, enabled: bool) -> Self {
+        self.tree_delta = enabled;
+        self
+    }
+
+    /// Whether the sender offers whole-file reuse within directory transfers.
+    #[must_use]
+    pub const fn tree_delta(&self) -> bool {
+        self.tree_delta
+    }
+
+    fn validate(&self, config: &QuicConfig) -> Result<(), QuicTransportError> {
+        validate_quic_delta_chunks_option(self.delta_chunks(), config)?;
+        if self.delta_chunks() && self.compression() != CompressionMode::Off {
+            return Err(QuicTransportError::Config(
+                "QUIC changed chunks cannot be combined with source-stream compression".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -2909,7 +3051,7 @@ struct QuicDeltaObjectRequest {
     request: DeltaObjectRequest,
 }
 
-/// Terminal proof for an authenticated QUIC delta no-op.
+/// Terminal proof for an authenticated QUIC delta result or refusal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg(any(feature = "tls", test))]
@@ -4256,12 +4398,26 @@ enum QuicBuildItem {
 
 const QUIC_DELTA_MAX_MANIFEST_CHUNKS: u64 = 4_096;
 const QUIC_DELTA_ENVELOPE_WIRE_BUDGET: usize = 2 * 1024;
+#[cfg(any(feature = "tls", test))]
+const QUIC_REFUSAL_REASON_MAX_BYTES: usize = 512;
 
 fn quic_delta_control_auth_context(config: &QuicConfig) -> Option<&SecurityContext> {
     config
         .delta_control_auth_context
         .as_ref()
         .filter(|context| context.mode() == AuthMode::Strict)
+}
+
+fn validate_quic_delta_chunks_option(
+    enabled: bool,
+    config: &QuicConfig,
+) -> Result<(), QuicTransportError> {
+    if enabled && (!config.enable_delta || quic_delta_control_auth_context(config).is_none()) {
+        return Err(QuicTransportError::Config(
+            "QUIC changed chunks require enable_delta and a strict delta control authentication context".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn quic_delta_manifest_entry(manifest: &TransferManifest) -> Option<&ManifestEntry> {
@@ -4278,6 +4434,7 @@ fn quic_delta_manifest_entry(manifest: &TransferManifest) -> Option<&ManifestEnt
     .then_some(entry)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_quic_delta_manifest_for_file(
     cx: &Cx,
     tree_id: &str,
@@ -4288,15 +4445,48 @@ async fn build_quic_delta_manifest_for_file(
     expected_sha256_hex: &str,
     chunk_size: usize,
 ) -> Result<DeltaManifestWire, QuicTransportError> {
+    build_quic_delta_manifest_with_layout(
+        cx, tree_id, path, entry_index, rel_path, expected_size,
+        expected_sha256_hex, chunk_size, false,
+    )
+    .await?
+    .ok_or_else(|| QuicTransportError::Control(
+        "QUIC fixed delta manifest exceeds its chunk-count budget".to_string(),
+    ))
+}
+
+/// None means the actual bounded chunk index cannot represent this file.
+/// Callers choosing an optional CDC layout retain their fixed manifest.
+#[allow(clippy::too_many_arguments)]
+async fn build_quic_delta_manifest_with_layout(
+    cx: &Cx,
+    tree_id: &str,
+    path: &Path,
+    entry_index: u32,
+    rel_path: &str,
+    expected_size: u64,
+    expected_sha256_hex: &str,
+    chunk_size: usize,
+    content_defined: bool,
+) -> Result<Option<DeltaManifestWire>, QuicTransportError> {
+    use crate::net::atp::transport_common::delta::cdc;
+
     const OBJECT_DATA_HEADER_BYTES: usize = 12;
     let max_chunk_size = usize::try_from(MAX_FRAME_SIZE)
         .unwrap_or(usize::MAX)
         .saturating_sub(OBJECT_DATA_HEADER_BYTES);
-    let chunk_size = chunk_size.max(1).min(max_chunk_size);
-    let mut file = crate::fs::File::open(path)
+    let chunk_size = if content_defined {
+        if !delta_cdc::size_may_fit(expected_size) {
+            return Ok(None);
+        }
+        cdc::MAX_CHUNK_BYTES
+    } else {
+        chunk_size.max(1).min(max_chunk_size)
+    };
+    let file = crate::fs::File::open(path)
         .await
         .map_err(|error| QuicTransportError::Source(format!("{}: {error}", path.display())))?;
-    let mut buf = vec![0u8; chunk_size];
+    let mut reader = delta_cdc::ChunkReader::new(file, chunk_size, content_defined);
     let mut chunks = Vec::new();
     let mut planner_chunks = Vec::new();
     let mut offset = 0u64;
@@ -4305,19 +4495,26 @@ async fn build_quic_delta_manifest_for_file(
     let mut content_id = ContentId::streaming();
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        // A whole `chunk_size` chunk per iteration (asupersync-u4j7sr): one
-        // read of `crate::fs::File` returns at most 128 KiB.
-        let read = crate::net::atp::transport_common::delta::read_full_chunk(&mut file, &mut buf)
-            .await
-            .map_err(|error| QuicTransportError::Source(format!("{}: {error}", path.display())))?;
-        if read == 0 {
+        let Some(bytes) = reader.next_chunk().await.map_err(|error| {
+            QuicTransportError::Source(format!("{}: {error}", path.display()))
+        })? else {
             break;
+        };
+        let size_bytes = u64::try_from(bytes.len())
+            .map_err(|_| QuicTransportError::Control("delta chunk size overflow".to_string()))?;
+        let end = offset.checked_add(size_bytes).ok_or_else(|| {
+            QuicTransportError::Control("delta chunk offset overflow".to_string())
+        })?;
+        if end > expected_size {
+            return Err(QuicTransportError::Source(format!(
+                "{} grew while building its QUIC delta manifest", path.display(),
+            )));
         }
-        let bytes = &buf[..read];
+        if u64::try_from(chunks.len()).unwrap_or(u64::MAX) >= QUIC_DELTA_MAX_MANIFEST_CHUNKS {
+            return Ok(None);
+        }
         sha256.update(bytes);
         content_id.update(bytes);
-        let size_bytes = u64::try_from(read)
-            .map_err(|_| QuicTransportError::Control("delta chunk size overflow".to_string()))?;
         let content_id = ContentId::from_bytes(bytes);
         planner_chunks.push(CasChunkRef {
             index,
@@ -4337,9 +4534,7 @@ async fn build_quic_delta_manifest_for_file(
         index = index
             .checked_add(1)
             .ok_or_else(|| QuicTransportError::Control("delta chunk index overflow".to_string()))?;
-        offset = offset.checked_add(size_bytes).ok_or_else(|| {
-            QuicTransportError::Control("delta chunk offset overflow".to_string())
-        })?;
+        offset = end;
     }
     if offset != expected_size {
         return Err(QuicTransportError::Source(format!(
@@ -4366,14 +4561,18 @@ async fn build_quic_delta_manifest_for_file(
         PersistentChunkManifest::new(tree_id.to_string(), planner_chunks).map_err(|error| {
             QuicTransportError::Control(format!("build QUIC delta manifest: {error}"))
         })?;
-    Ok(DeltaManifestWire {
-        schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
+    Ok(Some(DeltaManifestWire {
+        schema: if content_defined {
+            delta_cdc::MANIFEST_SCHEMA
+        } else {
+            ATP_DELTA_CHUNK_MANIFEST_SCHEMA
+        }.to_string(),
         tree_id: tree_id.to_string(),
         chunk_size,
         total_size_bytes: planner.total_size_bytes,
         merkle_root_hex: planner.merkle_root.to_hex(),
         chunks,
-    })
+    }))
 }
 
 async fn maybe_attach_quic_delta_manifest(
@@ -4452,6 +4651,9 @@ async fn validate_quic_prepared_delta_source_unchanged(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
 ) -> Result<(), QuicTransportError> {
+    if tree_delta::is_tree(&prepared.manifest) {
+        return tree_delta::revalidate_source(cx, prepared, config).await;
+    }
     let manifest = &prepared.manifest;
     let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
         QuicTransportError::Control(
@@ -4474,7 +4676,7 @@ async fn validate_quic_prepared_delta_source_unchanged(
             "prepared QUIC source metadata changed before delta no-op completion".to_string(),
         ));
     }
-    let current = build_quic_delta_manifest_for_file(
+    let current = build_quic_delta_manifest_with_layout(
         cx,
         &manifest.merkle_root_hex,
         &source.abs_path,
@@ -4483,8 +4685,12 @@ async fn validate_quic_prepared_delta_source_unchanged(
         entry.size,
         &entry.sha256_hex,
         delta.chunk_size,
+        delta_cdc::is_cdc(manifest),
     )
-    .await?;
+    .await?
+    .ok_or_else(|| QuicTransportError::Integrity(
+        "prepared QUIC source exceeded its negotiated delta chunk budget".to_string(),
+    ))?;
     if current != *delta
         || read_entry_metadata(&source.abs_path, &config.metadata_policy).await?
             != expected_metadata
@@ -7472,6 +7678,15 @@ async fn build_quic_receiver_delta_request(
             "cannot build a bound QUIC delta request without a delta manifest".to_string(),
         )
     })?;
+    if tree_delta::is_tree(manifest) {
+        return Ok(make_quic_delta_request(
+            session,
+            manifest,
+            DeltaObjectRequest::full(
+                delta.merkle_root_hex.clone(), None, "tree_reconstruction_required",
+            ),
+        ));
+    }
     let entry = quic_delta_manifest_entry(manifest).ok_or_else(|| {
         QuicTransportError::Control(
             "cannot build a bound QUIC delta request for this transfer shape".to_string(),
@@ -7504,7 +7719,7 @@ async fn build_quic_receiver_delta_request(
         return Ok(full(None, "destination_metadata_mismatch"));
     }
 
-    let receiver_delta = match build_quic_delta_manifest_for_file(
+    let receiver_delta = match build_quic_delta_manifest_with_layout(
         cx,
         &manifest.merkle_root_hex,
         &path,
@@ -7513,10 +7728,12 @@ async fn build_quic_receiver_delta_request(
         entry.size,
         &entry.sha256_hex,
         delta.chunk_size,
+        delta_cdc::is_cdc(manifest),
     )
     .await
     {
-        Ok(delta) => delta,
+        Ok(Some(delta)) => delta,
+        Ok(None) => return Ok(full(None, "destination_delta_chunk_budget")),
         Err(QuicTransportError::Source(_)) => {
             return Ok(full(None, "destination_changed_during_delta_validation"));
         }
@@ -7598,6 +7815,11 @@ fn validate_quic_delta_request(
             }
         }
         DeltaWireMode::AlreadyInSync => {
+            if tree_delta::is_tree(manifest) {
+                return Err(QuicTransportError::Control(
+                    "QUIC tree reuse requires staged reconstruction, including metadata".to_string(),
+                ));
+            }
             let expected_shared = u64::try_from(delta_manifest.chunks.len()).unwrap_or(u64::MAX);
             if request.fallback_reason.is_some()
                 || request.receiver_merkle_root_hex.as_deref()
@@ -7613,9 +7835,7 @@ fn validate_quic_delta_request(
             }
         }
         DeltaWireMode::DeltaChunks => {
-            return Err(QuicTransportError::Control(
-                "QUIC missing-chunk delta requests are not enabled in this rollout".to_string(),
-            ));
+            delta_chunks::validate_request(manifest, request)?;
         }
     }
     Ok(request.mode)
@@ -7642,15 +7862,7 @@ fn validate_quic_delta_proof(
     session: QuicDeltaSessionContext,
     manifest: &TransferManifest,
 ) -> Result<ReceiveReceipt, QuicTransportError> {
-    if proof.control_seq != 1
-        || proof.session_id != session.session_id
-        || proof.transfer_id != manifest.transfer_id
-        || proof.destination_root != session.destination_root
-    {
-        return Err(QuicTransportError::Control(
-            "QUIC delta Proof binding mismatch".to_string(),
-        ));
-    }
+    validate_quic_delta_proof_binding(&proof, session, manifest)?;
     if !proof.receipt.committed
         || !proof.receipt.sha_ok
         || !proof.receipt.merkle_ok
@@ -7673,6 +7885,59 @@ fn validate_quic_delta_proof(
         ));
     }
     Ok(proof.receipt)
+}
+
+#[cfg(any(feature = "tls", test))]
+fn validate_quic_delta_proof_binding(
+    proof: &QuicDeltaProof,
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<(), QuicTransportError> {
+    if proof.control_seq != 1
+        || proof.session_id != session.session_id
+        || proof.transfer_id != manifest.transfer_id
+        || proof.destination_root != session.destination_root
+    {
+        return Err(QuicTransportError::Control(
+            "QUIC delta Proof binding mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Before the receiver selects a transfer mode, only a bound failure is a
+/// terminal response. A successful no-op proof cannot skip ObjectRequest and
+/// the sender's source revalidation/ObjectComplete handshake.
+#[cfg(any(feature = "tls", test))]
+fn validate_quic_delta_refusal(
+    proof: QuicDeltaProof,
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<String, QuicTransportError> {
+    validate_quic_delta_proof_binding(&proof, session, manifest)?;
+    if proof.receipt.committed
+        || proof.receipt.sha_ok
+        || proof.receipt.merkle_ok
+        || proof.receipt.bytes_received != 0
+        || proof.receipt.files != 0
+        || proof.receipt.symbols_accepted != 0
+        || proof.receipt.feedback_rounds != 0
+        || proof.receipt.decode_count != 0
+        || proof.receipt.decode_micros != 0
+        || !proof.receipt.committed_paths.is_empty()
+    {
+        return Err(QuicTransportError::Control(
+            "QUIC delta refusal made an early commit or data claim".to_string(),
+        ));
+    }
+    match proof.receipt.reason {
+        Some(reason) if !reason.is_empty() && reason.len() <= QUIC_REFUSAL_REASON_MAX_BYTES => {
+            Ok(reason)
+        }
+        _ => Err(QuicTransportError::Control(
+            "QUIC delta refusal requires a bounded nonempty reason".to_string(),
+        )),
+    }
 }
 
 #[allow(dead_code)]
@@ -9344,6 +9609,23 @@ fn validate_quic_manifest(
     manifest: &TransferManifest,
     config: &QuicConfig,
 ) -> Result<(), QuicTransportError> {
+    validate_quic_manifest_with_cdc(manifest, config, false)
+}
+
+fn validate_quic_manifest_with_cdc(
+    manifest: &TransferManifest,
+    config: &QuicConfig,
+    cdc_negotiated: bool,
+) -> Result<(), QuicTransportError> {
+    validate_quic_manifest_with_layouts(manifest, config, cdc_negotiated, false)
+}
+
+fn validate_quic_manifest_with_layouts(
+    manifest: &TransferManifest,
+    config: &QuicConfig,
+    cdc_negotiated: bool,
+    tree_negotiated: bool,
+) -> Result<(), QuicTransportError> {
     const MAX_QUIC_LOGICAL_MANIFEST_ENTRIES: usize = 4 * 1024 * 1024;
     // The off-wire `transfer_id` is interpolated directly into the receiver's
     // on-disk staging-directory path (native_link.rs:
@@ -9642,11 +9924,29 @@ fn validate_quic_manifest(
             "manifest metadata commitment mismatch".to_string(),
         ));
     }
-    validate_quic_delta_manifest(manifest)?;
+    if tree_delta::is_tree(manifest) {
+        if !tree_negotiated {
+            return Err(QuicTransportError::Source(
+                "QUIC tree delta manifest was not negotiated".to_string(),
+            ));
+        }
+        tree_delta::validate_manifest(manifest)?;
+    } else if cdc_negotiated {
+        validate_quic_delta_manifest_with_cdc(manifest, true)?;
+    } else {
+        validate_quic_delta_manifest(manifest)?;
+    }
     Ok(())
 }
 
 fn validate_quic_delta_manifest(manifest: &TransferManifest) -> Result<(), QuicTransportError> {
+    validate_quic_delta_manifest_with_cdc(manifest, false)
+}
+
+fn validate_quic_delta_manifest_with_cdc(
+    manifest: &TransferManifest,
+    cdc_negotiated: bool,
+) -> Result<(), QuicTransportError> {
     let Some(delta) = manifest.delta_manifest.as_ref() else {
         return Ok(());
     };
@@ -9660,11 +9960,22 @@ fn validate_quic_delta_manifest(manifest: &TransferManifest) -> Result<(), QuicT
             "QUIC delta manifest declares too many chunks".to_string(),
         ));
     }
-    if delta.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA {
+    let content_defined = delta_cdc::is_cdc(manifest);
+    if (delta.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA && !content_defined)
+        || (content_defined && !cdc_negotiated)
+    {
         return Err(QuicTransportError::Source(format!(
-            "unsupported QUIC delta manifest schema: {}",
+            "unsupported or unnegotiated QUIC delta manifest schema: {}",
             delta.schema
         )));
+    }
+    if content_defined
+        && (delta.chunk_size != crate::net::atp::transport_common::delta::cdc::MAX_CHUNK_BYTES
+            || !delta_cdc::size_may_fit(delta.total_size_bytes))
+    {
+        return Err(QuicTransportError::Source(
+            "QUIC CDC manifest exceeds the receiver's chunk geometry policy".to_string(),
+        ));
     }
     if delta.tree_id != manifest.merkle_root_hex {
         return Err(QuicTransportError::Source(
@@ -9701,7 +10012,10 @@ fn validate_quic_delta_manifest(manifest: &TransferManifest) -> Result<(), QuicT
             || chunk.stream_offset != expected_offset
             || chunk.size_bytes == 0
             || chunk.size_bytes > max_chunk_size
-            || (!is_final && chunk.size_bytes != max_chunk_size)
+            || (!content_defined && !is_final && chunk.size_bytes != max_chunk_size)
+            || (content_defined && !is_final
+                && chunk.size_bytes
+                    < crate::net::atp::transport_common::delta::cdc::MIN_CHUNK_BYTES as u64)
         {
             return Err(QuicTransportError::Source(format!(
                 "QUIC delta chunk {} has invalid index, path, offset, or size",
@@ -10897,6 +11211,7 @@ async fn receive_established_native_connection(
     peer_id: &str,
     options: QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    options.validate_detached()?;
     let mut config = effective_quic_receiver_config(&config)?;
     let mut control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
     let symbol_auth = config.symbol_auth_context()?;
@@ -11216,6 +11531,7 @@ async fn send_path_outcome(
     options: QuicSendOptions,
 ) -> Result<QuicSendOutcome, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    options.validate(&config)?;
     config.validate()?;
     trace_config_summary(cx, "send_path", &config, peer_id, None);
     let prepared = prepare_source_manifest(cx, source, &config).await?;
@@ -11283,6 +11599,7 @@ pub async fn receive_path_with_options(
 ) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     options.validate()?;
+    validate_quic_delta_chunks_option(options.delta_chunks(), &config)?;
     config.validate()?;
     trace_config_summary(cx, "receive_path", &config, peer_id, Some(&options));
     let endpoint = native_link::bind_server_endpoint(cx, listen).await?;
@@ -11331,7 +11648,7 @@ pub async fn receive_once_with_options(
     options: QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    options.validate()?;
+    options.validate_detached()?;
     config.validate()?;
     trace_config_summary(cx, "receive_once", &config, peer_id, Some(&options));
 
@@ -11409,7 +11726,7 @@ pub async fn receive_connection_with_options(
     options: QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    options.validate()?;
+    options.validate_detached()?;
     config.validate()?;
     trace_config_summary(cx, "receive_connection", &config, peer_id, Some(&options));
     receive_established_native_connection(cx, connection, peer, dest_dir, config, peer_id, options)
@@ -11467,7 +11784,7 @@ where
     F: FnMut(Result<ReceiveReport, QuicTransportError>),
 {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    options.validate()?;
+    options.validate_detached()?;
     config.validate()?;
     trace_config_summary(cx, "serve", &config, &peer_id, Some(&options));
 
