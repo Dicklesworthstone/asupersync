@@ -526,6 +526,25 @@ struct SendArgs {
         ]
     )]
     quic_tree_delta: bool,
+    /// Retain verified fixed chunks so an interrupted regular-file QUIC transfer
+    /// can resume on reconnect or re-invocation. Requires --transport quic, a
+    /// shared key, --compress off, and --quic-resume on the receiver (forwarded
+    /// over SSH). Supports up to 1 GiB using the default 256 KiB fixed chunks;
+    /// persistence requires a Unix receiver. Resume data is retained beneath
+    /// the destination. Peers without this option retain the existing
+    /// authenticated transfer path.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "no_delta",
+            "rq_allow_unauthenticated_lab",
+            "rq_cdc_delta",
+            "quic_delta_chunks",
+            "quic_cdc_delta",
+            "quic_tree_delta"
+        ]
+    )]
+    quic_resume: bool,
     /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
     /// delta negotiation now runs inside authenticated framed control.
     #[arg(long, hide = true)]
@@ -676,6 +695,23 @@ struct RecvArgs {
         ]
     )]
     quic_tree_delta: bool,
+    /// Persist verified fixed chunks from --quic-resume senders beneath the
+    /// destination, and reuse them after an interrupted connection or process.
+    /// Requires Unix, --transport quic, and a shared authentication key. Stored bytes
+    /// are rechecked before reuse; the destination is published only after full
+    /// verification. Peers without this option retain their existing path.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "no_delta",
+            "rq_allow_unauthenticated_lab",
+            "rq_cdc_delta",
+            "quic_delta_chunks",
+            "quic_cdc_delta",
+            "quic_tree_delta"
+        ]
+    )]
+    quic_resume: bool,
     /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
     /// delta negotiation now runs inside authenticated framed control.
     #[arg(long, hide = true)]
@@ -1167,19 +1203,23 @@ fn validate_rq_cdc_delta_options(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_quic_delta_chunks_options(
     transport: Transport,
     enabled: bool,
     cdc_enabled: bool,
     tree_enabled: bool,
+    resume_enabled: bool,
     no_delta: bool,
     unauthenticated_lab: bool,
     compression: Compress,
 ) -> Result<(), String> {
-    if !enabled && !cdc_enabled && !tree_enabled {
+    if !enabled && !cdc_enabled && !tree_enabled && !resume_enabled {
         return Ok(());
     }
-    let option = if tree_enabled {
+    let option = if resume_enabled {
+        "--quic-resume"
+    } else if tree_enabled {
         "--quic-tree-delta"
     } else if cdc_enabled {
         "--quic-cdc-delta"
@@ -1209,15 +1249,18 @@ fn validate_quic_delta_chunks_auth(
     enabled: bool,
     cdc_enabled: bool,
     tree_enabled: bool,
+    resume_enabled: bool,
     config: &asupersync::net::atp::transport_quic::QuicConfig,
 ) -> Result<(), String> {
-    if (enabled || cdc_enabled || tree_enabled)
+    if (enabled || cdc_enabled || tree_enabled || resume_enabled)
         && !config
             .delta_control_auth_context
             .as_ref()
             .is_some_and(|context| context.mode() == asupersync::security::AuthMode::Strict)
     {
-        let option = if tree_enabled {
+        let option = if resume_enabled {
+            "--quic-resume"
+        } else if tree_enabled {
             "--quic-tree-delta"
         } else if cdc_enabled {
             "--quic-cdc-delta"
@@ -1238,6 +1281,7 @@ fn quic_cli_send_options(args: &SendArgs) -> asupersync::net::atp::transport_qui
         .with_delta_chunks(args.quic_delta_chunks)
         .with_cdc_delta(args.quic_cdc_delta)
         .with_tree_delta(args.quic_tree_delta)
+        .with_resume(args.quic_resume)
 }
 
 #[cfg(feature = "tls")]
@@ -1249,6 +1293,7 @@ fn quic_cli_receive_options(
         .with_delta_chunks(args.quic_delta_chunks)
         .with_cdc_delta(args.quic_cdc_delta)
         .with_tree_delta(args.quic_tree_delta)
+        .with_resume(args.quic_resume)
 }
 
 #[cfg(test)]
@@ -1699,6 +1744,7 @@ fn quic_source_config(
         args.quic_delta_chunks,
         args.quic_cdc_delta,
         args.quic_tree_delta,
+        args.quic_resume,
         &cfg,
     )?;
     Ok(cfg)
@@ -1785,6 +1831,7 @@ fn quic_config_recv(
         args.quic_delta_chunks,
         args.quic_cdc_delta,
         args.quic_tree_delta,
+        args.quic_resume,
         &cfg,
     )?;
     cfg.server_tls = Some(QuicServerTls { config });
@@ -2163,6 +2210,7 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
         args.quic_delta_chunks,
         args.quic_cdc_delta,
         args.quic_tree_delta,
+        args.quic_resume,
         args.no_delta,
         args.rq_allow_unauthenticated_lab,
         args.compress,
@@ -2186,8 +2234,10 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
             );
         }
     }
-    if args.rq_cdc_delta || args.quic_delta_chunks || args.quic_cdc_delta {
-        let option = if args.rq_cdc_delta {
+    if args.rq_cdc_delta || args.quic_delta_chunks || args.quic_cdc_delta || args.quic_resume {
+        let option = if args.quic_resume {
+            "--quic-resume"
+        } else if args.rq_cdc_delta {
             "--rq-cdc-delta"
         } else if args.quic_cdc_delta {
             "--quic-cdc-delta"
@@ -3846,6 +3896,7 @@ fn send_to_addr_with_transport(
         args.quic_delta_chunks,
         args.quic_cdc_delta,
         args.quic_tree_delta,
+        args.quic_resume,
         args.no_delta,
         args.rq_allow_unauthenticated_lab,
         args.compress,
@@ -7511,7 +7562,9 @@ fn probe_remote_tailscale_ipv4(
 
 fn append_remote_receiver_options(args: &SendArgs, argv: &mut Vec<String>) {
     if args.transport == Transport::Quic {
-        if args.quic_tree_delta {
+        if args.quic_resume {
+            argv.push("--quic-resume".to_string());
+        } else if args.quic_tree_delta {
             argv.push("--quic-tree-delta".to_string());
         } else if args.quic_cdc_delta {
             argv.push("--quic-cdc-delta".to_string());
@@ -9328,6 +9381,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
         args.quic_delta_chunks,
         args.quic_cdc_delta,
         args.quic_tree_delta,
+        args.quic_resume,
         args.no_delta,
         args.rq_allow_unauthenticated_lab,
         Compress::Off,
@@ -10446,6 +10500,7 @@ mod tests {
             Some("--quic-delta-chunks"),
             Some("--quic-cdc-delta"),
             Some("--quic-tree-delta"),
+            Some("--quic-resume"),
         ] {
             let mut argv = vec![
                 "atp-send",
@@ -10464,6 +10519,7 @@ mod tests {
             assert_eq!(options.delta_chunks(), flag.is_some());
             assert_eq!(options.cdc_delta(), flag == Some("--quic-cdc-delta"));
             assert_eq!(options.tree_delta(), flag == Some("--quic-tree-delta"));
+            assert_eq!(options.resume(), flag == Some("--quic-resume"));
             let config = quic_source_config(&send, None).expect("configured delta authority");
             assert!(config.delta_control_auth_context.is_some());
             assert!(config.enable_delta);
@@ -10487,18 +10543,20 @@ mod tests {
                 assert_eq!(options.delta_chunks(), flag.is_some());
                 assert_eq!(options.cdc_delta(), flag == Some("--quic-cdc-delta"));
                 assert_eq!(options.tree_delta(), flag == Some("--quic-tree-delta"));
+                assert_eq!(options.resume(), flag == Some("--quic-resume"));
                 assert!(!options.sparse_files());
             }
         }
         let unauthenticated = asupersync::net::atp::transport_quic::QuicConfig::default();
-        validate_quic_delta_chunks_auth(false, false, false, &unauthenticated)
+        validate_quic_delta_chunks_auth(false, false, false, false, &unauthenticated)
             .expect("legacy TLS-only mode remains available");
-        for (fixed, cdc, tree, flag) in [
-            (true, false, false, "--quic-delta-chunks"),
-            (false, true, false, "--quic-cdc-delta"),
-            (false, false, true, "--quic-tree-delta"),
+        for (fixed, cdc, tree, resume, flag) in [
+            (true, false, false, false, "--quic-delta-chunks"),
+            (false, true, false, false, "--quic-cdc-delta"),
+            (false, false, true, false, "--quic-tree-delta"),
+            (false, false, false, true, "--quic-resume"),
         ] {
-            let error = validate_quic_delta_chunks_auth(fixed, cdc, tree, &unauthenticated)
+            let error = validate_quic_delta_chunks_auth(fixed, cdc, tree, resume, &unauthenticated)
                 .expect_err("every delta mode requires explicit control authority");
             assert!(error.contains(flag), "{error}");
         }
@@ -10506,7 +10564,12 @@ mod tests {
 
     #[test]
     fn quic_chunk_delta_cli_rejects_conflicts_before_source_or_network_io() {
-        for flag in ["--quic-delta-chunks", "--quic-cdc-delta", "--quic-tree-delta"] {
+        for flag in [
+            "--quic-delta-chunks",
+            "--quic-cdc-delta",
+            "--quic-tree-delta",
+            "--quic-resume",
+        ] {
             for command in ["send", "recv", "serve"] {
                 for conflict in [
                     "--no-delta",
@@ -10515,6 +10578,7 @@ mod tests {
                     "--quic-delta-chunks",
                     "--quic-cdc-delta",
                     "--quic-tree-delta",
+                    "--quic-resume",
                 ] {
                     if conflict == flag {
                         continue;
@@ -10629,6 +10693,27 @@ mod tests {
         ])
         .expect("parse directory delta plan");
         run_send(args).expect("directory delta dry run needs no peer or TLS handshake");
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn quic_resume_cli_accepts_an_offline_regular_file_plan() {
+        let directory = tempfile::tempdir().expect("source directory");
+        let source = directory.path().join("payload.bin");
+        std::fs::write(&source, b"resumable contents").expect("write source");
+        let args = SendArgs::try_parse_from([
+            "atp-send",
+            source.to_str().expect("UTF-8 source path"),
+            "target-must-not-be-resolved",
+            "--transport",
+            "quic",
+            "--quic-resume",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+            "--dry-run",
+        ])
+        .expect("parse resumable file plan");
+        run_send(args).expect("resume dry run needs no destination, peer, or TLS handshake");
     }
 
     #[test]
