@@ -68,6 +68,8 @@
 //! tests and scaffold-only drivers; they are not the B5 bounded-memory proof
 //! path.
 
+#[cfg(any(feature = "tls", test))]
+mod delta_chunks;
 #[cfg(feature = "tls")]
 pub mod native_link;
 pub mod symbol_datagram;
@@ -1033,6 +1035,7 @@ pub struct QuicConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct QuicReceiveOptions {
     sparse_files: bool,
+    delta_chunks: bool,
 }
 
 impl QuicReceiveOptions {
@@ -1041,6 +1044,7 @@ impl QuicReceiveOptions {
     pub const fn new() -> Self {
         Self {
             sparse_files: false,
+            delta_chunks: false,
         }
     }
 
@@ -1058,6 +1062,35 @@ impl QuicReceiveOptions {
     #[must_use]
     pub const fn sparse_files(&self) -> bool {
         self.sparse_files
+    }
+
+    /// Enable authenticated fixed-chunk reuse for bounded single regular files
+    /// on the native UDP receive path and native UDP endpoint receiver.
+    ///
+    /// Requires [`QuicConfig::enable_delta`] and a strict delta control key.
+    /// Both peers must opt in; old peers and unsupported file shapes retain
+    /// the existing full/no-op behavior. Reused ranges are verified again and
+    /// staged with received chunks before whole-file integrity and publication.
+    #[must_use]
+    pub const fn with_delta_chunks(mut self, enabled: bool) -> Self {
+        self.delta_chunks = enabled;
+        self
+    }
+
+    /// Whether native UDP transfers may negotiate changed-chunk reconstruction.
+    #[must_use]
+    pub const fn delta_chunks(&self) -> bool {
+        self.delta_chunks
+    }
+
+    fn validate_detached(&self) -> Result<(), QuicTransportError> {
+        self.validate()?;
+        if self.delta_chunks() {
+            return Err(QuicTransportError::Config(
+                "QUIC changed chunks require the native UDP receive path; detached connection receivers do not negotiate this mode".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), QuicTransportError> {
@@ -1080,6 +1113,7 @@ impl QuicReceiveOptions {
 pub struct QuicSendOptions {
     compression: CompressionMode,
     compression_parallelism: usize,
+    delta_chunks: bool,
 }
 
 impl Default for QuicSendOptions {
@@ -1095,6 +1129,7 @@ impl QuicSendOptions {
         Self {
             compression: CompressionMode::Off,
             compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
+            delta_chunks: false,
         }
     }
 
@@ -1132,6 +1167,34 @@ impl QuicSendOptions {
     #[must_use]
     pub const fn compression(&self) -> CompressionMode {
         self.compression
+    }
+
+    /// Offer authenticated fixed-chunk reuse for bounded single regular files.
+    ///
+    /// Requires [`QuicConfig::enable_delta`], a strict delta control key, and
+    /// compression off. A receiver that also opts in requests only missing
+    /// chunks, carried raw on the reliable control stream. Legacy peers and
+    /// unsupported shapes retain the existing full/no-op transfer behavior.
+    #[must_use]
+    pub const fn with_delta_chunks(mut self, enabled: bool) -> Self {
+        self.delta_chunks = enabled;
+        self
+    }
+
+    /// Whether the sender advertises authenticated changed-chunk support.
+    #[must_use]
+    pub const fn delta_chunks(&self) -> bool {
+        self.delta_chunks
+    }
+
+    fn validate(&self, config: &QuicConfig) -> Result<(), QuicTransportError> {
+        validate_quic_delta_chunks_option(self.delta_chunks(), config)?;
+        if self.delta_chunks() && self.compression() != CompressionMode::Off {
+            return Err(QuicTransportError::Config(
+                "QUIC changed chunks cannot be combined with source-stream compression".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -2909,7 +2972,7 @@ struct QuicDeltaObjectRequest {
     request: DeltaObjectRequest,
 }
 
-/// Terminal proof for an authenticated QUIC delta no-op or pre-data refusal.
+/// Terminal proof for an authenticated QUIC delta result or refusal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg(any(feature = "tls", test))]
@@ -4264,6 +4327,18 @@ fn quic_delta_control_auth_context(config: &QuicConfig) -> Option<&SecurityConte
         .delta_control_auth_context
         .as_ref()
         .filter(|context| context.mode() == AuthMode::Strict)
+}
+
+fn validate_quic_delta_chunks_option(
+    enabled: bool,
+    config: &QuicConfig,
+) -> Result<(), QuicTransportError> {
+    if enabled && (!config.enable_delta || quic_delta_control_auth_context(config).is_none()) {
+        return Err(QuicTransportError::Config(
+            "QUIC changed chunks require enable_delta and a strict delta control authentication context".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn quic_delta_manifest_entry(manifest: &TransferManifest) -> Option<&ManifestEntry> {
@@ -7615,9 +7690,7 @@ fn validate_quic_delta_request(
             }
         }
         DeltaWireMode::DeltaChunks => {
-            return Err(QuicTransportError::Control(
-                "QUIC missing-chunk delta requests are not enabled in this rollout".to_string(),
-            ));
+            delta_chunks::validate_request(manifest, request)?;
         }
     }
     Ok(request.mode)
@@ -10944,6 +11017,7 @@ async fn receive_established_native_connection(
     peer_id: &str,
     options: QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    options.validate_detached()?;
     let mut config = effective_quic_receiver_config(&config)?;
     let mut control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
     let symbol_auth = config.symbol_auth_context()?;
@@ -11263,6 +11337,7 @@ async fn send_path_outcome(
     options: QuicSendOptions,
 ) -> Result<QuicSendOutcome, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    options.validate(&config)?;
     config.validate()?;
     trace_config_summary(cx, "send_path", &config, peer_id, None);
     let prepared = prepare_source_manifest(cx, source, &config).await?;
@@ -11330,6 +11405,7 @@ pub async fn receive_path_with_options(
 ) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     options.validate()?;
+    validate_quic_delta_chunks_option(options.delta_chunks(), &config)?;
     config.validate()?;
     trace_config_summary(cx, "receive_path", &config, peer_id, Some(&options));
     let endpoint = native_link::bind_server_endpoint(cx, listen).await?;
@@ -11378,7 +11454,7 @@ pub async fn receive_once_with_options(
     options: QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    options.validate()?;
+    options.validate_detached()?;
     config.validate()?;
     trace_config_summary(cx, "receive_once", &config, peer_id, Some(&options));
 
@@ -11456,7 +11532,7 @@ pub async fn receive_connection_with_options(
     options: QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    options.validate()?;
+    options.validate_detached()?;
     config.validate()?;
     trace_config_summary(cx, "receive_connection", &config, peer_id, Some(&options));
     receive_established_native_connection(cx, connection, peer, dest_dir, config, peer_id, options)
@@ -11514,7 +11590,7 @@ where
     F: FnMut(Result<ReceiveReport, QuicTransportError>),
 {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    options.validate()?;
+    options.validate_detached()?;
     config.validate()?;
     trace_config_summary(cx, "serve", &config, &peer_id, Some(&options));
 

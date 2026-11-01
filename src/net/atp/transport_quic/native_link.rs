@@ -110,6 +110,9 @@ use super::{
     classify_source_stream_admission,
 };
 
+#[path = "native_link_delta_chunks.rs"]
+mod delta_chunks;
+
 /// Shared QUIC Initial Destination Connection ID for ATP-over-QUIC.
 ///
 /// RFC 9001 §5.2 derives the (non-secret) Initial-space keys from the client's
@@ -8299,14 +8302,34 @@ async fn check_source_stream_control(
     link: &mut QuicLink,
     control: &mut NativeQuicFrameTransport,
     early: &mut Option<Frame>,
+    delta: Option<(super::QuicDeltaSessionContext, &TransferManifest)>,
 ) -> Result<(), QuicTransportError> {
     while early.is_none() {
-        let Some(frame) = control.try_recv(cx, &mut link.conn)? else {
+        let pending = if delta.is_some() {
+            link.pending_control_frames.pop_front()
+        } else {
+            None
+        };
+        let frame = match pending {
+            Some(frame) => Some(frame),
+            None => control.try_recv(cx, &mut link.conn)?,
+        };
+        let Some(frame) = frame else {
             break;
         };
         match frame.frame_type() {
             FrameType::KeepAlive => {}
             FrameType::Proof => {
+                if let Some((session, manifest)) = delta {
+                    let proof = super::parse_json::<super::QuicDeltaProof>(&frame)?;
+                    let reason = super::validate_quic_delta_refusal(proof, session, manifest)?;
+                    // While changed data is being queued, a bound refusal is
+                    // the only admissible proof. Never acknowledge early success.
+                    // This stream may contain a partially queued ATP data
+                    // frame: appending Close here would corrupt that frame.
+                    // The receiver's refusal close wait is independently bounded.
+                    return Err(QuicTransportError::Integrity(reason));
+                }
                 let receipt = super::parse_json::<ReceiveReceipt>(&frame)?;
                 if receipt.committed {
                     *early = Some(frame);
@@ -8319,6 +8342,12 @@ async fn check_source_stream_control(
                             .unwrap_or_else(|| "receiver did not commit".to_string()),
                     ));
                 }
+            }
+            got if delta.is_some() => {
+                return Err(QuicTransportError::Unexpected {
+                    got,
+                    expected: "KeepAlive | bound refusal Proof before changed-chunk completion",
+                });
             }
             _ => *early = Some(frame),
         }
@@ -8342,6 +8371,7 @@ async fn wait_source_stream_send_admission(
     stream: StreamId,
     min_credit: u64,
     config: &QuicConfig,
+    delta: Option<(super::QuicDeltaSessionContext, &TransferManifest)>,
 ) -> Result<(), QuicTransportError> {
     let gate_started = Instant::now();
     let mut last_progress = Instant::now();
@@ -8374,7 +8404,7 @@ async fn wait_source_stream_send_admission(
                 false,
             ))
             .await?;
-            check_source_stream_control(cx, link, control, early).await?;
+            check_source_stream_control(cx, link, control, early, delta).await?;
             continue;
         }
         let credit_remaining = link.conn.stream_send_credit_remaining(stream);
@@ -8438,7 +8468,7 @@ async fn wait_source_stream_send_admission(
         // either reason is where a refusal would otherwise go unheard until
         // the idle timeout. Every waiting round reads control; a transfer that
         // never waits here is untouched.
-        check_source_stream_control(cx, link, control, early).await?;
+        check_source_stream_control(cx, link, control, early, delta).await?;
         // Give never-yet-sent pending frames (e.g. a tree manifest's tail on
         // the control stream) a shot at whatever cwnd the latest ACKs freed:
         // the gate's non-stall path otherwise never flushes, so pending
@@ -8559,6 +8589,7 @@ async fn send_native_source_stream_entries_pumped(
                         config,
                         &buf[..n],
                         &mut queued_since_flush,
+                        None,
                     )
                     .await?;
                 }
@@ -8588,6 +8619,7 @@ async fn send_native_source_stream_entries_pumped(
                                 &frame,
                                 piece,
                                 &mut queued_since_flush,
+                                None,
                             )
                             .await?;
                         }
@@ -8612,6 +8644,7 @@ async fn send_native_source_stream_entries_pumped(
                         &frame,
                         piece,
                         &mut queued_since_flush,
+                        None,
                     )
                     .await?;
                 }
@@ -8651,6 +8684,7 @@ async fn send_native_source_stream_entries_pumped(
                 &frame,
                 piece,
                 &mut queued_since_flush,
+                None,
             )
             .await?;
         }
@@ -8677,6 +8711,7 @@ async fn queue_source_stream_bytes(
     config: &QuicConfig,
     bytes: &[u8],
     queued_since_flush: &mut u64,
+    delta: Option<(super::QuicDeltaSessionContext, &TransferManifest)>,
 ) -> Result<(), QuicTransportError> {
     let n_u64 = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     // Never write past the receiver's bounded window: `write_stream_bytes`
@@ -8685,7 +8720,7 @@ async fn queue_source_stream_bytes(
     if link.conn.stream_send_credit_remaining(stream) < n_u64 {
         drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
         *queued_since_flush = 0;
-        wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config).await?;
+        wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config, delta).await?;
     }
     link.conn
         .write_stream_bytes(cx, stream, Bytes::copy_from_slice(bytes), false)?;
@@ -8706,7 +8741,7 @@ async fn queue_source_stream_bytes(
         // window of credit here quantized the transfer into one
         // window per RTT); this wait only enforces the queue and
         // unacked ceilings.
-        wait_source_stream_send_admission(cx, link, control, early, stream, 0, config).await?;
+        wait_source_stream_send_admission(cx, link, control, early, stream, 0, config, delta).await?;
     }
     Ok(())
 }
@@ -8790,6 +8825,7 @@ async fn queue_source_stream_frame(
     frame: &Frame,
     piece: usize,
     queued_since_flush: &mut u64,
+    delta: Option<(super::QuicDeltaSessionContext, &TransferManifest)>,
 ) -> Result<(), QuicTransportError> {
     let wire = frame
         .to_wire_bytes()
@@ -8804,6 +8840,7 @@ async fn queue_source_stream_frame(
             config,
             bytes,
             queued_since_flush,
+            delta,
         )
         .await?;
     }
@@ -8941,6 +8978,7 @@ async fn run_sender_session(
 ) -> Result<SendReport, QuicTransportError> {
     let config = prepared.effective_config(config);
     let config = &config;
+    options.validate(config)?;
     config.validate()?;
     super::validate_quic_manifest(&prepared.manifest, config)?;
     let manifest = &prepared.manifest;
@@ -9034,7 +9072,10 @@ async fn run_sender_session(
             )
         })?;
         let envelope = super::make_quic_delta_manifest_envelope(context, session, manifest)?;
-        let frame = super::json_frame(FrameType::ObjectManifest, &envelope)?;
+        let mut frame = super::json_frame(FrameType::ObjectManifest, &envelope)?;
+        if options.delta_chunks() {
+            super::delta_chunks::advertise(&mut frame, context, session, manifest)?;
+        }
         control.send(cx, &mut link.conn, &frame)?;
     } else {
         let mut full_manifest;
@@ -9131,9 +9172,14 @@ async fn run_sender_session(
                 });
             }
             super::DeltaWireMode::DeltaChunks => {
-                return Err(QuicTransportError::Control(
-                    "QUIC missing-chunk mode passed strict request validation".to_string(),
-                ));
+                if !options.delta_chunks() {
+                    return Err(QuicTransportError::Control(
+                        "receiver requested unoffered QUIC changed-chunk mode".to_string(),
+                    ));
+                }
+                return erase_send(delta_chunks::send(
+                    cx, link, &mut control, prepared, config, session, &request.request,
+                )).await;
             }
         }
     }
@@ -11494,6 +11540,7 @@ async fn run_receiver_session(
     options: &QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
     let mut config = super::effective_quic_receiver_config(config)?;
+    super::validate_quic_delta_chunks_option(options.delta_chunks(), &config)?;
     config.validate()?;
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
@@ -11712,18 +11759,44 @@ async fn run_receiver_session(
         config.max_block_size
     ));
     link.flush(cx).await?;
+    let changed_chunks_offered = if options.delta_chunks() {
+        match delta_session {
+            Some(session) => super::delta_chunks::offered(
+                &manifest_frame,
+                super::quic_delta_control_auth_context(config).ok_or_else(|| {
+                    QuicTransportError::Config("QUIC changed chunks lost their authentication context".to_string())
+                })?,
+                session,
+                &manifest,
+            )?,
+            None => false,
+        }
+    } else {
+        false
+    };
     let mut delta_full_request_frame = None;
     if let Some(session) = delta_session {
-        let request =
-            super::build_quic_receiver_delta_request(cx, dest_dir, config, session, &manifest)
-                .await
-                .and_then(|request| {
-                    let mode = super::validate_quic_delta_request(&request, session, &manifest)?;
-                    Ok((request, mode))
-                });
-        let (request, request_mode) = match request {
+        let request = keep_peer_alive_while(cx, link, &mut control, async {
+            let mut request = super::build_quic_receiver_delta_request(
+                cx, dest_dir, config, session, &manifest,
+            ).await?;
+            let plan = if changed_chunks_offered && request.request.mode == super::DeltaWireMode::FullObject {
+                super::delta_chunks::plan(cx, dest_dir, config, &manifest).await?
+            } else {
+                None
+            };
+            if let Some(plan) = &plan {
+                request = super::make_quic_delta_request(session, &manifest, plan.request.clone());
+            }
+            let mode = super::validate_quic_delta_request(&request, session, &manifest)?;
+            Ok((request, mode, plan))
+        }).await;
+        let (request, request_mode, changed_plan) = match request {
             Ok(request) => request,
             Err(error) => {
+                if options.delta_chunks() && cx.checkpoint().is_err() {
+                    return Err(QuicTransportError::Cancelled);
+                }
                 if !matches!(&error, QuicTransportError::Cancelled) {
                     refuse_transfer_in_band(
                         cx,
@@ -11737,6 +11810,11 @@ async fn run_receiver_session(
                 return Err(error);
             }
         };
+        if request_mode == super::DeltaWireMode::DeltaChunks {
+            link.conn.configure_stream_recv_window(
+                cx, control.stream, super::delta_chunks::STREAM_WINDOW_BYTES,
+            )?;
+        }
         let request_frame = super::json_frame(FrameType::ObjectRequest, &request)?;
         control.send(cx, &mut link.conn, &request_frame)?;
         link.flush(cx).await?;
@@ -11837,9 +11915,13 @@ async fn run_receiver_session(
                 });
             }
             super::DeltaWireMode::DeltaChunks => {
-                return Err(QuicTransportError::Control(
-                    "QUIC receiver selected unsupported missing-chunk mode".to_string(),
-                ));
+                let plan = changed_plan.ok_or_else(|| QuicTransportError::Control(
+                    "QUIC changed-chunk request lost its verified baseline plan".to_string(),
+                ))?;
+                return erase_send(delta_chunks::receive(
+                    cx, link, &mut control, dest_dir, config, &manifest, options,
+                    session, plan, &manifest_frame, &request_frame,
+                )).await;
             }
         }
     }
@@ -12539,6 +12621,7 @@ pub(crate) async fn send_prepared_over_udp(
     options: super::QuicSendOptions,
 ) -> Result<(SendReport, QuicSendLimiterReport), QuicTransportError> {
     let config = prepared.effective_config(config);
+    options.validate(&config)?;
     config.validate()?;
     let client_tls = config.client_tls.as_ref().ok_or_else(|| {
         QuicTransportError::Config(
@@ -12592,6 +12675,7 @@ pub async fn receive_on_endpoint_with_options(
     options: QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
     options.validate()?;
+    super::validate_quic_delta_chunks_option(options.delta_chunks(), config)?;
     let config = super::effective_quic_receiver_config(config)?;
     let config = &config;
     config.validate()?;
