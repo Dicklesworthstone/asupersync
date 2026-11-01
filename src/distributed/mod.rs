@@ -71,10 +71,12 @@ pub use membership::{
 };
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use node::{
-    NativeDistributedComponent, NativeDistributedComponentResult, NativeDistributedNode,
+    NativeDistributedClient, NativeDistributedComponent, NativeDistributedComponentResult, NativeDistributedNode,
     NativeDistributedNodeReport,
     NativeDistributedNodeStartError, NativeDistributedNodeStartFailure,
-    NativeDistributedNodeStopCause, NativeListenerResult, NativeMembershipResult,
+    NativeDistributedNodeStopCause, NativeDistributedOutboundConfig, NativeDistributedOutboundError,
+    NativeDistributedOutboundReport, NativeDistributedRemoteError, NativeDistributedRemoteHandle,
+    NativeDistributedRemoteResult, NativeListenerResult, NativeMembershipResult,
 };
 pub use recovery::{
     CollectedSymbol, CollectionConsistency, CollectionMetrics, RecoveryCollector, RecoveryConfig,

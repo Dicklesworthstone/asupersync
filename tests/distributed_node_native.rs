@@ -14,6 +14,8 @@ use asupersync::distributed::membership::driver::{
 use asupersync::distributed::membership::owned::{
     OwnedLeaseStatus, OwnedMembershipController, OwnedMembershipError,
 };
+use asupersync::distributed::membership::owned::work::MembershipWorkTrigger;
+use asupersync::distributed::remote_owned::{RemoteRunConfig, RemoteRunError};
 use asupersync::distributed::membership::service::{
     MEMBERSHIP_SERVICE_COMPUTATION, register_owned_membership_service,
     submit_membership_update,
@@ -28,29 +30,35 @@ use asupersync::distributed::symbol_service::{
 use asupersync::distributed::{
     HasSchema, NativeDistributedComponent, NativeDistributedNode,
     NativeDistributedNodeStartFailure, NativeDistributedNodeStopCause, SchemaDescriptor,
+    NativeDistributedOutboundConfig, NativeDistributedOutboundError,
+    NativeDistributedRemoteResult,
 };
 use asupersync::net::{TcpStream, UdpSocket};
 use asupersync::remote::{
-    ComputationName, IdempotencyKey, NodeId, RemoteComputationClient,
+    ComputationName, IdempotencyKey, NativeRemoteRoute, NativeRemoteRuntimeConfig, NodeId, RemoteCap, RemoteComputationClient,
     RemoteComputationClientConfig, RemoteComputationRegistry, RemoteComputationService,
     RemoteComputationServiceConfig, RemoteComputationServiceHandle, RemoteInput,
     RemoteOutcome, RemotePeerAdmissionPolicy, RemotePeerHello, RemoteProtocolVersion,
     RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse,
     RemoteTaskId, SpawnRequest,
 };
-use asupersync::runtime::{JoinError, RootDrainOutcome, Runtime, RuntimeBuilder};
+use asupersync::runtime::{JoinError, RootDrainOutcome, Runtime, RuntimeBuilder, RuntimeHandle};
+use asupersync::runtime::reactor::{Events, Interest, Reactor, Source, Token, create_reactor};
 use asupersync::security::{AuthKey, SecurityContext};
+use asupersync::sync::Notify;
+use asupersync::time::{TimeSource, TimerDriver, TimerDriverHandle, WallClock};
 use asupersync::tls::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth,
     PrivateKey, RootCertStore, TlsAcceptorBuilder, TlsConnectorBuilder,
 };
 use asupersync::types::symbol::Symbol;
-use asupersync::{Cx, Outcome};
+use asupersync::{Cx, Outcome, Time};
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 const WINDOW: Duration = Duration::from_secs(10);
@@ -74,11 +82,15 @@ fn batch_limits() -> SymbolBatchLimits {
 }
 
 fn statement(sequence: u64) -> Vec<u8> {
+    member_statement(1, sequence, MembershipKind::Alive)
+}
+
+fn member_statement(incarnation: u64, sequence: u64, kind: MembershipKind) -> Vec<u8> {
     MembershipUpdate {
         event: MembershipEvent {
             node: NodeId::new("worker"),
-            incarnation: 1,
-            kind: MembershipKind::Alive,
+            incarnation,
+            kind,
         },
         sequence,
     }
@@ -93,9 +105,30 @@ struct Fixture {
     client: RemoteComputationClient,
     hello: RemotePeerHello,
     store: Arc<SymbolReplicaStore>,
+    parked: Arc<ParkedInvocation>,
 }
 
 async fn fixture(cx: &Cx) -> Fixture {
+    fixture_protocol(cx, RemoteProtocolVersion::V1).await
+}
+
+#[derive(Default)]
+struct ParkedInvocation {
+    entered: AtomicBool,
+    cancelled: AtomicBool,
+    release: AtomicBool,
+    changed: Notify,
+}
+
+struct ReleaseParked(Arc<ParkedInvocation>);
+impl Drop for ReleaseParked {
+    fn drop(&mut self) {
+        self.0.release.store(true, Ordering::Release);
+        self.0.changed.notify_waiters();
+    }
+}
+
+async fn fixture_protocol(cx: &Cx, protocol: RemoteProtocolVersion) -> Fixture {
     let membership = OwnedMembershipController::new(
         NodeId::new("authority"),
         7,
@@ -116,8 +149,31 @@ async fn fixture(cx: &Cx) -> Fixture {
         },
     ).unwrap());
     let mut registry = RemoteComputationRegistry::new();
-    registry.register::<EchoRequest, EchoResponse, _, _>("echo", |_, invocation| async move {
-        Ok(RemoteOutcome::Success(invocation.request().input.data().to_vec()))
+    let parked = Arc::new(ParkedInvocation::default());
+    let observed = Arc::clone(&parked);
+    registry.register::<EchoRequest, EchoResponse, _, _>("echo", move |body, invocation| {
+        let observed = Arc::clone(&observed);
+        async move {
+            if invocation.request().input.data() == b"park" {
+                let mut cancelled = std::pin::pin!(body.cancelled());
+                poll_fn(|task| {
+                    let next = cancelled.as_mut().poll(task);
+                    if next.is_pending() {
+                        observed.entered.store(true, Ordering::Release);
+                        observed.changed.notify_waiters();
+                    }
+                    next
+                }).await;
+                assert!(body.checkpoint().is_err());
+                observed.cancelled.store(true, Ordering::Release);
+                observed.changed.notify_waiters();
+                // Deliberately withhold cleanup after acknowledged cancellation.
+                observed.changed.wait_until(|| observed.release.load(Ordering::Acquire)).await;
+                Ok(RemoteOutcome::Cancelled(body.cancel_reason().unwrap()))
+            } else {
+                Ok(RemoteOutcome::Success(invocation.request().input.data().to_vec()))
+            }
+        }
     }).unwrap();
     register_owned_membership_service(&mut registry, membership.clone()).unwrap();
     register_symbol_service(&mut registry, Arc::clone(&store)).unwrap();
@@ -135,7 +191,7 @@ async fn fixture(cx: &Cx) -> Fixture {
         .add_root_certificate(&cert).identity(chain, key)
         .with_certificate_pins(pins.clone()).build().unwrap();
     let mut policy = RemotePeerAdmissionPolicy::new(
-        RemoteProtocolVersion::V1, registry.schema_registry().clone(),
+        protocol, registry.schema_registry().clone(),
     );
     policy.grant_tls_peer(
         NodeId::new("authority"), pins,
@@ -154,7 +210,7 @@ async fn fixture(cx: &Cx) -> Fixture {
             .with_connect_timeout(Duration::from_secs(2))
             .with_attempt_timeout(Duration::from_secs(3)),
     ).unwrap();
-    Fixture { service, operator, membership, client, hello, store }
+    Fixture { service, operator, membership, client, hello, store, parked }
 }
 
 fn singleton_swim(address: SocketAddr) -> UdpSwimDriver {
@@ -209,7 +265,7 @@ fn node_serves_named_symbols_and_membership_then_drains_after_caller_cancel() {
             else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
         runtime.block_on(async {
             let cx = Cx::current().unwrap();
-            let Fixture { service, operator, membership, client, hello, store } = fixture(&cx).await;
+            let Fixture { service, operator, membership, client, hello, store, .. } = fixture(&cx).await;
             let address = service.local_addr().unwrap();
             let swim = singleton_swim(address);
             let node = assert_send(NativeDistributedNode::start(
@@ -425,6 +481,400 @@ fn owner_drop_requests_existing_region_cleanup_for_every_component() {
         assert!(matches!(membership.apply_authenticated(&NodeId::new("authority"), &statement(1)),
             Err(OwnedMembershipError::Closed)));
         eventually(&cx, || observer.snapshot().status.is_terminal()).await;
+    });
+    finish(runtime);
+}
+
+fn outbound_config(runtime: RuntimeHandle) -> NativeDistributedOutboundConfig {
+    NativeDistributedOutboundConfig::new(
+        runtime,
+        RemoteCap::new().with_local_node(NodeId::new("authority")),
+        NativeRemoteRuntimeConfig::new().with_max_in_flight(1)
+            .with_drain_timeout(Duration::from_secs(3)),
+        1,
+    ).unwrap()
+}
+
+fn remote_run_config() -> RemoteRunConfig {
+    RemoteRunConfig { timeout: WINDOW, child: ChildRegionSpec::inherit() }
+}
+
+fn assert_node_remote_success(result: NativeDistributedRemoteResult, expected: &[u8]) {
+    assert_eq!(result.retirement, Ok(()));
+    let membership = result.outcome.expect("actual owner outcome").unwrap();
+    assert!(membership.is_success(), "{membership:?}");
+    let remote = membership.work.task.unwrap().unwrap();
+    assert!(remote.is_success(), "{remote:?}");
+    assert!(matches!(remote.task.unwrap().outcome,
+        Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == expected));
+}
+
+struct SubmissionPanicReactor {
+    inner: Arc<dyn Reactor>,
+    armed: AtomicBool,
+}
+
+impl Reactor for SubmissionPanicReactor {
+    fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> std::io::Result<()> {
+        self.inner.register(source, token, interest)
+    }
+
+    fn modify(&self, token: Token, interest: Interest) -> std::io::Result<()> {
+        self.inner.modify(token, interest)
+    }
+
+    fn deregister(&self, token: Token) -> std::io::Result<()> { self.inner.deregister(token) }
+
+    fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> std::io::Result<usize> {
+        self.inner.poll(events, timeout)
+    }
+
+    fn wake(&self) -> std::io::Result<()> {
+        if self.armed.swap(false, Ordering::AcqRel) { panic!("submission notifier panic"); }
+        self.inner.wake()
+    }
+
+    fn registration_count(&self) -> usize { self.inner.registration_count() }
+}
+
+#[derive(Debug, Default)]
+struct SubmissionPanicClock {
+    inner: WallClock,
+    remaining: AtomicUsize,
+}
+
+impl TimeSource for SubmissionPanicClock {
+    fn now(&self) -> Time {
+        if self.remaining.fetch_update(Ordering::AcqRel, Ordering::Acquire,
+            |remaining| remaining.checked_sub(1)) == Ok(1)
+        { panic!("submission clock panic"); }
+        self.inner.now()
+    }
+}
+
+#[test]
+fn node_outbound_submission_unwind_seals_admission_and_drains_unpublished_owner() {
+    for before_enqueue in [true, false] {
+        // Use real native I/O and wall time. A current-thread driver keeps the
+        // armed callback on this synchronous submission, without a timing race.
+        let reactor = Arc::new(SubmissionPanicReactor {
+            inner: create_reactor().unwrap(), armed: AtomicBool::new(false),
+        });
+        let clock = Arc::new(SubmissionPanicClock::default());
+        let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(reactor.clone())
+            .with_timer_driver(TimerDriverHandle::new(Arc::new(TimerDriver::with_clock(Arc::clone(&clock)))))
+            .build().unwrap();
+        let runtime_handle = runtime.handle();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let Fixture { service, operator, membership, client, hello, parked, .. } =
+                fixture_protocol(&cx, RemoteProtocolVersion::V3).await;
+            let _release = ReleaseParked(Arc::clone(&parked));
+            membership.apply_authenticated(&NodeId::new("authority"), &statement(1)).unwrap();
+            let route = NativeRemoteRoute::new(NodeId::new("worker"), hello, client);
+            let node = NativeDistributedNode::start_with_outbound(
+                &cx, service, membership.clone(), None, outbound_config(runtime_handle), ChildRegionSpec::inherit(),
+            ).await.unwrap();
+            let outbound = node.client().unwrap();
+            outbound.publish_peer(route.clone(), 1).unwrap();
+            if before_enqueue {
+                // The submission deadline samples first; gateway enqueue
+                // samples next, after the outbound credit was reserved.
+                clock.remaining.store(2, Ordering::Release);
+            } else {
+                reactor.armed.store(true, Ordering::Release);
+            }
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                outbound.spawn_remote(NodeId::new("worker"), 1, ComputationName::new("echo"),
+                    RemoteInput::new(b"park".to_vec()), remote_run_config())
+            })).expect_err("injected submission callback must unwind");
+            let expected = if before_enqueue { "submission clock panic" } else { "submission notifier panic" };
+            assert_eq!(panic.downcast_ref::<&str>().copied(), Some(expected));
+            assert!(outbound.is_closed());
+            assert!(node.is_closed());
+            assert!(operator.shutdown_signal().is_shutting_down());
+            assert_eq!(outbound.retained_operations(), 1, "unknown publication keeps its credit until region close");
+            assert!(matches!(outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"), RemoteInput::empty(), remote_run_config(),
+            ), Err(NativeDistributedOutboundError::Closed)));
+            assert!(matches!(outbound.publish_peer(route, 1), Err(NativeDistributedOutboundError::Closed)));
+            assert!(matches!(membership.apply_authenticated(&NodeId::new("authority"), &statement(2)),
+                Err(OwnedMembershipError::Closed)));
+            assert!(cx.checkpoint().is_ok(), "submission unwind must not cancel the caller's parent region");
+
+            let report = assert_send(node.close()).await;
+            assert_eq!(report.stop_cause, NativeDistributedNodeStopCause::OwnerDropped);
+            assert!(matches!(report.region_close, Some(Ok(()))));
+            let remote = report.outbound.unwrap();
+            assert!(remote.graceful);
+            assert_eq!(remote.active_sessions, 0);
+            assert_eq!(remote.retained_operations, 0);
+            assert_eq!(outbound.retained_operations(), 0);
+            assert_eq!(membership.live_leases(), 0);
+            assert!(!parked.entered.load(Ordering::Acquire), "cancelled unpublished work must not reach the remote handler");
+        });
+        finish(runtime);
+    }
+}
+
+#[test]
+fn node_outbound_authenticates_work_rejoins_and_retains_completed_results() {
+    for workers in [1, 2] {
+        let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
+            else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+        let runtime_handle = runtime.handle();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let Fixture { service, membership, client, hello, parked, .. } =
+                fixture_protocol(&cx, RemoteProtocolVersion::V3).await;
+            let _release = ReleaseParked(Arc::clone(&parked));
+            let route = NativeRemoteRoute::new(NodeId::new("worker"), hello.clone(), client.clone());
+            let node = NativeDistributedNode::start_with_outbound(
+                &cx, service, membership.clone(), None, outbound_config(runtime_handle), ChildRegionSpec::inherit(),
+            ).await.unwrap();
+            let outbound = node.client().unwrap();
+            assert_eq!(outbound.route_generation(), 0);
+            assert!(matches!(outbound.publish_peer(route.clone(), 1), Err(NativeDistributedOutboundError::Membership)));
+            assert!(matches!(outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"), RemoteInput::empty(), remote_run_config(),
+            ), Err(NativeDistributedOutboundError::Membership)));
+            assert_eq!(outbound.retained_operations(), 0);
+
+            membership.apply_authenticated(&NodeId::new("authority"), &statement(1)).unwrap();
+            let wrong_origin = RemotePeerHello::new(
+                NodeId::new("wrong-origin"), RemoteProtocolVersion::V3, hello.registry_fingerprint(),
+            );
+            assert!(matches!(outbound.publish_peer(
+                NativeRemoteRoute::new(NodeId::new("worker"), wrong_origin, client.clone()), 1,
+            ), Err(NativeDistributedOutboundError::Routes(
+                asupersync::remote::NativeRemoteRuntimeBuildError::OriginIdentityMismatch { .. }
+            ))));
+            assert_eq!(outbound.route_generation(), 0, "invalid candidate never publishes");
+            assert_eq!(outbound.publish_peer(route.clone(), 1).unwrap(), 1);
+            assert!(matches!(outbound.publish_peer(
+                NativeRemoteRoute::new(NodeId::new("other"), hello, client.clone()), 1,
+            ), Err(NativeDistributedOutboundError::PeerCapacity)));
+            assert_eq!(outbound.route_generation(), 1);
+
+            let oversized = Vec::with_capacity(client.config().wire_limits().max_frame_bytes() + 1);
+            assert!(matches!(outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"), RemoteInput::new(oversized), remote_run_config(),
+            ), Err(NativeDistributedOutboundError::RequestTooLarge)));
+            assert!(matches!(outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"), RemoteInput::empty(),
+                RemoteRunConfig { timeout: Duration::ZERO, child: ChildRegionSpec::inherit() },
+            ), Err(NativeDistributedOutboundError::Timing(RemoteRunError::Timeout))));
+            assert_eq!(outbound.retained_operations(), 0);
+
+            let mut first = outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"),
+                RemoteInput::new(b"first generation".to_vec()), remote_run_config(),
+            ).unwrap();
+            eventually(&cx, || first.is_finished()).await;
+            assert_eq!(outbound.active_sessions(), 0);
+            assert_eq!(outbound.retained_operations(), 1, "unread reports retain the bounded slot");
+            assert!(matches!(outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"), RemoteInput::empty(), remote_run_config(),
+            ), Err(NativeDistributedOutboundError::OperationCapacity)));
+            assert_node_remote_success(assert_send(first.join()).await, b"first generation");
+            assert_eq!(outbound.retained_operations(), 0);
+            let repeated = first.join().await;
+            assert!(repeated.outcome.is_none());
+            assert_eq!(repeated.retirement, Err(JoinError::PolledAfterCompletion));
+
+            let mut revoked = outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"),
+                RemoteInput::new(b"park".to_vec()), remote_run_config(),
+            ).unwrap();
+            eventually(&cx, || parked.entered.load(Ordering::Acquire)).await;
+            assert_eq!(membership.live_leases(), 1);
+            membership.apply_authenticated(&NodeId::new("authority"),
+                &member_statement(1, 2, MembershipKind::Dead)).unwrap();
+            eventually(&cx, || parked.cancelled.load(Ordering::Acquire)).await;
+            assert_eq!(outbound.retained_operations(), 1, "revocation still owns the draining invocation");
+            assert!(matches!(outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"), RemoteInput::empty(), remote_run_config(),
+            ), Err(NativeDistributedOutboundError::Membership)));
+            parked.release.store(true, Ordering::Release);
+            parked.changed.notify_waiters();
+            let retired = revoked.join().await;
+            assert_retired(retired.retirement);
+            let retired = retired.outcome.expect("revoked owner retained its report").unwrap();
+            assert!(!retired.is_success());
+            assert!(matches!(retired.work.trigger, MembershipWorkTrigger::LeaseEnded(OwnedLeaseStatus::Revoked)));
+            assert!(retired.work.close.is_ok());
+            assert!(matches!(retired.work.lease, Ok(OwnedLeaseStatus::Revoked)));
+            assert_eq!(membership.live_leases(), 0);
+            assert_eq!(outbound.retained_operations(), 0);
+            membership.apply_authenticated(&NodeId::new("authority"),
+                &member_statement(2, 3, MembershipKind::Alive)).unwrap();
+            assert!(matches!(outbound.spawn_remote(
+                NodeId::new("worker"), 2, ComputationName::new("echo"), RemoteInput::empty(), remote_run_config(),
+            ), Err(NativeDistributedOutboundError::Membership)), "new authority alone cannot rebind an old route");
+            assert!(matches!(outbound.publish_peer(route.clone(), 1), Err(NativeDistributedOutboundError::Membership)));
+            assert_eq!(outbound.route_generation(), 1);
+            assert_eq!(outbound.publish_peer(route.clone(), 2).unwrap(), 2);
+            let mut rejoined = outbound.spawn_remote(
+                NodeId::new("worker"), 2, ComputationName::new("echo"),
+                RemoteInput::new(b"fresh generation".to_vec()), remote_run_config(),
+            ).unwrap();
+            assert_node_remote_success(assert_send(rejoined.join()).await, b"fresh generation");
+            assert_eq!(outbound.remove_peer(&NodeId::new("worker")).unwrap(), 3);
+            assert!(matches!(outbound.spawn_remote(
+                NodeId::new("worker"), 2, ComputationName::new("echo"), RemoteInput::empty(), remote_run_config(),
+            ), Err(NativeDistributedOutboundError::Membership)));
+
+            let report = assert_send(node.close()).await;
+            assert!(matches!(report.region_close, Some(Ok(()))));
+            let remote = report.outbound.unwrap();
+            assert!(remote.graceful);
+            assert_eq!(remote.active_sessions, 0);
+            assert_eq!(remote.retained_operations, 0);
+            assert_eq!(remote.route_generation, 3);
+            assert!(outbound.is_closed());
+            assert!(matches!(outbound.publish_peer(route, 2), Err(NativeDistributedOutboundError::Closed)));
+        });
+        finish(runtime);
+    }
+}
+
+#[test]
+fn node_outbound_drop_retains_capacity_until_real_drain_and_close_collects_owners() {
+    for workers in [1, 2] {
+        let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
+            else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+        let runtime_handle = runtime.handle();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let Fixture { service, membership, client, hello, parked, .. } =
+                fixture_protocol(&cx, RemoteProtocolVersion::V3).await;
+            let _release = ReleaseParked(Arc::clone(&parked));
+            membership.apply_authenticated(&NodeId::new("authority"), &statement(1)).unwrap();
+            let route = NativeRemoteRoute::new(NodeId::new("worker"), hello, client);
+            let node = NativeDistributedNode::start_with_outbound(
+                &cx, service, membership.clone(), None, outbound_config(runtime_handle), ChildRegionSpec::inherit(),
+            ).await.unwrap();
+            let outbound = node.client().unwrap();
+            outbound.publish_peer(route, 1).unwrap();
+            let first = outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"),
+                RemoteInput::new(b"park".to_vec()), remote_run_config(),
+            ).unwrap();
+            eventually(&cx, || parked.entered.load(Ordering::Acquire)).await;
+            assert_eq!(membership.live_leases(), 1);
+            assert_eq!(outbound.active_sessions(), 1);
+            drop(first);
+            eventually(&cx, || parked.cancelled.load(Ordering::Acquire)).await;
+            assert_eq!(outbound.retained_operations(), 1, "handle drop cannot free an owner still draining");
+            assert!(matches!(outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"), RemoteInput::empty(), remote_run_config(),
+            ), Err(NativeDistributedOutboundError::OperationCapacity)));
+            parked.release.store(true, Ordering::Release);
+            parked.changed.notify_waiters();
+            eventually(&cx, || outbound.retained_operations() == 0).await;
+            assert_eq!(membership.live_leases(), 0);
+            assert_eq!(outbound.active_sessions(), 0);
+            let mut healthy = outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"),
+                RemoteInput::new(b"after cancelled work".to_vec()), remote_run_config(),
+            ).unwrap();
+            assert_node_remote_success(healthy.join().await, b"after cancelled work");
+
+            parked.entered.store(false, Ordering::Release);
+            parked.cancelled.store(false, Ordering::Release);
+            parked.release.store(false, Ordering::Release);
+            let mut last = outbound.spawn_remote(
+                NodeId::new("worker"), 1, ComputationName::new("echo"),
+                RemoteInput::new(b"park".to_vec()), remote_run_config(),
+            ).unwrap();
+            eventually(&cx, || parked.entered.load(Ordering::Acquire)).await;
+            node.begin_close();
+            assert!(outbound.is_closed());
+            eventually(&cx, || parked.cancelled.load(Ordering::Acquire)).await;
+            let mut closing = std::pin::pin!(assert_send(node.close()));
+            poll_fn(|task| {
+                assert!(closing.as_mut().poll(task).is_pending(), "close must await the observed remote cleanup");
+                Poll::Ready(())
+            }).await;
+            parked.release.store(true, Ordering::Release);
+            parked.changed.notify_waiters();
+            let report = closing.await;
+            assert!(matches!(report.region_close, Some(Ok(()))));
+            let remote = report.outbound.unwrap();
+            assert_eq!(remote.active_sessions, 0);
+            assert_eq!(remote.retained_operations, 1, "retired unread handle remains charged");
+            let terminal = last.join().await;
+            assert_retired(terminal.retirement);
+            let actual = terminal.outcome.expect("entered owner retained its actual report");
+            assert!(!actual.is_ok_and(|report| report.is_success()));
+            assert_eq!(outbound.retained_operations(), 0);
+            assert_eq!(membership.live_leases(), 0);
+        });
+        finish(runtime);
+    }
+}
+
+#[test]
+fn node_outbound_startup_rollback_and_unpolled_start_preserve_quiescence() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let handle = runtime.handle();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        assert!(matches!(NativeDistributedOutboundConfig::new(
+            handle.clone(), RemoteCap::new(), NativeRemoteRuntimeConfig::new(), 0,
+        ), Err(NativeDistributedOutboundError::Configuration)));
+        assert!(matches!(NativeDistributedOutboundConfig::new(
+            handle.clone(), RemoteCap::new(), NativeRemoteRuntimeConfig::new().with_max_in_flight(0), 1,
+        ), Err(NativeDistributedOutboundError::Routes(
+            asupersync::remote::NativeRemoteRuntimeBuildError::ZeroMaxInFlight
+        ))));
+        let Fixture { service, membership, operator, .. } = fixture(&cx).await;
+        type NoIo = CapSet<true, true, true, false, true>;
+        let restricted = {
+            let _guard = Cx::push_restriction(<NoIo as CapSetRuntimeMask>::MASK);
+            Cx::current().unwrap()
+        };
+        let error = NativeDistributedNode::start_with_outbound(
+            &restricted, service, membership.clone(), None,
+            outbound_config(handle.clone()), ChildRegionSpec::inherit(),
+        ).await.unwrap_err();
+        assert!(matches!(error.cause, NativeDistributedNodeStartFailure::MissingIoDriver));
+        assert!(error.rollback.region_id.is_none());
+        let outbound = error.rollback.outbound.unwrap();
+        assert!(outbound.graceful);
+        assert_eq!(outbound.active_sessions, 0);
+        assert_eq!(outbound.retained_operations, 0);
+        assert_eq!(outbound.route_generation, 0);
+        assert!(operator.shutdown_signal().is_shutting_down());
+        assert!(matches!(membership.apply_authenticated(&NodeId::new("authority"), &statement(1)),
+            Err(OwnedMembershipError::Closed)));
+
+        let Fixture { service, membership, .. } = fixture(&cx).await;
+        type NoRemote = CapSet<true, true, true, true, false>;
+        let restricted = {
+            let _guard = Cx::push_restriction(<NoRemote as CapSetRuntimeMask>::MASK);
+            Cx::current().unwrap()
+        };
+        assert!(!restricted.capabilities().remote);
+        let error = NativeDistributedNode::start_with_outbound(
+            &restricted, service, membership, None,
+            outbound_config(handle.clone()), ChildRegionSpec::inherit(),
+        ).await.unwrap_err();
+        assert!(matches!(error.cause, NativeDistributedNodeStartFailure::MissingRemote));
+        assert!(error.rollback.region_id.is_none());
+        assert_eq!(error.rollback.outbound.unwrap().active_sessions, 0);
+
+        let Fixture { service, membership, operator, .. } = fixture(&cx).await;
+        let address = service.local_addr().unwrap();
+        drop(assert_send(NativeDistributedNode::start_with_outbound(
+            &cx, service, membership.clone(), None, outbound_config(handle), ChildRegionSpec::inherit(),
+        )));
+        assert!(operator.shutdown_signal().is_shutting_down());
+        assert!(matches!(membership.apply_authenticated(&NodeId::new("authority"), &statement(1)),
+            Err(OwnedMembershipError::Closed)));
+        let rebound = std::net::TcpListener::bind(address).expect("never-polled node released its listener");
+        drop(rebound);
     });
     finish(runtime);
 }
