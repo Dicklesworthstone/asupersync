@@ -1427,20 +1427,6 @@ fn empty_udp_receive_buffer_error(op: &str) -> io::Error {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[inline]
-fn is_wsaemsgsize(err: &io::Error) -> bool {
-    #[cfg(windows)]
-    {
-        err.raw_os_error() == Some(windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = err;
-        false
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn recv_batch_payload_buffer(spare_payloads: &mut Vec<Vec<u8>>, packet_size: usize) -> Vec<u8> {
     let mut buf = spare_payloads
         .pop()
@@ -3777,6 +3763,10 @@ impl UdpSocket {
     }
 
     /// Receive one readiness-driven packet, then drain any immediately-ready packets.
+    ///
+    /// Datagrams larger than `packet_size` retain their source and their first
+    /// `packet_size` bytes with [`UdpInboundDatagram::possibly_truncated`] set.
+    /// They count toward `max_packets`, including on Windows.
     pub async fn recv_batch_from(
         &mut self,
         max_packets: usize,
@@ -3846,27 +3836,27 @@ impl UdpSocket {
 
             // One reusable scratch buffer serves every receive in the batch;
             // each datagram is copied out into an exactly-sized payload Vec.
-            // Sizing scratch with a guard byte (`packet_size + 1`) allows unambiguous
-            // detection of truncated datagrams (`bytes_read > packet_size`) while
-            // avoiding false positives for exact MTU-sized packets (`bytes_read == packet_size`).
-            let guard_size = packet_size.saturating_add(1);
+            // A guard byte distinguishes exact-size packets from truncation.
+            // Winsock consumes an oversized datagram but returns WSAEMSGSIZE,
+            // so std cannot return its source address or copied prefix. Receive
+            // a complete ordinary UDP datagram there, then apply the caller's
+            // bound below. One scratch buffer is shared by the whole batch;
+            // non-Windows targets retain their small guard-byte allocation.
+            let guard_size = if cfg!(windows) {
+                packet_size.saturating_add(1).max(usize::from(u16::MAX))
+            } else {
+                packet_size.saturating_add(1)
+            };
             let mut scratch = recv_batch_payload_buffer(spare_payloads, guard_size);
-            let (bytes_read, src_addr) = loop {
-                match self.poll_recv_from(cx, &mut scratch) {
-                    Poll::Ready(Ok(received)) => break received,
-                    Poll::Ready(Err(err)) if is_wsaemsgsize(&err) => {
-                        // Winsock reports datagrams larger than the buffer as WSAEMSGSIZE (10040)
-                        // rather than truncating into the buffer. Skip the oversized datagram and
-                        // poll again so a stray oversized packet does not kill the batch.
-                    }
-                    Poll::Ready(Err(err)) => {
-                        recycle_unused_recv_batch_payload(spare_payloads, scratch);
-                        return Poll::Ready(Err(err));
-                    }
-                    Poll::Pending => {
-                        recycle_unused_recv_batch_payload(spare_payloads, scratch);
-                        return Poll::Pending;
-                    }
+            let (bytes_read, src_addr) = match self.poll_recv_from(cx, &mut scratch) {
+                Poll::Ready(Ok(received)) => received,
+                Poll::Ready(Err(err)) => {
+                    recycle_unused_recv_batch_payload(spare_payloads, scratch);
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending => {
+                    recycle_unused_recv_batch_payload(spare_payloads, scratch);
+                    return Poll::Pending;
                 }
             };
 
@@ -3916,9 +3906,6 @@ impl UdpSocket {
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                         break;
-                    }
-                    Err(err) if is_wsaemsgsize(&err) => {
-                        // Winsock oversized datagram: skip and continue receiving remaining packets.
                     }
                     Err(err) => {
                         batch.report.error = Some(err.to_string());
