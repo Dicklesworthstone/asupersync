@@ -530,7 +530,7 @@ impl Reactor for SubmissionPanicReactor {
     }
 
     fn wake(&self) -> std::io::Result<()> {
-        if self.armed.swap(false, Ordering::AcqRel) { panic!("submission notifier panic"); }
+        assert!(!self.armed.swap(false, Ordering::AcqRel), "submission notifier panic");
         self.inner.wake()
     }
 
@@ -545,7 +545,7 @@ struct SubmissionPanicClock {
 
 impl TimeSource for SubmissionPanicClock {
     fn now(&self) -> Time {
-        if self.remaining.fetch_update(Ordering::AcqRel, Ordering::Acquire,
+        if self.remaining.try_update(Ordering::AcqRel, Ordering::Acquire,
             |remaining| remaining.checked_sub(1)) == Ok(1)
         { panic!("submission clock panic"); }
         self.inner.now()
