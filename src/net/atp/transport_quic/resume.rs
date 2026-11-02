@@ -624,10 +624,8 @@ mod storage {
         Some(progress.load(std::sync::atomic::Ordering::Acquire))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     mod tests {
-        #![cfg(unix)]
-
         use super::{
             AuthKey, Cx, File, MAX_HISTORY_BYTES, OpenOptions, Path, PathBuf, Read,
             Seek, SeekFrom, Store, TransferManifest, Write, cache_identity, hex_encode, open,
