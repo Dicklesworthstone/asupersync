@@ -265,11 +265,11 @@ impl<T> Component<T> {
         Some(task.join(cx).await)
     }
 
-    fn collect(&self, retirement: Option<Result<(), JoinError>>) -> Option<NativeDistributedComponentResult<T>> {
-        retirement.map(|retirement| NativeDistributedComponentResult {
+    fn collect(&self, retirement: Result<(), JoinError>) -> NativeDistributedComponentResult<T> {
+        NativeDistributedComponentResult {
             outcome: self.outcome.lock().take(),
             retirement,
-        })
+        }
     }
 }
 
@@ -610,9 +610,9 @@ impl NativeDistributedNode {
             stop_cause: self.controls.cause().expect("finish sealed admission"),
             region_id: self.region_id,
             region_close,
-            listener: self.listener.collect(listener),
-            membership: self.membership.collect(membership),
-            swim: self.swim.collect(swim),
+            listener: listener.map(|retirement| self.listener.collect(retirement)),
+            membership: membership.map(|retirement| self.membership.collect(retirement)),
+            swim: swim.map(|retirement| self.swim.collect(retirement)),
             outbound: self.controls.outbound.as_ref().zip(outbound_graceful)
                 .map(|(outbound, graceful)| outbound.report(graceful)),
         }
