@@ -1373,14 +1373,22 @@ mod tests {
     }
 
     fn write_startup_ready(stream: &mut std::net::TcpStream) {
+        write_startup_ready_with_key(stream, 4242, 31337);
+    }
+
+    fn write_startup_ready_with_key(
+        stream: &mut std::net::TcpStream,
+        process_id: i32,
+        secret_key: i32,
+    ) {
         use std::io::Write;
 
         stream
             .write_all(&backend_message(b'R', &0i32.to_be_bytes()))
             .expect("write AuthenticationOk");
         let mut key_data = Vec::new();
-        key_data.extend_from_slice(&4242i32.to_be_bytes());
-        key_data.extend_from_slice(&31337i32.to_be_bytes());
+        key_data.extend_from_slice(&process_id.to_be_bytes());
+        key_data.extend_from_slice(&secret_key.to_be_bytes());
         stream
             .write_all(&backend_message(b'K', &key_data))
             .expect("write BackendKeyData");
@@ -6207,6 +6215,153 @@ mod tests {
         assert_eq!(seen.as_ref(), Some(&("localhost:5432".to_string(), None)));
     }
 
+    /// The cancellation connection belongs to the established backend, even
+    /// when retained connection metadata no longer names that endpoint.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn cancel_target_uses_connected_tcp_peer_instead_of_connection_options() {
+        use std::io::Read;
+        use std::time::Duration;
+
+        for current_thread in [true, false] {
+            let runtime = if current_thread {
+                crate::runtime::RuntimeBuilder::current_thread()
+            } else {
+                crate::runtime::RuntimeBuilder::new().worker_threads(2)
+            }
+            .build()
+            .expect("native runtime");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let socket = std::net::TcpStream::connect(address).unwrap();
+            let (_original_peer, _) = listener.accept().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let stream = PgStream::Plain(TcpStream::from_std(socket).unwrap());
+            let mut options = deterministic_postgres_options(1);
+            options.host = "changed-backend.invalid".to_owned();
+            let target = CancelTarget::from_connected_stream(&options, &stream).unwrap();
+            assert_eq!(target.endpoint, CancelEndpoint::Tcp(address));
+            assert_eq!(target.connect_timeout, Duration::from_millis(500));
+
+            runtime
+                .block_on(PgConnection::send_cancel_request(target, 42, 1337))
+                .expect("cancel reaches the original peer without resolving the stale host");
+            let (mut cancel, _) = listener.accept().expect("original listener receives cancel");
+            cancel
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut frame = [0_u8; 16];
+            cancel
+                .read_exact(&mut frame)
+                .expect("complete cancellation frame");
+            assert_eq!(&frame[..4], &16_i32.to_be_bytes());
+            assert_eq!(&frame[4..8], &80_877_102_i32.to_be_bytes());
+            assert_eq!(&frame[8..12], &42_i32.to_be_bytes());
+            assert_eq!(&frame[12..], &1337_i32.to_be_bytes());
+
+            options.connect_timeout = Some(Duration::from_millis(75));
+            let short = CancelTarget::from_connected_stream(&options, &stream).unwrap();
+            assert_eq!(short.connect_timeout, Duration::from_millis(75));
+            assert_eq!(short.endpoint, CancelEndpoint::Tcp(address));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reconnect_replaces_cancel_endpoint_and_backend_key_together() {
+        let server = |process_id, secret_key| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let worker = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_startup_packet(&mut stream);
+                write_startup_ready_with_key(&mut stream, process_id, secret_key);
+            });
+            (
+                deterministic_postgres_options(address.port()),
+                address,
+                worker,
+            )
+        };
+        let (first_options, first_address, first_server) = server(42, 1337);
+        let (second_options, second_address, second_server) = server(43, 1338);
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native context");
+            let mut connection =
+                match PgConnection::connect_with_options(&cx, first_options).await {
+                    Outcome::Ok(connection) => connection,
+                    other => panic!("connect to first backend: {other:?}"),
+                };
+            assert_eq!(
+                connection.inner.cancel_target.endpoint,
+                CancelEndpoint::Tcp(first_address)
+            );
+            assert_eq!(
+                (connection.inner.process_id, connection.inner.secret_key),
+                (42, 1337)
+            );
+
+            // Model an idle close followed by a changed resolution/endpoint.
+            // The public connect path must capture the new actual socket and
+            // must never carry the first server's cancellation authority over.
+            connection.abort_in_flight_exchange();
+            connection.inner.options = second_options;
+            assert!(matches!(
+                connection.ensure_open_for_request(&cx).await,
+                Outcome::Ok(PgOpenState::Reconnected)
+            ));
+            assert_eq!(
+                connection.inner.cancel_target.endpoint,
+                CancelEndpoint::Tcp(second_address)
+            );
+            assert_eq!(
+                (connection.inner.process_id, connection.inner.secret_key),
+                (43, 1338)
+            );
+        });
+        first_server.join().expect("first backend");
+        second_server.join().expect("replacement backend");
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn cancel_target_preserves_unix_socket_transport_and_path() {
+        use std::io::Read;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(".s.PGSQL.5433");
+        let listener = UnixListener::bind(&path).unwrap();
+        let socket = UnixStream::connect(&path).unwrap();
+        let (_original_peer, _) = listener.accept().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stream = PgStream::Unix(crate::net::unix::UnixStream::from_std(socket).unwrap());
+        let mut options = deterministic_postgres_options(5433);
+        options.host = directory.path().to_str().unwrap().to_owned();
+        let target = CancelTarget::from_connected_stream(&options, &stream).unwrap();
+        assert_eq!(target.endpoint, CancelEndpoint::Unix(path));
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native runtime");
+        runtime
+            .block_on(PgConnection::send_cancel_request(target, 42, 1337))
+            .expect("Unix cancellation stays on the Unix transport");
+        let (mut cancel, _) = listener.accept().unwrap();
+        cancel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut frame = [0_u8; 16];
+        cancel.read_exact(&mut frame).unwrap();
+        assert_eq!(&frame[..4], &16_i32.to_be_bytes());
+        assert_eq!(&frame[4..8], &80_877_102_i32.to_be_bytes());
+        assert_eq!(&frame[8..12], &42_i32.to_be_bytes());
+        assert_eq!(&frame[12..], &1337_i32.to_be_bytes());
+    }
+
     #[test]
     fn tls_error_is_connection_error() {
         let err = PgError::Tls("handshake failed".into());
@@ -6395,8 +6550,7 @@ mod tests {
                 conn.inner.process_id = 51;
                 conn.inner.secret_key = 123;
                 conn.inner.cancel_target = CancelTarget {
-                    host: cancel_addr.ip().to_string(),
-                    port: cancel_addr.port(),
+                    endpoint: CancelEndpoint::Tcp(cancel_addr),
                     connect_timeout: Duration::from_millis(100),
                 };
                 let (parked_tx, parked_rx) = std::sync::mpsc::channel();
@@ -7209,8 +7363,7 @@ mod tests {
         let cancel_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let cancel_addr = cancel_listener.local_addr().expect("local_addr");
         conn.inner.cancel_target = CancelTarget {
-            host: cancel_addr.ip().to_string(),
-            port: cancel_addr.port(),
+            endpoint: CancelEndpoint::Tcp(cancel_addr),
             connect_timeout: std::time::Duration::from_millis(500),
         };
 
@@ -7264,8 +7417,7 @@ mod tests {
             listener.local_addr().expect("local_addr").port()
         };
         conn.inner.cancel_target = CancelTarget {
-            host: "127.0.0.1".to_string(),
-            port: dead_port,
+            endpoint: CancelEndpoint::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], dead_port))),
             connect_timeout: std::time::Duration::from_millis(500),
         };
 
@@ -12054,7 +12206,11 @@ mod tests {
             });
             let mut conn = make_test_connection();
             conn.inner.options = options;
-            conn.inner.cancel_target = CancelTarget::from_options(&conn.inner.options);
+            conn.inner.cancel_target = CancelTarget::from_connected_stream(
+                &conn.inner.options,
+                &conn.inner.stream,
+            )
+            .expect("capture connected cancellation endpoint");
             let cx = crate::cx::Cx::for_testing();
 
             // The local state mirrors a server-side idle timeout detected
@@ -12137,7 +12293,11 @@ mod tests {
 
             let mut conn = make_test_connection();
             conn.inner.options = options;
-            conn.inner.cancel_target = CancelTarget::from_options(&conn.inner.options);
+            conn.inner.cancel_target = CancelTarget::from_connected_stream(
+                &conn.inner.options,
+                &conn.inner.stream,
+            )
+            .expect("capture connected cancellation endpoint");
             conn.inner.next_stmt_id = 2;
             conn.inner.closed = true;
             let old_handle = |name: &str, sql: &str| PgStatement {
@@ -12277,7 +12437,11 @@ mod tests {
             let (options, server) = spawn_deterministic_postgres_server(|_stream| {});
             let mut conn = make_test_connection();
             conn.inner.options = options.clone();
-            conn.inner.cancel_target = CancelTarget::from_options(&conn.inner.options);
+            conn.inner.cancel_target = CancelTarget::from_connected_stream(
+                &conn.inner.options,
+                &conn.inner.stream,
+            )
+            .expect("capture connected cancellation endpoint");
             conn.inner.max_result_rows = 17;
             let timeout = std::time::Duration::from_millis(500);
             conn.set_statement_timeout_override(Some(timeout));
@@ -12445,7 +12609,11 @@ mod tests {
             });
             let mut conn = make_test_connection();
             conn.inner.options = options;
-            conn.inner.cancel_target = CancelTarget::from_options(&conn.inner.options);
+            conn.inner.cancel_target = CancelTarget::from_connected_stream(
+                &conn.inner.options,
+                &conn.inner.stream,
+            )
+            .expect("capture connected cancellation endpoint");
             let cx = crate::cx::Cx::for_testing();
             conn.inner.subscribed_channels.insert("jobs".to_string());
             conn.inner
@@ -12795,8 +12963,7 @@ mod tests {
                 .set_nonblocking(true)
                 .expect("nonblocking listener");
             conn.inner.cancel_target = CancelTarget {
-                host: cancel_addr.ip().to_string(),
-                port: cancel_addr.port(),
+                endpoint: CancelEndpoint::Tcp(cancel_addr),
                 connect_timeout: Duration::from_millis(500),
             };
 
