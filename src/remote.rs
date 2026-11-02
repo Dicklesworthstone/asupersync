@@ -3551,29 +3551,111 @@ impl RemoteServicePeerIdempotency {
         }
     }
 
-    fn evict_expired(&mut self, now: Time) {
-        let _ = self.store.evict_expired(now);
-        self.execution_rejections
-            .retain(|_, rejection| now < rejection.expires_at);
+    fn evict_expired(&mut self, key: &IdempotencyKey, now: Time) {
+        if self.store.entries.get(key).is_some_and(|record| {
+            record.outcome.is_some() && record.expires_at.is_some_and(|expiry| now >= expiry)
+        }) {
+            self.store.entries.remove(key);
+        }
+        if self
+            .execution_rejections
+            .get(key)
+            .is_some_and(|rejection| now >= rejection.expires_at)
+        {
+            self.execution_rejections.remove(key);
+        }
     }
 
     fn is_empty(&self) -> bool {
         self.store.len() == 0 && self.execution_rejections.is_empty()
+    }
+
+    fn key_expiry(&self, key: &IdempotencyKey) -> Option<Time> {
+        self.store
+            .entries
+            .get(key)
+            .filter(|record| record.outcome.is_some())
+            .and_then(|record| record.expires_at)
+            .into_iter()
+            .chain(
+                self.execution_rejections
+                    .get(key)
+                    .map(|rejection| rejection.expires_at),
+            )
+            .min()
     }
 }
 
 #[cfg(feature = "tls")]
 struct RemoteServiceIdempotencyInner {
     peers: BTreeMap<NodeId, RemoteServicePeerIdempotency>,
-    /// When every peer's expired records are next swept.
-    next_sweep: Time,
+    /// At most one expiry per retained peer/key; in-flight reservations have
+    /// none. The index avoids rescanning every peer for each terminal expiry.
+    expiries: BTreeSet<(Time, NodeId, u128)>,
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServiceIdempotencyInner {
+    fn next_expiry(&self) -> Option<Time> {
+        self.expiries.first().map(|(expiry, _, _)| *expiry)
+    }
+
+    fn record_expiry(
+        &mut self,
+        peer: &NodeId,
+        key: IdempotencyKey,
+        previous: Option<Time>,
+        next: Option<Time>,
+    ) -> bool {
+        let previous_first = self.next_expiry();
+        if previous != next {
+            if let Some(previous) = previous {
+                self.expiries.remove(&(previous, peer.clone(), key.raw()));
+            }
+            if let Some(next) = next {
+                self.expiries.insert((next, peer.clone(), key.raw()));
+            }
+        }
+        self.next_expiry()
+            .is_some_and(|next| previous_first.is_none_or(|previous| next < previous))
+    }
+
+    fn evict_expired(&mut self, now: Time) -> Option<Time> {
+        while self.next_expiry().is_some_and(|next| now >= next) {
+            let Some((_, peer, raw_key)) = self.expiries.pop_first() else {
+                break;
+            };
+            let Some(peer_state) = self.peers.get_mut(&peer) else {
+                continue;
+            };
+            let key = IdempotencyKey::from_raw(raw_key);
+            peer_state.evict_expired(&key, now);
+            if peer_state.is_empty() {
+                self.peers.remove(&peer);
+            } else if let Some(next) = peer_state.key_expiry(&key) {
+                // A rejection and a subsequently refreshed outcome can have
+                // different deadlines. Keep only the next one indexed.
+                self.expiries.insert((next, peer, raw_key));
+            }
+        }
+        self.next_expiry()
+    }
 }
 
 #[cfg(feature = "tls")]
 struct RemoteServiceIdempotency {
     inner: Mutex<RemoteServiceIdempotencyInner>,
+    expiry_changed: crate::sync::Notify,
     retention: Duration,
     max_records_per_peer: usize,
+}
+
+#[cfg(feature = "tls")]
+fn remote_service_idempotency_now(cx: &Cx) -> Time {
+    // A driverless owner must not borrow the poller's clock through Cx::now:
+    // expiry waits use the process wall clock in that case.
+    cx.timer_driver()
+        .map_or_else(crate::time::raw_wall_now, |clock| clock.now())
 }
 
 #[cfg(feature = "tls")]
@@ -3592,8 +3674,9 @@ impl RemoteServiceIdempotency {
         Self {
             inner: Mutex::new(RemoteServiceIdempotencyInner {
                 peers: BTreeMap::new(),
-                next_sweep: Time::ZERO,
+                expiries: BTreeSet::new(),
             }),
+            expiry_changed: crate::sync::Notify::new(),
             retention,
             max_records_per_peer,
         }
@@ -3606,22 +3689,13 @@ impl RemoteServiceIdempotency {
         now: Time,
     ) -> RemoteServiceIdempotencyAdmission {
         let mut inner = self.inner.lock();
-        // A peer's expired records (inputs and outcomes) were evicted only
-        // when that peer was admitted again, so a peer that went quiet kept
-        // them for the life of the process. Sweep every peer at most once per
-        // retention period, and drop peers left with nothing.
-        if now >= inner.next_sweep {
-            inner.peers.retain(|_, peer_state| {
-                peer_state.evict_expired(now);
-                !peer_state.is_empty()
-            });
-            inner.next_sweep = now + self.retention;
-        }
+        // Retain lazy eviction for adapters without a listener, and free all
+        // peers whose terminal retention has elapsed before admitting more work.
+        let _ = inner.evict_expired(now);
         let peer_state = inner
             .peers
             .entry(peer.clone())
             .or_insert_with(|| RemoteServicePeerIdempotency::new(self.retention));
-        peer_state.evict_expired(now);
 
         let key = request.idempotency_key;
         if !peer_state.store.entries.contains_key(&key)
@@ -3667,9 +3741,17 @@ impl RemoteServiceIdempotency {
         let Some(peer_state) = inner.peers.get_mut(peer) else {
             return false;
         };
-        peer_state
+        let previous_expiry = peer_state.key_expiry(&key);
+        let completed = peer_state
             .store
-            .complete(&key, canonical_task_id, outcome, now)
+            .complete(&key, canonical_task_id, outcome, now);
+        let next_expiry = peer_state.key_expiry(&key);
+        let notify = completed && inner.record_expiry(peer, key, previous_expiry, next_expiry);
+        drop(inner);
+        if notify {
+            self.expiry_changed.notify_one();
+        }
+        completed
     }
 
     fn complete_execution_rejection(
@@ -3684,6 +3766,7 @@ impl RemoteServiceIdempotency {
         let Some(peer_state) = inner.peers.get_mut(peer) else {
             return false;
         };
+        let previous_expiry = peer_state.key_expiry(&key);
         let completed = peer_state.store.complete(
             &key,
             canonical_task_id,
@@ -3700,7 +3783,45 @@ impl RemoteServiceIdempotency {
                 },
             );
         }
+        let next_expiry = peer_state.key_expiry(&key);
+        let notify = completed && inner.record_expiry(peer, key, previous_expiry, next_expiry);
+        drop(inner);
+        if notify {
+            self.expiry_changed.notify_one();
+        }
         completed
+    }
+
+    /// Runs inside the listener's accept wait, using one retained timer and no
+    /// background task. A quiet service releases cached input/outcome bytes at
+    /// their terminal expiry even if no peer ever connects again.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn maintain_expiry(&self, cx: &Cx) {
+        let clock = cx.timer_driver();
+        loop {
+            // notify_one stores a permit if completion races this condition
+            // check and the first poll, so the first deadline cannot be lost.
+            let mut changed = core::pin::pin!(self.expiry_changed.notified());
+            let now = clock
+                .as_ref()
+                .map_or_else(crate::time::raw_wall_now, crate::time::TimerDriverHandle::now);
+            let deadline = self.inner.lock().evict_expired(now);
+            let mut timer = deadline.map(|deadline| match &clock {
+                Some(clock) => crate::time::Sleep::with_timer_driver(deadline, clock.clone()),
+                None => crate::time::Sleep::with_wall_clock(deadline),
+            });
+
+            std::future::poll_fn(|task_cx| {
+                if changed.as_mut().poll(task_cx).is_ready() {
+                    return std::task::Poll::Ready(());
+                }
+                match timer.as_mut() {
+                    Some(timer) => Pin::new(timer).poll_deadline(task_cx),
+                    None => std::task::Poll::Pending,
+                }
+            })
+            .await;
+        }
     }
 }
 
@@ -4627,7 +4748,7 @@ where
     if let Some(commit) = terminal_commit
         && !commit.complete(
             idempotency.ok_or(RemoteComputationServiceError::IdempotencyStateLost)?,
-            cx.now(),
+            remote_service_idempotency_now(cx),
         )
     {
         return Err(RemoteComputationServiceError::IdempotencyStateLost);
@@ -4678,7 +4799,11 @@ async fn remote_service_dispatch_with_idempotency(
                 }
                 .with_no_commit();
             };
-            Some(state.admit(session.peer_node(), &request, cx.now()))
+            Some(state.admit(
+                session.peer_node(),
+                &request,
+                remote_service_idempotency_now(cx),
+            ))
         }
         RemoteServiceProtocolKind::V3Session => {
             return RemoteServiceWireResponse::Rejected {
@@ -4868,7 +4993,11 @@ where
         .await;
     }
 
-    match idempotency.admit(session.peer_node(), &request, cx.now()) {
+    match idempotency.admit(
+        session.peer_node(),
+        &request,
+        remote_service_idempotency_now(cx),
+    ) {
         RemoteServiceIdempotencyAdmission::CachedOutcome(outcome) => {
             let response = RemoteServiceWireResponse::Outcome {
                 remote_task_id: remote_task_id.raw(),
@@ -5351,7 +5480,7 @@ where
     let (response, commit, encoded) =
         remote_service_prepare_terminal_encoding(response, commit, max_frame_bytes, true);
     if let Some(commit) = commit
-        && !commit.complete(idempotency, cx.now())
+        && !commit.complete(idempotency, remote_service_idempotency_now(cx))
     {
         return Err(RemoteComputationServiceError::IdempotencyStateLost);
     }
@@ -5455,7 +5584,7 @@ async fn remote_service_v3_abort_after_transport(
                 canonical_task_id: request.remote_task_id,
                 outcome,
             };
-            if commit.complete(idempotency, cx.now()) {
+            if commit.complete(idempotency, remote_service_idempotency_now(cx)) {
                 source
             } else {
                 RemoteComputationServiceError::IdempotencyStateLost
@@ -9566,6 +9695,8 @@ impl RemoteConnectionOutcomeCounts {
 /// cancel/renew lifecycle until a terminal event. V2/V3 requests share this
 /// listener's authenticated-peer-scoped idempotency state; durable restart
 /// recovery and a production `RemoteRuntime` driver remain separate layers.
+/// Retained terminal outcomes expire on the service clock even when no new
+/// connections arrive; in-flight reservations remain until execution completes.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub struct RemoteComputationService {
     tcp_listener: TcpListener,
@@ -9691,6 +9822,9 @@ impl RemoteComputationService {
         let service_cx = child_region.cx().clone();
         let mut connection_tasks = JoinSet::in_cx(&service_cx);
         let mut shutdown_rx = self.shutdown_signal.subscribe();
+        // Keep the same maintenance future across accepts: traffic must not
+        // discard its timer or postpone an idle peer's terminal expiry.
+        let mut idempotency_expiry = Box::pin(self.idempotency.maintain_expiry(&service_cx));
         let mut accepted_connections = 0_u64;
         let mut capacity_rejections = 0_u64;
         let mut connection_outcomes = RemoteConnectionOutcomeCounts::default();
@@ -9710,6 +9844,7 @@ impl RemoteComputationService {
                 &self.tcp_listener,
                 &self.shutdown_signal,
                 &mut shutdown_rx,
+                idempotency_expiry.as_mut(),
             )
             .await;
             let accepted = match accepted {
@@ -9831,6 +9966,8 @@ impl RemoteComputationService {
             }
         }
 
+        // Retire the expiry timer and notification registration before drain.
+        drop(idempotency_expiry);
         // Close the admission surface before waiting for existing connection
         // tasks. Otherwise new peers can complete the TCP handshake into the
         // kernel backlog after the service has committed to drain.
@@ -9921,6 +10058,7 @@ async fn remote_service_accept_or_shutdown(
     listener: &TcpListener,
     shutdown_signal: &ShutdownSignal,
     shutdown_rx: &mut crate::signal::ShutdownReceiver,
+    mut idempotency_expiry: Pin<&mut impl Future<Output = ()>>,
 ) -> RemoteServiceAccept {
     let mut accept = core::pin::pin!(listener.accept());
     let mut shutdown = core::pin::pin!(shutdown_rx.wait());
@@ -9938,6 +10076,9 @@ async fn remote_service_accept_or_shutdown(
         if shutdown.as_mut().poll(task_cx).is_ready() {
             return std::task::Poll::Ready(RemoteServiceAccept::Shutdown);
         }
+        // This listener-owned future never completes; it only sweeps due
+        // cache entries and registers its next timer/notification wake.
+        let _ = idempotency_expiry.as_mut().poll(task_cx);
         accept
             .as_mut()
             .poll(task_cx)

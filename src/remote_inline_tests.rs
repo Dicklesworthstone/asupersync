@@ -3050,6 +3050,422 @@ peers = []
         assert_eq!(inner.peers[&active].store.len(), 1);
     }
 
+    #[cfg(feature = "tls")]
+    #[test]
+    fn remote_service_idempotency_expiry_refresh_preserves_generation_and_rejection() {
+        let cx = Cx::for_testing();
+        let state = RemoteServiceIdempotency::new(Duration::from_secs(10), 16);
+        let peer = NodeId::new("refreshed-peer");
+        let mut request = test_spawn_request(&cx, RemoteTaskId::from_raw(301));
+        assert!(matches!(
+            state.admit(&peer, &request, Time::from_secs(100)),
+            RemoteServiceIdempotencyAdmission::Execute
+        ));
+        assert!(state.complete_execution_rejection(
+            &peer,
+            request.idempotency_key,
+            request.remote_task_id,
+            "rejected".to_owned(),
+            Time::from_secs(100),
+        ));
+        // A repeated completion refreshes outcome retention, while an existing
+        // execution rejection still expires at its own original deadline.
+        for now in 101..=105 {
+            assert!(state.complete_outcome(
+                &peer,
+                request.idempotency_key,
+                request.remote_task_id,
+                RemoteOutcome::Success(vec![1]),
+                Time::from_secs(now),
+            ));
+            assert_eq!(state.inner.lock().expiries.len(), 1);
+        }
+        {
+            let mut inner = state.inner.lock();
+            assert_eq!(
+                inner.evict_expired(Time::from_secs(110)),
+                Some(Time::from_secs(115))
+            );
+            assert!(inner.peers[&peer].execution_rejections.is_empty());
+            assert_eq!(inner.peers[&peer].store.len(), 1);
+            assert_eq!(inner.expiries.len(), 1);
+        }
+        assert!(matches!(
+            state.admit(&peer, &request, Time::from_secs(114)),
+            RemoteServiceIdempotencyAdmission::CachedOutcome(RemoteOutcome::Success(bytes))
+                if bytes == vec![1]
+        ));
+
+        let previous_task = request.remote_task_id;
+        request.remote_task_id = RemoteTaskId::from_raw(302);
+        assert!(matches!(
+            state.admit(&peer, &request, Time::from_secs(115)),
+            RemoteServiceIdempotencyAdmission::Execute
+        ));
+        assert!(!state.complete_outcome(
+            &peer,
+            request.idempotency_key,
+            previous_task,
+            RemoteOutcome::Success(vec![2]),
+            Time::from_secs(116),
+        ));
+        let mut inner = state.inner.lock();
+        assert_eq!(inner.evict_expired(Time::from_secs(10_000)), None);
+        assert!(inner.expiries.is_empty());
+        let record = &inner.peers[&peer].store.entries[&request.idempotency_key];
+        assert_eq!(record.remote_task_id, request.remote_task_id);
+        assert!(record.outcome.is_none());
+        assert!(record.expires_at.is_none());
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn remote_service_idle_expiry_uses_service_clock_and_preserves_live_records() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use std::sync::atomic::AtomicUsize;
+        use std::task::Wake;
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let clock = Arc::new(VirtualClock::new());
+        clock.advance_to(Time::from_secs(100));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 1),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        // A different ambient clock must neither expire the service's records
+        // early nor steal registration of its timer.
+        let ambient_clock = Arc::new(VirtualClock::new());
+        ambient_clock.advance_to(Time::from_secs(10_000));
+        let ambient_timer = TimerDriverHandle::with_virtual_clock(ambient_clock);
+        let ambient = Cx::new_with_drivers(
+            RegionId::new_for_test(1, 1),
+            TaskId::new_for_test(1, 1),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(ambient_timer.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(ambient));
+        let state = RemoteServiceIdempotency::new(Duration::from_secs(10), 16);
+        let quiet = NodeId::new("expired-peer");
+        let live = NodeId::new("live-peer");
+        let completed = test_spawn_request(&cx, RemoteTaskId::from_raw(101));
+        let rejected = test_spawn_request(&cx, RemoteTaskId::from_raw(102));
+        let in_flight = test_spawn_request(&cx, RemoteTaskId::from_raw(103));
+        let retained = test_spawn_request(&cx, RemoteTaskId::from_raw(104));
+        for (peer, request) in [
+            (&quiet, &completed),
+            (&quiet, &rejected),
+            (&live, &in_flight),
+            (&live, &retained),
+        ] {
+            assert!(matches!(
+                state.admit(peer, request, cx.now()),
+                RemoteServiceIdempotencyAdmission::Execute
+            ));
+        }
+
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut maintenance = Box::pin(state.maintain_expiry(&cx));
+        assert!(maintenance.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(state.expiry_changed.waiter_count(), 1);
+        assert_eq!(timer.pending_count(), 0, "in-flight work has no expiry");
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+        let first_completed_at = cx.now();
+        clock.advance_to(Time::from_secs(105));
+        assert!(state.complete_outcome(
+            &live,
+            retained.idempotency_key,
+            retained.remote_task_id,
+            RemoteOutcome::Success(vec![8; 4096]),
+            cx.now(),
+        ));
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        assert!(maintenance.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_secs(115)));
+
+        // Another connection sampled its completion time before contending
+        // for the cache lock. Publishing it must advance the parked deadline.
+        assert!(state.complete_outcome(
+            &quiet,
+            completed.idempotency_key,
+            completed.remote_task_id,
+            RemoteOutcome::Success(vec![7; 4096]),
+            first_completed_at,
+        ));
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
+        assert!(state.complete_execution_rejection(
+            &quiet,
+            rejected.idempotency_key,
+            rejected.remote_task_id,
+            "execution rejected".to_owned(),
+            first_completed_at,
+        ));
+        assert!(maintenance.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_secs(110)));
+        assert_eq!(ambient_timer.pending_count(), 0);
+
+        for _ in 0..4 {
+            assert!(maintenance.as_mut().poll(&mut task_cx).is_pending());
+        }
+        assert_eq!(timer.pending_count(), 1, "retain exactly one expiry timer");
+        assert_eq!(timer.next_deadline(), Some(Time::from_secs(110)));
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 2, "no idle self-waking");
+
+        clock.advance_to(Time::from_secs(109));
+        assert_eq!(timer.process_timers(), 0);
+        assert!(maintenance.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(state.inner.lock().peers[&quiet].store.len(), 2);
+
+        // Expire without admitting any more requests, on either peer.
+        clock.advance_to(Time::from_secs(110));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(maintenance.as_mut().poll(&mut task_cx).is_pending());
+        {
+            let inner = state.inner.lock();
+            assert!(!inner.peers.contains_key(&quiet));
+            assert_eq!(inner.peers[&live].store.len(), 2);
+            assert!(
+                inner.peers[&live].store.entries[&in_flight.idempotency_key]
+                    .outcome
+                    .is_none()
+            );
+            assert!(
+                inner.peers[&live].store.entries[&retained.idempotency_key]
+                    .outcome
+                    .is_some()
+            );
+        }
+        assert_eq!(timer.next_deadline(), Some(Time::from_secs(115)));
+
+        clock.advance_to(Time::from_secs(115));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(maintenance.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(state.inner.lock().peers[&live].store.len(), 1);
+        assert_eq!(timer.pending_count(), 0);
+        assert_eq!(ambient_timer.pending_count(), 0);
+
+        // Listener shutdown drops this future before the next expiry, retiring
+        // the outstanding registration without evicting a retained outcome.
+        assert!(state.complete_outcome(
+            &live,
+            in_flight.idempotency_key,
+            in_flight.remote_task_id,
+            RemoteOutcome::Success(vec![]),
+            cx.now(),
+        ));
+        assert!(maintenance.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_secs(125)));
+        drop(maintenance);
+        assert_eq!(state.expiry_changed.waiter_count(), 0);
+        assert_eq!(timer.pending_count(), 0);
+        assert_eq!(state.inner.lock().peers[&live].store.len(), 1);
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn remote_service_driverless_idle_expiry_keeps_wall_clock_under_foreign_context() {
+        use crate::time::{TimerDriverHandle, VirtualClock, raw_wall_now};
+
+        let owner = Cx::for_testing();
+        assert!(owner.timer_driver().is_none());
+        let ambient_clock = Arc::new(VirtualClock::new());
+        ambient_clock.advance_to(Time::MAX);
+        let ambient_timer = TimerDriverHandle::with_virtual_clock(ambient_clock);
+        let ambient = Cx::new_with_drivers(
+            RegionId::new_for_test(1, 1),
+            TaskId::new_for_test(1, 1),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(ambient_timer.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(ambient));
+        // Cx's driverless convenience clock can follow the ambient driver;
+        // cache timestamps and maintenance must consistently select raw wall
+        // time to match the explicitly wall-bound expiry timer.
+        assert_eq!(owner.now(), Time::MAX);
+        let before = raw_wall_now();
+        let now = remote_service_idempotency_now(&owner);
+        assert!(before <= now && now <= raw_wall_now());
+
+        let retention = Duration::from_secs(3600);
+        let state = RemoteServiceIdempotency::new(retention, 16);
+        let peer = NodeId::new("driverless-peer");
+        let request = test_spawn_request(&owner, RemoteTaskId::from_raw(401));
+        assert!(matches!(
+            state.admit(&peer, &request, now),
+            RemoteServiceIdempotencyAdmission::Execute
+        ));
+        assert!(state.complete_outcome(
+            &peer,
+            request.idempotency_key,
+            request.remote_task_id,
+            RemoteOutcome::Success(vec![1; 1024]),
+            now,
+        ));
+
+        let mut maintenance = Box::pin(state.maintain_expiry(&owner));
+        let mut task_cx = Context::from_waker(Waker::noop());
+        for _ in 0..3 {
+            assert!(maintenance.as_mut().poll(&mut task_cx).is_pending());
+        }
+        let inner = state.inner.lock();
+        assert_eq!(inner.peers[&peer].store.len(), 1);
+        assert_eq!(inner.next_expiry(), Some(now + retention));
+        drop(inner);
+        assert_eq!(ambient_timer.pending_count(), 0);
+        assert_eq!(state.expiry_changed.waiter_count(), 1);
+        drop(maintenance);
+        assert_eq!(state.expiry_changed.waiter_count(), 0);
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn remote_service_native_idle_listener_evicts_without_connections() {
+        use crate::runtime::RuntimeBuilder;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::tls::{CertificateChain, PrivateKey};
+
+        let clock = Arc::new(VirtualClock::new());
+        clock.advance_to(Time::from_secs(100));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let runtime = RuntimeBuilder::current_thread()
+            .with_timer_driver(timer.clone())
+            .build()
+            .expect("native service runtime");
+        let chain = CertificateChain::from_pem(include_bytes!("../tests/fixtures/tls/server.crt"))
+            .expect("fixture certificate");
+        let key = PrivateKey::from_pem(include_bytes!("../tests/fixtures/tls/server.key"))
+            .expect("fixture private key");
+        let acceptor = TlsAcceptor::builder(chain, key)
+            .disable_strict_cert_validation()
+            .build()
+            .expect("fixture acceptor");
+        let service = runtime
+            .block_on(RemoteComputationService::bind(
+                "127.0.0.1:0",
+                acceptor,
+                RemotePeerAdmissionPolicy::new(
+                    RemoteProtocolVersion::V3,
+                    ComputationSchemaRegistry::new(),
+                ),
+                RemoteComputationRegistry::new(),
+                RemoteComputationServiceConfig::new()
+                    .with_idempotency_retention(Duration::from_secs(10)),
+            ))
+            .expect("bind idle listener");
+        let operator = service.handle();
+        let state = Arc::clone(&service.idempotency);
+        let peer = NodeId::new("quiet-native-peer");
+        let request = test_spawn_request(&Cx::for_testing(), RemoteTaskId::from_raw(201));
+        assert!(matches!(
+            state.admit(&peer, &request, timer.now()),
+            RemoteServiceIdempotencyAdmission::Execute
+        ));
+
+        let (parked_tx, parked_rx) = std::sync::mpsc::sync_channel(1);
+        let (armed_tx, armed_rx) = std::sync::mpsc::sync_channel(1);
+        let (expired_tx, expired_rx) = std::sync::mpsc::sync_channel(1);
+        let controller_state = Arc::clone(&state);
+        let controller_timer = timer.clone();
+        let controller_operator = operator.clone();
+        let controller = std::thread::spawn(move || {
+            // A failed witness must still release block_on and join the native
+            // runtime, so regressions fail within the bounded channel waits.
+            struct StopService(RemoteComputationServiceHandle);
+            impl Drop for StopService {
+                fn drop(&mut self) {
+                    self.0.force_close();
+                }
+            }
+            let _stop = StopService(controller_operator);
+            let limit = Duration::from_secs(5);
+            parked_rx
+                .recv_timeout(limit)
+                .expect("listener parked without clients");
+            assert_eq!(controller_timer.pending_count(), 0);
+            assert!(controller_state.complete_outcome(
+                &peer,
+                request.idempotency_key,
+                request.remote_task_id,
+                RemoteOutcome::Success(vec![42; 64 * 1024]),
+                controller_timer.now(),
+            ));
+            armed_rx
+                .recv_timeout(limit)
+                .expect("completion wakes idle listener and arms expiry");
+            assert_eq!(controller_state.inner.lock().peers[&peer].store.len(), 1);
+            clock.advance_to(Time::from_secs(110));
+            let _ = controller_timer.process_timers();
+            expired_rx
+                .recv_timeout(limit)
+                .expect("timer alone releases cached outcome");
+        });
+
+        let report = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("native service context");
+                let mut run = Box::pin(service.run(&cx));
+                let mut parked_tx = Some(parked_tx);
+                let mut armed_tx = Some(armed_tx);
+                let mut expired_tx = Some(expired_tx);
+                std::future::poll_fn(|task_cx| {
+                    let result = run.as_mut().poll(task_cx);
+                    if result.is_pending() {
+                        if state.expiry_changed.waiter_count() == 1
+                            && let Some(tx) = parked_tx.take()
+                        {
+                            tx.send(()).expect("publish parked listener witness");
+                        }
+                        if timer.next_deadline() == Some(Time::from_secs(110))
+                            && let Some(tx) = armed_tx.take()
+                        {
+                            tx.send(()).expect("publish expiry timer witness");
+                        }
+                        if state.inner.lock().peers.is_empty()
+                            && let Some(tx) = expired_tx.take()
+                        {
+                            tx.send(()).expect("publish idle cache eviction");
+                        }
+                    }
+                    result
+                })
+                .await
+            })
+            .expect("idle listener shuts down cleanly");
+        controller.join().expect("expiry controller completes");
+        assert_eq!(report.accepted_connections(), 0);
+        assert_eq!(report.completed_connections(), 0);
+        assert_eq!(report.failed_connections(), 0);
+        assert_eq!(operator.active_connections(), 0);
+        assert_eq!(operator.shutdown_signal().phase(), ShutdownPhase::Stopped);
+        assert!(state.inner.lock().peers.is_empty());
+        assert_eq!(state.expiry_changed.waiter_count(), 0);
+        assert_eq!(timer.pending_count(), 0);
+    }
+
     #[test]
     fn saga_successful_completion() {
         let mut saga = Saga::new();
