@@ -10,11 +10,10 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-10-28, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts. `v0.6.0` is an unpublished
-release candidate; its package version does not establish delivery. The latest
-verified GitHub and crates.io release is `v0.5.0`, with release evidence recorded
-in `asupersync-v5fn1e`.
+Entries are newest first. A version number in a heading or in `Cargo.toml`
+does not by itself establish delivery. The history up to 2026-10-28 was
+reconstructed from git history, beads, benchmark ledgers, and live repo
+artifacts.
 
 ## Version Timeline
 
@@ -97,25 +96,6 @@ in `asupersync-v5fn1e`.
 ---
 
 ## [Unreleased]
-
-### `atp send --compress` and async zstd streams (feature `zstd`)
-
-`atp send` can ask for compression: `--compress zstd` (`on` is an alias) or
-`--compress auto`, on `--transport tcp`, `quic` or `auto`, in an `atp` built
-with `--features atp-cli,zstd`. The default stays `off`. An `atp recv` from
-such a build accepts without a flag, and an older or codec-less receiver gets
-the raw wire as before. `atp send` refuses `--compress`, before connecting,
-on `--transport rq` and in a build without the codec, rather than sending raw
-without saying so; under `--transport auto` it skips the rq candidate.
-`transport_quic::send_path_with_options_and_limiter_report` is the QUIC send
-it uses. (`br-asupersync-t1fblr.18`.)
-
-`asupersync::compression::zstd` compresses any runtime stream:
-`ZstdEncoder<W: AsyncWrite>` writes standard Zstandard frames (1 MiB by
-default, with checksums), and `ZstdDecoder<R: AsyncRead>` reads them within
-explicit `DecodeLimits`. A dropped read or write future loses nothing as long
-as the adapter is kept. A truncated stream fails with `UnexpectedEof`, and any
-other decoding failure with `InvalidData`. (`br-asupersync-t1fblr.31`.)
 
 ## [v0.6.2] - 2026-11-03
 
@@ -673,6 +653,25 @@ consecutive files share one pipeline, so a tree of small files compresses in
 parallel too. The setting never changes what `CompressionMode::Zstd` sends.
 Delta chunks on TCP are still compressed one at a time.
 (`br-asupersync-t1fblr.25`.)
+
+### `atp send --compress` and async zstd streams (feature `zstd`)
+
+`atp send` can ask for compression: `--compress zstd` (`on` is an alias) or
+`--compress auto`, on `--transport tcp`, `quic` or `auto`, in an `atp` built
+with `--features atp-cli,zstd`. The default stays `off`. An `atp recv` from
+such a build accepts without a flag, and an older or codec-less receiver gets
+the raw wire as before. `atp send` refuses `--compress`, before connecting,
+on `--transport rq` and in a build without the codec, rather than sending raw
+without saying so; under `--transport auto` it skips the rq candidate.
+`transport_quic::send_path_with_options_and_limiter_report` is the QUIC send
+it uses. (`br-asupersync-t1fblr.18`.)
+
+`asupersync::compression::zstd` compresses any runtime stream:
+`ZstdEncoder<W: AsyncWrite>` writes standard Zstandard frames (1 MiB by
+default, with checksums), and `ZstdDecoder<R: AsyncRead>` reads them within
+explicit `DecodeLimits`. A dropped read or write future loses nothing as long
+as the adapter is kept. A truncated stream fails with `UnexpectedEof`, and any
+other decoding failure with `InvalidData`. (`br-asupersync-t1fblr.31`.)
 
 ### HTTP `zstd` content coding (feature `zstd`)
 
