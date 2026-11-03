@@ -18,6 +18,12 @@ in `asupersync-v5fn1e`.
 
 ## Version Timeline
 
+- **v0.6.2 (2026-11-03)**: an ATP fix for QUIC request retransmission
+  storms, opt-in resume of authenticated QUIC transfers from durable chunks
+  (`atp --quic-resume`), opt-in outbound work for native distributed nodes,
+  and fixes for Windows UDP receive batches, idle remote-service result
+  expiry, PostgreSQL cancellation and NATS owner clocks. Only `asupersync`
+  is republished.
 - **v0.6.1 (2026-11-01)**: packaging fix only. The crates.io package of
   `asupersync` now ships the two feature-gated modules that 0.5.0 and 0.6.0
   left out, so `channel-mpsc-select-e2e`, `obligation-cleanup-e2e` and the
@@ -110,6 +116,74 @@ default, with checksums), and `ZstdDecoder<R: AsyncRead>` reads them within
 explicit `DecodeLimits`. A dropped read or write future loses nothing as long
 as the adapter is kept. A truncated stream fails with `UnexpectedEof`, and any
 other decoding failure with `InvalidData`. (`br-asupersync-t1fblr.31`.)
+
+## [v0.6.2] - 2026-11-03
+
+### Fixed: QUIC request retransmission storms (ATP)
+
+A QUIC request flight is now kept until its PTO expires, instead of being
+replaced after every inbound batch, and later retries back off within the
+existing idle deadline. Delayed acknowledgements can now settle a request on
+paths whose RTT exceeds the initial PTO. (`br-asupersync-io5r88`.)
+
+### Added: resume authenticated QUIC transfers from durable chunks (ATP)
+
+`QuicSendOptions::with_resume(true)` and `QuicReceiveOptions::with_resume(true)`
+opt a transfer on the native authenticated fixed-chunk path into resume. A fresh
+session reopens the retained recovery state, authenticates its journal, rehashes
+the durable ranges and requests only the missing chunks. Old peers and
+unsupported profiles fall back to the existing transfer. The resuming receiver
+is Unix only. Limits: payload 4096 chunks of 256 KiB (at most 1 GiB), journal
+history 8 MiB or 16,385 records, and 4 journal generations. The application owns
+cache retention; it is not a global disk quota. A `QuicReceiveOptions` that sets
+both resume and a delta selector is refused.
+
+`atp` (feature `atp-cli`) exposes this as `--quic-resume` on `send`, `recv`,
+`serve` and the SSH receiver bootstrap. It requires explicit QUIC, strict
+shared-key control authority, compression off and a regular-file source, and it
+rejects incompatible delta selectors before any source, stdin, DNS or bind work.
+(`br-asupersync-arq-quic-epic-b0k8qo.10.1`.)
+
+### Added: outbound work for native distributed nodes
+
+`NativeDistributedNode::start_with_outbound` with a
+`NativeDistributedOutboundConfig` is opt-in. The node's cloneable
+`NativeDistributedClient` publishes explicitly provisioned V3 routes only for a
+peer's current authenticated Alive incarnation, and it runs named computations
+in the node's child region. Routes must be published again after a peer
+rejoins. The peer catalog, owner tasks, retained result credits and admitted
+inputs are bounded. Service-only startup is unchanged. Multi-process
+partition and restart acceptance is still open (`br-asupersync-bi2462.12`).
+
+### Fixed
+
+- **UDP on Windows:** an oversized datagram in a receive batch is read into one
+  bounded, reused buffer and then truncated to the caller's limit, keeping its
+  source, prefix, truncation marker and packet accounting. Before, `WSAEMSGSIZE`
+  was swallowed, and a receive could park after consuming the only packet. The
+  release gate type-checked the Windows code (clippy for
+  `x86_64-pc-windows-gnu`) and ran the new regressions on Linux, but it did not
+  run them on Windows. (`br-asupersync-vs1vdk`.)
+- **Remote service:** for authenticated peers, retained idempotency inputs,
+  outcomes and execution rejections now expire while the listener is idle,
+  without waiting for another client. V1-V3 wire formats are unchanged.
+  (`br-asupersync-remote-service-audit-pjrlqa`.)
+- **PostgreSQL:** a `CancelRequest` goes to the backend's actual peer address,
+  captured after connection and TLS negotiation, not to a re-resolved configured
+  host and port. (`br-asupersync-postgres-client-audit-r10-xi63yt`.)
+- **NATS:** explicit-owner and polling-task deadlines stay on their own timer
+  drivers, instead of comparing absolute times from different clocks. A
+  committed reply is kept when cancellation races its acknowledgement.
+  (`br-asupersync-pm29wb`.)
+
+### Release gate
+
+None of the code commits above had been compiled before this release. The gate
+compiled and tested them on Linux, and fixed six clippy findings without
+changing behavior; one of them moves the 64 KiB resume read buffers to the heap.
+Only `asupersync` is republished; the other workspace crates stay at 0.6.0
+(unchanged). The v0.6.0 known issues still apply, except the crates.io feature
+fix that 0.6.1 shipped.
 
 ## [v0.6.1] - 2026-11-01
 
