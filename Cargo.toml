@@ -21,7 +21,7 @@ exclude = [
 
 [package]
 name = "asupersync"
-version = "0.6.0"
+version = "0.6.2"
 edition = "2024"
 license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Spec-first, cancel-correct, capability-secure async runtime for Rust."
@@ -106,6 +106,11 @@ include = [
     "src/observability/otlp_dst_clock_jump_audit_test.rs",
     "src/sync/lock_ordering_test.rs",
     "src/transport/half_close_conformance_tests.rs",
+    # Compiled into the library by the `channel-mpsc-select-e2e` and `obligation-cleanup-e2e`
+    # features (not cfg(test)), so they must ship; 0.5.0 and 0.6.0 left them out (fixed in 0.6.1).
+    # They stay below the `!**/real_*_e2e_tests.rs` and `!**/*tests.rs` rules: the last match wins.
+    "src/real_channel_mpsc_combinator_select_integration_e2e_tests.rs",
+    "src/real_obligation_leak_check_e2e_tests.rs",
     "!src/bin/io_cap_budget_profile.rs",
     "!src/bin/verify_blocked_elimination.rs",
     "!src/bin/quic_conformance_report.rs",

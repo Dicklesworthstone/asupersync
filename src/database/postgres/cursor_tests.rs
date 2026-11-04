@@ -2,7 +2,7 @@
 
 use super::*;
 use super::super::{
-    BackendFrame, CancelTarget, DEFAULT_MAX_PREPARED_STATEMENTS, DEFAULT_MAX_RESULT_ROWS,
+    BackendFrame, CancelEndpoint, CancelTarget, DEFAULT_MAX_PREPARED_STATEMENTS, DEFAULT_MAX_RESULT_ROWS,
     NotificationBuffer, PgConnectOptions, PgConnectionInner, PgStream, PreparedStatementCache,
     SslMode, oid,
 };
@@ -58,7 +58,7 @@ fn pair() -> (PgConnection, std::net::TcpStream) {
     (PgConnection { inner: PgConnectionInner {
         stream: PgStream::Plain(crate::net::TcpStream::from_std(socket).unwrap()),
         options, tls_options: super::super::PgTlsOptions::default(), process_id: 0, secret_key: 0,
-        cancel_target: CancelTarget { host: "127.0.0.1".to_string(), port: addr.port(), connect_timeout: Duration::from_millis(500) },
+        cancel_target: CancelTarget { endpoint: CancelEndpoint::Tcp(addr), connect_timeout: Duration::from_millis(500) },
         parameters: BTreeMap::new(), transaction_status: b'I', closed: false,
         explicitly_closed: false, needs_rollback: false, needs_discard: false,
         next_stmt_id: 0, session_generation: 0, max_result_rows: DEFAULT_MAX_RESULT_ROWS,
@@ -420,7 +420,7 @@ fn native_parked_cursor_cancel_reaches_backend_before_socket_close() {
             conn.inner.process_id = 42; conn.inner.secret_key = 1337;
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = listener.local_addr().unwrap(); listener.set_nonblocking(true).unwrap();
-            conn.inner.cancel_target = CancelTarget { host: "127.0.0.1".to_string(), port: addr.port(), connect_timeout: Duration::from_millis(500) };
+            conn.inner.cancel_target = CancelTarget { endpoint: CancelEndpoint::Tcp(addr), connect_timeout: Duration::from_millis(500) };
             let progress = Arc::new(AtomicUsize::new(usize::MAX)); conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
             start_response(&mut peer); peer.write_all(prefix).unwrap();
             let mut cursor = match conn.query_cursor_params(&cx, "SELECT value", &[], PgCursorConfig::new(1, 128).unwrap()).await {

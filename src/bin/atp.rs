@@ -1204,6 +1204,8 @@ fn validate_rq_cdc_delta_options(
 }
 
 #[allow(clippy::too_many_arguments)]
+// A private CLI validator over the command line's four QUIC delta-mode flags, not public API.
+#[allow(clippy::fn_params_excessive_bools)]
 fn validate_quic_delta_chunks_options(
     transport: Transport,
     enabled: bool,
@@ -1245,6 +1247,8 @@ fn validate_quic_delta_chunks_options(
 }
 
 #[cfg(feature = "tls")]
+// A private CLI validator over the command line's four QUIC delta-mode flags, not public API.
+#[allow(clippy::fn_params_excessive_bools)]
 fn validate_quic_delta_chunks_auth(
     enabled: bool,
     cdc_enabled: bool,

@@ -1649,12 +1649,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 14821,
+          "line": 14825,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 14829,
+          "line": 14833,
           "pattern": "unsafe {"
         }
       ]
@@ -2111,7 +2111,7 @@
       "feature_or_platform_gate": "cfg(test), target_os = linux, feature = io-uring; included from src/fs/uring.rs",
       "why_safe_rust_is_insufficient": "Existing io_uring regression fixtures exercise raw submission entries, descriptor ownership transfer, and pipe syscalls at the filesystem FFI boundary.",
       "safety_invariant": "Test buffers remain alive until terminal completion; transferred descriptors are owned exactly once, and pipe fixtures close only descriptors they still own.",
-      "expected_evidence": "Existing io_uring descriptor and completion-lifetime regressions plus the unsafe-boundary-ledger-contract lane; locator maintenance does not constitute a fresh execution receipt.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md; Existing io_uring descriptor and completion-lifetime regressions plus the unsafe-boundary-ledger-contract lane; locator maintenance does not constitute a fresh execution receipt.",
       "explicit_no_claims": [
         "These are existing test-only sites relocated from the src/fs/uring.rs inventory after test extraction; no unsafe operation is added.",
         "Locator alignment alone does not prove production safety, platform coverage, or runtime execution."

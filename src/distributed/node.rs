@@ -3,8 +3,9 @@
 //! The caller constructs the authenticated computation listener (including any
 //! registered symbol/membership services), the owned membership controller, and
 //! optionally a trusted-network SWIM driver. This module gives those concrete
-//! components one child-region lifetime. It neither derives authenticated route
-//! authority from SWIM nor constructs outbound routes or credentials.
+//! components one child-region lifetime. An opt-in outbound configuration adds
+//! bounded node-owned named computations and explicit membership-bound route
+//! publication. No authenticated authority or credential is derived from SWIM.
 //!
 //! Startup acknowledges task admission/body entry, not listener readiness: the
 //! listener still opens its own connection region before accepting. A component
@@ -30,6 +31,14 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+
+mod outbound;
+pub use outbound::{
+    NativeDistributedClient, NativeDistributedOutboundConfig, NativeDistributedOutboundError,
+    NativeDistributedOutboundReport, NativeDistributedRemoteError, NativeDistributedRemoteHandle,
+    NativeDistributedRemoteResult,
+};
+use outbound::Outbound;
 
 /// A concrete task owned by the node's child region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +109,8 @@ pub struct NativeDistributedNodeReport {
     pub membership: Option<NativeMembershipResult>,
     /// Optional SWIM task's actual protocol/runtime report.
     pub swim: Option<NativeDistributedComponentResult<SwimDriverReport>>,
+    /// Optional outbound native driver drain, separate from local region close.
+    pub outbound: Option<NativeDistributedOutboundReport>,
 }
 
 /// Admission failure. Already-started components are drained before return.
@@ -122,6 +133,9 @@ pub enum NativeDistributedNodeStartFailure {
     /// Native sockets require the caller's runtime I/O driver.
     #[error("node startup requires a native runtime I/O driver")]
     MissingIoDriver,
+    /// Outbound configuration cannot override the caller's remote restriction.
+    #[error("node outbound startup requires remote capability permission")]
+    MissingRemote,
     /// The caller was cancelled before admission completed.
     #[error("node startup caller is cancelled")]
     Cancelled,
@@ -185,6 +199,7 @@ struct Controls {
     stopped: AtomicU8,
     listener: RemoteComputationServiceHandle,
     membership: OwnedMembershipController,
+    outbound: Option<Arc<Outbound>>,
     changed: Notify,
 }
 
@@ -220,6 +235,7 @@ impl Controls {
         }
         // Publish the seal before any callback; independent stop actions must
         // all run even if a membership lease waiter panics while being woken.
+        if let Some(outbound) = &self.outbound { outbound.begin_close(panics); }
         panics.run(|| { let _ = self.listener.begin_drain(); });
         panics.run(|| self.membership.close());
         panics.run(|| self.changed.notify_waiters());
@@ -249,11 +265,11 @@ impl<T> Component<T> {
         Some(task.join(cx).await)
     }
 
-    fn collect(&self, retirement: Option<Result<(), JoinError>>) -> Option<NativeDistributedComponentResult<T>> {
-        retirement.map(|retirement| NativeDistributedComponentResult {
+    fn collect(&self, retirement: Result<(), JoinError>) -> NativeDistributedComponentResult<T> {
+        NativeDistributedComponentResult {
             outcome: self.outcome.lock().take(),
             retirement,
-        })
+        }
     }
 }
 
@@ -271,6 +287,7 @@ struct Unstarted {
     listener: Option<RemoteComputationService>,
     membership: Option<OwnedMembershipController>,
     swim: Option<UdpSwimDriver>,
+    outbound: Option<NativeDistributedOutboundConfig>,
 }
 
 impl Drop for Unstarted {
@@ -293,7 +310,7 @@ impl Drop for Unstarted {
 /// Opt-in ownership of an authenticated listener, membership expiry and SWIM.
 ///
 /// Inputs retain their independently validated identities, capabilities,
-/// routes, and resource policies. The owner adds at most three tasks; connection,
+/// routes, and resource policies. The owner adds at most three service tasks; connection,
 /// frame, store and lease bounds remain those configured by the caller.
 /// In particular, the listener's registry
 /// must explicitly register the caller's symbol/membership handlers; this owner
@@ -351,6 +368,31 @@ impl NativeDistributedNode {
             listener: Some(listener),
             membership: Some(membership),
             swim,
+            outbound: None,
+        };
+        Self::start_inner(cx, unstarted, child)
+    }
+
+    /// Start the services and an explicit bounded outbound capability together.
+    ///
+    /// The outbound runtime starts with no routes. After admission, use
+    /// [`client`](Self::client) to publish independently provisioned peer routes
+    /// and submit membership-owned V3 computations. Closing the node seals that
+    /// client, drains its native transport and closes every local owner task.
+    /// The original [`start`](Self::start) keeps its service-only behavior.
+    ///
+    /// Ownership starts synchronously, including on a never-polled future.
+    pub fn start_with_outbound(
+        cx: &Cx,
+        listener: RemoteComputationService,
+        membership: OwnedMembershipController,
+        swim: Option<UdpSwimDriver>,
+        outbound: NativeDistributedOutboundConfig,
+        child: ChildRegionSpec,
+    ) -> impl Future<Output = Result<Self, NativeDistributedNodeStartError>> {
+        let unstarted = Unstarted {
+            listener: Some(listener), membership: Some(membership), swim,
+            outbound: Some(outbound),
         };
         Self::start_inner(cx, unstarted, child)
     }
@@ -360,10 +402,14 @@ impl NativeDistributedNode {
         mut unstarted: Unstarted,
         child: ChildRegionSpec,
     ) -> Result<Self, NativeDistributedNodeStartError> {
+        let outbound = unstarted.outbound.take().map(|outbound| {
+            outbound.bind(unstarted.membership.as_ref().expect("owned membership").clone())
+        });
         let controls = Arc::new(Controls {
             stopped: AtomicU8::new(0),
             listener: unstarted.listener.as_ref().expect("owned listener").handle(),
             membership: unstarted.membership.as_ref().expect("owned membership").clone(),
+            outbound,
             changed: Notify::new(),
         });
         let observer = unstarted.swim.as_ref().map(UdpSwimDriver::observer);
@@ -400,6 +446,9 @@ impl NativeDistributedNode {
         if cx.timer_driver().is_none() { return Err(Failure::MissingTimer); }
         if !cx.capabilities().io || cx.io_driver_handle().is_none() {
             return Err(Failure::MissingIoDriver);
+        }
+        if self.controls.outbound.is_some() && !cx.capabilities().remote {
+            return Err(Failure::MissingRemote);
         }
         self.address = Some(self.unstarted_listener.as_ref().expect("unstarted listener")
             .local_addr().map_err(Failure::Address)?);
@@ -506,6 +555,18 @@ impl NativeDistributedNode {
     #[must_use]
     pub fn swim_observer(&self) -> Option<SwimObserver> { self.observer.clone() }
 
+    /// Bounded node-owned outbound work, when configured at startup.
+    ///
+    /// Clones retain the node's child authority and cannot reopen it after close.
+    /// This does not expose the raw native runtime or permit replacing its
+    /// membership controller, transport policy or capability after admission.
+    #[must_use]
+    pub fn client(&self) -> Option<NativeDistributedClient> {
+        self.controls.outbound.as_ref().map(|_| NativeDistributedClient::new(
+            Arc::clone(&self.controls), self.principal.as_ref().expect("admitted node principal").clone(),
+        ))
+    }
+
     /// Seal admission and ask every component to stop. Await `close` for drain.
     pub fn begin_close(&self) {
         let mut panics = StopPanics::new();
@@ -526,11 +587,17 @@ impl NativeDistributedNode {
         let mut panics = StopPanics::new();
         self.controls.stop(cause, &mut panics);
         self.retire_unstarted(&mut panics);
+        let outbound_graceful = if let Some(outbound) = &self.controls.outbound {
+            Some(outbound.close(self.principal.as_ref()).await)
+        } else { None };
         let region_close = if let Some(region) = self.region.take() {
             Some(region.close().await)
         } else {
             None
         };
+        if matches!(&region_close, Some(Ok(()))) {
+            if let Some(outbound) = &self.controls.outbound { outbound.region_retired(); }
+        }
         let (mut listener, mut membership, mut swim) = (None, None, None);
         if let Some(principal) = self.principal.as_ref() {
             listener = self.listener.join(principal).await;
@@ -543,9 +610,11 @@ impl NativeDistributedNode {
             stop_cause: self.controls.cause().expect("finish sealed admission"),
             region_id: self.region_id,
             region_close,
-            listener: self.listener.collect(listener),
-            membership: self.membership.collect(membership),
-            swim: self.swim.collect(swim),
+            listener: listener.map(|retirement| self.listener.collect(retirement)),
+            membership: membership.map(|retirement| self.membership.collect(retirement)),
+            swim: swim.map(|retirement| self.swim.collect(retirement)),
+            outbound: self.controls.outbound.as_ref().zip(outbound_graceful)
+                .map(|(outbound, graceful)| outbound.report(graceful)),
         }
     }
 

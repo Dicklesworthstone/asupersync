@@ -20,7 +20,17 @@
     #[cfg(feature = "tls")]
     const NATS_TEST_KEY_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.key");
 
-    fn native_parked_read_cancellation(worker_threads: usize, cancel_driver: bool) {
+    #[derive(Clone, Copy, Debug)]
+    enum NativeNatsCancel {
+        Owner,
+        Driver,
+        OwnerDeadline,
+    }
+
+    fn native_parked_read_cancellation(worker_threads: usize, source: NativeNatsCancel) {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind cancellation listener");
         let addr = listener
             .local_addr()
@@ -42,7 +52,23 @@
             let _ = reader.get_mut().shutdown(std::net::Shutdown::Both);
         });
 
-        let owner: Cx = Cx::for_testing();
+        let owner_start = crate::time::raw_wall_now() + Duration::from_secs(86_400);
+        let owner_clock = Arc::new(VirtualClock::starting_at(owner_start));
+        let owner_timer = TimerDriverHandle::with_virtual_clock(owner_clock.clone());
+        let owner: Cx = if matches!(source, NativeNatsCancel::OwnerDeadline) {
+            Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(1, 0),
+                Budget::new().with_deadline(owner_start + Duration::from_millis(100)),
+                None,
+                None,
+                None,
+                Some(owner_timer.clone()),
+                None,
+            )
+        } else {
+            Cx::for_testing()
+        };
         let operation_owner = owner.clone();
         let (parked_tx, parked_rx) = std_mpsc::channel();
         let (result_tx, result_rx) = std_mpsc::channel();
@@ -54,10 +80,13 @@
             let driver = Cx::current().expect("native NATS driver context");
             let config = NatsConfig::from_url(&format!("nats://{addr}"))
                 .expect("parse cancellation peer URL");
-            let mut connection =
-                NatsConnection::connect_with_policy(&driver, config, NatsConnectPolicy::default())
-                    .await
-                    .expect("connect cancellation peer");
+            let mut connection = NatsClient::connect_with_policy(
+                &operation_owner,
+                config,
+                NatsConnectPolicy::default(),
+            )
+            .await
+            .expect("connect cancellation peer through public API");
             let owner_baseline = operation_owner
                 .inner
                 .read()
@@ -96,11 +125,19 @@
         });
 
         let parked = parked_rx.recv_timeout(Duration::from_secs(3));
+        let deadline_armed = owner_timer.pending_count() > 0;
         if let Ok(driver) = &parked {
-            if cancel_driver {
-                driver.cancel_with(crate::types::CancelKind::Shutdown, Some("NATS driver stop"));
-            } else {
-                owner.cancel_with(crate::types::CancelKind::User, Some("NATS caller stop"));
+            match source {
+                NativeNatsCancel::Owner => {
+                    owner.cancel_with(crate::types::CancelKind::User, Some("NATS caller stop"));
+                }
+                NativeNatsCancel::Driver => {
+                    driver.cancel_with(crate::types::CancelKind::Shutdown, Some("NATS driver stop"));
+                }
+                NativeNatsCancel::OwnerDeadline => {
+                    owner_clock.advance(100_000_000);
+                    let _ = owner_timer.process_timers();
+                }
             }
         }
         let result = result_rx.recv_timeout(Duration::from_secs(2));
@@ -113,10 +150,18 @@
 
         assert!(parked.is_ok(), "native read never parked: {parked:?}");
         assert!(drained, "native cancellation runtime did not drain");
+        if matches!(source, NativeNatsCancel::OwnerDeadline) {
+            assert!(deadline_armed, "the explicit owner's timer was never armed");
+            assert_eq!(owner_timer.pending_count(), 0);
+            assert_eq!(
+                owner.cancel_reason().unwrap().kind,
+                crate::types::CancelKind::Deadline,
+            );
+        }
         match result {
             Ok((Err(NatsError::Cancelled), true, true)) => {}
             other => panic!(
-                "NATS_CANCEL_OWNER workers={worker_threads} driver={cancel_driver} \
+                "NATS_CANCEL_OWNER workers={worker_threads} source={source:?} \
                  parked=true expected=Cancelled,registrations_retired observed={other:?}"
             ),
         }
@@ -125,14 +170,21 @@
     #[test]
     fn nats_native_parked_read_observes_noncurrent_owner_and_retires_registrations() {
         for workers in [1, 2] {
-            native_parked_read_cancellation(workers, false);
+            native_parked_read_cancellation(workers, NativeNatsCancel::Owner);
         }
     }
 
     #[test]
     fn nats_native_parked_read_still_observes_supervisor_shutdown() {
         for workers in [1, 2] {
-            native_parked_read_cancellation(workers, true);
+            native_parked_read_cancellation(workers, NativeNatsCancel::Driver);
+        }
+    }
+
+    #[test]
+    fn nats_native_parked_read_wakes_at_a_foreign_owner_deadline() {
+        for workers in [1, 2] {
+            native_parked_read_cancellation(workers, NativeNatsCancel::OwnerDeadline);
         }
     }
 
@@ -255,6 +307,220 @@
     }
 
     #[test]
+    fn nats_io_keeps_distinct_budget_clocks_armed_after_a_masked_deadline() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, RegionId, TaskId};
+
+        struct CountWakes(AtomicU64);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        // Both numeric orderings matter: sorting these absolute deadlines
+        // either prematurely consumes the owner's timer or delays its wake.
+        for (owner_epoch, driver_epoch) in [(100, 10_000), (10_000, 100)] {
+            let owner_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(owner_epoch)));
+            let owner_timer = TimerDriverHandle::with_virtual_clock(owner_clock.clone());
+            let driver_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(driver_epoch)));
+            let driver_timer = TimerDriverHandle::with_virtual_clock(driver_clock.clone());
+            let make_cx = |task, timer, deadline| {
+                Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(task, 0),
+                    Budget::new().with_deadline(deadline),
+                    None,
+                    None,
+                    None,
+                    Some(timer),
+                    None,
+                )
+            };
+            let owner = make_cx(
+                1,
+                owner_timer.clone(),
+                Time::from_secs(owner_epoch) + Duration::from_millis(300),
+            );
+            let driver = make_cx(
+                2,
+                driver_timer.clone(),
+                Time::from_secs(driver_epoch) + Duration::from_millis(100),
+            );
+            let _current = Cx::set_current(Some(driver.clone()));
+            let mut call = Box::pin(crate::combinator::bracket::commit_section(
+                &driver,
+                u32::MAX,
+                nats_io(&owner, std::future::pending::<Result<(), NatsError>>()),
+            ));
+            let wakes = Arc::new(CountWakes(AtomicU64::new(0)));
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = std::task::Context::from_waker(&waker);
+            assert!(call.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(owner_timer.pending_count(), 1, "owner timer was not armed");
+            assert_eq!(driver_timer.pending_count(), 1, "driver timer was not armed");
+
+            driver_clock.advance(100_000_000);
+            let _ = driver_timer.process_timers();
+            assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            assert!(call.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(driver_timer.pending_count(), 0);
+            assert_eq!(owner_timer.pending_count(), 1);
+            assert!(!owner.is_cancel_requested());
+
+            let before = wakes.0.load(Ordering::SeqCst);
+            owner_clock.advance(300_000_000);
+            let _ = owner_timer.process_timers();
+            assert!(
+                wakes.0.load(Ordering::SeqCst) > before,
+                "a masked foreign deadline must not strand the owner"
+            );
+            assert!(matches!(
+                call.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(NatsError::Cancelled))
+            ));
+            assert_eq!(owner.cancel_reason().unwrap().kind, CancelKind::Deadline);
+            drop(call);
+            assert_eq!(owner_timer.pending_count(), 0);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    #[test]
+    fn nats_io_driverless_owner_preserves_its_clock_and_the_polling_context() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, RegionId, TaskId};
+
+        let owner = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(1, 0),
+            Budget::new().with_deadline(crate::time::raw_wall_now() + Duration::from_secs(3_600)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let foreign_clock = Arc::new(VirtualClock::starting_at(
+            crate::time::raw_wall_now() + Duration::from_secs(86_400),
+        ));
+        let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock);
+        let driver = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(2, 0),
+            Budget::new(),
+            None,
+            None,
+            None,
+            Some(foreign_timer.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(driver.clone()));
+        let mut call = Box::pin(nats_io(
+            &owner,
+            std::future::poll_fn(|_| {
+                // Owner-only checkpointing must restore the task that owns
+                // reactor/capability access before polling transport work.
+                assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+                Poll::<Result<(), NatsError>>::Pending
+            }),
+        ));
+        let mut task_cx = std::task::Context::from_waker(Waker::noop());
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+        assert!(!owner.is_cancel_requested());
+        assert_eq!(foreign_timer.pending_count(), 0);
+        owner.cancel_with(CancelKind::User, Some("stop driverless NATS owner"));
+        assert!(matches!(
+            call.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(NatsError::Cancelled))
+        ));
+        assert_eq!(owner.cancel_reason().unwrap().kind, CancelKind::User);
+        assert!(!driver.is_cancel_requested());
+        assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+        drop(call);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn nats_timeout_keeps_request_bounds_and_boundary_semantics_on_owner_clock() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+        use std::sync::atomic::AtomicBool;
+
+        let owner_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100)));
+        let owner_timer = TimerDriverHandle::with_virtual_clock(owner_clock.clone());
+        let foreign_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10_000)));
+        let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock.clone());
+        let make_cx = |task, timer| {
+            Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(task, 0),
+                Budget::new(),
+                None,
+                None,
+                None,
+                Some(timer),
+                None,
+            )
+        };
+        let owner = make_cx(1, owner_timer.clone());
+        let driver = make_cx(2, foreign_timer.clone());
+        let _current = Cx::set_current(Some(driver));
+        let deadline = Time::from_secs(100) + Duration::from_millis(100);
+        let mut call = nats_timeout_at(
+            &owner,
+            deadline,
+            request_timeout_error,
+            std::future::pending::<Result<(), NatsError>>(),
+        );
+        let mut task_cx = std::task::Context::from_waker(Waker::noop());
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(owner_timer.pending_count(), 1);
+        assert_eq!(foreign_timer.pending_count(), 0);
+        foreign_clock.advance(1_000_000_000);
+        let _ = foreign_timer.process_timers();
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+        owner_clock.advance(100_000_000);
+        let _ = owner_timer.process_timers();
+        let Poll::Ready(Err(error)) = call.as_mut().poll(&mut task_cx) else {
+            panic!("request deadline must expire on its owner clock");
+        };
+        assert!(error.is_timeout());
+        drop(call);
+        assert_eq!(owner_timer.pending_count(), 0);
+
+        let mut ready = nats_timeout_at(
+            &owner,
+            deadline,
+            request_timeout_error,
+            std::future::ready(Ok(42)),
+        );
+        assert!(matches!(ready.as_mut().poll(&mut task_cx), Poll::Ready(Ok(42))));
+        let attempted = AtomicBool::new(false);
+        owner_clock.advance(1);
+        let mut late = nats_timeout_at(&owner, deadline, request_timeout_error, async {
+            attempted.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(matches!(late.as_mut().poll(&mut task_cx), Poll::Ready(Err(_))));
+        assert!(!attempted.load(Ordering::SeqCst));
+
+        owner.cancel_with(crate::types::CancelKind::User, Some("cancel expired request"));
+        let mut cancelled = nats_timeout_at(
+            &owner,
+            deadline,
+            request_timeout_error,
+            std::future::pending::<Result<(), NatsError>>(),
+        );
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(NatsError::Cancelled))
+        ));
+    }
+
+    #[test]
     fn nats_connect_policy_defaults_and_zero_timeout_pm29wb() {
         use std::sync::atomic::AtomicBool;
 
@@ -275,6 +541,65 @@
         };
         assert!(error.is_timeout(), "{error:?}");
         assert!(!attempted.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn nats_connect_attempt_driverless_timeout_wakes_without_advancing_the_poller() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+        use std::sync::atomic::AtomicBool;
+
+        struct WakeChannel(std_mpsc::Sender<()>);
+        impl std::task::Wake for WakeChannel {
+            fn wake(self: Arc<Self>) {
+                let _ = self.0.send(());
+            }
+        }
+        struct ReleaseOnDrop(Arc<AtomicBool>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let owner = Cx::for_testing();
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(86_400)));
+        let foreign_timer = TimerDriverHandle::with_virtual_clock(clock);
+        let driver = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(2, 0),
+            Budget::new(),
+            None,
+            None,
+            None,
+            Some(foreign_timer.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(driver));
+        let released = Arc::new(AtomicBool::new(false));
+        let release_on_drop = ReleaseOnDrop(Arc::clone(&released));
+        let attempt = async move {
+            let _release = release_on_drop;
+            std::future::pending::<Result<(), NatsError>>().await
+        };
+        let mut call = nats_connect_attempt(&owner, Some(Duration::from_millis(200)), attempt);
+        let (wake_tx, wake_rx) = std_mpsc::channel();
+        let waker = Waker::from(Arc::new(WakeChannel(wake_tx)));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        assert!(call.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(foreign_timer.pending_count(), 0);
+        assert!(!released.load(Ordering::SeqCst));
+        // The foreign virtual clock never advances and there is no transport
+        // wake. Only the owner's process-clock deadline can wake this poll.
+        wake_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("driverless connection timeout must wake on the process clock");
+        let Poll::Ready(Err(error)) = call.as_mut().poll(&mut task_cx) else {
+            panic!("the owner's timeout wake must complete the attempt");
+        };
+        assert!(error.is_timeout(), "{error:?}");
+        assert!(released.load(Ordering::SeqCst));
+        assert_eq!(foreign_timer.pending_count(), 0);
     }
 
     #[test]
@@ -404,6 +729,156 @@
             assert!(driver.inner.read().cancel_waker_registrations.is_empty());
             assert_eq!(timer.pending_count(), 0);
         }
+    }
+
+    #[test]
+    fn nats_native_reconnect_timeout_and_backoff_keep_the_explicit_owner_clock() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, RegionId, TaskId};
+
+        fn accept_within(listener: &TcpListener) -> Option<std::net::TcpStream> {
+            listener.set_nonblocking(true).expect("poll reconnect listener");
+            let until = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_nonblocking(false).expect("blocking reconnect peer");
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .expect("bound reconnect peer reads");
+                        return Some(stream);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= until {
+                            return None;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept reconnect peer: {error}"),
+                }
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind reconnect clock listener");
+        let addr = listener.local_addr().expect("reconnect clock address");
+        let (accepted_tx, accepted_rx) = std_mpsc::channel();
+        let (closed_tx, closed_rx) = std_mpsc::channel();
+        let server = thread::spawn(move || {
+            let Some(mut first) = accept_within(&listener) else {
+                return false;
+            };
+            first.write_all(b"INFO {").expect("send incomplete reconnect INFO");
+            let _ = accepted_tx.send(());
+            let mut byte = [0];
+            let first_closed = matches!(first.read(&mut byte), Ok(0));
+            let _ = closed_tx.send(first_closed);
+            drop(first);
+
+            let Some(mut second) = accept_within(&listener) else {
+                return false;
+            };
+            second
+                .write_all(b"INFO {\"server_id\":\"recovered\",\"max_payload\":1048576}\r\n")
+                .expect("send successful retry INFO");
+            let mut reader = BufReader::new(second);
+            read_protocol_line(&mut reader).starts_with("CONNECT ")
+        });
+
+        let start = crate::time::raw_wall_now() + Duration::from_secs(86_400);
+        let owner_clock = Arc::new(VirtualClock::starting_at(start));
+        let owner_timer = TimerDriverHandle::with_virtual_clock(owner_clock.clone());
+        let owner = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(1, 0),
+            Budget::new(),
+            None,
+            None,
+            None,
+            Some(owner_timer.clone()),
+            None,
+        );
+        let operation_owner = owner.clone();
+        let operation_timer = owner_timer.clone();
+        let (backoff_tx, backoff_rx) = std_mpsc::channel();
+        let (done_tx, done_rx) = std_mpsc::channel();
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("build reconnect clock runtime");
+        let task = runtime.handle().spawn(async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                auto_reconnect: true,
+                max_reconnect_attempts: 2,
+                reconnect_delay: Duration::from_millis(200),
+                max_reconnect_delay: Duration::from_millis(200),
+                ..Default::default()
+            };
+            let mut connection = NatsConnection {
+                read_buf: NatsReadBuffer::with_limit(config.max_read_buffer),
+                config,
+                connect_policy: NatsConnectPolicy::new().with_timeout(Duration::from_millis(100)),
+                stream: NatsStream::Closed,
+                state: Arc::new(SharedState::new()),
+                next_sid: AtomicU64::new(1),
+                connected: false,
+                tls_required_on_connect: false,
+            };
+            let mut streak = ReconnectStreak::default();
+            let mut backoff_tx = Some(backoff_tx);
+            let result = {
+                let reconnect = connection.try_reconnect(&operation_owner, &mut streak, false);
+                let mut reconnect = std::pin::pin!(reconnect);
+                std::future::poll_fn(|task_cx| {
+                    let result = reconnect.as_mut().poll(task_cx);
+                    if result.is_pending()
+                        && operation_timer.next_deadline()
+                            == Some(start + Duration::from_millis(300))
+                        && let Some(backoff_tx) = backoff_tx.take()
+                    {
+                        let _ = backoff_tx.send(());
+                    }
+                    result
+                })
+                .await
+            };
+            let connected = connection.connected;
+            drop(connection);
+            let retired = operation_owner
+                .inner
+                .read()
+                .cancel_waker_registrations
+                .is_empty();
+            let _ = done_tx.send((result, connected, retired));
+        });
+
+        let accepted = accepted_rx.recv_timeout(Duration::from_secs(3));
+        if accepted.is_ok() {
+            owner_clock.advance(100_000_000);
+            let _ = owner_timer.process_timers();
+        }
+        let first_closed = closed_rx.recv_timeout(Duration::from_secs(2));
+        let backoff = backoff_rx.recv_timeout(Duration::from_secs(2));
+        if backoff.is_ok() {
+            // No real-time delay or server byte can complete this retry
+            // wait: only advancing its explicit owner's clock permits it.
+            owner_clock.advance(200_000_000);
+            let _ = owner_timer.process_timers();
+        }
+        let completed = done_rx.recv_timeout(Duration::from_secs(2));
+        owner.cancel_with(CancelKind::User, Some("reconnect clock test cleanup"));
+        drop(task);
+        let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+        let second_connected = server.join().expect("join reconnect clock peer");
+
+        assert!(accepted.is_ok(), "first reconnect never reached the peer");
+        assert!(matches!(first_closed, Ok(true)), "timed-out socket was retained");
+        assert!(backoff.is_ok(), "retry backoff was not armed on the owner's clock");
+        assert!(matches!(completed, Ok((Ok(()), true, true))), "{completed:?}");
+        assert!(second_connected, "retry did not complete a fresh handshake");
+        assert!(drained, "reconnect clock runtime did not drain");
+        assert_eq!(owner_timer.pending_count(), 0);
     }
 
     #[test]
@@ -738,6 +1213,200 @@
             reply_to: None,
             headers: None,
             payload: vec![value],
+        }
+    }
+
+    fn driverless_nats_owner_and_foreign_driver() -> (Cx, Cx, crate::time::TimerDriverHandle) {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+
+        let owner = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(1, 0),
+            Budget::new().with_deadline(crate::time::raw_wall_now() + Duration::from_secs(3_600)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let clock = Arc::new(VirtualClock::starting_at(
+            crate::time::raw_wall_now() + Duration::from_secs(86_400),
+        ));
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let driver = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(2, 0),
+            Budget::new(),
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        (owner, driver, timer)
+    }
+
+    #[test]
+    fn nats_public_subscription_waits_keep_driverless_owner_clock_and_driver_cancellation() {
+        async fn receive(
+            sub: &mut Subscription,
+            cx: &Cx,
+            events: bool,
+        ) -> Result<Option<Message>, NatsError> {
+            if events {
+                match sub.next_event(cx).await? {
+                    Some(SubscriptionEvent::Message(message)) => Ok(Some(message)),
+                    Some(SubscriptionEvent::Lagged { .. }) => panic!("unexpected subscription loss"),
+                    None => Ok(None),
+                }
+            } else {
+                sub.next(cx).await
+            }
+        }
+
+        struct CountWakes(AtomicU64);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for events in [false, true] {
+            let (owner, driver, foreign_timer) = driverless_nats_owner_and_foreign_driver();
+            let _current = Cx::set_current(Some(driver.clone()));
+            let (connection, mut sub) = subscription_event_fixture(1);
+            let wakes = Arc::new(CountWakes(AtomicU64::new(0)));
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = std::task::Context::from_waker(&waker);
+            let mut waiting = Box::pin(receive(&mut sub, &owner, events));
+            assert!(waiting.as_mut().poll(&mut task_cx).is_pending());
+            assert!(!owner.is_cancel_requested());
+            assert_eq!(foreign_timer.pending_count(), 0);
+            assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+
+            connection.dispatch_message(subscription_event_message(7));
+            assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            let Poll::Ready(Ok(Some(message))) = waiting.as_mut().poll(&mut task_cx) else {
+                panic!("public subscription receive must deliver under a foreign clock");
+            };
+            assert_eq!(message.payload, vec![7]);
+            drop(waiting);
+
+            let mut waiting = Box::pin(receive(&mut sub, &owner, events));
+            assert!(waiting.as_mut().poll(&mut task_cx).is_pending());
+            let before = wakes.0.load(Ordering::SeqCst);
+            driver.cancel_with(crate::types::CancelKind::Shutdown, Some("stop NATS subscription poller"));
+            assert!(wakes.0.load(Ordering::SeqCst) > before);
+            assert!(matches!(
+                waiting.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(NatsError::Cancelled))
+            ));
+            drop(waiting);
+            assert!(!owner.is_cancel_requested());
+            assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+            connection.dispatch_message(subscription_event_message(8));
+            assert_eq!(sub.try_next().expect("message after cancelled wait").payload, vec![8]);
+        }
+    }
+
+    #[test]
+    fn nats_public_supervised_ping_preserves_driverless_channel_clock_and_committed_reply() {
+        for committed_reply in [false, true] {
+            let (owner, driver, foreign_timer) = driverless_nats_owner_and_foreign_driver();
+            let _current = Cx::set_current(Some(driver.clone()));
+            let (commands, mut queued) = mpsc::channel(1);
+            let (prior_reply, _prior_response) = oneshot::channel();
+            assert!(commands.try_send(NatsSupervisorCommand::Ping {
+                cx: owner.clone(),
+                reply: prior_reply,
+            }).is_ok());
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                state: Arc::new(SharedState::new()),
+                mode: NatsClientMode::Supervised(NatsSupervisor { commands, task: None }),
+            };
+            let mut ping = Box::pin(client.ping(&owner));
+            let mut task_cx = std::task::Context::from_waker(Waker::noop());
+            // First park on real command-channel capacity, then on the real
+            // oneshot response. Either unguarded checkpoint used to cancel
+            // this owner against the foreign clock's much later epoch.
+            assert!(ping.as_mut().poll(&mut task_cx).is_pending());
+            assert!(!owner.is_cancel_requested());
+            drop(queued.try_recv().expect("release prior command capacity"));
+            assert!(ping.as_mut().poll(&mut task_cx).is_pending());
+            let NatsSupervisorCommand::Ping { cx, reply } =
+                queued.try_recv().expect("supervisor receives current ping")
+            else {
+                panic!("unexpected supervisor command");
+            };
+            assert_eq!(cx.task_id(), owner.task_id());
+            assert_eq!(foreign_timer.pending_count(), 0);
+
+            if committed_reply {
+                reply.send_blocking(Ok(())).expect("commit successful ping reply");
+                owner.cancel_with(crate::types::CancelKind::User, Some("cancel after reply commit"));
+                assert!(matches!(ping.as_mut().poll(&mut task_cx), Poll::Ready(Ok(()))));
+            } else {
+                driver.cancel_with(crate::types::CancelKind::Shutdown, Some("stop NATS command poller"));
+                assert!(matches!(
+                    ping.as_mut().poll(&mut task_cx),
+                    Poll::Ready(Err(NatsError::Cancelled))
+                ));
+                assert!(reply.is_closed());
+                assert!(!owner.is_cancel_requested());
+            }
+            drop(ping);
+            assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    #[test]
+    fn nats_channel_wait_rechecks_a_reply_committed_during_cancellation_handoff() {
+        for cancel_owner in [false, true] {
+            let (owner, driver, _) = driverless_nats_owner_and_foreign_driver();
+            let _current = Cx::set_current(Some(driver.clone()));
+            let (reply, mut response) = oneshot::channel();
+            let mut reply = Some(reply);
+            let mut receive = std::pin::pin!(response.recv(&owner));
+            let mut polls = 0;
+            let mut call = Box::pin(nats_channel_wait(
+                &owner,
+                std::future::poll_fn(|task_cx| {
+                    polls += 1;
+                    let result = receive.as_mut().poll(task_cx).map_err(|error| match error {
+                        oneshot::RecvError::Cancelled => NatsError::Cancelled,
+                        oneshot::RecvError::Closed | oneshot::RecvError::PolledAfterCompletion => {
+                            NatsError::Closed
+                        }
+                    });
+                    if result.is_pending()
+                        && let Some(reply) = reply.take()
+                    {
+                        // The real receiver has already returned Pending.
+                        // Publish both events before its enclosing waiter can
+                        // inspect cancellation, without a second scheduler poll.
+                        reply.send_blocking(7_u8).expect("commit reply during handoff");
+                        let cancelled = if cancel_owner { &owner } else { &driver };
+                        cancelled.cancel_with(
+                            crate::types::CancelKind::User,
+                            Some("cancel during channel handoff"),
+                        );
+                    }
+                    result
+                }),
+            ));
+            let mut task_cx = std::task::Context::from_waker(Waker::noop());
+            assert!(matches!(call.as_mut().poll(&mut task_cx), Poll::Ready(Ok(7))));
+            drop(call);
+            assert_eq!(polls, 2, "cancellation must recheck the real channel");
+            assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(driver.inner.read().cancel_waker_registrations.is_empty());
         }
     }
 

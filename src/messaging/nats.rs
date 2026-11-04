@@ -46,7 +46,78 @@ const CONNECT_TIMEOUT_MESSAGE: &str = "connection attempt timed out";
 
 fn timeout_now(cx: &Cx) -> Time {
     cx.timer_driver()
-        .map_or_else(crate::time::wall_now, |driver| driver.now())
+        .map_or_else(crate::time::raw_wall_now, |driver| driver.now())
+}
+
+/// A deadline belongs to the context that supplied it, even when a different
+/// runtime task polls the connection. Driverless owners use the process clock,
+/// never a virtual clock borrowed from the poller.
+fn nats_deadline_timer(cx: &Cx, deadline: Time) -> crate::time::Sleep {
+    match cx.timer_driver() {
+        Some(driver) => crate::time::Sleep::with_timer_driver(deadline, driver),
+        None => crate::time::Sleep::with_wall_clock(deadline),
+    }
+}
+
+fn nats_checkpoint(cx: &Cx) -> Result<(), NatsError> {
+    // Cx's driverless checkpoint reads wall_now(), which consults the ambient
+    // frame. Install the actual owner only for this check, restoring the
+    // polling task before any transport I/O or its capability checks run.
+    let _owner = cx
+        .timer_driver()
+        .is_none()
+        .then(|| Cx::set_current(Some(cx.clone())));
+    cx.checkpoint().map_err(|_| NatsError::Cancelled)
+}
+
+/// Channel futures also checkpoint their explicit owner internally. Limit the
+/// temporary driverless-owner frame to their synchronous poll; the enclosing
+/// `nats_io` still observes the original polling task and its cancellation.
+/// Transport futures must keep that original task's I/O capabilities instead.
+fn nats_poll_channel<F: Future + ?Sized>(
+    cx: &Cx,
+    future: Pin<&mut F>,
+    task_cx: &mut std::task::Context<'_>,
+) -> Poll<F::Output> {
+    let _owner = cx
+        .timer_driver()
+        .is_none()
+        .then(|| Cx::set_current(Some(cx.clone())));
+    future.poll(task_cx)
+}
+
+async fn nats_channel_wait<T>(
+    cx: &Cx,
+    future: impl Future<Output = Result<T, NatsError>>,
+) -> Result<T, NatsError> {
+    let mut future = std::pin::pin!(future);
+    let mut cancellation = std::pin::pin!(nats_io(
+        cx,
+        std::future::pending::<Result<T, NatsError>>(),
+    ));
+    std::future::poll_fn(|task_cx| {
+        // Preserve each channel's commit precedence, particularly oneshot
+        // replies: a completed operation must not become a retryable failure
+        // merely because cancellation raced its acknowledgement.
+        match nats_poll_channel(cx, future.as_mut(), task_cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            // The owner frame has been restored before observing the ambient
+            // task. A parked channel still has both cancellation wake sources.
+            Poll::Pending => match cancellation.as_mut().poll(task_cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(cancelled) => {
+                    // A reply can commit while the cancellation watcher
+                    // refreshes its wakers. Give the channel its terminal
+                    // state recheck before publishing a cancellation result.
+                    match nats_poll_channel(cx, future.as_mut(), task_cx) {
+                        Poll::Ready(result) => Poll::Ready(result),
+                        Poll::Pending => Poll::Ready(cancelled),
+                    }
+                }
+            },
+        }
+    })
+    .await
 }
 
 fn request_timeout_error() -> NatsError {
@@ -1668,29 +1739,27 @@ impl Drop for NatsCancelWakerGuard {
 ///
 /// A budget deadline on either context is a cancellation source too, but
 /// `Cx::checkpoint` only notices an expired deadline when something polls.
-/// A timer for each deadline re-polls work parked on a silent server, so it
-/// fails with `Cancelled` at the deadline, as `redis_io` does.
+/// Each deadline has its own timer and clock. Absolute instants from different
+/// drivers cannot be ordered together: firing a foreign-clock timer early and
+/// discarding it would leave its real owner deadline permanently unarmed.
 async fn nats_io<T, E>(cx: &Cx, future: impl Future<Output = Result<T, E>>) -> Result<T, NatsError>
 where
     NatsError: From<E>,
 {
     let mut owner_cancel = NatsCancelWakerGuard::new(cx);
     let mut driver_cancel = Cx::current().as_ref().map(NatsCancelWakerGuard::new);
-    let mut deadlines: Vec<_> = [
-        cx.budget().deadline,
+    let mut deadline_timers = [
+        cx.budget().deadline.map(|at| nats_deadline_timer(cx, at)),
         driver_cancel
             .as_ref()
-            .and_then(|driver| driver.cx.budget().deadline),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    deadlines.sort_unstable();
-    // Latest first, so `pop` yields the next deadline to arm.
-    deadlines.reverse();
-    let mut deadline_timer = deadlines
-        .pop()
-        .map(|at| Box::pin(crate::time::sleep_until(at)));
+            .and_then(|driver| {
+                driver
+                    .cx
+                    .budget()
+                    .deadline
+                    .map(|at| nats_deadline_timer(&driver.cx, at))
+            }),
+    ];
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|task_cx| {
         // Registration precedes the checkpoint: cancellation published while
@@ -1700,27 +1769,59 @@ where
         if let Some(driver) = driver_cancel.as_mut() {
             driver.refresh(task_cx.waker());
         }
-        // Arm (or re-arm) the deadline wakeup. A fired timer is replaced by
-        // the next deadline: the earlier one may not end the call (for
-        // example, the driving task is inside a masked section).
-        while deadline_timer
-            .as_mut()
-            .is_some_and(|timer| timer.as_mut().poll(task_cx).is_ready())
-        {
-            deadline_timer = deadlines
-                .pop()
-                .map(|at| Box::pin(crate::time::sleep_until(at)));
+        // A masked owner may survive its deadline. Retire only that owner's
+        // completed timer; the other clock must still be able to wake the call.
+        // Cancellation is classified by checkpoints, never as timer expiry.
+        for timer in &mut deadline_timers {
+            if timer
+                .as_mut()
+                .is_some_and(|timer| Pin::new(timer).poll_deadline(task_cx).is_ready())
+            {
+                *timer = None;
+            }
         }
-        if cx.checkpoint().is_err()
+        if nats_checkpoint(cx).is_err()
             || driver_cancel
                 .as_ref()
-                .is_some_and(|driver| driver.cx.checkpoint().is_err())
+                .is_some_and(|driver| nats_checkpoint(&driver.cx).is_err())
         {
             return Poll::Ready(Err(NatsError::Cancelled));
         }
         future.as_mut().poll(task_cx).map_err(Into::into)
     })
     .await
+}
+
+/// Keep request and ping bounds on their explicit owner's clock. As with the
+/// generic timeout wrapper, completed work wins at the exact boundary, while
+/// work first polled after the deadline cannot start another transport action.
+fn nats_timeout_at<'a, T: Send + 'a>(
+    cx: &'a Cx,
+    deadline: Time,
+    timeout_error: fn() -> NatsError,
+    future: impl Future<Output = Result<T, NatsError>> + Send + 'a,
+) -> Pin<Box<dyn Future<Output = Result<T, NatsError>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut timer = std::pin::pin!(nats_deadline_timer(cx, deadline));
+        let mut future = std::pin::pin!(future);
+        nats_io(
+            cx,
+            std::future::poll_fn(|task_cx| {
+                if timeout_now(cx) > deadline {
+                    return Poll::Ready(Err(timeout_error()));
+                }
+                if let Poll::Ready(result) = future.as_mut().poll(task_cx) {
+                    return Poll::Ready(result);
+                }
+                if timer.as_mut().poll_deadline(task_cx).is_ready() {
+                    Poll::Ready(Err(timeout_error()))
+                } else {
+                    Poll::Pending
+                }
+            }),
+        )
+        .await
+    })
 }
 
 /// One timer covers an entire connection attempt. Bind it to the explicit
@@ -1735,17 +1836,7 @@ fn nats_connect_attempt<'a, T: Send + 'a>(
     future: impl Future<Output = Result<T, NatsError>> + Send + 'a,
 ) -> Pin<Box<dyn Future<Output = Result<T, NatsError>> + Send + 'a>> {
     Box::pin(async move {
-        let timer = timeout.map(|duration| {
-            let driver = cx
-                .timer_driver()
-                .or_else(|| Cx::current().and_then(|current| current.timer_driver()));
-            match driver {
-                Some(driver) => {
-                    crate::time::Sleep::with_timer_driver(driver.now() + duration, driver)
-                }
-                None => crate::time::Sleep::after(crate::time::wall_now(), duration),
-            }
-        });
+        let timer = timeout.map(|duration| nats_deadline_timer(cx, timeout_now(cx) + duration));
         nats_io(cx, async {
             let Some(timer) = timer else {
                 return future.await;
@@ -1774,7 +1865,7 @@ impl NatsConnection {
         config: NatsConfig,
         connect_policy: NatsConnectPolicy,
     ) -> Result<Self, NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
         cx.trace(&format!(
             "nats: connecting to {}:{}",
             config.host, config.port
@@ -1856,7 +1947,7 @@ impl NatsConnection {
         server_required: bool,
         client_required: bool,
     ) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         #[cfg(feature = "tls")]
         let _ = (server_required, client_required);
@@ -1916,7 +2007,7 @@ impl NatsConnection {
     /// Read the initial INFO message from server.
     async fn read_info(&mut self, cx: &Cx) -> Result<ServerInfo, NatsError> {
         loop {
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
 
             if let Some(msg) = self.try_parse_message()? {
                 match msg {
@@ -1936,7 +2027,7 @@ impl NatsConnection {
 
     /// Send CONNECT command to server.
     async fn send_connect(&mut self, cx: &Cx) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
         let server_info = self.state.server_info.lock().clone();
         let connect_auth = self.config.resolve_connect_auth(server_info.as_ref())?;
         let nonce_len = server_info
@@ -2053,7 +2144,7 @@ impl NatsConnection {
         self.send_keepalive_ping(cx).await?;
         let answered_at = self.state.pings_sent.load(Ordering::Acquire);
         loop {
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
             match self.try_parse_message()? {
                 Some(NatsMessage::Pong)
                     if self.state.pongs.load(Ordering::Acquire) >= answered_at =>
@@ -2107,7 +2198,7 @@ impl NatsConnection {
         let mut wait_first = failed_quickly;
 
         loop {
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
             if self.config.max_reconnect_attempts > 0
                 && attempt >= self.config.max_reconnect_attempts
             {
@@ -2126,9 +2217,14 @@ impl NatsConnection {
                     delay.as_millis()
                 ));
 
-                // Wait before retry
+                // Keep the retry delay on the same owner's clock as the
+                // attempt bound, even when a supervisor drives the retry.
                 nats_io(cx, async {
-                    crate::time::sleep(cx.now(), delay).await;
+                    let mut timer = std::pin::pin!(nats_deadline_timer(
+                        cx,
+                        timeout_now(cx) + delay,
+                    ));
+                    std::future::poll_fn(|task| timer.as_mut().poll_deadline(task)).await;
                     Ok::<(), NatsError>(())
                 })
                 .await?;
@@ -2140,7 +2236,7 @@ impl NatsConnection {
             attempt += 1;
 
             // Check for cancellation
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
 
             // One bound spans TCP and the entire handshake, including replay.
             // Failed attempts consume the existing attempt/backoff budget;
@@ -2265,7 +2361,7 @@ impl NatsConnection {
         // transcript, so keep the connection unusable until every SUB is flushed.
         self.connected = false;
         for subscription in &subscriptions {
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
             let cmd = if let Some(queue_group) = &subscription.queue_group {
                 format!(
                     "SUB {} {} {}\r\n",
@@ -2284,7 +2380,7 @@ impl NatsConnection {
     /// Wait for +OK response.
     async fn expect_ok(&mut self, cx: &Cx) -> Result<(), NatsError> {
         loop {
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
 
             if let Some(msg) = self.try_parse_message()? {
                 match msg {
@@ -2328,11 +2424,7 @@ impl NatsConnection {
         cx: &Cx,
         deadline: Time,
     ) -> Result<(), NatsError> {
-        let now = timeout_now(cx);
-        let remaining = Duration::from_nanos(deadline.duration_since(now));
-        crate::time::timeout(now, remaining, self.read_more(cx))
-            .await
-            .unwrap_or_else(|_| Err(request_timeout_error()))
+        nats_timeout_at(cx, deadline, request_timeout_error, self.read_more(cx)).await
     }
 
     async fn cleanup_request_subscription(&mut self, cx: &Cx, sid: u64, _reason: &str) {
@@ -2669,7 +2761,7 @@ impl NatsConnection {
         subject: &str,
         payload: &[u8],
     ) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         if !self.connected {
             // Try to reconnect if auto-reconnect is enabled
@@ -2718,7 +2810,7 @@ impl NatsConnection {
         reply_to: &str,
         payload: &[u8],
     ) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         if !self.connected {
             return Err(NatsError::NotConnected);
@@ -2776,7 +2868,7 @@ impl NatsConnection {
         headers: &[(&str, &[u8])],
         payload: &[u8],
     ) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         if !self.connected {
             return Err(NatsError::NotConnected);
@@ -2837,7 +2929,7 @@ impl NatsConnection {
         headers: &[(&str, &[u8])],
         payload: &[u8],
     ) -> Result<Message, NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         if !self.connected {
             return Err(NatsError::NotConnected);
@@ -2867,7 +2959,7 @@ impl NatsConnection {
         let deadline = timeout_now(cx) + self.config.request_timeout;
 
         loop {
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
 
             let mut processed_any = false;
             loop {
@@ -2943,7 +3035,7 @@ impl NatsConnection {
         subject: &str,
         payload: &[u8],
     ) -> Result<Message, NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         if !self.connected {
             return Err(NatsError::NotConnected);
@@ -2971,7 +3063,7 @@ impl NatsConnection {
         let deadline = timeout_now(cx) + self.config.request_timeout;
 
         loop {
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
 
             let mut processed_any = false;
             // Process messages looking for our reply
@@ -3056,7 +3148,7 @@ impl NatsConnection {
         subject: &str,
         capacity: usize,
     ) -> Result<Subscription, NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         if !self.connected {
             return Err(NatsError::NotConnected);
@@ -3121,7 +3213,7 @@ impl NatsConnection {
         queue_group: &str,
         capacity: usize,
     ) -> Result<Subscription, NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         if !self.connected {
             return Err(NatsError::NotConnected);
@@ -3176,7 +3268,7 @@ impl NatsConnection {
 
     /// Unsubscribe from a subscription.
     pub async fn unsubscribe(&mut self, cx: &Cx, sid: u64) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         // Remove from local state
         self.remove_local_subscription(sid);
@@ -3197,7 +3289,7 @@ impl NatsConnection {
 
     /// Send PING and wait for PONG.
     pub async fn ping(&mut self, cx: &Cx) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         if !self.connected {
             return Err(NatsError::NotConnected);
@@ -3217,7 +3309,7 @@ impl NatsConnection {
 
         // Wait for PONG
         loop {
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
 
             if let Some(msg) = self.try_parse_message()? {
                 match msg {
@@ -3302,7 +3394,7 @@ impl NatsConnection {
     /// Process incoming messages and dispatch to subscriptions.
     /// Call this periodically if you have active subscriptions.
     pub async fn process(&mut self, cx: &Cx) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         if !self.connected {
             return Err(NatsError::NotConnected);
@@ -3345,7 +3437,7 @@ impl NatsConnection {
     ///
     /// Flushes pending writes before shutting down the TCP stream.
     pub async fn close(&mut self, cx: &Cx) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         self.state.closed.store(true, Ordering::Release);
 
@@ -3714,26 +3806,37 @@ impl NatsSupervisor {
         build: impl FnOnce(Cx, oneshot::Sender<Result<T, NatsError>>) -> NatsSupervisorCommand,
     ) -> Result<T, NatsError> {
         let (reply, mut response) = oneshot::channel();
-        self.commands
-            .send(cx, build(cx.clone(), reply))
-            .await
-            .map_err(|error| match error {
-                mpsc::SendError::Cancelled(_) => NatsError::Cancelled,
-                mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => NatsError::Closed,
-            })?;
-        response.recv(cx).await.map_err(|error| match error {
-            oneshot::RecvError::Cancelled => NatsError::Cancelled,
-            oneshot::RecvError::Closed | oneshot::RecvError::PolledAfterCompletion => {
-                NatsError::Closed
-            }
-        })?
+        let mut send = std::pin::pin!(self.commands.send(cx, build(cx.clone(), reply)));
+        nats_channel_wait(
+            cx,
+            std::future::poll_fn(|task_cx| {
+                send.as_mut().poll(task_cx).map_err(|error| match error {
+                    mpsc::SendError::Cancelled(_) => NatsError::Cancelled,
+                    mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => NatsError::Closed,
+                })
+            }),
+        )
+        .await?;
+        let mut receive = std::pin::pin!(response.recv(cx));
+        nats_channel_wait(
+            cx,
+            std::future::poll_fn(|task_cx| {
+                receive.as_mut().poll(task_cx).map_err(|error| match error {
+                    oneshot::RecvError::Cancelled => NatsError::Cancelled,
+                    oneshot::RecvError::Closed | oneshot::RecvError::PolledAfterCompletion => {
+                        NatsError::Closed
+                    }
+                })
+            }),
+        )
+        .await?
     }
 }
 
 impl NatsClient {
     /// Connect to a NATS server.
     pub async fn connect(cx: &Cx, url: &str) -> Result<Self, NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
         let config = NatsConfig::from_url(url)?;
         Self::connect_with_config(cx, config).await
     }
@@ -4118,7 +4221,7 @@ impl NatsClient {
 
     /// Close the connection gracefully and drain its supervisor task.
     pub async fn close(&mut self, cx: &Cx) -> Result<(), NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
         match &mut self.mode {
             NatsClientMode::Direct(connection) => connection.close(cx).await,
             NatsClientMode::Supervised(supervisor) => {
@@ -4210,7 +4313,7 @@ async fn run_nats_supervisor(
 
         let due = keepalive.as_ref().map(|clock| clock.next_ping);
         if ping_timer.as_ref().map(|(at, _)| *at) != due {
-            ping_timer = due.map(|at| (at, Box::pin(crate::time::sleep_until(at))));
+            ping_timer = due.map(|at| (at, Box::pin(nats_deadline_timer(supervisor_cx, at))));
         }
 
         // All three operations are drop-cancel-safe: mpsc recv leaves the
@@ -4263,13 +4366,11 @@ async fn run_nats_supervisor(
                     KeepaliveTick::Ping(bound) => {
                         // A dead peer's full send buffer must not park the
                         // supervisor: the PING write gets one interval.
-                        let now = timeout_now(supervisor_cx);
+                        let deadline = timeout_now(supervisor_cx) + bound;
                         let ping = connection.send_keepalive_ping(supervisor_cx);
-                        match crate::time::timeout(now, bound, ping).await {
-                            Ok(Ok(())) => None,
-                            Ok(Err(error)) => Some(error),
-                            Err(_) => Some(stale_connection_error()),
-                        }
+                        nats_timeout_at(supervisor_cx, deadline, stale_connection_error, ping)
+                            .await
+                            .err()
                     }
                     KeepaliveTick::Stale => Some(stale_connection_error()),
                 };
@@ -4579,9 +4680,13 @@ async fn handle_supervisor_command(
                 match ping_bound {
                     Some(bound) => {
                         let ping = connection.ping(&cx);
-                        crate::time::timeout(timeout_now(&cx), bound, ping)
-                            .await
-                            .unwrap_or_else(|_| Err(stale_connection_error()))
+                        nats_timeout_at(
+                            &cx,
+                            timeout_now(&cx) + bound,
+                            stale_connection_error,
+                            ping,
+                        )
+                        .await
                     }
                     None => connection.ping(&cx).await,
                 }
@@ -4902,7 +5007,7 @@ impl Subscription {
     pub async fn next_event(&mut self, cx: &Cx) -> Result<Option<SubscriptionEvent>, NatsError> {
         let loss = Arc::clone(&self.loss);
         loop {
-            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            nats_checkpoint(cx)?;
             if let Some(event) = self.take_lagged_event() {
                 return Ok(Some(event));
             }
@@ -4911,21 +5016,22 @@ impl Subscription {
             let received = {
                 let mut changed = std::pin::pin!(loss.changed.notified());
                 let mut receive = std::pin::pin!(self.rx.recv(cx));
-                std::future::poll_fn(|task_cx| {
-                    if cx.checkpoint().is_err() {
-                        return Poll::Ready(Some(Err(mpsc::RecvError::Cancelled)));
-                    }
-                    // Arm before checking the counter. A receiver may drain
-                    // the last buffered message after try_send reports Full
-                    // but before dispatch publishes that loss, so the message
-                    // channel alone cannot provide the required wakeup.
-                    let notified = changed.as_mut().poll(task_cx);
-                    if loss.count.load(Ordering::Acquire) != reported || notified.is_ready() {
-                        return Poll::Ready(None);
-                    }
-                    receive.as_mut().poll(task_cx).map(Some)
-                })
-                .await
+                nats_channel_wait(
+                    cx,
+                    std::future::poll_fn(|task_cx| {
+                        // Arm before checking the counter. A receiver may drain
+                        // the last buffered message after try_send reports Full
+                        // but before dispatch publishes that loss, so the message
+                        // channel alone cannot provide the required wakeup.
+                        let notified = changed.as_mut().poll(task_cx);
+                        if loss.count.load(Ordering::Acquire) != reported || notified.is_ready() {
+                            return Poll::Ready(Ok::<_, NatsError>(None));
+                        }
+                        receive.as_mut().poll(task_cx)
+                            .map(|received| Ok(Some(received)))
+                    }),
+                )
+                .await?
             };
 
             match received {
@@ -4959,7 +5065,7 @@ impl Subscription {
     /// Local overflow is available through [`Self::dropped_messages`] or the
     /// event receive methods; this compatibility method returns messages only.
     pub async fn next(&mut self, cx: &Cx) -> Result<Option<Message>, NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        nats_checkpoint(cx)?;
 
         // Drain any buffered messages before reporting closure so that
         // messages dispatched before close() are not silently lost.
@@ -4971,11 +5077,18 @@ impl Subscription {
         // dispatch admitted before close can still hold a temporary sender.
         // Wait for that sender too, so the global closed flag cannot hide its
         // final accepted message from the message-only receive API.
-        match self.rx.recv(cx).await {
-            Ok(msg) => Ok(Some(msg)),
-            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Empty) => Ok(None),
-            Err(mpsc::RecvError::Cancelled) => Err(NatsError::Cancelled),
-        }
+        let mut receive = std::pin::pin!(self.rx.recv(cx));
+        nats_channel_wait(
+            cx,
+            std::future::poll_fn(|task_cx| {
+                receive.as_mut().poll(task_cx).map(|received| match received {
+                    Ok(msg) => Ok(Some(msg)),
+                    Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Empty) => Ok(None),
+                    Err(mpsc::RecvError::Cancelled) => Err(NatsError::Cancelled),
+                })
+            }),
+        )
+        .await
     }
 
     /// Try to receive a message without blocking.

@@ -286,7 +286,7 @@ mod storage {
 
     fn verify_range(cx: &Cx, file: &mut File, chunk: &DeltaChunkWire) -> io::Result<()> {
         file.seek(SeekFrom::Start(chunk.entry_offset))?;
-        let mut bytes = [0u8; 64 * 1024];
+        let mut bytes = vec![0u8; 64 * 1024];
         let mut left = chunk.size_bytes;
         let mut hash = ContentId::streaming();
         while left != 0 {
@@ -485,7 +485,7 @@ mod storage {
             // must reopen and authenticate the actual durable journal tail.
             state.failed = true;
             state.payload.seek(SeekFrom::Start(chunk.entry_offset))?;
-            let mut bytes = [0u8; 64 * 1024];
+            let mut bytes = vec![0u8; 64 * 1024];
             let mut left = chunk.size_bytes;
             let mut hash = ContentId::streaming();
             while left != 0 {
@@ -624,10 +624,8 @@ mod storage {
         Some(progress.load(std::sync::atomic::Ordering::Acquire))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     mod tests {
-        #![cfg(unix)]
-
         use super::{
             AuthKey, Cx, File, MAX_HISTORY_BYTES, OpenOptions, Path, PathBuf, Read,
             Seek, SeekFrom, Store, TransferManifest, Write, cache_identity, hex_encode, open,

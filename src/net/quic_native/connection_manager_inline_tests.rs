@@ -2655,7 +2655,9 @@
                 );
                 assert!(
                     router
-                        .expired_connections(deadline - Duration::from_micros(1))
+                        .expired_connections(
+                            deadline.checked_sub(Duration::from_micros(1)).unwrap()
+                        )
                         .is_empty()
                 );
                 assert_eq!(router.expired_connections(deadline), vec![cid]);

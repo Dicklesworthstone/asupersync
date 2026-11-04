@@ -314,6 +314,15 @@ impl fmt::Debug for File {
 }
 
 impl File {
+    /// Explicit cursor/size changes end a previous poll-write retry. Clear its
+    /// credit before awaiting the change: a failed or abandoned operation must
+    /// not let a later identical write report bytes committed at the old
+    /// position or removed by a resize (br-asupersync-pxg07b).
+    fn invalidate_settled_write(&self) {
+        let _pending = self.pending.lock();
+        self.settled_write.lock().take();
+    }
+
     async fn with_inner<R, F>(&self, op: F) -> io::Result<R>
     where
         R: Send + 'static,
@@ -577,6 +586,7 @@ impl File {
     /// returned future is dropped. A poll-trait write still in flight lands
     /// before the resize.
     pub async fn set_len(&self, size: u64) -> io::Result<()> {
+        self.invalidate_settled_write();
         self.settle_trait_pending().await?;
         self.with_inner(move |inner| inner.set_len(size)).await
     }
@@ -628,6 +638,7 @@ impl File {
     /// If this future is dropped after the syscall starts, the seek may still
     /// complete. A later cursor operation waits for that completion.
     pub async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.invalidate_settled_write();
         self.with_cursor_inner(move |inner| {
             let mut inner_ref: &std::fs::File = &inner;
             Seek::seek(&mut inner_ref, pos)
@@ -649,6 +660,7 @@ impl File {
     /// If this future is dropped after the syscall starts, the rewind may still
     /// complete. A later cursor operation waits for that completion.
     pub async fn rewind(&mut self) -> io::Result<()> {
+        self.invalidate_settled_write();
         self.with_cursor_inner(move |inner| {
             let mut inner_ref: &std::fs::File = &inner;
             Seek::rewind(&mut inner_ref)

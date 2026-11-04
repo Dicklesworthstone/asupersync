@@ -60,7 +60,10 @@ fn enqueue_pending_pong(pending_pongs: &mut std::collections::VecDeque<Bytes>, p
 
 struct WriterWaiter {
     id: u64,
-    waker: Waker,
+    // Queue snapshots clone only this Arc. A task-provided RawWaker may run
+    // arbitrary code from clone/drop, so its owner is prepared and retired
+    // outside the connection lock.
+    waker: Arc<Waker>,
 }
 
 /// Shared state between read and write halves.
@@ -114,7 +117,7 @@ impl<IO> WebSocketShared<IO> {
         self.close_handshake.force_close(reason);
     }
 
-    fn check_write_heartbeat(&mut self, task: &Context<'_>) -> io::Result<()> {
+    fn check_write_heartbeat(&self) -> io::Result<()> {
         // Another half may expire the close budget after this operation's
         // outer watchdog poll. Check under the same lock as transport I/O so
         // an abort can never be followed by a stale retained frame write.
@@ -130,13 +133,117 @@ impl<IO> WebSocketShared<IO> {
                 "WebSocket heartbeat timed out",
             ));
         }
-        if self
+        Ok(())
+    }
+}
+
+/// Finish stored-waker notifications and retirement even when one callback
+/// panics. Preserve the first panic after releasing every affected waiter;
+/// teardown during an existing unwind must not double-panic.
+struct SplitWakerCallbacks {
+    first_panic: Option<Box<dyn std::any::Any + Send>>,
+    unwinding: bool,
+}
+
+impl SplitWakerCallbacks {
+    fn new() -> Self {
+        Self {
+            first_panic: None,
+            unwinding: std::thread::panicking(),
+        }
+    }
+
+    fn run(&mut self, callback: impl FnOnce()) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+            if self.first_panic.is_none() {
+                self.first_panic = Some(payload);
+            } else {
+                // Even a panic payload can have an arbitrary destructor.
+                std::mem::forget(payload);
+            }
+        }
+    }
+}
+
+impl Drop for SplitWakerCallbacks {
+    fn drop(&mut self) {
+        if let Some(payload) = self.first_panic.take() {
+            if self.unwinding || std::thread::panicking() {
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
+/// Register the writer's heartbeat wake without running its clone or drop
+/// callbacks under the connection mutex. The common unchanged-Waker poll
+/// needs no clone or allocation. Recheck state after every unlocked callback,
+/// and retire a replaced Waker before transport I/O can commit any bytes.
+fn poll_write_with_heartbeat<IO, T>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    task: &mut Context<'_>,
+    op_cx: Option<&Cx>,
+    require_open: bool,
+    operation: impl FnOnce(&mut WebSocketShared<IO>, &mut Context<'_>) -> Poll<io::Result<T>>,
+) -> Poll<io::Result<T>> {
+    let mut incoming = None;
+    loop {
+        let mut state = shared.lock();
+        state.check_write_heartbeat()?;
+        if require_open && !state.close_handshake.is_open() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "connection is closing",
+            )));
+        }
+        let same_waker = state
             .heartbeat_writer
             .as_ref()
-            .is_none_or(|waker| !waker.will_wake(task.waker()))
-        {
-            self.heartbeat_writer = Some(task.waker().clone());
+            .is_some_and(|waker| waker.will_wake(task.waker()));
+        if same_waker {
+            if let Some(unused) = incoming.take() {
+                drop(state);
+                {
+                    let mut callbacks = SplitWakerCallbacks::new();
+                    callbacks.run(|| drop(unused));
+                }
+                check_write_after_callback(shared, op_cx)?;
+                continue;
+            }
+        } else if let Some(waker) = incoming.take() {
+            let retired = state.heartbeat_writer.replace(waker);
+            if retired.is_some() {
+                drop(state);
+                {
+                    let mut callbacks = SplitWakerCallbacks::new();
+                    callbacks.run(|| drop(retired));
+                }
+                check_write_after_callback(shared, op_cx)?;
+                continue;
+            }
+        } else {
+            drop(state);
+            incoming = Some(task.waker().clone());
+            check_write_after_callback(shared, op_cx)?;
+            continue;
         }
+        return operation(&mut state, task);
+    }
+}
+
+/// A stored-waker callback can cancel the operation or make the other half
+/// begin closing. Check cancellation outside the shared lock; new-frame
+/// admission is rechecked under that lock immediately before transport I/O.
+fn check_write_after_callback<IO>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    op_cx: Option<&Cx>,
+) -> io::Result<()> {
+    let is_open = op_cx.is_some() || shared.lock().close_handshake.is_open();
+    if write_path_cancelled(op_cx, is_open) {
+        Err(write_wait_cancelled())
+    } else {
         Ok(())
     }
 }
@@ -354,15 +461,20 @@ fn split_close_watch_result<IO, T>(
 
 impl<IO> Drop for SplitWritePermit<IO> {
     fn drop(&mut self) {
-        let next_waker = {
+        let (retired, next_waker) = {
             let mut shared = self.shared.lock();
             shared.writer_active = false;
-            shared.heartbeat_writer = None;
-            shared.writer_waiters.first().map(|w| w.waker.clone())
+            (
+                shared.heartbeat_writer.take(),
+                shared.writer_waiters.first().map(|w| Arc::clone(&w.waker)),
+            )
         };
+        let mut callbacks = SplitWakerCallbacks::new();
         if let Some(waker) = next_waker {
-            waker.wake();
+            callbacks.run(|| waker.wake_by_ref());
+            callbacks.run(|| drop(waker));
         }
+        callbacks.run(|| drop(retired));
     }
 }
 
@@ -375,44 +487,68 @@ impl<IO> Future for AcquireWritePermitFuture<'_, IO> {
     type Output = SplitWritePermit<IO>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.shared.lock();
-        let must_wait = if state.writer_active {
-            true
-        } else if let Some(id) = self.waiter_id {
-            state.writer_waiters.first().is_some_and(|w| w.id != id)
-        } else {
-            !state.writer_waiters.is_empty()
-        };
-        if must_wait {
-            if let Some(id) = self.waiter_id {
-                if let Some(existing) = state.writer_waiters.iter_mut().find(|w| w.id == id) {
-                    if !existing.waker.will_wake(cx.waker()) {
-                        existing.waker.clone_from(cx.waker());
-                    }
-                }
+        // Prepare lazily: the uncontended Ready path never clones a task
+        // Waker or allocates a relay. A clone callback may release the active
+        // writer, so reacquire the lock and recheck FIFO eligibility afterward.
+        let mut incoming = None;
+        loop {
+            let mut retired = None;
+            let mut state = self.shared.lock();
+            let must_wait = if state.writer_active {
+                true
+            } else if let Some(id) = self.waiter_id {
+                state.writer_waiters.first().is_some_and(|w| w.id != id)
             } else {
-                let id = state.next_waiter_id;
-                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                state.writer_waiters.push(WriterWaiter {
-                    id,
-                    waker: cx.waker().clone(),
-                });
-                self.waiter_id = Some(id);
+                !state.writer_waiters.is_empty()
+            };
+            if must_wait {
+                if let Some(id) = self.waiter_id {
+                    if let Some(existing) = state.writer_waiters.iter_mut().find(|w| w.id == id)
+                        && !existing.waker.will_wake(cx.waker())
+                    {
+                        let Some(waker) = incoming.take() else {
+                            drop(state);
+                            incoming = Some(Arc::new(cx.waker().clone()));
+                            continue;
+                        };
+                        retired = Some(std::mem::replace(&mut existing.waker, waker));
+                    }
+                } else {
+                    let Some(waker) = incoming.take() else {
+                        drop(state);
+                        incoming = Some(Arc::new(cx.waker().clone()));
+                        continue;
+                    };
+                    let id = state.next_waiter_id;
+                    state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                    state.writer_waiters.push(WriterWaiter { id, waker });
+                    self.waiter_id = Some(id);
+                }
+                drop(state);
+                let mut callbacks = SplitWakerCallbacks::new();
+                callbacks.run(|| drop(retired));
+                callbacks.run(|| drop(incoming));
+                return Poll::Pending;
             }
-            drop(state);
-            Poll::Pending
-        } else {
             state.writer_active = true;
             if let Some(id) = self.waiter_id {
                 if let Some(pos) = state.writer_waiters.iter().position(|w| w.id == id) {
-                    state.writer_waiters.remove(pos);
+                    retired = Some(state.writer_waiters.remove(pos).waker);
                 }
                 self.waiter_id = None;
             }
             drop(state);
-            Poll::Ready(SplitWritePermit {
+            // Own the active flag before retiring callbacks. If a removed
+            // Waker panics, this permit unwinds and releases the next head.
+            let permit = SplitWritePermit {
                 shared: Arc::clone(self.shared),
-            })
+            };
+            {
+                let mut callbacks = SplitWakerCallbacks::new();
+                callbacks.run(|| drop(retired));
+                callbacks.run(|| drop(incoming));
+            }
+            return Poll::Ready(permit);
         }
     }
 }
@@ -420,21 +556,27 @@ impl<IO> Future for AcquireWritePermitFuture<'_, IO> {
 impl<IO> Drop for AcquireWritePermitFuture<'_, IO> {
     fn drop(&mut self) {
         if let Some(id) = self.waiter_id {
-            let next_waker = {
+            let (retired, next_waker) = {
                 let mut state = self.shared.lock();
                 let is_head = state.writer_waiters.first().is_some_and(|w| w.id == id);
-                if let Some(pos) = state.writer_waiters.iter().position(|w| w.id == id) {
-                    state.writer_waiters.remove(pos);
-                }
-                if is_head && !state.writer_active {
-                    state.writer_waiters.first().map(|w| w.waker.clone())
+                let retired = state
+                    .writer_waiters
+                    .iter()
+                    .position(|w| w.id == id)
+                    .map(|pos| state.writer_waiters.remove(pos).waker);
+                let next_waker = if is_head && !state.writer_active {
+                    state.writer_waiters.first().map(|w| Arc::clone(&w.waker))
                 } else {
                     None
-                }
+                };
+                (retired, next_waker)
             };
+            let mut callbacks = SplitWakerCallbacks::new();
             if let Some(w) = next_waker {
-                w.wake();
+                callbacks.run(|| w.wake_by_ref());
+                callbacks.run(|| drop(w));
             }
+            callbacks.run(|| drop(retired));
         }
     }
 }
@@ -561,15 +703,14 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
             if write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(write_wait_cancelled()));
             }
-            let written = {
-                let mut guard = shared.lock();
-                guard.check_write_heartbeat(poll_cx)?;
-                if guard.write_buf.is_empty() {
-                    return Poll::Ready(Ok(0));
-                }
-                let WebSocketShared { io, write_buf, .. } = &mut *guard;
-                Pin::new(io).poll_write(poll_cx, &write_buf[..])
-            };
+            let written =
+                poll_write_with_heartbeat(shared, poll_cx, op_cx, false, |guard, poll_cx| {
+                    if guard.write_buf.is_empty() {
+                        return Poll::Ready(Ok(0));
+                    }
+                    let WebSocketShared { io, write_buf, .. } = guard;
+                    Pin::new(io).poll_write(poll_cx, &write_buf[..])
+                });
             if written.is_pending()
                 && park_write_wait_for_cancel(cancel_wake.as_mut(), op_cx, is_open, poll_cx.waker())
             {
@@ -599,9 +740,7 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
         if write_path_cancelled(op_cx, is_open) {
             return Poll::Ready(Err(write_wait_cancelled()));
         }
-        let flushed = {
-            let mut guard = shared.lock();
-            guard.check_write_heartbeat(poll_cx)?;
+        let flushed = poll_write_with_heartbeat(shared, poll_cx, op_cx, false, |guard, poll_cx| {
             let result = Pin::new(&mut guard.io).poll_flush(poll_cx);
             // The reader can queue a Close without the permit. Clear only while
             // holding this same lock, after the transport flush succeeds and no
@@ -610,7 +749,7 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
                 guard.close_flush_pending = false;
             }
             result
-        };
+        });
         if flushed.is_pending()
             && park_write_wait_for_cancel(cancel_wake.as_mut(), op_cx, is_open, poll_cx.waker())
         {
@@ -676,11 +815,10 @@ async fn write_owned_buf_with_permit_inner<IO: AsyncWrite + Unpin>(
         if write_path_cancelled(op_cx, is_open) {
             return Poll::Ready(Err(write_wait_cancelled()));
         }
-        let written = {
-            let mut guard = shared.lock();
-            guard.check_write_heartbeat(poll_cx)?;
-            Pin::new(&mut guard.io).poll_write(poll_cx, &buf[..])
-        };
+        let written =
+            poll_write_with_heartbeat(shared, poll_cx, op_cx, require_open, |guard, poll_cx| {
+                Pin::new(&mut guard.io).poll_write(poll_cx, &buf[..])
+            });
         if written.is_pending()
             && park_write_wait_for_cancel(cancel_wake.as_mut(), op_cx, is_open, poll_cx.waker())
         {
@@ -724,15 +862,13 @@ async fn write_owned_buf_with_permit_inner<IO: AsyncWrite + Unpin>(
         if write_path_cancelled(op_cx, is_open) {
             return Poll::Ready(Err(write_wait_cancelled()));
         }
-        let flushed = {
-            let mut guard = shared.lock();
-            guard.check_write_heartbeat(poll_cx)?;
+        let flushed = poll_write_with_heartbeat(shared, poll_cx, op_cx, false, |guard, poll_cx| {
             let result = Pin::new(&mut guard.io).poll_flush(poll_cx);
             if matches!(&result, Poll::Ready(Ok(()))) && guard.write_buf.is_empty() {
                 guard.close_flush_pending = false;
             }
             result
-        };
+        });
         if flushed.is_pending()
             && park_write_wait_for_cancel(cancel_wake.as_mut(), op_cx, is_open, poll_cx.waker())
         {
@@ -1227,15 +1363,18 @@ where
                 shared
                     .writer_waiters
                     .iter()
-                    .map(|waiter| waiter.waker.clone())
+                    .map(|waiter| Arc::clone(&waiter.waker))
                     .collect::<Vec<_>>(),
             )
         };
+        let mut callbacks = SplitWakerCallbacks::new();
         if let Some(writer) = writer {
-            writer.wake();
+            callbacks.run(|| writer.wake_by_ref());
+            callbacks.run(|| drop(writer));
         }
         for waiter in waiters {
-            waiter.wake();
+            callbacks.run(|| waiter.wake_by_ref());
+            callbacks.run(|| drop(waiter));
         }
     }
 

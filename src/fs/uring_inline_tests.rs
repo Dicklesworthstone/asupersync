@@ -1445,6 +1445,181 @@
         );
     }
 
+    /// Queue a real trait seek behind an occupied worker, then let a different
+    /// operation collect it. The seek's borrowing caller never receives its
+    /// result; the next poll must decide whether it is a retry or a new seek.
+    fn collect_trait_seek_with_flush(file: &mut IoUringFile, position: SeekFrom) -> io::Result<()> {
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut *file).poll_seek(&mut task, position).is_pending());
+        assert!(Pin::new(&mut *file).poll_flush(&mut task).is_pending());
+        occupied.release_and_drain();
+        futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut *file).poll_flush(cx)
+        }))
+    }
+
+    #[test]
+    fn test_uring_resize_invalidates_collected_end_seek() {
+        init_test("test_uring_resize_invalidates_collected_end_seek");
+        for new_length in [2_u64, 14] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("resized_seek.txt");
+            std::fs::write(&path, b"abcdefghij").unwrap();
+            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+            collect_trait_seek_with_flush(&mut file, SeekFrom::End(0)).unwrap();
+            assert_eq!(
+                file.position(),
+                10,
+                "the original seek finished before resizing"
+            );
+
+            file.set_len(new_length).unwrap();
+            assert_eq!(file.metadata().unwrap().len(), new_length);
+            assert_eq!(file.position(), 10_u64.min(new_length));
+            let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_seek(cx, SeekFrom::End(0))
+            }))
+            .unwrap();
+            assert_eq!(position, new_length, "the new seek must observe the new EOF");
+            assert_eq!(file.position(), new_length);
+            assert_eq!(futures_lite::future::block_on(file.write(b"!")).unwrap(), 1);
+            let mut expected = b"abcdefghij".to_vec();
+            expected.resize(usize::try_from(new_length).unwrap(), 0);
+            expected.push(b'!');
+            assert_eq!(std::fs::read(&path).unwrap(), expected);
+        }
+        crate::test_complete!("test_uring_resize_invalidates_collected_end_seek");
+    }
+
+    #[test]
+    fn test_uring_synchronous_writes_invalidate_collected_end_seek() {
+        init_test("test_uring_synchronous_writes_invalidate_collected_end_seek");
+        for positioned in [false, true] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("written_seek.txt");
+            std::fs::write(&path, b"abcdefghij").unwrap();
+            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+            collect_trait_seek_with_flush(&mut file, SeekFrom::End(0)).unwrap();
+            assert_eq!(file.position(), 10);
+
+            let (length, expected): (u64, &[u8]) = if positioned {
+                assert_eq!(
+                    futures_lite::future::block_on(file.write_at(b"XY", 14)).unwrap(),
+                    2
+                );
+                assert_eq!(file.position(), 10, "positioned writes keep the cursor");
+                (16, b"abcdefghij\0\0\0\0XY")
+            } else {
+                assert_eq!(futures_lite::future::block_on(file.write(b"XY")).unwrap(), 2);
+                assert_eq!(file.position(), 12);
+                (12, b"abcdefghijXY")
+            };
+            assert_eq!(std::fs::read(&path).unwrap(), expected);
+            let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_seek(cx, SeekFrom::End(0))
+            }))
+            .unwrap();
+            assert_eq!(position, length, "the write ended the old seek's retry");
+            assert_eq!(file.position(), length);
+        }
+        crate::test_complete!("test_uring_synchronous_writes_invalidate_collected_end_seek");
+    }
+
+    #[test]
+    fn test_uring_resize_discards_a_collected_seek_failure() {
+        init_test("test_uring_resize_discards_a_collected_seek_failure");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("resized_failed_seek.txt");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        let error = collect_trait_seek_with_flush(&mut file, SeekFrom::End(-8)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(file.position(), 0);
+
+        file.set_len(12).unwrap();
+        let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::End(-8))
+        }))
+        .unwrap();
+        assert_eq!(
+            position,
+            4,
+            "a new seek observes the now-valid end-relative offset"
+        );
+        assert_eq!(file.position(), 4);
+        crate::test_complete!("test_uring_resize_discards_a_collected_seek_failure");
+    }
+
+    #[test]
+    fn test_uring_failed_synchronous_changes_end_the_previous_seek_retry() {
+        init_test("test_uring_failed_synchronous_changes_end_the_previous_seek_retry");
+        for resize in [false, true] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("failed_change_seek.txt");
+            std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+            collect_trait_seek_with_flush(&mut file, SeekFrom::Current(5)).unwrap();
+            assert_eq!(file.position(), 5);
+
+            let error = if resize {
+                file.set_len(u64::MAX).unwrap_err()
+            } else {
+                file.seek(SeekFrom::Current(-6)).unwrap_err()
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(file.position(), 5);
+            assert_eq!(file.metadata().unwrap().len(), 16);
+            let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(5))
+            }))
+            .unwrap();
+            assert_eq!(position, 10, "the identical offset now requests a new seek");
+            assert_eq!(file.position(), 10);
+        }
+        crate::test_complete!("test_uring_failed_synchronous_changes_end_the_previous_seek_retry");
+    }
+
+    #[test]
+    fn test_uring_collected_seek_survives_synchronous_read_and_sync_observers() {
+        init_test("test_uring_collected_seek_survives_synchronous_read_and_sync_observers");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("observed_seek.txt");
+        std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        collect_trait_seek_with_flush(&mut file, SeekFrom::Current(5)).unwrap();
+        assert_eq!(file.position(), 5);
+        futures_lite::future::block_on(file.sync_all()).unwrap();
+        futures_lite::future::block_on(file.sync_data()).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 16);
+        let mut bytes = [0; 2];
+        assert_eq!(futures_lite::future::block_on(file.read(&mut bytes)).unwrap(), 2);
+        assert_eq!(&bytes, b"fg");
+        assert_eq!(
+            futures_lite::future::block_on(file.read_at(&mut bytes, 0)).unwrap(),
+            2
+        );
+        assert_eq!(&bytes, b"ab");
+        assert_eq!(file.position(), 7);
+
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Current(5)),
+            Poll::Ready(Ok(5))
+        ));
+        assert_eq!(
+            file.position(),
+            7,
+            "the original seek was acknowledged, not repeated"
+        );
+        crate::test_complete!(
+            "test_uring_collected_seek_survives_synchronous_read_and_sync_observers"
+        );
+    }
+
     #[test]
     fn test_uring_failed_relative_seek_keeps_its_original_error_after_a_read() {
         init_test("test_uring_failed_relative_seek_keeps_its_original_error_after_a_read");

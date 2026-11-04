@@ -4028,11 +4028,9 @@ struct PgConnectionInner {
     process_id: i32,
     /// Secret key for cancel requests.
     secret_key: i32,
-    /// Cancellation target: host/port/connect-timeout retained from the
-    /// original connect so a `CancelRequest` (PG protocol cancellation
-    /// message — see RFC-style spec at PG docs §53.2.7) can be sent on
-    /// a fresh TCP connection without re-parsing the URL or carrying
-    /// the password forward (br-asupersync-gvkj1r).
+    /// Cancellation endpoint captured from the connected transport. A fresh
+    /// `CancelRequest` must reach the server that issued BackendKeyData even
+    /// if DNS changes before cancellation. This never retains a password.
     cancel_target: CancelTarget,
     /// Server parameters.
     parameters: BTreeMap<String, String>,
@@ -4152,30 +4150,47 @@ impl CancelRequestSocket for crate::net::unix::UnixStream {
     }
 }
 
+/// The concrete transport endpoint that issued the session's BackendKeyData.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CancelEndpoint {
+    Tcp(std::net::SocketAddr),
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
+}
+
 /// Coordinates needed to send a PG `CancelRequest` on a fresh socket.
 #[derive(Clone, Debug)]
 struct CancelTarget {
-    host: String,
-    port: u16,
-    /// Hard upper bound on the whole cancel exchange, including name
-    /// resolution, connect, and frame write. Kept short so cleanup does not
-    /// inherit an arbitrarily long original connection timeout.
+    endpoint: CancelEndpoint,
+    /// Hard upper bound on the whole cancel exchange, including connect and
+    /// frame write. Kept short so cleanup does not inherit an arbitrarily
+    /// long original connection timeout. No DNS lookup is needed.
     connect_timeout: std::time::Duration,
 }
 
 impl CancelTarget {
-    fn from_options(options: &PgConnectOptions) -> Self {
+    fn from_connected_stream(options: &PgConnectOptions, stream: &PgStream) -> Result<Self, PgError> {
+        let endpoint = match stream {
+            PgStream::Plain(stream) => CancelEndpoint::Tcp(stream.peer_addr()?),
+            #[cfg(feature = "tls")]
+            PgStream::Tls(stream) => CancelEndpoint::Tcp(stream.get_ref().peer_addr()?),
+            #[cfg(unix)]
+            PgStream::Unix(_) => CancelEndpoint::Unix(
+                unix_socket_path(&options.host, options.port).ok_or_else(|| {
+                    PgError::Protocol("Unix connection has no cancellation socket path".into())
+                })?,
+            ),
+        };
         // CancelRequest is best-effort signaling — bound the entire exchange
         // to 500ms (or the user's configured connect_timeout, whichever is
         // smaller) so a cancelling caller can't be stalled by an
         // unreachable host on the cancel path.
         let cap = std::time::Duration::from_millis(500);
         let connect_timeout = options.connect_timeout.map_or(cap, |t| t.min(cap));
-        Self {
-            host: options.host.clone(),
-            port: options.port,
+        Ok(Self {
+            endpoint,
             connect_timeout,
-        }
+        })
     }
 }
 
@@ -4210,8 +4225,7 @@ impl Drop for PgConnectionInner {
 #[cfg(any(test, feature = "test-internals"))]
 fn test_cancel_target() -> CancelTarget {
     CancelTarget {
-        host: "127.0.0.1".to_string(),
-        port: 5432,
+        endpoint: CancelEndpoint::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], 5432))),
         connect_timeout: std::time::Duration::from_millis(500),
     }
 }
@@ -5000,7 +5014,7 @@ impl PgConnection {
     ///
     /// Returns the failure stage plus error so the drain path can log the
     /// connection-close fallback distinctly. The entire exchange, including
-    /// name resolution and writing the frame, is bounded by
+    /// connecting to the captured endpoint and writing the frame, is bounded by
     /// [`CancelTarget::connect_timeout`] (clamped to 500ms at capture time).
     /// TLS is intentionally not negotiated: the CancelRequest
     /// exchange is defined pre-TLS in the protocol and carries only the
@@ -5033,31 +5047,21 @@ impl PgConnection {
         process_id: i32,
         secret_key: i32,
     ) -> Result<(), (&'static str, std::io::Error)> {
-        if let Some(path) = unix_socket_path(&target.host, target.port) {
+        match target.endpoint {
+            CancelEndpoint::Tcp(address) => {
+                let stream = TcpStream::connect_timeout(address, target.connect_timeout)
+                    .await
+                    .map_err(|err| ("connect", err))?;
+                Self::write_cancel_request(stream, process_id, secret_key).await
+            }
             #[cfg(unix)]
-            {
+            CancelEndpoint::Unix(path) => {
                 let stream = crate::net::unix::UnixStream::connect(&path)
                     .await
                     .map_err(|err| ("connect", err))?;
-                return Self::write_cancel_request(stream, process_id, secret_key).await;
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = path;
-                return Err((
-                    "connect",
-                    io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "Unix-domain sockets are not supported on this platform",
-                    ),
-                ));
+                Self::write_cancel_request(stream, process_id, secret_key).await
             }
         }
-        let addr = format!("{}:{}", target.host, target.port);
-        let stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
-            .await
-            .map_err(|err| ("connect", err))?;
-        Self::write_cancel_request(stream, process_id, secret_key).await
     }
 
     async fn write_cancel_request<S: AsyncWrite + Unpin + CancelRequestSocket>(
@@ -5578,7 +5582,11 @@ impl PgConnection {
             }
         };
 
-        let cancel_target = CancelTarget::from_options(&options);
+        let cancel_target = match CancelTarget::from_connected_stream(&options, &stream) {
+            Ok(target) => target,
+            Err(PgError::Io(error)) => return outcome_from_error(io_or_cancelled(cx, error)),
+            Err(error) => return Outcome::Err(error),
+        };
         let mut conn = Self {
             inner: PgConnectionInner {
                 stream,

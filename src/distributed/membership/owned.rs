@@ -233,6 +233,19 @@ impl OwnedMembershipController {
         !state.closed && alive(&state, node, incarnation)
     }
 
+    // The node's bounded catalog publication is serialized with authority
+    // replacement/closure. The private callback only publishes already-built
+    // routes; it must not inspect membership or invoke user code. Native route
+    // selection releases its route lock before acquiring this policy lock.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub(crate) fn publish_native_route<T>(
+        &self, node: &NodeId, incarnation: u64, publish: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.shared.state.lock();
+        if state.closed || !alive(&state, node, incarnation) { return None; }
+        Some(publish())
+    }
+
     // Existing global-name observations survive suspicion with an explicit
     // uncertainty flag. Dead/Left, replacement incarnations and owner closure
     // still revoke them. This grants no new route, lease or invocation authority.

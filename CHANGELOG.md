@@ -10,15 +10,24 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-10-28, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts. `v0.6.0` is an unpublished
-release candidate; its package version does not establish delivery. The latest
-verified GitHub and crates.io release is `v0.5.0`, with release evidence recorded
-in `asupersync-v5fn1e`.
+Entries are newest first. A version number in a heading or in `Cargo.toml`
+does not by itself establish delivery. The history up to 2026-10-28 was
+reconstructed from git history, beads, benchmark ledgers, and live repo
+artifacts.
 
 ## Version Timeline
 
-- **v0.6.0 candidate (unreleased)**: durable ATP sender/receiver journaling and
+- **v0.6.2 (2026-11-03)**: an ATP fix for QUIC request retransmission
+  storms, opt-in resume of authenticated QUIC transfers from durable chunks
+  (`atp --quic-resume`), opt-in outbound work for native distributed nodes,
+  and fixes for Windows UDP receive batches, idle remote-service result
+  expiry, PostgreSQL cancellation and NATS owner clocks. Only `asupersync`
+  is republished.
+- **v0.6.1 (2026-11-01)**: packaging fix only. The crates.io package of
+  `asupersync` now ships the two feature-gated modules that 0.5.0 and 0.6.0
+  left out, so `channel-mpsc-select-e2e`, `obligation-cleanup-e2e` and the
+  features that enable them compile from crates.io. No code changes.
+- **v0.6.0 (2026-11-01)**: durable ATP sender/receiver journaling and
   resume across process loss, targeted resume-client revocation without peer
   restart, QUIC protected close and post-close accounting shutdown, bounded
   clock capture and replay, protected macaroon delegation, a `spawn_blocking`
@@ -26,8 +35,8 @@ in `asupersync-v5fn1e`.
   compression for ATP over TCP and QUIC, and an HTTP/1 fix that answers a
   rejected request head with `400`/`413`/`431` instead of a silent close. Also
   includes the TLS-enabled downstream `Cx: Send` compilation fix (GitHub #86).
-  The candidate contains ten publishable workspace crates, including the first
-  `asupersync-zstd`; publication and release artifacts are still pending.
+  Ten workspace crates are on crates.io, including the first
+  `asupersync-zstd`; the GitHub release binaries are still pending.
   Breaking changes are listed in the v0.6.0 section.
 - **v0.5.0 Release**: the approved capability-preserving context installation
   boundary, browser local-task isolation and shutdown, reentrant worker
@@ -88,26 +97,91 @@ in `asupersync-v5fn1e`.
 
 ## [Unreleased]
 
-### `atp send --compress` and async zstd streams (feature `zstd`)
+## [v0.6.2] - 2026-11-03
 
-`atp send` can ask for compression: `--compress zstd` (`on` is an alias) or
-`--compress auto`, on `--transport tcp`, `quic` or `auto`, in an `atp` built
-with `--features atp-cli,zstd`. The default stays `off`. An `atp recv` from
-such a build accepts without a flag, and an older or codec-less receiver gets
-the raw wire as before. `atp send` refuses `--compress`, before connecting,
-on `--transport rq` and in a build without the codec, rather than sending raw
-without saying so; under `--transport auto` it skips the rq candidate.
-`transport_quic::send_path_with_options_and_limiter_report` is the QUIC send
-it uses. (`br-asupersync-t1fblr.18`.)
+### Fixed: QUIC request retransmission storms (ATP)
 
-`asupersync::compression::zstd` compresses any runtime stream:
-`ZstdEncoder<W: AsyncWrite>` writes standard Zstandard frames (1 MiB by
-default, with checksums), and `ZstdDecoder<R: AsyncRead>` reads them within
-explicit `DecodeLimits`. A dropped read or write future loses nothing as long
-as the adapter is kept. A truncated stream fails with `UnexpectedEof`, and any
-other decoding failure with `InvalidData`. (`br-asupersync-t1fblr.31`.)
+A QUIC request flight is now kept until its PTO expires, instead of being
+replaced after every inbound batch, and later retries back off within the
+existing idle deadline. Delayed acknowledgements can now settle a request on
+paths whose RTT exceeds the initial PTO. (`br-asupersync-io5r88`.)
 
-## [v0.6.0] - Unreleased
+### Added: resume authenticated QUIC transfers from durable chunks (ATP)
+
+`QuicSendOptions::with_resume(true)` and `QuicReceiveOptions::with_resume(true)`
+opt a transfer on the native authenticated fixed-chunk path into resume. A fresh
+session reopens the retained recovery state, authenticates its journal, rehashes
+the durable ranges and requests only the missing chunks. Old peers and
+unsupported profiles fall back to the existing transfer. The resuming receiver
+is Unix only. Limits: payload 4096 chunks of 256 KiB (at most 1 GiB), journal
+history 8 MiB or 16,385 records, and 4 journal generations. The application owns
+cache retention; it is not a global disk quota. A `QuicReceiveOptions` that sets
+both resume and a delta selector is refused.
+
+`atp` (feature `atp-cli`) exposes this as `--quic-resume` on `send`, `recv`,
+`serve` and the SSH receiver bootstrap. It requires explicit QUIC, strict
+shared-key control authority, compression off and a regular-file source, and it
+rejects incompatible delta selectors before any source, stdin, DNS or bind work.
+(`br-asupersync-arq-quic-epic-b0k8qo.10.1`.)
+
+### Added: outbound work for native distributed nodes
+
+`NativeDistributedNode::start_with_outbound` with a
+`NativeDistributedOutboundConfig` is opt-in. The node's cloneable
+`NativeDistributedClient` publishes explicitly provisioned V3 routes only for a
+peer's current authenticated Alive incarnation, and it runs named computations
+in the node's child region. Routes must be published again after a peer
+rejoins. The peer catalog, owner tasks, retained result credits and admitted
+inputs are bounded. Service-only startup is unchanged. Multi-process
+partition and restart acceptance is still open (`br-asupersync-bi2462.12`).
+
+### Fixed
+
+- **UDP on Windows:** an oversized datagram in a receive batch is read into one
+  bounded, reused buffer and then truncated to the caller's limit, keeping its
+  source, prefix, truncation marker and packet accounting. Before, `WSAEMSGSIZE`
+  was swallowed, and a receive could park after consuming the only packet. The
+  release gate type-checked the Windows code (clippy for
+  `x86_64-pc-windows-gnu`) and ran the new regressions on Linux, but it did not
+  run them on Windows. (`br-asupersync-vs1vdk`.)
+- **Remote service:** for authenticated peers, retained idempotency inputs,
+  outcomes and execution rejections now expire while the listener is idle,
+  without waiting for another client. V1-V3 wire formats are unchanged.
+  (`br-asupersync-remote-service-audit-pjrlqa`.)
+- **PostgreSQL:** a `CancelRequest` goes to the backend's actual peer address,
+  captured after connection and TLS negotiation, not to a re-resolved configured
+  host and port. (`br-asupersync-postgres-client-audit-r10-xi63yt`.)
+- **NATS:** explicit-owner and polling-task deadlines stay on their own timer
+  drivers, instead of comparing absolute times from different clocks. A
+  committed reply is kept when cancellation races its acknowledgement.
+  (`br-asupersync-pm29wb`.)
+
+### Release gate
+
+None of the code commits above had been compiled before this release. The gate
+compiled and tested them on Linux, and fixed six clippy findings without
+changing behavior; one of them moves the 64 KiB resume read buffers to the heap.
+Only `asupersync` is republished; the other workspace crates stay at 0.6.0
+(unchanged). The v0.6.0 known issues still apply, except the crates.io feature
+fix that 0.6.1 shipped.
+
+## [v0.6.1] - 2026-11-01
+
+### Fixed: two feature-gated modules are in the crates.io package
+
+The published `asupersync` package now includes
+`src/real_channel_mpsc_combinator_select_integration_e2e_tests.rs` and
+`src/real_obligation_leak_check_e2e_tests.rs`. Before, enabling
+`channel-mpsc-select-e2e` or `obligation-cleanup-e2e` (directly, through
+`real-service-e2e`, `cross-subsystem-recovery-e2e` or `ci-cross-platform`, or
+with `--all-features`) on the published 0.5.0 or 0.6.0 failed with "file not
+found for module": the package rules left out the two modules these features
+compile. There are no code changes.
+
+Only `asupersync` is republished; the other workspace crates stay at 0.6.0
+(unchanged).
+
+## [v0.6.0] - 2026-11-01
 
 About 3,000 commits since v0.5.0. The theme is **durability**: ATP transfers now
 survive a process dying mid-send or mid-receive, QUIC closes cleanly and stops
@@ -290,8 +364,15 @@ symlink, where it used to fail on whichever came first.
   - the spawn check uses an empty `VerificationContext`, so every attenuated
     spawn token is denied. This fails closed (L5);
   - `SecurityConfig` derives `Debug`, which prints `auth_key_seed` (L6).
+- **From crates.io, two test-harness features do not compile.** Enabling
+  `channel-mpsc-select-e2e` or `obligation-cleanup-e2e` (directly, through
+  `real-service-e2e`, `cross-subsystem-recovery-e2e` or `ci-cross-platform`,
+  or with `--all-features`) fails with "file not found for module": the
+  package rules leave out the two feature-gated modules these features
+  compile. This was already true of 0.5.0. Default features and docs.rs are
+  unaffected, and builds from git work. Fixed in 0.6.1.
 - **The `zstd` feature is experimental, opt-in and off by default.**
-  `asupersync-zstd` 0.6.0 is planned as the codec's first crates.io release, and its
+  `asupersync-zstd` 0.6.0 is the codec's first crates.io release, and its
   encoder strategies are still being built (asupersync-t1fblr).
 - **JetStream and NATS:** every HIGH finding of the 10-03 messaging audit is
   fixed (asupersync-messaging-client-audit-k6pxks). Two items wait on owner
@@ -302,7 +383,7 @@ symlink, where it used to fail on whichever came first.
   unpublished.** `AppHandle::stop` and a failed supervisor boot park one for a
   worker turn, and on a multi-thread runtime the drain can return first. If you
   need the runtime fully quiescent, wait on `is_quiescent()`. The fix is
-  planned for 0.6.1 (asupersync-wcc1f5).
+  planned for a later release (asupersync-wcc1f5).
 - **`cargo fmt --check`** reports formatting drift on `main` that was not there at
   v0.5.0 (GitHub #76). It now also covers the 941 inline test modules that
   moved out of their source files (c5012547e) and kept their indentation. It is
@@ -519,7 +600,7 @@ Against an older receiver, a sender stays raw, and an older sender never
 offers. Default builds and `send_path`/`send_path_filtered` are unchanged.
 (`br-asupersync-t1fblr.14`, `.16`.)
 
-`asupersync-zstd` 0.6.0 is planned as the codec's first crates.io release, and it is
+`asupersync-zstd` 0.6.0 is the codec's first crates.io release, and it is
 experimental. It decodes every RFC 8878 frame without dictionaries, and
 encodes stored or `Level::Fast` frames, which compress slightly better than
 libzstd level 1. It has streaming encoder and decoder types, resumable async
@@ -572,6 +653,25 @@ consecutive files share one pipeline, so a tree of small files compresses in
 parallel too. The setting never changes what `CompressionMode::Zstd` sends.
 Delta chunks on TCP are still compressed one at a time.
 (`br-asupersync-t1fblr.25`.)
+
+### `atp send --compress` and async zstd streams (feature `zstd`)
+
+`atp send` can ask for compression: `--compress zstd` (`on` is an alias) or
+`--compress auto`, on `--transport tcp`, `quic` or `auto`, in an `atp` built
+with `--features atp-cli,zstd`. The default stays `off`. An `atp recv` from
+such a build accepts without a flag, and an older or codec-less receiver gets
+the raw wire as before. `atp send` refuses `--compress`, before connecting,
+on `--transport rq` and in a build without the codec, rather than sending raw
+without saying so; under `--transport auto` it skips the rq candidate.
+`transport_quic::send_path_with_options_and_limiter_report` is the QUIC send
+it uses. (`br-asupersync-t1fblr.18`.)
+
+`asupersync::compression::zstd` compresses any runtime stream:
+`ZstdEncoder<W: AsyncWrite>` writes standard Zstandard frames (1 MiB by
+default, with checksums), and `ZstdDecoder<R: AsyncRead>` reads them within
+explicit `DecodeLimits`. A dropped read or write future loses nothing as long
+as the adapter is kept. A truncated stream fails with `UnexpectedEof`, and any
+other decoding failure with `InvalidData`. (`br-asupersync-t1fblr.31`.)
 
 ### HTTP `zstd` content coding (feature `zstd`)
 

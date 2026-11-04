@@ -1810,6 +1810,163 @@
         });
     }
 
+    /// asupersync-vs1vdk U2: a datagram larger than the guard buffer must
+    /// remain a reported packet on Winsock, in both receive paths.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod bounded_recv_batches {
+        use super::*;
+        use crate::runtime::{Runtime, RuntimeBuilder};
+        use std::future::{Future, poll_fn};
+        use std::time::Duration;
+
+        fn queued_receiver(payloads: &[&[u8]]) -> (UdpSocket, StdUdpSocket) {
+            let receiver = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+            socket2::SockRef::from(&receiver)
+                .set_recv_buffer_size(256 * 1024)
+                .unwrap();
+            receiver
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let sender = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+            for payload in payloads {
+                assert_eq!(
+                    sender
+                        .send_to(payload, receiver.local_addr().unwrap())
+                        .unwrap(),
+                    payload.len()
+                );
+            }
+            // Prove a datagram is queued without consuming it. A full UDP
+            // buffer also makes this fixture's peek safe under Winsock.
+            let mut peek = vec![0; usize::from(u16::MAX)];
+            let (len, source) = receiver.peek_from(&mut peek).unwrap();
+            assert_eq!(&peek[..len], payloads[0]);
+            assert_eq!(source, sender.local_addr().unwrap());
+            (UdpSocket::from_std(receiver).unwrap(), sender)
+        }
+
+        fn runtime(current_thread: bool) -> Runtime {
+            if current_thread {
+                RuntimeBuilder::current_thread().build().unwrap()
+            } else {
+                RuntimeBuilder::new().worker_threads(2).build().unwrap()
+            }
+        }
+
+        fn receive_queued_batch(
+            runtime: &Runtime,
+            receiver: &mut UdpSocket,
+            max_packets: usize,
+            packet_size: usize,
+            spare: &mut Vec<Vec<u8>>,
+        ) -> UdpRecvBatch {
+            let observed = runtime.block_on(async {
+                let mut receive = std::pin::pin!(receiver.recv_batch_from_reusing(
+                    max_packets,
+                    packet_size,
+                    spare,
+                ));
+                // Capture Pending as a value. The old Windows first-packet
+                // loop consumed the only datagram and then parked forever;
+                // its negative control must fail promptly instead of hang.
+                poll_fn(|cx| Poll::Ready(receive.as_mut().poll(cx))).await
+            });
+            match observed {
+                Poll::Ready(Ok(batch)) => batch,
+                other => panic!("a queued datagram must complete the batch: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn recv_batch_preserves_a_first_datagram_larger_than_the_guard_buffer() {
+            for current_thread in [true, false] {
+                let runtime = runtime(current_thread);
+                let oversized = vec![0xA7; 60_000];
+                let (mut receiver, sender) = queued_receiver(&[&oversized]);
+                let mut spare = Vec::new();
+                let batch = receive_queued_batch(&runtime, &mut receiver, 1, 64, &mut spare);
+                assert_eq!(batch.packets.len(), 1);
+                assert_eq!(batch.packets[0].src_addr, sender.local_addr().unwrap());
+                assert_eq!(batch.packets[0].payload, oversized[..64]);
+                assert!(batch.packets[0].possibly_truncated);
+                assert_eq!(batch.report.packets_processed, 1);
+                assert_eq!(batch.report.bytes_processed, 64);
+                assert!(batch.report.error.is_none());
+                assert_eq!(spare.len(), 1, "one scratch allocation serves the batch");
+                assert!(spare[0].capacity() <= UDP_MAX_PACKET_SIZE + 1);
+                #[cfg(windows)]
+                assert!(spare[0].len() >= usize::from(u16::MAX));
+
+                let mut leftover = [0; 1];
+                assert_eq!(
+                    receiver.inner.recv_from(&mut leftover).unwrap_err().kind(),
+                    io::ErrorKind::WouldBlock,
+                    "the truncated tail is not a second datagram"
+                );
+            }
+        }
+
+        #[test]
+        fn recv_batch_preserves_later_oversized_packets_and_the_packet_limit() {
+            for current_thread in [true, false] {
+                let runtime = runtime(current_thread);
+                let oversized = vec![0xB8; 4096];
+                let (mut receiver, sender) = queued_receiver(&[b"first", &oversized, b"last"]);
+                let mut spare = Vec::new();
+                let batch = receive_queued_batch(&runtime, &mut receiver, 2, 64, &mut spare);
+                assert_eq!(batch.packets.len(), 2);
+                assert_eq!(batch.packets[0].payload, b"first");
+                assert!(!batch.packets[0].possibly_truncated);
+                assert_eq!(batch.packets[1].payload, oversized[..64]);
+                assert!(batch.packets[1].possibly_truncated);
+                for packet in &batch.packets {
+                    assert_eq!(packet.src_addr, sender.local_addr().unwrap());
+                }
+                assert_eq!(batch.report.packets_processed, 2);
+                assert_eq!(batch.report.bytes_processed, b"first".len() + 64);
+                assert!(batch.report.error.is_none());
+                assert_eq!(spare.len(), 1);
+                let scratch = spare[0].as_ptr();
+
+                let tail = receive_queued_batch(&runtime, &mut receiver, 2, 64, &mut spare);
+                assert_eq!(tail.packets.len(), 1);
+                assert_eq!(tail.packets[0].payload, b"last");
+                assert!(!tail.packets[0].possibly_truncated);
+                assert_eq!(tail.report.packets_processed, 1);
+                assert_eq!(tail.report.bytes_processed, b"last".len());
+                assert!(tail.report.error.is_none());
+                assert_eq!(spare.len(), 1);
+                assert_eq!(spare[0].as_ptr(), scratch, "reuse the bounded scratch buffer");
+            }
+        }
+
+        #[test]
+        fn recv_batch_empty_and_refused_requests_do_not_consume_a_datagram() {
+            let runtime = runtime(true);
+            let (mut receiver, sender) = queued_receiver(&[b"retained"]);
+            let mut spare = Vec::new();
+            let empty = receive_queued_batch(&runtime, &mut receiver, 0, 0, &mut spare);
+            assert_eq!(empty, UdpRecvBatch::default());
+            assert!(spare.is_empty());
+            for (max_packets, packet_size) in [
+                (1, 0),
+                (UDP_MAX_BATCH_SIZE + 1, 64),
+                (1, UDP_MAX_PACKET_SIZE + 1),
+            ] {
+                let error = runtime
+                    .block_on(receiver.recv_batch_from_reusing(max_packets, packet_size, &mut spare))
+                    .unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+                assert!(spare.is_empty(), "refusal must precede scratch allocation");
+            }
+            let batch = receive_queued_batch(&runtime, &mut receiver, 1, 64, &mut spare);
+            assert_eq!(batch.packets.len(), 1);
+            assert_eq!(batch.packets[0].payload, b"retained");
+            assert_eq!(batch.packets[0].src_addr, sender.local_addr().unwrap());
+            assert!(!batch.packets[0].possibly_truncated);
+        }
+    }
+
     /// GH#85: deterministic registration ownership checks complement the
     /// native loopback regressions; model readiness does not supply UDP data.
     #[cfg(unix)]

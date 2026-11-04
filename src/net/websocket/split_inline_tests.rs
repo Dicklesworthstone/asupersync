@@ -242,6 +242,482 @@
         out.to_vec()
     }
 
+    type SplitCallbackEvents = Arc<Mutex<Vec<(&'static str, &'static str, Option<bool>)>>>;
+
+    struct ReentrantSplitWake {
+        shared: std::sync::Weak<Mutex<WebSocketShared<TestIo>>>,
+        events: SplitCallbackEvents,
+        label: &'static str,
+        panic_on_wake: bool,
+        panic_on_drop: bool,
+        on_drop: Option<Box<dyn FnOnce() + Send + Sync>>,
+    }
+
+    impl ReentrantSplitWake {
+        fn record(&self, event: &'static str) -> bool {
+            let observed_open = self.shared.upgrade().and_then(|shared| {
+                let unlocked = {
+                    let guard = shared.try_lock();
+                    guard.is_some()
+                };
+                // Old code fails the lock witness instead of hanging the
+                // suite. On the repaired path, actually reenter the public
+                // half API after establishing that the mutex was released.
+                unlocked.then(|| WebSocketRead { shared }.is_open())
+            });
+            self.events.lock().push((self.label, event, observed_open));
+            observed_open.is_some()
+        }
+    }
+
+    impl std::task::Wake for ReentrantSplitWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.record("wake");
+            assert!(!self.panic_on_wake, "split wake callback panic");
+        }
+    }
+
+    impl Drop for ReentrantSplitWake {
+        fn drop(&mut self) {
+            let unlocked = self.record("drop");
+            if let Some(action) = self.on_drop.take()
+                && unlocked
+            {
+                action();
+            }
+            assert!(!self.panic_on_drop, "split retirement callback panic");
+        }
+    }
+
+    fn split_probe_waker(
+        shared: &Arc<Mutex<WebSocketShared<TestIo>>>,
+        events: &SplitCallbackEvents,
+        label: &'static str,
+        panic_on_wake: bool,
+        panic_on_drop: bool,
+    ) -> Waker {
+        Waker::from(Arc::new(ReentrantSplitWake {
+            shared: Arc::downgrade(shared),
+            events: Arc::clone(events),
+            label,
+            panic_on_wake,
+            panic_on_drop,
+            on_drop: None,
+        }))
+    }
+
+    fn assert_split_callbacks_reentered(events: &SplitCallbackEvents) {
+        let events = events.lock();
+        assert!(!events.is_empty(), "the stored task wakers must retire");
+        assert!(
+            events.iter().all(|(_, _, observed)| observed.is_some()),
+            "stored-waker callbacks ran with the connection mutex held: {events:?}"
+        );
+    }
+
+    fn poll_split_flush(
+        shared: &Arc<Mutex<WebSocketShared<TestIo>>>,
+        waker: &Waker,
+    ) -> Poll<Result<(), WsError>> {
+        let mut flush = std::pin::pin!(flush_shared_write_buf_with_permit(shared, None));
+        flush.as_mut().poll(&mut Context::from_waker(waker))
+    }
+
+    #[test]
+    fn split_waiter_replacement_dequeue_and_cancellation_retire_after_unlock() {
+        let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+        let (read, _write) = ws.split();
+        let shared = &read.shared;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let permit = future::block_on(acquire_write_permit(shared));
+        let mut first = Box::pin(acquire_write_permit(shared));
+        let mut second = Box::pin(acquire_write_permit(shared));
+        let old = split_probe_waker(shared, &events, "old", false, false);
+        let next = split_probe_waker(shared, &events, "next", false, false);
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&old))
+                .is_pending()
+        );
+        assert!(
+            second
+                .as_mut()
+                .poll(&mut Context::from_waker(&next))
+                .is_pending()
+        );
+        assert_eq!(shared.lock().writer_waiters.len(), 2);
+        drop(old);
+        let replacement = split_probe_waker(shared, &events, "replacement", false, false);
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&replacement))
+                .is_pending()
+        );
+        drop(replacement);
+        drop(permit);
+        let Poll::Ready(permit) = first.as_mut().poll(&mut Context::from_waker(Waker::noop())) else {
+            panic!("the queued FIFO head must acquire the released permit");
+        };
+        assert!(shared.lock().writer_active);
+        drop(next);
+        drop(second);
+        assert!(shared.lock().writer_waiters.is_empty());
+        drop(permit);
+        assert!(!shared.lock().writer_active);
+        assert_eq!(
+            events
+                .lock()
+                .iter()
+                .map(|(label, event, _)| (*label, *event))
+                .collect::<Vec<_>>(),
+            vec![
+                ("old", "drop"),
+                ("replacement", "wake"),
+                ("replacement", "drop"),
+                ("next", "drop")
+            ]
+        );
+        assert_split_callbacks_reentered(&events);
+    }
+
+    #[test]
+    fn split_panicking_waiter_retirement_cannot_strand_the_next_fifo_head() {
+        for dequeue in [false, true] {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, _write) = ws.split();
+            let shared = &read.shared;
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let permit = future::block_on(acquire_write_permit(shared));
+            let mut head = Box::pin(acquire_write_permit(shared));
+            let mut next = Box::pin(acquire_write_permit(shared));
+            let head_waker = split_probe_waker(shared, &events, "head", false, true);
+            let next_waker = split_probe_waker(shared, &events, "next", false, false);
+            assert!(
+                head.as_mut()
+                    .poll(&mut Context::from_waker(&head_waker))
+                    .is_pending()
+            );
+            assert!(
+                next.as_mut()
+                    .poll(&mut Context::from_waker(&next_waker))
+                    .is_pending()
+            );
+            assert_eq!(shared.lock().writer_waiters.len(), 2);
+            drop(head_waker);
+            drop(next_waker);
+            drop(permit);
+            let panicked = if dequeue {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let acquired = head.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+                    drop(acquired);
+                }))
+            } else {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(head)))
+            };
+            assert!(panicked.is_err(), "the original callback panic stays visible");
+            assert!(
+                !shared.lock().writer_active,
+                "an unwound acquisition must release ownership"
+            );
+            assert!(
+                events
+                    .lock()
+                    .iter()
+                    .any(|(label, event, _)| *label == "next" && *event == "wake")
+            );
+            let Poll::Ready(permit) = next.as_mut().poll(&mut Context::from_waker(Waker::noop())) else {
+                panic!("the surviving FIFO waiter must remain usable");
+            };
+            drop(permit);
+            assert!(shared.lock().writer_waiters.is_empty());
+            assert_split_callbacks_reentered(&events);
+        }
+    }
+
+    #[test]
+    fn split_heartbeat_waker_refresh_and_writer_completion_reenter_after_unlock() {
+        let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+        let (read, _write) = ws.split();
+        let shared = &read.shared;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let permit = future::block_on(acquire_write_permit(shared));
+        shared.lock().write_buf.extend_from_slice(b"committed once");
+        let first = split_probe_waker(shared, &events, "first", false, false);
+        assert!(matches!(
+            poll_split_flush(shared, &first),
+            Poll::Ready(Ok(()))
+        ));
+        drop(first);
+        let second = split_probe_waker(shared, &events, "second", false, false);
+        assert!(matches!(
+            poll_split_flush(shared, &second),
+            Poll::Ready(Ok(()))
+        ));
+        drop(second);
+        drop(permit);
+        assert_eq!(shared.lock().io.written, b"committed once");
+        assert_eq!(events.lock().len(), 2);
+        assert_split_callbacks_reentered(&events);
+    }
+
+    #[test]
+    fn split_panicking_heartbeat_retirement_preserves_output_and_wakes_waiters() {
+        for replace in [false, true] {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, _write) = ws.split();
+            let shared = &read.shared;
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let permit = future::block_on(acquire_write_permit(shared));
+            let heartbeat = split_probe_waker(shared, &events, "heartbeat", false, true);
+            assert!(matches!(
+                poll_split_flush(shared, &heartbeat),
+                Poll::Ready(Ok(()))
+            ));
+            drop(heartbeat);
+            let mut next = Box::pin(acquire_write_permit(shared));
+            let next_waker = split_probe_waker(shared, &events, "next", false, false);
+            assert!(
+                next.as_mut()
+                    .poll(&mut Context::from_waker(&next_waker))
+                    .is_pending()
+            );
+            drop(next_waker);
+            shared.lock().write_buf.extend_from_slice(b"retained");
+            let panicked = if replace {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = poll_split_flush(shared, Waker::noop());
+                }));
+                assert!(
+                    shared.lock().io.written.is_empty(),
+                    "retirement must precede transport side effects"
+                );
+                drop(permit);
+                result
+            } else {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(permit)))
+            };
+            assert!(panicked.is_err());
+            assert!(!shared.lock().writer_active);
+            assert!(
+                events
+                    .lock()
+                    .iter()
+                    .any(|(label, event, _)| *label == "next" && *event == "wake")
+            );
+            let Poll::Ready(permit) = next.as_mut().poll(&mut Context::from_waker(Waker::noop())) else {
+                panic!("heartbeat retirement must not strand the queued writer");
+            };
+            assert!(matches!(
+                poll_split_flush(shared, Waker::noop()),
+                Poll::Ready(Ok(()))
+            ));
+            drop(permit);
+            assert_eq!(shared.lock().io.written, b"retained");
+            assert!(shared.lock().write_buf.is_empty());
+            assert_split_callbacks_reentered(&events);
+        }
+    }
+
+    #[test]
+    fn split_failed_heartbeat_wakes_all_waiters_despite_panicking_callbacks() {
+        let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+        let (read, _write) = ws.split();
+        let shared = &read.shared;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let permit = future::block_on(acquire_write_permit(shared));
+        let writer = split_probe_waker(shared, &events, "writer", true, false);
+        assert!(matches!(
+            poll_split_flush(shared, &writer),
+            Poll::Ready(Ok(()))
+        ));
+        drop(writer);
+        let mut head = Box::pin(acquire_write_permit(shared));
+        let mut next = Box::pin(acquire_write_permit(shared));
+        let head_waker = split_probe_waker(shared, &events, "head", true, false);
+        let next_waker = split_probe_waker(shared, &events, "next", false, false);
+        assert!(
+            head.as_mut()
+                .poll(&mut Context::from_waker(&head_waker))
+                .is_pending()
+        );
+        assert!(
+            next.as_mut()
+                .poll(&mut Context::from_waker(&next_waker))
+                .is_pending()
+        );
+        drop(head_waker);
+        drop(next_waker);
+        let panicked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read.fail_heartbeat()));
+        assert!(panicked.is_err());
+        assert!(read.is_closed());
+        for label in ["writer", "head", "next"] {
+            assert!(
+                events
+                    .lock()
+                    .iter()
+                    .any(|(observed, event, _)| *observed == label && *event == "wake"),
+                "missing wake for {label}"
+            );
+        }
+        drop(head);
+        drop(next);
+        drop(permit);
+        assert!(shared.lock().writer_waiters.is_empty());
+        assert_split_callbacks_reentered(&events);
+    }
+
+    #[test]
+    fn split_writer_unwind_preserves_original_panic_after_retirement_panics() {
+        let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+        let (read, _write) = ws.split();
+        let shared = &read.shared;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let permit = future::block_on(acquire_write_permit(shared));
+        let writer = split_probe_waker(shared, &events, "writer", false, true);
+        assert!(matches!(
+            poll_split_flush(shared, &writer),
+            Poll::Ready(Ok(()))
+        ));
+        drop(writer);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _permit = permit;
+            panic!("original split operation panic");
+        }));
+        let payload = panicked.expect_err("the original operation panic remains visible");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"original split operation panic")
+        );
+        assert!(!shared.lock().writer_active);
+        assert!(shared.lock().heartbeat_writer.is_none());
+        assert_split_callbacks_reentered(&events);
+    }
+
+    #[test]
+    fn split_waker_retirement_cancellation_precedes_retained_output() {
+        let _ambient = Cx::set_current(None);
+        let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+        let (read, _write) = ws.split();
+        let shared = &read.shared;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let permit = future::block_on(acquire_write_permit(shared));
+        let cx = Cx::for_testing();
+        let cancel = cx.clone();
+        let writer = Waker::from(Arc::new(ReentrantSplitWake {
+            shared: Arc::downgrade(shared),
+            events: Arc::clone(&events),
+            label: "cancel",
+            panic_on_wake: false,
+            panic_on_drop: false,
+            on_drop: Some(Box::new(move || {
+                cancel.cancel_with(crate::types::CancelKind::User, Some("retired writer"));
+            })),
+        }));
+        assert!(matches!(
+            poll_split_flush(shared, &writer),
+            Poll::Ready(Ok(()))
+        ));
+        drop(writer);
+        shared
+            .lock()
+            .write_buf
+            .extend_from_slice(b"retry exactly once");
+        {
+            let _ambient = Cx::set_current(Some(cx));
+            assert!(matches!(
+                poll_split_flush(shared, Waker::noop()),
+                Poll::Ready(Err(WsError::Io(error))) if error.kind() == io::ErrorKind::Interrupted
+            ));
+        }
+        assert!(shared.lock().io.written.is_empty());
+        assert_eq!(&shared.lock().write_buf[..], b"retry exactly once");
+        assert!(matches!(
+            poll_split_flush(shared, Waker::noop()),
+            Poll::Ready(Ok(()))
+        ));
+        drop(permit);
+        assert_eq!(shared.lock().io.written, b"retry exactly once");
+        assert_split_callbacks_reentered(&events);
+    }
+
+    #[test]
+    fn split_waker_retirement_close_refuses_a_new_frame_but_preserves_close_flush() {
+        let _ambient = Cx::set_current(None);
+        let ws = WebSocket::from_upgraded(
+            TestIo::new(vec![]).with_stalled_writes(),
+            WebSocketConfig::default(),
+        );
+        let (read, _write) = ws.split();
+        let shared = &read.shared;
+        shared.lock().codec = FrameCodec::server();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let weak = Arc::downgrade(shared);
+        let (_clock, _timer, close_cx) = close_timer_context(0);
+        let writer = Waker::from(Arc::new(ReentrantSplitWake {
+            shared: Arc::downgrade(shared),
+            events: Arc::clone(&events),
+            label: "close",
+            panic_on_wake: false,
+            panic_on_drop: false,
+            on_drop: Some(Box::new(move || {
+                let _ambient = Cx::set_current(Some(close_cx));
+                let mut other = WebSocketWrite {
+                    shared: weak.upgrade().unwrap(),
+                };
+                let mut close = std::pin::pin!(other.close(CloseReason::normal()));
+                assert!(
+                    close
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+            })),
+        }));
+        let mut payload = BytesMut::from(&b"not admitted after close"[..]);
+        {
+            let mut send = std::pin::pin!(write_owned_buf_with_permit_inner(
+                shared,
+                None,
+                &mut payload,
+                true,
+            ));
+            assert!(
+                send.as_mut()
+                    .poll(&mut Context::from_waker(&writer))
+                    .is_pending()
+            );
+            assert!(shared.lock().writer_active);
+            assert_eq!(shared.lock().io.write_polls, 1);
+            drop(writer);
+            shared.lock().io.stall_writes = false;
+            assert!(matches!(
+                send.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(Err(WsError::Io(error))) if error.kind() == io::ErrorKind::NotConnected
+            ));
+        }
+        assert_eq!(&payload[..], b"not admitted after close");
+        assert!(shared.lock().io.written.is_empty());
+        assert!(!shared.lock().writer_active);
+        let permit = future::block_on(acquire_write_permit(shared));
+        assert!(matches!(
+            poll_split_flush(shared, Waker::noop()),
+            Poll::Ready(Ok(()))
+        ));
+        drop(permit);
+        assert_eq!(
+            shared.lock().io.written,
+            encode_server_frame(CloseReason::normal().to_frame())
+        );
+        assert_split_callbacks_reentered(&events);
+    }
+
     #[test]
     fn split_recv_keeps_one_inline_copy_of_the_receive_operation() {
         let websocket = WebSocket::from_upgraded(
