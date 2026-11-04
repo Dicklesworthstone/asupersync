@@ -2223,7 +2223,8 @@ pub async fn server_handshake_over_udp(
     server_scid: ConnectionId,
 ) -> Result<SocketAddr, QuicTlsError> {
     let (peer_addr, early_one_rtt) =
-        server_handshake_over_udp_with_early_data(cx, endpoint, driver, dcid, server_scid).await?;
+        server_handshake_over_udp_with_early_data(cx, endpoint, driver, dcid, server_scid, None)
+            .await?;
     if !early_one_rtt.is_empty() {
         return Err(handshake_failure("unexpected_early_one_rtt"));
     }
@@ -2305,8 +2306,13 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
     driver: &mut QuicHandshakeDriver,
     dcid: ConnectionId,
     server_scid: ConnectionId,
+    first: Option<ReceivedPacket>,
 ) -> Result<(SocketAddr, Vec<ReceivedPacket>), QuicTlsError> {
     driver.install_initial_keys(dcid.as_bytes())?;
+    // A caller that already received the client's first Initial (to learn its
+    // address and DCID) hands it in instead of waiting a client handshake PTO
+    // for the retransmission.
+    let mut first = first;
     let mut packet_number = 0u64;
     let mut peer: Option<(SocketAddr, ConnectionId)> = None;
     let mut last_flight = SentHandshakeFlight::default();
@@ -2330,32 +2336,36 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
         if driver.is_complete() {
             break;
         }
-        let received = match crate::time::timeout_at(
-            receive_deadline,
-            endpoint.receive_batch(cx, HANDSHAKE_RECEIVE_BATCH_SIZE),
-        )
-        .await
-        {
-            Ok(Ok(packets)) => packets,
-            Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
-            Err(_) => {
-                flights += 1;
-                if peer.is_none() {
-                    no_peer_idle_timeouts = no_peer_idle_timeouts.saturating_add(1);
-                    if no_peer_idle_timeouts >= HANDSHAKE_SERVER_NO_PEER_IDLE_LIMIT {
-                        return Err(handshake_failure("server_handshake_recv_timeout"));
+        let received = if let Some(packet) = first.take() {
+            vec![packet]
+        } else {
+            match crate::time::timeout_at(
+                receive_deadline,
+                endpoint.receive_batch(cx, HANDSHAKE_RECEIVE_BATCH_SIZE),
+            )
+            .await
+            {
+                Ok(Ok(packets)) => packets,
+                Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
+                Err(_) => {
+                    flights += 1;
+                    if peer.is_none() {
+                        no_peer_idle_timeouts = no_peer_idle_timeouts.saturating_add(1);
+                        if no_peer_idle_timeouts >= HANDSHAKE_SERVER_NO_PEER_IDLE_LIMIT {
+                            return Err(handshake_failure("server_handshake_recv_timeout"));
+                        }
+                        receive_deadline = cx.now() + pto;
+                        continue;
                     }
+                    // Each PTO without progress doubles the next one.
+                    pto = pto.saturating_mul(2).min(HANDSHAKE_MAX_PTO);
                     receive_deadline = cx.now() + pto;
-                    continue;
+                    if budget.queue_retransmit(driver, &mut last_flight, &mut packet_number)? {
+                        budget.flush(cx, endpoint).await?;
+                        continue;
+                    }
+                    return Err(handshake_failure("server_handshake_recv_timeout"));
                 }
-                // Each PTO without progress doubles the next one.
-                pto = pto.saturating_mul(2).min(HANDSHAKE_MAX_PTO);
-                receive_deadline = cx.now() + pto;
-                if budget.queue_retransmit(driver, &mut last_flight, &mut packet_number)? {
-                    budget.flush(cx, endpoint).await?;
-                    continue;
-                }
-                return Err(handshake_failure("server_handshake_recv_timeout"));
             }
         };
         if !received.is_empty() {

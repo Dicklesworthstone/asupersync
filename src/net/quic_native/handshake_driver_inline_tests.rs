@@ -3478,6 +3478,7 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
                     &mut server,
                     original_cid,
                     server_scid,
+                    None,
                 ),
                 scripted,
             )

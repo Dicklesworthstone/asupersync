@@ -472,11 +472,63 @@ impl NativeQuicUdpConnection {
     pub async fn accept(
         cx: &Cx,
         endpoint: QuicUdpEndpoint,
+        driver: QuicHandshakeDriver,
+        initial_dcid: ConnectionId,
+        local_cid: ConnectionId,
+        connection_config: NativeQuicConnectionConfig,
+        required_alpn: &[u8],
+    ) -> Result<Self, NativeQuicUdpConnectionError> {
+        Self::accept_inner(
+            cx,
+            endpoint,
+            driver,
+            initial_dcid,
+            local_cid,
+            connection_config,
+            required_alpn,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::accept`] for a caller that already received the client's first
+    /// Initial on `endpoint` (for example to learn its address and DCID before
+    /// admitting it). The handshake processes that packet first instead of
+    /// waiting for the client's retransmission, which costs a handshake PTO.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_with_initial(
+        cx: &Cx,
+        endpoint: QuicUdpEndpoint,
+        driver: QuicHandshakeDriver,
+        initial_dcid: ConnectionId,
+        local_cid: ConnectionId,
+        connection_config: NativeQuicConnectionConfig,
+        required_alpn: &[u8],
+        initial: ReceivedPacket,
+    ) -> Result<Self, NativeQuicUdpConnectionError> {
+        Self::accept_inner(
+            cx,
+            endpoint,
+            driver,
+            initial_dcid,
+            local_cid,
+            connection_config,
+            required_alpn,
+            Some(initial),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn accept_inner(
+        cx: &Cx,
+        endpoint: QuicUdpEndpoint,
         mut driver: QuicHandshakeDriver,
         initial_dcid: ConnectionId,
         local_cid: ConnectionId,
         connection_config: NativeQuicConnectionConfig,
         required_alpn: &[u8],
+        first: Option<ReceivedPacket>,
     ) -> Result<Self, NativeQuicUdpConnectionError> {
         if cx.checkpoint().is_err() {
             return Err(NativeQuicUdpConnectionError::Cancelled);
@@ -488,6 +540,7 @@ impl NativeQuicUdpConnection {
             &mut driver,
             initial_dcid,
             local_cid,
+            first,
         )
         .await
         {

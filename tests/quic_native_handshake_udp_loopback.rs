@@ -695,6 +695,101 @@ fn real_tls13_handshake_completes_over_real_loopback_udp() {
 /// exceeded the default 1500-byte packet size and the handshake failed with
 /// `udp_send`. A leaf plus four copies of the CA (about 2.1 KB of DER) must
 /// complete at the default packet size.
+/// A server that consumed the client's first Initial, to learn its address and
+/// DCID before admitting it, hands that packet to the handshake. Completing must
+/// not wait for the client's retransmission after its 1.5 s handshake PTO.
+#[test]
+fn accept_with_initial_completes_without_the_clients_retransmission() {
+    use asupersync::net::quic_core::TransportParameters;
+    use asupersync::net::quic_native::NativeQuicUdpConnection;
+
+    block_on(async {
+        let cx = Cx::for_testing();
+        let udp_config = QuicUdpEndpointConfig {
+            max_packet_size: 16384,
+            ..QuicUdpEndpointConfig::default()
+        };
+        let client_endpoint =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
+                .await
+                .unwrap();
+        let mut server_endpoint =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+                .await
+                .unwrap();
+        let server_addr = server_endpoint.local_addr();
+        let client_tls = client_config(
+            vec![parse_one_cert(CA_CERT_PEM)],
+            vec![ATP_QUIC_ALPN.to_vec()],
+        )
+        .unwrap();
+        let server_tls = server_config(
+            vec![parse_one_cert(LEAF_CERT_PEM)],
+            leaf_key(),
+            vec![ATP_QUIC_ALPN.to_vec()],
+        )
+        .unwrap();
+        let mut parameters = Vec::new();
+        TransportParameters {
+            initial_max_data: Some(1 << 20),
+            initial_max_stream_data_bidi_remote: Some(1 << 18),
+            initial_max_streams_bidi: Some(4),
+            ..TransportParameters::default()
+        }
+        .encode(&mut parameters)
+        .unwrap();
+        let client_driver = QuicHandshakeDriver::client(
+            client_tls,
+            ServerName::try_from("localhost").unwrap(),
+            parameters.clone(),
+        )
+        .unwrap();
+        let server_driver = QuicHandshakeDriver::server(server_tls, parameters).unwrap();
+        let initial_cid = ConnectionId::new(b"first-initial").unwrap();
+        let started = Instant::now();
+        let (client, server) = zip(
+            NativeQuicUdpConnection::connect(
+                &cx,
+                client_endpoint,
+                server_addr,
+                client_driver,
+                initial_cid,
+                ConnectionId::new(b"first-client").unwrap(),
+                NativeQuicConnectionConfig::default(),
+                ATP_QUIC_ALPN,
+            ),
+            async {
+                let first = server_endpoint
+                    .receive_batch(&cx, 1)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .unwrap();
+                NativeQuicUdpConnection::accept_with_initial(
+                    &cx,
+                    server_endpoint,
+                    server_driver,
+                    initial_cid,
+                    ConnectionId::new(b"first-server").unwrap(),
+                    NativeQuicConnectionConfig::default(),
+                    ATP_QUIC_ALPN,
+                    first,
+                )
+                .await
+            },
+        )
+        .await;
+        client.expect("client handshake");
+        server.expect("server handshake");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(1_400),
+            "the handshake waited for a retransmission: {elapsed:?}"
+        );
+    });
+}
+
 #[test]
 fn real_tls13_handshake_fits_a_long_certificate_chain_into_default_datagrams() {
     block_on(async {
