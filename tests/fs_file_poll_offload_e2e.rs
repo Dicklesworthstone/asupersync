@@ -585,6 +585,158 @@ fn abandoned_write_and_seek_are_not_credited_to_the_next_call() {
     assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
 }
 
+/// Establish the native state behind br-asupersync-pxg07b/e66q35: a queued
+/// write loses its borrowing future, then flush settles its syscall while
+/// preserving the count for a possible retry. The public cursor and file
+/// contents witness completion before the next operation changes anything.
+fn with_settled_write<F, Fut>(name: &str, scenario: F)
+where
+    F: FnOnce(File, std::path::PathBuf) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let path = scratch_path(name);
+    std::fs::write(&path, b"prior").expect("write prefix fixture");
+    let std_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open write fixture");
+    let mut file = File::from_std(std_file);
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("runtime with one blocking worker");
+    runtime.block_on(async move {
+        assert_eq!(file.seek(SeekFrom::End(0)).await.expect("seek to end"), 5);
+        abandon_queued_io(file.write_all(b"hello")).await;
+        file.flush().await.expect("settle the queued write");
+        assert_eq!(std::fs::read(&path).expect("read settled write"), b"priorhello");
+        assert_eq!(file.stream_position().await.expect("settled cursor"), 10);
+        scenario(file, path).await;
+    });
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+#[test]
+fn settled_write_is_not_reused_after_owned_seek() {
+    for abandon_seek in [false, true] {
+        with_settled_write(
+            &format!("settled-write-owned-seek-{abandon_seek}"),
+            move |mut file, path| async move {
+                let (position, expected): (u64, &[u8]) = if abandon_seek {
+                    // Unlike poll-trait I/O retained by File, the owned
+                    // operation is cancelled before the occupied worker can
+                    // claim it. Starting it still ends the old write's retry.
+                    abandon_queued_io(file.seek(SeekFrom::Start(15))).await;
+                    (10, b"priorhellohello")
+                } else {
+                    assert_eq!(file.seek(SeekFrom::Start(15)).await.expect("seek"), 15);
+                    (15, b"priorhello\0\0\0\0\0hello")
+                };
+                assert_eq!(file.stream_position().await.expect("seek cursor"), position);
+                file.write_all(b"hello").await.expect("new identical write");
+                file.flush().await.expect("flush new write");
+                assert_eq!(std::fs::read(&path).expect("read back"), expected);
+                assert_eq!(file.stream_position().await.expect("new cursor"), position + 5);
+            },
+        );
+    }
+}
+
+#[test]
+fn settled_write_is_not_reused_after_owned_rewind() {
+    for abandon_rewind in [false, true] {
+        with_settled_write(
+            &format!("settled-write-owned-rewind-{abandon_rewind}"),
+            move |mut file, path| async move {
+                let (position, expected): (u64, &[u8]) = if abandon_rewind {
+                    abandon_queued_io(file.rewind()).await;
+                    (10, b"priorhellohello")
+                } else {
+                    file.rewind().await.expect("rewind");
+                    (0, b"hellohello")
+                };
+                assert_eq!(file.stream_position().await.expect("rewind cursor"), position);
+                file.write_all(b"hello").await.expect("new identical write");
+                file.flush().await.expect("flush new write");
+                assert_eq!(std::fs::read(&path).expect("read back"), expected);
+                assert_eq!(file.stream_position().await.expect("new cursor"), position + 5);
+            },
+        );
+    }
+}
+
+#[test]
+fn settled_write_is_not_reused_after_resize() {
+    for abandon_resize in [false, true] {
+        with_settled_write(
+            &format!("settled-write-resize-{abandon_resize}"),
+            move |mut file, path| async move {
+                let (length, expected): (u64, &[u8]) = if abandon_resize {
+                    abandon_queued_io(file.set_len(0)).await;
+                    (10, b"priorhellohello")
+                } else {
+                    file.set_len(0).await.expect("truncate");
+                    (0, b"\0\0\0\0\0\0\0\0\0\0hello")
+                };
+                assert_eq!(file.metadata().await.expect("resized metadata").len(), length);
+                assert_eq!(file.stream_position().await.expect("resize cursor"), 10);
+                file.write_all(b"hello").await.expect("new identical write");
+                file.flush().await.expect("flush new write");
+                assert_eq!(std::fs::read(&path).expect("read back"), expected);
+                assert_eq!(file.stream_position().await.expect("new cursor"), 15);
+            },
+        );
+    }
+}
+
+#[test]
+fn settled_write_is_not_reused_after_failed_owned_change() {
+    for resize in [false, true] {
+        with_settled_write(
+            &format!("settled-write-failed-change-{resize}"),
+            move |mut file, path| async move {
+                if resize {
+                    file.set_len(u64::MAX)
+                        .await
+                        .expect_err("a size beyond the signed file-offset range is refused");
+                } else {
+                    file.seek(SeekFrom::Current(-11))
+                        .await
+                        .expect_err("a seek before offset zero is refused");
+                }
+                assert_eq!(file.stream_position().await.expect("unchanged cursor"), 10);
+                assert_eq!(file.metadata().await.expect("unchanged metadata").len(), 10);
+                file.write_all(b"hello").await.expect("new identical write");
+                file.flush().await.expect("flush new write");
+                assert_eq!(std::fs::read(&path).expect("read back"), b"priorhellohello");
+                assert_eq!(file.stream_position().await.expect("new cursor"), 15);
+            },
+        );
+    }
+}
+
+/// The original br-asupersync-pxg07b repair must keep suppressing a duplicate
+/// write when the other direction merely reads, flushes, syncs or inspects the
+/// cursor. None of those operations declares a new write position or extent.
+#[test]
+fn settled_write_retry_survives_reads_flushes_and_syncs() {
+    with_settled_write("settled-write-retry-control", |mut file, path| async move {
+        let mut byte = [0; 1];
+        assert_eq!(file.read(&mut byte).await.expect("read at EOF"), 0);
+        file.flush().await.expect("interleaved flush");
+        file.sync_all().await.expect("interleaved sync_all");
+        file.sync_data().await.expect("interleaved sync_data");
+        assert_eq!(file.stream_position().await.expect("unchanged cursor"), 10);
+        let (_, read) = file.read_into_vec(vec![0; 1]).await.expect("owned read at EOF");
+        assert_eq!(read, 0);
+        file.write_all(b"hello").await.expect("retry original write");
+        file.flush().await.expect("flush retry");
+        assert_eq!(std::fs::read(&path).expect("read back"), b"priorhello");
+        assert_eq!(file.stream_position().await.expect("unchanged cursor"), 10);
+    });
+}
+
 /// A write behind unconsumed read-ahead rewinds and writes in one job, so an
 /// abandoned write still lands at the caller's cursor once it is settled.
 #[test]
