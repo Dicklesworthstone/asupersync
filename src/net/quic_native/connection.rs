@@ -3012,7 +3012,28 @@ impl NativeQuicConnection {
         }
 
         if ack_eliciting {
-            self.queue_ack_frame(space, packet_number);
+            // A packet whose only ack-eliciting content is window updates (the
+            // peer re-attaching its own MAX_STREAM_DATA/MAX_DATA to an ACK) is
+            // acknowledged with a plain ACK. Re-attaching OUR advertisements
+            // here made that ACK ack-eliciting too, and two peers with bounded
+            // windows answered each other forever at round-trip speed. Any
+            // other frame (data, PING probes, STREAM_DATA_BLOCKED) still gets
+            // the re-attached advertisements, so a lost update cannot wedge a
+            // credit-blocked sender.
+            let window_only = frames.iter().all(|frame| {
+                matches!(
+                    frame,
+                    QuicFrame::Ack { .. }
+                        | QuicFrame::MaxStreamData { .. }
+                        | QuicFrame::MaxData { .. }
+                        | QuicFrame::Padding { .. }
+                )
+            });
+            if window_only {
+                self.queue_plain_ack_frame(space, packet_number);
+            } else {
+                self.queue_ack_frame(space, packet_number);
+            }
         } else {
             self.observe_non_ack_eliciting_packet(space, packet_number);
         }
@@ -4099,6 +4120,17 @@ impl NativeQuicConnection {
     /// packet carries this number along.
     fn observe_non_ack_eliciting_packet(&mut self, space: PacketNumberSpace, packet_number: u64) {
         self.received_ack_trackers[packet_number_space_idx(space)].observe(packet_number);
+    }
+
+    fn queue_plain_ack_frame(&mut self, space: PacketNumberSpace, packet_number: u64) {
+        let tracker = &mut self.received_ack_trackers[packet_number_space_idx(space)];
+        tracker.observe(packet_number);
+        let Some(frame) = tracker.ack_frame() else {
+            return;
+        };
+        self.pending_control_frames
+            .retain(|frame| !matches!(frame, QuicFrame::Ack { .. }));
+        self.pending_control_frames.push_back(frame);
     }
 
     fn queue_ack_frame(&mut self, space: PacketNumberSpace, packet_number: u64) {
