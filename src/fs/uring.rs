@@ -46,7 +46,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 /// Default io_uring queue size for file operations.

@@ -14,7 +14,7 @@ use crate::types::{RegionId, TaskId, Time};
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// A real managed work invocation's lifecycle boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

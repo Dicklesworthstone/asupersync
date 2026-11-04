@@ -9,7 +9,7 @@
     use super::*;
     use std::future::pending;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::Waker;
 
     fn init_test(name: &str) {

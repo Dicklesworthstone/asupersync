@@ -11,7 +11,7 @@
     use crate::cx::Cx;
     use crate::evidence_sink::CollectorSink;
     use std::future::Future;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex as StdMutex, Weak};
     use std::task::{Context, Poll};
 

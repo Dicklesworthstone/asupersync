@@ -7,7 +7,7 @@
 use crate::runtime::reactor::Reactor;
 use crate::types::Time;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::Waker;
 use std::time::Duration;

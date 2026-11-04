@@ -30,7 +30,7 @@ use std::backtrace::Backtrace;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Runtime modules that participate in epoch synchronization.
 ///

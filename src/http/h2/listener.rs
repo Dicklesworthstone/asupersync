@@ -65,7 +65,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -250,7 +250,7 @@ impl H2Transport {
             #[cfg(not(target_arch = "wasm32"))]
             Self::Handoff(socket) => {
                 if let Some(counter) = socket.stream.socket_bytes_written_counter() {
-                    counter.load(std::sync::atomic::Ordering::Relaxed)
+                    counter.load(crate::sync::atomic::Ordering::Relaxed)
                 } else {
                     socket.bytes_written
                 }

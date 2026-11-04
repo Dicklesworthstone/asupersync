@@ -183,7 +183,7 @@ impl PendingTaskCancelTrace {
 /// report is dispatched, after the canceller released its locks. The region's
 /// close reports its drain time from that stamp (br-asupersync-x9mmxl).
 pub(crate) struct CancelReportStamp {
-    pub(crate) stamp: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) stamp: Arc<crate::sync::atomic::AtomicU64>,
     /// The runtime's timer driver; without one the runtime's time when the
     /// cancel was requested.
     pub(crate) timer: Option<crate::time::TimerDriverHandle>,
@@ -204,7 +204,7 @@ impl CancelReportStamp {
     /// state lock under which no clock may be read.
     fn record_at(&self, now: Time) {
         self.stamp
-            .fetch_min(now.as_nanos(), std::sync::atomic::Ordering::AcqRel);
+            .fetch_min(now.as_nanos(), crate::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -954,7 +954,7 @@ impl RunnablePublication {
 /// Keeping the scheduler name as a crate-private alias lets the restored 0.4.3
 /// `fast_cancel: Arc<AtomicBool>` field and every runtime-owned publisher share
 /// one allocation and one Release/Acquire publication point.
-pub(crate) type CxCancellationState = std::sync::atomic::AtomicBool;
+pub(crate) type CxCancellationState = crate::sync::atomic::AtomicBool;
 
 /// Internal state for a capability context.
 ///
@@ -1041,7 +1041,7 @@ pub struct CxInner {
     ///
     /// Runtime mutation methods keep this flag synchronized with
     /// [`Self::cancel_requested`] and the internal publication envelope.
-    pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub fast_cancel: std::sync::Arc<crate::sync::atomic::AtomicBool>,
     /// Stable fast cancellation envelope shared with every `Cx` clone and
     /// runtime-owned cancellation producer for this context.
     cancellation: std::sync::Arc<CxCancellationState>,
@@ -1050,13 +1050,13 @@ pub struct CxInner {
     /// (br-asupersync-is2xg0). Drained into
     /// [`CheckpointState::checkpoint_count`] on the next slow-path call or
     /// when the materialised view is requested.
-    pub fast_path_count: std::sync::atomic::AtomicU64,
+    pub fast_path_count: crate::sync::atomic::AtomicU64,
     /// Fast-path last checkpoint time (ns since [`Time::ZERO`]). 0 means no
     /// fast-path checkpoint has been recorded since the last drain. Drained
     /// into [`CheckpointState::last_checkpoint`] on the next slow-path call
     /// or when the materialised view is requested. Stored as a plain
     /// `AtomicU64` because [`Time`] is just a `u64` nanos counter.
-    pub fast_path_last_checkpoint_ns: std::sync::atomic::AtomicU64,
+    pub fast_path_last_checkpoint_ns: crate::sync::atomic::AtomicU64,
     /// Retirement barrier the scheduler opens after this task's record reaches
     /// a terminal state in the post-lock completion dispatch, releasing any
     /// consumer that received the task's terminal result early
@@ -1106,8 +1106,8 @@ impl CxInner {
             checkpoint_state: CheckpointState::new(),
             fast_cancel,
             cancellation,
-            fast_path_count: std::sync::atomic::AtomicU64::new(0),
-            fast_path_last_checkpoint_ns: std::sync::atomic::AtomicU64::new(0),
+            fast_path_count: crate::sync::atomic::AtomicU64::new(0),
+            fast_path_last_checkpoint_ns: crate::sync::atomic::AtomicU64::new(0),
             retirement_barrier: None,
             spawn_fallback_region: None,
         }
@@ -1125,7 +1125,7 @@ impl CxInner {
     #[inline]
     #[must_use]
     pub(crate) fn is_cancel_requested(&self) -> bool {
-        self.cancel_requested || self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)
+        self.cancel_requested || self.fast_cancel.load(crate::sync::atomic::Ordering::Acquire)
     }
 
     /// Changes lock-backed cancellation state and publishes the matching
@@ -1134,7 +1134,7 @@ impl CxInner {
     pub(crate) fn set_cancel_requested(&mut self, value: bool) {
         self.cancel_requested = value;
         self.fast_cancel
-            .store(value, std::sync::atomic::Ordering::Release);
+            .store(value, crate::sync::atomic::Ordering::Release);
         if !std::sync::Arc::ptr_eq(&self.fast_cancel, &self.cancellation) {
             self.publish_cancel_requested(value);
         }
@@ -1144,7 +1144,7 @@ impl CxInner {
     #[inline]
     pub(crate) fn publish_cancel_requested(&self, value: bool) {
         self.cancellation
-            .store(value, std::sync::atomic::Ordering::Release);
+            .store(value, crate::sync::atomic::Ordering::Release);
     }
 
     /// Snapshot every distinct cancellation wake target using only safe `Arc`
@@ -1226,7 +1226,7 @@ impl CxInner {
     /// and from any reader of the materialised checkpoint view. Idempotent
     /// when there is nothing to drain. (br-asupersync-is2xg0)
     pub fn drain_fast_path_checkpoint(&mut self) {
-        use std::sync::atomic::Ordering;
+        use crate::sync::atomic::Ordering;
         let count = self.fast_path_count.swap(0, Ordering::Relaxed);
         let ns = self.fast_path_last_checkpoint_ns.swap(0, Ordering::Relaxed);
         if count > 0 {
@@ -1250,7 +1250,7 @@ impl CxInner {
     /// (br-asupersync-is2xg0)
     #[must_use]
     pub fn materialised_checkpoint_state(&self) -> CheckpointState {
-        use std::sync::atomic::Ordering;
+        use crate::sync::atomic::Ordering;
         let mut state = self.checkpoint_state.clone();
         let count = self.fast_path_count.load(Ordering::Relaxed);
         if count > 0 {

@@ -11,7 +11,7 @@ use crate::cx::Cx;
 use crate::time::sleep;
 use crate::types::Time;
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 // Removed tokio dependency - this project IS the async runtime

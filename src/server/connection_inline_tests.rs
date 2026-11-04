@@ -9,7 +9,7 @@
     use super::*;
     use crate::test_utils::init_test_logging;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
@@ -726,7 +726,7 @@
         crate::test_utils::run_test(|| async {
             struct ReentrantConnectionWaker {
                 manager: ConnectionManager,
-                woke: std::sync::atomic::AtomicBool,
+                woke: crate::sync::atomic::AtomicBool,
             }
 
             impl std::task::Wake for ReentrantConnectionWaker {
@@ -750,7 +750,7 @@
 
             let reentrant = Arc::new(ReentrantConnectionWaker {
                 manager: manager.clone(),
-                woke: std::sync::atomic::AtomicBool::new(false),
+                woke: crate::sync::atomic::AtomicBool::new(false),
             });
             let waker = Waker::from(Arc::clone(&reentrant));
             let mut context = Context::from_waker(&waker);
@@ -795,7 +795,7 @@
         let manager = Arc::new(ConnectionManager::new(Some(5), signal));
 
         let barrier = Arc::new(std::sync::Barrier::new(11));
-        let successes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let successes = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
 
         let mut handles = Vec::new();
         for i in 0..10 {
@@ -805,7 +805,7 @@
             handles.push(std::thread::spawn(move || {
                 b.wait();
                 if let Some(_guard) = m.register(test_addr(9000 + i)) {
-                    s.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    s.fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
                     // Hold the guard alive until thread exits
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -817,7 +817,7 @@
             h.join().expect("thread panicked");
         }
 
-        let total = successes.load(std::sync::atomic::Ordering::Relaxed);
+        let total = successes.load(crate::sync::atomic::Ordering::Relaxed);
         crate::assert_with_log!(total <= 5, "capacity not exceeded", "<=5", total);
         crate::test_complete!("concurrent_register_respects_capacity");
     }

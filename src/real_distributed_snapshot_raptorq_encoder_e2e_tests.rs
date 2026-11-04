@@ -10,7 +10,7 @@
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime};
 
@@ -150,7 +150,7 @@ mod tests {
         }
     }
 
-    use std::sync::atomic::AtomicBool;
+    use crate::sync::atomic::AtomicBool;
 
     /// Distributed snapshot system with RaptorQ encoding
     #[derive(Debug)]

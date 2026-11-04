@@ -16,7 +16,7 @@ mod tests {
     use crate::observability::otlp_trace_exporter::{
         InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,
     };
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::{Duration, Instant};

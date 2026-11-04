@@ -19,7 +19,7 @@ mod tests {
     use crate::types::{Budget, Policy, Priority, RegionId, TaskId, Time};
     use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
     // RaptorQ decode work unit representation

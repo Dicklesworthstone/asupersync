@@ -3,7 +3,7 @@
 //! This module provides instrumentation for understanding allocation patterns
 //! and performance characteristics of Bytes/BytesMut operations.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Global allocation counters for profiling.
 pub struct AllocationMetrics {
@@ -116,7 +116,7 @@ fn _profile_freeze_operation() {
         .fetch_add(1, Ordering::Relaxed);
 }
 
-use std::sync::atomic::AtomicU8;
+use crate::sync::atomic::AtomicU8;
 
 static PROFILING_ENABLED: AtomicU8 = AtomicU8::new(0); // 0 = uninit, 1 = true, 2 = false
 

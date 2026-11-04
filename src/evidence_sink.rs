@@ -14,7 +14,7 @@
 use parking_lot::Mutex;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 use franken_evidence::EvidenceLedger;
 use franken_evidence::export::JsonlExporter;

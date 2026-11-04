@@ -54,7 +54,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::net::SocketAddr;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
@@ -104,7 +104,7 @@ mod tests {
     struct MockTcpStream {
         read_data: Arc<Mutex<VecDeque<u8>>>,
         write_data: Arc<Mutex<Vec<u8>>>,
-        connected: Arc<std::sync::atomic::AtomicBool>,
+        connected: Arc<crate::sync::atomic::AtomicBool>,
         local_addr: SocketAddr,
         peer_addr: SocketAddr,
     }
@@ -115,7 +115,7 @@ mod tests {
 
             let client_to_server = Arc::new(Mutex::new(VecDeque::new()));
             let server_to_client = Arc::new(Mutex::new(VecDeque::new()));
-            let connected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let connected = Arc::new(crate::sync::atomic::AtomicBool::new(true));
 
             let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
             let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8443);

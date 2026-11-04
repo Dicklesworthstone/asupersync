@@ -61,7 +61,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll};
@@ -145,7 +145,7 @@ impl StreamAccounting {
         if let Some(stats) = &self.stats {
             stats
                 .total_bytes_read
-                .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(bytes as u64, crate::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -157,7 +157,7 @@ impl StreamAccounting {
         if let Some(stats) = &self.stats {
             stats
                 .total_bytes_written
-                .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(bytes as u64, crate::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -169,7 +169,7 @@ impl StreamAccounting {
         if let Some(stats) = &self.stats {
             stats
                 .streams_closed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
         }
         self.terminal = StreamTerminalState::Closed;
     }
@@ -182,7 +182,7 @@ impl StreamAccounting {
         if let Some(stats) = &self.stats {
             stats
                 .streams_aborted
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
         }
         self.terminal = StreamTerminalState::Aborted;
     }
@@ -1337,15 +1337,15 @@ pub struct BrowserStreamIoCap {
 #[derive(Debug, Default)]
 pub struct StreamStats {
     /// Total streams opened.
-    pub streams_opened: std::sync::atomic::AtomicU64,
+    pub streams_opened: crate::sync::atomic::AtomicU64,
     /// Total streams closed cleanly.
-    pub streams_closed: std::sync::atomic::AtomicU64,
+    pub streams_closed: crate::sync::atomic::AtomicU64,
     /// Total streams aborted.
-    pub streams_aborted: std::sync::atomic::AtomicU64,
+    pub streams_aborted: crate::sync::atomic::AtomicU64,
     /// Total bytes read across all streams.
-    pub total_bytes_read: std::sync::atomic::AtomicU64,
+    pub total_bytes_read: crate::sync::atomic::AtomicU64,
     /// Total bytes written across all streams.
-    pub total_bytes_written: std::sync::atomic::AtomicU64,
+    pub total_bytes_written: crate::sync::atomic::AtomicU64,
 }
 
 impl fmt::Debug for BrowserStreamIoCap {
@@ -1383,21 +1383,21 @@ impl BrowserStreamIoCap {
     pub fn record_open(&self) {
         self.stats
             .streams_opened
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
     }
 
     /// Records that a stream was closed cleanly.
     pub fn record_close(&self) {
         self.stats
             .streams_closed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
     }
 
     /// Records that a stream was aborted.
     pub fn record_abort(&self) {
         self.stats
             .streams_aborted
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
     }
 
     /// Wraps a source in a readable browser stream bridge using this capability policy.
@@ -1469,15 +1469,15 @@ impl IoCap for BrowserStreamIoCap {
         let opened = self
             .stats
             .streams_opened
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(crate::sync::atomic::Ordering::Relaxed);
         let completed = self
             .stats
             .streams_closed
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(crate::sync::atomic::Ordering::Relaxed)
             .saturating_add(
                 self.stats
                     .streams_aborted
-                    .load(std::sync::atomic::Ordering::Relaxed),
+                    .load(crate::sync::atomic::Ordering::Relaxed),
             );
         IoStats {
             submitted: opened,

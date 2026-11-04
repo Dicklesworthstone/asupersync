@@ -21,7 +21,7 @@ use parking_lot::{Mutex as ParkingMutex, RwLock};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 type EndpointSinkMap = HashMap<EndpointId, Arc<EndpointSinkSlot>>;
 

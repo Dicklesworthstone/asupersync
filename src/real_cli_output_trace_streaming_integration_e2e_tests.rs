@@ -22,7 +22,7 @@ mod real_cli_output_trace_streaming_e2e {
     use std::collections::{HashMap, VecDeque};
     use std::io::{self, BufReader, BufWriter, Write};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tempfile::{NamedTempFile, TempDir};
 

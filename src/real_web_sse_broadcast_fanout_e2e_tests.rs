@@ -10,7 +10,7 @@ use crate::cx::Cx;
 use crate::web::sse::{SseEvent, StreamingSse, StreamingSseError, StreamingSseSource};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Mock broadcast-driven SSE source that bridges broadcast receiver to streaming SSE.

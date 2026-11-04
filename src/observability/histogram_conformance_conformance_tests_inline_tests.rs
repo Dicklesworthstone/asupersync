@@ -1,5 +1,5 @@
     use crate::observability::metrics::{Histogram, Metrics};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier as StdBarrier};
     use std::thread;
 

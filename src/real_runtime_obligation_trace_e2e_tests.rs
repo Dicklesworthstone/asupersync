@@ -26,7 +26,7 @@ mod tests {
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     // Test data factories for realistic workflow scenarios

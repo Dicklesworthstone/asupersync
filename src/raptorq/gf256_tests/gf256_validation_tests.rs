@@ -11,7 +11,7 @@ use crate::raptorq::gf256::{
     gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
 };
 use crate::raptorq::test_log_schema::{UnitLogEntry, validate_unit_log_json};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 

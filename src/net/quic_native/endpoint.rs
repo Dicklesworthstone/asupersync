@@ -27,7 +27,7 @@ use smallvec::SmallVec;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -457,7 +457,7 @@ impl QuicUdpEndpoint {
             Poll::Ready(Err(e)) => {
                 self.metrics
                     .receive_errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
                 return Poll::Ready(Err(e.into()));
             }
         };
@@ -726,7 +726,7 @@ impl QuicUdpEndpoint {
                     Err(e) => {
                         self.metrics
                             .send_errors
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
                         return Err(e.into());
                     }
                 };
@@ -738,17 +738,17 @@ impl QuicUdpEndpoint {
                 gso_send_used |= report.gso_send_used;
                 self.metrics.packets_sent.fetch_add(
                     report.packets_processed as u64,
-                    std::sync::atomic::Ordering::Relaxed,
+                    crate::sync::atomic::Ordering::Relaxed,
                 );
                 self.metrics.bytes_sent.fetch_add(
                     report.bytes_processed as u64,
-                    std::sync::atomic::Ordering::Relaxed,
+                    crate::sync::atomic::Ordering::Relaxed,
                 );
 
                 if let Some(error) = report.error {
                     self.metrics
                         .send_errors
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
                     batch_error = Some(error);
                     break;
                 }
@@ -801,7 +801,7 @@ impl QuicUdpEndpoint {
 
 /// Generate a unique endpoint ID for logging.
 fn generate_endpoint_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }

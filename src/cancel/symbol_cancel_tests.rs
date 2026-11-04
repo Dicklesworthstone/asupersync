@@ -14,7 +14,7 @@ mod tests {
     use crate::types::symbol::{ObjectId, Symbol};
     use serde_json::Value;
     use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::AtomicUsize;
+    use crate::sync::atomic::AtomicUsize;
 
     struct CountingCleanupHandler;
     impl CleanupHandler for CountingCleanupHandler {
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_token_listener_notified() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use crate::sync::atomic::{AtomicBool, Ordering};
 
         let mut rng = DetRng::new(42);
         let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
@@ -697,12 +697,12 @@ mod tests {
         }
 
         struct CountingListener {
-            calls: Arc<std::sync::atomic::AtomicU64>,
+            calls: Arc<crate::sync::atomic::AtomicU64>,
         }
         impl CancelListener for CountingListener {
             fn on_cancel(&self, _reason: &CancelReason, _at: Time) {
                 self.calls
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
             }
         }
 
@@ -715,7 +715,7 @@ mod tests {
         // listeners — testing this proves the isolation extends past
         // the panic and reaches the next listener in the slot list.
         token.add_listener(PanickingListener);
-        let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let calls = Arc::new(crate::sync::atomic::AtomicU64::new(0));
         token.add_listener(CountingListener {
             calls: Arc::clone(&calls),
         });
@@ -732,7 +732,7 @@ mod tests {
         );
         assert_eq!(result.unwrap(), true, "first cancel should return true");
         assert_eq!(
-            calls.load(std::sync::atomic::Ordering::Relaxed),
+            calls.load(crate::sync::atomic::Ordering::Relaxed),
             1,
             "br-asupersync-64ijds: counting listener must fire even when prior listener panicked"
         );
@@ -751,7 +751,7 @@ mod tests {
         // Both listeners fire on renotify; counting listener should
         // see at least one more call.
         assert!(
-            calls.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+            calls.load(crate::sync::atomic::Ordering::Relaxed) >= 2,
             "counting listener must fire on renotification"
         );
 
@@ -1381,7 +1381,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_handler_called() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use crate::sync::atomic::{AtomicBool, Ordering};
 
         struct TestHandler {
             called: Arc<AtomicBool>,
@@ -1463,7 +1463,7 @@ mod tests {
 
     #[test]
     fn test_clear_pending_drops_registered_handler() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use crate::sync::atomic::{AtomicUsize, Ordering};
 
         struct DropCountingHandler {
             drops: Arc<AtomicUsize>,
@@ -1820,7 +1820,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_handler_invoked_without_holding_handler_lock() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use crate::sync::atomic::{AtomicBool, Ordering};
 
         struct LockCheckHandler {
             coordinator: Arc<CleanupCoordinator>,
@@ -2020,7 +2020,7 @@ mod tests {
     fn test_listener_registered_during_cancel_not_requeued() {
         let mut rng = DetRng::new(93);
         let token = SymbolCancelToken::new(ObjectId::new_for_test(7), &mut rng);
-        let notification_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let notification_count = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
         let seen_kind = Arc::new(std::sync::Mutex::new(None::<CancelKind>));
         let seen_time = Arc::new(std::sync::Mutex::new(None::<Time>));
 
@@ -2230,7 +2230,7 @@ mod tests {
 
     #[test]
     fn test_multiple_listeners_all_notified() {
-        use std::sync::atomic::{AtomicU32, Ordering};
+        use crate::sync::atomic::{AtomicU32, Ordering};
 
         let mut rng = DetRng::new(42);
         let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
@@ -2648,7 +2648,7 @@ mod tests {
     /// Metamorphic relation: notifications_received = listeners_count × severity_levels_seen
     #[test]
     fn meta_listener_multiplicativity() {
-        use std::sync::atomic::{AtomicU32, Ordering};
+        use crate::sync::atomic::{AtomicU32, Ordering};
 
         let mut rng = DetRng::new(33333);
         let token = SymbolCancelToken::new(ObjectId::new_for_test(40), &mut rng);
@@ -3297,7 +3297,7 @@ mod tests {
     /// (br-asupersync-bi2462.22 removed the wall-clock bounded spin).
     #[test]
     fn child_of_wire_shaped_token_inherits_time_zero_without_waiting() {
-        use std::sync::atomic::Ordering;
+        use crate::sync::atomic::Ordering;
 
         let mut rng = DetRng::new(0x5678);
         let parent = SymbolCancelToken::new(ObjectId::new(3, 3), &mut rng);
@@ -3490,7 +3490,7 @@ mod tests {
 
     #[test]
     fn cancelled_at_snapshot_for_child_livelock_regression() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use crate::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Barrier};
         use std::thread;
         use std::time::{Duration, Instant};

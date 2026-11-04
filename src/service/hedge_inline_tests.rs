@@ -12,7 +12,7 @@
     use std::future::Future as StdFuture;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
 
     fn init_test(name: &str) {

@@ -16,7 +16,7 @@ use crate::types::{CancelKind, Time};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -62,7 +62,7 @@ pub fn process_epoch() -> Instant {
 #[must_use]
 pub(crate) fn wasm_monotonic_nanos() -> u64 {
     static START_MS: OnceLock<f64> = OnceLock::new();
-    static LAST_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static LAST_NANOS: crate::sync::atomic::AtomicU64 = crate::sync::atomic::AtomicU64::new(0);
     let start = *START_MS.get_or_init(js_sys::Date::now);
     let elapsed_ms = (js_sys::Date::now() - start).max(0.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -398,9 +398,9 @@ pub struct Sleep {
     bound_timer_driver: Option<TimerDriverHandle>,
     /// Whether this sleep has been polled at least once.
     /// Used for tracing/debugging.
-    polled: std::sync::atomic::AtomicBool,
+    polled: crate::sync::atomic::AtomicBool,
     /// Whether this sleep has already completed and not yet been reset.
-    completed: std::sync::atomic::AtomicBool,
+    completed: crate::sync::atomic::AtomicBool,
     /// Whether a timer/fallback wake has already made this sleep ready.
     ready: Arc<AtomicBool>,
     /// Shared state for background waiter thread.
@@ -430,8 +430,8 @@ impl Sleep {
             deadline,
             time_getter: None,
             bound_timer_driver: None,
-            polled: std::sync::atomic::AtomicBool::new(false),
-            completed: std::sync::atomic::AtomicBool::new(false),
+            polled: crate::sync::atomic::AtomicBool::new(false),
+            completed: crate::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
@@ -488,8 +488,8 @@ impl Sleep {
             deadline,
             time_getter: Some(time_getter),
             bound_timer_driver: None,
-            polled: std::sync::atomic::AtomicBool::new(false),
-            completed: std::sync::atomic::AtomicBool::new(false),
+            polled: crate::sync::atomic::AtomicBool::new(false),
+            completed: crate::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
@@ -514,8 +514,8 @@ impl Sleep {
             deadline,
             time_getter: None,
             bound_timer_driver: Some(timer_driver),
-            polled: std::sync::atomic::AtomicBool::new(false),
-            completed: std::sync::atomic::AtomicBool::new(false),
+            polled: crate::sync::atomic::AtomicBool::new(false),
+            completed: crate::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
@@ -581,9 +581,9 @@ impl Sleep {
     pub fn reset(&mut self, deadline: Time) {
         self.deadline = deadline;
         self.polled
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+            .store(false, crate::sync::atomic::Ordering::Relaxed);
         self.completed
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+            .store(false, crate::sync::atomic::Ordering::Relaxed);
         self.ready = Arc::new(AtomicBool::new(false));
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
@@ -630,7 +630,7 @@ impl Sleep {
     #[must_use]
     #[inline]
     pub fn was_polled(&self) -> bool {
-        self.polled.load(std::sync::atomic::Ordering::Relaxed)
+        self.polled.load(crate::sync::atomic::Ordering::Relaxed)
     }
 
     /// Gets the current time using the configured time getter or default.
@@ -735,18 +735,18 @@ impl Sleep {
     /// Returns `Poll::Ready(())` if the deadline has passed.
     pub fn poll_with_time(&self, now: Time) -> Poll<()> {
         assert!(
-            !self.completed.load(std::sync::atomic::Ordering::Acquire),
+            !self.completed.load(crate::sync::atomic::Ordering::Acquire),
             "Sleep polled after completion"
         );
         self.polled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .store(true, crate::sync::atomic::Ordering::Relaxed);
         // Ordinary sleeps preserve an authoritative timer fire across driver
         // migration. A custom clock still owns its deadline: a runtime wake
         // only asks us to check that clock again. Clamped-wheel early fires are
         // intercepted by `poll_inner` before reaching this check.
         if self.take_elapsed_wake(now) || now >= self.deadline {
             self.completed
-                .store(true, std::sync::atomic::Ordering::Release);
+                .store(true, crate::sync::atomic::Ordering::Release);
             self.complete_ready_registration(now, self.timer_driver_for_poll());
             Poll::Ready(())
         } else {
@@ -763,14 +763,14 @@ impl Sleep {
 
     pub(crate) fn poll_ready_with_time(&self, now: Time) -> Poll<()> {
         assert!(
-            !self.completed.load(std::sync::atomic::Ordering::Acquire),
+            !self.completed.load(crate::sync::atomic::Ordering::Acquire),
             "Sleep polled after completion"
         );
         if self.take_elapsed_wake(now) || now >= self.deadline {
             self.polled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+                .store(true, crate::sync::atomic::Ordering::Relaxed);
             self.completed
-                .store(true, std::sync::atomic::Ordering::Release);
+                .store(true, crate::sync::atomic::Ordering::Release);
             self.complete_ready_registration(now, self.timer_driver_for_poll());
             Poll::Ready(())
         } else {
@@ -806,7 +806,7 @@ impl Sleep {
     #[allow(clippy::too_many_lines)]
     fn poll_inner(self: Pin<&mut Self>, cx: &mut Context<'_>, cancel_aware: bool) -> Poll<()> {
         assert!(
-            !self.completed.load(std::sync::atomic::Ordering::Acquire),
+            !self.completed.load(crate::sync::atomic::Ordering::Acquire),
             "Sleep polled after completion"
         );
 
@@ -840,12 +840,12 @@ impl Sleep {
             // pinning its worker (a current_thread runtime freezes) where no
             // cleanup budget can reach it (br-asupersync-2u7bpm). A Sleep that
             // was already parked completes at once, as before.
-            if !self.polled.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if !self.polled.swap(true, crate::sync::atomic::Ordering::Relaxed) {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
             self.completed
-                .store(true, std::sync::atomic::Ordering::Release);
+                .store(true, crate::sync::atomic::Ordering::Release);
             self.cancel_active_registration();
             return Poll::Ready(());
         }
@@ -1202,8 +1202,8 @@ impl Clone for Sleep {
             deadline: self.deadline,
             time_getter: self.time_getter,
             bound_timer_driver: self.bound_timer_driver.clone(),
-            polled: std::sync::atomic::AtomicBool::new(false), // Fresh clone hasn't been polled
-            completed: std::sync::atomic::AtomicBool::new(false),
+            polled: crate::sync::atomic::AtomicBool::new(false), // Fresh clone hasn't been polled
+            completed: crate::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,

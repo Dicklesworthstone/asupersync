@@ -3,7 +3,7 @@
 //! This module provides instrumentation for understanding allocation patterns
 //! and performance characteristics of waker operations.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Global waker allocation metrics for profiling.
 pub struct WakerMetrics {

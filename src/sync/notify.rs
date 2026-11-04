@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 /// Sentinel used by the intrusive active-waiter FIFO.

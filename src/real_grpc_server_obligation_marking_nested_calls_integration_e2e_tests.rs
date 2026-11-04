@@ -577,7 +577,7 @@ mod tests {
 
     // Add UUID generation for call IDs
     mod uuid {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(1);
 
         pub struct Uuid(u64);

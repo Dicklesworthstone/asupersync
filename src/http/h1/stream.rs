@@ -18,7 +18,7 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use parking_lot::Mutex;

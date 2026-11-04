@@ -28,7 +28,7 @@
 //! 2. The same fd/handle is not registered with multiple reactors concurrently
 //! 3. The fd/handle supports non-blocking operations
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Global counter for generating unique source IDs.
 static SOURCE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);

@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// A transport a listener can serve: TCP, TLS over TCP, or a stream that

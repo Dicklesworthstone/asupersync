@@ -10,7 +10,7 @@
     use crate::record::TaskRecord;
     use crate::types::{Budget, CxInner, RegionId, TaskId};
     use parking_lot::{Mutex, RwLock};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, OnceLock};
 
     fn init_test(name: &str) {
@@ -1374,7 +1374,7 @@
     fn deadline_monitor_on_warning_callback() {
         init_test("deadline_monitor_on_warning_callback");
         let mut monitor = DeadlineMonitor::new(MonitorConfig::default());
-        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called = Arc::new(crate::sync::atomic::AtomicBool::new(false));
         let called_ref = called;
         monitor.on_warning(move |_| {
             called_ref.store(true, Ordering::Relaxed);

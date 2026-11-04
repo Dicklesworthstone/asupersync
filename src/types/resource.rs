@@ -12,7 +12,7 @@ use crate::types::DEFAULT_SYMBOL_SIZE;
 use core::fmt;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use crate::sync::atomic::AtomicU64;
 
 /// Configuration for a symbol buffer pool.
 #[derive(Debug, Clone)]
@@ -378,7 +378,7 @@ impl SymbolPool {
 #[inline]
 fn next_symbol_pool_id() -> u64 {
     static NEXT_SYMBOL_POOL_ID: AtomicU64 = AtomicU64::new(1);
-    NEXT_SYMBOL_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    NEXT_SYMBOL_POOL_ID.fetch_add(1, crate::sync::atomic::Ordering::Relaxed)
 }
 
 /// Kinds of resource limits enforced by the tracker.

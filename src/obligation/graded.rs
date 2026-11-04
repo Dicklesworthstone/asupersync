@@ -70,7 +70,7 @@ use crate::types::{RegionId, id::next_bootstrap_region_id};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
 // Panic-Safe Leak Tracker

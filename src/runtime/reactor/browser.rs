@@ -46,8 +46,8 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::atomic::AtomicU64;
+use crate::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};

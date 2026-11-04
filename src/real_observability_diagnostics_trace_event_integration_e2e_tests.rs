@@ -19,7 +19,7 @@ mod tests {
 
     use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// Configuration for diagnostic event tracing coordination
     #[derive(Debug, Clone)]

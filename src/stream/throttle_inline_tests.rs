@@ -9,7 +9,7 @@
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Waker};
 
     static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);
@@ -27,7 +27,7 @@
         std::task::Waker::noop().clone()
     }
 
-    struct TrackWaker(Arc<std::sync::atomic::AtomicBool>);
+    struct TrackWaker(Arc<crate::sync::atomic::AtomicBool>);
 
     use std::task::Wake;
     impl Wake for TrackWaker {
@@ -254,7 +254,7 @@
     }
 
     struct AlwaysReadyStream {
-        polls: Arc<std::sync::atomic::AtomicUsize>,
+        polls: Arc<crate::sync::atomic::AtomicUsize>,
     }
 
     impl Stream for AlwaysReadyStream {
@@ -275,8 +275,8 @@
         init_test("throttle_yields_after_suppression_budget_on_always_ready_stream");
         let _time_guard = lock_test_time();
         set_test_time(0);
-        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let wake_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let polls = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
+        let wake_flag = Arc::new(crate::sync::atomic::AtomicBool::new(false));
         let waker: Waker = Arc::new(TrackWaker(Arc::clone(&wake_flag))).into();
         let mut cx = Context::from_waker(&waker);
         let inner = AlwaysReadyStream {

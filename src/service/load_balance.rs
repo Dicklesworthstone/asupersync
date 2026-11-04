@@ -18,7 +18,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use super::Service;
@@ -250,11 +250,12 @@ impl LoadMetric {
         self.in_flight.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(deprecated)]
     fn decrement(&self) {
-        // Use try_update to prevent underflow wrapping.
+        // Use fetch_update to prevent underflow wrapping.
         let _ = self
             .in_flight
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
     }
 }
 

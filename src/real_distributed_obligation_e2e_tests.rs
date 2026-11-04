@@ -27,7 +27,7 @@ mod tests {
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
     // Test node representation for distributed scenarios

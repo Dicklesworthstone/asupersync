@@ -15,7 +15,7 @@ use std::io;
 #[cfg(any(unix, windows))]
 use std::collections::HashMap;
 #[cfg(any(unix, windows))]
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(unix, windows))]
 use std::sync::{Arc, RwLock};
 #[cfg(any(unix, windows))]

@@ -1582,7 +1582,7 @@ struct FallbackIoStarter {
     /// Set when a start failed with `Unsupported` (no backend, or the
     /// syscall is missing): no later start can succeed, so callers return
     /// `None` without taking the lock or counting.
-    unsupported: std::sync::atomic::AtomicBool,
+    unsupported: crate::sync::atomic::AtomicBool,
     state: parking_lot::Mutex<FallbackIoStart>,
 }
 
@@ -1590,7 +1590,7 @@ struct FallbackIoStarter {
 impl FallbackIoStarter {
     const fn new() -> Self {
         Self {
-            unsupported: std::sync::atomic::AtomicBool::new(false),
+            unsupported: crate::sync::atomic::AtomicBool::new(false),
             state: parking_lot::Mutex::new(FallbackIoStart {
                 failures: 0,
                 calls_since_failure: 0,
@@ -1631,7 +1631,7 @@ fn fallback_io_driver_from(
     }
     if starter_state
         .unsupported
-        .load(std::sync::atomic::Ordering::Acquire)
+        .load(crate::sync::atomic::Ordering::Acquire)
     {
         return None;
     }
@@ -1658,7 +1658,7 @@ fn fallback_io_driver_from(
             if err.kind() == io::ErrorKind::Unsupported {
                 starter_state
                     .unsupported
-                    .store(true, std::sync::atomic::Ordering::Release);
+                    .store(true, crate::sync::atomic::Ordering::Release);
             }
             start.record_failure();
             None
@@ -1719,7 +1719,7 @@ fn fallback_io_pump_loop(driver: &IoDriverHandle) -> ! {
 /// for tests and `test-internals`; production builds carry no counters.
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
 mod fallback_io_probe {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
 
     /// Registrations accepted by the fallback driver.
     pub(super) static REGISTRATIONS: AtomicU64 = AtomicU64::new(0);
@@ -1860,8 +1860,8 @@ struct SharedWaiter {
 /// list ([`ReactorRegistration::arm_shared`]).
 #[cfg(unix)]
 pub fn next_shared_waiter_owner() -> u64 {
-    static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    NEXT_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    static NEXT_OWNER: crate::sync::atomic::AtomicU64 = crate::sync::atomic::AtomicU64::new(0);
+    NEXT_OWNER.fetch_add(1, crate::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(unix)]
@@ -2383,7 +2383,7 @@ pub fn fresh_reactor_registration(
 /// for the wake the fallback reactor pump delivers.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod fallback_io_test_support {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::sync::{Arc, Mutex};
     use std::task::{Wake, Waker};
@@ -2432,7 +2432,7 @@ pub struct UdpSocket {
     txtime: Option<UdpTxTimeConfig>,
     /// `IP_RECVERR` / `IPV6_RECVERR` set through this handle.
     #[cfg(target_os = "linux")]
-    recverr: std::sync::atomic::AtomicBool,
+    recverr: crate::sync::atomic::AtomicBool,
 }
 
 impl UdpSocket {
@@ -2472,7 +2472,7 @@ impl UdpSocket {
                             #[cfg(target_os = "linux")]
                             txtime: None,
                             #[cfg(target_os = "linux")]
-                            recverr: std::sync::atomic::AtomicBool::new(false),
+                            recverr: crate::sync::atomic::AtomicBool::new(false),
                         });
                     }
                     Err(err) => last_err = Some(err),
@@ -3930,8 +3930,8 @@ impl UdpSocket {
             #[cfg(target_os = "linux")]
             txtime: self.txtime,
             #[cfg(target_os = "linux")]
-            recverr: std::sync::atomic::AtomicBool::new(
-                self.recverr.load(std::sync::atomic::Ordering::Relaxed),
+            recverr: crate::sync::atomic::AtomicBool::new(
+                self.recverr.load(crate::sync::atomic::Ordering::Relaxed),
             ),
         })
     }
@@ -3977,7 +3977,7 @@ impl UdpSocket {
                 #[cfg(target_os = "linux")]
                 txtime: None,
                 #[cfg(target_os = "linux")]
-                recverr: std::sync::atomic::AtomicBool::new(false),
+                recverr: crate::sync::atomic::AtomicBool::new(false),
             })
         }
     }

@@ -22,7 +22,7 @@ mod tests {
     use crate::types::{Budget, Outcome, RegionId, TaskId, Time};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
     // Test message types for different communication patterns

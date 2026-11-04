@@ -5,7 +5,7 @@ use crate::atp::journal::FsyncPolicy;
 use crate::atp::object::{MetadataPolicy, Object, ObjectGraph};
 use futures_lite::future::block_on;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 fn prepared_writer(
     content: &[u8],

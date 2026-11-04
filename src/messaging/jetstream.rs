@@ -45,11 +45,11 @@ use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use crate::sync::atomic::{AtomicBool, AtomicU64};
 
 /// br-asupersync-w7n2qx: client-side cap on stream and consumer name
 /// length, in bytes. Mirrors the upstream `nats-server` 256-byte cap on

@@ -19,7 +19,7 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// Configuration for blocking file I/O coordination
     #[derive(Debug, Clone)]

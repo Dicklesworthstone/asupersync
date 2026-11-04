@@ -23,7 +23,7 @@
 
 use std::fmt::Debug;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Capability surface advertised by an [`IoCap`] implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

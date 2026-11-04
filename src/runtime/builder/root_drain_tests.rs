@@ -8,7 +8,7 @@ use crate::types::{
     CancelKind, CapabilityBudget, CapabilityBudgetDimension, CapabilityBudgetRefusal,
     CapabilityBudgetRequirements, Outcome, TaskId,
 };
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 fn runtime_for(case: u8) -> Runtime {
@@ -468,7 +468,7 @@ fn root_drain_contains_a_residual_cancellation_clock_panic() {
         runtime.inner.root_region,
         CancelKind::Shutdown,
         Some(CancelReportStamp {
-            stamp: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            stamp: Arc::new(crate::sync::atomic::AtomicU64::new(u64::MAX)),
             timer: Some(timer),
             fallback_now: crate::types::Time::ZERO,
         }),

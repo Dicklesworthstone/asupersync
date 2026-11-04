@@ -2,7 +2,7 @@
     use std::fs::File;
     use std::io::Write;
     use std::os::unix::fs::DirBuilderExt;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use asupersync::sync::atomic::{AtomicU64, Ordering};
 
     fn document(generation: u64, ids: &[&str]) -> Vec<u8> {
         serde_json::to_vec(&json!({"schema_version": 1, "generation": generation,

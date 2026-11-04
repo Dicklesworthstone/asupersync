@@ -41,7 +41,7 @@
         use std::future::{Future, poll_fn};
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         use std::path::PathBuf;
-        use std::sync::atomic::AtomicU64;
+        use crate::sync::atomic::AtomicU64;
         use std::task::Poll;
         use std::time::{Duration, Instant};
 

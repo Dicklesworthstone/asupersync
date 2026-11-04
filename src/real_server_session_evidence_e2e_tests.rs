@@ -21,7 +21,7 @@ mod tests {
     use std::io;
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     /// Allocate a single test port dynamically to avoid conflicts

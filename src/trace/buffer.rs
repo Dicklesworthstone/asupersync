@@ -7,7 +7,7 @@ use super::event::TraceEvent;
 use crate::types::{Budget, CancelReason, Severity, TaskId};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// A ring buffer for storing trace events.

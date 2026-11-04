@@ -11,7 +11,7 @@
     use crate::time::VirtualClock;
     use futures_lite::future::block_on;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

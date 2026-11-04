@@ -15,7 +15,7 @@ mod tests {
 
     use std::collections::{HashMap, VecDeque};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// Configuration for timed broadcast coordination system
     #[derive(Debug, Clone)]

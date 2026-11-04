@@ -156,7 +156,7 @@
     // --- E2E protocol tests (lab runtime) ---
 
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// E2E: Simple request-response protocol over session-typed endpoints.
     #[test]

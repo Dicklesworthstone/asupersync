@@ -37,7 +37,7 @@ use std::fmt;
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 

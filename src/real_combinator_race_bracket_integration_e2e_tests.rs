@@ -47,7 +47,7 @@ mod tests {
     use crate::types::{CancelReason, Outcome};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Test phases for race-bracket integration testing

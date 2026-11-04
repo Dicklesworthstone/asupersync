@@ -12,7 +12,7 @@
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, RegionId, TaskId};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);
     // The injected function pointer is also read by Sleep's helper thread.
@@ -956,7 +956,7 @@
         init_test("concurrent_begin_drain_only_one_wins");
         let signal = ShutdownSignal::new();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-        let winners = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let winners = std::sync::Arc::new(crate::sync::atomic::AtomicUsize::new(0));
 
         let mut handles = Vec::new();
         for _ in 0..2 {
@@ -966,7 +966,7 @@
             handles.push(std::thread::spawn(move || {
                 b.wait();
                 if sig.begin_drain(Duration::from_secs(30)) {
-                    w.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    w.fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
                 }
             }));
         }
@@ -976,7 +976,7 @@
             h.join().expect("thread panicked");
         }
 
-        let winner_count = winners.load(std::sync::atomic::Ordering::Relaxed);
+        let winner_count = winners.load(crate::sync::atomic::Ordering::Relaxed);
         crate::assert_with_log!(winner_count == 1, "exactly one winner", 1, winner_count);
         crate::assert_with_log!(
             signal.phase() == ShutdownPhase::Draining,

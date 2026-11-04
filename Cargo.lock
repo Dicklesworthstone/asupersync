@@ -272,6 +272,7 @@ dependencies = [
  "parking_lot",
  "pin-project",
  "polling",
+ "portable-atomic",
  "proptest",
  "prost",
  "raptorq",

@@ -23,7 +23,7 @@ mod tests {
     };
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, HashMap, VecDeque};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use thiserror::Error;
 
     #[derive(Debug, Clone)]

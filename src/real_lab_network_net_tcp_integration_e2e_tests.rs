@@ -54,7 +54,7 @@ mod tests {
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Test phases for lab network-TCP integration testing

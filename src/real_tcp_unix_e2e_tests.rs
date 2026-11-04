@@ -20,7 +20,7 @@ mod tcp_unix_e2e_tests {
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tempfile::{TempDir, tempdir};
 
@@ -245,7 +245,7 @@ mod tcp_unix_e2e_tests {
         }
     }
 
-    use std::sync::atomic::AtomicBool;
+    use crate::sync::atomic::AtomicBool;
 
     impl RealTcpServer {
         /// Create new real TCP server with actual socket binding

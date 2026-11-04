@@ -89,6 +89,7 @@ pub struct SyncTelemetrySnapshot {
     pub closed: bool,
 }
 
+pub mod atomic;
 mod barrier;
 mod contended_mutex;
 #[cfg(test)]

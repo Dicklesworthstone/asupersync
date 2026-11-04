@@ -67,7 +67,7 @@ use opentelemetry::{
 #[cfg(feature = "metrics")]
 use parking_lot::RwLock;
 #[cfg(feature = "metrics")]
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Detected span obligation leak for debugging.
 #[derive(Debug, Clone)]

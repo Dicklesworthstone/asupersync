@@ -35,7 +35,7 @@ use std::fmt;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 const READ: u8 = 1;
@@ -716,7 +716,7 @@ mod tests {
     use std::future::Future;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
-    use std::sync::atomic::AtomicUsize;
+    use crate::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     #[derive(Default)]

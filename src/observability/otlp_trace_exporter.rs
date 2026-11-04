@@ -17,7 +17,7 @@ use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Default maximum length for OTLP span attribute values per OTLP §2.5.3.

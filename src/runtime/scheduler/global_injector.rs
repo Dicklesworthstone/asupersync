@@ -8,7 +8,7 @@ use crate::util::CachePadded;
 use parking_lot::Mutex;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::global_queue::{CountReservation, GlobalFifoQueue};
 

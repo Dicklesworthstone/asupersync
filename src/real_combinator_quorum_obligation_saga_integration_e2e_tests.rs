@@ -40,7 +40,7 @@ mod tests {
         types::{Budget, Outcome},
     };
     use std::collections::{HashMap, VecDeque};
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     // ────────────────────────────────────────────────────────────────────────────────
     // Quorum + Saga Integration Test Framework

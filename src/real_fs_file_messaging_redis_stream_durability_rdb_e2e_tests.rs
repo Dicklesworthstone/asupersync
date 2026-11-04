@@ -16,7 +16,7 @@ mod real_fs_file_messaging_redis_e2e {
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tempfile::{NamedTempFile, TempDir};
 

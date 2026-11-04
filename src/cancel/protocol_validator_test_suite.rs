@@ -10,7 +10,7 @@ use super::protocol_state_machines::{
     TaskState, TaskStateMachine, TransitionResult, ValidationLevel,
 };
 use crate::types::{ObligationId, RegionId, TaskId, Time};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[cfg(test)]

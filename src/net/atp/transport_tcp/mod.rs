@@ -36,7 +36,7 @@ use std::future::Future;
 use std::io::SeekFrom;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(windows))]
 use std::sync::{
     Arc,

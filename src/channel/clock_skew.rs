@@ -38,7 +38,7 @@
 
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 use crate::evidence_sink::EvidenceSink;
 use crate::lab::chaos::ChaosRng;

@@ -12,7 +12,7 @@ use crate::io::{AsyncRead, AsyncReadExt};
 use crate::net::atp::chunk::profiles::ChunkingProfile as _;
 use crate::net::atp::chunk::reader::StreamChunkReader;
 use crate::net::atp::chunk::stream::StreamProfile;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 
 #[path = "receive_resume.rs"]
@@ -561,7 +561,7 @@ mod journaled_tests {
     use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder};
     use crate::security::{AuthKey, AuthenticationTag};
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use crate::sync::atomic::{AtomicBool, AtomicUsize};
     use std::task::{Context, Waker};
     use std::time::Duration;
 

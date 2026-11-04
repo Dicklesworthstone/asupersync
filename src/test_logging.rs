@@ -2927,9 +2927,9 @@ impl DockerFixtureService {
     /// fixtures.
     #[must_use]
     pub fn new(service_name: &str, image: &str) -> Self {
-        static NEXT_CONTAINER_ID: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(1);
-        let sequence = NEXT_CONTAINER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        static NEXT_CONTAINER_ID: crate::sync::atomic::AtomicU64 =
+            crate::sync::atomic::AtomicU64::new(1);
+        let sequence = NEXT_CONTAINER_ID.fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
         let safe_name: String = service_name
             .chars()
             .map(|ch| {

@@ -232,7 +232,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -2836,7 +2836,7 @@ mod pool_metrics {
     use opentelemetry::KeyValue;
     use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
 
     /// Shared state backing observable gauges for pool metrics.
     #[derive(Debug, Default)]

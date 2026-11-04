@@ -48,7 +48,7 @@
             let balancer = LoadBalancer::new(RoundRobin::new(), vec![breaker]);
             let backend = Arc::clone(&balancer.backends.lock()[0]);
             let weak = Arc::downgrade(&backend);
-            let released = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let released = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
             let observed = Arc::clone(&released);
             *callback.lock() = Some(Box::new(move || {
                 assert!(weak.upgrade().unwrap().service.try_lock().is_some());

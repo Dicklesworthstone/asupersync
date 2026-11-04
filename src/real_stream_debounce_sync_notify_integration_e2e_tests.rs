@@ -18,7 +18,7 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::task::{Context, Poll};
 
     /// Configuration for debounced notification coordination

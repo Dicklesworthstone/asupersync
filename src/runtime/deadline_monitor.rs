@@ -10,7 +10,7 @@ use crate::record::TaskRecord;
 use crate::types::{RegionId, TaskId, Time};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

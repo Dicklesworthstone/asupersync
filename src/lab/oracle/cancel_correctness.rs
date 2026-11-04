@@ -29,7 +29,7 @@ use std::backtrace::Backtrace;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use std::time::Duration;

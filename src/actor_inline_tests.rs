@@ -40,9 +40,9 @@
         }
     }
 
-    fn counting_waker(counter: Arc<std::sync::atomic::AtomicUsize>) -> Waker {
+    fn counting_waker(counter: Arc<crate::sync::atomic::AtomicUsize>) -> Waker {
         struct CountingWaker {
-            counter: Arc<std::sync::atomic::AtomicUsize>,
+            counter: Arc<crate::sync::atomic::AtomicUsize>,
         }
 
         impl std::task::Wake for CountingWaker {
@@ -72,11 +72,11 @@
 
     fn terminal_state_waker(
         state: Arc<ActorStateCell>,
-        counter: Arc<std::sync::atomic::AtomicUsize>,
+        counter: Arc<crate::sync::atomic::AtomicUsize>,
     ) -> Waker {
         struct TerminalStateWaker {
             state: Arc<ActorStateCell>,
-            counter: Arc<std::sync::atomic::AtomicUsize>,
+            counter: Arc<crate::sync::atomic::AtomicUsize>,
         }
 
         impl TerminalStateWaker {
@@ -150,7 +150,7 @@
     }
 
     struct FairnessProbeActor {
-        handled: Arc<std::sync::atomic::AtomicUsize>,
+        handled: Arc<crate::sync::atomic::AtomicUsize>,
     }
 
     impl Actor for FairnessProbeActor {
@@ -172,7 +172,7 @@
     fn actor_ready_mailbox_yields_after_bounded_batch() {
         init_test("actor_ready_mailbox_yields_after_bounded_batch");
 
-        let handled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handled = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
         let actor = FairnessProbeActor {
             handled: Arc::clone(&handled),
         };
@@ -373,7 +373,7 @@
             inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
             sender: mpsc::Sender<u64>,
             state: std::sync::Weak<ActorStateCell>,
-            published: Arc<std::sync::atomic::AtomicUsize>,
+            published: Arc<crate::sync::atomic::AtomicUsize>,
         }
 
         impl std::task::Wake for BackoffWake {
@@ -408,7 +408,7 @@
                 .spawn_actor(&mut state, &parent_cx, Counter::new(), 1)
                 .expect("spawn actor");
             let actor_cx: Cx = Cx::from_inner(handle.inner.upgrade().expect("actor Cx"));
-            let published = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let published = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
             let backoff_waker = Waker::from(Arc::new(BackoffWake {
                 inner: handle.inner.clone(),
                 sender: handle.sender.clone(),
@@ -418,7 +418,7 @@
             handle.state.register_stop_waker(&backoff_waker);
             let hostile = Waker::from(Arc::new(PanickingShutdownWaker));
             actor_cx.register_cancel_waker(&hostile);
-            let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let wakes = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
             let healthy = counting_waker(Arc::clone(&wakes));
             let token = actor_cx.refresh_cancel_waker(None, &healthy);
 
@@ -477,7 +477,7 @@
                     .poll(&mut Context::from_waker(&hostile))
                     .is_pending()
             );
-            let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let wakes = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
             let healthy = counting_waker(Arc::clone(&wakes));
             let token = actor_cx.refresh_cancel_waker(None, &healthy);
 
@@ -521,7 +521,7 @@
 
         struct DropProbe {
             state: std::sync::Weak<ActorStateCell>,
-            unlocked_drops: Arc<std::sync::atomic::AtomicUsize>,
+            unlocked_drops: Arc<crate::sync::atomic::AtomicUsize>,
         }
 
         #[allow(clippy::manual_noop_waker)]
@@ -543,7 +543,7 @@
         }
 
         let state = Arc::new(ActorStateCell::new(ActorState::Running));
-        let unlocked_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
         let waker = Waker::from(Arc::new(DropProbe {
             state: Arc::downgrade(&state),
             unlocked_drops: Arc::clone(&unlocked_drops),
@@ -563,7 +563,7 @@
 
         struct SealedBackoffWake {
             sender: mpsc::Sender<u64>,
-            sealed_wakes: Arc<std::sync::atomic::AtomicUsize>,
+            sealed_wakes: Arc<crate::sync::atomic::AtomicUsize>,
         }
 
         impl std::task::Wake for SealedBackoffWake {
@@ -588,7 +588,7 @@
             .expect("spawn actor");
         let actor_cx: Cx = Cx::from_inner(handle.inner.upgrade().expect("actor Cx"));
         let actor_ref = handle.sender();
-        let sealed_wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sealed_wakes = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
         let waker = Waker::from(Arc::new(SealedBackoffWake {
             sender: handle.sender.clone(),
             sealed_wakes: Arc::clone(&sealed_wakes),
@@ -768,7 +768,7 @@
 
     // ---- E2E Actor Scenarios ----
 
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// Observable counter actor: writes final count to shared state during on_stop.
     /// Used by E2E tests to verify actor behavior without needing join().
@@ -1228,7 +1228,7 @@
         handle.try_send(1).expect("fill mailbox");
         let sender = handle.sender();
         let mut send_fut = Box::pin(sender.send(&cx, 2));
-        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_count = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
         let waker = counting_waker(Arc::clone(&wake_count));
         let mut task_cx = Context::from_waker(&waker);
 
@@ -1260,7 +1260,7 @@
     /// E2E: Supervised actor crashes restart under Restart strategy.
     #[test]
     fn supervised_actor_panic_restarts_under_restart_strategy() {
-        use std::sync::atomic::AtomicU32;
+        use crate::sync::atomic::AtomicU32;
 
         #[derive(Debug)]
         struct PanickingCounter {
@@ -1457,7 +1457,7 @@
 
     #[test]
     fn supervised_actor_stop_prevents_restart_after_panic() {
-        use std::sync::atomic::AtomicU32;
+        use crate::sync::atomic::AtomicU32;
 
         #[derive(Debug)]
         struct StopThenPanicActor;
@@ -1532,7 +1532,7 @@
 
     #[test]
     fn supervised_actor_stop_during_restart_backoff_prevents_new_instance() {
-        use std::sync::atomic::AtomicU32;
+        use crate::sync::atomic::AtomicU32;
 
         #[derive(Debug)]
         struct DelayedRestartActor {
@@ -1644,7 +1644,7 @@
     /// the actor finishes without waiting for the backoff timer.
     #[test]
     fn supervised_actor_stop_ends_the_restart_backoff_without_waiting_for_it() {
-        use std::sync::atomic::AtomicU32;
+        use crate::sync::atomic::AtomicU32;
 
         #[derive(Debug)]
         struct CrashingActor;
@@ -1750,7 +1750,7 @@
             .expect("spawn actor");
         handle.try_send(()).expect("queue panic message");
 
-        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_count = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
         let waker = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&wake_count));
         let mut poll_cx = Context::from_waker(&waker);
         let join = std::pin::pin!(handle.join(&cx));
@@ -1814,7 +1814,7 @@
             .expect("spawn supervised actor");
         handle.try_send(()).expect("queue panic message");
 
-        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_count = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
         let waker = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&wake_count));
         let mut poll_cx = Context::from_waker(&waker);
         let join = std::pin::pin!(handle.join(&cx));
@@ -1961,7 +1961,7 @@
 
     #[test]
     fn supervised_restart_factory_panic_reaches_join_and_marks_stopped() {
-        use std::sync::atomic::AtomicU32;
+        use crate::sync::atomic::AtomicU32;
 
         init_test("supervised_restart_factory_panic_reaches_join_and_marks_stopped");
 
@@ -2014,7 +2014,7 @@
         handle.try_send(()).expect("queue panic message");
 
         let actor_ref = handle.sender();
-        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_count = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
         let waker = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&wake_count));
         let mut poll_cx = Context::from_waker(&waker);
         let join = std::pin::pin!(handle.join(&cx));
@@ -2765,7 +2765,7 @@
                 &mut result_rx,
                 &mut terminal_state,
             ));
-            let waker = counting_waker(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+            let waker = counting_waker(Arc::new(crate::sync::atomic::AtomicUsize::new(0)));
             let mut poll_cx = Context::from_waker(&waker);
             join.as_mut().poll(&mut poll_cx)
         };
@@ -2805,7 +2805,7 @@
                 &mut result_rx,
                 &mut terminal_state,
             ));
-            let waker = counting_waker(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+            let waker = counting_waker(Arc::new(crate::sync::atomic::AtomicUsize::new(0)));
             let mut poll_cx = Context::from_waker(&waker);
             let first_poll = join.as_mut().poll(&mut poll_cx);
             let second_poll = join.as_mut().poll(&mut poll_cx);

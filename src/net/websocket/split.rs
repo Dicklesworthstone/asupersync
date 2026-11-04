@@ -1005,8 +1005,8 @@ where
     /// halves are dropped or `reunite()` is called.
     pub fn split(self) -> (WebSocketRead<IO>, WebSocketWrite<IO>) {
         // Generate a unique ID for reunite verification
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        static COUNTER: crate::sync::atomic::AtomicU64 = crate::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
         let pending_pong_flush = !self.write_buf.is_empty();
 
         let shared = Arc::new(Mutex::new(WebSocketShared {

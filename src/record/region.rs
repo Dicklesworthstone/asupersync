@@ -13,7 +13,7 @@ use crate::types::{
 };
 use parking_lot::RwLock;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 // Thread-local flag to detect reentrant calls and prevent deadlock

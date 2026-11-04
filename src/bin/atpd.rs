@@ -31,7 +31,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use asupersync::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -928,9 +928,9 @@ impl DiagnosticsEndpoint {
 /// rather than a static config echo (br-asupersync-qk02uw).
 #[derive(Debug, Default)]
 struct TransferStats {
-    committed: std::sync::atomic::AtomicU64,
-    failed: std::sync::atomic::AtomicU64,
-    bytes_received: std::sync::atomic::AtomicU64,
+    committed: asupersync::sync::atomic::AtomicU64,
+    failed: asupersync::sync::atomic::AtomicU64,
+    bytes_received: asupersync::sync::atomic::AtomicU64,
     shutdown: Arc<ListenerShutdown>,
 }
 

@@ -34,7 +34,7 @@ mod tests {
         time::{Duration, sleep},
         types::{Budget, Outcome},
     };
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     // ────────────────────────────────────────────────────────────────────────────────
     // Timer Wheel + Notify Integration Test Framework

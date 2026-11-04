@@ -5,7 +5,7 @@
 //! compute budget.
 
 use crate::combinator::hedge::HedgeConfig;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 fn duration_nanos_saturating_u64(duration: Duration) -> u64 {

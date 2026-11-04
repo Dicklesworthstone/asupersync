@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::Wake;
 
 #[derive(Default)]

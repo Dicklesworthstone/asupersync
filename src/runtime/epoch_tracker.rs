@@ -43,7 +43,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 type TimeGetter = Arc<dyn Fn() -> Time + Send + Sync>;
 

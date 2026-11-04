@@ -15,7 +15,7 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // ============================================================================
 // Path Types

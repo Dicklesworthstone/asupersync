@@ -21,7 +21,7 @@ use crate::observability::otlp_trace_exporter::{
     ExportError, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 

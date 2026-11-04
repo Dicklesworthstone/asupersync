@@ -390,7 +390,7 @@ fn segments_can_match(left: &SubjectToken, right: &SubjectToken) -> bool {
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Opaque subscription identifier assigned by the [`Sublist`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2461,7 +2461,7 @@ mod tests {
 
     #[test]
     fn sublist_lookup_never_reports_subscription_after_cancel_completes() {
-        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use crate::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::thread;
 
         let sl = sublist();
@@ -2535,7 +2535,7 @@ mod tests {
 
     #[test]
     fn sublist_link_cache_lookup_never_reports_subscription_after_cancel_completes() {
-        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use crate::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::thread;
 
         let sl = sublist();
@@ -2700,7 +2700,7 @@ mod tests {
         let mut runtime = LabRuntime::new(LabConfig::new(0x5A5A_0202).max_steps(4_096));
         let region = runtime.state.create_root_region(Budget::INFINITE);
         let sublist = Arc::new(Sublist::new());
-        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = Arc::new(crate::sync::atomic::AtomicBool::new(false));
         let subject = Subject::new("lab.events.created");
 
         let task_sublist = Arc::clone(&sublist);

@@ -42,7 +42,7 @@ use crate::sync::ContendedMutex;
 use crate::types::{RegionId, TaskId};
 use crossbeam_queue::SegQueue;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 

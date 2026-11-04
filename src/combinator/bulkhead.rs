@@ -35,7 +35,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use std::task::Poll;
 

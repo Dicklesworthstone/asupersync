@@ -9,7 +9,7 @@
     use super::*;
     use crate::time::{CoalescingConfig, TimerWheelConfig};
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use crate::sync::atomic::AtomicBool;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

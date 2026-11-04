@@ -51,7 +51,7 @@ mod analysis {
 
 **Example from real_tls_acceptor_http_h1_server_e2e_tests.rs:**
 ```rust
-use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
+use crate::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};  // ❌ TOKIO CONTAMINATION!
 ```

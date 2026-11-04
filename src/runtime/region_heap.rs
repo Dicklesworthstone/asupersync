@@ -83,7 +83,7 @@
 //! ```
 
 use std::any::{Any, TypeId};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Statistics for region heap allocations.
 ///

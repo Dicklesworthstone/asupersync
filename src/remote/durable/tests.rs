@@ -2,7 +2,7 @@ use super::*;
 use crate::types::CancelReason;
 use std::io::Cursor as IoCursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 mod compaction;
 

@@ -12,7 +12,7 @@ use crate::remote::{NodeId, RemoteComputationRegistry, RemoteOutcome};
 use crate::types::Time;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicUsize, Ordering};
 use zeroize::Zeroizing;
 
 /// Multi-frame authenticated uploads with commit-before-receipt disk storage.
@@ -223,7 +223,7 @@ mod tests {
     use std::future::{Future, poll_fn};
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use crate::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::{Condvar, Mutex as StdMutex};
     use std::task::Poll;
     use std::time::{Duration, Instant};

@@ -446,7 +446,7 @@ pub enum DeltaCasError {
 }
 
 // Private staging names are never accepted as chunk or manifest identities.
-static NEXT_STAGING_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static NEXT_STAGING_ID: crate::sync::atomic::AtomicU64 = crate::sync::atomic::AtomicU64::new(0);
 
 struct StagingFile {
     path: PathBuf,
@@ -455,7 +455,7 @@ struct StagingFile {
 impl StagingFile {
     fn create(parent: &Path) -> std::io::Result<(Self, fs::File)> {
         for _ in 0..128 {
-            let serial = NEXT_STAGING_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let serial = NEXT_STAGING_ID.fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
             let path = parent.join(format!(
                 ".delta-cas-staging-{}-{serial:016x}.tmp",
                 std::process::id()

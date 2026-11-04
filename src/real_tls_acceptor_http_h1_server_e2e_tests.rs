@@ -33,7 +33,7 @@ mod tests {
     use std::io;
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use tokio::sync::{Mutex, RwLock};
 
     /// Allocate a test port dynamically to avoid conflicts with parallel tests

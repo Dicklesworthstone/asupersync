@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::atomic::{AtomicBool, Ordering};
 
 use super::{SignalKind, signal};
 use crate::sync::Notify;
@@ -58,7 +58,7 @@ pub struct ShutdownController {
 #[derive(Debug)]
 struct ReloadState {
     /// Monotone reload request sequence.
-    requests: std::sync::atomic::AtomicU64,
+    requests: crate::sync::atomic::AtomicU64,
     /// Ensures the SIGHUP listener is installed at most once per controller.
     signal_listener_started: AtomicBool,
     /// Notifier for reload request broadcasts.
@@ -83,7 +83,7 @@ impl ReloadController {
     pub fn new() -> Self {
         Self {
             state: Arc::new(ReloadState {
-                requests: std::sync::atomic::AtomicU64::new(0),
+                requests: crate::sync::atomic::AtomicU64::new(0),
                 signal_listener_started: AtomicBool::new(false),
                 notify: Notify::new(),
             }),

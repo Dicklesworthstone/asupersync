@@ -37,7 +37,7 @@ use crate::cx::{Cx, CxBuilder, Scope};
 use crate::types::{Budget, CancelKind, CancelReason, ObjectId, Time};
 use crate::util::DetRng;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

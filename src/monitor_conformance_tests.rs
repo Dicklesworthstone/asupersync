@@ -14,7 +14,7 @@
 
 #![allow(dead_code, clippy::vec_init_then_push)]
 
-use std::sync::atomic::AtomicU64;
+use crate::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use crate::monitor::{DownBatch, DownNotification, DownReason, MonitorRef, MonitorSet};

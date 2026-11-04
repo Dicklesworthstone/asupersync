@@ -11,7 +11,7 @@ mod tests {
     use crate::runtime::yield_now;
     use crate::test_utils::init_test_logging;
     use futures_lite::future::block_on;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Weak};
     use std::thread;
@@ -993,7 +993,7 @@ mod tests {
     fn notify_waiters_wakes_all() {
         init_test("notify_waiters_wakes_all");
         let notify = Arc::new(Notify::new());
-        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completed = Arc::new(crate::sync::atomic::AtomicUsize::new(0));
 
         let mut handles = Vec::new();
         for _ in 0..3 {
@@ -2912,7 +2912,7 @@ mod tests {
             let notify = std::sync::Arc::new(Notify::new());
 
             // Shared state to track wakeups
-            let wakeup_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let wakeup_count = std::sync::Arc::new(crate::sync::atomic::AtomicUsize::new(0));
             let completion_barrier = std::sync::Arc::new(std::sync::Barrier::new(NUM_WAITERS + 1));
 
             // Phase 1: Spawn waiters that will call notified()
@@ -2983,7 +2983,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
 
             // Phase 3: Verify perfect 1:1 pairing
-            let final_wakeup_count = wakeup_count.load(std::sync::atomic::Ordering::Acquire);
+            let final_wakeup_count = wakeup_count.load(crate::sync::atomic::Ordering::Acquire);
 
             crate::assert_with_log!(
                 final_wakeup_count == NUM_NOTIFICATIONS,
@@ -2998,7 +2998,7 @@ mod tests {
             // Verify no stored notifications remain (all were consumed by waiters)
             let stored_remaining = notify
                 .stored_notifications
-                .load(std::sync::atomic::Ordering::Acquire);
+                .load(crate::sync::atomic::Ordering::Acquire);
 
             // Signal waiters to complete
             completion_barrier.wait();
@@ -3288,7 +3288,7 @@ mod tests {
 
         const NUM_TASKS: usize = 8;
         let notify = std::sync::Arc::new(Notify::new());
-        let completion_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completion_count = std::sync::Arc::new(crate::sync::atomic::AtomicUsize::new(0));
 
         let mut task_handles = Vec::new();
 
@@ -3306,7 +3306,7 @@ mod tests {
                 drop(future);
 
                 // Mark completion
-                shared_counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                shared_counter.fetch_add(1, crate::sync::atomic::Ordering::AcqRel);
                 task_id
             });
 
@@ -3325,7 +3325,7 @@ mod tests {
         }
 
         // Verify all tasks completed
-        let final_count = completion_count.load(std::sync::atomic::Ordering::Acquire);
+        let final_count = completion_count.load(crate::sync::atomic::Ordering::Acquire);
         crate::assert_with_log!(
             final_count == NUM_TASKS,
             &format!("all {} tasks should complete", NUM_TASKS),
@@ -3469,11 +3469,11 @@ mod tests {
 
     /// Custom waker that counts wake() calls atomically.
     struct CountingWaker {
-        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        counter: std::sync::Arc<crate::sync::atomic::AtomicUsize>,
     }
 
     impl CountingWaker {
-        fn from_counter(counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Waker {
+        fn from_counter(counter: std::sync::Arc<crate::sync::atomic::AtomicUsize>) -> Waker {
             Waker::from(std::sync::Arc::new(Self { counter }))
         }
     }
@@ -3481,12 +3481,12 @@ mod tests {
     impl std::task::Wake for CountingWaker {
         fn wake(self: std::sync::Arc<Self>) {
             self.counter
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                .fetch_add(1, crate::sync::atomic::Ordering::AcqRel);
         }
 
         fn wake_by_ref(self: &std::sync::Arc<Self>) {
             self.counter
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                .fetch_add(1, crate::sync::atomic::Ordering::AcqRel);
         }
     }
 
@@ -3570,7 +3570,7 @@ mod tests {
         init_test_logging();
 
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::thread;
         use std::time::{Duration, Instant};
 
@@ -3699,7 +3699,7 @@ mod tests {
         use crate::cx::Cx;
         use crate::sync::Mutex;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+        use crate::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
         use std::thread;
         use std::time::{Duration, Instant};
 
@@ -3864,7 +3864,7 @@ mod tests {
     #[test]
     fn audit_notify_memory_ordering_correctness() {
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use crate::sync::atomic::{AtomicBool, AtomicU32, Ordering};
         use std::thread;
 
         fn wait_for_registered_waiters(notify: &Notify, expected: usize) {
@@ -4021,7 +4021,7 @@ mod tests {
     #[test]
     fn audit_notify_spurious_wakeup_prevention() {
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicU32, Ordering};
+        use crate::sync::atomic::{AtomicU32, Ordering};
         use std::thread;
         use std::time::Duration;
 
@@ -4034,7 +4034,7 @@ mod tests {
         // 3. Generation counter prevents spurious Ready returns
         // 4. No false positives from rapid polling
 
-        use std::sync::atomic::AtomicBool;
+        use crate::sync::atomic::AtomicBool;
 
         let notify = Arc::new(Notify::new());
         let poll_count = Arc::new(AtomicU32::new(0));
@@ -4279,7 +4279,7 @@ mod tests {
     #[test]
     fn audit_notify_one_multiple_unconsumed_queuing() {
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicU32, Ordering};
+        use crate::sync::atomic::{AtomicU32, Ordering};
         use std::thread;
         use std::time::Duration;
 
@@ -4544,7 +4544,7 @@ mod tests {
         // Phase 4: Verify no stored notifications remain (permit was consumed)
         let stored_after = notify
             .stored_notifications
-            .load(std::sync::atomic::Ordering::Acquire);
+            .load(crate::sync::atomic::Ordering::Acquire);
         crate::assert_with_log!(
             stored_after == 0,
             "No stored notifications remain after transfer",
@@ -4718,7 +4718,7 @@ mod tests {
 
         init_test("audit_notify_thrashing_performance_benchmark");
 
-        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::{Arc, Barrier};
         use std::thread;
         use std::time::{Duration, Instant};
@@ -5606,7 +5606,7 @@ mod tests {
         init_test("audit_notify_heavy_contention_latency_profile_p50_p99");
 
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::thread;
         use std::time::{Duration, Instant};
 

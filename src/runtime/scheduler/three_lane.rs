@@ -156,7 +156,7 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -1447,14 +1447,14 @@ struct AdaptiveBatchRuntimeState {
 /// gates the slot: on native no notifier is ever installed and the hottest
 /// path in the runtime must not pay for a mutex round trip to learn that.
 struct WakeNotifier {
-    armed: std::sync::atomic::AtomicBool,
+    armed: crate::sync::atomic::AtomicBool,
     slot: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl WakeNotifier {
     fn new() -> Self {
         Self {
-            armed: std::sync::atomic::AtomicBool::new(false),
+            armed: crate::sync::atomic::AtomicBool::new(false),
             slot: Mutex::new(None),
         }
     }
@@ -1465,7 +1465,7 @@ impl std::fmt::Debug for WakeNotifier {
         f.debug_struct("WakeNotifier")
             .field(
                 "is_set",
-                &self.armed.load(std::sync::atomic::Ordering::Relaxed),
+                &self.armed.load(crate::sync::atomic::Ordering::Relaxed),
             )
             .finish()
     }
@@ -1582,7 +1582,7 @@ impl WorkerCoordinator {
         self.released_at
             .store(reactor_standby_clock_nanos(), Ordering::Relaxed);
         self.release_epoch.fetch_add(1, Ordering::Release);
-        std::sync::atomic::fence(Ordering::SeqCst); // R
+        crate::sync::atomic::fence(Ordering::SeqCst); // R
         self.cover_released_reactor();
     }
 
@@ -1605,7 +1605,7 @@ impl WorkerCoordinator {
     /// turn or a promoted follower covers it.
     #[inline]
     fn cover_free_reactor(&self, io: &IoDriverHandle) {
-        std::sync::atomic::fence(Ordering::SeqCst);
+        crate::sync::atomic::fence(Ordering::SeqCst);
         if self.standby.load(Ordering::Relaxed) == STANDBY_NONE && !io.is_polling() {
             self.promote_follower();
         }
@@ -1636,7 +1636,7 @@ impl WorkerCoordinator {
     #[inline(never)]
     fn leave_standby(&self, io: &IoDriverHandle) {
         self.standby.store(STANDBY_NONE, Ordering::Relaxed);
-        std::sync::atomic::fence(Ordering::SeqCst); // L
+        crate::sync::atomic::fence(Ordering::SeqCst); // L
         if !io.is_polling() && self.standby.load(Ordering::Relaxed) == STANDBY_NONE {
             self.promote_follower();
         }
@@ -1699,7 +1699,7 @@ impl WorkerCoordinator {
         // Pairs with the fence in `Parker::park_inner` before an idle loop's
         // readiness check reads `lifo_watch`: the loop either sees the
         // request and does not sleep, or `wake_one` sees it waiting.
-        std::sync::atomic::fence(Ordering::SeqCst);
+        crate::sync::atomic::fence(Ordering::SeqCst);
         self.wake_one();
     }
 
@@ -1742,7 +1742,7 @@ impl WorkerCoordinator {
         // Paired with Parker's waiter-publication fence. The old poll flag
         // was released before this scan; a late follower either participates
         // in the scan or observes that release in park[_timeout]_unless.
-        std::sync::atomic::fence(Ordering::SeqCst);
+        crate::sync::atomic::fence(Ordering::SeqCst);
         let start = self.next_wake.fetch_add(1, Ordering::Relaxed);
         let mut slot = self.mask.map_or_else(|| start % count, |mask| start & mask);
         for _ in 0..count {
@@ -1862,7 +1862,7 @@ impl WorkerCoordinator {
         let previous = self.wake_notifier.slot.lock().replace(notifier);
         self.wake_notifier
             .armed
-            .store(true, std::sync::atomic::Ordering::Release);
+            .store(true, crate::sync::atomic::Ordering::Release);
         // Captured destructors may wake tasks and reenter the notifier. Publish
         // the replacement first, then retire the old callback outside its lock.
         drop(previous);
@@ -1873,7 +1873,7 @@ impl WorkerCoordinator {
         if !self
             .wake_notifier
             .armed
-            .load(std::sync::atomic::Ordering::Acquire)
+            .load(crate::sync::atomic::Ordering::Acquire)
         {
             return;
         }
@@ -2589,7 +2589,7 @@ impl std::fmt::Debug for SchedulerConstructionHandles {
                 "pending_cancel_dispatch_ready",
                 &self
                     .pending_cancel_dispatch_ready
-                    .load(std::sync::atomic::Ordering::Relaxed),
+                    .load(crate::sync::atomic::Ordering::Relaxed),
             )
             .finish()
     }
@@ -6268,7 +6268,7 @@ impl ThreeLaneWorker {
             if io.is_polling() {
                 standby_test_point(StandbyPoint::SawTurn);
                 coordinator.standby.store(waiting, Ordering::Relaxed);
-                std::sync::atomic::fence(Ordering::SeqCst); // S
+                crate::sync::atomic::fence(Ordering::SeqCst); // S
                 if coordinator.release_epoch.load(Ordering::Relaxed) != epoch {
                     continue;
                 }

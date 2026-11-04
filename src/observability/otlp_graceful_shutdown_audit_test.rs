@@ -20,7 +20,7 @@ use crate::observability::otlp_trace_exporter::{
     ExportError, InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpSpan, SpanBatch,
     TraceExporter,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};

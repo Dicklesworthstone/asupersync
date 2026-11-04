@@ -1268,7 +1268,7 @@
     #[test]
     fn harness_receives_correct_seeds() {
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicU64, Ordering};
         init_test("harness_receives_correct_seeds");
 
         let captured_lab_seed = Arc::new(AtomicU64::new(0));
@@ -1296,7 +1296,7 @@
     #[test]
     fn harness_with_custom_seed_plan() {
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicU64, Ordering};
         init_test("harness_with_custom_seed_plan");
 
         let captured_lab = Arc::new(AtomicU64::new(0));

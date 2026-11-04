@@ -5484,7 +5484,7 @@ mod tests {
     mod real_database_integration {
         use super::*;
         use crate::test_utils::run_test_with_cx;
-        use std::sync::atomic::{AtomicU32, Ordering};
+        use crate::sync::atomic::{AtomicU32, Ordering};
         use std::time::Instant;
 
         /// Real SQLite integration test configuration with production safety guards

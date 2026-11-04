@@ -21,7 +21,7 @@
 //!
 //! # Ordering
 //!
-//! The atomics use [`core::sync::atomic::Ordering::Relaxed`]. These counters
+//! The atomics use [`crate::sync::atomic::Ordering::Relaxed`]. These counters
 //! are diagnostics, not synchronization primitives: a reader only needs an
 //! eventually-consistent tally, never a happens-before edge to the work being
 //! counted. Relaxed keeps the instrumentation as close to free as an atomic
@@ -36,7 +36,7 @@
 //! the same global counters in parallel; relying on absolute values is not.
 
 #[cfg(feature = "runtime-metrics")]
-use core::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// A point-in-time copy of the runtime instrumentation counters.
 ///

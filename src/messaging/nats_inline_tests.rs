@@ -242,7 +242,7 @@
     fn nats_io_wakes_a_parked_call_at_each_budget_deadline() {
         use crate::time::{TimerDriverHandle, VirtualClock};
         use crate::types::{Budget, RegionId, TaskId, Time};
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use crate::sync::atomic::{AtomicUsize, Ordering};
 
         struct CountWakes(AtomicUsize);
         impl std::task::Wake for CountWakes {
@@ -447,7 +447,7 @@
     fn nats_timeout_keeps_request_bounds_and_boundary_semantics_on_owner_clock() {
         use crate::time::{TimerDriverHandle, VirtualClock};
         use crate::types::{Budget, RegionId, TaskId};
-        use std::sync::atomic::AtomicBool;
+        use crate::sync::atomic::AtomicBool;
 
         let owner_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100)));
         let owner_timer = TimerDriverHandle::with_virtual_clock(owner_clock.clone());
@@ -522,7 +522,7 @@
 
     #[test]
     fn nats_connect_policy_defaults_and_zero_timeout_pm29wb() {
-        use std::sync::atomic::AtomicBool;
+        use crate::sync::atomic::AtomicBool;
 
         let default = NatsConnectPolicy::default();
         assert_eq!(default.timeout(), None);
@@ -547,7 +547,7 @@
     fn nats_connect_attempt_driverless_timeout_wakes_without_advancing_the_poller() {
         use crate::time::{TimerDriverHandle, VirtualClock};
         use crate::types::{Budget, RegionId, TaskId};
-        use std::sync::atomic::AtomicBool;
+        use crate::sync::atomic::AtomicBool;
 
         struct WakeChannel(std_mpsc::Sender<()>);
         impl std::task::Wake for WakeChannel {
@@ -606,7 +606,7 @@
     fn nats_connect_attempt_keeps_one_deadline_on_the_owner_clock_pm29wb() {
         use crate::time::{TimerDriverHandle, VirtualClock};
         use crate::types::{Budget, RegionId, TaskId};
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use crate::sync::atomic::{AtomicBool, AtomicUsize};
 
         struct CountWakes(AtomicUsize);
         impl std::task::Wake for CountWakes {

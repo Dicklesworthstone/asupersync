@@ -14,7 +14,7 @@ use crate::sync::Notify;
 use crate::types::{Budget, CancelReason};
 use std::future::poll_fn;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex as StdMutex};
 use std::task::Poll;
 use std::time::Duration;

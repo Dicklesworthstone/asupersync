@@ -626,7 +626,7 @@ impl HealthChecker {
 struct HealthStream {
     service_name: String,
     status_sequence: std::sync::Mutex<Vec<HealthStatus>>,
-    current_index: std::sync::atomic::AtomicUsize,
+    current_index: crate::sync::atomic::AtomicUsize,
 }
 
 impl HealthStream {
@@ -642,7 +642,7 @@ impl HealthStream {
         Self {
             service_name,
             status_sequence: std::sync::Mutex::new(sequence),
-            current_index: std::sync::atomic::AtomicUsize::new(0),
+            current_index: crate::sync::atomic::AtomicUsize::new(0),
         }
     }
 

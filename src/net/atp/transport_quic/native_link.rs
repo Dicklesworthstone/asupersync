@@ -55,7 +55,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
@@ -4656,7 +4656,7 @@ impl QuicLink {
             .endpoint
             .metrics()
             .send_errors
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(crate::sync::atomic::Ordering::Relaxed);
         let buffers = self.endpoint.buffer_report();
         report.requested_send_buffer_bytes = buffers.requested_send_buffer_bytes;
         report.applied_send_buffer_bytes = buffers.applied_send_buffer_bytes;

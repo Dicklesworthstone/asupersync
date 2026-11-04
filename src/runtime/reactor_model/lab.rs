@@ -134,7 +134,7 @@ mod tests {
     use crate::types::{Budget, Time};
     use std::future::poll_fn;
     use std::io;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::{Poll, Wake, Waker};
 
     struct CountWakes(AtomicUsize);

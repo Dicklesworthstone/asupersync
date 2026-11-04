@@ -4,7 +4,7 @@ use super::*;
 use crate::atp::manifest::ChunkStrategy;
 use crate::atp::object::{ContentId, ManifestId, MetadataPolicy, Object, ObjectGraph};
 use futures_lite::future::block_on;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 fn unique_path() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);

@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 const WATCHDOG: Duration = Duration::from_secs(15);

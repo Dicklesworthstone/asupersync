@@ -107,7 +107,7 @@
     impl_test_sync_call!(W3CTraceContextMiddleware);
 
     struct CountingHandler {
-        calls: Arc<std::sync::atomic::AtomicU32>,
+        calls: Arc<crate::sync::atomic::AtomicU32>,
         delay: Duration,
         status: StatusCode,
     }
@@ -119,7 +119,7 @@
             _req: Request,
         ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
             Box::pin(async move {
-                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.calls.fetch_add(1, crate::sync::atomic::Ordering::SeqCst);
                 if !self.delay.is_zero() {
                     std::thread::sleep(self.delay);
                 }
@@ -584,7 +584,7 @@
 
     #[test]
     fn rate_limit_short_circuits_inner_handler() {
-        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls = Arc::new(crate::sync::atomic::AtomicU32::new(0));
         let handler = CountingHandler {
             calls: Arc::clone(&calls),
             delay: Duration::from_millis(0),
@@ -601,7 +601,7 @@
         let _ = mw.call(make_request());
         let resp = mw.call(make_request());
         assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(calls.load(crate::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -752,7 +752,7 @@
 
     #[test]
     fn retry_all_methods_retries_post() {
-        use std::sync::atomic::{AtomicU32, Ordering};
+        use crate::sync::atomic::{AtomicU32, Ordering};
 
         static CALL_COUNT: AtomicU32 = AtomicU32::new(0);
 
@@ -1602,7 +1602,7 @@
     /// ordinary OPTIONS request the application must handle.
     #[test]
     fn fetch_3_2_preflight_requires_origin_header() {
-        let inner_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let inner_calls = Arc::new(crate::sync::atomic::AtomicU32::new(0));
         let handler = CountingHandler {
             calls: Arc::clone(&inner_calls),
             delay: Duration::ZERO,
@@ -1615,7 +1615,7 @@
         let resp = mw.call(req);
 
         assert_eq!(
-            inner_calls.load(std::sync::atomic::Ordering::SeqCst),
+            inner_calls.load(crate::sync::atomic::Ordering::SeqCst),
             1,
             "OPTIONS without Origin must reach the inner handler",
         );
@@ -1632,7 +1632,7 @@
     /// applied, but no preflight short-circuit.
     #[test]
     fn fetch_3_2_preflight_requires_acrm_header() {
-        let inner_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let inner_calls = Arc::new(crate::sync::atomic::AtomicU32::new(0));
         let handler = CountingHandler {
             calls: Arc::clone(&inner_calls),
             delay: Duration::ZERO,
@@ -1644,7 +1644,7 @@
         let resp = mw.call(req);
 
         assert_eq!(
-            inner_calls.load(std::sync::atomic::Ordering::SeqCst),
+            inner_calls.load(crate::sync::atomic::Ordering::SeqCst),
             1,
             "OPTIONS without ACRM must reach the inner handler (not a preflight)",
         );
@@ -1931,7 +1931,7 @@
 
     #[test]
     fn middleware_stack_retry_wraps_timeout() {
-        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls = Arc::new(crate::sync::atomic::AtomicU32::new(0));
         let handler = CountingHandler {
             calls: Arc::clone(&calls),
             delay: Duration::from_millis(10),
@@ -1944,7 +1944,7 @@
 
         let resp = stacked.call(make_request());
         assert_eq!(resp.status, StatusCode::GATEWAY_TIMEOUT);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(calls.load(crate::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -2418,7 +2418,7 @@
 
     #[test]
     fn body_limit_short_circuits_handler() {
-        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls = Arc::new(crate::sync::atomic::AtomicU32::new(0));
         let handler = CountingHandler {
             calls: Arc::clone(&calls),
             delay: Duration::ZERO,
@@ -2428,7 +2428,7 @@
         let mut req = make_request();
         req.body = vec![0u8; 20].into();
         let _ = mw.call(req);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(calls.load(crate::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]

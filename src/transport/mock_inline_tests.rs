@@ -11,7 +11,7 @@
     use crate::transport::{SymbolSinkExt, SymbolStreamExt};
     use crate::types::{Symbol, SymbolId, SymbolKind, Time};
     use futures_lite::future;
-    use std::sync::atomic::AtomicU64;
+    use crate::sync::atomic::AtomicU64;
     use std::task::{Poll, Waker};
 
     static STREAM_TEST_NOW: AtomicU64 = AtomicU64::new(0);

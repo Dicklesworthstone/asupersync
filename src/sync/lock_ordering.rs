@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::hash::{Hash, Hasher};
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 

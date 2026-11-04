@@ -422,7 +422,7 @@
     #[cfg(feature = "tracing-integration")]
     #[test]
     fn epoch_telemetry_dispatch_allows_subscriber_reentry_after_tracker_unlock() {
-        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use crate::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         use tracing::Subscriber;
         use tracing_subscriber::layer::{Context, Layer};
         use tracing_subscriber::prelude::*;

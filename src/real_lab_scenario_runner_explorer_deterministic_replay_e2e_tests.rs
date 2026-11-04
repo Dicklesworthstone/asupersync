@@ -20,7 +20,7 @@ mod real_lab_scenario_runner_explorer_e2e {
     use crate::types::Budget;
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap, HashSet};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Statistics collected during deterministic replay verification

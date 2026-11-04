@@ -161,7 +161,7 @@ use crate::cx::Cx;
 use crate::record::ObligationKind;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicU64;
+use crate::sync::atomic::AtomicU64;
 
 /// br-asupersync-wue53y: process-global counter of async session
 /// transitions that consumed the linear channel via an Err arm
@@ -179,7 +179,7 @@ static SILENT_SESSION_CONSUME_COUNT: AtomicU64 = AtomicU64::new(0);
 /// scrape it via the metrics provider.
 #[must_use]
 pub fn silent_session_consume_count() -> u64 {
-    SILENT_SESSION_CONSUME_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    SILENT_SESSION_CONSUME_COUNT.load(crate::sync::atomic::Ordering::Relaxed)
 }
 
 // ============================================================================
@@ -384,7 +384,7 @@ impl<R, S> Chan<R, S> {
         // Keep these observability fields "used" even when the tracing
         // macro compiles down to a no-op in minimal builds.
         let _ = (channel_id, &obligation_kind, op, error);
-        SILENT_SESSION_CONSUME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SILENT_SESSION_CONSUME_COUNT.fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
         crate::tracing_compat::error!(
             channel_id = channel_id,
             obligation_kind = %obligation_kind,

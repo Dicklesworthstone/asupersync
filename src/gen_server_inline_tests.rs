@@ -17,7 +17,7 @@
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
@@ -6065,7 +6065,7 @@
         runtime.state.store_spawned_task(server, stored);
         runtime.scheduler.lock().schedule(server, 0);
 
-        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = Arc::new(crate::sync::atomic::AtomicBool::new(false));
         let target_gate = Arc::clone(&gate);
         let (target, target_handle) = runtime
             .state

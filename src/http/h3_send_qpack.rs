@@ -409,7 +409,7 @@ mod tests {
     use crate::net::atp::protocol::varint::VarInt;
     use crate::net::quic_native::{NativeQuicConnectionConfig, PacketNumberSpace};
     use crate::types::Budget;
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     #[derive(Default)]

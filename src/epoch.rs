@@ -21,7 +21,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -890,12 +890,13 @@ impl EpochClock {
         }
 
         // Advance to next epoch (saturating to prevent wrap at u64::MAX)
+        #[allow(deprecated)]
         let prev = self
             .current
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
                 Some(v.saturating_add(1))
             })
-            .unwrap_or_else(|v| v); // try_update with Some never fails
+            .unwrap_or_else(|v| v); // fetch_update with Some never fails
         let new_id = EpochId(prev.saturating_add(1));
         let new_epoch = Epoch::new(new_id, now, self.config.clone());
         *active = Some(new_epoch);

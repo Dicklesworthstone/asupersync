@@ -48,7 +48,7 @@
 
 use crate::record::ObligationKind;
 use crate::record::region::AdmissionKind;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Number of [`ObligationKind`] variants.
 const OBLIGATION_KIND_COUNT: usize = 6;

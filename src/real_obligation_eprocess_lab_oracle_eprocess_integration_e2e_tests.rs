@@ -15,7 +15,7 @@ mod real_obligation_eprocess_oracle_e2e {
     use crate::types::{ObligationId, RegionId, TaskId, Time};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 

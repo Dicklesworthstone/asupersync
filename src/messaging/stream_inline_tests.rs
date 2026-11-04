@@ -11,7 +11,7 @@
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);

@@ -50,8 +50,8 @@
     /// blocking threads. A refused operation still completes through the
     /// blocking syscall, so a concurrent test sees the same results.
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
-    static FORCED_URING_REFUSAL: std::sync::atomic::AtomicI32 =
-        std::sync::atomic::AtomicI32::new(0);
+    static FORCED_URING_REFUSAL: crate::sync::atomic::AtomicI32 =
+        crate::sync::atomic::AtomicI32::new(0);
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     static BLOCKING_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 

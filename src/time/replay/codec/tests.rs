@@ -3,7 +3,7 @@ use crate::time::replay::{RecordingTimeSource, TimeReplayError};
 use crate::time::{TimeSource, TimerDriver, TimerDriverHandle};
 use crate::types::Time;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
 const LIMITS: TimeTapeDecodeLimits = TimeTapeDecodeLimits::new(4096, 128, 1024);

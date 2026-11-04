@@ -49,7 +49,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -946,7 +946,7 @@ impl Detection {
     async fn detect(&self, stream: TcpStream, peer: SocketAddr) {
         #[cfg(feature = "tls")]
         if let Some(acceptor) = &self.tls {
-            let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let counter = std::sync::Arc::new(crate::sync::atomic::AtomicU64::new(0));
             let stream = super::handoff::SocketByteCounter::new(stream, std::sync::Arc::clone(&counter));
             let bound = acceptor.handshake_timeout().unwrap_or(self.timeout);
             let Ok(Ok(tls)) = crate::time::timeout(now(), bound, acceptor.accept(stream)).await

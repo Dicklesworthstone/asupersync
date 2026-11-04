@@ -9,7 +9,7 @@ use crate::cx::io_gate::spawn_blocking_io;
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "test-internals")]
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 #[cfg(feature = "test-internals")]

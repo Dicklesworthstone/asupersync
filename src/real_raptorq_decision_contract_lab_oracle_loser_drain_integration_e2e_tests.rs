@@ -18,7 +18,7 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
     use crate::types::{RegionId, TaskId, Time};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap, HashSet};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 

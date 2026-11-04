@@ -19,7 +19,7 @@
 use crate::types::{RegionId, TaskId};
 use crate::util::CachePadded;
 use crossbeam_queue::SegQueue;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 

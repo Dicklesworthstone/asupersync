@@ -28,7 +28,7 @@
 mod tests {
     use proptest::prelude::*;
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
 
     /// Runtime state machine conformance test infrastructure
     struct RuntimeConformanceTester {

@@ -2885,7 +2885,7 @@ impl ReactProviderState {
         // identical default token stream would "own" the first provider's root
         // scope and accept cross-provider spawns. A process-global monotone
         // counter keeps this deterministic per run while distinct per instance.
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicU64, Ordering};
         static PROVIDER_NONCE: AtomicU64 = AtomicU64::new(1);
         let nonce = PROVIDER_NONCE.fetch_add(1, Ordering::Relaxed);
         // SplitMix step so consecutive nonces produce well-separated seeds.

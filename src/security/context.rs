@@ -14,7 +14,7 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 type HmacSha256 = Hmac<Sha256>;
 

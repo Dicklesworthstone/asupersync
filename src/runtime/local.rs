@@ -103,8 +103,8 @@ impl Drop for LocalTaskStore {
 /// dropped can never be mistaken for a later runtime's store (a heap address
 /// used to serve as the key, and allocator reuse made that aliasing likely;
 /// asupersync-1fyc8f).
-static NEXT_LOCAL_STORE_KEY: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(1);
+static NEXT_LOCAL_STORE_KEY: crate::sync::atomic::AtomicUsize =
+    crate::sync::atomic::AtomicUsize::new(1);
 
 /// Inclusive intervals of retired keys. Adjacent retirements coalesce, while
 /// gaps preserve keys belonging to live runtimes. Retirement is never forgotten:
@@ -152,8 +152,8 @@ static RETIRED_LOCAL_STORE_KEYS: std::sync::Mutex<RetiredLocalStoreKeys> =
     std::sync::Mutex::new(RetiredLocalStoreKeys::new());
 /// Bumped on every retirement; threads compare it against their last-seen
 /// value so the purge check on the store hot path is one atomic load.
-static RETIRED_LOCAL_STORE_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static RETIRED_LOCAL_STORE_GENERATION: crate::sync::atomic::AtomicU64 =
+    crate::sync::atomic::AtomicU64::new(0);
 
 /// Allocates a fresh, process-unique local-store key for a runtime.
 #[must_use]
@@ -161,8 +161,8 @@ pub(crate) fn allocate_local_store_key() -> usize {
     allocate_local_store_key_from(&NEXT_LOCAL_STORE_KEY)
 }
 
-fn allocate_local_store_key_from(next: &std::sync::atomic::AtomicUsize) -> usize {
-    use std::sync::atomic::Ordering;
+fn allocate_local_store_key_from(next: &crate::sync::atomic::AtomicUsize) -> usize {
+    use crate::sync::atomic::Ordering;
 
     let mut key = next.load(Ordering::Relaxed);
     loop {
@@ -190,13 +190,13 @@ pub(crate) fn publish_retired_local_store_key(key: usize) {
         return;
     }
     drop(retired);
-    RETIRED_LOCAL_STORE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
+    RETIRED_LOCAL_STORE_GENERATION.fetch_add(1, crate::sync::atomic::Ordering::Release);
 }
 
 /// Drops this thread's stores whose keys were retired since the last check.
 /// Task destructors run after the store borrow is released.
 fn purge_retired_local_stores() {
-    let generation = RETIRED_LOCAL_STORE_GENERATION.load(std::sync::atomic::Ordering::Acquire);
+    let generation = RETIRED_LOCAL_STORE_GENERATION.load(crate::sync::atomic::Ordering::Acquire);
     let seen = SEEN_RETIRED_LOCAL_STORE_GENERATION.with(Cell::get);
     if seen == generation {
         return;

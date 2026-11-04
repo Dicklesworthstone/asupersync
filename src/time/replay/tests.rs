@@ -2,7 +2,7 @@ use super::*;
 use crate::time::{TimerDriver, TimerDriverHandle};
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
 // Deliberately not Debug: capture diagnostics must never inspect the provider.

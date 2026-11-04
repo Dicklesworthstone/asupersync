@@ -16,7 +16,7 @@
 
 use crate::observability::context::SpanId as ContextSpanId;
 use crate::observability::w3c_trace_context::{SpanId as W3CSpanId, TraceId};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};

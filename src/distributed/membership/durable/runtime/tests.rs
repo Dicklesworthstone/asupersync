@@ -8,7 +8,7 @@ use crate::runtime::obligation_mailbox::apply_obligation_posts;
 use crate::security::AuthKey;
 use crate::types::Budget;
 use std::fs::OpenOptions;
-use std::sync::atomic::AtomicU64;
+use crate::sync::atomic::AtomicU64;
 use std::task::{Context, Wake, Waker};
 
 fn config() -> MembershipJournalConfig {

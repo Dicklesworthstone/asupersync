@@ -12,10 +12,8 @@ use std::io::ErrorKind;
 #[cfg(unix)]
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicU64, Ordering},
-};
+use crate::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 /// Static operation costs to avoid repeated HashMap allocation
 static OPERATION_COSTS: OnceLock<HashMap<&'static str, u32>> = OnceLock::new();

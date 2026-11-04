@@ -46,7 +46,7 @@ mod tests {
     use crate::types::{Budget, CancelKind, CancelReason, ObjectId, Time};
     use crate::util::DetRng;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 

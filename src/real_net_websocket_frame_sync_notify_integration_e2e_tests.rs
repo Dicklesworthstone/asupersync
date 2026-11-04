@@ -1194,7 +1194,7 @@ struct NotificationId(u64);
 
 impl NotificationId {
     fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         Self(COUNTER.fetch_add(1, Ordering::Release))
     }

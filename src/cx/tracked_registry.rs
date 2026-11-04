@@ -25,7 +25,7 @@ use crate::runtime::obligation_mailbox::{
 use crate::types::{RegionId, TaskId, Time};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 /// Refusal of a runtime-accounted name operation.

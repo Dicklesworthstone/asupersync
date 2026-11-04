@@ -14,7 +14,7 @@
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::task::Waker;
     use std::thread;
     use std::time::Instant;

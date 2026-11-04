@@ -27,7 +27,7 @@
 
     #[test]
     fn lab_teardown_releases_parked_task_join_barrier() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use crate::sync::atomic::{AtomicBool, Ordering};
         struct Retired(Arc<AtomicBool>);
         impl Drop for Retired {
             fn drop(&mut self) {
@@ -90,7 +90,7 @@
 
     #[test]
     fn lab_teardown_releases_unapplied_region_finalizer_acknowledgment() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use crate::sync::atomic::{AtomicBool, Ordering};
         struct Retained(Arc<AtomicBool>);
         impl Drop for Retained {
             fn drop(&mut self) {
@@ -145,18 +145,18 @@
     }
 
     /// Waker that sets an `AtomicBool` when woken (for virtual time tests).
-    struct FlagWaker(Arc<std::sync::atomic::AtomicBool>);
+    struct FlagWaker(Arc<crate::sync::atomic::AtomicBool>);
     impl Wake for FlagWaker {
         fn wake(self: Arc<Self>) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.0.store(true, crate::sync::atomic::Ordering::SeqCst);
         }
     }
 
     /// Waker that increments an `AtomicU64` counter when woken.
-    struct CountWaker(Arc<std::sync::atomic::AtomicU64>);
+    struct CountWaker(Arc<crate::sync::atomic::AtomicU64>);
     impl Wake for CountWaker {
         fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.fetch_add(1, crate::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -164,15 +164,15 @@
         task_id: TaskId,
         caller_lock: Arc<Mutex<()>>,
         scheduler: Arc<Mutex<LabScheduler>>,
-        wake_calls: Arc<std::sync::atomic::AtomicUsize>,
-        calls_under_caller_lock: Arc<std::sync::atomic::AtomicUsize>,
-        calls_under_scheduler_lock: Arc<std::sync::atomic::AtomicUsize>,
-        cancel_lane_published: Arc<std::sync::atomic::AtomicBool>,
+        wake_calls: Arc<crate::sync::atomic::AtomicUsize>,
+        calls_under_caller_lock: Arc<crate::sync::atomic::AtomicUsize>,
+        calls_under_scheduler_lock: Arc<crate::sync::atomic::AtomicUsize>,
+        cancel_lane_published: Arc<crate::sync::atomic::AtomicBool>,
     }
 
     impl std::task::Wake for HandleCancelWakeAudit {
         fn wake(self: Arc<Self>) {
-            use std::sync::atomic::Ordering;
+            use crate::sync::atomic::Ordering;
 
             self.wake_calls.fetch_add(1, Ordering::SeqCst);
             let caller_guard = self.caller_lock.try_lock();
@@ -199,7 +199,7 @@
     }
 
     fn exercise_managed_handle_cancel_boundary(via_join_drop: bool) {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         let mut runtime = LabRuntime::new(LabConfig::new(7));
         let root = runtime.state.create_root_region(Budget::INFINITE);
@@ -323,7 +323,7 @@
     #[test]
     fn checkpoint_ack_ready_before_handle_command_reconciles_terminal_cancel() {
         use std::sync::Barrier;
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicU64, Ordering};
 
         init_test("checkpoint_ack_ready_before_handle_command_reconciles_terminal_cancel");
         let mut runtime = LabRuntime::new(LabConfig::new(19));
@@ -403,7 +403,7 @@
     #[test]
     fn checkpoint_ack_pending_republishes_cancel_lane_before_waker_dispatch() {
         use std::sync::Barrier;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         init_test("checkpoint_ack_pending_republishes_cancel_lane_before_waker_dispatch");
         let mut runtime = LabRuntime::new(LabConfig::new(23));
@@ -519,7 +519,7 @@
 
     #[test]
     fn repeated_checkpoint_cleanup_parks_until_an_external_wake() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         init_test("repeated_checkpoint_cleanup_parks_until_an_external_wake");
         let mut runtime = LabRuntime::new(LabConfig::new(47));
@@ -779,8 +779,8 @@
     ) -> TimerAdvanceOutcome {
         let mut runtime = LabRuntime::with_seed(42);
         let timer_handle = runtime.state.timer_driver_handle().expect("timer handle");
-        let live_wakeups = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let cancelled_wakeups = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let live_wakeups = Arc::new(crate::sync::atomic::AtomicU64::new(0));
+        let cancelled_wakeups = Arc::new(crate::sync::atomic::AtomicU64::new(0));
         let mut handles = Vec::with_capacity(deadlines_secs.len());
 
         for (idx, secs) in deadlines_secs.iter().copied().enumerate() {
@@ -834,9 +834,9 @@
 
         TimerAdvanceOutcome {
             advance_points,
-            total_wakeups: live_wakeups.load(std::sync::atomic::Ordering::SeqCst),
+            total_wakeups: live_wakeups.load(crate::sync::atomic::Ordering::SeqCst),
             final_time: runtime.now(),
-            cancelled_wakeups: cancelled_wakeups.load(std::sync::atomic::Ordering::SeqCst),
+            cancelled_wakeups: cancelled_wakeups.load(crate::sync::atomic::Ordering::SeqCst),
         }
     }
 
@@ -3445,7 +3445,7 @@
 
         // Register a timer at t=1s via the timer driver handle
         let timer_handle = runtime.state.timer_driver_handle().unwrap();
-        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let woken = Arc::new(crate::sync::atomic::AtomicBool::new(false));
 
         let waker = Waker::from(Arc::new(FlagWaker(woken.clone())));
         let _ = timer_handle.register(Time::from_secs(1), waker);
@@ -3468,7 +3468,7 @@
         );
 
         // Waker should have been called
-        let was_woken = woken.load(std::sync::atomic::Ordering::SeqCst);
+        let was_woken = woken.load(crate::sync::atomic::Ordering::SeqCst);
         crate::assert_with_log!(was_woken, "waker fired", true, was_woken);
         crate::test_complete!("advance_to_next_timer_fires_timer");
     }
@@ -3563,7 +3563,7 @@
         let config = LabConfig::new(42).with_auto_advance().max_steps(32);
         let mut runtime = LabRuntime::new(config);
         let handle = runtime.state.io_driver_handle().expect("io driver");
-        let wake_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let wake_count = Arc::new(crate::sync::atomic::AtomicU64::new(0));
         let waker = Waker::from(Arc::new(CountWaker(wake_count.clone())));
         let source = TestFdSource;
 
@@ -3590,7 +3590,7 @@
             true,
             runtime.now() >= Time::from_secs(1)
         );
-        let wakeups = wake_count.load(std::sync::atomic::Ordering::SeqCst);
+        let wakeups = wake_count.load(crate::sync::atomic::Ordering::SeqCst);
         crate::assert_with_log!(
             wakeups == 1,
             "reactor event woke registration",
@@ -3641,7 +3641,7 @@
 
         // Register timers at 1s, 5s, and 10s via timer driver
         let timer_handle = runtime.state.timer_driver_handle().unwrap();
-        let wake_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let wake_count = Arc::new(crate::sync::atomic::AtomicU64::new(0));
 
         for secs in [1, 5, 10] {
             let waker = Waker::from(Arc::new(CountWaker(wake_count.clone())));
@@ -3668,7 +3668,7 @@
         );
 
         // All wakers should have been called
-        let count = wake_count.load(std::sync::atomic::Ordering::SeqCst);
+        let count = wake_count.load(crate::sync::atomic::Ordering::SeqCst);
         crate::assert_with_log!(count == 3, "3 wakeups", 3u64, count);
         crate::test_complete!("run_with_auto_advance_jumps_past_timer_deadlines");
     }
@@ -3682,7 +3682,7 @@
 
         // Register timers spread across 24 hours (every hour)
         let timer_handle = runtime.state.timer_driver_handle().unwrap();
-        let wake_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let wake_count = Arc::new(crate::sync::atomic::AtomicU64::new(0));
 
         for hour in 1..=24 {
             let waker = Waker::from(Arc::new(CountWaker(wake_count.clone())));
@@ -3702,7 +3702,7 @@
         );
 
         // All 24 timers fired
-        let count = wake_count.load(std::sync::atomic::Ordering::SeqCst);
+        let count = wake_count.load(crate::sync::atomic::Ordering::SeqCst);
         crate::assert_with_log!(count == 24, "24 wakeups", 24u64, count);
 
         // Wall time should be well under 1 second (typically <1ms)
@@ -3778,7 +3778,7 @@
     /// Completes once `flag` is set; parks its waker otherwise so only the
     /// setter's explicit wake makes the task runnable again.
     struct WaitForFlag {
-        flag: Arc<std::sync::atomic::AtomicBool>,
+        flag: Arc<crate::sync::atomic::AtomicBool>,
         waker: Arc<Mutex<Option<Waker>>>,
     }
 
@@ -3789,7 +3789,7 @@
             self: std::pin::Pin<&mut Self>,
             cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<()> {
-            if self.flag.load(std::sync::atomic::Ordering::Acquire) {
+            if self.flag.load(crate::sync::atomic::Ordering::Acquire) {
                 std::task::Poll::Ready(())
             } else {
                 *self.waker.lock() = Some(cx.waker().clone());
@@ -3808,7 +3808,7 @@
         config: LabConfig,
         observations: Arc<Mutex<Vec<u8>>>,
     ) -> LabRuntime {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use crate::sync::atomic::{AtomicBool, Ordering};
 
         let mut runtime = LabRuntime::new(config);
         let root = runtime.state.create_root_region(Budget::INFINITE);
@@ -6377,7 +6377,7 @@
         let mut lab = LabRuntime::new(LabConfig::new(0xD3_41ED).max_steps(10_000));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (release, mut gate) = crate::channel::oneshot::channel::<()>();
-        let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closed = std::sync::Arc::new(crate::sync::atomic::AtomicBool::new(false));
         let observed = std::sync::Arc::clone(&closed);
         let (owner, _join) = lab
             .state
@@ -6395,7 +6395,7 @@
                     })
                     .expect("spawn the late spawner");
                 let _ = child.close().await;
-                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                observed.store(true, crate::sync::atomic::Ordering::SeqCst);
             })
             .expect("create owner");
         lab.scheduler.lock().schedule(owner, 0);
@@ -6403,7 +6403,7 @@
         release.send_blocking(()).expect("release the late spawner");
         lab.run_until_quiescent();
         assert!(
-            closed.load(std::sync::atomic::Ordering::SeqCst),
+            closed.load(crate::sync::atomic::Ordering::SeqCst),
             "the closing region closed after the denied spawn"
         );
     }

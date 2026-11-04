@@ -1,7 +1,7 @@
     use super::*;
     use crate::runtime::pool_sizing::PoolSizingAction;
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize};
+    use crate::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize};
     use std::sync::{Condvar as StdCondvar, Mutex as StdMutex, OnceLock};
 
     static DETERMINISTIC_HOOK_TEST_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
@@ -1701,7 +1701,7 @@
 
     mod spawn_blocking_conformance {
         use super::*;
-        use std::sync::atomic::{AtomicU32, Ordering};
+        use crate::sync::atomic::{AtomicU32, Ordering};
         use std::sync::{Arc, Barrier};
         use std::thread;
         use std::time::{Duration, Instant};

@@ -86,7 +86,7 @@ use crate::types::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Configuration for cancel-correctness oracle runtime behavior.
 #[derive(Debug, Clone)]

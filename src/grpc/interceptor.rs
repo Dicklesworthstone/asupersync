@@ -77,7 +77,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::bytes::Bytes;
@@ -939,14 +939,14 @@ pub struct RateLimitInterceptor {
 
 #[derive(Debug)]
 struct RateLimitState {
-    packed: std::sync::atomic::AtomicU64,
+    packed: crate::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug)]
 struct RateLimitLease {
     state: std::sync::Arc<RateLimitState>,
     generation: u32,
-    released: std::sync::atomic::AtomicBool,
+    released: crate::sync::atomic::AtomicBool,
 }
 
 /// Every rate-limit lease a request holds, one per limiter in the chain.
@@ -975,19 +975,19 @@ impl RateLimitLease {
         Self {
             state,
             generation,
-            released: std::sync::atomic::AtomicBool::new(false),
+            released: crate::sync::atomic::AtomicBool::new(false),
         }
     }
 
     fn release(&self) {
         if self
             .released
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
+            .swap(true, crate::sync::atomic::Ordering::AcqRel)
         {
             return;
         }
 
-        let mut packed = self.state.packed.load(std::sync::atomic::Ordering::Relaxed);
+        let mut packed = self.state.packed.load(crate::sync::atomic::Ordering::Relaxed);
         loop {
             let generation = rate_limit_generation(packed);
             let count = rate_limit_count(packed);
@@ -999,8 +999,8 @@ impl RateLimitLease {
             match self.state.packed.compare_exchange_weak(
                 packed,
                 next,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
+                crate::sync::atomic::Ordering::AcqRel,
+                crate::sync::atomic::Ordering::Relaxed,
             ) {
                 Ok(_) => return,
                 Err(observed) => packed = observed,
@@ -1022,13 +1022,13 @@ impl RateLimitInterceptor {
         Self {
             max_requests,
             state: std::sync::Arc::new(RateLimitState {
-                packed: std::sync::atomic::AtomicU64::new(rate_limit_pack(0, 0)),
+                packed: crate::sync::atomic::AtomicU64::new(rate_limit_pack(0, 0)),
             }),
         }
     }
 
     fn try_acquire_slot(&self) -> Option<u32> {
-        let mut packed = self.state.packed.load(std::sync::atomic::Ordering::Relaxed);
+        let mut packed = self.state.packed.load(crate::sync::atomic::Ordering::Relaxed);
         loop {
             let generation = rate_limit_generation(packed);
             let count = rate_limit_count(packed);
@@ -1040,8 +1040,8 @@ impl RateLimitInterceptor {
             match self.state.packed.compare_exchange_weak(
                 packed,
                 next,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
+                crate::sync::atomic::Ordering::AcqRel,
+                crate::sync::atomic::Ordering::Relaxed,
             ) {
                 Ok(_) => return Some(generation),
                 Err(observed) => packed = observed,
@@ -1063,15 +1063,15 @@ impl RateLimitInterceptor {
 
     /// Reset the request counter.
     pub fn reset(&self) {
-        let mut packed = self.state.packed.load(std::sync::atomic::Ordering::Relaxed);
+        let mut packed = self.state.packed.load(crate::sync::atomic::Ordering::Relaxed);
         loop {
             let next_generation = rate_limit_generation(packed).wrapping_add(1);
             let next = rate_limit_pack(next_generation, 0);
             match self.state.packed.compare_exchange_weak(
                 packed,
                 next,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
+                crate::sync::atomic::Ordering::AcqRel,
+                crate::sync::atomic::Ordering::Relaxed,
             ) {
                 Ok(_) => return,
                 Err(observed) => packed = observed,
@@ -1082,7 +1082,7 @@ impl RateLimitInterceptor {
     /// Get the current request count.
     #[must_use]
     pub fn current_count(&self) -> u32 {
-        rate_limit_count(self.state.packed.load(std::sync::atomic::Ordering::Relaxed))
+        rate_limit_count(self.state.packed.load(crate::sync::atomic::Ordering::Relaxed))
     }
 }
 

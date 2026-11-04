@@ -2691,7 +2691,7 @@
             use super::*;
             use crate::web::extract::Extension;
             use crate::web::handler::FnHandler1;
-            use std::sync::atomic::{AtomicU64, Ordering};
+            use crate::sync::atomic::{AtomicU64, Ordering};
             use std::sync::{Arc, Mutex, Weak};
 
             #[derive(Clone)]

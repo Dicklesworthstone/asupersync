@@ -59,7 +59,7 @@ use crate::runtime::pool_sizing::{
 use parking_lot::{Condvar, Mutex};
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
 use std::time::{Duration, Instant};
 
@@ -1526,7 +1526,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
                         .replacement_pending
                         .fetch_add(1, Ordering::Release);
                     self.inner.active_threads.fetch_sub(1, Ordering::Release);
-                    std::sync::atomic::fence(Ordering::SeqCst);
+                    crate::sync::atomic::fence(Ordering::SeqCst);
                     if blocking_pool_has_pending_work(self.inner) {
                         maybe_spawn_thread_on_inner(self.inner);
                         let _guard = self.inner.mutex.lock();
@@ -1612,7 +1612,7 @@ fn maybe_spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     // queued tasks; each spawn claims its `active_threads` slot before it
     // returns, so the next pass sees it.
     loop {
-        std::sync::atomic::fence(Ordering::SeqCst);
+        crate::sync::atomic::fence(Ordering::SeqCst);
         let active = inner.active_threads.load(Ordering::Relaxed);
         let busy = inner.busy_threads.load(Ordering::Relaxed);
         let pending = inner.pending_count.load(Ordering::Relaxed);
@@ -1770,7 +1770,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
                     // our store and load — paired with the matching fence on
                     // the enqueue side — forces a total order so at least one
                     // side observes the other's store. (No-op on x86.)
-                    std::sync::atomic::fence(Ordering::SeqCst);
+                    crate::sync::atomic::fence(Ordering::SeqCst);
                     if !blocking_pool_has_pending_work(inner) {
                         // Retire this thread; active_threads was already decremented atomically.
                         return true;

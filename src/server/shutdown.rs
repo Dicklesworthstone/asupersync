@@ -12,7 +12,7 @@ use crate::sync::Notify;
 use crate::time::{Sleep, TimerDriverHandle, sleep_until, wall_now};
 use crate::types::Time;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 #[cfg(test)]

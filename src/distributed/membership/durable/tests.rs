@@ -3,7 +3,7 @@ use crate::distributed::membership::{MembershipEvent, MembershipKind};
 use crate::distributed::membership::authority::MembershipUpdate;
 use std::fs::OpenOptions;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
 struct FaultFile { bytes: Cursor<Vec<u8>>, budget: Option<usize>, fail_sync: bool, panic_sync: bool, syncs: usize }

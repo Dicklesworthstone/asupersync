@@ -16,7 +16,7 @@ mod tests {
 
     use std::collections::{HashMap, VecDeque};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     /// Configuration for oneshot race coordination
     #[derive(Debug, Clone)]

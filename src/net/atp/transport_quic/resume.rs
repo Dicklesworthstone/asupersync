@@ -125,7 +125,7 @@ mod storage {
         expected: Vec<DeltaChunkWire>,
         state: Mutex<State>,
         #[cfg(feature = "test-internals")]
-        progress: Arc<std::sync::atomic::AtomicU64>,
+        progress: Arc<crate::sync::atomic::AtomicU64>,
     }
 
     fn invalid(message: &str) -> io::Error {
@@ -421,7 +421,7 @@ mod storage {
             durable.insert(chunk.index, (*chunk).clone());
         }
         #[cfg(feature = "test-internals")]
-        let progress = Arc::new(std::sync::atomic::AtomicU64::new(summary.durable_bytes));
+        let progress = Arc::new(crate::sync::atomic::AtomicU64::new(summary.durable_bytes));
         #[cfg(feature = "test-internals")]
         register_progress(parent.to_path_buf(), &progress);
         let records = usize::try_from(journal.get_stats().total_entries)
@@ -524,7 +524,7 @@ mod storage {
             state.durable.insert(chunk.index, chunk.clone());
             state.failed = false;
             #[cfg(feature = "test-internals")]
-            self.progress.fetch_add(chunk.size_bytes, std::sync::atomic::Ordering::Release);
+            self.progress.fetch_add(chunk.size_bytes, crate::sync::atomic::Ordering::Release);
             Ok(())
         }
     }
@@ -606,12 +606,12 @@ mod storage {
     }
 
     #[cfg(feature = "test-internals")]
-    type Progress = std::sync::OnceLock<Mutex<BTreeMap<PathBuf, std::sync::Weak<std::sync::atomic::AtomicU64>>>>;
+    type Progress = std::sync::OnceLock<Mutex<BTreeMap<PathBuf, std::sync::Weak<crate::sync::atomic::AtomicU64>>>>;
     #[cfg(feature = "test-internals")]
     static PROGRESS: Progress = std::sync::OnceLock::new();
 
     #[cfg(feature = "test-internals")]
-    fn register_progress(destination: PathBuf, progress: &Arc<std::sync::atomic::AtomicU64>) {
+    fn register_progress(destination: PathBuf, progress: &Arc<crate::sync::atomic::AtomicU64>) {
         let mut all = PROGRESS.get_or_init(Mutex::default).lock();
         all.retain(|_, value| value.strong_count() != 0);
         all.insert(destination, Arc::downgrade(progress));
@@ -621,7 +621,7 @@ mod storage {
     #[cfg(feature = "test-internals")]
     pub(in super::super) fn checkpoint_bytes(destination: &Path) -> Option<u64> {
         let progress = PROGRESS.get()?.lock().get(destination)?.upgrade()?;
-        Some(progress.load(std::sync::atomic::Ordering::Acquire))
+        Some(progress.load(crate::sync::atomic::Ordering::Acquire))
     }
 
     #[cfg(all(test, unix))]

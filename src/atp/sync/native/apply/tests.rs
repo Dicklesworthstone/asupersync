@@ -5,7 +5,7 @@ use crate::runtime::RuntimeBuilder;
 use std::fs;
 use std::future::Future;
 use std::os::unix::fs::MetadataExt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 

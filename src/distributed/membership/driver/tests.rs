@@ -9,7 +9,7 @@ use std::task::Waker;
 #[test]
 fn elapsed_rearm_keeps_tick_ready_without_repolling_completed_sleep() {
     use crate::time::VirtualClock;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Wake;
 
     #[derive(Default)]
@@ -564,12 +564,12 @@ fn invalid_topology_and_timing_are_refused_before_socket_polling() {
 /// sleep is already due at the arming poll.
 #[derive(Debug)]
 struct StrideClock {
-    reads: std::sync::atomic::AtomicU64,
+    reads: crate::sync::atomic::AtomicU64,
     stride_nanos: u64,
 }
 impl crate::time::TimeSource for StrideClock {
     fn now(&self) -> Time {
-        let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let read = self.reads.fetch_add(1, crate::sync::atomic::Ordering::SeqCst) + 1;
         Time::from_nanos(read * self.stride_nanos)
     }
 }
@@ -581,7 +581,7 @@ fn already_due_rearmed_tick_is_consumed_without_repolling_the_completed_sleep() 
     // sleep completed while it was being armed and the next pass polled it.
     use crate::runtime::{IoDriverHandle, LabReactor};
     use crate::types::{Budget, RegionId, TaskId};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
 
     const PASSES: u64 = 64;
     let stride_nanos = config().tick_ms * 1_000_000;

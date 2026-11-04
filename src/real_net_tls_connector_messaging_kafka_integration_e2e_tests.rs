@@ -51,7 +51,7 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     /// Test phases for TLS-Kafka integration testing

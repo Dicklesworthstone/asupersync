@@ -4,7 +4,7 @@ use crate::types::symbol::Symbol;
 use std::fs::OpenOptions;
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
 struct FaultFile {

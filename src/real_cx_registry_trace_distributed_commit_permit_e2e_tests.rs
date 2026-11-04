@@ -18,7 +18,7 @@ use futures_lite::future;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Configuration for registry + distributed trace testing.
 #[derive(Debug, Clone)]

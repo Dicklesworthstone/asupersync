@@ -41,7 +41,7 @@ use crate::runtime::resource_monitor::{DegradationLevel, RegionPriority, Resourc
 use crate::types::{RegionId, id::next_bootstrap_region_id};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -276,8 +276,9 @@ fn reserve_envelope_budget(
     }
 }
 
+#[allow(deprecated)]
 fn release_envelope_budget(used: &AtomicU64, amount: u64) {
-    let _ = used.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = used.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_sub(amount))
     });
 }
@@ -4104,9 +4105,10 @@ impl SwarmPressureGovernor {
         Ok(SwarmAdmissionDecisionInternal { decision, reason })
     }
 
+    #[allow(deprecated)]
     fn record_decision_latency(&self, decision_start: Instant) -> u64 {
         let latency_ns = duration_as_u64_ns(decision_start.elapsed());
-        let _ = self.max_decision_latency_ns.try_update(
+        let _ = self.max_decision_latency_ns.fetch_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |current| (latency_ns > current).then_some(latency_ns),

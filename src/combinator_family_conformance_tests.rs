@@ -34,7 +34,7 @@
 #[cfg(any(test, feature = "test-internals"))]
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-internals"))]
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

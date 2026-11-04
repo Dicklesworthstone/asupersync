@@ -9,7 +9,7 @@
     use super::*;
     use crate::bytes::Bytes;
     use crate::http::h2::settings;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 

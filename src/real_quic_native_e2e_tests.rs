@@ -20,7 +20,7 @@ mod quic_native_e2e_tests {
     use serde_json;
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Real QUIC server for E2E testing with actual protocol handling
@@ -597,7 +597,7 @@ mod quic_native_e2e_tests {
     }
 }
 
-use std::sync::atomic::AtomicBool;
+use crate::sync::atomic::AtomicBool;
 
 #[cfg(any(test, feature = "test-internals"))]
 pub use quic_native_e2e_tests::*;

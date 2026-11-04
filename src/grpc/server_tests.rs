@@ -723,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_inclusive_deadline_guard_rejects_ready_inner_at_boundary() {
-        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         static OFFSET_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -820,7 +820,7 @@ mod tests {
     #[test]
     fn test_call_context_time_getter_controls_deadline_helpers_without_sleep() {
         use std::sync::OnceLock;
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicU64, Ordering};
 
         static BASE: OnceLock<std::time::Instant> = OnceLock::new();
         static NOW_OFFSET_NS: AtomicU64 = AtomicU64::new(0);
@@ -2204,8 +2204,8 @@ mod tests {
     #[derive(Debug)]
     struct CountingInterceptor {
         name: &'static str,
-        request_count: std::sync::atomic::AtomicUsize,
-        response_count: std::sync::atomic::AtomicUsize,
+        request_count: crate::sync::atomic::AtomicUsize,
+        response_count: crate::sync::atomic::AtomicUsize,
         events: Arc<parking_lot::Mutex<Vec<String>>>,
     }
 
@@ -2213,8 +2213,8 @@ mod tests {
         fn new(name: &'static str, events: Arc<parking_lot::Mutex<Vec<String>>>) -> Self {
             Self {
                 name,
-                request_count: std::sync::atomic::AtomicUsize::new(0),
-                response_count: std::sync::atomic::AtomicUsize::new(0),
+                request_count: crate::sync::atomic::AtomicUsize::new(0),
+                response_count: crate::sync::atomic::AtomicUsize::new(0),
                 events,
             }
         }
@@ -2223,13 +2223,13 @@ mod tests {
     impl Interceptor for CountingInterceptor {
         fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
             self.request_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                .fetch_add(1, crate::sync::atomic::Ordering::SeqCst);
             self.events.lock().push(format!("req:{}", self.name));
             Ok(())
         }
         fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
             self.response_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                .fetch_add(1, crate::sync::atomic::Ordering::SeqCst);
             self.events.lock().push(format!("resp:{}", self.name));
             Ok(())
         }
@@ -3089,7 +3089,7 @@ mod tests {
             events: Arc::clone(&events),
         };
         let i_after = CountingInterceptor::new("after", Arc::clone(&events));
-        let handler_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_called = Arc::new(crate::sync::atomic::AtomicBool::new(false));
         let handler_called_clone = Arc::clone(&handler_called);
 
         let server = Server::builder()
@@ -3103,7 +3103,7 @@ mod tests {
         let result = block_on(server.dispatch_unary(request, move |req| {
             let flag = Arc::clone(&handler_called_clone);
             async move {
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                flag.store(true, crate::sync::atomic::Ordering::SeqCst);
                 Ok(Response::new(req.into_inner()))
             }
         }));
@@ -3112,7 +3112,7 @@ mod tests {
         assert_eq!(err.code(), super::super::Code::Unauthenticated);
 
         assert!(
-            !handler_called.load(std::sync::atomic::Ordering::SeqCst),
+            !handler_called.load(crate::sync::atomic::Ordering::SeqCst),
             "handler must NOT be invoked when an earlier interceptor rejects"
         );
 
@@ -3747,10 +3747,10 @@ mod tests {
         let request = Request::with_metadata(Bytes::new(), metadata);
 
         // Counter to verify the handler is NOT invoked.
-        let handler_invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_invoked = std::sync::Arc::new(crate::sync::atomic::AtomicBool::new(false));
         let handler_invoked_clone = std::sync::Arc::clone(&handler_invoked);
         let result = block_on(server.dispatch_unary(request, move |_req| {
-            handler_invoked_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            handler_invoked_clone.store(true, crate::sync::atomic::Ordering::Relaxed);
             async move { Ok(Response::new(Bytes::from_static(b"ok"))) }
         }));
 
@@ -3761,7 +3761,7 @@ mod tests {
             "rejection must use RESOURCE_EXHAUSTED per gRPC convention"
         );
         assert!(
-            !handler_invoked.load(std::sync::atomic::Ordering::Relaxed),
+            !handler_invoked.load(crate::sync::atomic::Ordering::Relaxed),
             "handler must NOT be invoked when metadata cap is exceeded"
         );
         crate::test_complete!("test_dispatch_unary_enforces_max_metadata_size");
@@ -3798,17 +3798,17 @@ mod tests {
         )]);
         let request = Request::with_metadata(Bytes::new(), metadata);
 
-        let handler_invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_invoked = std::sync::Arc::new(crate::sync::atomic::AtomicBool::new(false));
         let handler_invoked_clone = std::sync::Arc::clone(&handler_invoked);
         let result = block_on(server.dispatch_unary(request, move |_req| {
-            handler_invoked_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            handler_invoked_clone.store(true, crate::sync::atomic::Ordering::Relaxed);
             async move { Ok(Response::new(Bytes::from_static(b"ok"))) }
         }));
 
         let err = result.expect_err("invalid metadata must reject");
         assert_eq!(err.code(), crate::grpc::status::Code::InvalidArgument);
         assert!(
-            !handler_invoked.load(std::sync::atomic::Ordering::Relaxed),
+            !handler_invoked.load(crate::sync::atomic::Ordering::Relaxed),
             "handler must NOT be invoked when inbound metadata is malformed"
         );
         crate::test_complete!("test_dispatch_unary_rejects_invalid_metadata_before_handler");
@@ -3831,17 +3831,17 @@ mod tests {
         ]);
         let request = Request::with_metadata(Bytes::new(), metadata);
 
-        let handler_invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_invoked = std::sync::Arc::new(crate::sync::atomic::AtomicBool::new(false));
         let handler_invoked_clone = std::sync::Arc::clone(&handler_invoked);
         let result = block_on(server.dispatch_unary(request, move |_req| {
-            handler_invoked_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            handler_invoked_clone.store(true, crate::sync::atomic::Ordering::Relaxed);
             async move { Ok(Response::new(Bytes::from_static(b"ok"))) }
         }));
 
         let err = result.expect_err("invalid protocol headers must reject");
         assert_eq!(err.code(), crate::grpc::status::Code::InvalidArgument);
         assert!(
-            !handler_invoked.load(std::sync::atomic::Ordering::Relaxed),
+            !handler_invoked.load(crate::sync::atomic::Ordering::Relaxed),
             "handler must NOT be invoked when unary protocol headers are malformed"
         );
         crate::test_complete!(
@@ -4241,7 +4241,7 @@ mod tests {
         use crate::grpc::Code;
         use crate::grpc::MetadataValue;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use crate::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
 
         /// AUDIT: Verify current deadline parsing is correct

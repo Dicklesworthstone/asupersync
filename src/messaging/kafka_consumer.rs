@@ -47,7 +47,7 @@ use std::future::Future;
 ))]
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(
     feature = "kafka",
     all(not(feature = "kafka"), any(test, feature = "test-internals"))
@@ -858,13 +858,13 @@ struct BrokerConsumerContext {
 #[cfg(feature = "kafka")]
 #[derive(Debug, Default)]
 struct RebalanceCounters {
-    incremental_assigns: std::sync::atomic::AtomicU64,
-    eager_assigns: std::sync::atomic::AtomicU64,
-    incremental_unassigns: std::sync::atomic::AtomicU64,
-    eager_unassigns: std::sync::atomic::AtomicU64,
+    incremental_assigns: crate::sync::atomic::AtomicU64,
+    eager_assigns: crate::sync::atomic::AtomicU64,
+    incremental_unassigns: crate::sync::atomic::AtomicU64,
+    eager_unassigns: crate::sync::atomic::AtomicU64,
     /// Partitions the group assigned through the callback and has not revoked;
     /// an explicit `KafkaConsumer::rebalance` leaves this count untouched.
-    group_partitions: std::sync::atomic::AtomicUsize,
+    group_partitions: crate::sync::atomic::AtomicUsize,
     #[cfg(test)]
     native_drop_thread: Mutex<Option<(std::thread::ThreadId, Option<String>)>>,
 }

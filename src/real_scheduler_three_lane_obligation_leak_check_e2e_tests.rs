@@ -17,7 +17,7 @@ use crate::util::det_rng::DetRng;
 use futures_lite::future;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Configuration for scheduler + obligation integration testing.
 #[derive(Debug, Clone)]

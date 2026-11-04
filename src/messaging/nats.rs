@@ -36,7 +36,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -1469,8 +1469,8 @@ struct SubscriptionReplay {
 struct SharedState {
     subscriptions: Mutex<HashMap<u64, SubscriptionState>>,
     server_info: Mutex<Option<ServerInfo>>,
-    closed: std::sync::atomic::AtomicBool,
-    connected: std::sync::atomic::AtomicBool,
+    closed: crate::sync::atomic::AtomicBool,
+    connected: crate::sync::atomic::AtomicBool,
     processed_epoch: AtomicU64,
     /// PINGs written on the current connection, keepalive and
     /// [`NatsClient::ping`] alike. The server answers in order, so
@@ -1481,7 +1481,7 @@ struct SharedState {
     pongs: AtomicU64,
     /// Set once a supervisor owns the connection. Only a supervised client
     /// unsubscribes dropped subscriptions.
-    supervised: std::sync::atomic::AtomicBool,
+    supervised: crate::sync::atomic::AtomicBool,
     /// SIDs of subscriptions dropped without an unsubscribe, awaiting their
     /// UNSUB. Lock order: `subscriptions`, then `dropped_sids`.
     dropped_sids: Mutex<Vec<u64>>,
@@ -1492,12 +1492,12 @@ impl SharedState {
         Self {
             subscriptions: Mutex::new(HashMap::new()),
             server_info: Mutex::new(None),
-            closed: std::sync::atomic::AtomicBool::new(false),
-            connected: std::sync::atomic::AtomicBool::new(false),
+            closed: crate::sync::atomic::AtomicBool::new(false),
+            connected: crate::sync::atomic::AtomicBool::new(false),
             processed_epoch: AtomicU64::new(0),
             pings_sent: AtomicU64::new(0),
             pongs: AtomicU64::new(0),
-            supervised: std::sync::atomic::AtomicBool::new(false),
+            supervised: crate::sync::atomic::AtomicBool::new(false),
             dropped_sids: Mutex::new(Vec::new()),
         }
     }

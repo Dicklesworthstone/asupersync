@@ -10,7 +10,7 @@ use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder, SpawnError, yiel
 use crate::types::CancelKind;
 use sha2::{Digest, Sha256};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use crate::sync::atomic::{AtomicBool, AtomicUsize};
 use std::task::{Context, Waker};
 use std::time::{Duration, Instant};
 

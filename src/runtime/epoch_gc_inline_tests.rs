@@ -297,7 +297,7 @@
 
     #[test]
     fn stress_test_memory_usage_extended_operation() {
-        use std::sync::atomic::AtomicUsize;
+        use crate::sync::atomic::AtomicUsize;
 
         // Simple memory usage tracker
         static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
@@ -411,7 +411,7 @@
 
     #[test]
     fn correctness_test_no_work_lost() {
-        use std::sync::atomic::AtomicU64;
+        use crate::sync::atomic::AtomicU64;
 
         let epoch_gc = Arc::new(EpochGC::new());
         let _processed_counter = Arc::new(AtomicU64::new(0));

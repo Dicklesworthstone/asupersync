@@ -25,7 +25,7 @@ use std::time::Duration;
 use smallvec::SmallVec;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use super::WebBodyDiagnostic;

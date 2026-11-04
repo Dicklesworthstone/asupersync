@@ -28,7 +28,7 @@
 mod tests {
     use proptest::prelude::*;
     use std::collections::{HashMap, VecDeque};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
 
     /// Channel ordering conformance test infrastructure
     struct ChannelConformanceTester {

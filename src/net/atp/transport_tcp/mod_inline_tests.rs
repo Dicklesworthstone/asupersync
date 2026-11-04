@@ -367,7 +367,7 @@
         committed: PathBuf,
         receive: std::sync::Arc<parking_lot::Mutex<Option<ReceiveTaskHandle>>>,
         receive_cx: Cx,
-        aborted_before_receipt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        aborted_before_receipt: std::sync::Arc<crate::sync::atomic::AtomicBool>,
         park_receipt: bool,
     }
 
@@ -484,7 +484,7 @@
                         .await
                         .expect("accept the sender");
                 let receive = std::sync::Arc::new(parking_lot::Mutex::new(None));
-                let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let aborted = std::sync::Arc::new(crate::sync::atomic::AtomicBool::new(false));
                 let receive_slot = std::sync::Arc::clone(&receive);
                 let aborted_witness = std::sync::Arc::clone(&aborted);
                 let handle = cx
@@ -3182,7 +3182,7 @@ where
 fn regular_commit_syncs_overlap_with_at_most_sixteen_open_files() {
     use crate::net::atp::transport_common::metadata::StagedFileSync;
     use crate::runtime::BlockingPool;
-    use std::sync::atomic::AtomicUsize;
+    use crate::sync::atomic::AtomicUsize;
 
     let temp = tempfile::tempdir().expect("temporary directory");
     let root = temp.path().canonicalize().expect("canonical root");
@@ -3280,7 +3280,7 @@ fn regular_commit_syncs_overlap_with_at_most_sixteen_open_files() {
 #[test]
 fn regular_commit_reports_the_first_manifest_sync_error_after_all_jobs_complete() {
     use crate::runtime::BlockingPool;
-    use std::sync::atomic::AtomicUsize;
+    use crate::sync::atomic::AtomicUsize;
 
     let temp = tempfile::tempdir().expect("temporary directory");
     let root = temp.path().canonicalize().expect("canonical root");
@@ -3349,7 +3349,7 @@ fn regular_commit_reports_the_first_manifest_sync_error_after_all_jobs_complete(
 #[test]
 fn cancelling_or_dropping_regular_syncs_never_publishes_their_batch() {
     use crate::runtime::BlockingPool;
-    use std::sync::atomic::AtomicUsize;
+    use crate::sync::atomic::AtomicUsize;
 
     for drop_future in [false, true] {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -3626,7 +3626,7 @@ fn regular_commit_rejects_oversized_batches_before_starting_any_work() {
 
 #[cfg(unix)]
 #[derive(Default)]
-struct RegularCommitWakeCount(std::sync::atomic::AtomicUsize);
+struct RegularCommitWakeCount(crate::sync::atomic::AtomicUsize);
 
 #[cfg(unix)]
 impl std::task::Wake for RegularCommitWakeCount {
@@ -3651,7 +3651,7 @@ fn regular_commit_capacity_one_pool() -> crate::runtime::BlockingPool {
 #[cfg(unix)]
 #[test]
 fn queued_regular_syncs_cancel_or_drop_without_waiting_for_unrelated_capacity() {
-    use std::sync::atomic::AtomicUsize;
+    use crate::sync::atomic::AtomicUsize;
 
     for drop_future in [false, true] {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -3735,7 +3735,7 @@ fn queued_regular_syncs_cancel_or_drop_without_waiting_for_unrelated_capacity() 
 #[cfg(unix)]
 #[test]
 fn regular_sync_cancellation_drains_only_the_job_that_already_started() {
-    use std::sync::atomic::AtomicUsize;
+    use crate::sync::atomic::AtomicUsize;
 
     let temp = tempfile::tempdir().expect("temporary directory");
     let root = temp.path().canonicalize().expect("canonical root");

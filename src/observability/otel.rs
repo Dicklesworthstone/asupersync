@@ -62,7 +62,7 @@ use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -5746,7 +5746,7 @@ pub struct InMemoryExporter {
 pub struct BoundedExportQueue<T> {
     queue: Mutex<std::collections::VecDeque<T>>,
     capacity: usize,
-    dropped_batches: std::sync::atomic::AtomicU64,
+    dropped_batches: crate::sync::atomic::AtomicU64,
 }
 
 impl<T> BoundedExportQueue<T> {
@@ -5756,7 +5756,7 @@ impl<T> BoundedExportQueue<T> {
         Self {
             queue: Mutex::new(std::collections::VecDeque::with_capacity(capacity)),
             capacity,
-            dropped_batches: std::sync::atomic::AtomicU64::new(0),
+            dropped_batches: crate::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -5771,7 +5771,7 @@ impl<T> BoundedExportQueue<T> {
             let dropped_existing = queue.pop_front().is_some(); // Remove OLDEST batch (correct OTLP behavior)
             if dropped_existing {
                 self.dropped_batches
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
             }
             true
         } else {
@@ -5796,7 +5796,7 @@ impl<T> BoundedExportQueue<T> {
         let mut queue = self.queue.lock();
         if queue.len() >= self.capacity {
             self.dropped_batches
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(1, crate::sync::atomic::Ordering::Relaxed);
             return false;
         }
         queue.push_front(batch);
@@ -5819,7 +5819,7 @@ impl<T> BoundedExportQueue<T> {
     #[must_use]
     pub fn dropped_count(&self) -> u64 {
         self.dropped_batches
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(crate::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get the configured capacity.
@@ -7988,7 +7988,7 @@ mod otlp_retry_tests {
     fn otlp_retry_backoff_observes_cx_cancellation() {
         use std::future::Future;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use crate::sync::atomic::{AtomicUsize, Ordering};
         use std::task::{Context, Poll, Wake, Waker};
 
         #[derive(Default)]
@@ -10594,7 +10594,7 @@ pub mod span_semantics {
         AnyValue, KeyValue, any_value::Value as ProtoValue,
     };
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static NEXT_TEST_SPAN_SEED: AtomicU64 = AtomicU64::new(1);

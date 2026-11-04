@@ -112,7 +112,7 @@ impl TransferId {
     /// Generate a unique transfer ID.
     #[must_use]
     pub fn generate() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use crate::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         Self(format!("atp_transfer_{:016x}", id))

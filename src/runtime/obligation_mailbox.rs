@@ -59,7 +59,7 @@ use crate::runtime::scheduler::global_queue::GlobalFifoQueue;
 use crate::runtime::state::RuntimeState;
 use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::det_hash::DetHashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 /// Refusal before a checked obligation token becomes observable.

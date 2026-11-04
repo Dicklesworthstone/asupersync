@@ -17,7 +17,7 @@ mod real_obligation_graded_no_aliasing_proof_e2e {
     use crate::types::{Budget, ObligationId, RegionId, TaskId, Time};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap, HashSet};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Statistics for graded obligation + no-aliasing proof testing

@@ -15,7 +15,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -248,10 +248,11 @@ impl HedgeStats {
         waiters.push(waker.clone());
     }
 
+    #[allow(deprecated)]
     fn release_pending_slot(&self) {
         let released = self
             .pending
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_sub(1)
             })
             .is_ok();
