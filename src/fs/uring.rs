@@ -559,9 +559,9 @@ impl IoUringFile {
     /// Sets the logical file position used by sequential read/write operations.
     pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
         self.prepare_synchronous_operation(true, true)?;
-        // This synchronous call is a new seek, not a retry of a trait future
-        // whose result another operation already collected.
-        self.trait_io.lock().seek_credit = None;
+        // Preparation ends the previous trait seek and write sequences. This
+        // synchronous call is a new seek, not a retry of a collected result;
+        // keep the cursor gate through the actual position change below.
         let _cursor_guard = self.inner.cursor_lock.lock();
         self.seek_locked(pos)
     }
@@ -1498,6 +1498,10 @@ impl IoUringFile {
         }
         if new_write {
             state.write_credit = None;
+            // A synchronous write, seek or resize also ends a previous trait
+            // seek. Reusing its result after the cursor or EOF changes would
+            // skip the new seek, including a newly valid End-relative seek.
+            state.seek_credit = None;
         }
         Ok(())
     }
