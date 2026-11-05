@@ -5195,10 +5195,39 @@ impl PgConnection {
             // The minimal simple-Query exchange, which deliberately skips the
             // command-tag reactions (DISCARD would otherwise mark this
             // connection for discard).
-            match self
-                .run_managed_statement_timeout_set(cx, "DISCARD ALL")
-                .await
+            // Neither checkout validation nor reset_and_return supplies a
+            // deadline to the manager. Bound this maintenance exchange even
+            // when the borrower has an unbounded Cx, so a silent backend
+            // cannot retain the pool slot indefinitely (br-asupersync-qml5yb).
+            let bound = self
+                .inner
+                .options
+                .connect_timeout
+                .unwrap_or(self.inner.tls_options.connect_timeout_duration());
+            let result = match crate::time::timeout(
+                cx.now(),
+                bound,
+                self.run_managed_statement_timeout_set(cx, "DISCARD ALL"),
+            )
+            .await
             {
+                Ok(result) => result,
+                Err(_) => {
+                    // Expiry can win without repolling the socket. Close it
+                    // before returning and keep the reset pending: a partial
+                    // DISCARD must never reach another borrower.
+                    self.abort_in_flight_exchange();
+                    if cx.checkpoint().is_err() {
+                        Outcome::Cancelled(cancelled_reason(cx))
+                    } else {
+                        Outcome::Err(PgError::Io(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "PostgreSQL pool session reset timed out",
+                        )))
+                    }
+                }
+            };
+            match result {
                 Outcome::Ok(()) => {}
                 other => return other,
             }
@@ -10845,6 +10874,12 @@ impl PgConnectionManager {
     /// to run the reset before it goes idle. A checkout that validates
     /// connections runs a reset still pending, and discards a connection
     /// whose reset fails.
+    ///
+    /// Each pending reset uses the same whole-connect timeout as connection
+    /// setup: [`PgConnectOptions::connect_timeout`] takes precedence over
+    /// [`PgTlsOptions::connect_timeout`], whose default is thirty seconds.
+    /// Expiry closes and discards the session, releasing the pool slot even
+    /// when the caller's context has no deadline.
     #[must_use]
     pub fn reset_session_on_return(mut self, enabled: bool) -> Self {
         self.reset_session_on_return = enabled;

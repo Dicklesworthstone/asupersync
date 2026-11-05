@@ -9973,6 +9973,177 @@ mod tests {
         assert!(run(mgr.is_valid(&cx, &mut conn)), "nothing to reset");
     }
 
+    /// br-asupersync-qml5yb: a silent backend must not hold a pending
+    /// DISCARD ALL forever. Exercise the real socket read with a native
+    /// runtime and advance time only after observing it parked.
+    #[test]
+    fn session_reset_deadline_uses_connection_policy_and_preserves_cancellation() {
+        use std::future::Future;
+        use std::io::Read;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        for (legacy_secs, policy_secs, bound_secs) in [
+            (Some(5), Some(11), 5),
+            (None, Some(11), 11),
+            (None, None, 30),
+        ] {
+            for cancel_at_expiry in [false, true] {
+                let clock = Arc::new(crate::time::VirtualClock::new());
+                let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                    .with_reactor(
+                        crate::runtime::reactor::create_reactor().expect("native reactor"),
+                    )
+                    .with_timer_driver(timer.clone())
+                    .build()
+                    .expect("native reset runtime");
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("native context").derive_cancel_scope();
+                    let (mut conn, mut peer) = make_test_connection_with_peer();
+                    conn.inner.options.connect_timeout = legacy_secs.map(Duration::from_secs);
+                    if let Some(seconds) = policy_secs {
+                        conn.inner.tls_options =
+                            PgTlsOptions::default().connect_timeout(Duration::from_secs(seconds));
+                    }
+                    conn.inner.pending_session_reset = true;
+                    let progress = Arc::new(AtomicUsize::new(usize::MAX));
+                    conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
+                    let mut reset = Box::pin(conn.reset_pooled_session(&cx));
+                    let first =
+                        std::future::poll_fn(|task_cx| Poll::Ready(reset.as_mut().poll(task_cx)))
+                            .await;
+                    assert!(first.is_pending(), "reset must await the backend's reply");
+                    assert_eq!(progress.load(Ordering::Acquire), 0, "socket read is parked");
+                    let request = read_until_contains(&mut peer, b"DISCARD ALL\0");
+                    assert_eq!(request.first(), Some(&b'Q'));
+
+                    clock.advance_to(crate::types::Time::from_secs(bound_secs - 1));
+                    let _ = timer.process_timers();
+                    let before_expiry =
+                        std::future::poll_fn(|task_cx| Poll::Ready(reset.as_mut().poll(task_cx)))
+                            .await;
+                    assert!(before_expiry.is_pending(), "reset must retain its configured bound");
+
+                    clock.advance_to(crate::types::Time::from_secs(bound_secs + 1));
+                    if cancel_at_expiry {
+                        cx.cancel_with(CancelKind::User, Some("cancel at session reset expiry"));
+                    }
+                    let _ = timer.process_timers();
+                    let completed =
+                        std::future::poll_fn(|task_cx| Poll::Ready(reset.as_mut().poll(task_cx)))
+                            .await;
+                    let Poll::Ready(outcome) = completed else {
+                        panic!("a silent backend must not outlive the reset deadline");
+                    };
+                    drop(reset);
+                    if cancel_at_expiry {
+                        assert!(
+                            matches!(outcome, Outcome::Cancelled(ref reason)
+                                if reason.kind == CancelKind::User
+                                    && reason.message.as_deref()
+                                        == Some("cancel at session reset expiry")),
+                            "preserve cancellation at expiry: {outcome:?}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(outcome, Outcome::Err(PgError::Io(ref error))
+                                if error.kind() == io::ErrorKind::TimedOut
+                                    && error.to_string() == "PostgreSQL pool session reset timed out"),
+                            "report the reset timeout: {outcome:?}"
+                        );
+                    }
+                    assert!(conn.inner.closed, "an incomplete reset cannot be reused");
+                    assert!(conn.inner.pending_session_reset, "the reset never completed");
+                    assert_eq!(conn.inner.session_generation, 0);
+                    let mut byte = [0u8; 1];
+                    match peer.read(&mut byte) {
+                        Ok(0) => {}
+                        Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+                        other => panic!("timeout must physically close the socket: {other:?}"),
+                    }
+                });
+            }
+        }
+    }
+
+    /// The same timeout must propagate through the public pool return API,
+    /// which owns the slot until the manager finishes resetting the socket.
+    #[test]
+    fn session_reset_timeout_releases_the_public_pool_slot() {
+        use std::future::Future;
+        use std::io::Read;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        for worker_threads in [1, 2] {
+            let (mut options, server) = spawn_deterministic_postgres_server(|peer| {
+                let request = read_until_contains(peer, b"DISCARD ALL\0");
+                assert_eq!(request.first(), Some(&b'Q'));
+                // Withhold ReadyForQuery. A timed-out reset must close this
+                // socket rather than returning it to another pool borrower.
+                let mut byte = [0u8; 1];
+                match peer.read(&mut byte) {
+                    Ok(0) => {}
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+                    other => panic!("pool must discard the stalled reset socket: {other:?}"),
+                }
+            });
+            options.connect_timeout = Some(Duration::from_secs(5));
+            let clock = Arc::new(crate::time::VirtualClock::new());
+            let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let builder = if worker_threads == 1 {
+                crate::runtime::RuntimeBuilder::current_thread()
+            } else {
+                crate::runtime::RuntimeBuilder::new().worker_threads(worker_threads)
+            };
+            let runtime = builder
+                .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+                .with_timer_driver(timer.clone())
+                .build()
+                .expect("native pool reset runtime");
+            runtime.block_on(async {
+                let cx = Cx::current().expect("native context");
+                let pool = crate::database::pool::AsyncDbPool::new(
+                    PgConnectionManager::new(options).reset_session_on_return(true),
+                    crate::database::pool::DbPoolConfig::with_max_size(1),
+                );
+                let mut borrowed = pool.get(&cx).await.expect("initial pool checkout");
+                let progress = Arc::new(AtomicUsize::new(usize::MAX));
+                borrowed.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
+                let mut reset = Box::pin(borrowed.reset_and_return(&cx));
+                let pending =
+                    std::future::poll_fn(|task_cx| Poll::Ready(reset.as_mut().poll(task_cx))).await;
+                assert!(pending.is_pending());
+                assert_eq!(progress.load(Ordering::Acquire), 0, "reset read must be parked");
+                let stats = pool.stats();
+                assert_eq!((stats.total, stats.active, stats.idle), (1, 1, 0));
+
+                let mut contender = Box::pin(pool.get(&cx));
+                let queued =
+                    std::future::poll_fn(|task_cx| Poll::Ready(contender.as_mut().poll(task_cx)))
+                        .await;
+                assert!(queued.is_pending(), "the reset must retain exclusive ownership");
+                assert_eq!(pool.stats().pending_waiters, 1);
+                drop(contender);
+                assert_eq!(pool.stats().pending_waiters, 0);
+
+                clock.advance_to(crate::types::Time::from_secs(6));
+                let _ = timer.process_timers();
+                let completed =
+                    std::future::poll_fn(|task_cx| Poll::Ready(reset.as_mut().poll(task_cx))).await;
+                assert!(completed.is_ready(), "return must finish when the reset expires");
+                drop(reset);
+                let stats = pool.stats();
+                assert_eq!((stats.total, stats.active, stats.idle), (0, 0, 0));
+                assert_eq!(stats.total_discards, 1);
+                assert_eq!(stats.pending_waiters, 0);
+                pool.close();
+            });
+            server.join().expect("silent backend observed the socket close");
+        }
+    }
+
     /// br-asupersync-t4wfzb: PgConnectionManager::release_check must
     /// return false when the connection is flagged unhealthy (via
     /// br-asupersync-7v80ju consecutive DEALLOCATE failures).
