@@ -1640,6 +1640,7 @@ impl OwnedH2Request {
         cx: &Cx,
         signal: &ShutdownSignal,
         mut idle: Option<(Time, ServerRequestDeadline)>,
+        handler_finished_at: Option<&parking_lot::Mutex<Option<Time>>>,
     ) -> (Result<(), JoinError>, bool) {
         let mut force = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
         let mut cancellation_sent = false;
@@ -1668,6 +1669,16 @@ impl OwnedH2Request {
                     idle = None;
                     parent.clear();
                 }
+            }
+            // Produced responses keep this task alive after the handler has
+            // returned. Only a handler that met its deadline retires that
+            // timer; a delayed coordinator cannot forgive an overdue return.
+            if idle.as_ref().is_some_and(|(deadline, _)| {
+                handler_finished_at
+                    .and_then(|finished| *finished.lock())
+                    .is_some_and(|finished| finished <= *deadline)
+            }) {
+                idle = None;
             }
             // Match timeout_at's strict-overdue rule before observing ready
             // work. A body can finish while its coordinator is not scheduled;
@@ -1776,10 +1787,26 @@ where
     .await
 }
 
+#[cfg(any(test, feature = "http2-streaming"))]
 async fn run_owned_h2_hop<F, Fut, T>(
     cx: &Cx,
     signal: &ShutdownSignal,
     config: OwnedH2HopConfig,
+    factory: F,
+) -> Result<OwnedH2HopCompletion<T>, String>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    run_owned_h2_hop_observing_handler(cx, signal, config, None, factory).await
+}
+
+async fn run_owned_h2_hop_observing_handler<F, Fut, T>(
+    cx: &Cx,
+    signal: &ShutdownSignal,
+    config: OwnedH2HopConfig,
+    handler_finished_at: Option<Arc<parking_lot::Mutex<Option<Time>>>>,
     factory: F,
 ) -> Result<OwnedH2HopCompletion<T>, String>
 where
@@ -1854,20 +1881,52 @@ where
         let deadline = config.started_at + timeout;
         (deadline, ServerRequestDeadline::new(timer, deadline))
     });
-    let (task_outcome, idle_expired) = owner.join(cx, signal, idle).await;
-    owner
+    let (task_outcome, idle_expired) = owner
+        .join(cx, signal, idle, handler_finished_at.as_deref())
+        .await;
+    let closed = owner
         .region
         .take()
         .expect("owned region")
-        .close()
+        .close_with_outcome()
         .await
         .map_err(|error| error.to_string())?;
     let returned = publication.lock().take();
-    let hop = match (&task_outcome, returned) {
-        (Err(JoinError::Panicked(payload)), _) => ServerHopOutcome::Panicked(payload.to_string()),
-        (_, Some(outcome)) => outcome,
-        (Err(JoinError::Cancelled(_)), None) => ServerHopOutcome::Cancelled,
-        (_, None) => ServerHopOutcome::Panicked("H2 body omitted terminal publication".to_owned()),
+    // Only the produced-owned adapter records a produced-plan return here.
+    // Preserve established buffered semantics while requiring this new lane
+    // to distinguish actual quiescence from successful request cleanup.
+    let close_failure = if handler_finished_at
+        .as_ref()
+        .is_some_and(|finished| finished.lock().is_some())
+    {
+        use crate::types::Outcome;
+        match (closed.descendant_panic, closed.cleanup_outcome, closed.outcome) {
+            (Some(panic), _, _)
+            | (_, Some(Outcome::Panicked(panic)), _)
+            | (_, _, Outcome::Panicked(panic)) => Some(panic.to_string()),
+            (_, Some(cleanup), _) if !matches!(cleanup, Outcome::Ok(())) => {
+                Some(format!("HTTP/2 produced request cleanup failed: {cleanup:?}"))
+            }
+            (_, _, Outcome::Err(error)) => {
+                Some(format!("HTTP/2 produced request descendant failed: {error:?}"))
+            }
+            // Closing deliberately cancels remaining descendants. That
+            // aggregate cancellation alone is not a failed finalizer.
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let hop = match (close_failure, &task_outcome, returned) {
+        (Some(failure), _, _) => ServerHopOutcome::Panicked(failure),
+        (_, Err(JoinError::Panicked(payload)), _) => {
+            ServerHopOutcome::Panicked(payload.to_string())
+        }
+        (_, _, Some(outcome)) => outcome,
+        (_, Err(JoinError::Cancelled(_)), None) => ServerHopOutcome::Cancelled,
+        (_, _, None) => {
+            ServerHopOutcome::Panicked("H2 body omitted terminal publication".to_owned())
+        }
     };
     Ok(OwnedH2HopCompletion {
         hop,
@@ -3051,6 +3110,197 @@ async fn next_driver_event(
     .await
 }
 
+enum OwnedH2Response {
+    Buffered(Http2Response),
+    Produced(Http2ProducerOutcome),
+    HandlerIdleTimeout,
+}
+
+/// Keep a handler and its deferred producer in the same admitted request
+/// task. The frame driver may stream the body while this hop is running, but
+/// its existing ProducedDone barrier cannot publish END_STREAM until close
+/// has retired every descendant and finalizer (asupersync-m8xsjx).
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_owned_h2_response<F, Fut>(
+    cx: &Cx,
+    signal: &ShutdownSignal,
+    config: OwnedH2HopConfig,
+    handler: Arc<F>,
+    request: Request,
+    stream_id: u32,
+    resp_tx: &mpsc::Sender<FunnelItem>,
+    guard: InFlightRequestGuard,
+    suppress_response_body: bool,
+)
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = H2DispatchResponse> + Send + 'static,
+{
+    let guard = Arc::new(guard);
+    let body_guard = Arc::clone(&guard);
+    let body_tx = resp_tx.clone();
+    let produced_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_by_body = Arc::clone(&produced_started);
+    let handler_finished_at = Arc::new(parking_lot::Mutex::new(None));
+    let finished_by_body = Arc::clone(&handler_finished_at);
+    let completion = run_owned_h2_hop_observing_handler(
+        cx,
+        signal,
+        config,
+        Some(handler_finished_at),
+        move || async move {
+            let request_cx = Cx::current().expect("owned HTTP/2 request task context");
+            let plan = match handler(request).await {
+                H2DispatchResponse::Buffered(response) => {
+                    return OwnedH2Response::Buffered(response);
+                }
+                H2DispatchResponse::Produced(plan) => plan,
+            };
+            let finished_at = request_cx.now();
+            *finished_by_body.lock() = Some(finished_at);
+            if config
+                .idle_timeout
+                .is_some_and(|timeout| finished_at > config.started_at + timeout)
+            {
+                return OwnedH2Response::HandlerIdleTimeout;
+            }
+            let validation = if suppress_response_body {
+                validate_h2_produced_head_for_queue(&plan.response)
+            } else {
+                validate_h2_produced_response_for_queue(&plan.response)
+            };
+            if validation.is_err() {
+                return OwnedH2Response::Buffered(invalid_h2_response_fallback());
+            }
+            if suppress_response_body {
+                return OwnedH2Response::Buffered(plan.response.into_h2_response());
+            }
+            if request_cx.is_cancel_requested() {
+                return OwnedH2Response::Produced(Http2ProducerOutcome::Cancelled);
+            }
+            let (response, body, sender, producer) = plan.into_parts(&request_cx);
+            let Ok(permit) = body_tx.reserve(&request_cx).await else {
+                return OwnedH2Response::Produced(Http2ProducerOutcome::Cancelled);
+            };
+            let (published, wake) = permit.try_send_deferred_wake(FunnelItem::ProducedStart {
+                stream_id,
+                response,
+                body,
+                cancellation: ProducedCancellationGuard::new(request_cx.clone()),
+                guard: body_guard,
+            });
+            // Queue publication precedes arbitrary receiver/obligation wakes.
+            // Record it before a callback can panic, so the owning coordinator
+            // still reports ProducedDone for a body already visible on wire.
+            started_by_body.store(published.is_ok(), Ordering::Release);
+            wake.wake();
+            if published.is_err() {
+                return OwnedH2Response::Produced(Http2ProducerOutcome::Cancelled);
+            }
+            // Factory construction, future polls, and destruction all remain
+            // inside the actual request task's protocol/panic boundary.
+            let result = producer(request_cx.clone(), sender).await;
+            OwnedH2Response::Produced(classify_h2_producer_hop(
+                Some(ServerHopOutcome::Ok(result)),
+                &request_cx,
+            ))
+        },
+    )
+    .await;
+    if let Ok(completed) = &completion {
+        if let Some(Err(error)) = &completed.task_outcome {
+            cx.trace(&format!("h2_owned_handler_task_terminal: {error:?}"));
+        }
+    }
+    if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+        return;
+    }
+    let item = if produced_started.load(Ordering::Acquire) {
+        let outcome = match completion {
+            Ok(OwnedH2HopCompletion {
+                hop: ServerHopOutcome::Ok(OwnedH2Response::Produced(outcome)),
+                ..
+            }) => outcome,
+            Ok(OwnedH2HopCompletion {
+                hop: ServerHopOutcome::DeadlineExceeded,
+                ..
+            }) => Http2ProducerOutcome::DeadlineExceeded,
+            Ok(OwnedH2HopCompletion {
+                hop: ServerHopOutcome::Cancelled,
+                ..
+            }) => Http2ProducerOutcome::Cancelled,
+            Ok(OwnedH2HopCompletion {
+                hop: ServerHopOutcome::ConnectionLost,
+                ..
+            }) => Http2ProducerOutcome::ConnectionLost,
+            _ => Http2ProducerOutcome::Failed,
+        };
+        FunnelItem::ProducedDone { stream_id, outcome }
+    } else {
+        // No ProducedStart escaped, and the request task and subtree have
+        // closed. Only this coordinator can still hold the admission guard.
+        let guard = Arc::try_unwrap(guard)
+            .unwrap_or_else(|_| unreachable!("closed request retained an unpublished guard"));
+        match completion {
+            Ok(OwnedH2HopCompletion {
+                idle_expired: true, ..
+            })
+            | Ok(OwnedH2HopCompletion {
+                hop: ServerHopOutcome::Ok(OwnedH2Response::HandlerIdleTimeout),
+                ..
+            }) => FunnelItem::StreamIdleTimeout { stream_id, guard },
+            completion => {
+                let response = match completion {
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::Ok(OwnedH2Response::Buffered(response)),
+                        ..
+                    }) => response,
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::DeadlineExceeded,
+                        ..
+                    }) => Response::new(
+                        503,
+                        "Service Unavailable",
+                        HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
+                    )
+                    .into_h2_response(),
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::Cancelled
+                            | ServerHopOutcome::ConnectionLost
+                            | ServerHopOutcome::Ok(OwnedH2Response::Produced(_)),
+                        ..
+                    }) => return,
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::Panicked(message),
+                        ..
+                    }) => {
+                        cx.trace(&format!("h2_owned_handler_panicked: {message}"));
+                        invalid_h2_response_fallback()
+                    }
+                    Err(error) => {
+                        cx.trace(&format!("h2_owned_handler_admission_or_close_failed: {error}"));
+                        invalid_h2_response_fallback()
+                    }
+                    _ => invalid_h2_response_fallback(),
+                };
+                FunnelItem::Response {
+                    stream_id,
+                    response,
+                    guard,
+                    suppress_response_body,
+                }
+            }
+        }
+    };
+    // The request Cx may be cancelled. Cleanup publication belongs to its
+    // coordinator and happens only after the retirement barrier above.
+    if let Ok(permit) = resp_tx.reserve(cx).await {
+        if signal.phase() as u8 < ShutdownPhase::ForceClosing as u8 {
+            let _ = permit.try_send(item);
+        }
+    }
+}
+
 /// Dispatch one complete request to the handler on its own task.
 ///
 /// The spawned task races the handler against force-close (h1 parity) and
@@ -3139,10 +3389,9 @@ where
         // via `ServerRequestRegion`). The request budget is the connection
         // budget tightened by the configured request timeout and the (opt-in,
         // cap-clamped) client `Request-Timeout` header (meet semantics — it
-        // can only tighten, never extend). Buffered listeners use an actual
-        // admitted child task. Produced listeners retain their existing
-        // handler lifetime because the returned producer may release work
-        // started by that handler.
+        // can only tighten, never extend). Owned serving keeps both the
+        // handler and a deferred producer in the same admitted child task.
+        // Legacy produced serving retains its existing handler lifetime.
         let request_now = cx
             .timer_driver()
             .map_or_else(crate::time::wall_now, |timer| timer.now());
@@ -3156,10 +3405,8 @@ where
             request_timeout_header_cap,
         );
 
-        let producer_signal = signal.clone();
-        let handler_connection_cx = cx.clone();
-        let response = if owned_request {
-            let completed = run_owned_h2_hop(
+        if owned_request {
+            dispatch_owned_h2_response(
                 &cx,
                 &signal,
                 OwnedH2HopConfig {
@@ -3169,57 +3416,19 @@ where
                     drain_grace: request_drain_grace,
                     idle_timeout: stream_idle_timeout,
                 },
-                move || handler(request),
+                handler,
+                request,
+                stream_id,
+                &resp_tx,
+                guard,
+                suppress_response_body,
             )
             .await;
-            // Closing the child can itself wait for descendants/finalizers.
-            // A response completed before ForceClosing still cannot escape
-            // after shutdown won during that owned close.
-            if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
-                drop(guard);
-                return;
-            }
-            match completed {
-                Ok(completed) => {
-                    if let Some(Err(error)) = &completed.task_outcome {
-                        cx.trace(&format!("h2_owned_handler_task_terminal: {error:?}"));
-                    }
-                    if completed.idle_expired {
-                        if let Ok(permit) = resp_tx.reserve(&cx).await {
-                            permit.send(FunnelItem::StreamIdleTimeout { stream_id, guard });
-                        }
-                        return;
-                    }
-                    match completed.hop {
-                        ServerHopOutcome::Ok(response) => Some(response),
-                        ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost => None,
-                        ServerHopOutcome::Panicked(message) => {
-                            cx.trace(&format!("h2_owned_handler_panicked: {message}"));
-                            Some(H2DispatchResponse::Buffered(
-                                Response::new(500, "Internal Server Error", Vec::new())
-                                    .into_h2_response(),
-                            ))
-                        }
-                        ServerHopOutcome::DeadlineExceeded => Some(H2DispatchResponse::Buffered(
-                            Response::new(
-                                503,
-                                "Service Unavailable",
-                                HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
-                            )
-                            .into_h2_response(),
-                        )),
-                    }
-                }
-                Err(error) => {
-                    cx.trace(&format!(
-                        "h2_owned_handler_admission_or_close_failed: {error}"
-                    ));
-                    Some(H2DispatchResponse::Buffered(
-                        Response::new(500, "Internal Server Error", Vec::new()).into_h2_response(),
-                    ))
-                }
-            }
-        } else {
+            return;
+        }
+        let producer_signal = signal.clone();
+        let handler_connection_cx = cx.clone();
+        let response = {
             let handler_future = async move {
                 match ServerRequestRegion::mint("h2", request_budget, request_now) {
                     Some(region) => {
@@ -3315,15 +3524,6 @@ where
         match response {
             H2DispatchResponse::Buffered(response) => {
                 if let Ok(permit) = resp_tx.reserve(&cx).await {
-                    if owned_request
-                        && producer_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
-                    {
-                        // Capacity becoming available is not permission to
-                        // publish a completed response after forced shutdown.
-                        drop(permit);
-                        drop(guard);
-                        return;
-                    }
                     permit.send(FunnelItem::Response {
                         stream_id,
                         response,
@@ -5714,6 +5914,40 @@ impl<F> Http2Listener<F> {
         self.run_mapped(
             runtime,
             false,
+            #[cfg(feature = "http2-streaming")]
+            None,
+            |handler, request| async move { handler(request).await.into_driver_response() },
+        )
+        .await
+    }
+
+    /// Run deferred response producers in actual request child regions.
+    ///
+    /// The handler and producer factories run in the same admitted task with
+    /// the same ambient [`Cx`]. Work spawned by the handler remains available
+    /// to its producer. HEADERS and bounded DATA stream while that task runs;
+    /// a successful END_STREAM or trailing HEADERS waits for every request
+    /// descendant and finalizer to retire.
+    ///
+    /// Peer reset, disconnect, request timeout, and forced shutdown cancel
+    /// the request subtree. Its admission slot remains held through actual
+    /// cleanup. Non-cooperative descendants can delay quiescence; elapsed
+    /// drain grace alone never certifies that their region has closed.
+    /// `stream_idle_timeout` bounds the handler before it returns a response;
+    /// the request budget continues to bound the deferred producer.
+    ///
+    /// This opt-in uses the same bounded queues, flow control, HEAD handling,
+    /// and connection driver as [`Self::run_produced`], which retains its
+    /// existing request-context behavior. Buffered responses also wait for
+    /// request retirement before they are published.
+    pub async fn run_produced_owned<Fut>(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats>
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        self.run_mapped(
+            runtime,
+            true,
             #[cfg(feature = "http2-streaming")]
             None,
             |handler, request| async move { handler(request).await.into_driver_response() },

@@ -557,6 +557,186 @@
         }
     }
 
+    #[test]
+    fn owned_h2_producer_outlives_handler_idle_but_keeps_its_request_deadline() {
+        use crate::lab::{LabConfig, LabRuntime};
+
+        let mut lab = LabRuntime::new(LabConfig::new(0x36_510).max_steps(2048));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let signal = ShutdownSignal::new();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&in_flight);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let retired = Arc::clone(&dropped);
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&cancelled);
+        let handler = Arc::new(move |_request: Request| {
+            let dropped = Arc::clone(&retired);
+            let cancelled = Arc::clone(&observed);
+            async move {
+                Http2ProducedResponse::streaming(
+                    Response::new(200, "OK", Vec::new()),
+                    NonZeroUsize::MIN,
+                    NonZeroUsize::new(8).unwrap(),
+                    move |cx, _sender| async move {
+                        let _drop = OwnedBodyDrop {
+                            cx,
+                            dropped,
+                            cancelled,
+                        };
+                        std::future::pending().await
+                    },
+                )
+                .into_driver_response()
+            }
+        });
+        let (tx, mut rx) = mpsc::channel::<FunnelItem>(4);
+        let mut config = owned_hop_config();
+        config.idle_timeout = Some(Duration::from_nanos(100));
+        config.budget = config.budget.with_deadline(Time::from_nanos(200));
+        config.drain_grace = Duration::from_nanos(10);
+        let request =
+            request_from_h2_parts(request_block(&[]), Vec::new(), Vec::new(), None).unwrap();
+        let (owner, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let guard = InFlightRequestGuard::acquire(Some(&counter));
+                dispatch_owned_h2_response(
+                    &cx, &signal, config, handler, request, 1, &tx, guard, false,
+                )
+                .await;
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
+        assert!(lab.run_until_idle() < 2048);
+        let start = rx.try_recv().expect("producer must publish its live body");
+        assert!(matches!(&start, FunnelItem::ProducedStart { stream_id: 1, .. }));
+        assert_eq!(
+            lab.state.live_task_count(),
+            2,
+            "coordinator and actual producer are parked"
+        );
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+
+        lab.advance_time_to(Time::from_nanos(100));
+        assert!(lab.state.timer_driver_handle().unwrap().process_timers() > 0);
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(join.try_join(), Ok(None));
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 0);
+        assert!(
+            rx.try_recv().is_err(),
+            "handler idle cannot terminate a live producer"
+        );
+
+        lab.advance_time_to(Time::from_nanos(200));
+        assert!(lab.state.timer_driver_handle().unwrap().process_timers() > 0);
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            0,
+            "request deadline first starts cleanup grace"
+        );
+        lab.advance_time_to(Time::from_nanos(210));
+        assert!(lab.state.timer_driver_handle().unwrap().process_timers() > 0);
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(join.try_join(), Ok(Some(())));
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            FunnelItem::ProducedDone {
+                stream_id: 1,
+                outcome: Http2ProducerOutcome::DeadlineExceeded,
+            }
+        ));
+        assert_eq!(
+            in_flight.load(Ordering::SeqCst),
+            1,
+            "wire body retains its admission guard"
+        );
+        drop(start);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        drop(rx);
+        finish_owned_h2_lab(&mut lab, root);
+    }
+
+    #[test]
+    fn owned_h2_producer_publication_wake_panic_still_reports_failed_completion() {
+        struct PanicWake(Arc<AtomicUsize>);
+        impl std::task::Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("intentional produced response publication wake panic");
+            }
+        }
+
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = std::task::Waker::from(Arc::new(PanicWake(Arc::clone(&wakes))));
+            let (tx, mut rx) = mpsc::channel::<FunnelItem>(4);
+            assert!(
+                rx.poll_recv(&cx, &mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            let factories = Arc::new(AtomicUsize::new(0));
+            let handler_factories = Arc::clone(&factories);
+            let handler = Arc::new(move |_request: Request| {
+                let factories = Arc::clone(&handler_factories);
+                async move {
+                    Http2ProducedResponse::streaming(
+                        Response::new(200, "OK", Vec::new()),
+                        NonZeroUsize::MIN,
+                        NonZeroUsize::new(8).unwrap(),
+                        move |cx, mut sender| {
+                            factories.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                sender.finish(&cx)?;
+                                Ok(sender)
+                            }
+                        },
+                    )
+                    .into_driver_response()
+                }
+            });
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let guard = InFlightRequestGuard::acquire(Some(&in_flight));
+            let request =
+                request_from_h2_parts(request_block(&[]), Vec::new(), Vec::new(), None).unwrap();
+            dispatch_owned_h2_response(
+                &cx,
+                &ShutdownSignal::new(),
+                owned_hop_config(),
+                handler,
+                request,
+                1,
+                &tx,
+                guard,
+                false,
+            )
+            .await;
+            assert_eq!(wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(factories.load(Ordering::SeqCst), 0);
+            let start = rx.try_recv().unwrap();
+            assert!(matches!(&start, FunnelItem::ProducedStart { stream_id: 1, .. }));
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                FunnelItem::ProducedDone {
+                    stream_id: 1,
+                    outcome: Http2ProducerOutcome::Failed,
+                }
+            ));
+            assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+            drop(start);
+            assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        });
+    }
+
     thread_local! {
         static H2_LISTENER_TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
