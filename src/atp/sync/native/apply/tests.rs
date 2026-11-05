@@ -67,6 +67,10 @@ fn overwrite_authorization() -> DestructiveAuthorization {
     }
 }
 
+fn delete_authorization() -> DestructiveAuthorization {
+    DestructiveAuthorization { allow_delete: true, ..create_authorization() }
+}
+
 fn untouched(report: &NativeDirectorySyncReport, staging: &Path) {
     assert!(!report.complete);
     assert!(report.verified_baseline.is_none());
@@ -276,6 +280,256 @@ fn native_apply_deletion_and_kind_change_refuse_even_with_broad_authorization() 
             }
         });
     }
+}
+
+#[test]
+fn native_quarantined_deletions_converge_both_directions_and_retain_every_inode() {
+    for workers in [1, 2] {
+        for deleted_locally in [false, true] {
+            native(workers, move |cx| async move {
+                let (local, remote, staging) = roots("quarantined-subtree");
+                for root in [&local, &remote] {
+                    fs::create_dir_all(root.join("retire/deep")).unwrap();
+                    fs::create_dir(root.join("retire/empty")).unwrap();
+                    fs::write(root.join("retire/deep/file"), b"retained original bytes").unwrap();
+                    fs::write(root.join("keep"), b"common file").unwrap();
+                }
+                let limits = NativeDirectoryLimits { buffer_bytes: 7, ..NativeDirectoryLimits::default() };
+                let baseline = scan_native_directory(&cx, local.clone(), limits)
+                    .await.unwrap().manifest().clone();
+                let (missing, remaining) = if deleted_locally { (&local, &remote) } else { (&remote, &local) };
+                let retained: std::collections::BTreeMap<_, _> = [
+                    "retire", "retire/deep", "retire/deep/file", "retire/empty",
+                ].into_iter().map(|path| (path, fs::metadata(remaining.join(path)).unwrap().ino())).collect();
+                // Simulate the user's deletion without erasing fixture data.
+                fs::rename(missing.join("retire"), staging.join("observed-deletion")).unwrap();
+                fs::write(remaining.join("a-new"), b"independent copy survives").unwrap();
+                let prepared = prepare_native_directory_sync(
+                    &cx, baseline, local.clone(), remote.clone(), limits,
+                ).await.unwrap();
+                assert!(!prepared.preview().has_conflicts());
+                let deletion = if deleted_locally { BidirectionalSyncAction::DeleteRemote }
+                    else { BidirectionalSyncAction::DeleteLocal };
+                assert_eq!(prepared.preview().decisions.iter().filter(|decision| decision.action == deletion).count(), 4);
+                let report = prepared.apply_with_quarantined_deletions(
+                    &cx, delete_authorization(), staging.clone(),
+                ).await.unwrap();
+                assert!(report.complete, "{:?}", report.failure);
+                assert!(report.failure.is_none());
+                for root in [&local, &remote] {
+                    assert!(!root.join("retire").exists());
+                    assert_eq!(fs::read(root.join("a-new")).unwrap(), b"independent copy survives");
+                    assert_eq!(fs::read(root.join("keep")).unwrap(), b"common file");
+                }
+                let recovery_root = report.staging_directory.as_ref().unwrap();
+                let mut deleted = 0;
+                for receipt in &report.actions {
+                    if receipt.action != deletion { continue; }
+                    deleted += 1;
+                    assert_eq!(receipt.state, NativeDirectoryActionState::Quarantined);
+                    assert!(receipt.durable);
+                    assert_eq!(receipt.bytes_written, 0);
+                    assert!(receipt.staged_path.is_none());
+                    let recovered = receipt.quarantine_path.as_ref().unwrap();
+                    assert_eq!(recovered.parent().unwrap(), recovery_root);
+                    assert_eq!(fs::metadata(recovered).unwrap().ino(), retained[receipt.path.as_str()]);
+                    if receipt.path.as_str() == "retire/deep/file" {
+                        assert_eq!(fs::read(recovered).unwrap(), b"retained original bytes");
+                    } else {
+                        assert!(recovered.is_dir());
+                        assert_eq!(fs::read_dir(recovered).unwrap().count(), 0,
+                            "each reviewed child must retire before its directory");
+                    }
+                }
+                assert_eq!(deleted, 4);
+                let baseline = report.verified_baseline.unwrap();
+                for root in [&local, &remote] {
+                    let actual = scan_native_directory(&cx, root.clone(), limits).await.unwrap();
+                    assert_eq!(actual.manifest(), &baseline);
+                }
+                let prepared = prepare_native_directory_sync(
+                    &cx, baseline, local, remote, limits,
+                ).await.unwrap();
+                assert!(prepared.preview().is_noop());
+                let report = prepared.apply(&cx, create_authorization(), staging).await.unwrap();
+                assert!(report.complete);
+                assert!(report.staging_directory.is_none());
+            });
+        }
+    }
+}
+
+#[test]
+fn native_quarantined_deletions_require_consent_and_keep_dry_runs_read_only() {
+    native(1, |cx| async move {
+        let (local, remote, staging) = roots("quarantine-authorization");
+        fs::write(local.join("file"), b"retained").unwrap();
+        fs::write(remote.join("file"), b"retained").unwrap();
+        let limits = NativeDirectoryLimits::default();
+        let baseline = scan_native_directory(&cx, local.clone(), limits)
+            .await.unwrap().manifest().clone();
+        fs::rename(local.join("file"), staging.join("observed-deletion")).unwrap();
+        let original = fs::metadata(remote.join("file")).unwrap().ino();
+        for dry_run in [false, true] {
+            let prepared = prepare_native_directory_sync(
+                &cx, baseline.clone(), local.clone(), remote.clone(), limits,
+            ).await.unwrap();
+            let report = prepared.apply_with_quarantined_deletions(
+                &cx, DestructiveAuthorization { dry_run, ..DestructiveAuthorization::default() },
+                staging.clone(),
+            ).await.unwrap();
+            assert_eq!(report.dry_run, dry_run);
+            assert!(!report.complete);
+            assert!(report.staging_directory.is_none());
+            assert!(report.verified_baseline.is_none());
+            assert!(report.actions.iter().all(|receipt| receipt.state == NativeDirectoryActionState::NotStarted));
+            if dry_run {
+                assert!(report.failure.is_none());
+            } else {
+                assert!(matches!(report.failure, Some(NativeDirectoryError::Refused {
+                    reason: "deletion requires explicit delete authorization", ..
+                })));
+            }
+            assert_eq!(fs::metadata(remote.join("file")).unwrap().ino(), original);
+            assert_eq!(fs::read(remote.join("file")).unwrap(), b"retained");
+            assert_eq!(fs::read_dir(&staging).unwrap().count(), 1, "only the retained fixture exists");
+        }
+    });
+}
+
+#[test]
+fn native_quarantined_delete_vs_edit_conflict_blocks_all_effects() {
+    for deleted_locally in [false, true] {
+        native(2, move |cx| async move {
+            let (local, remote, staging) = roots("quarantine-conflict");
+            fs::write(local.join("z-file"), b"common").unwrap();
+            fs::write(remote.join("z-file"), b"common").unwrap();
+            let limits = NativeDirectoryLimits::default();
+            let baseline = scan_native_directory(&cx, local.clone(), limits)
+                .await.unwrap().manifest().clone();
+            let (missing, edited) = if deleted_locally { (&local, &remote) } else { (&remote, &local) };
+            fs::rename(missing.join("z-file"), staging.join("observed-deletion")).unwrap();
+            fs::write(edited.join("z-file"), b"concurrent edit must remain").unwrap();
+            fs::write(missing.join("a-copy"), b"independent copy").unwrap();
+            let prepared = prepare_native_directory_sync(
+                &cx, baseline, local.clone(), remote.clone(), limits,
+            ).await.unwrap();
+            assert!(prepared.preview().has_conflicts());
+            let report = prepared.apply_with_quarantined_deletions(
+                &cx, DestructiveAuthorization::explicit_mirror_apply(), staging.clone(),
+            ).await.unwrap();
+            assert!(matches!(report.failure, Some(NativeDirectoryError::Refused { .. })));
+            assert!(!report.complete);
+            assert!(report.staging_directory.is_none());
+            assert!(report.actions.iter().all(|receipt| receipt.state == NativeDirectoryActionState::NotStarted));
+            assert!(!edited.join("a-copy").exists());
+            assert_eq!(fs::read(edited.join("z-file")).unwrap(), b"concurrent edit must remain");
+            assert_eq!(fs::read_dir(staging).unwrap().count(), 1);
+        });
+    }
+}
+
+#[test]
+fn native_quarantined_deletions_revalidate_both_sides_before_effects() {
+    for recreate_absent in [false, true] {
+        native(2, move |cx| async move {
+            let (local, remote, staging) = roots("quarantine-stale");
+            fs::write(local.join("z-file"), b"common").unwrap();
+            fs::write(remote.join("z-file"), b"common").unwrap();
+            let limits = NativeDirectoryLimits::default();
+            let baseline = scan_native_directory(&cx, local.clone(), limits)
+                .await.unwrap().manifest().clone();
+            fs::rename(local.join("z-file"), staging.join("observed-deletion")).unwrap();
+            fs::write(local.join("a-copy"), b"independent copy").unwrap();
+            let prepared = prepare_native_directory_sync(
+                &cx, baseline, local.clone(), remote.clone(), limits,
+            ).await.unwrap();
+            let changed_path = if recreate_absent { local.join("z-file") } else { remote.join("z-file") };
+            fs::write(&changed_path, b"new observation").unwrap();
+            let report = prepared.apply_with_quarantined_deletions(
+                &cx, delete_authorization(), staging.clone(),
+            ).await.unwrap();
+            assert!(matches!(report.failure, Some(NativeDirectoryError::Changed { .. })));
+            assert!(!report.complete);
+            assert!(report.staging_directory.is_none());
+            assert!(report.actions.iter().all(|receipt| receipt.state == NativeDirectoryActionState::NotStarted));
+            assert!(!remote.join("a-copy").exists());
+            assert_eq!(fs::read(changed_path).unwrap(), b"new observation");
+            assert!(remote.join("z-file").exists());
+            assert_eq!(fs::read_dir(staging).unwrap().count(), 1);
+        });
+    }
+}
+
+#[test]
+fn native_quarantined_deletion_cancellation_returns_durable_partial_recovery() {
+    native(2, |cx| async move {
+        let (local, remote, staging) = roots("quarantine-cancel");
+        let payload = vec![0x6b; 1024 * 1024];
+        for root in [&local, &remote] {
+            fs::create_dir(root.join("retire")).unwrap();
+            fs::write(root.join("retire/a-slow"), &payload).unwrap();
+            fs::write(root.join("retire/z-first"), b"first retained inode").unwrap();
+        }
+        let limits = NativeDirectoryLimits {
+            buffer_bytes: 1, ..NativeDirectoryLimits::default()
+        };
+        let baseline = scan_native_directory(&cx, local.clone(), limits)
+            .await.unwrap().manifest().clone();
+        fs::rename(local.join("retire"), staging.join("observed-deletion")).unwrap();
+        let original = fs::metadata(remote.join("retire/z-first")).unwrap().ino();
+        let slow_original = fs::metadata(remote.join("retire/a-slow")).unwrap().ino();
+        let prepared = prepare_native_directory_sync(
+            &cx, baseline, local, remote.clone(), limits,
+        ).await.unwrap();
+        let first_index = prepared.preview().decisions.iter()
+            .position(|decision| decision.path.as_str() == "retire/z-first").unwrap();
+        let recovery = staging.join(format!("asupersync-sync-{}", prepared.plan_id()))
+            .join(format!("previous-{first_index:08x}"));
+        let owner = cx.clone();
+        let ready = Arc::new(Barrier::new(2));
+        let observer_ready = Arc::clone(&ready);
+        let observer_path = recovery.clone();
+        let observer = std::thread::spawn(move || {
+            observer_ready.wait();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(metadata) = fs::metadata(&observer_path) {
+                    owner.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("cancel after an actual native quarantine move"),
+                    );
+                    return metadata.ino();
+                }
+                assert!(Instant::now() < deadline, "no actual quarantine progress observed");
+                std::thread::yield_now();
+            }
+        });
+        ready.wait();
+        let report = prepared.apply_with_quarantined_deletions(
+            &cx, delete_authorization(), staging,
+        ).await.unwrap();
+        assert_eq!(observer.join().unwrap(), original);
+        assert!(matches!(report.failure, Some(NativeDirectoryError::Checkpoint(_))));
+        assert!(!report.complete);
+        assert!(report.verified_baseline.is_none());
+        let receipt = &report.actions[first_index];
+        assert_eq!(receipt.state, NativeDirectoryActionState::Quarantined);
+        assert!(receipt.durable, "the in-flight rename and both directory syncs must retire");
+        assert_eq!(receipt.quarantine_path.as_ref(), Some(&recovery));
+        assert_eq!(receipt.bytes_written, 0);
+        assert!(receipt.staged_path.is_none());
+        assert_eq!(fs::metadata(&recovery).unwrap().ino(), original);
+        assert_eq!(fs::read(recovery).unwrap(), b"first retained inode");
+        assert!(!remote.join("retire/z-first").exists());
+        assert_eq!(fs::metadata(remote.join("retire/a-slow")).unwrap().ino(), slow_original);
+        assert_eq!(fs::read(remote.join("retire/a-slow")).unwrap(), payload);
+        assert!(report.actions.iter().enumerate().all(|(index, receipt)| {
+            index == first_index || (receipt.state == NativeDirectoryActionState::NotStarted
+                && receipt.quarantine_path.is_none() && !receipt.durable)
+        }));
+        assert_eq!(fs::read_dir(report.staging_directory.unwrap()).unwrap().count(), 1);
+    });
 }
 
 #[test]

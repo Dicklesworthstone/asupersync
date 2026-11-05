@@ -12,6 +12,7 @@ use crate::atp::sync::{
     BidirectionalSyncAction, BidirectionalSyncDecision, DestructiveAuthorization,
 };
 use crate::cx::Cx;
+use nix::dir::Dir;
 use nix::fcntl::{OFlag, RenameFlags, openat, renameat2};
 use nix::sys::stat::{Mode, mkdirat};
 use nix::unistd::{getegid, geteuid};
@@ -33,6 +34,7 @@ pub enum NativeDirectoryActionState {
     /// A staging file exists, possibly with only partial contents.
     Staged,
     /// The previous destination was moved to the reported quarantine path.
+    /// This is also the completed effect for an authorized deletion.
     Quarantined,
     /// The new file or directory was published at its destination.
     Published,
@@ -52,9 +54,9 @@ pub struct NativeDirectoryActionReceipt {
     pub bytes_written: u64,
     /// Retained staging file, if it has not been moved into its destination.
     pub staged_path: Option<PathBuf>,
-    /// Retained original destination inode after an authorized overwrite.
+    /// Retained original destination inode after an authorized overwrite or deletion.
     pub quarantine_path: Option<PathBuf>,
-    /// Required file and directory syncs completed after publication.
+    /// Required file and directory syncs completed after publication or deletion.
     pub durable: bool,
 }
 
@@ -121,10 +123,59 @@ impl PreparedNativeDirectorySync {
         authorization: DestructiveAuthorization,
         staging_root: impl Into<PathBuf>,
     ) -> Result<NativeDirectorySyncReport, NativeDirectoryError> {
-        let staging_root = staging_root.into();
+        self.apply_profile(cx, authorization, staging_root.into(), false).await
+    }
+
+    /// Apply a reviewed reconciliation, retaining deleted entries in quarantine.
+    ///
+    /// Extends [`Self::apply`] with `DeleteLocal` and `DeleteRemote` decisions.
+    /// Effects require explicit `authorization.allow_delete`; a dry run reports
+    /// the plan without creating staging artifacts or requiring deletion consent.
+    /// Conflicts, unsupported kinds, missing authorization, and stale observations
+    /// still refuse the entire plan before the first effect. Overwrite keeps its
+    /// separate overwrite/permission-change authorization requirements.
+    ///
+    /// Copies and directory creation run first. Deletions then run in reverse
+    /// path order so every descendant retires before its directory. Each file is
+    /// rehashed, the opposite side must still be absent, and directories must be
+    /// empty. The original inode is synced and moved with `RENAME_NOREPLACE` to
+    /// the same private recovery staging used for overwrites. Nothing is unlinked
+    /// or recursively erased: inspect each `quarantine_path` to restore content.
+    /// A deleted subtree has a separate receipt and recovery path for each entry.
+    ///
+    /// Cancellation is checked before each move; once a move starts, its actual
+    /// result and directory syncs retire before return. A completed deletion has
+    /// state [`NativeDirectoryActionState::Quarantined`] and `durable: true`.
+    /// Failure may leave earlier effects or a moved inode whose directory sync
+    /// failed; receipts retain those boundaries. Both final trees must match the
+    /// reviewed projection before this returns a verified common baseline.
+    ///
+    /// The content-only Linux/glibc profile, exclusive-root ownership requirement,
+    /// external same-filesystem staging, and absence of cross-tree atomicity are
+    /// unchanged. The original [`Self::apply`] continues to refuse all deletions.
+    ///
+    /// # Errors
+    /// The outer error means runtime dispatch/retirement failed. An operation
+    /// that ran returns its actual partial report, with `failure` populated.
+    pub async fn apply_with_quarantined_deletions(
+        self,
+        cx: &Cx,
+        authorization: DestructiveAuthorization,
+        staging_root: impl Into<PathBuf>,
+    ) -> Result<NativeDirectorySyncReport, NativeDirectoryError> {
+        self.apply_profile(cx, authorization, staging_root.into(), true).await
+    }
+
+    async fn apply_profile(
+        self,
+        cx: &Cx,
+        authorization: DestructiveAuthorization,
+        staging_root: PathBuf,
+        quarantine_deletions: bool,
+    ) -> Result<NativeDirectorySyncReport, NativeDirectoryError> {
         cx.scoped_fs()
             .run_io(move |worker| {
-                Ok(apply_owned(&worker, self, authorization, &staging_root))
+                Ok(apply_owned(&worker, self, authorization, &staging_root, quarantine_deletions))
             })
             .await
             .map_err(NativeDirectoryError::Runtime)
@@ -136,6 +187,7 @@ fn apply_owned(
     mut prepared: PreparedNativeDirectorySync,
     authorization: DestructiveAuthorization,
     staging_path: &Path,
+    quarantine_deletions: bool,
 ) -> NativeDirectorySyncReport {
     let mut report = NativeDirectorySyncReport {
         plan_id: prepared.plan_id.clone(),
@@ -159,7 +211,7 @@ fn apply_owned(
     let result = (|| {
         checkpoint(cx)?;
         prepared.limits.validate()?;
-        let expected = preflight_actions(&prepared, authorization)?;
+        let expected = preflight_actions(&prepared, authorization, quarantine_deletions)?;
         revalidate_complete(cx, &prepared.local, prepared.limits)?;
         revalidate_complete(cx, &prepared.remote, prepared.limits)?;
         revalidate_stamps(cx, &prepared.local)?;
@@ -223,10 +275,32 @@ fn apply_owned(
                     cx, &prepared.remote, &mut prepared.local, decision,
                     &staging, &job_path, index, prepared.limits, receipt,
                 )?,
+                BidirectionalSyncAction::DeleteLocal | BidirectionalSyncAction::DeleteRemote => {}
                 _ => return Err(refused(
                     Path::new(decision.path.as_str()), "unsupported action escaped preflight",
                 )),
             }
+        }
+
+        // Planner decisions are canonical path ordered. Reversing that order
+        // puts every descendant before its ancestor without another work queue.
+        for (index, decision) in prepared.preview.decisions.iter().enumerate().rev() {
+            let (absent, destination) = match decision.action {
+                BidirectionalSyncAction::DeleteLocal => (&prepared.remote, &mut prepared.local),
+                BidirectionalSyncAction::DeleteRemote => (&prepared.local, &mut prepared.remote),
+                _ => continue,
+            };
+            checkpoint(cx)?;
+            staging_root.revalidate()?;
+            let current_job = stat_at(&staging_root.file, directory_name.as_str(), &job_path)?
+                .ok_or_else(|| changed(&job_path))?;
+            if current_job.identity != job_stamp.identity {
+                return Err(changed(&job_path));
+            }
+            apply_delete(
+                cx, absent, destination, decision, &staging, &job_path,
+                index, prepared.limits, &mut report.actions[index],
+            )?;
         }
 
         // Both real trees, not the preview alone, establish a common baseline.
@@ -254,6 +328,7 @@ fn apply_owned(
 fn preflight_actions(
     prepared: &PreparedNativeDirectorySync,
     authorization: DestructiveAuthorization,
+    quarantine_deletions: bool,
 ) -> Result<DirectoryManifest, NativeDirectoryError> {
     for decision in &prepared.preview.decisions {
         let path = Path::new(decision.path.as_str());
@@ -265,7 +340,22 @@ fn preflight_actions(
                 return Err(refused(path, "unresolved conflict blocks the entire native plan"));
             }
             BidirectionalSyncAction::DeleteLocal | BidirectionalSyncAction::DeleteRemote => {
-                return Err(refused(path, "native directory deletion is not supported"));
+                if !quarantine_deletions {
+                    return Err(refused(path, "native directory deletion is not supported"));
+                }
+                if !authorization.dry_run && !authorization.allow_delete {
+                    return Err(refused(path, "deletion requires explicit delete authorization"));
+                }
+                let (destination, absent) = match decision.action {
+                    BidirectionalSyncAction::DeleteLocal => (&decision.local, &decision.remote),
+                    _ => (&decision.remote, &decision.local),
+                };
+                if absent.is_some() || !destination.as_ref().is_some_and(|entry| {
+                    matches!(entry.kind, DirectoryEntryKind::File | DirectoryEntryKind::Directory)
+                }) {
+                    return Err(refused(path, "deletion requires an ordinary entry and opposite-side absence"));
+                }
+                continue;
             }
         };
         let source = source.as_ref().ok_or_else(|| refused(path, "copy source is absent"))?;
@@ -438,6 +528,129 @@ fn open_guarded_file(
     Ok(file)
 }
 
+// An absent ancestor also proves absence of the reviewed leaf. Walk through
+// retained, stamp-checked directories instead of treating ENOENT from an
+// arbitrary path lookup as permission to remove its peer.
+fn verify_absent(
+    cx: &Cx,
+    snapshot: &NativeDirectorySnapshot,
+    path: &DirectoryPath,
+) -> Result<(), NativeDirectoryError> {
+    snapshot.root.revalidate()?;
+    if snapshot.manifest.entries.contains_key(path)
+        || metadata_stamp(&snapshot.root.file, &snapshot.root.path)? != snapshot.root_stamp
+    {
+        return Err(changed(&snapshot.root.path.join(path.as_str())));
+    }
+    let mut directory = snapshot.root.file.try_clone()
+        .map_err(|source| io_error(&snapshot.root.path, source))?;
+    let mut relative = String::new();
+    let mut display = snapshot.root.path.clone();
+    for name in path.as_str().split('/') {
+        checkpoint(cx)?;
+        if !relative.is_empty() { relative.push('/'); }
+        relative.push_str(name);
+        display.push(name);
+        let prefix = DirectoryPath::normalize(&relative, snapshot.manifest.path_rules)
+            .map_err(NativeDirectoryError::Manifest)?;
+        let expected = snapshot.guards.get(&prefix).copied();
+        if stat_at(&directory, name, &display)? != expected {
+            return Err(changed(&display));
+        }
+        let Some(expected) = expected else { return Ok(()); };
+        if expected.kind(&display)? != DirectoryEntryKind::Directory {
+            return Err(changed(&display));
+        }
+        directory = File::from(
+            openat(&directory, name, directory_flags(), Mode::empty())
+                .map_err(|error| os_error(&display, error))?,
+        );
+        if metadata_stamp(&directory, &display)? != expected {
+            return Err(changed(&display));
+        }
+    }
+    Err(changed(&display))
+}
+
+fn verify_empty_directory(cx: &Cx, directory: &File, path: &Path) -> Result<(), NativeDirectoryError> {
+    let mut entries = Dir::openat(directory, ".", directory_flags(), Mode::empty())
+        .map_err(|error| os_error(path, error))?;
+    for entry in entries.iter() {
+        checkpoint(cx)?;
+        let entry = entry.map_err(|error| os_error(path, error))?;
+        let name = entry.file_name().to_bytes();
+        if name != b"." && name != b".." {
+            return Err(changed(path));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_delete(
+    cx: &Cx,
+    absent: &NativeDirectorySnapshot,
+    destination: &mut NativeDirectorySnapshot,
+    decision: &BidirectionalSyncDecision,
+    staging: &File,
+    staging_path: &Path,
+    index: usize,
+    limits: NativeDirectoryLimits,
+    receipt: &mut NativeDirectoryActionReceipt,
+) -> Result<(), NativeDirectoryError> {
+    let path = &decision.path;
+    let display = destination.root.path.join(path.as_str());
+    verify_absent(cx, absent, path)?;
+    let entry = destination.manifest.entries.get(path).ok_or_else(|| changed(&display))?;
+    let expected = destination.guards.get(path).copied().ok_or_else(|| changed(&display))?;
+    let (parent, name) = guarded_parent(destination, path)?;
+    if stat_at(&parent, name, &display)? != Some(expected) {
+        return Err(changed(&display));
+    }
+    let original = if entry.kind == DirectoryEntryKind::File {
+        let original = open_guarded_file(&parent, name, &display, expected)?;
+        let digest = super::hash_file(cx, &original, expected, &display, limits)?;
+        if Some(digest.as_str()) != entry.content_id.as_deref() {
+            return Err(changed(&display));
+        }
+        original
+    } else {
+        let original = File::from(
+            openat(&parent, name, directory_flags(), Mode::empty())
+                .map_err(|error| os_error(&display, error))?,
+        );
+        if metadata_stamp(&original, &display)? != expected {
+            return Err(changed(&display));
+        }
+        verify_empty_directory(cx, &original, &display)?;
+        original
+    };
+    // Preserve the original inode's data/metadata before moving its only name.
+    original.sync_all().map_err(|source| io_error(&display, source))?;
+
+    // Hashing and syncing may be long: recheck both sides and staging at the
+    // actual effect boundary, including the absence that justified deletion.
+    verify_absent(cx, absent, path)?;
+    let (parent, name) = guarded_parent(destination, path)?;
+    if stat_at(&parent, name, &display)? != Some(expected)
+        || metadata_stamp(&original, &display)? != expected
+    {
+        return Err(changed(&display));
+    }
+    if entry.kind == DirectoryEntryKind::Directory {
+        verify_empty_directory(cx, &original, &display)?;
+    }
+    verify_staging_directory(staging, staging_path)?;
+    checkpoint(cx)?;
+    // No cancellation boundary inside the move, recovery-name sync and receipt.
+    quarantine_previous(&parent, name, &display, expected, staging, staging_path, index, receipt)?;
+    receipt.durable = true;
+    if stat_at(&parent, name, &display)?.is_some() {
+        return Err(changed(&display));
+    }
+    record_deletion(destination, path, &parent)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_copy(
     cx: &Cx,
@@ -574,15 +787,20 @@ fn verify_staged(
     name: &str,
     expected: Stamp,
 ) -> Result<(), NativeDirectoryError> {
-    let named_directory = NativeRoot::open(staging_path)?;
-    if named_directory.identity != metadata_stamp(staging, staging_path)?.identity {
-        return Err(changed(staging_path));
-    }
+    verify_staging_directory(staging, staging_path)?;
     let path = staging_path.join(name);
     if stat_at(staging, name, &path)? != Some(expected)
         || metadata_stamp(staged, &path)? != expected
     {
         return Err(changed(&path));
+    }
+    Ok(())
+}
+
+fn verify_staging_directory(staging: &File, staging_path: &Path) -> Result<(), NativeDirectoryError> {
+    let named_directory = NativeRoot::open(staging_path)?;
+    if named_directory.identity != metadata_stamp(staging, staging_path)?.identity {
+        return Err(changed(staging_path));
     }
     Ok(())
 }
@@ -697,6 +915,27 @@ fn record_destination(
     let published_stamp = metadata_stamp(published, &display)?;
     destination.guards.insert(path.clone(), published_stamp);
     destination.manifest.entries.insert(path.clone(), entry.clone());
+    if let Some((prefix, _)) = path.as_str().rsplit_once('/') {
+        let prefix = DirectoryPath::normalize(prefix, destination.manifest.path_rules)
+            .map_err(NativeDirectoryError::Manifest)?;
+        destination.guards.insert(prefix, metadata_stamp(parent, &display)?);
+    } else {
+        destination.root_stamp = metadata_stamp(parent, &destination.root.path)?;
+    }
+    Ok(())
+}
+
+fn record_deletion(
+    destination: &mut NativeDirectorySnapshot,
+    path: &DirectoryPath,
+    parent: &File,
+) -> Result<(), NativeDirectoryError> {
+    let display = destination.root.path.join(path.as_str());
+    let removed = destination.manifest.entries.remove(path).ok_or_else(|| changed(&display))?;
+    destination.guards.remove(path);
+    destination.total_bytes = destination.total_bytes
+        .checked_sub(removed.metadata.size_bytes.unwrap_or(0))
+        .ok_or_else(|| changed(&display))?;
     if let Some((prefix, _)) = path.as_str().rsplit_once('/') {
         let prefix = DirectoryPath::normalize(prefix, destination.manifest.path_rules)
             .map_err(NativeDirectoryError::Manifest)?;
