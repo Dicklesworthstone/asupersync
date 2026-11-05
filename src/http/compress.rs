@@ -62,6 +62,23 @@ impl Default for DecompressionLimit {
     }
 }
 
+/// Private marker retained through codec I/O errors so request middleware can
+/// report a bounded-output refusal without matching error-message strings.
+#[derive(Debug)]
+pub(crate) struct DecompressionLimitExceeded(&'static str);
+
+impl fmt::Display for DecompressionLimitExceeded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for DecompressionLimitExceeded {}
+
+pub(crate) fn decompression_limit_error(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, DecompressionLimitExceeded(message))
+}
+
 /// Supported content encodings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentEncoding {
@@ -495,25 +512,39 @@ impl Decompressor for IdentityDecompressor {
 struct LimitedWriter {
     inner: Vec<u8>,
     max_size: Option<usize>,
-    limit_error: &'static str,
+    output: LimitedOutput,
+}
+
+#[derive(Debug)]
+#[cfg(feature = "compression")]
+enum LimitedOutput {
+    Compressed,
+    Decompressed,
 }
 
 #[cfg(feature = "compression")]
 #[allow(dead_code)]
 impl LimitedWriter {
     fn new(max_size: Option<usize>) -> Self {
-        Self::with_error(max_size, "decompressed size exceeds limit")
+        Self::with_output(max_size, LimitedOutput::Decompressed)
     }
 
     fn for_compressed_output(max_size: Option<usize>) -> Self {
-        Self::with_error(max_size, "compressed size exceeds limit")
+        Self::with_output(max_size, LimitedOutput::Compressed)
     }
 
-    fn with_error(max_size: Option<usize>, limit_error: &'static str) -> Self {
+    fn with_output(max_size: Option<usize>, output: LimitedOutput) -> Self {
         Self {
             inner: Vec::new(),
             max_size,
-            limit_error,
+            output,
+        }
+    }
+
+    fn limit_error(&self) -> io::Error {
+        match self.output {
+            LimitedOutput::Compressed => limit_error("compressed size exceeds limit"),
+            LimitedOutput::Decompressed => decompression_limit_error("decompressed size exceeds limit"),
         }
     }
 }
@@ -533,9 +564,9 @@ impl io::Write for LimitedWriter {
                 .inner
                 .len()
                 .checked_add(buf.len())
-                .ok_or_else(|| limit_error(self.limit_error))?;
+                .ok_or_else(|| self.limit_error())?;
             if next_len > max {
-                return Err(limit_error(self.limit_error));
+                return Err(self.limit_error());
             }
         }
         self.inner.extend_from_slice(buf);
@@ -1380,18 +1411,12 @@ fn update_decompressed_total(
     added: usize,
     max_size: Option<usize>,
 ) -> io::Result<()> {
-    let next_total = total.checked_add(added).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "decompressed size exceeds limit",
-        )
-    })?;
+    let next_total = total
+        .checked_add(added)
+        .ok_or_else(|| decompression_limit_error("decompressed size exceeds limit"))?;
     if let Some(max) = max_size {
         if next_total > max {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "decompressed size exceeds limit",
-            ));
+            return Err(decompression_limit_error("decompressed size exceeds limit"));
         }
     }
     *total = next_total;

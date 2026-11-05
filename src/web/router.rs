@@ -4573,8 +4573,16 @@ fn join_route_pattern(prefix: &str, pattern: &str) -> String {
 /// Protocol validation (Host, Content-Length, transfer coding, etc.) remains
 /// the listener's job and runs before this.
 fn insert_wire_headers(request: &mut Request, headers: Vec<(String, String)>) {
+    let mut content_codings: Option<Vec<String>> = None;
     for (name, value) in headers {
         let name = name.to_ascii_lowercase();
+        if name == "content-encoding"
+            && let Some(previous) = request.headers.get("content-encoding")
+        {
+            content_codings
+                .get_or_insert_with(|| vec![previous.clone()])
+                .push(value.clone());
+        }
         if name == "cookie"
             && let Some(joined) = request.headers.get_mut("cookie")
         {
@@ -4583,6 +4591,12 @@ fn insert_wire_headers(request: &mut Request, headers: Vec<(String, String)>) {
             continue;
         }
         request.headers.insert(name, value);
+    }
+    if let Some(fields) = content_codings {
+        request.extensions.insert_typed(super::middleware::RequestContentCodings::new(
+            fields,
+            request.body.clone(),
+        ));
     }
 }
 

@@ -22,7 +22,7 @@
 pub mod auto;
 pub mod body;
 pub mod compress;
-mod decode;
+pub(crate) mod decode;
 pub mod h1;
 pub mod h2;
 #[cfg(not(target_arch = "wasm32"))]

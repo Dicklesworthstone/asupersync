@@ -1,4 +1,4 @@
-//! Explicit, bounded content decoding for buffered HTTP client responses.
+//! Explicit, bounded content decoding shared by buffered HTTP messages.
 
 use super::compress::{ContentEncoding, DecompressionLimit, Decompressor};
 use super::{Method, Response};
@@ -70,8 +70,10 @@ impl Response {
             return Ok(());
         }
 
-        let codings = content_codings(&self.headers)?;
-        if codings.iter().all(|coding| *coding == IDENTITY) {
+        let decoder = ContentDecoder::from_fields(self.headers.iter().filter_map(|(name, value)| {
+            name.eq_ignore_ascii_case("content-encoding").then_some(value.as_str())
+        }))?;
+        if decoder.is_identity() {
             return check_size(self.body.len(), limit);
         }
         if self.status == 206
@@ -97,11 +99,47 @@ impl Response {
             return Ok(());
         }
 
-        // Keep the original response intact until every layer has completed,
-        // including each codec's trailer/checksum validation in finish().
-        let mut decoded = Cow::Borrowed(self.body.as_slice());
-        for coding in codings.into_iter().rev() {
-            let output = match coding {
+        let decoded = decoder.decode(&self.body, limit)?;
+        self.body = decoded.into_owned();
+        self.headers.retain(|(name, _)| !invalidated_field(name));
+        self.trailers.retain(|(name, _)| !invalidated_field(name));
+        Ok(())
+    }
+}
+
+/// A bounded ordered coding stack. Parsing does not allocate codecs or body
+/// output; adapters can reject unavailable body modes before consuming data.
+pub(crate) struct ContentDecoder {
+    codings: Vec<Coding>,
+}
+
+impl ContentDecoder {
+    pub(crate) fn from_fields<'a>(fields: impl IntoIterator<Item = &'a str>) -> io::Result<Self> {
+        Ok(Self { codings: content_codings(fields, false)? })
+    }
+
+    pub(crate) fn from_request_fields<'a>(fields: impl IntoIterator<Item = &'a str>) -> io::Result<Self> {
+        Ok(Self { codings: content_codings(fields, true)? })
+    }
+
+    pub(crate) fn is_identity(&self) -> bool {
+        self.codings.iter().all(|coding| *coding == IDENTITY)
+    }
+
+    /// Return borrowed input for identity. Every decoded stage is independently
+    /// bounded and validated before the caller replaces any original message.
+    pub(crate) fn decode<'a>(
+        &self,
+        body: &'a [u8],
+        limit: DecompressionLimit,
+    ) -> io::Result<Cow<'a, [u8]>> {
+        if self.is_identity() {
+            check_size(body.len(), limit)?;
+            return Ok(Cow::Borrowed(body));
+        }
+        let mut decoded = Cow::Borrowed(body);
+        for coding in self.codings.iter().rev() {
+            let output = match *coding {
                 IDENTITY => {
                     check_size(decoded.len(), limit)?;
                     continue;
@@ -118,10 +156,7 @@ impl Response {
             check_size(output.len(), limit)?;
             decoded = Cow::Owned(output);
         }
-        self.body = decoded.into_owned();
-        self.headers.retain(|(name, _)| !invalidated_field(name));
-        self.trailers.retain(|(name, _)| !invalidated_field(name));
-        Ok(())
+        Ok(decoded)
     }
 }
 
@@ -137,10 +172,7 @@ fn declared_empty(headers: &[(String, String)]) -> bool {
 
 fn check_size(size: usize, limit: DecompressionLimit) -> io::Result<()> {
     if size > limit.get() {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "decoded response exceeds output limit",
-        ))
+        Err(super::compress::decompression_limit_error("decoded response exceeds output limit"))
     } else {
         Ok(())
     }
@@ -173,13 +205,13 @@ fn zstd_decode(_input: &[u8], _limit: DecompressionLimit) -> io::Result<Vec<u8>>
     ))
 }
 
-fn content_codings(headers: &[(String, String)]) -> io::Result<Vec<Coding>> {
+fn content_codings<'a>(
+    fields: impl IntoIterator<Item = &'a str>,
+    strict_tokens: bool,
+) -> io::Result<Vec<Coding>> {
     let mut codings = Vec::new();
     let mut present = false;
-    for (name, value) in headers {
-        if !name.eq_ignore_ascii_case("content-encoding") {
-            continue;
-        }
+    for value in fields {
         present = true;
         for token in value.split(',') {
             let token = token.trim_matches([' ', '\t']);
@@ -187,6 +219,16 @@ fn content_codings(headers: &[(String, String)]) -> io::Result<Vec<Coding>> {
             // containing no actual coding at all is still invalid here.
             if token.is_empty() {
                 continue;
+            }
+            // Response decoding historically classifies unknown tokens alike.
+            // Requests distinguish malformed token syntax (400) from a valid
+            // but unsupported coding (415), without changing that public API.
+            if strict_tokens && !token.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*'
+                        | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
+            }) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "malformed request content coding"));
             }
             if codings.len() == MAX_CONTENT_CODINGS {
                 return Err(io::Error::new(
@@ -248,7 +290,7 @@ fn decoder_for(
     }
 }
 
-fn invalidated_field(name: &str) -> bool {
+pub(crate) fn invalidated_field(name: &str) -> bool {
     [
         "content-encoding",
         "content-length",
@@ -259,4 +301,23 @@ fn invalidated_field(name: &str) -> bool {
     ]
     .iter()
     .any(|field| name.eq_ignore_ascii_case(field))
+}
+
+/// Resource refusals remain distinguishable from corrupt compressed streams
+/// without treating a codec's human-readable error text as a protocol.
+pub(crate) fn is_limit_error(error: &io::Error) -> bool {
+    let Some(source) = error.get_ref() else {
+        return false;
+    };
+    if source.is::<super::compress::DecompressionLimitExceeded>() {
+        return true;
+    }
+    #[cfg(feature = "zstd")]
+    if matches!(
+        source.downcast_ref::<asupersync_zstd::DecodeError>(),
+        Some(asupersync_zstd::DecodeError::OutputTooLarge | asupersync_zstd::DecodeError::WindowTooLarge)
+    ) {
+        return true;
+    }
+    false
 }

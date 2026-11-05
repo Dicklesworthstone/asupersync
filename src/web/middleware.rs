@@ -107,6 +107,10 @@ use super::extract::Request;
 use super::handler::Handler;
 use super::response::{IntoResponse, Redirect, Response, StatusCode};
 
+mod decompression;
+pub use decompression::{RequestDecompressionLayer, RequestDecompressionMiddleware};
+pub(crate) use decompression::RequestContentCodings;
+
 // ─── CorsMiddleware ─────────────────────────────────────────────────────────
 
 /// Origin matching policy for CORS headers.

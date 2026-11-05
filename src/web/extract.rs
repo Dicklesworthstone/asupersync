@@ -205,6 +205,14 @@ impl Extensions {
         self.get_typed::<T>().cloned()
     }
 
+    /// Release internal request metadata after its consuming middleware runs.
+    pub(crate) fn remove_typed<T>(&mut self)
+    where
+        T: Send + Sync + 'static,
+    {
+        self.typed_data.remove(&TypeId::of::<T>());
+    }
+
     /// Merge data from another extension map.
     pub(crate) fn extend_from(&mut self, other: &Self) {
         self.string_data.extend(other.string_data.clone());
