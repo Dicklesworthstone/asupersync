@@ -395,8 +395,9 @@ fn native_mtls_client_identity_does_not_disable_server_name_verification() {
         let destination = root.join("received");
         let (sent, received) = transfer(&cx, &send, &receive, &source, &destination).await;
         let error = sent.expect_err("server name must remain authenticated");
+        // The client's verifier refuses the name: a rejected certificate.
         assert!(
-            format!("{error:?}").contains("read_hs_fatal_alert"),
+            format!("{error:?}").contains("server_certificate_invalid"),
             "{error:?}"
         );
         assert!(received.is_err());

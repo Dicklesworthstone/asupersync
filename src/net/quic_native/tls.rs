@@ -353,7 +353,7 @@ impl QuicServerIdentityVerifier {
 }
 
 #[cfg(feature = "tls")]
-fn map_server_cert_verification_error(err: rustls::Error) -> QuicTlsError {
+pub(super) fn map_server_cert_verification_error(err: rustls::Error) -> QuicTlsError {
     let code = match err {
         rustls::Error::InvalidCertificate(_) => "server_certificate_invalid",
         rustls::Error::NoCertificatesPresented => "server_certificate_chain_empty",

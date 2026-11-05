@@ -162,8 +162,10 @@ enter the fallback. Bad signature, wrong name/purpose, critical-extension,
 constraint, and revocation errors return unchanged.
 
 TLS CertificateVerify and supported schemes delegate to the inner WebPKI
-verifier. Certificate-specific detail is later reduced to the native
-handshake's stable `read_hs_fatal_alert` / `read_hs_failed` codes.
+verifier. A client's certificate refusal is later reduced to the redaction-safe
+`server_certificate_invalid` code (`QuicTlsError::ServerCertificateRejected`).
+Other handshake failures keep the native handshake's stable
+`read_hs_fatal_alert` / `read_hs_failed` codes.
 
 ### Dormant legacy QUIC
 

@@ -2768,14 +2768,16 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 
     /// br-asupersync-2eqmd2 M3: a client that rejects the server's certificate
     /// already holds Handshake keys, so it closes in Handshake space only, and
-    /// the server's handshake ends on that close with the client's alert.
-    #[test]
-    fn a_rejected_certificate_reaches_the_server_as_a_handshake_space_close() {
+    /// the server's handshake ends on that close with the client's alert. The
+    /// client's own error names the rejected certificate, not a generic alert.
+    fn assert_client_rejects_server_certificate(
+        roots: Vec<CertificateDer<'static>>,
+        name: &'static str,
+    ) {
         let alpn = vec![ATP_QUIC_ALPN.to_vec()];
         let mut client = QuicHandshakeDriver::client(
-            // No trust anchor, so the server's chain fails verification.
-            client_config(Vec::new(), alpn.clone()).expect("client config"),
-            ServerName::try_from("localhost").expect("server name"),
+            client_config(roots, alpn.clone()).expect("client config"),
+            ServerName::try_from(name).expect("server name"),
             Vec::new(),
         )
         .expect("client driver");
@@ -2820,8 +2822,13 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
                 }
             }
         }
-        let refused = refused.expect("the client rejects the untrusted chain");
-        assert_eq!(failure_code(&refused), "read_hs_fatal_alert");
+        let refused = refused.expect("the client rejects the server's chain");
+        assert_eq!(
+            refused,
+            QuicTlsError::ServerCertificateRejected {
+                code: "server_certificate_invalid"
+            }
+        );
         let alert = client.tls.alert().expect("TLS raised an alert");
 
         let mut client_packet_number = 1;
@@ -2840,6 +2847,18 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             server.peer_close_error_code(),
             Some(0x0100 + u64::from(u8::from(alert)))
         );
+    }
+
+    #[test]
+    fn a_rejected_certificate_reaches_the_server_as_a_handshake_space_close() {
+        // No trust anchor, so the server's chain fails verification.
+        assert_client_rejects_server_certificate(Vec::new(), "localhost");
+    }
+
+    #[test]
+    fn a_trusted_certificate_for_another_name_is_rejected_as_a_certificate() {
+        // The chain is trusted and valid, but issued for localhost.
+        assert_client_rejects_server_certificate(vec![ca_cert()], "wrong.localhost");
     }
 
     /// Review r29-e8 of 168379675 (M1): mainstream servers coalesce their first
@@ -2900,7 +2919,12 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         let refused = client
             .recv_handshake_packet(&datagram)
             .expect_err("the chain in the coalesced Handshake packet is rejected");
-        assert_eq!(failure_code(&refused), "read_hs_fatal_alert");
+        assert_eq!(
+            refused,
+            QuicTlsError::ServerCertificateRejected {
+                code: "server_certificate_invalid"
+            }
+        );
         let alert = client.tls.alert().expect("TLS raised an alert");
 
         let mut client_packet_number = 1;

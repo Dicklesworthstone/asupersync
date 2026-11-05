@@ -1694,7 +1694,7 @@ fn check_self_signed_leaf_pin(cert_pem: &str, expected_success: bool) {
         );
         let diagnostics = String::from_utf8_lossy(&sender.stderr);
         assert!(
-            diagnostics.contains("read_hs_fatal_alert"),
+            diagnostics.contains("server_certificate_invalid"),
             "expected TLS certificate refusal: {diagnostics}"
         );
         assert!(!dest_dir.join("payload.bin").exists());

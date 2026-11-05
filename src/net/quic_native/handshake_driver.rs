@@ -45,7 +45,7 @@ use rustls::{
 use super::tls::{
     PacketProtectionRequest, PacketProtectionSpace, ProtectedPacket, ProtectionProof,
     QuicHandshakeTranscript, QuicPacketProtectionProvider, QuicTlsError, RustlsQuicCryptoProvider,
-    RustlsQuicProviderSide, TranscriptHash,
+    RustlsQuicProviderSide, TranscriptHash, map_server_cert_verification_error,
 };
 use crate::bytes::{Bytes, BytesMut};
 use crate::cx::Cx;
@@ -1517,9 +1517,15 @@ impl QuicHandshakeDriver {
     /// supplied in separate calls (rustls requirement); the packet layer already
     /// delivers them per-space, so callers pass one space's CRYPTO data per call.
     pub fn read_handshake(&mut self, data: &[u8]) -> Result<(), QuicTlsError> {
-        self.tls.read_hs(data).map_err(|_| {
-            // Surface a fatal alert as a redacted, stable code if one arose.
-            if self.tls.alert().is_some() {
+        self.tls.read_hs(data).map_err(|error| {
+            let client = matches!(self.tls, Connection::Client(_));
+            if client && matches!(error, RustlsError::InvalidCertificate(_)) {
+                // The client's verifier refused the server's certificate. Report
+                // it as the post-handshake identity gate does. The TLS alert is
+                // still raised, so the CRYPTO_ERROR close is unchanged.
+                map_server_cert_verification_error(error)
+            } else if self.tls.alert().is_some() {
+                // Any other fatal alert keeps a redacted, stable code.
                 handshake_failure("read_hs_fatal_alert")
             } else {
                 handshake_failure("read_hs_failed")

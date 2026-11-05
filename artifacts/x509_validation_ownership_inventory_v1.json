@@ -788,8 +788,8 @@
     },
     {
       "diagnostic_id": "X509-DIAG-QUIC-HANDSHAKE",
-      "surface": "QuicTlsError::CryptoProviderFailure",
-      "behavior": "live native QUIC collapses certificate detail to read_hs_fatal_alert or read_hs_failed",
+      "surface": "QuicTlsError::ServerCertificateRejected or CryptoProviderFailure",
+      "behavior": "a live native QUIC client collapses a refused server certificate to server_certificate_invalid; every other handshake failure keeps read_hs_fatal_alert or read_hs_failed",
       "secret_safe": true
     },
     {
