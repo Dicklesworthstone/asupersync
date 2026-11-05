@@ -257,10 +257,77 @@ pub async fn prepare_native_directory_sync(
     remote_root: impl Into<PathBuf>,
     limits: NativeDirectoryLimits,
 ) -> Result<PreparedNativeDirectorySync, NativeDirectoryError> {
+    prepare_native_directory(
+        cx,
+        NativePlanBaseline::Common(baseline),
+        local_root.into(),
+        remote_root.into(),
+        limits,
+    )
+    .await
+}
+
+/// Prepare a read-only, one-way mirror from an actual source to a destination.
+///
+/// The source is authoritative for ordinary file contents and directory
+/// structure. In the returned preview, `local` means source and `remote` means
+/// destination: differences propose copies to the destination, and entries
+/// present only at the destination propose deletion. Destination-only content
+/// is never copied back to the source. Unlike three-way synchronization, this
+/// operation deliberately does not preserve independent destination edits.
+/// Every proposed overwrite or deletion remains visible for operator review.
+///
+/// This shares the native scanner, limits, descriptor confinement and opaque
+/// single-use application path with [`prepare_native_directory_sync`]. Each
+/// root is scanned once; the captured destination manifest supplies the
+/// comparison baseline without another filesystem pass or manifest clone.
+/// Preparation grants no authority to mutate either tree. Use
+/// [`PreparedNativeDirectorySync::apply_with_quarantined_deletions`] with
+/// separately supplied [`super::DestructiveAuthorization`] to apply deletions
+/// recoverably, or [`PreparedNativeDirectorySync::apply`] for plans without
+/// deletions. Both revalidate the captured roots before effects. Existing
+/// apply restrictions, including refusal to change entry kinds, still apply.
+///
+/// This Linux/glibc profile preserves file bytes and directory structure only.
+/// It does not preserve source permissions, timestamps or platform metadata,
+/// and does not implement the legacy CLI's unavailable mirror command.
+///
+/// # Errors
+///
+/// Refuses invalid limits, overlapping roots, symlinks, multiply linked files,
+/// unsupported entries, unstable observations, or planner validation failures.
+pub async fn prepare_native_directory_mirror(
+    cx: &Cx,
+    source_root: impl Into<PathBuf>,
+    destination_root: impl Into<PathBuf>,
+    limits: NativeDirectoryLimits,
+) -> Result<PreparedNativeDirectorySync, NativeDirectoryError> {
+    prepare_native_directory(
+        cx,
+        NativePlanBaseline::Destination,
+        source_root.into(),
+        destination_root.into(),
+        limits,
+    )
+    .await
+}
+
+enum NativePlanBaseline {
+    Common(DirectoryManifest),
+    Destination,
+}
+
+async fn prepare_native_directory(
+    cx: &Cx,
+    basis: NativePlanBaseline,
+    local_path: PathBuf,
+    remote_path: PathBuf,
+    limits: NativeDirectoryLimits,
+) -> Result<PreparedNativeDirectorySync, NativeDirectoryError> {
     limits.validate()?;
-    validate_profile(&baseline, limits)?;
-    let local_path = local_root.into();
-    let remote_path = remote_root.into();
+    if let NativePlanBaseline::Common(baseline) = &basis {
+        validate_profile(baseline, limits)?;
+    }
     cx.scoped_fs()
         .run_io(move |worker| {
             Ok((|| {
@@ -273,11 +340,19 @@ pub async fn prepare_native_directory_sync(
                 // Local may have changed while remote was being scanned.
                 local.root.revalidate()?;
                 revalidate_stamps(&worker, &local)?;
+                let (baseline, domain): (&DirectoryManifest, &[u8]) = match &basis {
+                    NativePlanBaseline::Common(baseline) => {
+                        (baseline, b"asupersync.native-directory-plan.v1\0")
+                    }
+                    NativePlanBaseline::Destination => {
+                        (&remote.manifest, b"asupersync.native-directory-mirror-plan.v1\0")
+                    }
+                };
                 let preview =
-                    plan_bidirectional_sync(&baseline, &local.manifest, &remote.manifest)
+                    plan_bidirectional_sync(baseline, &local.manifest, &remote.manifest)
                         .map_err(NativeDirectoryError::Plan)?;
                 let mut identity = Sha256::new();
-                identity.update(b"asupersync.native-directory-plan.v1\0");
+                identity.update(domain);
                 identity.update(baseline.tree_root());
                 for snapshot in [&local, &remote] {
                     identity.update(snapshot.root.path.as_os_str().as_encoded_bytes());
