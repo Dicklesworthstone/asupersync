@@ -976,11 +976,12 @@ impl UnixStream {
                 .lock()
                 .arm_shared(&*self.inner, interest, owner, waker);
         // The registration lock was released at the end of the statement
-        // above; replaced, redundant, and failed-call wakers drop only now.
-        drop(displaced);
-        for waiter in stranded {
-            waiter.wake();
-        }
+        // above. A retired waker's destructor must not strand the peers
+        // detached by a failed rearm.
+        crate::runtime::io_driver::run_callbacks_then_wake(
+            || crate::runtime::io_driver::retire_each(displaced),
+            stranded,
+        );
         match armed {
             Ok(Armed::Parked) => Poll::Pending,
             Ok(Armed::SelfWake) => {
@@ -1023,10 +1024,7 @@ impl Drop for SharedWaiterEntry<'_> {
         // call's now-idle runtime. Drop and wake only after both the waiter
         // list and registration locks are released (GH#85).
         let (removed, survivors) = self.stream.registration.lock().forget_shared(self.owner);
-        drop(removed);
-        for waiter in survivors {
-            waiter.wake();
-        }
+        crate::runtime::io_driver::run_callbacks_then_wake(|| drop(removed), survivors);
     }
 }
 

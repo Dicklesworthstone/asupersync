@@ -1223,27 +1223,48 @@ impl std::fmt::Debug for IoDriver {
 /// unwoken because an earlier one panicked would never be woken again
 /// (br-asupersync-reactor-audit-dofi11). Shared descriptor/listener waiters
 /// must use this boundary too: catching only their aggregate reactor waker
-/// cannot recover siblings already removed from an inner waiter list.
+/// cannot recover siblings already removed from an inner waiter list. During
+/// an existing unwind, cleanup failures are contained to preserve that panic.
 pub(crate) fn wake_each(wakers: impl IntoIterator<Item = Waker>) {
-    dispatch_wakers(wakers, None);
+    dispatch_wakers(wakers, |_| true);
 }
 
 /// Retires the current poller's entries and wakes every other detached
 /// waiter. Retirement happens inside the same panic boundary as waking:
 /// dropping the current waker can also run user code.
 pub(crate) fn wake_each_except(wakers: impl IntoIterator<Item = Waker>, current: &Waker) {
-    dispatch_wakers(wakers, Some(current));
+    dispatch_wakers(wakers, |waker| !waker.will_wake(current));
 }
 
-fn dispatch_wakers(wakers: impl IntoIterator<Item = Waker>, current: Option<&Waker>) {
+/// Retires every detached waker without notifying it. Each destructor gets
+/// its own panic boundary, including when a small retired batch has several
+/// custom `RawWaker` drop hooks.
+#[cfg(unix)]
+pub(crate) fn retire_each(wakers: impl IntoIterator<Item = Waker>) {
+    dispatch_wakers(wakers, |_| false);
+}
+
+fn dispatch_wakers(wakers: impl IntoIterator<Item = Waker>, should_wake: impl Fn(&Waker) -> bool) {
+    let already_unwinding = std::thread::panicking();
     let mut first_panic = None;
     for waker in wakers {
-        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if !current.is_some_and(|current| waker.will_wake(current)) {
-                waker.wake();
+        // Keep the owner alive across wake_by_ref: a safe Wake callback and
+        // its final-owner destructor must not panic in the same unwind.
+        let notified = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if should_wake(&waker) {
+                waker.wake_by_ref();
             }
-        })) {
-            first_panic.get_or_insert(payload);
+        }));
+        let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker)));
+        for payload in [notified, retired].into_iter().filter_map(Result::err) {
+            if !already_unwinding && first_panic.is_none() {
+                first_panic = Some(payload);
+            } else {
+                // An opaque panic payload can itself panic on drop. Match
+                // OnceCell and semaphore cleanup: forget secondary failures
+                // so every detached peer runs and an existing unwind wins.
+                std::mem::forget(payload);
+            }
         }
     }
     if let Some(payload) = first_panic {
@@ -1256,15 +1277,25 @@ fn dispatch_wakers(wakers: impl IntoIterator<Item = Waker>, current: Option<&Wak
 /// one-shot registrations have already fired, so wakers dropped by the
 /// unwind would never be woken again (br-asupersync-n89rul L4, the same class
 /// as dofi11). When both panic, the callback's panic is the one re-raised.
+/// If cleanup is already unwinding, its original panic remains authoritative.
 pub(crate) fn run_callbacks_then_wake(
     callbacks: impl FnOnce(),
     wakers: impl IntoIterator<Item = Waker>,
 ) {
+    let already_unwinding = std::thread::panicking();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(callbacks)) {
         Ok(()) => wake_each(wakers),
         Err(payload) => {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wake_each(wakers)));
-            std::panic::resume_unwind(payload);
+            if let Err(wake_panic) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wake_each(wakers)))
+            {
+                std::mem::forget(wake_panic);
+            }
+            if already_unwinding {
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
         }
     }
 }
@@ -3826,6 +3857,216 @@ mod tests {
         assert!(callback_executed.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(events, 1);
         assert!(waker_state.flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[derive(Clone, Copy)]
+    enum DispatchPanicMode {
+        Never,
+        Wake,
+        Retirement,
+        Both,
+    }
+
+    struct OpaqueDispatchPanic;
+
+    impl Drop for OpaqueDispatchPanic {
+        fn drop(&mut self) {
+            panic!("secondary dispatch payload must not be dropped");
+        }
+    }
+
+    struct DispatchPanicProbe {
+        mode: DispatchPanicMode,
+        opaque_payload: bool,
+        wakes: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Wake for DispatchPanicProbe {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            if matches!(self.mode, DispatchPanicMode::Wake | DispatchPanicMode::Both) {
+                if self.opaque_payload {
+                    std::panic::panic_any(OpaqueDispatchPanic);
+                }
+                panic!("first wake failure");
+            }
+        }
+    }
+
+    impl Drop for DispatchPanicProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if matches!(
+                self.mode,
+                DispatchPanicMode::Retirement | DispatchPanicMode::Both
+            ) {
+                if self.opaque_payload {
+                    std::panic::panic_any(OpaqueDispatchPanic);
+                }
+                panic!("first retirement failure");
+            }
+        }
+    }
+
+    fn dispatch_panic_probe(
+        mode: DispatchPanicMode,
+        opaque_payload: bool,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(DispatchPanicProbe {
+            mode,
+            opaque_payload,
+            wakes: Arc::clone(&wakes),
+            drops: Arc::clone(&drops),
+        }));
+        (waker, wakes, drops)
+    }
+
+    // A consuming wake could abort if its callback and final-owner destructor
+    // both panic. Keep that pre-fix failure inside a child process.
+    fn dispatch_panic_test_child(test_name: &str) -> bool {
+        const CHILD_ENV: &str = "ASUPERSYNC_IO_DISPATCH_PANIC_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).as_deref() == Some(std::ffi::OsStr::new(test_name)) {
+            return true;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                &format!("runtime::io_driver::tests::{test_name}"),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, test_name)
+            .output()
+            .expect("run isolated I/O dispatch regression");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "I/O dispatch regression child failed: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+        false
+    }
+
+    #[test]
+    fn dispatch_wake_and_retirement_panics_preserve_fanout() {
+        let name = "dispatch_wake_and_retirement_panics_preserve_fanout";
+        if !dispatch_panic_test_child(name) {
+            return;
+        }
+        init_test(name);
+        for mode in [
+            DispatchPanicMode::Wake,
+            DispatchPanicMode::Retirement,
+            DispatchPanicMode::Both,
+        ] {
+            let (first, first_wakes, first_drops) = dispatch_panic_probe(mode, false);
+            let (second, second_wakes, second_drops) =
+                dispatch_panic_probe(DispatchPanicMode::Both, true);
+            let (last, last_state) = create_test_waker();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                wake_each([first, second, last]);
+            }));
+            let panic = result.expect_err("the first dispatch failure must remain observable");
+            let expected = if matches!(mode, DispatchPanicMode::Retirement) {
+                "first retirement failure"
+            } else {
+                "first wake failure"
+            };
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&expected));
+            assert_eq!(first_wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(second_wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(second_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(last_state.count.load(Ordering::SeqCst), 1);
+        }
+        crate::test_complete!(name);
+    }
+
+    #[test]
+    fn retirement_batch_panics_preserve_cleanup_without_waking() {
+        let name = "retirement_batch_panics_preserve_cleanup_without_waking";
+        if !dispatch_panic_test_child(name) {
+            return;
+        }
+        init_test(name);
+        let (first, first_wakes, first_drops) =
+            dispatch_panic_probe(DispatchPanicMode::Retirement, false);
+        let (second, second_wakes, second_drops) =
+            dispatch_panic_probe(DispatchPanicMode::Retirement, true);
+        let (last, last_wakes, last_drops) = dispatch_panic_probe(DispatchPanicMode::Never, false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            retire_each([first, second, last]);
+        }));
+        let panic = result.expect_err("the first retirement failure must remain observable");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"first retirement failure"));
+        for wakes in [first_wakes, second_wakes, last_wakes] {
+            assert_eq!(wakes.load(Ordering::SeqCst), 0);
+        }
+        for drops in [first_drops, second_drops, last_drops] {
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+        crate::test_complete!(name);
+    }
+
+    #[test]
+    fn callback_panic_precedes_opaque_wake_and_retirement_panics() {
+        let name = "callback_panic_precedes_opaque_wake_and_retirement_panics";
+        if !dispatch_panic_test_child(name) {
+            return;
+        }
+        init_test(name);
+        let (panicking, wakes, drops) = dispatch_panic_probe(DispatchPanicMode::Both, true);
+        let (last, last_state) = create_test_waker();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_callbacks_then_wake(|| panic!("event callback failed"), [panicking, last]);
+        }));
+        let panic = result.expect_err("the callback failure must remain observable");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"event callback failed"));
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(last_state.count.load(Ordering::SeqCst), 1);
+        crate::test_complete!(name);
+    }
+
+    #[test]
+    fn dispatch_during_unwind_preserves_original_failure() {
+        let name = "dispatch_during_unwind_preserves_original_failure";
+        if !dispatch_panic_test_child(name) {
+            return;
+        }
+        init_test(name);
+
+        struct DispatchOnDrop(Option<[Waker; 2]>);
+
+        impl Drop for DispatchOnDrop {
+            fn drop(&mut self) {
+                run_callbacks_then_wake(
+                    || panic!("cleanup callback failed"),
+                    self.0.take().expect("one cleanup batch"),
+                );
+            }
+        }
+
+        let (panicking, wakes, drops) = dispatch_panic_probe(DispatchPanicMode::Both, true);
+        let (last, last_state) = create_test_waker();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _batch = DispatchOnDrop(Some([panicking, last]));
+            panic!("original operation failed");
+        }));
+        let panic = result.expect_err("the original operation failure must remain observable");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"original operation failed"));
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(last_state.count.load(Ordering::SeqCst), 1);
+        crate::test_complete!(name);
     }
 
     struct PanickingWaker;

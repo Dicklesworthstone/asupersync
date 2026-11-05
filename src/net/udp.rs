@@ -1941,9 +1941,7 @@ impl SharedWaiters {
 
     fn wake_all(&self) {
         let waiters = std::mem::take(&mut *self.waiters.lock());
-        for waiter in waiters {
-            waiter.waker.wake();
-        }
+        crate::runtime::io_driver::wake_each(waiters.into_iter().map(|waiter| waiter.waker));
     }
 
     #[cfg(test)]

@@ -2133,6 +2133,72 @@
         }
 
         #[test]
+        fn shared_readiness_wakes_every_waiter_before_resuming_the_first_panic() {
+            struct PanicWake {
+                attempts: Arc<AtomicUsize>,
+                message: &'static str,
+            }
+
+            impl Wake for PanicWake {
+                fn wake(self: Arc<Self>) {
+                    self.attempts.fetch_add(1, Ordering::SeqCst);
+                    std::panic::panic_any(self.message);
+                }
+            }
+
+            let model = Arc::new(LabReactorModel::new());
+            let driver = IoDriverHandle::new(model.clone());
+            let source = source();
+            let registration = Arc::new(parking_lot::Mutex::new(ReactorRegistration::new()));
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let first = Waker::from(Arc::new(PanicWake {
+                attempts: Arc::clone(&attempts),
+                message: "first shared waiter",
+            }));
+            let second = Waker::from(Arc::new(PanicWake {
+                attempts: Arc::clone(&attempts),
+                message: "second shared waiter",
+            }));
+            let first_count = Arc::new(WakeCount::default());
+            let last_count = Arc::new(WakeCount::default());
+            let first_peer = Waker::from(Arc::new(SharedWake {
+                registration: Arc::downgrade(&registration),
+                count: Arc::clone(&first_count),
+            }));
+            let last_peer = Waker::from(Arc::new(SharedWake {
+                registration: Arc::downgrade(&registration),
+                count: Arc::clone(&last_count),
+            }));
+            for waker in [&first, &first_peer, &second, &last_peer] {
+                arm_shared_on(
+                    &registration,
+                    &source,
+                    &driver,
+                    next_shared_waiter_owner(),
+                    waker,
+                );
+            }
+            let token = registration.lock().as_ref().unwrap().token();
+            model.set_ready(token, Interest::READABLE).unwrap();
+
+            // The driver's outer panic boundary sees just one aggregate
+            // waker. Every task behind that waker must be notified before
+            // the aggregate propagates its first panic.
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
+            }))
+            .expect_err("the first shared waiter panic must remain observable");
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"first shared waiter"));
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            assert_eq!(first_count.0.load(Ordering::SeqCst), 1);
+            assert_eq!(last_count.0.load(Ordering::SeqCst), 1);
+            assert_eq!(registration.lock().shared_waiter_count(), 0);
+            registration.lock().clear();
+            assert_eq!(model.registration_count(), 0);
+            assert!(driver.is_empty());
+        }
+
+        #[test]
         fn departing_shared_waiter_notifies_survivor_to_rebind() {
             let old_model = Arc::new(LabReactorModel::new());
             let idle_model = Arc::new(LabReactorModel::new());

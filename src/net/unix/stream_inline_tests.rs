@@ -228,10 +228,12 @@
         use crate::net::unix::SocketAncillary;
         use crate::runtime::IoDriverHandle;
         use crate::runtime::reactor::Reactor;
-        use crate::runtime::reactor_model::LabReactorModel;
+        use crate::runtime::reactor_model::{LabReactorModel, ReactorOperation};
         use crate::types::{Budget, RegionId, TaskId};
         use std::io::Write;
-        use std::sync::atomic::Ordering;
+        use std::sync::Weak;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
         use std::time::Duration;
 
         /// Writes into `stream` until its send direction would block.
@@ -682,6 +684,165 @@
                 0,
                 "a dropped call leaves no entry behind"
             );
+        }
+
+        struct AncillaryBatchWake {
+            stream: Weak<UnixStream>,
+            wakes: Arc<AtomicUsize>,
+            panic_on_wake: bool,
+        }
+
+        impl Wake for AncillaryBatchWake {
+            fn wake(self: Arc<Self>) {
+                let stream = self.stream.upgrade().expect("stream remains alive");
+                assert!(
+                    stream.registration.try_lock().is_some(),
+                    "survivors must wake outside the registration lock"
+                );
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+                assert!(!self.panic_on_wake, "surviving ancillary waiter");
+            }
+        }
+
+        struct AncillaryDropPanic {
+            stream: Weak<UnixStream>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        // This probe measures final-owner retirement, not its wake callback.
+        #[allow(clippy::manual_noop_waker)]
+        impl Wake for AncillaryDropPanic {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for AncillaryDropPanic {
+            fn drop(&mut self) {
+                let stream = self.stream.upgrade().expect("stream remains alive");
+                assert!(
+                    stream.registration.try_lock().is_some(),
+                    "retirement must happen outside the registration lock"
+                );
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                panic!("retired ancillary waiter");
+            }
+        }
+
+        fn assert_ancillary_batch_survives_panics(failed_handoff: bool) {
+            let model = Arc::new(LabReactorModel::new());
+            let driver = IoDriverHandle::new(model.clone());
+            let replacement_model = Arc::new(LabReactorModel::new());
+            let replacement_driver = IoDriverHandle::new(replacement_model.clone());
+            let (stream, peer) = UnixStream::pair().expect("socket pair");
+            let stream = Arc::new(stream);
+            let removed_drops = Arc::new(AtomicUsize::new(0));
+            let panicking_wakes = Arc::new(AtomicUsize::new(0));
+            let healthy_wakes = Arc::new(AtomicUsize::new(0));
+            let retiring_waker = Waker::from(Arc::new(AncillaryDropPanic {
+                stream: Arc::downgrade(&stream),
+                drops: Arc::clone(&removed_drops),
+            }));
+            let panicking_waker = Waker::from(Arc::new(AncillaryBatchWake {
+                stream: Arc::downgrade(&stream),
+                wakes: Arc::clone(&panicking_wakes),
+                panic_on_wake: true,
+            }));
+            let healthy_waker = Waker::from(Arc::new(AncillaryBatchWake {
+                stream: Arc::downgrade(&stream),
+                wakes: Arc::clone(&healthy_wakes),
+                panic_on_wake: false,
+            }));
+            let mut panicking_buf = [0u8; 1];
+            let mut healthy_buf = [0u8; 1];
+            let mut retiring_buf = [0u8; 1];
+            let mut panicking_ancillary = SocketAncillary::new(64);
+            let mut healthy_ancillary = SocketAncillary::new(64);
+            let mut retiring_ancillary = SocketAncillary::new(64);
+            let mut panicking = Box::pin(
+                stream.recv_with_ancillary(&mut panicking_buf, &mut panicking_ancillary),
+            );
+            let mut healthy =
+                Box::pin(stream.recv_with_ancillary(&mut healthy_buf, &mut healthy_ancillary));
+            let mut retiring =
+                Box::pin(stream.recv_with_ancillary(&mut retiring_buf, &mut retiring_ancillary));
+            assert!(with_driver(&driver, || {
+                panicking
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&panicking_waker))
+            })
+            .is_pending());
+            assert!(with_driver(&driver, || {
+                healthy
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&healthy_waker))
+            })
+            .is_pending());
+            // Register the departing call last so its removal leaves the
+            // panicking survivor before the healthy one in the detached batch.
+            assert!(with_driver(&driver, || {
+                retiring
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&retiring_waker))
+            })
+            .is_pending());
+            drop(retiring_waker);
+            assert_eq!(stream.registration.lock().shared_waiter_count(), 3);
+
+            let failure = if failed_handoff {
+                replacement_model
+                    .fail_next(
+                        ReactorOperation::Register,
+                        None,
+                        io::ErrorKind::PermissionDenied,
+                    )
+                    .unwrap();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    with_driver(&replacement_driver, || {
+                        retiring
+                            .as_mut()
+                            .poll(&mut Context::from_waker(Waker::noop()))
+                    })
+                }));
+                drop(retiring);
+                result.map(|_| ())
+            } else {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(retiring)))
+            };
+            let panic = failure.expect_err("retired waiter panic must remain observable");
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"retired ancillary waiter"));
+            assert_eq!(removed_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(panicking_wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(healthy_wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(stream.registration.lock().shared_waiter_count(), 0);
+
+            // Notification must let a surviving real receive finish even
+            // though its peer's cancellation or failed handoff panicked.
+            (&*peer.inner).write_all(b"r").expect("survivor payload");
+            assert!(with_driver(&driver, || {
+                matches!(
+                    healthy
+                        .as_mut()
+                        .poll(&mut Context::from_waker(&healthy_waker)),
+                    Poll::Ready(Ok(1))
+                )
+            }));
+            drop(healthy);
+            assert_eq!(&healthy_buf, b"r");
+            drop(panicking);
+            drop(stream);
+            drop(peer);
+            assert_eq!(model.registration_count(), 0);
+            assert_eq!(replacement_model.registration_count(), 0);
+            assert!(driver.is_empty() && replacement_driver.is_empty());
+        }
+
+        #[test]
+        fn ancillary_departure_wakes_survivors_before_resuming_drop_panic() {
+            assert_ancillary_batch_survives_panics(false);
+        }
+
+        #[test]
+        fn failed_ancillary_handoff_wakes_survivors_before_resuming_drop_panic() {
+            assert_ancillary_batch_survives_panics(true);
         }
 
         /// A waker that records, when its last clone drops, whether the
