@@ -141,10 +141,10 @@ impl AcceptWaiters {
         // The departing owner's reactor may become idle after having adopted
         // this shared registration. Let every survivor re-poll and rehome it.
         // No user waker clone/drop/wake callback runs while the list is locked.
-        drop(retired);
-        for survivor in survivors {
-            survivor.waker.wake();
-        }
+        crate::runtime::io_driver::run_callbacks_then_wake(
+            || drop(retired),
+            survivors.into_iter().map(|entry| entry.waker),
+        );
     }
 
     fn wake_all(&self) {
@@ -152,9 +152,7 @@ impl AcceptWaiters {
             let mut guard = self.waiters.lock();
             std::mem::take(&mut *guard)
         };
-        for waiter in waiters {
-            waiter.waker.wake();
-        }
+        crate::runtime::io_driver::wake_each(waiters.into_iter().map(|entry| entry.waker));
     }
 
     fn wake_others(&self, current: &Waker) {
@@ -162,11 +160,10 @@ impl AcceptWaiters {
             let mut guard = self.waiters.lock();
             std::mem::take(&mut *guard)
         };
-        for waiter in waiters {
-            if !waiter.waker.will_wake(current) {
-                waiter.waker.wake();
-            }
-        }
+        crate::runtime::io_driver::wake_each_except(
+            waiters.into_iter().map(|entry| entry.waker),
+            current,
+        );
     }
 }
 

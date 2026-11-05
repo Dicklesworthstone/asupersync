@@ -822,3 +822,111 @@
         });
         crate::test_complete!("test_abstract_socket");
     }
+
+    #[test]
+    fn panicking_accept_waker_keeps_every_detached_sibling_runnable() {
+        struct PanicWake(std::sync::Weak<AcceptWaiters>);
+        impl Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                let waiters = self.0.upgrade().expect("live waiter list");
+                assert!(waiters.waiters.try_lock().is_some(), "wake outside lock");
+                // A reentrant registration belongs to the next event and
+                // must survive completion of the detached batch.
+                waiters.register(Some(100), Waker::noop());
+                panic!("accept wake failed");
+            }
+        }
+
+        for mode in ["readiness", "retry", "departure"] {
+            let waiters = Arc::new(AcceptWaiters::default());
+            let current_hits = Arc::new(AtomicUsize::new(0));
+            let current = Waker::from(Arc::new(CountingWaker {
+                hits: Arc::clone(&current_hits),
+            }));
+            let sibling_hits = Arc::new(AtomicUsize::new(0));
+            let sibling = Waker::from(Arc::new(CountingWaker {
+                hits: Arc::clone(&sibling_hits),
+            }));
+            waiters.register(Some(0), &current);
+            waiters.register(
+                Some(1),
+                &Waker::from(Arc::new(PanicWake(Arc::downgrade(&waiters)))),
+            );
+            waiters.register(Some(2), &sibling);
+            waiters.register(
+                Some(3),
+                &Waker::from(Arc::new(CountingWaker {
+                    hits: Arc::clone(&sibling_hits),
+                })),
+            );
+            assert_eq!(waiters.waiters.lock().len(), 4);
+            assert_eq!(sibling_hits.load(Ordering::SeqCst), 0);
+
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match mode {
+                    "readiness" => waiters.wake_all(),
+                    "retry" => waiters.wake_others(&current),
+                    "departure" => waiters.remove(0),
+                    _ => unreachable!(),
+                }
+            }))
+            .expect_err("the failing callback must still propagate");
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"accept wake failed"));
+            assert_eq!(
+                sibling_hits.load(Ordering::SeqCst),
+                2,
+                "every detached sibling must wake in {mode}"
+            );
+            assert_eq!(
+                current_hits.load(Ordering::SeqCst),
+                usize::from(mode == "readiness")
+            );
+            let registered = waiters.waiters.lock();
+            assert_eq!(registered.len(), 1, "reentrant waiter must remain");
+            assert_eq!(registered[0].owner, Some(100));
+        }
+    }
+
+    #[test]
+    fn departing_accept_waker_drop_panic_still_wakes_siblings() {
+        struct PanicDrop(std::sync::Weak<AcceptWaiters>);
+        impl Wake for PanicDrop {
+            fn wake(self: Arc<Self>) {
+                panic!("departing owner must be retired without waking");
+            }
+        }
+        impl Drop for PanicDrop {
+            fn drop(&mut self) {
+                let waiters = self.0.upgrade().expect("live waiter list");
+                assert!(waiters.waiters.try_lock().is_some(), "drop outside lock");
+                panic!("accept retirement failed");
+            }
+        }
+
+        let waiters = Arc::new(AcceptWaiters::default());
+        let retired = Waker::from(Arc::new(PanicDrop(Arc::downgrade(&waiters))));
+        waiters.register(Some(0), &retired);
+        drop(retired);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let sibling = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+        waiters.register(Some(1), &sibling);
+        waiters.register(
+            Some(2),
+            &Waker::from(Arc::new(CountingWaker {
+                hits: Arc::clone(&hits),
+            })),
+        );
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            waiters.remove(0);
+        }))
+        .expect_err("the retirement panic must still propagate");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"accept retirement failed")
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(waiters.waiters.lock().is_empty());
+    }

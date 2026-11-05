@@ -168,29 +168,27 @@ impl FdReadiness {
         // Wake survivors so they rehome it if that runtime becomes idle.
         // This is a scheduling hint, not an I/O event: do not modify ready or
         // armed bits, and run all user waker hooks outside the list lock.
-        drop(retired);
-        for survivor in survivors {
-            survivor.waker.wake();
-        }
+        crate::runtime::io_driver::run_callbacks_then_wake(
+            || drop(retired),
+            survivors.into_iter().map(|entry| entry.waker),
+        );
     }
 
     /// Wakes every listed waiter but `current`, for a wait the reactor will
     /// not complete: each re-polls and sees the readiness or the error itself.
     fn wake_others(&self, current: &Waker) {
-        let mut waiters = std::mem::take(&mut *self.waiters.lock());
-        waiters.retain(|waiter| !waiter.waker.will_wake(current));
-        for waiter in waiters {
-            waiter.waker.wake();
-        }
+        let waiters = std::mem::take(&mut *self.waiters.lock());
+        crate::runtime::io_driver::wake_each_except(
+            waiters.into_iter().map(|entry| entry.waker),
+            current,
+        );
     }
 
     fn fire(&self) {
         let fired = self.armed.swap(0, Ordering::AcqRel);
         self.ready.fetch_or(fired, Ordering::AcqRel);
         let waiters = std::mem::take(&mut *self.waiters.lock());
-        for waiter in waiters {
-            waiter.waker.wake();
-        }
+        crate::runtime::io_driver::wake_each(waiters.into_iter().map(|entry| entry.waker));
     }
 }
 
@@ -1216,5 +1214,125 @@ mod tests {
         assert_eq!(readiness.waiters.lock()[0].owner, Some(101));
         assert_eq!(readiness.ready.load(Ordering::SeqCst), READ | WRITE);
         assert_eq!(readiness.armed.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn panicking_readiness_waker_does_not_strand_other_readers() {
+        struct PanicWake;
+        impl Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                panic!("descriptor wake failed");
+            }
+        }
+
+        let (fd, mut peer) = nonblocking_pair();
+        let (reactor, driver) = lab_driver();
+        let bad_waker = Waker::from(Arc::new(PanicWake));
+        let mut bad_cx = Context::from_waker(&bad_waker);
+        let mut bad_reader = Box::pin(fd.readable());
+        assert!(with_driver(&driver, || bad_reader.as_mut().poll(&mut bad_cx)).is_pending());
+        let signals = [counted_waker(), counted_waker()];
+        let mut readers = [Box::pin(fd.readable()), Box::pin(fd.readable())];
+        for (reader, (signal, waker)) in readers.iter_mut().zip(&signals) {
+            let mut task_cx = Context::from_waker(waker);
+            assert!(with_driver(&driver, || reader.as_mut().poll(&mut task_cx)).is_pending());
+            assert_eq!(signal.0.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(fd.readiness.waiters.lock().len(), 3);
+        let token = registered_token(&fd, &driver, READ);
+        peer.write_all(b"x").expect("make the descriptor readable");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatch(&reactor, &driver, token, READ);
+        }))
+        .expect_err("the aggregate reactor wake must still propagate the panic");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"descriptor wake failed"));
+        assert!(fd.readiness.waiters.lock().is_empty());
+        assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), READ);
+        assert_eq!(fd.readiness.armed.load(Ordering::SeqCst), 0);
+        for (reader, (signal, waker)) in readers.iter_mut().zip(&signals) {
+            assert_eq!(signal.0.load(Ordering::SeqCst), 1);
+            let mut task_cx = Context::from_waker(waker);
+            let Poll::Ready(Ok(guard)) =
+                with_driver(&driver, || reader.as_mut().poll(&mut task_cx))
+            else {
+                panic!("a sibling reader must receive the detached readiness event");
+            };
+            assert!(guard.is_readable());
+        }
+        let mut byte = [0];
+        fd.get_ref().read_exact(&mut byte).expect("read the peer byte");
+        assert_eq!(byte, *b"x");
+    }
+
+    #[test]
+    fn readiness_retry_and_departure_wake_every_sibling_after_a_panic() {
+        struct PanicWake;
+        impl Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                panic!("descriptor retry wake failed");
+            }
+        }
+
+        for departure in [false, true] {
+            let readiness = FdReadiness::default();
+            readiness.ready.store(WRITE, Ordering::SeqCst);
+            readiness.armed.store(READ, Ordering::SeqCst);
+            let (current_signal, current) = counted_waker();
+            let (sibling_signal, sibling) = counted_waker();
+            readiness.register(Some(0), &current);
+            readiness.register(Some(1), &Waker::from(Arc::new(PanicWake)));
+            readiness.register(Some(2), &sibling);
+
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if departure {
+                    readiness.remove(0);
+                } else {
+                    readiness.wake_others(&current);
+                }
+            }))
+            .expect_err("the wake panic must remain visible");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"descriptor retry wake failed")
+            );
+            assert_eq!(current_signal.0.load(Ordering::SeqCst), 0);
+            assert_eq!(sibling_signal.0.load(Ordering::SeqCst), 1);
+            assert!(readiness.waiters.lock().is_empty());
+            assert_eq!(readiness.ready.load(Ordering::SeqCst), WRITE);
+            assert_eq!(readiness.armed.load(Ordering::SeqCst), READ);
+        }
+    }
+
+    #[test]
+    fn departing_readiness_waker_drop_panic_still_wakes_siblings() {
+        struct PanicDrop;
+        impl Wake for PanicDrop {
+            fn wake(self: Arc<Self>) {
+                panic!("departing descriptor owner must not be woken");
+            }
+        }
+        impl Drop for PanicDrop {
+            fn drop(&mut self) {
+                panic!("descriptor retirement failed");
+            }
+        }
+
+        let readiness = FdReadiness::default();
+        let retired = Waker::from(Arc::new(PanicDrop));
+        readiness.register(Some(0), &retired);
+        drop(retired);
+        let (signal, sibling) = counted_waker();
+        readiness.register(Some(1), &sibling);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            readiness.remove(0);
+        }))
+        .expect_err("the retirement panic must remain visible");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"descriptor retirement failed")
+        );
+        assert_eq!(signal.0.load(Ordering::SeqCst), 1);
+        assert!(readiness.waiters.lock().is_empty());
     }
 }

@@ -1221,13 +1221,28 @@ impl std::fmt::Debug for IoDriver {
 /// Wakes every waker of one dispatch batch, then re-raises the first panic.
 /// The batch's one-shot registrations have already fired, so a waker left
 /// unwoken because an earlier one panicked would never be woken again
-/// (br-asupersync-reactor-audit-dofi11).
-fn wake_each(wakers: impl IntoIterator<Item = Waker>) {
+/// (br-asupersync-reactor-audit-dofi11). Shared descriptor/listener waiters
+/// must use this boundary too: catching only their aggregate reactor waker
+/// cannot recover siblings already removed from an inner waiter list.
+pub(crate) fn wake_each(wakers: impl IntoIterator<Item = Waker>) {
+    dispatch_wakers(wakers, None);
+}
+
+/// Retires the current poller's entries and wakes every other detached
+/// waiter. Retirement happens inside the same panic boundary as waking:
+/// dropping the current waker can also run user code.
+pub(crate) fn wake_each_except(wakers: impl IntoIterator<Item = Waker>, current: &Waker) {
+    dispatch_wakers(wakers, Some(current));
+}
+
+fn dispatch_wakers(wakers: impl IntoIterator<Item = Waker>, current: Option<&Waker>) {
     let mut first_panic = None;
     for waker in wakers {
-        if let Err(payload) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
-        {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if !current.is_some_and(|current| waker.will_wake(current)) {
+                waker.wake();
+            }
+        })) {
             first_panic.get_or_insert(payload);
         }
     }
@@ -1241,7 +1256,10 @@ fn wake_each(wakers: impl IntoIterator<Item = Waker>) {
 /// one-shot registrations have already fired, so wakers dropped by the
 /// unwind would never be woken again (br-asupersync-n89rul L4, the same class
 /// as dofi11). When both panic, the callback's panic is the one re-raised.
-fn run_callbacks_then_wake(callbacks: impl FnOnce(), wakers: impl IntoIterator<Item = Waker>) {
+pub(crate) fn run_callbacks_then_wake(
+    callbacks: impl FnOnce(),
+    wakers: impl IntoIterator<Item = Waker>,
+) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(callbacks)) {
         Ok(()) => wake_each(wakers),
         Err(payload) => {

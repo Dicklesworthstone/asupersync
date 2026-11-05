@@ -158,10 +158,10 @@ impl AcceptWaiters {
         // Survivors must re-poll on their own runtimes if that reactor stops
         // being serviced. Move entries out: user waker clone/drop/wake hooks
         // can re-enter this list and must never run under its lock.
-        drop(retired);
-        for survivor in survivors {
-            survivor.waker.wake();
-        }
+        crate::runtime::io_driver::run_callbacks_then_wake(
+            || drop(retired),
+            survivors.into_iter().map(|entry| entry.waker),
+        );
     }
 
     fn wake_all(&self) {
@@ -169,9 +169,7 @@ impl AcceptWaiters {
             let mut guard = self.waiters.lock();
             std::mem::take(&mut *guard)
         };
-        for waiter in waiters {
-            waiter.waker.wake();
-        }
+        crate::runtime::io_driver::wake_each(waiters.into_iter().map(|entry| entry.waker));
     }
 
     fn wake_others(&self, current: &Waker) {
@@ -179,11 +177,10 @@ impl AcceptWaiters {
             let mut guard = self.waiters.lock();
             std::mem::take(&mut *guard)
         };
-        for waiter in waiters {
-            if !waiter.waker.will_wake(current) {
-                waiter.waker.wake();
-            }
-        }
+        crate::runtime::io_driver::wake_each_except(
+            waiters.into_iter().map(|entry| entry.waker),
+            current,
+        );
     }
 }
 
