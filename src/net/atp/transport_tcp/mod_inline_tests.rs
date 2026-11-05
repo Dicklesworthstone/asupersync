@@ -3086,8 +3086,98 @@ fn a_baseline_finer_than_the_chunk_budget_falls_back_to_a_full_transfer() {
     };
     // 100 one-byte chunks exceed a budget of 8: no baseline, a full transfer.
     assert_eq!(scan(1), None);
+    // The final partial chunk must fit, and the exact budget is admissible.
+    assert_eq!(scan(12), None);
+    assert_eq!(scan(13), Some(8));
     // Two 64-byte chunks fit.
     assert_eq!(scan(64), Some(2));
+}
+
+/// Exercise the production admission boundary with the real hash future.
+/// A rejected file must leave that future unpolled (asupersync-9avoui F1).
+#[test]
+fn delta_baseline_preflight_checks_remaining_capacity_before_hashing() {
+    let root = canonical_test_root("delta-baseline-preflight");
+    let path = root.join("data");
+    let empty_path = root.join("empty");
+    std::fs::write(&path, b"123456789").expect("write the existing destination");
+    std::fs::write(&empty_path, b"").expect("write an empty destination");
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("test runtime");
+
+    runtime.block_on(runtime.handle().spawn(async move {
+        for (path, chunk_size, chunks, max_chunks, expected_size) in [
+            (&path, 1, 0, 8, None),
+            (&path, 0, 0, 8, None),
+            (&path, 0, 0, 9, Some(9)),
+            (&path, 4, 1, 3, None),
+            (&path, 4, 1, 4, Some(9)),
+            (&path, 4, 5, 4, None),
+            (&path, 1, u64::MAX, u64::MAX, None),
+            (&path, usize::MAX, u64::MAX - 1, u64::MAX, Some(9)),
+            (&empty_path, 1, 0, 0, Some(0)),
+            (&empty_path, 1, u64::MAX, u64::MAX, Some(0)),
+        ] {
+            let hash_started = AtomicU64::new(0);
+            let hash = async {
+                hash_started.fetch_add(1, Ordering::Relaxed);
+                let mut read_buf = [0u8; 16];
+                hash_file_streaming(path, &mut read_buf).await
+            };
+            let digest = hash_receiver_delta_entry(path, chunk_size, chunks, max_chunks, hash)
+                .await
+                .expect("admit or decline the existing destination");
+            assert_eq!(
+                digest.map(|digest| digest.0),
+                expected_size,
+                "chunk_size={chunk_size}, used={chunks}, limit={max_chunks}"
+            );
+            assert_eq!(
+                hash_started.load(Ordering::Relaxed),
+                u64::from(expected_size.is_some()),
+                "a declined baseline must not poll its content hash"
+            );
+        }
+    }));
+}
+
+#[test]
+fn delta_baseline_preflight_rechecks_files_that_grow_during_hashing() {
+    let root = canonical_test_root("delta-baseline-preflight-growth");
+    let path = root.join("data");
+    let empty_path = root.join("empty");
+    std::fs::write(&path, b"x").expect("write the existing destination");
+    std::fs::write(&empty_path, b"").expect("write an empty destination");
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("test runtime");
+
+    runtime.block_on(runtime.handle().spawn(async move {
+        for (path, grown_bytes, chunk_size, chunks, max_chunks) in [
+            (&path, &b"123456789"[..], 4, 1, 3),
+            (&empty_path, &b"x"[..], 1, u64::MAX, u64::MAX),
+        ] {
+            let hash = async {
+                // This future is first polled after the metadata admission.
+                std::fs::write(path, grown_bytes).expect("grow the admitted destination");
+                let mut read_buf = [0u8; 16];
+                hash_file_streaming(path, &mut read_buf).await
+            };
+            let digest = hash_receiver_delta_entry(path, chunk_size, chunks, max_chunks, hash)
+                .await
+                .expect("recheck the bytes actually hashed");
+            assert!(
+                digest.is_none(),
+                "a file that outgrows the remaining budget must decline delta"
+            );
+            assert_eq!(
+                std::fs::metadata(path).expect("stat the grown file").len(),
+                grown_bytes.len() as u64,
+                "the hash future must run after the initial size was admitted"
+            );
+        }
+    }));
 }
 
 #[cfg(unix)]

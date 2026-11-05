@@ -2608,19 +2608,24 @@ async fn build_receiver_delta_baseline(
             return Ok(None);
         }
         receiver_metadata.insert(entry.rel_path.clone(), metadata);
-        let (size, content_id, content_sha256) =
-            hash_file_streaming(&entry.abs_path, &mut read_buf).await?;
+        let chunks = u64::try_from(planner_chunks.len()).unwrap_or(u64::MAX);
+        let Some((size, content_id, content_sha256)) = hash_receiver_delta_entry(
+            &entry.abs_path,
+            delta_manifest.chunk_size,
+            chunks,
+            max_chunks,
+            hash_file_streaming(&entry.abs_path, &mut read_buf),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
         digests.push(EntryDigest {
             rel_path: entry.rel_path.clone(),
             size,
             content_id,
             content_sha256,
         });
-        let chunk_size = u64::try_from(delta_manifest.chunk_size.max(1)).unwrap_or(u64::MAX);
-        let chunks = u64::try_from(planner_chunks.len()).unwrap_or(u64::MAX);
-        if chunks.saturating_add(size.div_ceil(chunk_size)) > max_chunks {
-            return Ok(None);
-        }
         if !append_receiver_delta_chunks(
             &entry.abs_path,
             delta_manifest.chunk_size.max(1),
@@ -2651,6 +2656,36 @@ async fn build_receiver_delta_baseline(
         chunks_by_content,
         metadata_matches_sender,
     }))
+}
+
+/// Check the remaining chunk budget before polling the content hash, then
+/// recheck the actual bytes hashed in case the file grew after the metadata
+/// sample. Subtracting the used budget avoids overflowing a total chunk count.
+async fn hash_receiver_delta_entry<F>(
+    path: &Path,
+    chunk_size: usize,
+    chunks: u64,
+    max_chunks: u64,
+    hash: F,
+) -> Result<Option<(u64, ObjectId, [u8; 32])>, TransportError>
+where
+    F: Future<Output = Result<(u64, ObjectId, [u8; 32]), StreamingError>>,
+{
+    let Some(remaining_chunks) = max_chunks.checked_sub(chunks) else {
+        return Ok(None);
+    };
+    let chunk_size = u64::try_from(chunk_size.max(1)).unwrap_or(u64::MAX);
+    let metadata = crate::fs::metadata(path)
+        .await
+        .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
+    if metadata.len().div_ceil(chunk_size) > remaining_chunks {
+        return Ok(None);
+    }
+    let digest = hash.await?;
+    if digest.0.div_ceil(chunk_size) > remaining_chunks {
+        return Ok(None);
+    }
+    Ok(Some(digest))
 }
 
 async fn append_receiver_delta_chunks(
