@@ -7,10 +7,16 @@
 #![recursion_limit = "256"]
 
 use asupersync::distributed::distribution::{DistributionConfig, DistributorTransport, SymbolDistributor};
+use asupersync::cx::ChildRegionSpec;
+use asupersync::distributed::remote_owned::{
+    RemoteAdmissionLimits, RemoteAdmissionUsage, RemotePeerLimits, RemoteQueueLimits,
+    RemoteQueueUsage, RemoteServiceAdmission,
+};
 use asupersync::distributed::symbol_service::{
     ChunkedSymbolService, RemoteSymbolTransport, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
     SYMBOL_SERVICE_COMPUTATION, SymbolBatchLimits, SymbolChunkedLimits, SymbolReplicaStore,
     SymbolStoreLimits, encode_symbol_batch, register_chunked_symbol_service, register_symbol_service,
+    register_chunked_symbol_service_with_admission, register_symbol_service_with_admission,
 };
 use asupersync::distributed::EncodedState;
 use asupersync::record::distributed_region::{ConsistencyLevel, ReplicaInfo};
@@ -62,7 +68,18 @@ impl Drop for ClientJoin {
 }
 
 #[derive(Clone, Copy)]
-enum Case { Roundtrip, WrongTarget, WrongSymbolKey, MissingClientIdentity, UnauthorizedPeer }
+enum Case { Roundtrip, AdmittedRoundtrip, WrongTarget, WrongSymbolKey, MissingClientIdentity, UnauthorizedPeer }
+
+fn service_admission(maximum: usize) -> RemoteServiceAdmission {
+    RemoteServiceAdmission::new_queued(
+        RemoteAdmissionLimits { max_peers: 1, max_in_flight: 1, max_input_bytes: maximum },
+        [(NodeId::new("origin-a"), RemotePeerLimits {
+            max_in_flight: 1, max_input_bytes: maximum, max_request_bytes: maximum,
+        })],
+        RemoteQueueLimits { max_waiters: 2, max_input_bytes: 2 * maximum,
+            max_waiters_per_peer: 2, max_input_bytes_per_peer: 2 * maximum },
+    ).unwrap()
+}
 
 fn exercise(case: Case, workers: usize) {
     let receiver_key = if matches!(case, Case::WrongSymbolKey) { 43 } else { 42 };
@@ -71,7 +88,13 @@ fn exercise(case: Case, workers: usize) {
         SymbolStoreLimits { max_batches: 2, max_bytes: 16384, max_batches_per_peer: 1, max_bytes_per_peer: 8192 },
     ).unwrap());
     let mut registry = RemoteComputationRegistry::new();
-    register_symbol_service(&mut registry, Arc::clone(&store)).unwrap();
+    let admission = matches!(case, Case::AdmittedRoundtrip).then(|| service_admission(8192));
+    if let Some(admission) = &admission {
+        register_symbol_service_with_admission(&mut registry, Arc::clone(&store), admission,
+            ChildRegionSpec::inherit(), None).unwrap();
+    } else {
+        register_symbol_service(&mut registry, Arc::clone(&store)).unwrap();
+    }
     let (acceptor, connector, pins) = tls(!matches!(case, Case::MissingClientIdentity));
     let mut policy = RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V1, registry.schema_registry().clone());
     policy.grant_tls_peer(NodeId::new("origin-a"), pins, [SYMBOL_SERVICE_COMPUTATION]).unwrap();
@@ -113,7 +136,7 @@ fn exercise(case: Case, workers: usize) {
             };
             let signed: Vec<_> = encoded.symbols.iter().map(|s| security.sign_symbol(s)).collect();
             let key = encode_symbol_batch(&signed, limits()).unwrap().key();
-            if matches!(case, Case::Roundtrip) {
+            if matches!(case, Case::Roundtrip | Case::AdmittedRoundtrip) {
                 let mut distributor = SymbolDistributor::new(DistributionConfig {
                     consistency: ConsistencyLevel::All, max_concurrent: 2,
                     ack_timeout: Duration::from_secs(4), ..Default::default()
@@ -161,18 +184,26 @@ fn exercise(case: Case, workers: usize) {
     let report = report.expect("native service deadline").expect("service run");
     assert!(report.accepted_connections() >= 1);
     assert_eq!(active, 0);
-    if matches!(case, Case::Roundtrip) {
+    if matches!(case, Case::Roundtrip | Case::AdmittedRoundtrip) {
         assert_eq!(report.accepted_connections(), 4);
         assert_eq!(report.failed_connections(), 0);
         assert_eq!(report.completed_connections(), 4);
     }
     assert!(no_leaks);
     assert!(shutdown);
+    if let Some(admission) = admission {
+        assert_eq!(admission.usage(), RemoteAdmissionUsage::default());
+        assert_eq!(admission.queue_usage(), RemoteQueueUsage::default());
+    }
 }
 
 #[test]
 fn public_distribution_and_exact_fetch_use_real_mtls_storage() {
     for workers in [1, 2] { exercise(Case::Roundtrip, workers); }
+}
+#[test]
+fn admitted_symbol_distribution_and_fetch_preserve_native_mtls_receipts() {
+    for workers in [1, 2] { exercise(Case::AdmittedRoundtrip, workers); }
 }
 #[test]
 fn misrouted_replica_is_rejected_before_remote_publication() { exercise(Case::WrongTarget, 1); }
@@ -213,6 +244,7 @@ fn chunked_symbols(key_seed: u64) -> Vec<AuthenticatedSymbol> {
 #[derive(Clone, Copy)]
 enum ChunkedCase {
     Roundtrip,
+    AdmittedRoundtrip,
     WrongSymbolKey,
     CorruptSymbolTag,
     DropAfterAcceptedChunk,
@@ -239,8 +271,17 @@ fn exercise_chunked(case: ChunkedCase, workers: usize) {
         ).unwrap(),
     ));
     let mut registry = RemoteComputationRegistry::new();
-    register_symbol_service(&mut registry, Arc::clone(&store)).unwrap();
-    register_chunked_symbol_service(&mut registry, Arc::clone(&staged)).unwrap();
+    let admission = matches!(case, ChunkedCase::AdmittedRoundtrip)
+        .then(|| service_admission(CHUNKED_FRAME_BYTES));
+    if let Some(admission) = &admission {
+        register_symbol_service_with_admission(&mut registry, Arc::clone(&store), admission,
+            ChildRegionSpec::inherit(), Some(Duration::from_secs(3))).unwrap();
+        register_chunked_symbol_service_with_admission(&mut registry, Arc::clone(&staged), admission,
+            ChildRegionSpec::inherit(), Some(Duration::from_secs(3))).unwrap();
+    } else {
+        register_symbol_service(&mut registry, Arc::clone(&store)).unwrap();
+        register_chunked_symbol_service(&mut registry, Arc::clone(&staged)).unwrap();
+    }
     let (acceptor, connector, pins) = tls(true);
     let mut policy = RemotePeerAdmissionPolicy::new(
         RemoteProtocolVersion::V1, registry.schema_registry().clone(),
@@ -285,7 +326,7 @@ fn exercise_chunked(case: ChunkedCase, workers: usize) {
             assert!(encoded_len > 8 * CHUNKED_FRAME_BYTES,
                 "fixture must not fit a single request or response frame");
 
-            if matches!(case, ChunkedCase::Roundtrip) {
+            if matches!(case, ChunkedCase::Roundtrip | ChunkedCase::AdmittedRoundtrip) {
                 // The same object, client and service ceiling cannot carry the
                 // legacy whole-batch frame. This witnesses the actual boundary.
                 let whole_batch = RemoteSymbolTransport::new_bounded(
@@ -410,11 +451,20 @@ fn exercise_chunked(case: ChunkedCase, workers: usize) {
     assert_eq!(staged.stats().received_bytes, 0);
     assert!(no_leaks);
     assert!(shutdown);
+    if let Some(admission) = admission {
+        assert_eq!(admission.usage(), RemoteAdmissionUsage::default());
+        assert_eq!(admission.queue_usage(), RemoteQueueUsage::default());
+    }
 }
 
 #[test]
 fn chunked_symbol_transfer_and_exact_fetch_exceed_native_mtls_frame_limit() {
     for workers in [1, 2] { exercise_chunked(ChunkedCase::Roundtrip, workers); }
+}
+
+#[test]
+fn admitted_chunked_symbol_transfer_and_fetch_preserve_native_mtls_receipts() {
+    for workers in [1, 2] { exercise_chunked(ChunkedCase::AdmittedRoundtrip, workers); }
 }
 
 #[test]

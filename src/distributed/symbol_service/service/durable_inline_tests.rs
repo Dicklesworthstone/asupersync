@@ -27,6 +27,10 @@
     mod native {
         use super::*;
         use crate::distributed::symbol_service::durable::DurableSymbolLimits;
+        use crate::distributed::remote_owned::{
+            RemoteAdmissionLimits, RemoteAdmissionUsage, RemotePeerLimits, RemoteQueueLimits,
+            RemoteQueueUsage,
+        };
         use crate::distributed::symbol_service::service::{
             fetch_request, put_request, validate_receipt,
         };
@@ -34,6 +38,10 @@
             EncodedSymbolBatch, SymbolBatchLimits, SymbolStoreLimits, encode_symbol_batch,
         };
         use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder, yield_now};
+        use crate::remote::{
+            ComputationName, IdempotencyKey, RemoteComputationDispatchError, RemoteInput,
+            RemotePeerAdmissionPolicy, RemoteProtocolVersion, RemoteTaskId, SpawnRequest,
+        };
         use crate::security::{AuthKey, SecurityContext};
         use crate::types::CancelReason;
         use crate::types::symbol::Symbol;
@@ -56,6 +64,10 @@
         }
 
         fn linked_store() -> (PathBuf, Arc<DurableSymbolReplicaStore>) {
+            linked_store_with_limits(limits())
+        }
+
+        fn linked_store_with_limits(bounds: DurableSymbolLimits) -> (PathBuf, Arc<DurableSymbolReplicaStore>) {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let parent = std::env::temp_dir();
             loop {
@@ -66,7 +78,7 @@
                         file.sync_all().unwrap();
                         File::open(&parent).unwrap().sync_all().unwrap();
                         let store = DurableSymbolReplicaStore::create(file, "replica",
-                            AuthKey::from_seed(42), AuthKey::from_seed(99), limits()).unwrap();
+                            AuthKey::from_seed(42), AuthKey::from_seed(99), bounds).unwrap();
                         return (path, Arc::new(store));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -112,6 +124,293 @@
 
         impl Drop for ReleasePoolWorker {
             fn drop(&mut self) { self.release(); }
+        }
+
+        fn service_admission() -> RemoteServiceAdmission {
+            RemoteServiceAdmission::new_queued(
+                RemoteAdmissionLimits { max_peers: 2, max_in_flight: 1, max_input_bytes: 8192 },
+                ["a", "b"].map(|peer| (NodeId::new(peer), RemotePeerLimits {
+                    max_in_flight: 1, max_input_bytes: 8192, max_request_bytes: 8192,
+                })),
+                RemoteQueueLimits { max_waiters: 2, max_input_bytes: 16384,
+                    max_waiters_per_peer: 1, max_input_bytes_per_peer: 8192 },
+            ).unwrap()
+        }
+
+        // Tests the admitted registry and actual native worker seam. Certificate
+        // binding is exercised independently by tests/symbol_service_native.rs.
+        async fn registered(
+            cx: &Cx, registry: &RemoteComputationRegistry, name: &str,
+            peer: &str, origin: &str, input: &[u8],
+        ) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
+            let mut policy = RemotePeerAdmissionPolicy::new(
+                RemoteProtocolVersion::V1, registry.schema_registry().clone());
+            let peer = NodeId::new(peer);
+            policy.grant_peer(peer.clone(), [name]).unwrap();
+            let session = policy.admit(&policy.hello_for(peer)).unwrap();
+            let task = RemoteTaskId::next();
+            registry.dispatch(cx, &session, SpawnRequest {
+                remote_task_id: task, computation: ComputationName::new(name),
+                input: RemoteInput::new(input.to_vec()), lease: Duration::from_secs(10),
+                idempotency_key: IdempotencyKey::from_raw(u128::from(task.raw())), budget: None,
+                origin_node: NodeId::new(origin), origin_region: cx.region_id(), origin_task: cx.task_id(),
+            }).await
+        }
+
+        #[test]
+        fn admitted_durable_queue_is_peer_bounded_and_cancellation_releases_only_waiting_credit() {
+            for workers in [1, 2] {
+                let mut bounds = limits();
+                bounds.store.max_batches = 2;
+                bounds.store.max_bytes = 8192;
+                bounds.max_journal_bytes = 16384;
+                let (_path, store) = linked_store_with_limits(bounds);
+                let admission = service_admission();
+                let mut registry = RemoteComputationRegistry::new();
+                let handle = register_durable_symbol_service_with_admission(&mut registry,
+                    Arc::clone(&store), &admission, ChildRegionSpec::inherit(),
+                    Some(Duration::from_secs(5))).unwrap();
+                let mut ordinary = RemoteComputationRegistry::new();
+                register_durable_symbol_service(&mut ordinary, Arc::clone(&store)).unwrap();
+                assert_eq!(registry.schema_registry().fingerprint(), ordinary.schema_registry().fingerprint());
+                let batch = batch();
+                let input = put_request("replica", batch.as_ref()).unwrap();
+                let runtime = runtime(workers);
+                let pool = runtime.blocking_handle().unwrap();
+                let (entered, parked) = std::sync::mpsc::channel();
+                let (release, hold) = std::sync::mpsc::channel();
+                let mut release = ReleasePoolWorker(Some(release));
+                let occupying = pool.spawn(move || {
+                    entered.send(()).unwrap();
+                    hold.recv_timeout(Duration::from_secs(15)).unwrap();
+                });
+                parked.recv_timeout(Duration::from_secs(5)).expect("real pool worker is occupied");
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    crate::time::timeout(cx.now(), Duration::from_secs(10), async {
+                        let oversized = registered(&cx, &registry, SYMBOL_SERVICE_COMPUTATION,
+                            "a", "b", &vec![0; 8193]).await.unwrap();
+                        assert!(matches!(oversized, RemoteOutcome::Failed(message)
+                            if message == "remote service admission refused: remote request payload exceeds its admission limit"));
+                        assert!(!handle.in_flight());
+                        let start = |peer: &'static str, origin: &'static str| {
+                            let registry = registry.clone();
+                            let input = input.clone();
+                            cx.spawn(move |body| async move {
+                                registered(&body, &registry, SYMBOL_SERVICE_COMPUTATION,
+                                    peer, origin, &input).await
+                            }).unwrap()
+                        };
+                        let mut first = start("a", "b");
+                        while pool.pending_count() != 1 { yield_now().await; }
+                        assert!(handle.in_flight());
+                        assert!(!first.is_finished());
+                        assert_eq!(admission.usage(), RemoteAdmissionUsage { in_flight: 1, input_bytes: input.len() });
+                        assert_eq!(admission.peer_usage(&NodeId::new("a")).unwrap().in_flight, 1);
+                        assert_eq!(admission.peer_usage(&NodeId::new("b")).unwrap().in_flight, 0);
+                        let mut expiring = RemoteComputationRegistry::new();
+                        let expired_handle = register_durable_symbol_service_with_admission(&mut expiring,
+                            Arc::clone(&store), &admission, ChildRegionSpec::inherit(),
+                            Some(Duration::from_millis(1))).unwrap();
+                        let expired = registered(&cx, &expiring, SYMBOL_SERVICE_COMPUTATION,
+                            "b", "a", &input).await.unwrap();
+                        assert!(matches!(expired, RemoteOutcome::Failed(message)
+                            if message == "remote service admission refused: remote reservation deadline reached"));
+                        assert!(!expired_handle.in_flight());
+                        assert_eq!(admission.queue_usage(), RemoteQueueUsage::default());
+                        assert_eq!(pool.pending_count(), 1);
+                        let mut cancelled = start("a", "b");
+                        while admission.queue_usage().waiters != 1 { yield_now().await; }
+                        assert!(!cancelled.is_finished(), "the second request is parked in admission");
+                        assert_eq!(pool.pending_count(), 1, "waiting must not submit another disk job");
+                        let refused = registered(&cx, &registry, SYMBOL_SERVICE_COMPUTATION,
+                            "a", "b", &input).await.unwrap();
+                        assert!(matches!(refused, RemoteOutcome::Failed(message)
+                            if message == "remote service admission refused: remote wait queue limit reached: peer waiters"));
+                        let mut other = start("b", "a");
+                        while admission.queue_usage().waiters != 2 { yield_now().await; }
+                        assert_eq!(admission.peer_queue_usage(&NodeId::new("b")).unwrap().waiters, 1);
+                        assert_eq!(admission.queue_usage().input_bytes, 2 * input.len());
+                        let reason = CancelReason::user("cancel queued symbol request");
+                        cancelled.abort_with_reason(reason.clone());
+                        let outcome = cancelled.join(&cx).await.expect("queued invocation task")
+                            .expect("queued registry outcome");
+                        assert!(matches!(outcome, RemoteOutcome::Cancelled(actual) if actual == reason));
+                        assert_eq!(admission.peer_queue_usage(&NodeId::new("a")).unwrap(), RemoteQueueUsage::default());
+                        assert_eq!(admission.queue_usage(), RemoteQueueUsage { waiters: 1, input_bytes: input.len() });
+                        assert_eq!(admission.usage().in_flight, 1);
+                        assert_eq!(pool.pending_count(), 1);
+                        assert_eq!(store.stats().batches, 0);
+                        release.release();
+                        for task in [&mut first, &mut other] {
+                            let outcome = task.join(&cx).await.expect("admitted request task")
+                                .expect("admitted registry outcome");
+                            let RemoteOutcome::Success(bytes) = outcome else { panic!("admitted PUT must commit"); };
+                            validate_receipt(&bytes, "replica", batch.key(), batch.symbol_count()).unwrap();
+                        }
+                        assert_eq!(store.stats().batches, 2, "both authenticated peers make progress");
+                        assert!(!handle.in_flight());
+                        assert_eq!(admission.usage(), RemoteAdmissionUsage::default());
+                        assert_eq!(admission.queue_usage(), RemoteQueueUsage::default());
+                        let outcome = registered(&cx, &registry, SYMBOL_SERVICE_COMPUTATION, "b", "a",
+                            &fetch_request("replica", batch.key()).unwrap()).await.unwrap();
+                        assert!(matches!(outcome, RemoteOutcome::Success(bytes) if bytes == batch.as_ref()));
+                        assert_eq!(admission.usage(), RemoteAdmissionUsage::default());
+                    }).await.expect("native symbol admission queue watchdog");
+                });
+                assert!(occupying.wait_timeout(Duration::from_secs(1)));
+                assert_drained(&runtime);
+                assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+            }
+        }
+
+        #[test]
+        fn dropped_admitted_durable_dispatch_retains_quota_until_real_worker_retirement() {
+            for workers in [1, 2] {
+                let (_path, store) = linked_store();
+                let admission = service_admission();
+                let mut registry = RemoteComputationRegistry::new();
+                let handle = register_durable_symbol_service_with_admission(&mut registry,
+                    Arc::clone(&store), &admission, ChildRegionSpec::inherit(), None).unwrap();
+                let batch = batch();
+                let input = put_request("replica", batch.as_ref()).unwrap();
+                let runtime = runtime(workers);
+                let pool = runtime.blocking_handle().unwrap();
+                let (entered, parked) = std::sync::mpsc::channel();
+                let (release, hold) = std::sync::mpsc::channel();
+                let mut release = ReleasePoolWorker(Some(release));
+                let occupying = pool.spawn(move || {
+                    entered.send(()).unwrap();
+                    hold.recv_timeout(Duration::from_secs(15)).unwrap();
+                });
+                parked.recv_timeout(Duration::from_secs(5)).expect("real pool worker is occupied");
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    crate::time::timeout(cx.now(), Duration::from_secs(10), async {
+                        let mut pending = Box::pin(registered(&cx, &registry,
+                            SYMBOL_SERVICE_COMPUTATION, "a", "b", &input));
+                        poll_fn(|poll_cx| {
+                            assert!(pending.as_mut().poll(poll_cx).is_pending());
+                            if pool.pending_count() == 1 { Poll::Ready(()) }
+                            else { poll_cx.waker().wake_by_ref(); Poll::Pending }
+                        }).await;
+                        assert!(handle.in_flight());
+                        drop(pending);
+                        assert_eq!(admission.usage(), RemoteAdmissionUsage { in_flight: 1, input_bytes: input.len() });
+                        assert!(handle.in_flight());
+                    }).await.expect("native symbol admission parked-worker watchdog");
+                });
+                let blocked = runtime.shutdown_drained(Duration::from_millis(20));
+                assert_eq!(blocked.outcome, RootDrainOutcome::TimedOut, "{blocked:?}");
+                assert!(blocked.live_tasks > 0);
+                assert_eq!(admission.usage().in_flight, 1);
+                assert!(handle.in_flight());
+                assert_eq!(store.stats().batches, 0);
+                release.release();
+                assert!(occupying.wait_timeout(Duration::from_secs(1)));
+                assert_drained(&runtime);
+                assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+                assert!(!handle.in_flight());
+                assert_eq!(admission.usage(), RemoteAdmissionUsage::default());
+                assert_eq!(admission.queue_usage(), RemoteQueueUsage::default());
+                assert_eq!(store.stats().batches, 0, "cancelled queued disk work must not execute");
+                // The same registered handler and budget remain reusable by a
+                // healthy runtime after the cancelled owner has really drained.
+                let healthy = self::runtime(workers);
+                healthy.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let outcome = registered(&cx, &registry, SYMBOL_SERVICE_COMPUTATION,
+                        "b", "a", &input).await.unwrap();
+                    let RemoteOutcome::Success(bytes) = outcome else { panic!("retired quota must be reusable"); };
+                    validate_receipt(&bytes, "replica", batch.key(), batch.symbol_count()).unwrap();
+                });
+                assert_eq!(store.stats().batches, 1);
+                assert_eq!(admission.usage(), RemoteAdmissionUsage::default());
+                assert_drained(&healthy);
+                assert!(healthy.shutdown_timeout(Duration::from_secs(5)));
+            }
+        }
+
+        #[test]
+        fn admitted_durable_chunked_upload_commits_and_shares_admission_with_whole_frame_fetch() {
+            use crate::distributed::symbol_service::{
+                DurableChunkedSymbolService, SymbolChunkedLimits,
+                register_durable_chunked_symbol_service,
+                register_durable_chunked_symbol_service_with_admission,
+            };
+            use crate::distributed::symbol_service::service::chunked::{
+                BEGIN, CHUNK, COMMIT, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
+                Upload, read_progress, request, upload_body,
+            };
+            for workers in [1, 2] {
+                let (_path, store) = linked_store();
+                let service = Arc::new(DurableChunkedSymbolService::new(Arc::clone(&store),
+                    SymbolChunkedLimits::new(128, 1, 4096, 1, 4096, Duration::from_secs(60)).unwrap()));
+                let admission = service_admission();
+                let mut registry = RemoteComputationRegistry::new();
+                register_durable_symbol_service_with_admission(&mut registry, Arc::clone(&store),
+                    &admission, ChildRegionSpec::inherit(), Some(Duration::from_secs(5))).unwrap();
+                register_durable_chunked_symbol_service_with_admission(&mut registry, Arc::clone(&service),
+                    &admission, ChildRegionSpec::inherit(), Some(Duration::from_secs(5))).unwrap();
+                let mut ordinary = RemoteComputationRegistry::new();
+                register_durable_symbol_service(&mut ordinary, Arc::clone(&store)).unwrap();
+                register_durable_chunked_symbol_service(&mut ordinary, Arc::clone(&service)).unwrap();
+                assert_eq!(registry.schema_registry().fingerprint(), ordinary.schema_registry().fingerprint());
+                let batch = batch();
+                let upload = Upload { key: batch.key(), attempt: 77,
+                    total: batch.as_ref().len(), count: batch.symbol_count() };
+                let begin = request(BEGIN, "replica", &upload_body(upload)).unwrap();
+                let runtime = runtime(workers);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    crate::time::timeout(cx.now(), Duration::from_secs(10), async {
+                        let refused = registered(&cx, &registry, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
+                            "unconfigured", "a", &begin).await.unwrap();
+                        assert!(matches!(refused, RemoteOutcome::Failed(message)
+                            if message == "remote service admission refused: remote admission peer is not configured"));
+                        assert!(!service.in_flight());
+                        assert_eq!(service.stats().uploads, 0);
+                        let outcome = registered(&cx, &registry, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
+                            "a", "b", &begin).await.unwrap();
+                        let RemoteOutcome::Success(bytes) = outcome else { panic!("admitted BEGIN must stage"); };
+                        assert_eq!(read_progress(&bytes, upload).unwrap(), (0, 128));
+                        for (index, piece) in batch.as_ref().chunks(128).enumerate() {
+                            let mut body = upload_body(upload);
+                            body.extend_from_slice(&((index * 128) as u64).to_le_bytes());
+                            body.extend_from_slice(piece);
+                            let outcome = registered(&cx, &registry, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
+                                "a", "b", &request(CHUNK, "replica", &body).unwrap()).await.unwrap();
+                            let RemoteOutcome::Success(bytes) = outcome else { panic!("admitted CHUNK must progress"); };
+                            assert_eq!(read_progress(&bytes, upload).unwrap().0, index * 128 + piece.len());
+                            assert_eq!(admission.usage(), RemoteAdmissionUsage::default());
+                        }
+                        let outcome = registered(&cx, &registry, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
+                            "a", "b", &request(COMMIT, "replica", &upload_body(upload)).unwrap()).await.unwrap();
+                        let RemoteOutcome::Success(bytes) = outcome else { panic!("admitted COMMIT must persist"); };
+                        validate_receipt(&bytes[8..], "replica", batch.key(), batch.symbol_count()).unwrap();
+                        assert_eq!(store.stats().batches, 1);
+                        assert_eq!(service.stats().uploads, 0);
+                        assert!(!service.in_flight());
+                        let fetch = fetch_request("replica", batch.key()).unwrap();
+                        let outcome = registered(&cx, &registry, SYMBOL_SERVICE_COMPUTATION,
+                            "a", "b", &fetch).await.unwrap();
+                        assert!(matches!(outcome, RemoteOutcome::Success(bytes) if bytes == batch.as_ref()));
+                        assert!(admission.close_admission());
+                        for (name, input) in [(SYMBOL_SERVICE_COMPUTATION, &fetch),
+                            (SYMBOL_CHUNKED_SERVICE_COMPUTATION, &begin)] {
+                            let outcome = registered(&cx, &registry, name, "a", "b", input).await.unwrap();
+                            assert!(matches!(outcome, RemoteOutcome::Failed(message)
+                                if message == "remote service admission refused: remote executor admission is closed"));
+                        }
+                        assert_eq!(store.stats().batches, 1);
+                        assert_eq!(service.stats().uploads, 0);
+                        assert_eq!(admission.usage(), RemoteAdmissionUsage::default());
+                        assert_eq!(admission.queue_usage(), RemoteQueueUsage::default());
+                    }).await.expect("native admitted durable chunked workflow watchdog");
+                });
+                assert_drained(&runtime);
+                assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+            }
         }
 
         #[test]

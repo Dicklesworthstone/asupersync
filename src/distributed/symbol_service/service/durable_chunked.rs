@@ -4,14 +4,17 @@ use super::chunked::{
     ChunkedSymbolService, RequestSchema, ResponseSchema, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
     SymbolChunkedLimits, SymbolStagingStats,
 };
-use crate::cx::Cx;
+use super::{Admission, register_handler};
+use crate::cx::{ChildRegionSpec, Cx};
 use crate::distributed::ComputationSchemaRegistryError;
+use crate::distributed::remote_owned::RemoteServiceAdmission;
 use crate::distributed::symbol_service::SymbolStoreError;
 use crate::distributed::symbol_service::durable::DurableSymbolReplicaStore;
 use crate::remote::{NodeId, RemoteComputationRegistry, RemoteOutcome};
 use crate::types::Time;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 use crate::sync::atomic::{AtomicUsize, Ordering};
 use zeroize::Zeroizing;
 
@@ -191,8 +194,39 @@ async fn dispatch(
 pub fn register_durable_chunked_symbol_service(
     registry: &mut RemoteComputationRegistry, service: Arc<DurableChunkedSymbolService>,
 ) -> Result<(), ComputationSchemaRegistryError> {
-    registry.register::<RequestSchema, ResponseSchema, _, _>(
+    register_durable_chunked_symbol_service_inner(registry, service, None)
+}
+
+/// Register durable multi-frame storage with shared authenticated-peer admission.
+///
+/// Reuses [`register_durable_chunked_symbol_service`]'s exact handler and wire.
+/// Per-peer/global request and input-byte limits apply before frame copies or
+/// blocking-worker submission. Each invocation is charged through child-region
+/// drain and physical worker retirement, including after a dropped network waiter.
+/// `None` refuses saturation; `Some(timeout)` enables explicitly bounded waiting
+/// as described by [`super::register_symbol_service_with_admission`].
+///
+/// The service's existing request-credit ceiling and independent volatile staging
+/// limits still apply. Choose the shared execution limit within that ceiling to
+/// queue before the internal busy refusal. Credits cover individual requests,
+/// not entire uploads. Queue cancellation does not discard an existing upload,
+/// and cancellation cannot roll back an already started synchronous commit.
+pub fn register_durable_chunked_symbol_service_with_admission(
+    registry: &mut RemoteComputationRegistry, service: Arc<DurableChunkedSymbolService>,
+    admission: &RemoteServiceAdmission, child: ChildRegionSpec, wait_timeout: Option<Duration>,
+) -> Result<(), ComputationSchemaRegistryError> {
+    register_durable_chunked_symbol_service_inner(registry, service,
+        Some(Admission { limiter: admission, child, wait_timeout }))
+}
+
+fn register_durable_chunked_symbol_service_inner(
+    registry: &mut RemoteComputationRegistry, service: Arc<DurableChunkedSymbolService>,
+    admission: Option<Admission<'_>>,
+) -> Result<(), ComputationSchemaRegistryError> {
+    register_handler::<RequestSchema, ResponseSchema, _, _>(
+        registry,
         SYMBOL_CHUNKED_SERVICE_COMPUTATION,
+        admission,
         move |cx, invocation| {
             let service = Arc::clone(&service);
             async move {

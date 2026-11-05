@@ -1,12 +1,16 @@
 //! Register storage in the existing authenticated named-computation service.
 
 use super::{EncodedSymbolBatch, SymbolBatchKey, SymbolReplicaStore, SymbolStoreError};
+use crate::cx::{ChildRegionSpec, Cx};
+use crate::distributed::remote_owned::RemoteServiceAdmission;
 use crate::distributed::{ComputationSchemaRegistryError, HasSchema, SchemaDescriptor};
 #[cfg(any(test, all(feature = "tls", not(target_arch = "wasm32"))))]
 use crate::distributed::distribution::ReplicaAck;
-use crate::remote::{RemoteComputationRegistry, RemoteOutcome};
+use crate::remote::{RemoteComputationInvocation, RemoteComputationRegistry, RemoteError, RemoteOutcome};
 use crate::types::{Time, symbol::ObjectId};
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Versioned named-computation capability required for both put and exact fetch.
 pub const SYMBOL_SERVICE_COMPUTATION: &str = "asupersync.distributed.symbol-store.v1";
@@ -27,6 +31,35 @@ impl HasSchema for ServiceResponse {
     }
 }
 
+// Registration only: all accounting, waiting and cancellation ownership remains
+// in RemoteServiceAdmission. The direct path preserves existing handler behavior.
+struct Admission<'a> {
+    limiter: &'a RemoteServiceAdmission,
+    child: ChildRegionSpec,
+    wait_timeout: Option<Duration>,
+}
+
+fn register_handler<I, O, F, Fut>(
+    registry: &mut RemoteComputationRegistry, name: &str,
+    admission: Option<Admission<'_>>, handler: F,
+) -> Result<(), ComputationSchemaRegistryError>
+where
+    I: HasSchema,
+    O: HasSchema,
+    F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
+{
+    match admission {
+        None => registry.register::<I, O, _, _>(name, handler),
+        Some(Admission { limiter, child, wait_timeout: None }) => {
+            limiter.register::<I, O, _, _>(registry, name, child, handler)
+        }
+        Some(Admission { limiter, child, wait_timeout: Some(timeout) }) => {
+            limiter.register_waiting::<I, O, _, _>(registry, name, child, timeout, handler)
+        }
+    }
+}
+
 /// Install put/fetch handlers; this does NOT grant any network peer authority.
 ///
 /// Build the listener's admission policy from the resulting complete schema
@@ -42,8 +75,44 @@ impl HasSchema for ServiceResponse {
 pub fn register_symbol_service(
     registry: &mut RemoteComputationRegistry, store: Arc<SymbolReplicaStore>,
 ) -> Result<(), ComputationSchemaRegistryError> {
-    registry.register::<ServiceRequest, ServiceResponse, _, _>(
+    register_symbol_service_inner(registry, store, None)
+}
+
+/// Register the same put/fetch capability with shared authenticated-peer admission.
+///
+/// `admission` supplies global/per-peer invocation and original-input-byte limits.
+/// Reuse the same admission object across symbol registrations to share its budget;
+/// TLS grants and retained store limits remain independent. The admitted session's
+/// peer selects both the quota and storage namespace, never the claimed origin.
+///
+/// `None` refuses saturation immediately. `Some(timeout)` uses the admission
+/// object's bounded queue, which must be enabled with
+/// [`RemoteServiceAdmission::new_queued`] (or its prioritized constructor). The
+/// timeout must be positive and the context must supply a timer. Queue cancellation,
+/// disconnect/drop or expiry removes the request before the handler parses, copies
+/// or verifies it. Waiting does not extend the invocation's original deadline.
+///
+/// Execution runs in `child` and retains its charge until that region drains,
+/// including after its dispatch waiter disappears. Runtime spawn capability is
+/// required; there is no inline fallback. The original name, schemas, receipt and
+/// storage semantics are unchanged. Admission counts input bytes, not response
+/// buffers or retained batches; listener/frame and store bounds still apply.
+pub fn register_symbol_service_with_admission(
+    registry: &mut RemoteComputationRegistry, store: Arc<SymbolReplicaStore>,
+    admission: &RemoteServiceAdmission, child: ChildRegionSpec, wait_timeout: Option<Duration>,
+) -> Result<(), ComputationSchemaRegistryError> {
+    register_symbol_service_inner(registry, store,
+        Some(Admission { limiter: admission, child, wait_timeout }))
+}
+
+fn register_symbol_service_inner(
+    registry: &mut RemoteComputationRegistry, store: Arc<SymbolReplicaStore>,
+    admission: Option<Admission<'_>>,
+) -> Result<(), ComputationSchemaRegistryError> {
+    register_handler::<ServiceRequest, ServiceResponse, _, _>(
+        registry,
         SYMBOL_SERVICE_COMPUTATION,
+        admission,
         move |cx, invocation| {
             let store = Arc::clone(&store);
             async move {
@@ -166,9 +235,15 @@ pub(super) mod chunked;
 #[cfg(not(target_arch = "wasm32"))]
 mod durable;
 #[cfg(not(target_arch = "wasm32"))]
-pub use durable::{DurableSymbolServiceHandle, register_durable_symbol_service};
+pub use durable::{
+    DurableSymbolServiceHandle, register_durable_symbol_service,
+    register_durable_symbol_service_with_admission,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod durable_chunked;
 #[cfg(not(target_arch = "wasm32"))]
-pub use durable_chunked::{DurableChunkedSymbolService, register_durable_chunked_symbol_service};
+pub use durable_chunked::{
+    DurableChunkedSymbolService, register_durable_chunked_symbol_service,
+    register_durable_chunked_symbol_service_with_admission,
+};

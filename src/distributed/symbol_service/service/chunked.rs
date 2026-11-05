@@ -528,7 +528,36 @@ impl HasSchema for ResponseSchema {
 pub fn register_chunked_symbol_service(
     registry: &mut RemoteComputationRegistry, service: Arc<ChunkedSymbolService>,
 ) -> Result<(), ComputationSchemaRegistryError> {
-    registry.register::<RequestSchema, ResponseSchema, _, _>(SYMBOL_CHUNKED_SERVICE_COMPUTATION, move |cx, invocation| {
+    register_chunked_symbol_service_inner(registry, service, None)
+}
+
+/// Register the existing multi-frame capability with shared execution admission.
+///
+/// Each BEGIN/CHUNK/COMMIT/READ invocation acquires authenticated-peer input-byte
+/// and execution credit before parsing or storage work. Incomplete uploads retain
+/// their independent [`SymbolChunkedLimits`] reservations between invocations;
+/// releasing request credit does not release or cancel an upload. No transfer-wide
+/// credit, receipt, protocol or automatic retry is introduced.
+///
+/// `None` refuses saturation; `Some(timeout)` uses the explicitly enabled bounded
+/// queue. See [`super::register_symbol_service_with_admission`] for queue, child
+/// drain and shared-budget behavior. The memory handler remains synchronous once
+/// admitted, so cancellation cannot preempt a verification poll already running.
+pub fn register_chunked_symbol_service_with_admission(
+    registry: &mut RemoteComputationRegistry, service: Arc<ChunkedSymbolService>,
+    admission: &crate::distributed::remote_owned::RemoteServiceAdmission,
+    child: crate::cx::ChildRegionSpec, wait_timeout: Option<Duration>,
+) -> Result<(), ComputationSchemaRegistryError> {
+    register_chunked_symbol_service_inner(registry, service,
+        Some(super::Admission { limiter: admission, child, wait_timeout }))
+}
+
+fn register_chunked_symbol_service_inner(
+    registry: &mut RemoteComputationRegistry, service: Arc<ChunkedSymbolService>,
+    admission: Option<super::Admission<'_>>,
+) -> Result<(), ComputationSchemaRegistryError> {
+    super::register_handler::<RequestSchema, ResponseSchema, _, _>(
+        registry, SYMBOL_CHUNKED_SERVICE_COMPUTATION, admission, move |cx, invocation| {
         let service = Arc::clone(&service);
         async move {
             if cx.checkpoint().is_err() {

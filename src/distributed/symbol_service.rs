@@ -160,10 +160,12 @@ impl SymbolReplicaStore {
 mod tests;
 
 mod service;
-pub use service::{SYMBOL_SERVICE_COMPUTATION, register_symbol_service};
+pub use service::{
+    SYMBOL_SERVICE_COMPUTATION, register_symbol_service, register_symbol_service_with_admission,
+};
 pub use service::chunked::{
     ChunkedSymbolService, SYMBOL_CHUNKED_SERVICE_COMPUTATION, SymbolChunkedLimits,
-    SymbolStagingStats, register_chunked_symbol_service,
+    SymbolStagingStats, register_chunked_symbol_service, register_chunked_symbol_service_with_admission,
 };
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -178,10 +180,16 @@ pub use native::recovery;
 pub mod durable;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use service::{DurableSymbolServiceHandle, register_durable_symbol_service};
+pub use service::{
+    DurableSymbolServiceHandle, register_durable_symbol_service,
+    register_durable_symbol_service_with_admission,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use service::{DurableChunkedSymbolService, register_durable_chunked_symbol_service};
+pub use service::{
+    DurableChunkedSymbolService, register_durable_chunked_symbol_service,
+    register_durable_chunked_symbol_service_with_admission,
+};
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use native::checkpoint;

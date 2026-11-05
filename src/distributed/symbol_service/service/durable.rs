@@ -1,13 +1,18 @@
 //! Existing symbol-service wire, with commit-before-receipt disk ownership.
 
-use super::{ServiceRequest, ServiceResponse, SYMBOL_SERVICE_COMPUTATION, read_key, receipt, split_request};
-use crate::cx::Cx;
+use super::{
+    Admission, ServiceRequest, ServiceResponse, SYMBOL_SERVICE_COMPUTATION,
+    read_key, receipt, register_handler, split_request,
+};
+use crate::cx::{ChildRegionSpec, Cx};
 use crate::distributed::ComputationSchemaRegistryError;
+use crate::distributed::remote_owned::RemoteServiceAdmission;
 use crate::distributed::symbol_service::durable::{DurableSymbolError, DurableSymbolReplicaStore};
 use crate::distributed::symbol_service::{SymbolBatchKey, SymbolStoreError};
 use crate::remote::{NodeId, RemoteComputationRegistry, RemoteOutcome};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// Observes admission across all connections using one registered durable handler.
@@ -150,10 +155,44 @@ pub fn register_durable_symbol_service(
     registry: &mut RemoteComputationRegistry,
     store: Arc<DurableSymbolReplicaStore>,
 ) -> Result<DurableSymbolServiceHandle, ComputationSchemaRegistryError> {
+    register_durable_symbol_service_inner(registry, store, None)
+}
+
+/// Register disk-backed put/fetch with authenticated-peer execution admission.
+///
+/// Uses the same handler, wire capability and commit-before-receipt semantics as
+/// [`register_durable_symbol_service`]. Admission precedes request copying and
+/// blocking-worker submission, and owns the child region through actual worker
+/// retirement even if the caller cancels or drops its dispatch waiter.
+///
+/// The existing one-job durable gate remains in force. To queue fairly for that
+/// gate, use a dedicated [`RemoteServiceAdmission::new_queued`] budget with
+/// `max_in_flight: 1`, explicit peer/waiter/byte limits and `Some(wait_timeout)`.
+/// A larger execution limit can still encounter the durable handler's busy
+/// refusal. Other registrations or direct journal users have independent gates.
+/// `None` selects immediate refusal. See [`super::register_symbol_service_with_admission`]
+/// for the shared admission, child-region and queue contracts.
+///
+/// Cancellation cannot undo a synchronous journal commit that already started;
+/// a cancelled or lost response is not evidence of rollback.
+pub fn register_durable_symbol_service_with_admission(
+    registry: &mut RemoteComputationRegistry, store: Arc<DurableSymbolReplicaStore>,
+    admission: &RemoteServiceAdmission, child: ChildRegionSpec, wait_timeout: Option<Duration>,
+) -> Result<DurableSymbolServiceHandle, ComputationSchemaRegistryError> {
+    register_durable_symbol_service_inner(registry, store,
+        Some(Admission { limiter: admission, child, wait_timeout }))
+}
+
+fn register_durable_symbol_service_inner(
+    registry: &mut RemoteComputationRegistry, store: Arc<DurableSymbolReplicaStore>,
+    admission: Option<Admission<'_>>,
+) -> Result<DurableSymbolServiceHandle, ComputationSchemaRegistryError> {
     let handle = DurableSymbolServiceHandle(Arc::new(AtomicBool::new(false)));
     let gate = Arc::clone(&handle.0);
-    registry.register::<ServiceRequest, ServiceResponse, _, _>(
+    register_handler::<ServiceRequest, ServiceResponse, _, _>(
+        registry,
         SYMBOL_SERVICE_COMPUTATION,
+        admission,
         move |cx, invocation| {
             let store = Arc::clone(&store);
             let gate = Arc::clone(&gate);

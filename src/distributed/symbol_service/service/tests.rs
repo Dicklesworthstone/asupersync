@@ -19,6 +19,33 @@ fn setup() -> (Arc<SymbolReplicaStore>, RemoteComputationRegistry, RemotePeerAdm
     (store, registry, policy)
 }
 
+#[test]
+fn admitted_whole_and_chunked_registrations_preserve_original_schemas() {
+    use crate::distributed::remote_owned::{RemoteAdmissionLimits, RemotePeerLimits, RemoteQueueLimits};
+    use super::chunked::{ChunkedSymbolService, SymbolChunkedLimits,
+        register_chunked_symbol_service, register_chunked_symbol_service_with_admission};
+    let (store, mut ordinary, _) = setup();
+    let chunked = Arc::new(ChunkedSymbolService::new(Arc::clone(&store),
+        SymbolChunkedLimits::new(128, 2, 8192, 1, 4096, Duration::from_secs(30)).unwrap()));
+    register_chunked_symbol_service(&mut ordinary, Arc::clone(&chunked)).unwrap();
+    let admission = RemoteServiceAdmission::new_queued(
+        RemoteAdmissionLimits { max_peers: 1, max_in_flight: 1, max_input_bytes: 8192 },
+        [(NodeId::new("a"), RemotePeerLimits {
+            max_in_flight: 1, max_input_bytes: 8192, max_request_bytes: 8192,
+        })],
+        RemoteQueueLimits { max_waiters: 1, max_input_bytes: 8192,
+            max_waiters_per_peer: 1, max_input_bytes_per_peer: 8192 },
+    ).unwrap();
+    for wait in [None, Some(Duration::from_secs(1))] {
+        let mut admitted = RemoteComputationRegistry::new();
+        register_symbol_service_with_admission(&mut admitted, Arc::clone(&store), &admission,
+            ChildRegionSpec::inherit(), wait).unwrap();
+        register_chunked_symbol_service_with_admission(&mut admitted, Arc::clone(&chunked), &admission,
+            ChildRegionSpec::inherit(), wait).unwrap();
+        assert_eq!(admitted.schema_registry().fingerprint(), ordinary.schema_registry().fingerprint());
+    }
+}
+
 fn dispatch(
     registry: &RemoteComputationRegistry, policy: &RemotePeerAdmissionPolicy,
     peer: &str, claimed_origin: &str, input: Vec<u8>,
