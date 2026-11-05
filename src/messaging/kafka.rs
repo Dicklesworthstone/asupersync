@@ -105,11 +105,14 @@ pub enum KafkaError {
 /// to inspect it. The standard error source chain retains the native error.
 /// Flags describe librdkafka's verdict; the transaction owner still requires
 /// abort recovery after any failed enrollment, including a retriable failure.
+/// Producers created with [`TransactionalProducer::new_with_commit_recovery`]
+/// retain an uncertain commit for resumption instead of attempting to abort it.
 #[derive(Debug)]
 pub struct KafkaTransactionFailure {
     retriable: bool,
     abort_required: bool,
     fatal: bool,
+    commit_resume_required: bool,
     source: Box<dyn std::error::Error + Send + Sync>,
 }
 
@@ -132,10 +135,28 @@ impl KafkaTransactionFailure {
     pub const fn is_fatal(&self) -> bool {
         self.fatal
     }
+
+    /// Whether an opted-in producer must resume the existing commit.
+    ///
+    /// The commit outcome is still unknown. The next
+    /// [`TransactionalProducer::begin_transaction`] resumes that same commit
+    /// before admitting a new transaction. Do not replay the batch: this is
+    /// not permission to begin a replacement transaction with the same records.
+    #[must_use]
+    pub const fn requires_commit_resume(&self) -> bool {
+        self.commit_resume_required
+    }
 }
 
 impl fmt::Display for KafkaTransactionFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.commit_resume_required {
+            return write!(
+                f,
+                "transaction commit outcome unknown; the producer must resume the existing commit: {}",
+                self.source
+            );
+        }
         write!(
             f,
             "transactional offset operation failed (retriable={}, abort_required={}, fatal={}): {}",
@@ -192,8 +213,8 @@ impl From<io::Error> for KafkaError {
 }
 
 impl KafkaError {
-    /// Inspect a native transactional-offset failure without parsing its text.
-    /// Ordinary I/O errors and the legacy producer APIs return `None`.
+    /// Inspect a native transactional-offset or opted-in commit-recovery
+    /// failure without parsing its text. Ordinary I/O errors return `None`.
     #[must_use]
     pub fn transaction_failure(&self) -> Option<&KafkaTransactionFailure> {
         match self {
@@ -241,7 +262,7 @@ impl KafkaError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         // The native flag alone is insufficient: this owner conservatively
-        // fences every failed enrollment/commit until abort recovery completes.
+        // fences failed operations until abort or commit recovery completes.
         if self.transaction_failure().is_some() {
             return false;
         }
@@ -495,6 +516,16 @@ fn map_rdkafka_error(err: &RdKafkaError, message: Option<&BorrowedMessage<'_>>) 
 
 #[cfg(feature = "kafka")]
 fn map_transaction_failure(error: RdKafkaError) -> KafkaError {
+    map_transaction_failure_with_recovery(error, false)
+}
+
+#[cfg(feature = "kafka")]
+fn map_commit_recovery_failure(error: RdKafkaError) -> KafkaError {
+    map_transaction_failure_with_recovery(error, true)
+}
+
+#[cfg(feature = "kafka")]
+fn map_transaction_failure_with_recovery(error: RdKafkaError, resume_commit: bool) -> KafkaError {
     let (retriable, abort_required, fatal) = match &error {
         RdKafkaError::Transaction(native) => (
             native.is_retriable(),
@@ -507,6 +538,7 @@ fn map_transaction_failure(error: RdKafkaError) -> KafkaError {
         retriable,
         abort_required,
         fatal,
+        commit_resume_required: resume_commit && retriable && !abort_required && !fatal,
         source: Box::new(error),
     }))
 }
@@ -1978,10 +2010,13 @@ enum TransactionPhase {
     // Also used while a native initialization or recovery owns the producer.
     Finalizing,
     NeedsAbortRecovery,
+    NeedsCommitRecovery,
 }
 
 #[derive(Debug, Default)]
 struct TransactionalProducerState {
+    // Chosen at construction and never changed for this producer instance.
+    resume_pending_commits: bool,
     phase: TransactionPhase,
     generation: u64,
     operation_in_flight: bool,
@@ -2549,6 +2584,34 @@ impl fmt::Debug for TransactionalProducer {
 impl TransactionalProducer {
     /// Create a new transactional producer.
     pub fn new(config: TransactionalConfig) -> Result<Self, KafkaError> {
+        Self::new_with_recovery_mode(config, false)
+    }
+
+    /// Create a producer that retains and resumes uncertain native commits.
+    ///
+    /// After the bounded commit attempts are exhausted, a retriable native
+    /// error leaves the existing transaction and its enrolled consumer offsets
+    /// owned by this producer. The error's
+    /// [`KafkaTransactionFailure::requires_commit_resume`] flag is true, and
+    /// [`KafkaError::is_retryable`] is false: replaying the batch could duplicate
+    /// records that the broker has already committed.
+    ///
+    /// The next [`Self::begin_transaction`] resumes the existing commit before
+    /// admitting a new transaction. Each recovery call has the same bounded
+    /// attempt window as [`Transaction::commit`]. Consumer offsets are published
+    /// only after native commit success. An abort-required failure switches to
+    /// abort recovery; a fatal failure still requires recreating the producer.
+    /// Dropping a waiter does not release a running native operation or discard
+    /// the pending commit. Recovery is caller-driven, with no detached retry
+    /// loop. [`Self::new`] preserves the legacy abort-recovery behavior.
+    pub fn new_with_commit_recovery(config: TransactionalConfig) -> Result<Self, KafkaError> {
+        Self::new_with_recovery_mode(config, true)
+    }
+
+    fn new_with_recovery_mode(
+        config: TransactionalConfig,
+        resume_pending_commits: bool,
+    ) -> Result<Self, KafkaError> {
         config.producer.validate()?;
 
         if config.transaction_id.is_empty() {
@@ -2562,7 +2625,10 @@ impl TransactionalProducer {
 
         Ok(Self {
             config,
-            state: Arc::new(Mutex::new(TransactionalProducerState::default())),
+            state: Arc::new(Mutex::new(TransactionalProducerState {
+                resume_pending_commits,
+                ..TransactionalProducerState::default()
+            })),
             #[cfg(feature = "kafka")]
             producer,
         })
@@ -2571,6 +2637,11 @@ impl TransactionalProducer {
     /// Begin a new transaction.
     ///
     /// Returns a `Transaction` that must be committed or aborted.
+    /// With [`Self::new_with_commit_recovery`], this first resumes any pending
+    /// commit. An error requiring commit resumption leaves the same transaction
+    /// owned by the producer; call this method again with a live context to
+    /// resume it. A successful return means recovery completed before the new
+    /// transaction began, and does not mean the previous batch should be replayed.
     pub async fn begin_transaction(&self, cx: &Cx) -> Result<Transaction<'_>, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.recover_abandoned_transaction(cx).await?;
@@ -2582,6 +2653,13 @@ impl TransactionalProducer {
             .deterministic_broker_allowed_for_testing()
         {
             return Err(KafkaError::FeatureDisabled);
+        }
+        // An opted-in commit recovery can finish after its explicit owner was
+        // cancelled. Retire that commit, but do not admit replacement work on
+        // the cancelled context. Keep the legacy constructor's policy intact.
+        let resume_pending_commits = self.state.lock().resume_pending_commits;
+        if resume_pending_commits {
+            cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         }
         let generation = self.activate_transaction()?;
 
@@ -2664,6 +2742,9 @@ impl TransactionalProducer {
             TransactionPhase::NeedsAbortRecovery => Err(KafkaError::Transaction(
                 "previous transaction requires abort recovery".to_string(),
             )),
+            TransactionPhase::NeedsCommitRecovery => Err(KafkaError::Transaction(
+                "previous transaction requires commit resumption".to_string(),
+            )),
         }
     }
 
@@ -2684,6 +2765,9 @@ impl TransactionalProducer {
             )),
             TransactionPhase::NeedsAbortRecovery => Err(KafkaError::Transaction(
                 "transaction is poisoned and must be aborted before reuse".to_string(),
+            )),
+            TransactionPhase::NeedsCommitRecovery => Err(KafkaError::Transaction(
+                "transaction commit is pending and must be resumed before reuse".to_string(),
             )),
         }
     }
@@ -2761,17 +2845,19 @@ impl TransactionalProducer {
 
     fn claim_recovery(&self) -> Option<TransactionOperationGuard> {
         let mut state = self.state.lock();
-        if state.phase != TransactionPhase::NeedsAbortRecovery {
-            return None;
-        }
+        let operation = match state.phase {
+            TransactionPhase::NeedsAbortRecovery => TransactionOperation::Recover,
+            TransactionPhase::NeedsCommitRecovery => TransactionOperation::RecoverCommit,
+            _ => return None,
+        };
         // Claim before releasing the lock; another begin must not queue a
-        // second abort or reuse this producer before recovery completes.
+        // second finalization or reuse this producer before recovery completes.
         state.phase = TransactionPhase::Finalizing;
         state.operation_in_flight = true;
         Some(TransactionOperationGuard {
             state: Arc::clone(&self.state),
             generation: state.generation,
-            operation: TransactionOperation::Recover,
+            operation,
             offsets: None,
             #[cfg(any(feature = "kafka", test))]
             started: false,
@@ -2785,6 +2871,9 @@ impl TransactionalProducer {
             return Ok(());
         };
 
+        #[cfg(feature = "kafka")]
+        let resume_commit = operation.operation.is_commit();
+
         #[cfg(not(feature = "kafka"))]
         let _ = cx;
 
@@ -2793,6 +2882,12 @@ impl TransactionalProducer {
             let producer = self.producer.clone();
             let timeout = self.config.transaction_timeout;
             move || {
+                if resume_commit {
+                    return commit_resuming_retriable_failures(|| {
+                        producer.commit_transaction(timeout)
+                    })
+                    .map_err(map_commit_recovery_failure);
+                }
                 producer.abort_transaction(timeout).map_err(|err| {
                     // A fenced producer must be recreated. Keep that verdict
                     // instead of reporting a retryable broker error forever.
@@ -2831,6 +2926,18 @@ enum TransactionOperation {
     #[cfg(any(feature = "kafka", test))]
     Commit,
     Recover,
+    RecoverCommit,
+}
+
+impl TransactionOperation {
+    const fn is_commit(self) -> bool {
+        match self {
+            #[cfg(any(feature = "kafka", test))]
+            Self::Commit => true,
+            Self::RecoverCommit => true,
+            _ => false,
+        }
+    }
 }
 
 /// Owns the occupied phase even if the async waiter disappears. Its Drop also
@@ -2856,6 +2963,7 @@ impl TransactionOperationGuard {
         let mut state = owner.lock();
         let expected = match operation {
             TransactionOperation::Recover => TransactionPhase::NeedsAbortRecovery,
+            TransactionOperation::RecoverCommit => TransactionPhase::NeedsCommitRecovery,
             #[cfg(feature = "kafka")]
             TransactionOperation::Initialize => TransactionPhase::Idle,
             TransactionOperation::Begin
@@ -2938,6 +3046,16 @@ impl TransactionOperationGuard {
                     }
                     #[cfg(any(feature = "kafka", test))]
                     TransactionOperation::Begin => TransactionPhase::Idle,
+                    _ if self.operation.is_commit()
+                        && state.resume_pending_commits
+                        && result
+                            .as_ref()
+                            .err()
+                            .and_then(KafkaError::transaction_failure)
+                            .is_some_and(KafkaTransactionFailure::requires_commit_resume) =>
+                    {
+                        TransactionPhase::NeedsCommitRecovery
+                    }
                     _ if result.is_ok() => TransactionPhase::Idle,
                     _ => TransactionPhase::NeedsAbortRecovery,
                 };
@@ -2947,11 +3065,13 @@ impl TransactionOperationGuard {
                 {
                     state.pending_offsets = self.offsets.take();
                 }
-                #[cfg(any(feature = "kafka", test))]
-                if matches!(self.operation, TransactionOperation::Commit) && result.is_ok() {
+                if self.operation.is_commit() && result.is_ok() {
                     committed_offsets = state.pending_offsets.take();
                 }
-                if state.phase != TransactionPhase::Active {
+                if !matches!(
+                    state.phase,
+                    TransactionPhase::Active | TransactionPhase::NeedsCommitRecovery
+                ) {
                     state.pending_offsets = None;
                 }
                 if committed_offsets.is_some() {
@@ -2962,7 +3082,10 @@ impl TransactionOperationGuard {
                     state.operation_in_flight = false;
                 }
                 #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
-                if state.phase != TransactionPhase::Active {
+                if !matches!(
+                    state.phase,
+                    TransactionPhase::Active | TransactionPhase::NeedsCommitRecovery
+                ) {
                     state.staged_records.clear();
                 }
             }
@@ -2998,9 +3121,19 @@ impl Drop for TransactionOperationGuard {
             TransactionOperation::Initialize => TransactionPhase::Idle,
             #[cfg(any(feature = "kafka", test))]
             TransactionOperation::Begin if !self.started => TransactionPhase::Idle,
+            // A queued recovery already owns an uncertain native commit. A
+            // started commit may also have succeeded before an unwind. Neither
+            // may be reclassified as an abort merely because its waiter left.
+            TransactionOperation::RecoverCommit => TransactionPhase::NeedsCommitRecovery,
+            #[cfg(any(feature = "kafka", test))]
+            TransactionOperation::Commit if state.resume_pending_commits && self.started => {
+                TransactionPhase::NeedsCommitRecovery
+            }
             _ => TransactionPhase::NeedsAbortRecovery,
         };
-        state.pending_offsets = None;
+        if state.phase != TransactionPhase::NeedsCommitRecovery {
+            state.pending_offsets = None;
+        }
     }
 }
 
@@ -3313,6 +3446,13 @@ impl Transaction<'_> {
     /// times, each bounded by `transaction_timeout`, before the error is
     /// returned. After a returned retriable error the commit outcome is
     /// unknown.
+    ///
+    /// A producer created with
+    /// [`TransactionalProducer::new_with_commit_recovery`] retains that pending
+    /// commit and its enrolled offsets. The error is not batch-retryable; inspect
+    /// [`KafkaTransactionFailure::requires_commit_resume`] and call
+    /// [`TransactionalProducer::begin_transaction`] to resume the existing
+    /// commit before admitting a new transaction.
     #[allow(unused_variables, clippy::unused_async)]
     pub async fn commit(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
@@ -3320,7 +3460,10 @@ impl Transaction<'_> {
 
         #[cfg(feature = "kafka")]
         {
-            let enrolled_offsets = self.producer.state.lock().pending_offsets.is_some();
+            let (enrolled_offsets, resume_pending_commits) = {
+                let state = self.producer.state.lock();
+                (state.pending_offsets.is_some(), state.resume_pending_commits)
+            };
             let operation = TransactionOperationGuard::claim(
                 &self.producer.state,
                 self.generation,
@@ -3333,7 +3476,9 @@ impl Transaction<'_> {
                 move || {
                     commit_resuming_retriable_failures(|| producer.commit_transaction(timeout))
                         .map_err(|error| {
-                            if enrolled_offsets {
+                            if resume_pending_commits {
+                                map_commit_recovery_failure(error)
+                            } else if enrolled_offsets {
                                 map_transaction_failure(error)
                             } else {
                                 map_rdkafka_error(&error, None)

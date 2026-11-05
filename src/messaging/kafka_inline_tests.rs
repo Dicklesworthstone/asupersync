@@ -1587,12 +1587,14 @@
                 retriable,
                 abort_required,
                 fatal,
+                commit_resume_required: false,
                 source: Box::new(io::Error::other("native offset error sentinel")),
             }));
             let failure = error.transaction_failure().unwrap();
             assert_eq!(failure.is_retriable(), retriable);
             assert_eq!(failure.requires_abort(), abort_required);
             assert_eq!(failure.is_fatal(), fatal);
+            assert!(!failure.requires_commit_resume());
             assert_eq!(error.is_transient(), retriable && !abort_required && !fatal);
             assert!(!error.is_retryable(), "owner needs abort recovery before reuse");
             assert!(!error.is_connection_error(), "Io is only the compatible carrier");
@@ -1602,6 +1604,251 @@
         let legacy = KafkaError::Io(io::Error::other("legacy socket error"));
         assert!(legacy.transaction_failure().is_none());
         assert!(legacy.is_transient() && legacy.is_retryable() && legacy.is_connection_error());
+    }
+
+    fn commit_recovery_test_producer() -> TransactionalProducer {
+        TransactionalProducer::new_with_commit_recovery(TransactionalConfig::new(
+            ProducerConfig::default(),
+            "commit-recovery-test".into(),
+        ))
+        .unwrap()
+    }
+
+    fn pending_commit_test_failure() -> KafkaError {
+        KafkaError::Io(io::Error::other(KafkaTransactionFailure {
+            retriable: true,
+            abort_required: false,
+            fatal: false,
+            commit_resume_required: true,
+            source: Box::new(io::Error::other("native commit still in progress")),
+        }))
+    }
+
+    #[test]
+    fn transaction_commit_recovery_keeps_legacy_constructor_abort_behavior() {
+        let producer = transaction_test_producer();
+        assert!(!producer.state.lock().resume_pending_commits);
+        let generation = producer.activate_transaction().unwrap();
+        let operation = TransactionOperationGuard::claim(
+            &producer.state,
+            generation,
+            TransactionOperation::Commit,
+        )
+        .unwrap();
+        assert!(operation.complete(Err(pending_commit_test_failure())).is_err());
+        assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+        let recovery = producer.claim_recovery().unwrap();
+        assert!(matches!(recovery.operation, TransactionOperation::Recover));
+        recovery.complete(Ok(())).unwrap();
+        assert_eq!(producer.activate_transaction().unwrap(), generation + 1);
+    }
+
+    #[test]
+    fn transaction_commit_recovery_retains_offsets_until_definitive_success() {
+        use crate::messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer};
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["commit-resume-input"]).await.unwrap();
+            let producer = commit_recovery_test_producer();
+            assert!(producer.state.lock().resume_pending_commits);
+            let generation = producer.activate_transaction().unwrap();
+            let offsets = consumer.group_metadata_for_state_test().prepare_offsets(&[
+                TopicPartitionOffset::new("commit-resume-input", 0, 7),
+            ]).unwrap();
+            TransactionOperationGuard::claim_offsets(&producer.state, generation, offsets)
+                .unwrap().complete(Ok(())).unwrap();
+
+            for attempt in 0..3 {
+                let operation = if attempt == 0 {
+                    TransactionOperationGuard::claim(
+                        &producer.state, generation, TransactionOperation::Commit,
+                    ).unwrap()
+                } else {
+                    let recovery = producer.claim_recovery().unwrap();
+                    assert!(matches!(recovery.operation, TransactionOperation::RecoverCommit));
+                    recovery
+                };
+                assert!(producer.claim_recovery().is_none());
+                assert!(producer.activate_transaction().is_err());
+                let error = operation.complete(Err(pending_commit_test_failure())).unwrap_err();
+                assert!(error.transaction_failure().unwrap().requires_commit_resume());
+                assert!(!error.is_retryable(), "an uncertain batch must not be replayed");
+                assert!(error.to_string().contains("outcome unknown"));
+                assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsCommitRecovery);
+                assert!(!producer.state.lock().operation_in_flight);
+                assert!(producer.state.lock().pending_offsets.is_some());
+                assert_eq!(consumer.committed_offset("commit-resume-input", 0), None);
+                producer.mark_transaction_dropped(generation);
+                assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsCommitRecovery);
+            }
+
+            producer.claim_recovery().unwrap().complete(Ok(())).unwrap();
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+            assert!(producer.state.lock().pending_offsets.is_none());
+            assert_eq!(consumer.committed_offset("commit-resume-input", 0), Some(7));
+            assert!(producer.claim_recovery().is_none(), "a committed batch retires once");
+            let next = producer.activate_transaction().unwrap();
+            assert_eq!(next, generation + 1);
+            producer.mark_transaction_dropped(generation);
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Active);
+            TransactionOperationGuard::claim(&producer.state, next, TransactionOperation::Commit)
+                .unwrap().complete(Ok(())).unwrap();
+            assert_eq!(consumer.committed_offset("commit-resume-input", 0), Some(7));
+            consumer.close(&cx).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn transaction_commit_recovery_does_not_resume_abort_required_or_fatal_failures() {
+        use crate::messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer};
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["commit-resume-input"]).await.unwrap();
+            for (abort_required, fatal) in [(true, false), (false, true), (true, true)] {
+                let producer = commit_recovery_test_producer();
+                let generation = producer.activate_transaction().unwrap();
+                let offsets = consumer.group_metadata_for_state_test().prepare_offsets(&[
+                    TopicPartitionOffset::new("commit-resume-input", 0, 7),
+                ]).unwrap();
+                TransactionOperationGuard::claim_offsets(&producer.state, generation, offsets)
+                    .unwrap().complete(Ok(())).unwrap();
+                let commit = TransactionOperationGuard::claim(
+                    &producer.state, generation, TransactionOperation::Commit,
+                ).unwrap();
+                assert!(commit.complete(Err(pending_commit_test_failure())).is_err());
+                let recovery = producer.claim_recovery().unwrap();
+                let failure = KafkaError::Io(io::Error::other(KafkaTransactionFailure {
+                    retriable: true,
+                    abort_required,
+                    fatal,
+                    commit_resume_required: false,
+                    source: Box::new(io::Error::other("definitive native recovery failure")),
+                }));
+                let error = recovery.complete(Err(failure)).unwrap_err();
+                let failure = error.transaction_failure().unwrap();
+                assert_eq!(failure.requires_abort(), abort_required);
+                assert_eq!(failure.is_fatal(), fatal);
+                assert!(!failure.requires_commit_resume());
+                assert!(!error.is_retryable());
+                assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+                assert!(producer.state.lock().pending_offsets.is_none());
+                assert_eq!(consumer.committed_offset("commit-resume-input", 0), None);
+                assert!(matches!(
+                    producer.claim_recovery().unwrap().operation,
+                    TransactionOperation::Recover
+                ));
+            }
+            consumer.close(&cx).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn transaction_commit_recovery_guard_drop_preserves_started_or_pending_commits() {
+        use crate::messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer};
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["commit-resume-input"]).await.unwrap();
+            for recovery in [false, true] {
+                for started in [false, true] {
+                    let producer = commit_recovery_test_producer();
+                    let generation = producer.activate_transaction().unwrap();
+                    let offsets = consumer.group_metadata_for_state_test().prepare_offsets(&[
+                        TopicPartitionOffset::new("commit-resume-input", 0, 7),
+                    ]).unwrap();
+                    TransactionOperationGuard::claim_offsets(&producer.state, generation, offsets)
+                        .unwrap().complete(Ok(())).unwrap();
+                    let commit = TransactionOperationGuard::claim(
+                        &producer.state, generation, TransactionOperation::Commit,
+                    ).unwrap();
+                    let mut operation = if recovery {
+                        assert!(commit.complete(Err(pending_commit_test_failure())).is_err());
+                        producer.claim_recovery().unwrap()
+                    } else {
+                        commit
+                    };
+                    operation.started = started;
+                    drop(operation);
+                    let pending = started || recovery;
+                    let state = producer.state.lock();
+                    assert_eq!(state.phase, if pending {
+                        TransactionPhase::NeedsCommitRecovery
+                    } else {
+                        TransactionPhase::NeedsAbortRecovery
+                    });
+                    assert_eq!(state.pending_offsets.is_some(), pending);
+                    assert!(!state.operation_in_flight);
+                    drop(state);
+                    assert_eq!(consumer.committed_offset("commit-resume-input", 0), None);
+                }
+            }
+            consumer.close(&cx).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn transaction_commit_recovery_waiter_drop_keeps_worker_owned_until_publication() {
+        use crate::messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer};
+        for multithread in [false, true] {
+            let builder = if multithread {
+                crate::runtime::RuntimeBuilder::new().worker_threads(2)
+            } else {
+                crate::runtime::RuntimeBuilder::current_thread()
+            };
+            let runtime = builder.blocking_threads(1, 2).build().unwrap();
+            let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+            runtime.block_on_with_cx(owner.clone(), async move {
+                let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+                consumer.subscribe(&owner, &["commit-resume-input"]).await.unwrap();
+                let producer = commit_recovery_test_producer();
+                let generation = producer.activate_transaction().unwrap();
+                let offsets = consumer.group_metadata_for_state_test().prepare_offsets(&[
+                    TopicPartitionOffset::new("commit-resume-input", 0, 7),
+                ]).unwrap();
+                TransactionOperationGuard::claim_offsets(&producer.state, generation, offsets)
+                    .unwrap().complete(Ok(())).unwrap();
+                let commit = TransactionOperationGuard::claim(
+                    &producer.state, generation, TransactionOperation::Commit,
+                ).unwrap();
+                assert!(commit.complete(Err(pending_commit_test_failure())).is_err());
+                let recovery = producer.claim_recovery().unwrap();
+                let (entered, mut wait_entered) = crate::channel::oneshot::channel();
+                let (release, wait_release) = std::sync::mpsc::channel();
+                let mut waiter = Box::pin(run_owned_transaction_op(&owner, recovery, move || {
+                    entered.send_blocking(std::thread::current().id()).unwrap();
+                    wait_release.recv_timeout(Duration::from_secs(10))
+                        .map_err(|error| KafkaError::Transaction(error.to_string()))?;
+                    Ok(())
+                }));
+                std::future::poll_fn(|task_cx| {
+                    assert!(waiter.as_mut().poll(task_cx).is_pending());
+                    Poll::Ready(())
+                }).await;
+                assert_ne!(wait_entered.recv(&owner).await.unwrap(), std::thread::current().id());
+                let mut sibling = owner.spawn(|_| async { 73 }).unwrap();
+                assert_eq!(sibling.join(&owner).await.unwrap(), 73);
+                drop(waiter);
+                assert_eq!(producer.state.lock().phase, TransactionPhase::Finalizing);
+                assert!(producer.state.lock().operation_in_flight);
+                assert!(producer.state.lock().pending_offsets.is_some());
+                assert!(producer.claim_recovery().is_none());
+                assert!(producer.activate_transaction().is_err());
+                assert_eq!(consumer.committed_offset("commit-resume-input", 0), None);
+                release.send(()).unwrap();
+                let start = std::time::Instant::now();
+                while producer.state.lock().operation_in_flight {
+                    assert!(start.elapsed() < Duration::from_secs(5));
+                    crate::runtime::yield_now::yield_now().await;
+                }
+                assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+                assert!(producer.state.lock().pending_offsets.is_none());
+                assert_eq!(consumer.committed_offset("commit-resume-input", 0), Some(7));
+                assert!(producer.claim_recovery().is_none());
+                assert_eq!(producer.activate_transaction().unwrap(), generation + 1);
+                producer.mark_transaction_idle(generation + 1);
+                consumer.close(&owner).await.unwrap();
+            });
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        }
     }
 
     #[test]
@@ -1835,6 +2082,92 @@
                 .expect("the producer is usable again");
             next.abort(&cx).await.unwrap();
         });
+    }
+
+    /// br-asupersync-lde436: an opted-in producer must recover after *all*
+    /// bounded commit attempts fail. This exercises librdkafka's real native
+    /// commit state machine, not broker-side transactional offset persistence
+    /// or read_committed visibility, which MockCluster does not implement.
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn transaction_commit_recovery_resumes_after_the_bounded_window_is_exhausted() {
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let output = "transaction-pending-commit-recovery";
+        cluster.create_topic(output, 1, 1).unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 2)
+            .build()
+            .unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        runtime.block_on_with_cx(cx.clone(), async {
+            let producer = TransactionalProducer::new_with_commit_recovery(
+                TransactionalConfig::new(
+                    ProducerConfig::new(vec![cluster.bootstrap_servers()])
+                        .with_property("retry.backoff.ms", "50")
+                        .with_property("retry.backoff.max.ms", "50"),
+                    "transaction-pending-commit-recovery".into(),
+                )
+                .transaction_timeout(Duration::from_secs(1)),
+            )
+            .unwrap();
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            transaction.send(&cx, output, None, b"one retained batch").await.unwrap();
+            let generation = producer.state.lock().generation;
+            cluster.request_errors(
+                RDKafkaApiKey::EndTxn,
+                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 300],
+            );
+            let error = transaction.commit(&cx).await.unwrap_err();
+            assert!(error.transaction_failure().unwrap().requires_commit_resume());
+            assert!(!error.is_retryable());
+            assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsCommitRecovery);
+
+            let cancelled = Cx::for_testing();
+            cancelled.cancel_with(crate::types::CancelKind::User, Some("stop commit recovery"));
+            assert!(matches!(
+                producer.begin_transaction(&cancelled).await,
+                Err(KafkaError::Cancelled)
+            ));
+            assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsCommitRecovery);
+            assert!(!producer.state.lock().operation_in_flight);
+
+            let error = producer.begin_transaction(&cx).await.unwrap_err();
+            assert!(error.transaction_failure().unwrap().requires_commit_resume());
+            assert!(!error.is_retryable());
+            assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsCommitRecovery);
+            assert_eq!(producer.state.lock().generation, generation);
+
+            // Cancellation after an actual Pending recovery wait must allow
+            // that commit to retire, without beginning replacement work on the
+            // cancelled explicit context.
+            let recovery_owner = Cx::for_testing()
+                .with_blocking_pool_handle(cx.blocking_pool_handle());
+            let mut recovery = Box::pin(producer.begin_transaction(&recovery_owner));
+            std::future::poll_fn(|task_cx| {
+                assert!(recovery.as_mut().poll(task_cx).is_pending());
+                Poll::Ready(())
+            }).await;
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Finalizing);
+            assert!(producer.state.lock().operation_in_flight);
+            recovery_owner.cancel_with(
+                crate::types::CancelKind::User,
+                Some("cancel the pending recovery observer"),
+            );
+            cluster.clear_request_errors(RDKafkaApiKey::EndTxn);
+            assert!(matches!(recovery.await, Err(KafkaError::Cancelled)));
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+            assert!(!producer.state.lock().operation_in_flight);
+            assert_eq!(producer.state.lock().generation, generation);
+
+            let next = producer.begin_transaction(&cx).await
+                .expect("pending commit must be resumed instead of attempting a conflicting abort");
+            assert_eq!(producer.state.lock().generation, generation + 1);
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Active);
+            next.abort(&cx).await.unwrap();
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+        });
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     }
 
     #[cfg(feature = "kafka")]
@@ -2261,15 +2594,25 @@
             TransactionOperation::SendOffsets,
             TransactionOperation::Commit,
             TransactionOperation::Recover,
+            TransactionOperation::RecoverCommit,
             #[cfg(feature = "kafka")]
             TransactionOperation::Initialize,
         ] {
-            let producer = transaction_test_producer();
+            let producer = if matches!(kind, TransactionOperation::RecoverCommit) {
+                commit_recovery_test_producer()
+            } else {
+                transaction_test_producer()
+            };
             let generation = producer.activate_transaction().unwrap();
             let activation = matches!(kind, TransactionOperation::Begin)
                 .then(|| TransactionActivationGuard::armed(&producer));
             if matches!(kind, TransactionOperation::Recover) {
                 producer.mark_transaction_dropped(generation);
+            }
+            if matches!(kind, TransactionOperation::RecoverCommit) {
+                TransactionOperationGuard::claim(
+                    &producer.state, generation, TransactionOperation::Commit,
+                ).unwrap().complete(Err(pending_commit_test_failure())).unwrap_err();
             }
             #[cfg(feature = "kafka")]
             if matches!(kind, TransactionOperation::Initialize) {
@@ -2304,6 +2647,7 @@
                 producer.state.lock().phase,
                 match kind {
                     TransactionOperation::Begin => TransactionPhase::Idle,
+                    TransactionOperation::RecoverCommit => TransactionPhase::NeedsCommitRecovery,
                     #[cfg(feature = "kafka")]
                     TransactionOperation::Initialize => TransactionPhase::Idle,
                     _ => TransactionPhase::NeedsAbortRecovery,
