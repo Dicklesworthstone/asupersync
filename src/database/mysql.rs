@@ -2013,6 +2013,9 @@ fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError
 // Connection URL Parsing
 // ============================================================================
 
+mod multi_result;
+pub use multi_result::{MySqlMultiResultConnection, MySqlMultiResultLimits, MySqlResultSet};
+
 /// Parsed MySQL connection URL.
 #[derive(Clone)]
 pub struct MySqlConnectOptions {
@@ -3202,6 +3205,24 @@ impl MySqlConnection {
         capture_pool_session: bool,
         #[cfg(feature = "tls")] connector: Option<TlsConnector>,
     ) -> Outcome<Self, MySqlError> {
+        Self::connect_bounded_with_capabilities(
+            cx,
+            options,
+            capture_pool_session,
+            0,
+            #[cfg(feature = "tls")]
+            connector,
+        )
+        .await
+    }
+
+    async fn connect_bounded_with_capabilities(
+        cx: &Cx,
+        options: MySqlConnectOptions,
+        capture_pool_session: bool,
+        additional_capabilities: u32,
+        #[cfg(feature = "tls")] connector: Option<TlsConnector>,
+    ) -> Outcome<Self, MySqlError> {
         use std::future::Future;
 
         let mut deadline = crate::time::Sleep::after(
@@ -3213,6 +3234,7 @@ impl MySqlConnection {
         let mut connecting = std::pin::pin!(async {
             let mut conn = match Self::connect_inner(
                 options,
+                additional_capabilities,
                 #[cfg(feature = "tls")]
                 connector,
             ).await {
@@ -3273,6 +3295,7 @@ impl MySqlConnection {
 
     async fn connect_inner(
         options: MySqlConnectOptions,
+        additional_capabilities: u32,
         #[cfg(feature = "tls")] connector: Option<TlsConnector>,
     ) -> Outcome<Self, MySqlError> {
         let cx = Cx::current().expect("connect_bounded installs its Cx during polling");
@@ -3354,13 +3377,26 @@ impl MySqlConnection {
                 Ok(connector) => connector,
                 Err(error) => return outcome_from_error(error),
             };
-            if let Err(error) = conn.upgrade_tls(&options, &handshake, connector).await {
+            if let Err(error) = conn
+                .upgrade_tls(&options, &handshake, connector, additional_capabilities)
+                .await
+            {
                 return outcome_from_error(error);
             }
         }
 
         // Send handshake response
-        if let Err(e) = conn.send_handshake_response(&options, &handshake).await {
+        let handshake_result = if additional_capabilities == 0 {
+            conn.send_handshake_response(&options, &handshake).await
+        } else {
+            conn.send_handshake_response_with_capabilities(
+                &options,
+                &handshake,
+                additional_capabilities,
+            )
+            .await
+        };
+        if let Err(e) = handshake_result {
             return outcome_from_error(e);
         }
 
@@ -3395,11 +3431,13 @@ impl MySqlConnection {
         options: &MySqlConnectOptions,
         handshake: &Handshake,
         connector: TlsConnector,
+        additional_capabilities: u32,
     ) -> Result<(), MySqlError> {
         let mut request = PacketBuffer::new();
         request.set_sequence(self.inner.sequence);
         request.write_u32_le(
             Self::client_handshake_response_capabilities(options.database.is_some())
+                | additional_capabilities
                 | capability::CLIENT_SSL,
         );
         request.write_u32_le(16_777_215);
@@ -3901,12 +3939,23 @@ impl MySqlConnection {
         options: &MySqlConnectOptions,
         handshake: &Handshake,
     ) -> Result<(), MySqlError> {
+        self.send_handshake_response_with_capabilities(options, handshake, 0)
+            .await
+    }
+
+    async fn send_handshake_response_with_capabilities(
+        &mut self,
+        options: &MySqlConnectOptions,
+        handshake: &Handshake,
+        additional_capabilities: u32,
+    ) -> Result<(), MySqlError> {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(self.inner.sequence);
 
         // Client capabilities
         let mut client_caps =
-            Self::client_handshake_response_capabilities(options.database.is_some());
+            Self::client_handshake_response_capabilities(options.database.is_some())
+                | additional_capabilities;
         if self.inner.stream.is_tls() {
             client_caps |= capability::CLIENT_SSL;
         }
@@ -5578,12 +5627,29 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::Protocol("empty execute response".to_string()));
         }
 
+        let multi_result_session = self.inner.capabilities
+            & (capability::CLIENT_MULTI_RESULTS | capability::CLIENT_PS_MULTI_RESULTS)
+            != 0;
+        if multi_result_session && !matches!(data[0], 0x00 | 0xFF) {
+            // Only internal single-status setup uses this path on the isolated
+            // multi-result session. A row set cannot complete that exchange.
+            return Outcome::Err(MySqlError::Protocol(
+                "unexpected row set for multi-result session setup".to_string(),
+            ));
+        }
+
         match data[0] {
             0x00 => {
                 // OK packet
                 match Self::parse_ok_packet(&data) {
                     Ok(ok) => {
                         self.inner.status_flags = ok.status_flags;
+                        if multi_result_session && ok.status_flags & 0x0008 != 0 {
+                            return Outcome::Err(MySqlError::Protocol(
+                                "unexpected additional results for multi-result session setup"
+                                    .to_string(),
+                            ));
+                        }
                         self.inner.closed = false;
                         Outcome::Ok(MySqlExecResult {
                             affected_rows: ok.affected_rows,
@@ -5591,9 +5657,9 @@ impl MySqlConnection {
                         })
                     }
                     Err(e) => {
-                        // OK packet was fully received; connection protocol
-                        // state is clean even though the payload is malformed.
-                        self.inner.closed = false;
+                        // Preserve legacy behavior. The opt-in profile must
+                        // prove the final status before clearing its poison.
+                        self.inner.closed = multi_result_session;
                         Outcome::Err(e)
                     }
                 }
@@ -6550,6 +6616,18 @@ impl MySqlConnection {
         params: &[&dyn ToSql],
         flags: u8,
     ) -> Outcome<Vec<u8>, MySqlError> {
+        self.start_prepared_query_with_budget(cx, stmt, params, flags, None)
+            .await
+    }
+
+    async fn start_prepared_query_with_budget(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+        flags: u8,
+        response_bytes: Option<&mut usize>,
+    ) -> Outcome<Vec<u8>, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -6617,7 +6695,7 @@ impl MySqlConnection {
         self.inner.sequence = packet.next_sequence;
 
         // Read response
-        let (response_data, seq) = match self.read_packet(Some(cx)).await {
+        let (response_data, seq) = match self.read_packet_with_budget(Some(cx), response_bytes).await {
             Ok((data, seq)) => (data, seq),
             Err(e) => return outcome_from_error(e),
         };
@@ -6922,6 +7000,20 @@ impl MySqlConnection {
         match data.first() {
             Some(0x00) => {
                 self.inner.status_flags = Self::parse_ok_packet(&data)?.status_flags;
+                if self.inner.capabilities
+                    & (capability::CLIENT_MULTI_RESULTS | capability::CLIENT_PS_MULTI_RESULTS)
+                    != 0
+                    && self.inner.status_flags & 0x0008 != 0
+                {
+                    // Session-control commands are single-result exchanges,
+                    // even on the isolated multi-result connection. Never let
+                    // unread setup results become the next query's response.
+                    self.inner.closed = true;
+                    let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+                    return Err(MySqlError::Protocol(format!(
+                        "unexpected additional results for {what}"
+                    )));
+                }
                 Ok(())
             }
             Some(0xFF) => {
@@ -6949,21 +7041,50 @@ impl MySqlConnection {
 
     /// Read a complete packet.
     async fn read_packet(&mut self, cx: Option<&Cx>) -> Result<(Vec<u8>, u8), MySqlError> {
+        self.read_packet_with_budget(cx, None).await
+    }
+
+    /// Optional response-wide wire budget, charged before allocating each
+    /// fragment. Ordinary connections keep their established packet limit.
+    async fn read_packet_with_budget(
+        &mut self,
+        cx: Option<&Cx>,
+        mut remaining: Option<&mut usize>,
+    ) -> Result<(Vec<u8>, u8), MySqlError> {
         let mut expected_seq = self.inner.sequence;
         let mut last_seq;
         let mut data = Vec::new();
 
         loop {
+            if remaining.as_ref().is_some_and(|bytes| **bytes < 4) {
+                return Err(MySqlError::Protocol(
+                    "multi-result response exceeds its wire byte limit".to_string(),
+                ));
+            }
             let mut header = [0u8; 4];
             self.read_exact(cx, &mut header).await?;
 
             let (len, seq) = match Self::decode_packet_header(header, expected_seq) {
                 Ok(decoded) => decoded,
                 Err(mismatch) => {
+                    if remaining.is_some() {
+                        // An unsolicited error must not bypass a bounded
+                        // exchange's allocation limit while diagnosing it.
+                        return Err(mismatch);
+                    }
                     return Err(self.unsolicited_server_error(cx, header, mismatch).await);
                 }
             };
             last_seq = seq;
+            if let Some(bytes) = remaining.as_deref_mut() {
+                let charge = len as usize + 4;
+                if charge > *bytes {
+                    return Err(MySqlError::Protocol(
+                        "multi-result response exceeds its wire byte limit".to_string(),
+                    ));
+                }
+                *bytes -= charge;
+            }
 
             if len > 0 {
                 let start = data.len();

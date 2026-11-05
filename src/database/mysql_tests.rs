@@ -8466,6 +8466,460 @@ mod tests {
         assert!(!conn.inner.closed, "the connection is in step and reusable");
     }
 
+    // asupersync-1dl7 / asupersync-1dl7s: additive stored-procedure workflow.
+    // asupersync-mysql-multi-results-dirty-4aeorh kept ordinary connections
+    // single-result. These native peers exercise the isolated full-drain API.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod multi_results {
+        use super::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const MULTI: u32 = capability::CLIENT_MULTI_RESULTS | capability::CLIENT_PS_MULTI_RESULTS;
+        const MORE: u16 = 0x0008;
+        const AUTOCOMMIT: u16 = 0x0002;
+        const OUT_PARAMS: u16 = 0x1000;
+        const CALL: &str = "CALL values_for(?)";
+
+        fn native_journey<F>(workers: usize, journey: F)
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            let runtime = pool_reset_runtime(workers);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native multi-result task");
+                crate::time::timeout(cx.now(), Duration::from_secs(30), journey)
+                    .await
+                    .expect("bounded multi-result journey");
+            }));
+            assert_pool_reset_drained(&runtime);
+        }
+
+        fn authenticate(peer: &mut std::net::TcpStream, offered_multi: u32) {
+            let capabilities = capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH
+                | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+                | capability::CLIENT_TRANSACTIONS
+                | capability::CLIENT_CONNECT_WITH_DB
+                | capability::CLIENT_DEPRECATE_EOF
+                | offered_multi;
+            peer.write_all(&handshake_packet_bytes(capabilities)).unwrap();
+            let (sequence, response) = read_native_kat_peer_packet(peer);
+            assert_eq!(sequence, 1);
+            let flags = u32::from_le_bytes(response[..4].try_into().unwrap());
+            assert_eq!(flags & MULTI, MULTI);
+            assert_eq!(flags & capability::CLIENT_MULTI_STATEMENTS, 0);
+            assert_eq!(flags & capability::CLIENT_LOCAL_FILES, 0);
+            assert_eq!(flags & capability::CLIENT_DEPRECATE_EOF, 0);
+            write_response_packet(peer, 2, ok_packet_payload(0, AUTOCOMMIT));
+        }
+
+        fn integer_column(name: &str) -> Vec<u8> {
+            let mut column = column_definition_payload_with_type(name, column_type::MYSQL_TYPE_LONG);
+            column.extend_from_slice(&[0, 0]);
+            column
+        }
+
+        fn text_row(value: &str) -> Vec<u8> {
+            let mut row = PacketBuffer::new();
+            row.write_lenenc_int(value.len() as u64);
+            row.write_bytes(value.as_bytes());
+            row.buf
+        }
+
+        fn binary_row(value: i32) -> Vec<u8> {
+            let mut row = vec![0, 0];
+            row.extend_from_slice(&value.to_le_bytes());
+            row
+        }
+
+        fn respond(peer: &mut std::net::TcpStream, packets: Vec<Vec<u8>>) {
+            // One write also makes limit tests independent of when the client
+            // closes after rejecting an earlier packet in the response.
+            let mut wire = Vec::new();
+            for (index, payload) in packets.into_iter().enumerate() {
+                let mut packet = PacketBuffer::new();
+                packet.set_sequence(u8::try_from(index + 1).unwrap());
+                packet.buf = payload;
+                wire.extend_from_slice(&packet.build_packet().bytes);
+            }
+            peer.write_all(&wire).unwrap();
+        }
+
+        fn finish_clean(peer: &mut std::net::TcpStream) {
+            pool_reset_peer_command(peer, command::COM_QUERY, b"DO 1");
+            write_response_packet(peer, 1, ok_packet_payload(9, AUTOCOMMIT));
+            pool_reset_peer_command(peer, command::COM_QUIT, &[]);
+            pool_reset_peer_eof(peer);
+        }
+
+        async fn assert_reusable(mut connection: MySqlMultiResultConnection, cx: &Cx) {
+            assert!(!connection.is_closed());
+            let results = connection.query_trusted_sql(cx, "DO 1").await.unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].command_result().unwrap().affected_rows, 9);
+            connection.close().await.unwrap();
+        }
+
+        #[test]
+        fn multi_result_native_text_drains_mixed_empty_and_status_results_before_reuse() {
+            for workers in [1, 2] {
+                let peer = PoolResetPeer::start(|peer| {
+                    authenticate(peer, MULTI);
+                    pool_reset_peer_command(peer, command::COM_QUERY, b"CALL mixed_results()");
+                    respond(peer, vec![
+                        ok_packet_payload(3, AUTOCOMMIT | MORE),
+                        vec![1],
+                        integer_column("value"),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        text_row("42"),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        vec![1],
+                        integer_column("empty"),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        ok_packet_payload(7, AUTOCOMMIT),
+                    ]);
+                    finish_clean(peer);
+                });
+                let options = peer.options(None);
+                native_journey(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let mut connection = MySqlMultiResultConnection::connect_with_options(
+                        &cx, options, MySqlMultiResultLimits::default(),
+                    ).await.unwrap();
+                    let results = connection.query_static_sql(&cx, "CALL mixed_results()")
+                        .await.unwrap();
+                    assert_eq!(results.len(), 4);
+                    assert_eq!(results[0].command_result().unwrap().affected_rows, 3);
+                    assert_eq!(results[1].rows()[0].get_i32("value").unwrap(), 42);
+                    assert!(results[1].command_result().is_none());
+                    assert!(results[2].rows().is_empty());
+                    assert_eq!(results[2].columns()[0].name, "empty");
+                    assert!(results[2].command_result().is_none());
+                    assert_eq!(results[3].command_result().unwrap().affected_rows, 7);
+                    assert_eq!(results[3].status_flags() & MORE, 0);
+                    assert_reusable(connection, &cx).await;
+                });
+                peer.finish();
+            }
+        }
+
+        fn expect_prepared_execute(peer: &mut std::net::TcpStream, id: u32) {
+            let mut body = id.to_le_bytes().to_vec();
+            // flags, iteration count, null bitmap, new-bind marker,
+            // unsigned MYSQL_TYPE_LONG, then the bound value 42.
+            body.extend_from_slice(&[0, 1, 0, 0, 0, 0, 1, 3, 0x80, 42, 0, 0, 0]);
+            pool_reset_peer_command(peer, command::COM_STMT_EXECUTE, &body);
+        }
+
+        #[test]
+        fn multi_result_native_prepared_call_drains_out_parameters_and_reuses_cached_binding() {
+            for workers in [1, 2] {
+                let peer = PoolResetPeer::start(|peer| {
+                    authenticate(peer, MULTI);
+                    pool_reset_peer_command(peer, command::COM_STMT_PREPARE, CALL.as_bytes());
+                    let mut prepared = prepare_ok_payload(73);
+                    prepared[7..9].copy_from_slice(&1_u16.to_le_bytes());
+                    respond(peer, vec![prepared, integer_column("tenant"), eof_packet_payload(AUTOCOMMIT)]);
+                    expect_prepared_execute(peer, 73);
+                    respond(peer, vec![
+                        vec![1], integer_column("value"),
+                        eof_packet_payload(AUTOCOMMIT | MORE), binary_row(51),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        vec![1], integer_column("output"),
+                        eof_packet_payload(AUTOCOMMIT | MORE | OUT_PARAMS), binary_row(9),
+                        // MySQL clears MORE/OUT on this EOF. The preceding
+                        // OUT metadata still requires consuming the CALL OK.
+                        eof_packet_payload(AUTOCOMMIT),
+                        ok_packet_payload(3, AUTOCOMMIT),
+                    ]);
+                    // query_params must reuse the existing statement and bind
+                    // again; the terminal prepared ERR must also allow reuse.
+                    expect_prepared_execute(peer, 73);
+                    write_response_packet(peer, 1, error_packet_payload(1644, "45000", "procedure refused"));
+                    finish_clean(peer);
+                });
+                let options = peer.options(None);
+                native_journey(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let mut connection = MySqlMultiResultConnection::connect_with_options(
+                        &cx, options, MySqlMultiResultLimits::default(),
+                    ).await.unwrap();
+                    let statement = connection.prepare(&cx, CALL).await.unwrap();
+                    let mut unrelated = statement.clone();
+                    unrelated.owner_connection_id = 99;
+                    assert!(matches!(connection.query_prepared(&cx, &unrelated, &[&42_u32]).await,
+                        Outcome::Err(MySqlError::InvalidParameter(_))));
+                    let mut stale = statement.clone();
+                    stale.owner_prepared_statement_epoch += 1;
+                    assert!(matches!(connection.query_prepared(&cx, &stale, &[&42_u32]).await,
+                        Outcome::Err(MySqlError::InvalidParameter(_))));
+                    assert!(matches!(connection.query_prepared(&cx, &statement, &[]).await,
+                        Outcome::Err(MySqlError::InvalidParameter(_))));
+                    assert!(!connection.is_closed(), "admission errors occur before I/O");
+
+                    let results = connection.query_prepared(&cx, &statement, &[&42_u32]).await.unwrap();
+                    assert_eq!(results.len(), 3);
+                    assert_eq!(results[0].rows()[0].get_i32("value").unwrap(), 51);
+                    assert!(!results[0].is_output_parameters());
+                    assert_eq!(results[1].rows()[0].get_i32("output").unwrap(), 9);
+                    assert!(results[1].is_output_parameters());
+                    assert_eq!(results[1].status_flags(), AUTOCOMMIT);
+                    assert_eq!(results[2].command_result().unwrap().affected_rows, 3);
+                    assert!(matches!(connection.query_params(&cx, CALL, &[&42_u32]).await,
+                        Outcome::Err(MySqlError::Server { code: 1644, .. })));
+                    assert_reusable(connection, &cx).await;
+                });
+                peer.finish();
+            }
+        }
+
+        #[test]
+        fn multi_result_native_terminal_error_after_an_earlier_result_keeps_framing_reusable() {
+            let peer = PoolResetPeer::start(|peer| {
+                authenticate(peer, MULTI);
+                pool_reset_peer_command(peer, command::COM_QUERY, b"CALL partial_then_error()");
+                respond(peer, vec![
+                    ok_packet_payload(5, AUTOCOMMIT | MORE),
+                    error_packet_payload(1644, "45000", "no second result"),
+                ]);
+                finish_clean(peer);
+            });
+            let options = peer.options(None);
+            native_journey(1, async move {
+                let cx = Cx::current().unwrap();
+                let mut connection = MySqlMultiResultConnection::connect_with_options(
+                    &cx, options, MySqlMultiResultLimits::default(),
+                ).await.unwrap();
+                assert!(matches!(connection.query_trusted_sql(&cx, "CALL partial_then_error()").await,
+                    Outcome::Err(MySqlError::Server { code: 1644, .. })));
+                assert_reusable(connection, &cx).await;
+            });
+            peer.finish();
+        }
+
+        #[test]
+        fn multi_result_native_requires_both_result_capabilities() {
+            for offered in [0, capability::CLIENT_MULTI_RESULTS, capability::CLIENT_PS_MULTI_RESULTS] {
+                let peer = PoolResetPeer::start(move |peer| {
+                    authenticate(peer, offered);
+                    pool_reset_peer_eof(peer);
+                });
+                let options = peer.options(None);
+                native_journey(1, async move {
+                    let cx = Cx::current().unwrap();
+                    assert!(matches!(MySqlMultiResultConnection::connect_with_options(
+                        &cx, options, MySqlMultiResultLimits::default(),
+                    ).await, Outcome::Err(MySqlError::Protocol(message))
+                        if message.contains("did not negotiate")));
+                });
+                peer.finish();
+            }
+            assert!(MySqlMultiResultLimits::new(0, 1, 1).is_err());
+            assert!(MySqlMultiResultLimits::new(1, 0, 1).is_err());
+            assert!(MySqlMultiResultLimits::new(1, 1, 0).is_err());
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum LimitCase { Sets, AggregateRows, PerSetRows, WireBytes, DecodedBytes, Malformed, Setup }
+
+        #[test]
+        fn multi_result_limits_and_malformed_responses_close_before_reuse() {
+            for case in [LimitCase::Sets, LimitCase::AggregateRows, LimitCase::PerSetRows,
+                LimitCase::WireBytes, LimitCase::DecodedBytes, LimitCase::Malformed, LimitCase::Setup]
+            {
+                let (mut inner, listener) = make_server_backed_connection(0);
+                inner.inner.capabilities = MULTI;
+                if matches!(case, LimitCase::PerSetRows) {
+                    inner.inner.max_result_rows = 1;
+                }
+                if matches!(case, LimitCase::Setup) {
+                    inner.set_statement_timeout_override(Some(Duration::from_secs(1)));
+                }
+                let (sets, rows, bytes, expected) = match case {
+                    LimitCase::Sets => (1, 10, 1 << 20, "result-set limit"),
+                    LimitCase::AggregateRows => (10, 1, 1 << 20, "aggregate row limit"),
+                    LimitCase::PerSetRows => (10, 10, 1 << 20, "per-result row limit"),
+                    LimitCase::WireBytes => (10, 10, 1024, "wire byte limit"),
+                    LimitCase::DecodedBytes => (10, 10, 1024, "decoded byte limit"),
+                    LimitCase::Malformed => (10, 10, 1 << 20, "packet"),
+                    LimitCase::Setup => (10, 10, 1 << 20, "additional results"),
+                };
+                let limits = MySqlMultiResultLimits::new(sets, rows, bytes).unwrap();
+                let mut connection = MySqlMultiResultConnection::from_connection_for_test(inner, limits);
+                let server = std::thread::spawn(move || {
+                    let (mut peer, _) = listener.accept().unwrap();
+                    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let sql = command_sql(&read_client_command(&mut peer));
+                    if matches!(case, LimitCase::Setup) {
+                        assert_eq!(sql, "SET SESSION max_execution_time = 1000");
+                    } else {
+                        assert_eq!(sql, "CALL too_many()");
+                    }
+                    match case {
+                        LimitCase::Sets | LimitCase::Setup => {
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, AUTOCOMMIT | MORE));
+                        }
+                        LimitCase::AggregateRows => respond(&mut peer, vec![
+                            vec![1], integer_column("a"), eof_packet_payload(AUTOCOMMIT),
+                            text_row("1"), eof_packet_payload(AUTOCOMMIT | MORE),
+                            vec![1], integer_column("b"), eof_packet_payload(AUTOCOMMIT), text_row("2"),
+                        ]),
+                        LimitCase::PerSetRows => respond(&mut peer, vec![
+                            vec![1], integer_column("a"), eof_packet_payload(AUTOCOMMIT),
+                            text_row("1"), text_row("2"),
+                        ]),
+                        LimitCase::WireBytes => {
+                            // Declared one-MiB payload is never sent: refusal
+                            // must occur immediately after its four-byte header.
+                            peer.write_all(&[0, 0, 0x10, 1]).unwrap();
+                        }
+                        LimitCase::DecodedBytes => {
+                            // A valid column count whose metadata allocation
+                            // exceeds the budget, before any definitions arrive.
+                            write_response_packet(&mut peer, 1, vec![0xfc, 0, 0x40]);
+                        }
+                        LimitCase::Malformed => respond(&mut peer, vec![
+                            ok_packet_payload(0, AUTOCOMMIT | MORE), vec![0xff, 0],
+                        ]),
+                    }
+                    pool_reset_peer_eof(&mut peer);
+                });
+                native_journey(1, async move {
+                    let cx = Cx::current().unwrap();
+                    let outcome = connection.query_trusted_sql(&cx, "CALL too_many()").await;
+                    match outcome {
+                        Outcome::Err(MySqlError::Protocol(message) | MySqlError::InvalidPacket(message)) => {
+                            assert!(message.to_ascii_lowercase().contains(expected), "{case:?}: {message}");
+                        }
+                        other => panic!("{case:?}: expected bounded protocol rejection, got {other:?}"),
+                    }
+                    assert!(connection.is_closed(), "{case:?}");
+                    assert!(matches!(connection.query_trusted_sql(&cx, "DO 1").await,
+                        Outcome::Err(MySqlError::ConnectionClosed)));
+                    connection.close().await.unwrap();
+                });
+                server.join().expect("limit peer observed transport closure");
+            }
+        }
+
+        fn finish_kill(listener: &std::net::TcpListener, observed: &AtomicBool) {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut killer = loop {
+                match listener.accept() {
+                    Ok((peer, _)) => break peer,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "separate KILL connection");
+                        std::thread::park_timeout(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("accept KILL: {error}"),
+                }
+            };
+            killer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            pool_reset_peer_auth(&mut killer, false);
+            pool_reset_peer_command(&mut killer, command::COM_QUERY, b"KILL QUERY 1");
+            observed.store(true, Ordering::Release);
+            write_response_packet(&mut killer, 1, ok_packet_payload(0, AUTOCOMMIT));
+            pool_reset_peer_eof(&mut killer);
+        }
+
+        #[test]
+        fn multi_result_native_cancelled_pending_next_result_finishes_kill_and_preserves_reason() {
+            for workers in [1, 2] {
+                let first_result = Arc::new(crate::sync::Notify::new());
+                let peer_first = Arc::clone(&first_result);
+                let killed = Arc::new(AtomicBool::new(false));
+                let peer_killed = Arc::clone(&killed);
+                let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
+                    authenticate(peer, MULTI);
+                    pool_reset_peer_command(peer, command::COM_QUERY, b"CALL pending_results()");
+                    write_response_packet(peer, 1, ok_packet_payload(4, AUTOCOMMIT | MORE));
+                    peer_first.notify_one();
+                    // No next result arrives. The public cancellation must
+                    // finish its separate wire KILL before closing this socket.
+                    finish_kill(listener, &peer_killed);
+                    pool_reset_peer_eof(peer);
+                });
+                let options = peer.options(None);
+                native_journey(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let mut connection = MySqlMultiResultConnection::connect_with_options(
+                        &cx, options, MySqlMultiResultLimits::default(),
+                    ).await.unwrap();
+                    let caller = Cx::for_testing();
+                    let reason = CancelReason::user("cancel remaining procedure results")
+                        .with_cause(CancelReason::shutdown());
+                    let mut pending = Box::pin(connection.query_trusted_sql(&caller, "CALL pending_results()"));
+                    let mut first = Box::pin(first_result.notified());
+                    std::future::poll_fn(|task_cx| {
+                        assert!(pending.as_mut().poll(task_cx).is_pending());
+                        first.as_mut().poll(task_cx)
+                    }).await;
+                    // The peer has written the complete first result. Poll
+                    // again to consume it and witness the next real read parked.
+                    std::future::poll_fn(|task_cx| {
+                        assert!(pending.as_mut().poll(task_cx).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    let mut sibling = cx.spawn(|_| async { 17_u8 }).unwrap();
+                    assert_eq!(sibling.join(&cx).await.unwrap(), 17);
+                    caller.cancel_with_reason(reason.clone());
+                    assert!(matches!(pending.await, Outcome::Cancelled(actual) if actual == reason));
+                    assert!(killed.load(Ordering::Acquire), "KILL reached the peer before return");
+                    assert!(connection.is_closed());
+                    assert!(matches!(connection.query_trusted_sql(&cx, "DO 1").await,
+                        Outcome::Err(MySqlError::ConnectionClosed)));
+                    connection.close().await.unwrap();
+                });
+                peer.finish();
+            }
+        }
+
+        #[test]
+        fn multi_result_native_dropped_pending_query_poison_is_retained_until_connection_drop() {
+            for workers in [1, 2] {
+                let (mut inner, listener) = make_server_backed_connection(0);
+                inner.inner.capabilities = MULTI;
+                let first_result = Arc::new(crate::sync::Notify::new());
+                let peer_first = Arc::clone(&first_result);
+                let mut connection = MySqlMultiResultConnection::from_connection_for_test(
+                    inner, MySqlMultiResultLimits::default(),
+                );
+                let server = std::thread::spawn(move || {
+                    let (mut peer, _) = listener.accept().unwrap();
+                    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    assert_eq!(command_sql(&read_client_command(&mut peer)), "CALL abandoned_results()");
+                    write_response_packet(&mut peer, 1, ok_packet_payload(0, AUTOCOMMIT | MORE));
+                    peer_first.notify_one();
+                    pool_reset_peer_eof(&mut peer);
+                });
+                native_journey(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let mut pending = Box::pin(connection.query_trusted_sql(&cx, "CALL abandoned_results()"));
+                    let mut first = Box::pin(first_result.notified());
+                    std::future::poll_fn(|task_cx| {
+                        assert!(pending.as_mut().poll(task_cx).is_pending());
+                        first.as_mut().poll(task_cx)
+                    }).await;
+                    std::future::poll_fn(|task_cx| {
+                        assert!(pending.as_mut().poll(task_cx).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    drop(pending);
+                    assert!(connection.is_closed());
+                    assert!(matches!(connection.query_trusted_sql(&cx, "DO 1").await,
+                        Outcome::Err(MySqlError::ConnectionClosed)));
+                    // This fixture has no stored reconnect options. Drop must
+                    // still close the poisoned transport through the fallback.
+                    drop(connection);
+                });
+                server.join().expect("abandoned connection closed without another command");
+            }
+        }
+    }
+
     /// br-asupersync-sqlite-pool-audit-r10-dj4uhx L4: a body that cancelled
     /// its Cx and returned Ok made commit() refuse at its first checkpoint;
     /// the helper then returned at once with the rollback only scheduled, so
