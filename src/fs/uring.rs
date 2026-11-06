@@ -4,7 +4,9 @@
 //! traits offload terminal-completion waits to the inherited blocking pool;
 //! the synchronous constructors and borrowed operation futures retain their
 //! synchronous completion boundary. An absent or rejecting pool uses the inline
-//! fallback provided by ordinary filesystem I/O.
+//! fallback provided by ordinary filesystem I/O for the traits. The additive
+//! `*_owned` operations retain an `Arc<IoUringFile>` and owned buffers, and never
+//! run kernel completion waits inline, including when no pool is available.
 //!
 //! # Platform Requirements
 //!
@@ -30,6 +32,10 @@
 //!   trait operation has been collected. Polling the original trait operation
 //!   or `poll_flush` collects it. An explicit seek or a different write starts
 //!   a new write sequence, so identical bytes after a seek are written again.
+//! - owned operations: admission can be cancelled before the worker claims the
+//!   operation; a claimed operation keeps its file and buffer through terminal
+//!   completion even if the waiting future is dropped. Its effects may commit
+//!   after cancellation. Keep the future when its result must be recovered.
 
 #![cfg(all(target_os = "linux", feature = "io-uring"))]
 #![allow(unsafe_code)]
@@ -135,6 +141,9 @@ impl std::fmt::Debug for IoUringFileInner {
 /// keep their synchronous poll behavior. Finish a pending trait operation before
 /// mixing in synchronous cursor or data operations; otherwise they return
 /// [`io::ErrorKind::WouldBlock`].
+/// The additive [`read_owned`](Self::read_owned), [`write_owned`](Self::write_owned),
+/// and owned sync methods accept an `Arc<Self>` to move every completion wait
+/// off the polling thread without changing the borrowed methods' boundary.
 ///
 /// # Example
 ///
@@ -1158,32 +1167,9 @@ impl std::future::Future for ReadFuture<'_> {
         if this.done {
             return Poll::Ready(Err(polled_after_completion_error("read")));
         }
-        let result = if this.update_position {
-            if let Err(error) = this.file.prepare_synchronous_operation(true, false) {
-                this.done = true;
-                return Poll::Ready(Err(error));
-            }
-            let _cursor_guard = this.file.inner.cursor_lock.lock();
-            let offset = this.file.inner.position.load(Ordering::Relaxed);
-            let result = this.file.blocking_read_at(this.buf, offset);
-            if let Ok(n) = result {
-                this.file
-                    .inner
-                    .position
-                    .store(offset.saturating_add(n as u64), Ordering::Relaxed);
-            }
-            result
-        } else {
-            if let Err(error) = this.file.prepare_synchronous_operation(false, false) {
-                this.done = true;
-                return Poll::Ready(Err(error));
-            }
-            match this.offset {
-                Some(offset) => this.file.blocking_read_at(this.buf, offset),
-                None => Err(missing_explicit_offset_error("read")),
-            }
-        };
-
+        let result = this
+            .file
+            .read_synchronously(this.buf, this.offset, this.update_position);
         this.done = true;
         Poll::Ready(result)
     }
@@ -1206,34 +1192,9 @@ impl std::future::Future for WriteFuture<'_> {
         if this.done {
             return Poll::Ready(Err(polled_after_completion_error("write")));
         }
-        let result = if this.update_position {
-            if let Err(error) = this.file.prepare_synchronous_operation(true, true) {
-                this.done = true;
-                return Poll::Ready(Err(error));
-            }
-            let _cursor_guard = this.file.inner.cursor_lock.lock();
-            let offset = this.file.inner.position.load(Ordering::Relaxed);
-            let result = this.file.blocking_write_at(this.buf, offset);
-            if let Ok(n) = result {
-                this.file
-                    .inner
-                    .position
-                    .store(offset.saturating_add(n as u64), Ordering::Relaxed);
-            }
-            result
-        } else {
-            // A positioned mutation must invalidate unread trait data too,
-            // without changing the caller's logical sequential position.
-            if let Err(error) = this.file.prepare_synchronous_operation(true, true) {
-                this.done = true;
-                return Poll::Ready(Err(error));
-            }
-            match this.offset {
-                Some(offset) => this.file.blocking_write_at(this.buf, offset),
-                None => Err(missing_explicit_offset_error("write")),
-            }
-        };
-
+        let result = this
+            .file
+            .write_synchronously(this.buf, this.offset, this.update_position);
         this.done = true;
         Poll::Ready(result)
     }
@@ -1261,6 +1222,204 @@ impl std::future::Future for SyncFuture<'_> {
             .and_then(|()| this.file.blocking_sync(this.datasync));
         this.done = true;
         Poll::Ready(result)
+    }
+}
+
+impl IoUringFile {
+    fn read_synchronously(
+        &self,
+        buf: &mut [u8],
+        offset: Option<u64>,
+        update_position: bool,
+    ) -> io::Result<usize> {
+        self.prepare_synchronous_operation(update_position, false)?;
+        if update_position {
+            let _cursor_guard = self.inner.cursor_lock.lock();
+            let offset = self.inner.position.load(Ordering::Relaxed);
+            let result = self.blocking_read_at(buf, offset);
+            if let Ok(count) = result {
+                self.inner
+                    .position
+                    .store(offset.saturating_add(count as u64), Ordering::Relaxed);
+            }
+            result
+        } else {
+            self.blocking_read_at(
+                buf,
+                offset.ok_or_else(|| missing_explicit_offset_error("read"))?,
+            )
+        }
+    }
+
+    fn write_synchronously(
+        &self,
+        buf: &[u8],
+        offset: Option<u64>,
+        update_position: bool,
+    ) -> io::Result<usize> {
+        // Positioned writes invalidate unread trait data too, without changing
+        // the caller's logical sequential position.
+        self.prepare_synchronous_operation(true, true)?;
+        if update_position {
+            let _cursor_guard = self.inner.cursor_lock.lock();
+            let offset = self.inner.position.load(Ordering::Relaxed);
+            let result = self.blocking_write_at(buf, offset);
+            if let Ok(count) = result {
+                self.inner
+                    .position
+                    .store(offset.saturating_add(count as u64), Ordering::Relaxed);
+            }
+            result
+        } else {
+            self.blocking_write_at(
+                buf,
+                offset.ok_or_else(|| missing_explicit_offset_error("write"))?,
+            )
+        }
+    }
+
+    /// Reads into an owned buffer without waiting for kernel completion on the
+    /// polling thread. Returns the original allocation with the operation result.
+    ///
+    /// The file's logical cursor advances by the number of bytes read. The
+    /// buffer's length and capacity are unchanged; only its returned prefix is
+    /// overwritten with file data. An inherited blocking pool runs the request;
+    /// a missing pool uses a bounded background thread. A closed pool or failed
+    /// thread admission returns an error and the original buffer, never runs the
+    /// request inline, and leaves the file untouched.
+    ///
+    /// This consumes one `Arc`, so use `Arc::clone(&file)` to retain access to the
+    /// handle. The worker owns that same file, including pending trait state,
+    /// until the kernel's terminal completion. A retained trait operation must
+    /// be collected before starting an owned operation, as for [`Self::read`].
+    ///
+    /// # Cancel safety
+    ///
+    /// Dropping an unpolled future has no I/O effect. Dropping while admission or
+    /// execution is queued cancels work that no worker has claimed. After a
+    /// worker claims the request, dropping the future discards its result, but
+    /// the worker retains the file and buffer until terminal kernel completion;
+    /// the cursor may still advance. Keep the future and resume polling it when
+    /// the result must survive a cancelled wait. This is not region-drain or
+    /// hard-cancellation enforcement.
+    ///
+    /// ```no_run
+    /// use asupersync::fs::uring::IoUringFile;
+    /// use std::sync::Arc;
+    ///
+    /// async fn read_prefix() -> std::io::Result<Vec<u8>> {
+    ///     let file = Arc::new(IoUringFile::open("data.bin")?);
+    ///     let (result, mut bytes) = file.read_owned(vec![0; 4096]).await;
+    ///     bytes.truncate(result?);
+    ///     Ok(bytes)
+    /// }
+    /// ```
+    pub async fn read_owned(self: Arc<Self>, buffer: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
+        self.run_owned_buffer_io(buffer, |file, bytes| {
+            file.read_synchronously(bytes, None, true)
+        })
+        .await
+    }
+
+    /// Reads into an owned buffer at `offset`, leaving the logical cursor
+    /// unchanged. Placement, buffer recovery, and cancellation follow
+    /// [`Self::read_owned`].
+    pub async fn read_at_owned(
+        self: Arc<Self>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> (io::Result<usize>, Vec<u8>) {
+        self.run_owned_buffer_io(buffer, move |file, bytes| {
+            file.read_synchronously(bytes, Some(offset), false)
+        })
+        .await
+    }
+
+    /// Writes an owned buffer at the logical cursor without blocking the
+    /// polling thread. Returns the original allocation even on an I/O error.
+    ///
+    /// A short write advances the cursor by the returned count. Placement and
+    /// cancellation follow [`Self::read_owned`]; after the worker claims the
+    /// request, dropping the future does not undo bytes already written or stop
+    /// the kernel from completing the write.
+    pub async fn write_owned(self: Arc<Self>, buffer: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
+        self.run_owned_buffer_io(buffer, |file, bytes| {
+            file.write_synchronously(bytes, None, true)
+        })
+        .await
+    }
+
+    /// Writes an owned buffer at `offset`, leaving the logical cursor
+    /// unchanged. Placement, buffer recovery, and cancellation follow
+    /// [`Self::write_owned`].
+    pub async fn write_at_owned(
+        self: Arc<Self>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> (io::Result<usize>, Vec<u8>) {
+        self.run_owned_buffer_io(buffer, move |file, bytes| {
+            file.write_synchronously(bytes, Some(offset), false)
+        })
+        .await
+    }
+
+    /// Syncs file data on a blocking worker while retaining the file through
+    /// terminal completion. Placement and cancellation follow [`Self::read_owned`].
+    pub async fn sync_data_owned(self: Arc<Self>) -> io::Result<()> {
+        self.run_owned_sync(true).await
+    }
+
+    /// Syncs file data and metadata on a blocking worker while retaining the
+    /// file through terminal completion. Placement and cancellation follow
+    /// [`Self::read_owned`].
+    pub async fn sync_all_owned(self: Arc<Self>) -> io::Result<()> {
+        self.run_owned_sync(false).await
+    }
+
+    async fn run_owned_buffer_io(
+        self: Arc<Self>,
+        buffer: Vec<u8>,
+        operation: impl FnOnce(&Self, &mut [u8]) -> io::Result<usize> + Send + 'static,
+    ) -> (io::Result<usize>, Vec<u8>) {
+        // Admission refusal must return the user's allocation. The worker
+        // removes it only after claiming the closure, and retains it on its own
+        // stack through submit_and_wait's terminal-completion guard.
+        let retained = Arc::new(Mutex::new(Some(buffer)));
+        let worker_buffer = Arc::clone(&retained);
+        let pool =
+            crate::cx::Cx::current().and_then(|cx| cx.blocking_pool_handle_for_inheritance());
+        let result = crate::runtime::spawn_blocking::spawn_blocking_io_off_worker(
+            pool,
+            move || {
+                let mut buffer = worker_buffer
+                    .lock()
+                    .take()
+                    .expect("owned io_uring buffer is claimed once");
+                let result = operation(&self, &mut buffer);
+                Ok((result, buffer))
+            },
+        )
+        .await;
+        match result {
+            Ok(completed) => completed,
+            Err(error) => (
+                Err(error),
+                retained
+                    .lock()
+                    .take()
+                    .expect("unstarted io_uring request retains its buffer"),
+            ),
+        }
+    }
+
+    async fn run_owned_sync(self: Arc<Self>, datasync: bool) -> io::Result<()> {
+        let pool =
+            crate::cx::Cx::current().and_then(|cx| cx.blocking_pool_handle_for_inheritance());
+        crate::runtime::spawn_blocking::spawn_blocking_io_off_worker(pool, move || {
+            self.prepare_synchronous_operation(false, false)?;
+            self.blocking_sync(datasync)
+        })
+        .await
     }
 }
 

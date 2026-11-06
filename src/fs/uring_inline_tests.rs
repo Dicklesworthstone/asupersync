@@ -1758,3 +1758,291 @@
             "test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive"
         );
     }
+
+    #[test]
+    fn test_uring_owned_cursor_io_queues_and_returns_the_original_buffers() {
+        init_test("test_uring_owned_cursor_io_queues_and_returns_the_original_buffers");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("owned_cursor.txt");
+        let file = Arc::new(
+            IoUringFile::open_with_flags(
+                &path,
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o600,
+            )
+            .unwrap(),
+        );
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let bytes = b"owned bytes".to_vec();
+        let allocation = bytes.as_ptr();
+        let capacity = bytes.capacity();
+        let mut write = Box::pin(Arc::clone(&file).write_owned(bytes));
+        assert!(write.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert_eq!(file.position(), 0);
+        assert!(std::fs::read(&path).unwrap().is_empty());
+        occupied.release_and_drain();
+        let (written, bytes) = futures_lite::future::block_on(write);
+        assert_eq!(written.unwrap(), 11);
+        assert_eq!(bytes.as_ptr(), allocation);
+        assert_eq!(bytes.capacity(), capacity);
+        assert_eq!(file.position(), 11);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut occupied_read = OccupiedTraitPool::new();
+        let read_cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied_read.pool.handle()));
+        let _read_current = crate::cx::Cx::set_current(Some(read_cx));
+        let read_bytes = vec![b'x'; 16];
+        let read_allocation = read_bytes.as_ptr();
+        let mut read = Box::pin(Arc::clone(&file).read_owned(read_bytes));
+        assert!(read.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert_eq!(file.position(), 0);
+        occupied_read.release_and_drain();
+        let (count, read_bytes) = futures_lite::future::block_on(read);
+        assert_eq!(count.unwrap(), 11);
+        assert_eq!(read_bytes.as_ptr(), read_allocation);
+        assert_eq!(&read_bytes[..11], b"owned bytes");
+        assert_eq!(&read_bytes[11..], b"xxxxx");
+        assert_eq!(file.position(), 11);
+        crate::test_complete!("test_uring_owned_cursor_io_queues_and_returns_the_original_buffers");
+    }
+
+    #[test]
+    fn test_uring_owned_positioned_io_preserves_cursor_and_invalidates_read_ahead() {
+        init_test("test_uring_owned_positioned_io_preserves_cursor_and_invalidates_read_ahead");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("owned_positioned.txt");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        let mut whole = [0; 6];
+        assert!(
+            Pin::new(&mut file)
+                .poll_read(
+                    &mut Context::from_waker(Waker::noop()),
+                    &mut ReadBuf::new(&mut whole),
+                )
+                .is_pending()
+        );
+        occupied.release_and_drain();
+        let mut prefix = [0; 2];
+        assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
+        assert_eq!(&prefix, b"ab");
+        assert_eq!(file.position(), 2);
+
+        let file = Arc::new(file);
+        let (written, original) = futures_lite::future::block_on(
+            Arc::clone(&file).write_at_owned(b"XY".to_vec(), 2),
+        );
+        assert_eq!(written.unwrap(), 2);
+        assert_eq!(original, b"XY");
+        assert_eq!(file.position(), 2);
+        let (read, bytes) = futures_lite::future::block_on(
+            Arc::clone(&file).read_at_owned(vec![0; 2], 4),
+        );
+        assert_eq!(read.unwrap(), 2);
+        assert_eq!(bytes, b"ef");
+        assert_eq!(file.position(), 2);
+
+        let mut file = Arc::try_unwrap(file).unwrap();
+        let mut rest = [0; 4];
+        assert_eq!(read_via_trait(&mut file, &mut rest).unwrap(), 4);
+        assert_eq!(&rest, b"XYef", "the owned write shares the real trait cache");
+        crate::test_complete!("test_uring_owned_positioned_io_preserves_cursor_and_invalidates_read_ahead");
+    }
+
+    #[test]
+    fn test_uring_owned_io_refuses_an_uncollected_trait_request() {
+        init_test("test_uring_owned_io_refuses_an_uncollected_trait_request");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("owned_trait_pending.txt");
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::create(&path).unwrap();
+        assert!(
+            Pin::new(&mut file)
+                .poll_write(&mut Context::from_waker(Waker::noop()), b"first")
+                .is_pending()
+        );
+        let file = Arc::new(file);
+        let mut owned = Box::pin(Arc::clone(&file).write_owned(b"second".to_vec()));
+        assert!(owned.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        occupied.release_and_drain();
+        let (result, original) = futures_lite::future::block_on(owned);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(original, b"second");
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        let mut file = Arc::try_unwrap(file).unwrap();
+        assert!(matches!(
+            Pin::new(&mut file).poll_write(&mut Context::from_waker(Waker::noop()), b"first"),
+            Poll::Ready(Ok(5))
+        ));
+        assert_eq!(file.position(), 5);
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        crate::test_complete!("test_uring_owned_io_refuses_an_uncollected_trait_request");
+    }
+
+    #[test]
+    fn test_uring_owned_syncs_queue_on_the_inherited_pool() {
+        init_test("test_uring_owned_syncs_queue_on_the_inherited_pool");
+        for datasync in [false, true] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("owned_sync.txt");
+            std::fs::write(&path, b"durable").unwrap();
+            let mut occupied = OccupiedTraitPool::new();
+            let cx = crate::cx::Cx::for_testing()
+                .with_blocking_pool_handle(Some(occupied.pool.handle()));
+            let _current = crate::cx::Cx::set_current(Some(cx));
+            let file = Arc::new(IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap());
+            let submitted_before = file.inner.next_user_data.load(Ordering::Relaxed);
+            let mut sync: Pin<Box<dyn Future<Output = io::Result<()>>>> = if datasync {
+                Box::pin(Arc::clone(&file).sync_data_owned())
+            } else {
+                Box::pin(Arc::clone(&file).sync_all_owned())
+            };
+            assert!(sync.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), submitted_before);
+            occupied.release_and_drain();
+            futures_lite::future::block_on(sync).unwrap();
+            assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), submitted_before + 1);
+        }
+        crate::test_complete!("test_uring_owned_syncs_queue_on_the_inherited_pool");
+    }
+
+    #[test]
+    fn test_uring_owned_io_recovers_buffers_without_inline_fallback_on_pool_refusal() {
+        init_test("test_uring_owned_io_recovers_buffers_without_inline_fallback_on_pool_refusal");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("owned_refused.txt");
+        std::fs::write(&path, b"unchanged").unwrap();
+        let file = Arc::new(IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap());
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        pool.shutdown();
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let bytes = b"rejected".to_vec();
+        let allocation = bytes.as_ptr();
+        let submitted_before = file.inner.next_user_data.load(Ordering::Relaxed);
+        let (result, bytes) = futures_lite::future::block_on(Arc::clone(&file).write_owned(bytes));
+        assert!(result.is_err());
+        assert_eq!(bytes.as_ptr(), allocation);
+        assert_eq!(bytes, b"rejected");
+        assert!(futures_lite::future::block_on(Arc::clone(&file).sync_all_owned()).is_err());
+        assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), submitted_before);
+        assert_eq!(file.position(), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
+        crate::test_complete!("test_uring_owned_io_recovers_buffers_without_inline_fallback_on_pool_refusal");
+    }
+
+    #[test]
+    fn test_uring_owned_io_returns_the_buffer_on_a_kernel_error() {
+        init_test("test_uring_owned_io_returns_the_buffer_on_a_kernel_error");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("owned_read_only.txt");
+        std::fs::write(&path, b"unchanged").unwrap();
+        let file = Arc::new(IoUringFile::open(&path).unwrap());
+        let bytes = b"rejected".to_vec();
+        let allocation = bytes.as_ptr();
+        let (result, bytes) = futures_lite::future::block_on(Arc::clone(&file).write_owned(bytes));
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EBADF));
+        assert_eq!(bytes.as_ptr(), allocation);
+        assert_eq!(bytes, b"rejected");
+        assert_eq!(file.position(), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
+        crate::test_complete!("test_uring_owned_io_returns_the_buffer_on_a_kernel_error");
+    }
+
+    #[test]
+    fn test_uring_owned_write_drop_before_worker_claim_has_no_effect() {
+        init_test("test_uring_owned_write_drop_before_worker_claim_has_no_effect");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("owned_queued_drop.txt");
+        let file = Arc::new(IoUringFile::create(&path).unwrap());
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut write = Box::pin(Arc::clone(&file).write_owned(b"cancelled".to_vec()));
+        assert!(write.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        drop(write);
+        occupied.release_and_drain();
+        assert_eq!(file.position(), 0);
+        assert!(std::fs::read(&path).unwrap().is_empty());
+        crate::test_complete!("test_uring_owned_write_drop_before_worker_claim_has_no_effect");
+    }
+
+    #[test]
+    fn test_uring_owned_write_keeps_the_file_alive_after_a_running_wait_is_dropped() {
+        init_test("test_uring_owned_write_keeps_the_file_alive_after_a_running_wait_is_dropped");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("owned_running_drop.txt");
+        let file = Arc::new(IoUringFile::create(&path).unwrap());
+        let weak_file = Arc::downgrade(&file);
+        let inner = Arc::clone(&file.inner);
+        let ring_guard = inner.ring.lock();
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut write = Box::pin(Arc::clone(&file).write_owned(b"retained".to_vec()));
+        assert!(write.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while inner.cursor_lock.try_lock().is_some() {
+            assert!(std::time::Instant::now() < deadline, "worker never claimed the write");
+            std::thread::yield_now();
+        }
+        drop(write);
+        drop(file);
+        assert!(weak_file.upgrade().is_some(), "the running worker owns the file");
+        drop(ring_guard);
+        let marker = pool.spawn(|| {});
+        assert!(marker.wait_timeout(std::time::Duration::from_secs(5)));
+        assert!(weak_file.upgrade().is_none(), "terminal completion retires ownership");
+        assert_eq!(std::fs::read(&path).unwrap(), b"retained");
+        crate::test_complete!("test_uring_owned_write_keeps_the_file_alive_after_a_running_wait_is_dropped");
+    }
+
+    #[test]
+    fn test_uring_owned_read_without_a_pool_never_waits_on_the_polling_thread() {
+        init_test("test_uring_owned_read_without_a_pool_never_waits_on_the_polling_thread");
+        for install_context in [false, true] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("owned_no_pool.txt");
+            std::fs::write(&path, b"worker").unwrap();
+            let file = Arc::new(IoUringFile::open(&path).unwrap());
+            let inner = Arc::clone(&file.inner);
+            let ring_guard = inner.ring.lock();
+            let (polled_tx, polled_rx) = std::sync::mpsc::channel();
+            let polling = std::thread::spawn(move || {
+                let cx = install_context.then(|| {
+                    crate::cx::Cx::for_testing().with_blocking_pool_handle(None)
+                });
+                let _current = crate::cx::Cx::set_current(cx);
+                let mut read = Box::pin(file.read_owned(vec![0; 6]));
+                let first = read.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+                polled_tx.send(first.is_pending()).unwrap();
+                match first {
+                    Poll::Ready(result) => result,
+                    Poll::Pending => futures_lite::future::block_on(read),
+                }
+            });
+            // A deliberately held ring makes terminal completion impossible.
+            // Releasing it before assertions also lets an inline regression
+            // exit, so the test fails instead of hanging the whole suite.
+            let first_poll = polled_rx.recv_timeout(std::time::Duration::from_secs(5));
+            drop(ring_guard);
+            let (result, bytes) = polling.join().unwrap();
+            assert!(first_poll.unwrap(), "the first poll must yield");
+            assert_eq!(result.unwrap(), 6);
+            assert_eq!(bytes, b"worker");
+        }
+        crate::test_complete!("test_uring_owned_read_without_a_pool_never_waits_on_the_polling_thread");
+    }

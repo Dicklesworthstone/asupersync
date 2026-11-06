@@ -2048,57 +2048,57 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 35,
+          "line": 41,
           "pattern": "#![allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 369,
+          "line": 378,
           "pattern": "let result = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 403,
+          "line": 412,
           "pattern": "let fd = unsafe { libc::openat(libc::AT_FDCWD, c_path.as_ptr(), flags, mode) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 409,
+          "line": 418,
           "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 436,
+          "line": 445,
           "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 595,
+          "line": 604,
           "pattern": "let result = unsafe { libc::ftruncate(fd, size_off) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 611,
+          "line": 620,
           "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });"
         },
         {
           "kind": "unsafe_block",
-          "line": 618,
+          "line": 627,
           "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });"
         },
         {
           "kind": "unsafe_block",
-          "line": 663,
+          "line": 672,
           "pattern": "let push_result = unsafe { ring.submission().push(entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 797,
+          "line": 806,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_fn",
-          "line": 434,
+          "line": 443,
           "pattern": "pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {"
         }
       ]
