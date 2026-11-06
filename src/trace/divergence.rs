@@ -172,13 +172,15 @@ pub struct DivergenceReport {
     /// High-level category of the divergence.
     pub category: DivergenceCategory,
 
-    /// Event index where divergence was detected.
+    /// Event index in the original expected trace, or its length at EOF.
     pub divergence_index: usize,
 
     /// Total events in the recorded trace.
     pub trace_length: usize,
 
     /// Percentage of trace that replayed successfully before divergence.
+    /// Full-trace comparisons count matching canonical events, even when
+    /// their original source positions differ.
     pub replay_progress_pct: f64,
 
     /// Summary of the expected event.
@@ -209,7 +211,11 @@ pub struct DivergenceReport {
     /// Entities affected by the divergence.
     pub affected: AffectedEntities,
 
-    /// Length of the minimal divergent prefix (events 0..=divergence_index).
+    /// Length of the expected source prefix needed for the diagnosis.
+    /// Direct replay errors use events `0..=divergence_index`. Full-trace
+    /// comparisons also retain earlier matching canonical events, which may
+    /// occur later in source order, and are bounded by the source trace's
+    /// length. A configured prefix cap can truncate that evidence.
     pub minimal_prefix_len: usize,
 
     /// Seed from the trace metadata.
@@ -380,6 +386,9 @@ pub fn replay_traces_foata_equivalent(expected: &ReplayTrace, actual: &ReplayTra
 ///
 /// The traces are first canonicalized using a conservative Foata normal form so
 /// independent scheduling reorderings do not produce false divergence reports.
+/// Event indices and context windows refer to each trace's original order.
+/// The expected source prefix retains the matching canonical evidence as well
+/// as the mismatch; it can extend beyond `divergence_index + 1`.
 /// Returns `None` when the traces are equivalent after canonicalization.
 #[must_use]
 #[allow(clippy::similar_names)]
@@ -388,12 +397,18 @@ pub fn diagnose_replay_trace_divergence(
     actual: &ReplayTrace,
     config: &DiagnosticConfig,
 ) -> Option<DivergenceReport> {
-    let expected_events = canonicalize_replay_events(&expected.events);
-    let actual_events = canonicalize_replay_events(&actual.events);
-    let idx = first_replay_mismatch(&expected_events, &actual_events)?;
-
-    let expected_at = expected_events.get(idx);
-    let actual_at = actual_events.get(idx);
+    let expected_order = canonical_replay_order(&expected.events);
+    let actual_order = canonical_replay_order(&actual.events);
+    let shared_len = expected_order.len().min(actual_order.len());
+    let idx = (0..shared_len)
+        .find(|&index| {
+            expected.events[expected_order[index]] != actual.events[actual_order[index]]
+        })
+        .or_else(|| (expected_order.len() != actual_order.len()).then_some(shared_len))?;
+    let expected_index = expected_order.get(idx).copied().unwrap_or(expected.len());
+    let actual_index = actual_order.get(idx).copied().unwrap_or(actual.len());
+    let expected_at = expected.events.get(expected_index);
+    let actual_at = actual.events.get(actual_index);
     let category = match (expected_at, actual_at) {
         (Some(expected_event), Some(actual_event)) => {
             classify_divergence(Some(expected_event), actual_event)
@@ -402,12 +417,12 @@ pub fn diagnose_replay_trace_divergence(
     };
 
     let expected_summary = expected_at.map_or_else(
-        || trace_exhausted_summary(idx, "expected"),
-        |event| EventSummary::from_event(idx, event),
+        || trace_exhausted_summary(expected_index, "expected"),
+        |event| EventSummary::from_event(expected_index, event),
     );
     let actual_summary = actual_at.map_or_else(
-        || trace_exhausted_summary(idx, "actual"),
-        |event| EventSummary::from_event(idx, event),
+        || trace_exhausted_summary(actual_index, "actual"),
+        |event| EventSummary::from_event(actual_index, event),
     );
 
     let affected = match (expected_at, actual_at) {
@@ -435,34 +450,48 @@ pub fn diagnose_replay_trace_divergence(
         "Compare the expected trace boundary with replay termination. Check for premature cancellation, early region close, or a missing wakeup before the trace ended.".to_string()
     };
 
+    // Canonical predecessors may occur after the mismatching event in source
+    // order. Keep them too, or the advertised prefix can lose the common
+    // evidence that established this mismatch in the first place.
+    let evidence_prefix_len = expected_order
+        .iter()
+        .take(idx.saturating_add(1))
+        .copied()
+        .max()
+        .map_or(0, |index| index + 1);
     let minimal_prefix_len = if config.max_prefix_len > 0 {
-        (idx + 1).min(config.max_prefix_len)
+        evidence_prefix_len.min(config.max_prefix_len)
     } else {
-        idx + 1
+        evidence_prefix_len
     };
 
     Some(DivergenceReport {
         category,
-        divergence_index: idx,
-        trace_length: expected_events.len(),
-        replay_progress_pct: replay_progress_pct(idx, expected_events.len()),
+        divergence_index: expected_index,
+        trace_length: expected.len(),
+        replay_progress_pct: replay_progress_pct(idx, expected.len()),
         expected: expected_summary,
         actual: actual_summary,
         explanation,
         suggestion,
-        context_before: build_context_before(&expected_events, idx, config.context_before),
-        context_after: build_context_after(&expected_events, idx, config.context_after),
-        context_after_actual: build_context_after(&actual_events, idx, config.context_after),
+        context_before: build_context_before(&expected.events, expected_index, config.context_before),
+        context_after: build_context_after(&expected.events, expected_index, config.context_after),
+        context_after_actual: build_context_after(
+            &actual.events,
+            actual_index,
+            config.context_after,
+        ),
         affected,
         minimal_prefix_len,
         seed: expected.metadata.seed,
     })
 }
 
-/// Extract the minimal divergent prefix: the shortest sub-trace that still
-/// demonstrates the divergence.
+/// Extract a source prefix ending at the given inclusive event index.
 ///
 /// Returns the prefix as a new `ReplayTrace` containing events `0..=divergence_index`.
+/// For a full-trace diagnosis, pass `report.minimal_prefix_len.saturating_sub(1)`
+/// to retain the source events supporting earlier canonical comparisons too.
 #[must_use]
 pub fn minimal_divergent_prefix(trace: &ReplayTrace, divergence_index: usize) -> ReplayTrace {
     let end = (divergence_index + 1).min(trace.events.len());
@@ -629,13 +658,6 @@ fn replay_progress_pct(idx: usize, trace_len: usize) -> f64 {
     (idx_f / len_f) * 100.0
 }
 
-fn first_replay_mismatch(expected: &[ReplayEvent], actual: &[ReplayEvent]) -> Option<usize> {
-    let shared_len = expected.len().min(actual.len());
-    (0..shared_len)
-        .find(|&idx| expected[idx] != actual[idx])
-        .or_else(|| (expected.len() != actual.len()).then_some(shared_len))
-}
-
 fn trace_exhausted_summary(index: usize, side: &str) -> EventSummary {
     EventSummary {
         index,
@@ -647,6 +669,15 @@ fn trace_exhausted_summary(index: usize, side: &str) -> EventSummary {
 }
 
 fn canonicalize_replay_events(events: &[ReplayEvent]) -> Vec<ReplayEvent> {
+    canonical_replay_order(events)
+        .into_iter()
+        .map(|index| events[index].clone())
+        .collect()
+}
+
+/// Canonical positions retain their source identity for diagnostic consumers.
+/// Equality still compares the events, never their source indices.
+fn canonical_replay_order(events: &[ReplayEvent]) -> Vec<usize> {
     let mut layered = Vec::with_capacity(events.len());
     let mut resource_next_layers = BTreeMap::new();
     let mut global_floor = 0;
@@ -680,21 +711,22 @@ fn canonicalize_replay_events(events: &[ReplayEvent]) -> Vec<ReplayEvent> {
         }
         next_global_layer = next_global_layer.max(next_layer);
 
-        layered.push((layer, event.clone(), source_index));
+        layered.push((layer, source_index));
     }
 
     layered.sort_by(
-        |(left_layer, left_event, left_index), (right_layer, right_event, right_index)| {
+        |(left_layer, left_index), (right_layer, right_index)| {
             left_layer
                 .cmp(right_layer)
                 .then_with(|| {
-                    replay_event_sort_key(left_event).cmp(&replay_event_sort_key(right_event))
+                    replay_event_sort_key(&events[*left_index])
+                        .cmp(&replay_event_sort_key(&events[*right_index]))
                 })
                 .then_with(|| left_index.cmp(right_index))
         },
     );
 
-    layered.into_iter().map(|(_, event, _)| event).collect()
+    layered.into_iter().map(|(_, index)| index).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

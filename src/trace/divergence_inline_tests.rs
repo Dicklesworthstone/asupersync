@@ -579,6 +579,160 @@
         );
     }
 
+    #[test]
+    fn replay_trace_diagnostics_keep_original_source_positions_and_context() {
+        let scheduled = |task, at_tick| ReplayEvent::TaskScheduled {
+            task: CompactTaskId(task),
+            at_tick,
+        };
+        let expected = make_trace(
+            42,
+            vec![
+                scheduled(3, 0),
+                scheduled(1, 0),
+                scheduled(2, 0),
+                scheduled(4, 0),
+            ],
+        );
+        let actual = make_trace(
+            42,
+            vec![
+                scheduled(2, 99),
+                scheduled(4, 0),
+                scheduled(3, 0),
+                scheduled(1, 0),
+            ],
+        );
+        let config = DiagnosticConfig {
+            context_before: 2,
+            context_after: 3,
+            max_prefix_len: 0,
+        };
+        let report = diagnose_replay_trace_divergence(&expected, &actual, &config)
+            .expect("task 2 was scheduled at a different tick");
+
+        assert_eq!(report.divergence_index, 2);
+        assert_eq!(
+            report.expected,
+            EventSummary::from_event(2, &expected.events[2])
+        );
+        assert_eq!(report.actual, EventSummary::from_event(0, &actual.events[0]));
+        assert_eq!(report.category, DivergenceCategory::SchedulingOrder);
+        assert_eq!(report.trace_length, 4);
+        assert_eq!(report.replay_progress_pct, 25.0);
+        assert_eq!(report.minimal_prefix_len, 3);
+        assert_eq!(
+            report.context_before,
+            vec![
+                EventSummary::from_event(0, &expected.events[0]),
+                EventSummary::from_event(1, &expected.events[1]),
+            ]
+        );
+        assert_eq!(
+            report.context_after,
+            vec![EventSummary::from_event(3, &expected.events[3])]
+        );
+        assert_eq!(
+            report.context_after_actual,
+            (1..4)
+                .map(|index| EventSummary::from_event(index, &actual.events[index]))
+                .collect::<Vec<_>>()
+        );
+        let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        assert_eq!(json["expected"]["index"], 2);
+        assert_eq!(json["actual"]["index"], 0);
+    }
+
+    #[test]
+    fn replay_trace_prefix_retains_later_source_events_used_as_canonical_evidence() {
+        let first = ReplayEvent::TaskScheduled {
+            task: CompactTaskId(1),
+            at_tick: 0,
+        };
+        let second = ReplayEvent::TaskScheduled {
+            task: CompactTaskId(2),
+            at_tick: 0,
+        };
+        let expected = make_trace(42, vec![second, first.clone()]);
+        let actual = make_trace(42, vec![first]);
+        let config = DiagnosticConfig::default();
+        let report = diagnose_replay_trace_divergence(&expected, &actual, &config)
+            .expect("the actual trace is missing task 2");
+
+        assert_eq!(report.category, DivergenceCategory::LengthMismatch);
+        assert_eq!(report.divergence_index, 0);
+        assert_eq!(report.expected.index, 0);
+        assert_eq!(report.actual.index, 1);
+        assert_eq!(report.actual.event_type, "TraceExhausted");
+        assert_eq!(report.minimal_prefix_len, 2);
+        assert!(report.context_before.is_empty());
+        assert_eq!(
+            report.context_after,
+            vec![EventSummary::from_event(1, &expected.events[1])]
+        );
+        assert!(report.context_after_actual.is_empty());
+        let prefix = minimal_divergent_prefix(&expected, report.minimal_prefix_len - 1);
+        assert_eq!(prefix.events, expected.events);
+
+        let capped = diagnose_replay_trace_divergence(
+            &expected,
+            &actual,
+            &DiagnosticConfig {
+                max_prefix_len: 1,
+                ..config
+            },
+        )
+        .unwrap();
+        assert_eq!(capped.minimal_prefix_len, 1);
+        assert_eq!(capped.divergence_index, 0);
+    }
+
+    #[test]
+    fn replay_trace_diagnostics_use_each_trace_eof_and_bound_empty_prefixes() {
+        let first = ReplayEvent::TaskScheduled {
+            task: CompactTaskId(1),
+            at_tick: 0,
+        };
+        let second = ReplayEvent::TaskScheduled {
+            task: CompactTaskId(2),
+            at_tick: 0,
+        };
+        let short = make_trace(42, vec![first.clone()]);
+        let long = make_trace(42, vec![second, first]);
+        let empty = make_trace(42, Vec::new());
+        let config = DiagnosticConfig::default();
+        let report = diagnose_replay_trace_divergence(&short, &long, &config).unwrap();
+
+        assert_eq!(report.divergence_index, 1);
+        assert_eq!(report.expected.index, 1);
+        assert_eq!(report.expected.event_type, "TraceExhausted");
+        assert_eq!(report.actual.index, 0);
+        assert_eq!(report.minimal_prefix_len, 1);
+        assert_eq!(
+            report.context_before,
+            vec![EventSummary::from_event(0, &short.events[0])]
+        );
+        assert!(report.context_after.is_empty());
+        assert_eq!(
+            report.context_after_actual,
+            vec![EventSummary::from_event(1, &long.events[1])]
+        );
+
+        let missing_expected = diagnose_replay_trace_divergence(&empty, &long, &config).unwrap();
+        assert_eq!(missing_expected.divergence_index, 0);
+        assert_eq!(missing_expected.expected.index, 0);
+        assert_eq!(missing_expected.actual.index, 1);
+        assert_eq!(missing_expected.minimal_prefix_len, 0);
+        assert!(missing_expected.context_before.is_empty());
+        assert!(missing_expected.context_after.is_empty());
+
+        let missing_actual = diagnose_replay_trace_divergence(&long, &empty, &config).unwrap();
+        assert_eq!(missing_actual.divergence_index, 1);
+        assert_eq!(missing_actual.actual.index, 0);
+        assert_eq!(missing_actual.minimal_prefix_len, 2);
+        assert!(diagnose_replay_trace_divergence(&empty, &empty, &config).is_none());
+    }
+
     // -------------------------------------------------------------------------
     // Context window tests
     // -------------------------------------------------------------------------

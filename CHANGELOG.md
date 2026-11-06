@@ -108,6 +108,11 @@ artifacts.
   events. Global fences and canonical event ordering are preserved while
   dependency tracking and sorting take O(n log n) work.
   (`br-asupersync-tjr6s9`, M6.)
+- **Replay source locations:** Full-trace divergence reports now identify
+  original source positions and context on each side instead of labeling
+  canonical positions as source indices. Reproduction prefixes retain earlier
+  canonical evidence even when it occurs later in source order, and stop at
+  the expected trace's actual end. (`br-asupersync-tjr6s9`, M7.)
 
 ## [v0.6.2] - 2026-11-03
 
