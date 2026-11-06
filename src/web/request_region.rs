@@ -713,6 +713,64 @@ pub enum ServerHopOutcome<R> {
     ConnectionLost,
 }
 
+/// Admission or ownership failure from [`ServerRequestRegion::run_scoped`].
+///
+/// Handler and descendant panics are reported as [`ServerHopOutcome::Panicked`].
+/// These errors mean that request ownership could not be established or its
+/// quiescent close could not be observed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ScopedServerRequestError {
+    /// The explicit owner has no timer for request deadlines and protocol drain.
+    MissingTimer,
+    /// The runtime refused a child region or could not complete its close.
+    Region(crate::cx::ChildRegionError),
+    /// The request body could not be submitted to its child region.
+    Spawn(crate::runtime::SpawnError),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Display for ScopedServerRequestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingTimer => f.write_str("scoped server request requires an owner timer"),
+            Self::Region(error) => write!(f, "scoped server request region: {error}"),
+            Self::Spawn(error) => write!(f, "scoped server request body: {error}"),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for ScopedServerRequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MissingTimer => None,
+            Self::Region(error) => Some(error),
+            Self::Spawn(error) => Some(error),
+        }
+    }
+}
+
+/// Retains the scheduler-owned body and the subtree throughout execution and
+/// close. An abandoned caller requests cancellation, but claims no completion.
+#[cfg(not(target_arch = "wasm32"))]
+struct ScopedRequestOwner {
+    region: Option<crate::cx::ChildRegion>,
+    body: Option<crate::runtime::TaskHandle<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for ScopedRequestOwner {
+    fn drop(&mut self) {
+        if let Some(body) = &self.body {
+            body.abort();
+        }
+        // ChildRegion's own Drop closes the complete subtree, including a
+        // queued admission or a body blocked while joining one of its children.
+    }
+}
+
 /// Installs a [`Cx`] as the ambient context for every poll of `inner`.
 ///
 /// Unlike holding a [`Cx::set_current`] guard across `.await` points (which
@@ -866,6 +924,281 @@ impl Drop for ConnectionCancelWaker {
 }
 
 impl ServerRequestRegion {
+    /// Runs a request in a real child region and returns after that subtree closes.
+    ///
+    /// This additive execution API owns the handler, every task it spawns, and
+    /// their registered cleanup independently of the connection's lifetime.
+    /// The factory runs only after scheduler admission, with the admitted
+    /// task's actual `Cx`. Its budget is met with the explicit connection
+    /// context's budget, and capabilities and clock remain inherited from that
+    /// context. A native runtime gateway and timer are required; no detached
+    /// context or replacement authority is invented.
+    ///
+    /// The handler uses [`Self::run_with_protocol_drain`]'s deadline, panic and
+    /// response-commit rules. Cancellation of either `connection_cx` or the task
+    /// polling this call is forwarded to the entire request subtree before
+    /// waiting for its handler. A completed response is retained independently
+    /// of the cancelled `Cx`. After handler retirement the child region closes:
+    /// outstanding children are cancelled, their cleanup finishes, and finalizers
+    /// run. A descendant panic or failed finalizer dominates a successful response.
+    ///
+    /// `drain_grace` bounds the handler's protocol-drain window, **not** arbitrary
+    /// descendant cleanup. This method promises actual quiescence: a child that
+    /// never cooperates with cancellation can delay return indefinitely. The
+    /// returned value must not retain request-owned obligations that prevent
+    /// that close. Dropping the future requests subtree close but cannot wait
+    /// for it; the connection/ancestor remains responsible for eventual drain.
+    /// An unpolled future admits no work.
+    ///
+    /// Existing minted and borrowed request contexts keep their established
+    /// behavior. Protocol adapters can opt into this API without changing the
+    /// execution policy of other requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScopedServerRequestError`] when runtime ownership is unavailable,
+    /// admission fails, or the runtime disappears before close can be observed.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_lines)] // Keep admission, retirement, and close in one owned lifecycle.
+    pub async fn run_scoped<F, Fut, R>(
+        connection_cx: &Cx,
+        protocol: &'static str,
+        budget: Budget,
+        source: RequestBudgetSource,
+        drain_grace: Duration,
+        factory: F,
+    ) -> Result<ServerHopOutcome<R>, ScopedServerRequestError>
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: Send + 'static,
+    {
+        use crate::cx::ChildRegionSpec;
+        use crate::runtime::JoinError;
+        use crate::types::CancelReason;
+
+        let polling_cx = Cx::current();
+        let refused = if connection_cx.checkpoint().is_err() {
+            Some(connection_cx)
+        } else {
+            polling_cx.as_ref().filter(|cx| cx.checkpoint().is_err())
+        };
+        if let Some(refused) = refused {
+            return Ok(
+                if refused
+                    .cancel_reason()
+                    .is_some_and(|reason| reason.chain().any(|cause| cause.is_time_exceeded()))
+                {
+                    ServerHopOutcome::DeadlineExceeded
+                } else {
+                    ServerHopOutcome::Cancelled
+                },
+            );
+        }
+        if connection_cx.timer_driver().is_none() {
+            return Err(ScopedServerRequestError::MissingTimer);
+        }
+        let started_at = connection_cx.now();
+        if budget
+            .deadline
+            .is_some_and(|deadline| started_at >= deadline)
+        {
+            return Ok(ServerHopOutcome::DeadlineExceeded);
+        }
+        let region = connection_cx
+            .open_child_region(ChildRegionSpec::inherit().with_budget(budget))
+            .await
+            .map_err(ScopedServerRequestError::Region)?;
+        let mut owner = ScopedRequestOwner {
+            region: Some(region),
+            body: None,
+        };
+        // Region admission is asynchronous. Cancellation or a deadline may
+        // have arrived while its command was queued; do not invoke a factory
+        // that was already refused before its body was submitted.
+        let region = owner.region.as_ref().expect("admitted scoped request");
+        let refused = if connection_cx.checkpoint().is_err() {
+            Some(connection_cx)
+        } else if let Some(polling) = polling_cx.as_ref()
+            && polling.checkpoint().is_err()
+        {
+            Some(polling)
+        } else if region.cx().checkpoint().is_err() {
+            Some(region.cx())
+        } else {
+            None
+        };
+        if let Some(refused) = refused {
+            let reason = refused
+                .cancel_reason()
+                .unwrap_or_else(CancelReason::parent_cancelled);
+            let outcome = if reason.chain().any(|cause| cause.is_time_exceeded()) {
+                ServerHopOutcome::DeadlineExceeded
+            } else {
+                ServerHopOutcome::Cancelled
+            };
+            let cancellation = region.cancel(reason);
+            let closed = owner
+                .region
+                .take()
+                .expect("admitted scoped request")
+                .close()
+                .await;
+            cancellation.map_err(ScopedServerRequestError::Region)?;
+            closed.map_err(ScopedServerRequestError::Region)?;
+            return Ok(outcome);
+        }
+        // Terminal publication must not use an operation's cancelled Cx.
+        // As with the owned HTTP/1 path, the slot preserves the response while
+        // TaskHandle::poll_join provides the separate task-retirement barrier.
+        let publication = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let body_publication = std::sync::Arc::clone(&publication);
+        let region = owner.region.as_ref().expect("admitted scoped request");
+        let scope = region.cx().scope();
+        let spawned =
+            region
+                .cx()
+                .spawn_in_cancellation_dominant(&scope, move |body_cx| async move {
+                    let region = Self::from_body_cx(protocol, body_cx.clone(), started_at);
+                    let handler_cx = body_cx.clone();
+                    let mut execution = Box::pin(CatchUnwind {
+                        inner: region.run_with_protocol_drain(
+                            source,
+                            Some(body_cx),
+                            drain_grace,
+                            async move { factory(handler_cx).await },
+                        ),
+                    });
+                    let returned = execution.as_mut().await;
+                    // Retiring a handler may itself panic. Do that before making
+                    // its response visible, with the same boundary as owned h1.
+                    let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        drop(execution);
+                    }));
+                    let outcome = match (returned, retired) {
+                        (Err(payload), retirement) => {
+                            if let Err(secondary) = retirement {
+                                std::mem::forget(secondary);
+                            }
+                            ServerHopOutcome::Panicked(extract_panic_message(&payload))
+                        }
+                        (Ok(_), Err(payload)) => {
+                            ServerHopOutcome::Panicked(extract_panic_message(&payload))
+                        }
+                        (Ok(outcome), Ok(())) => outcome,
+                    };
+                    *body_publication.lock() = Some(outcome);
+                });
+        match spawned {
+            Ok(body) => owner.body = Some(body),
+            Err(error) => {
+                owner
+                    .region
+                    .take()
+                    .expect("admitted scoped request")
+                    .close()
+                    .await
+                    .map_err(ScopedServerRequestError::Region)?;
+                return Err(ScopedServerRequestError::Spawn(error));
+            }
+        }
+
+        let mut connection_cancel = ConnectionCancelWaker::new(connection_cx.clone());
+        let mut polling_cancel = polling_cx.map(ConnectionCancelWaker::new);
+        let mut cancellation_sent = false;
+        let mut cancellation_was_deadline = false;
+        let mut cancellation_failure = None;
+        let task_outcome = std::future::poll_fn(|task| {
+            if !cancellation_sent {
+                connection_cancel.refresh(task.waker());
+                if let Some(polling) = &mut polling_cancel {
+                    polling.refresh(task.waker());
+                }
+                let cancelled = if connection_cancel.is_cancel_requested() {
+                    Some(&connection_cancel.cx)
+                } else {
+                    polling_cancel
+                        .as_ref()
+                        .filter(|polling| polling.is_cancel_requested())
+                        .map(|polling| &polling.cx)
+                };
+                if let Some(cancelled) = cancelled {
+                    let reason = cancelled
+                        .cancel_reason()
+                        .unwrap_or_else(CancelReason::parent_cancelled);
+                    // Preserve attribution before the borrowed protocol runner
+                    // can strengthen a bare Timeout into ParentCancelled.
+                    cancellation_was_deadline =
+                        reason.chain().any(|cause| cause.is_time_exceeded());
+                    let _ = cancelled.checkpoint();
+                    cancellation_failure = owner
+                        .region
+                        .as_ref()
+                        .expect("admitted scoped request")
+                        .cancel(reason)
+                        .err();
+                    cancellation_sent = true;
+                    connection_cancel.clear();
+                    if let Some(polling) = &mut polling_cancel {
+                        polling.clear();
+                    }
+                }
+            }
+            owner
+                .body
+                .as_mut()
+                .expect("admitted scoped request body")
+                .poll_join(task)
+        })
+        .await;
+        owner.body = None;
+        connection_cancel.clear();
+        if let Some(polling) = &mut polling_cancel {
+            polling.clear();
+        }
+        let closed = owner
+            .region
+            .take()
+            .expect("admitted scoped request")
+            .close_with_outcome()
+            .await
+            .map_err(ScopedServerRequestError::Region)?;
+        if let Some(error) = cancellation_failure {
+            return Err(ScopedServerRequestError::Region(error));
+        }
+        if let Some(panic) = closed.descendant_panic {
+            return Ok(ServerHopOutcome::Panicked(panic.to_string()));
+        }
+        if let Some(cleanup) = closed.cleanup_outcome
+            && !matches!(cleanup, crate::types::Outcome::Ok(()))
+        {
+            return Ok(ServerHopOutcome::Panicked(format!(
+                "scoped server request cleanup failed: {cleanup:?}"
+            )));
+        }
+        let returned = publication.lock().take();
+        Ok(match (task_outcome, returned) {
+            (Err(JoinError::Panicked(payload)), _) => {
+                ServerHopOutcome::Panicked(payload.to_string())
+            }
+            (_, Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost))
+                if cancellation_was_deadline =>
+            {
+                ServerHopOutcome::DeadlineExceeded
+            }
+            (_, Some(outcome)) => outcome,
+            (Err(JoinError::Cancelled(reason)), None)
+                if reason.chain().any(|cause| cause.is_time_exceeded()) =>
+            {
+                ServerHopOutcome::DeadlineExceeded
+            }
+            (Err(JoinError::Cancelled(_)), None) => ServerHopOutcome::Cancelled,
+            _ => ServerHopOutcome::Panicked(
+                "scoped request body omitted terminal publication".to_owned(),
+            ),
+        })
+    }
+
     /// Mints a request region through the runtime boundary.
     ///
     /// Uses `Runtime::current_request_cx_with_budget` so the request Cx

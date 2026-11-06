@@ -13,6 +13,601 @@
         Request::new(method, path)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    mod scoped_requests {
+        use super::*;
+        use crate::channel::oneshot;
+        use crate::cx::ChildRegionSpec;
+        use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder};
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use std::future::{poll_fn, Future};
+        use std::pin::pin;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{mpsc, Arc};
+        use std::task::Poll;
+
+        fn native<F, Fut>(scenario: F)
+        where
+            F: Fn(Cx) -> Fut + Clone + Send + 'static,
+            Fut: Future<Output = ()> + Send + 'static,
+        {
+            native_with_timer(None, scenario);
+        }
+
+        fn native_with_timer<F, Fut>(timer: Option<TimerDriverHandle>, scenario: F)
+        where
+            F: Fn(Cx) -> Fut + Clone + Send + 'static,
+            Fut: Future<Output = ()> + Send + 'static,
+        {
+            let (send, receive) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    for workers in [1, 2] {
+                        let builder = if workers == 1 {
+                            RuntimeBuilder::current_thread()
+                        } else {
+                            RuntimeBuilder::new().worker_threads(workers)
+                        };
+                        let builder = if let Some(timer) = &timer {
+                            builder.with_timer_driver(timer.clone())
+                        } else {
+                            builder
+                        };
+                        let runtime = builder.build().unwrap();
+                        runtime.block_on(async {
+                            let root = Cx::current().unwrap();
+                            let mut task = root.spawn(scenario.clone()).unwrap();
+                            task.join(&root).await.unwrap();
+                        });
+                        let report = runtime.shutdown_drained(Duration::from_secs(5));
+                        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+                        assert_eq!(report.live_tasks, 0);
+                        assert_eq!(report.pending_spawns, 0);
+                        assert_eq!(report.pending_obligations, 0);
+                    }
+                }));
+                let _ = send.send(result);
+            });
+            // Only a watchdog: readiness is always witnessed by actual Pending
+            // polls below, never inferred from elapsed wall time.
+            let result = receive
+                .recv_timeout(Duration::from_secs(30))
+                .expect("scoped request must reach quiescence");
+            thread.join().unwrap();
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        }
+
+        struct Dropped(Arc<AtomicUsize>);
+
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct DropSignal(Option<oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0.take() {
+                    let _ = signal.send_blocking(());
+                }
+            }
+        }
+
+        async fn parked_until_cancelled(cx: &Cx, started: oneshot::Sender<()>) {
+            let mut started = Some(started);
+            let mut cancelled = pin!(cx.cancelled());
+            poll_fn(|task| match cancelled.as_mut().poll(task) {
+                Poll::Ready(()) => Poll::Ready(()),
+                Poll::Pending => {
+                    if let Some(started) = started.take() {
+                        started.send_blocking(()).unwrap();
+                    }
+                    Poll::Pending
+                }
+            })
+            .await;
+            assert!(cx.checkpoint().is_err());
+        }
+
+        async fn success_waits_for_cleanup(cx: Cx) {
+            let parent_region = cx.region_id();
+            let (cleanup_ready, mut cleanup) = oneshot::channel();
+            let (release, mut released) = oneshot::channel();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let child_drops = Arc::clone(&drops);
+            let finalizers = Arc::new(AtomicUsize::new(0));
+            let finalizer_count = Arc::clone(&finalizers);
+            let cleanup_cx = cx.clone();
+            let mut request = Box::pin(ServerRequestRegion::run_scoped(
+                &cx,
+                "scoped-test",
+                Budget::INFINITE,
+                RequestBudgetSource::Inherited,
+                Duration::from_secs(1),
+                move |request_cx| async move {
+                    assert_ne!(request_cx.region_id(), parent_region);
+                    assert_eq!(Cx::current().unwrap().task_id(), request_cx.task_id());
+                    assert!(Runtime::current_handle().unwrap()
+                        .register_sync_finalizer_for_testing(request_cx.region_id(), move || {
+                            finalizer_count.fetch_add(1, Ordering::SeqCst);
+                        }));
+                    let (started, mut child_started) = oneshot::channel();
+                    let _child = request_cx.spawn(move |child_cx| async move {
+                        let _dropped = Dropped(child_drops);
+                        parked_until_cancelled(&child_cx, started).await;
+                        let mut ready = Some(cleanup_ready);
+                        let mut wait = pin!(released.recv(&cleanup_cx));
+                        poll_fn(|task| match wait.as_mut().poll(task) {
+                            Poll::Ready(result) => Poll::Ready(result.unwrap()),
+                            Poll::Pending => {
+                                if let Some(ready) = ready.take() {
+                                    ready.send_blocking(()).unwrap();
+                                }
+                                Poll::Pending
+                            }
+                        }).await;
+                    }).unwrap();
+                    child_started.recv(&request_cx).await.unwrap();
+                    42_u8
+                },
+            ));
+            let mut cleanup_wait = pin!(cleanup.recv(&cx));
+            poll_fn(|task| {
+                assert!(request.as_mut().poll(task).is_pending(),
+                    "handler success cannot escape while child cleanup is parked");
+                cleanup_wait.as_mut().poll(task)
+            }).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(finalizers.load(Ordering::SeqCst), 0);
+            release.send_blocking(()).unwrap();
+            assert!(matches!(request.await.unwrap(), ServerHopOutcome::Ok(42)));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(finalizers.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn native_scoped_request_success_waits_for_descendant_cleanup_and_finalizers() {
+            native(success_waits_for_cleanup);
+        }
+
+        async fn cancellation_reaches_joined_child(cx: Cx) {
+            let connection = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let connection_cx = connection.cx().clone();
+            let (joining, mut joined_child) = oneshot::channel();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let child_drops = Arc::clone(&drops);
+            let mut request = Box::pin(ServerRequestRegion::run_scoped(
+                &connection_cx,
+                "scoped-test",
+                Budget::INFINITE,
+                RequestBudgetSource::Inherited,
+                Duration::from_secs(1),
+                move |request_cx| async move {
+                    let (started, mut child_started) = oneshot::channel();
+                    let mut child = request_cx.spawn(move |child_cx| async move {
+                        let _dropped = Dropped(child_drops);
+                        parked_until_cancelled(&child_cx, started).await;
+                        7_u8
+                    }).unwrap();
+                    child_started.recv(&request_cx).await.unwrap();
+                    let mut joining = Some(joining);
+                    let result = poll_fn(|task| match child.poll_join(task) {
+                        Poll::Ready(result) => Poll::Ready(result.unwrap()),
+                        Poll::Pending => {
+                            if let Some(joining) = joining.take() {
+                                joining.send_blocking(()).unwrap();
+                            }
+                            Poll::Pending
+                        }
+                    }).await;
+                    assert!(request_cx.checkpoint().is_err());
+                    result
+                },
+            ));
+            let mut joined_wait = pin!(joined_child.recv(&cx));
+            poll_fn(|task| {
+                assert!(request.as_mut().poll(task).is_pending());
+                joined_wait.as_mut().poll(task)
+            }).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            connection_cx.cancel_with(CancelKind::User, Some("peer left after handler parked"));
+            assert!(matches!(request.await.unwrap(), ServerHopOutcome::Ok(7)),
+                "typed cleanup response must survive cancellation publication");
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            connection.close().await.unwrap();
+        }
+
+        #[test]
+        fn native_scoped_request_cancels_subtree_before_joining_its_handler() {
+            native(cancellation_reaches_joined_child);
+        }
+
+        async fn polling_task_cancellation_reaches_subtree(cx: Cx) {
+            let (joining, mut joined_child) = oneshot::channel();
+            // The explicit connection stays live. Only the task polling the
+            // helper is aborted, so observing the connection alone would hang.
+            let connection = cx.clone();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let child_drops = Arc::clone(&drops);
+            let mut polling = cx.spawn(move |_polling_cx| async move {
+                ServerRequestRegion::run_scoped(
+                    &connection, "scoped-test", Budget::INFINITE,
+                    RequestBudgetSource::Inherited, Duration::from_secs(1),
+                    move |request_cx| async move {
+                        let (started, mut child_started) = oneshot::channel();
+                        let mut child = request_cx.spawn(move |child_cx| async move {
+                            let _dropped = Dropped(child_drops);
+                            parked_until_cancelled(&child_cx, started).await;
+                            9_u8
+                        }).unwrap();
+                        child_started.recv(&request_cx).await.unwrap();
+                        let mut joining = Some(joining);
+                        let result = poll_fn(|task| match child.poll_join(task) {
+                            Poll::Ready(result) => Poll::Ready(result.unwrap()),
+                            Poll::Pending => {
+                                if let Some(joining) = joining.take() {
+                                    joining.send_blocking(()).unwrap();
+                                }
+                                Poll::Pending
+                            }
+                        }).await;
+                        assert!(request_cx.checkpoint().is_err());
+                        result
+                    },
+                ).await
+            }).unwrap();
+            joined_child.recv(&cx).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            polling.abort();
+            assert!(matches!(polling.join(&cx).await.unwrap().unwrap(), ServerHopOutcome::Ok(9)));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(!cx.is_cancel_requested(), "the explicit connection remains open");
+        }
+
+        #[test]
+        fn native_scoped_request_observes_polling_task_cancellation_without_cancelling_connection() {
+            native(polling_task_cancellation_reaches_subtree);
+        }
+
+        async fn active_deadline_waits_for_cleanup(
+            cx: Cx,
+            clock: Arc<VirtualClock>,
+            timer: TimerDriverHandle,
+        ) {
+            let started_at = cx.now();
+            assert_eq!(started_at, timer.now());
+            let deadline = started_at + Duration::from_secs(1);
+            let grace = Duration::from_millis(10);
+            let (handler_parked, mut handler_started) = oneshot::channel();
+            let (handler_dropped, mut handler_retired) = oneshot::channel();
+            let (cleanup_ready, mut cleanup) = oneshot::channel();
+            let (release, mut released) = oneshot::channel();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let child_drops = Arc::clone(&drops);
+            let finalizers = Arc::new(AtomicUsize::new(0));
+            let finalizer_count = Arc::clone(&finalizers);
+            let cleanup_cx = cx.clone();
+            let mut request = Box::pin(ServerRequestRegion::run_scoped(
+                &cx,
+                "scoped-test",
+                Budget::INFINITE.with_deadline(deadline),
+                RequestBudgetSource::ServerConfig,
+                grace,
+                move |owner| async move {
+                    let _retirement = DropSignal(Some(handler_dropped));
+                    assert_eq!(owner.now(), started_at);
+                    assert_eq!(owner.budget().deadline, Some(deadline));
+                    assert!(Runtime::current_handle().unwrap()
+                        .register_sync_finalizer_for_testing(owner.region_id(), move || {
+                            finalizer_count.fetch_add(1, Ordering::SeqCst);
+                        }));
+                    let (started, mut child_started) = oneshot::channel();
+                    let _child = owner.spawn(move |child_cx| async move {
+                        let _dropped = Dropped(child_drops);
+                        parked_until_cancelled(&child_cx, started).await;
+                        assert!(child_cx.cancel_reason().unwrap().chain()
+                            .any(|cause| cause.is_time_exceeded()));
+                        let mut ready = Some(cleanup_ready);
+                        let mut wait = pin!(released.recv(&cleanup_cx));
+                        poll_fn(|task| match wait.as_mut().poll(task) {
+                            Poll::Ready(result) => Poll::Ready(result.unwrap()),
+                            Poll::Pending => {
+                                if let Some(ready) = ready.take() {
+                                    ready.send_blocking(()).unwrap();
+                                }
+                                Poll::Pending
+                            }
+                        }).await;
+                    }).unwrap();
+                    child_started.recv(&owner).await.unwrap();
+                    let mut ready = Some(handler_parked);
+                    poll_fn(move |_task| {
+                        if let Some(ready) = ready.take() {
+                            ready.send_blocking(owner.clone()).unwrap();
+                        }
+                        Poll::<u8>::Pending
+                    }).await
+                },
+            ));
+            let mut handler_wait = pin!(handler_started.recv(&cx));
+            let handler_cx = poll_fn(|task| {
+                assert!(request.as_mut().poll(task).is_pending());
+                handler_wait.as_mut().poll(task)
+            }).await.unwrap();
+            assert_eq!(cx.now(), started_at);
+            assert!(!handler_cx.is_cancel_requested());
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+            // Both real tasks have returned Pending before the owner clock
+            // advances. No wall-clock sleep stands in for deadline readiness.
+            clock.advance_to(deadline);
+            let _ = timer.process_timers();
+            let mut cleanup_wait = pin!(cleanup.recv(&cx));
+            poll_fn(|task| {
+                assert!(request.as_mut().poll(task).is_pending());
+                cleanup_wait.as_mut().poll(task)
+            }).await.unwrap();
+            assert!(handler_cx.cancel_reason().unwrap().chain()
+                .any(|cause| cause.is_time_exceeded()));
+            assert!(!cx.is_cancel_requested());
+            // Registration is the drain-readiness witness. In two-worker
+            // mode the descendant may park before the handler installs it.
+            poll_fn(|task| {
+                assert!(request.as_mut().poll(task).is_pending());
+                if timer.next_deadline() == Some(deadline + grace) {
+                    Poll::Ready(())
+                } else {
+                    task.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }).await;
+            clock.advance_to(deadline + grace);
+            let _ = timer.process_timers();
+            let mut retirement_wait = pin!(handler_retired.recv(&cx));
+            poll_fn(|task| {
+                assert!(request.as_mut().poll(task).is_pending(),
+                    "deadline response must wait for descendant cleanup past grace");
+                retirement_wait.as_mut().poll(task)
+            }).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(finalizers.load(Ordering::SeqCst), 0);
+            release.send_blocking(()).unwrap();
+            assert!(matches!(request.await.unwrap(), ServerHopOutcome::DeadlineExceeded));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(finalizers.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn native_scoped_request_active_deadline_drains_on_owner_clock_before_returning() {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(50_000)));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            native_with_timer(Some(timer.clone()), move |cx| {
+                active_deadline_waits_for_cleanup(cx, Arc::clone(&clock), timer.clone())
+            });
+        }
+
+        async fn live_time_cancellation_preserves_attribution(cx: Cx) {
+            use crate::types::CancelReason;
+
+            for reason in [
+                CancelReason::new(CancelKind::Timeout),
+                CancelReason::parent_cancelled().with_cause(CancelReason::new(CancelKind::Timeout)),
+                CancelReason::parent_cancelled().with_cause(CancelReason::new(CancelKind::Deadline)),
+            ] {
+                for cancel_polling_task in [false, true] {
+                    let connection = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                    let connection_cx = connection.cx().clone();
+                    let explicit_owner = connection_cx.clone();
+                    let (poller, mut polling_context) = oneshot::channel();
+                    let (parked, mut handler_started) = oneshot::channel();
+                    let drops = Arc::new(AtomicUsize::new(0));
+                    let child_drops = Arc::clone(&drops);
+                    let finalizers = Arc::new(AtomicUsize::new(0));
+                    let finalizer_count = Arc::clone(&finalizers);
+                    let mut task = cx.spawn(move |polling_cx| async move {
+                        poller.send_blocking(polling_cx).unwrap();
+                        ServerRequestRegion::run_scoped(
+                            &explicit_owner, "scoped-test", Budget::INFINITE,
+                            RequestBudgetSource::Inherited, Duration::ZERO,
+                            move |owner| async move {
+                                assert!(Runtime::current_handle().unwrap()
+                                    .register_sync_finalizer_for_testing(owner.region_id(), move || {
+                                        finalizer_count.fetch_add(1, Ordering::SeqCst);
+                                    }));
+                                let (started, mut child_started) = oneshot::channel();
+                                let _child = owner.spawn(move |child_cx| async move {
+                                    let _dropped = Dropped(child_drops);
+                                    parked_until_cancelled(&child_cx, started).await;
+                                    assert!(child_cx.cancel_reason().unwrap().chain()
+                                        .any(|cause| cause.is_time_exceeded()));
+                                }).unwrap();
+                                child_started.recv(&owner).await.unwrap();
+                                let mut ready = Some(parked);
+                                poll_fn(move |_task| {
+                                    if let Some(ready) = ready.take() {
+                                        ready.send_blocking(()).unwrap();
+                                    }
+                                    Poll::<u8>::Pending
+                                }).await
+                            },
+                        ).await
+                    }).unwrap();
+                    let polling_cx = polling_context.recv(&cx).await.unwrap();
+                    handler_started.recv(&cx).await.unwrap();
+                    assert_eq!(drops.load(Ordering::SeqCst), 0);
+                    let cancelled = if cancel_polling_task { &polling_cx } else { &connection_cx };
+                    cancelled.cancel_with_reason(reason.clone());
+                    let outcome = task.join(&cx).await.unwrap().unwrap();
+                    assert!(matches!(outcome, ServerHopOutcome::DeadlineExceeded),
+                        "{reason:?}, polling={cancel_polling_task}: {outcome:?}");
+                    assert_eq!(drops.load(Ordering::SeqCst), 1);
+                    assert_eq!(finalizers.load(Ordering::SeqCst), 1);
+                    assert!(!cx.is_cancel_requested());
+                    connection.close().await.unwrap();
+                }
+            }
+        }
+
+        #[test]
+        fn native_scoped_request_live_deadline_causes_survive_protocol_cancellation() {
+            native(live_time_cancellation_preserves_attribution);
+        }
+
+        async fn admission_is_closed(cx: Cx) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let invoked = Arc::clone(&calls);
+            drop(ServerRequestRegion::run_scoped(
+                &cx, "scoped-test", Budget::INFINITE, RequestBudgetSource::Inherited,
+                Duration::ZERO, move |_| async move { invoked.fetch_add(1, Ordering::SeqCst); },
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            let invoked = Arc::clone(&calls);
+            let expired = ServerRequestRegion::run_scoped(
+                &cx, "scoped-test", Budget::INFINITE.with_deadline(cx.now()),
+                RequestBudgetSource::ServerConfig, Duration::ZERO,
+                move |_| async move { invoked.fetch_add(1, Ordering::SeqCst); },
+            ).await.unwrap();
+            assert!(matches!(expired, ServerHopOutcome::DeadlineExceeded));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            let no_spawn = {
+                let _restricted = cx.restrict::<cap::CapSet<false, true, true, true, true>>()
+                    .set_current_restricted();
+                Cx::current().unwrap()
+            };
+            let invoked = Arc::clone(&calls);
+            let result = ServerRequestRegion::run_scoped(
+                &no_spawn, "scoped-test", Budget::INFINITE, RequestBudgetSource::Inherited,
+                Duration::ZERO, move |_| async move { invoked.fetch_add(1, Ordering::SeqCst); },
+            ).await;
+            assert!(matches!(result, Err(ScopedServerRequestError::Region(
+                crate::cx::ChildRegionError::RuntimeUnavailable
+            ))));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            let invoked = Arc::clone(&calls);
+            let mut cancelled = cx.spawn(move |owner| async move {
+                owner.cancel_with(CancelKind::User, Some("cancelled before scoped admission"));
+                let result = ServerRequestRegion::run_scoped(
+                    &owner, "scoped-test", Budget::INFINITE, RequestBudgetSource::Inherited,
+                    Duration::ZERO, move |_| async move { invoked.fetch_add(1, Ordering::SeqCst); },
+                ).await.unwrap();
+                assert!(matches!(result, ServerHopOutcome::Cancelled));
+            }).unwrap();
+            cancelled.join(&cx).await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            for kind in [CancelKind::Timeout, CancelKind::Deadline] {
+                let connection = cx.clone();
+                let invoked = Arc::clone(&calls);
+                let mut cancelled = cx.spawn(move |polling_cx| async move {
+                    polling_cx.cancel_with_reason(crate::types::CancelReason::parent_cancelled()
+                        .with_cause(crate::types::CancelReason::new(kind)));
+                    let result = ServerRequestRegion::run_scoped(
+                        &connection, "scoped-test", Budget::INFINITE,
+                        RequestBudgetSource::Inherited, Duration::ZERO,
+                        move |_| async move { invoked.fetch_add(1, Ordering::SeqCst); },
+                    ).await.unwrap();
+                    assert!(matches!(result, ServerHopOutcome::DeadlineExceeded));
+                }).unwrap();
+                cancelled.join(&cx).await.unwrap();
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert!(!cx.is_cancel_requested());
+            }
+        }
+
+        #[test]
+        fn native_scoped_request_unpolled_cancelled_and_forbidden_calls_admit_no_handler() {
+            native(admission_is_closed);
+        }
+
+        async fn panics_override_response(cx: Cx) {
+            let factory = ServerRequestRegion::run_scoped(
+                &cx, "scoped-test", Budget::INFINITE, RequestBudgetSource::Inherited,
+                Duration::ZERO, |_| -> std::future::Ready<u8> { panic!("scoped factory sentinel") },
+            ).await.unwrap();
+            assert!(matches!(factory, ServerHopOutcome::Panicked(message)
+                if message.contains("scoped factory sentinel")));
+
+            let descendant = ServerRequestRegion::run_scoped(
+                &cx, "scoped-test", Budget::INFINITE, RequestBudgetSource::Inherited,
+                Duration::ZERO, |owner| async move {
+                    let mut child = owner.spawn(|_| async { panic!("scoped descendant sentinel") }).unwrap();
+                    assert!(matches!(child.join(&owner).await, Err(crate::runtime::JoinError::Panicked(_))));
+                    42_u8
+                },
+            ).await.unwrap();
+            assert!(matches!(descendant, ServerHopOutcome::Panicked(message)
+                if message.contains("scoped descendant sentinel")));
+
+            let finalizer = ServerRequestRegion::run_scoped(
+                &cx, "scoped-test", Budget::INFINITE, RequestBudgetSource::Inherited,
+                Duration::ZERO, |owner| async move {
+                    assert!(Runtime::current_handle().unwrap()
+                        .register_sync_finalizer_for_testing(owner.region_id(), || {
+                            panic!("scoped finalizer sentinel");
+                        }));
+                    42_u8
+                },
+            ).await.unwrap();
+            assert!(matches!(finalizer, ServerHopOutcome::Panicked(message)
+                if message.contains("scoped finalizer sentinel")));
+        }
+
+        #[test]
+        fn native_scoped_request_factory_descendant_and_finalizer_panics_do_not_report_success() {
+            native(panics_override_response);
+        }
+
+        async fn abandoning_request_closes_subtree(cx: Cx) {
+            let (started, mut child_started) = oneshot::channel();
+            let (handler_parked, mut handler_started) = oneshot::channel();
+            let (finalized, mut closed) = oneshot::channel();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let child_drops = Arc::clone(&drops);
+            let mut request = Box::pin(ServerRequestRegion::run_scoped(
+                &cx, "scoped-test", Budget::INFINITE, RequestBudgetSource::Inherited,
+                Duration::ZERO, move |owner| async move {
+                    assert!(Runtime::current_handle().unwrap()
+                        .register_sync_finalizer_for_testing(owner.region_id(), move || {
+                            finalized.send_blocking(()).unwrap();
+                        }));
+                    let _child = owner.spawn(move |child_cx| async move {
+                        let _dropped = Dropped(child_drops);
+                        parked_until_cancelled(&child_cx, started).await;
+                    }).unwrap();
+                    child_started.recv(&owner).await.unwrap();
+                    let mut ready = Some(handler_parked);
+                    poll_fn(move |_task| {
+                        if let Some(ready) = ready.take() {
+                            ready.send_blocking(()).unwrap();
+                        }
+                        Poll::<u8>::Pending
+                    }).await
+                },
+            ));
+            let mut handler_wait = pin!(handler_started.recv(&cx));
+            poll_fn(|task| {
+                assert!(request.as_mut().poll(task).is_pending());
+                handler_wait.as_mut().poll(task)
+            }).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            drop(request);
+            closed.recv(&cx).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn native_scoped_request_drop_closes_parked_handler_and_descendants() {
+            native(abandoning_request_closes_subtree);
+        }
+    }
+
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn producer_cancellation_classifies_time_causes_through_parent_cleanup() {
