@@ -358,6 +358,19 @@ impl NativeThreadHostServices {
         Self
     }
 
+    // Match the blocking pool's hook policy: a callback panic must not retire
+    // the worker before task dispatch or interrupt its normal shutdown.
+    fn run_thread_hook(callback: &(dyn Fn() + Send + Sync)) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback))
+            && let Err(secondary) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+        {
+            // A destructor can panic with another destructor-panicking payload.
+            // Drop ordinary payloads normally; never recursively drop this one.
+            std::mem::forget(secondary);
+        }
+    }
+
     fn spawn_worker_threads(
         runtime: &Arc<RuntimeInner>,
         workers: Vec<ThreeLaneWorker>,
@@ -388,19 +401,19 @@ impl NativeThreadHostServices {
                     match current_thread_driver {
                         Some(driver) => driver.run_background(worker, || {
                             if let Some(callback) = on_start.as_ref() {
-                                callback();
+                                Self::run_thread_hook(callback.as_ref());
                             }
                         }),
                         None => {
                             if let Some(callback) = on_start.as_ref() {
-                                callback();
+                                Self::run_thread_hook(callback.as_ref());
                             }
                             let mut worker = worker;
                             worker.run_worker_thread();
                         }
                     }
                     if let Some(callback) = on_stop.as_ref() {
-                        callback();
+                        Self::run_thread_hook(callback.as_ref());
                     }
                 })
                 .map_err(|e| {
@@ -3229,6 +3242,7 @@ impl RuntimeBuilder {
     }
 
     /// Register a callback to run when a worker thread starts.
+    /// Unwinding callback panics are contained so workers can still run tasks.
     #[must_use]
     pub fn on_thread_start<F>(mut self, f: F) -> Self
     where
@@ -3239,6 +3253,7 @@ impl RuntimeBuilder {
     }
 
     /// Register a callback to run when a worker thread stops.
+    /// Unwinding callback panics are contained so runtime teardown can complete.
     #[must_use]
     pub fn on_thread_stop<F>(mut self, f: F) -> Self
     where

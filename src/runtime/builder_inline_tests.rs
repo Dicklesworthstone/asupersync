@@ -6866,3 +6866,119 @@ worker_threads = 16
             "no further timer is due"
         );
     }
+
+    #[derive(Clone, Copy, Debug)]
+    enum NativeHookPanicAt {
+        Start,
+        Stop,
+    }
+
+    struct ThreadHookPanicPayload {
+        dropped: Arc<AtomicUsize>,
+        panic_on_drop: bool,
+    }
+
+    impl Drop for ThreadHookPanicPayload {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic_on_drop, "native hook panic payload destructor");
+        }
+    }
+
+    fn assert_native_thread_hook_panic_is_contained(
+        current_thread: bool,
+        panic_at: NativeHookPanicAt,
+        panic_on_drop: bool,
+    ) {
+        let started = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let payload_drops = Arc::new(AtomicUsize::new(0));
+        let started_for_hook = Arc::clone(&started);
+        let stopped_for_hook = Arc::clone(&stopped);
+        let start_payload_drops = Arc::clone(&payload_drops);
+        let stop_payload_drops = Arc::clone(&payload_drops);
+        let builder = if current_thread {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::multi_thread().worker_threads(1)
+        };
+        let runtime = builder
+            .blocking_threads(0, 0)
+            .on_thread_start(move || {
+                started_for_hook.fetch_add(1, Ordering::SeqCst);
+                if matches!(panic_at, NativeHookPanicAt::Start) {
+                    std::panic::panic_any(ThreadHookPanicPayload {
+                        dropped: Arc::clone(&start_payload_drops),
+                        panic_on_drop,
+                    });
+                }
+            })
+            .on_thread_stop(move || {
+                stopped_for_hook.fetch_add(1, Ordering::SeqCst);
+                if matches!(panic_at, NativeHookPanicAt::Stop) {
+                    std::panic::panic_any(ThreadHookPanicPayload {
+                        dropped: Arc::clone(&stop_payload_drops),
+                        panic_on_drop,
+                    });
+                }
+            })
+            .build()
+            .expect("runtime with panicking native hook");
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let parent = runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("native worker installs its task context");
+            let mut child = cx
+                .spawn(|_| async { 42_u32 })
+                .expect("parent admits its child");
+            let value = child.join(&cx).await.expect("spawned child joins");
+            let _ = completed_tx.send(value);
+        });
+        // No block_on fallback can satisfy this: the native worker must poll
+        // both parent and child. Retain failure until bounded teardown finishes,
+        // so old code cannot drop a hostile payload during assertion unwinding.
+        let completed = completed_rx.recv_timeout(Duration::from_secs(5));
+        let shutdown = runtime.shutdown_timeout(Duration::from_secs(5));
+        drop(parent);
+        assert_eq!(
+            completed,
+            Ok(42),
+            "current_thread={current_thread}, hook={panic_at:?}, payload_drop_panics={panic_on_drop}"
+        );
+        assert!(
+            shutdown,
+            "current_thread={current_thread}, hook={panic_at:?}, payload_drop_panics={panic_on_drop}: teardown did not complete"
+        );
+        assert_eq!(started.load(Ordering::SeqCst), 1, "one native worker starts");
+        assert_eq!(stopped.load(Ordering::SeqCst), 1, "the same worker stops");
+        assert_eq!(
+            payload_drops.load(Ordering::SeqCst),
+            1,
+            "the primary panic payload is retired exactly once"
+        );
+    }
+
+    #[test]
+    fn native_start_hook_panics_preserve_spawned_child_progress() {
+        for current_thread in [false, true] {
+            for panic_on_drop in [false, true] {
+                assert_native_thread_hook_panic_is_contained(
+                    current_thread,
+                    NativeHookPanicAt::Start,
+                    panic_on_drop,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_stop_hook_panics_preserve_shutdown_completion() {
+        for current_thread in [false, true] {
+            for panic_on_drop in [false, true] {
+                assert_native_thread_hook_panic_is_contained(
+                    current_thread,
+                    NativeHookPanicAt::Stop,
+                    panic_on_drop,
+                );
+            }
+        }
+    }

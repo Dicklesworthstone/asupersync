@@ -99,6 +99,10 @@ artifacts.
 
 ### Fixed
 
+- **Native worker hooks:** Panics in configured start and stop hooks are
+  contained on normal native workers and the current-thread driver, matching
+  the blocking pool's policy so a startup hook cannot strand accepted work.
+  (`br-asupersync-mopkmt`, M2.)
 - **Complete lab traces:** Schedule, DPOR and topology exploration now reject
   evicted trace prefixes before classifying runs, with additive
   `with_trace_capacity(...)` builders for larger captures. An incomplete
