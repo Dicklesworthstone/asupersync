@@ -153,10 +153,17 @@ pub struct RouteBodyPolicyInfo {
 
 /// A set of handlers for different HTTP methods on a single route.
 pub struct MethodRouter {
-    handlers: HashMap<String, Box<dyn Handler>>,
+    handlers: HashMap<String, MethodRoute>,
     method_not_allowed: Box<dyn Handler>,
     allow_state: Arc<std::sync::RwLock<String>>,
     body_policy: Option<RequestBodyPolicy>,
+}
+
+struct MethodRoute {
+    handler: Box<dyn Handler>,
+    // An override when merged registrations use different patterns. None uses
+    // the shared route pattern and parameters already extracted by Router.
+    pattern: Option<RoutePattern>,
 }
 
 impl Default for MethodRouter {
@@ -180,12 +187,25 @@ impl MethodRouter {
 
     /// Add a handler for a specific method.
     fn on(mut self, method: &str, handler: impl Handler) -> Self {
-        self.handlers
-            .insert(method.to_uppercase(), Box::new(handler));
+        self.handlers.insert(
+            method.to_uppercase(),
+            MethodRoute {
+                handler: Box::new(handler),
+                pattern: None,
+            },
+        );
         if let Ok(mut guard) = self.allow_state.write() {
             *guard = self.allow_header();
         }
         self
+    }
+
+    // A nested router may already contain overrides from its own route merges.
+    // Bind only methods still using that router's shared pattern before merging.
+    fn bind_pattern(&mut self, pattern: &RoutePattern) {
+        for route in self.handlers.values_mut() {
+            route.pattern.get_or_insert_with(|| pattern.clone());
+        }
     }
 
     /// Register a GET handler.
@@ -231,8 +251,8 @@ impl MethodRouter {
     }
 
     /// Add `other`'s methods to this route. For a method both register, this
-    /// route's handler is kept: the first registration of a pattern and
-    /// method answers, as it did when each registration was a separate route
+    /// route's handler and parameter pattern are kept: the first registration
+    /// of a pattern and method answers, as it did when each was a separate route
     /// matched in order. A body policy is kept from this router, or taken
     /// from `other` if this one has none.
     ///
@@ -274,7 +294,15 @@ impl MethodRouter {
         let handlers = std::mem::take(&mut self.handlers);
         self.handlers = handlers
             .into_iter()
-            .map(|(method, handler)| (method, wrap(handler)))
+            .map(|(method, route)| {
+                (
+                    method,
+                    MethodRoute {
+                        handler: wrap(route.handler),
+                        pattern: route.pattern,
+                    },
+                )
+            })
             .collect();
         let method_not_allowed = std::mem::replace(
             &mut self.method_not_allowed,
@@ -293,14 +321,19 @@ impl MethodRouter {
         self.methods().join(", ")
     }
 
-    fn route_entries(&self, pattern: &str, mount_prefix: Option<&str>) -> Vec<RouteInfo> {
+    fn route_entries(
+        &self,
+        pattern: &RoutePattern,
+        prefix: &str,
+        mount_prefix: Option<&str>,
+    ) -> Vec<RouteInfo> {
         let mut entries = self
             .handlers
             .iter()
-            .map(|(method, handler)| RouteInfo {
+            .map(|(method, route)| RouteInfo {
                 method: method.clone(),
-                pattern: pattern.to_string(),
-                handler_name: handler.handler_name(),
+                pattern: join_route_pattern(prefix, &route.pattern.as_ref().unwrap_or(pattern).raw),
+                handler_name: route.handler.handler_name(),
                 mount_prefix: mount_prefix.map(ToOwned::to_owned),
             })
             .collect::<Vec<_>>();
@@ -321,20 +354,27 @@ impl MethodRouter {
             return response;
         }
         // Fast path: method is already uppercase (true for virtually all HTTP traffic).
-        if let Some(handler) = self.handlers.get(&req.method) {
-            return handler.call(cx, req).await;
+        let mut route = self.handlers.get(&req.method);
+        if route.is_none() {
+            // Slow path: case-insensitive fallback (allocates only if needed).
+            let upper = req.method.to_uppercase();
+            route = self.handlers.get(&upper);
+            // A server answers HEAD as it would GET (RFC 9110 §9.1, §9.3.2); the
+            // HTTP transports send the response without its content.
+            if route.is_none() && upper == METHOD_HEAD {
+                route = self.handlers.get(METHOD_GET);
+            }
         }
-        // Slow path: case-insensitive fallback (allocates only if needed).
-        let upper = req.method.to_uppercase();
-        if let Some(handler) = self.handlers.get(&upper) {
-            return handler.call(cx, req).await;
-        }
-        // A server answers HEAD as it would GET (RFC 9110 §9.1, §9.3.2); the
-        // HTTP transports send the response without its content.
-        if upper == METHOD_HEAD
-            && let Some(handler) = self.handlers.get(METHOD_GET)
-        {
-            return handler.call(cx, req).await;
+        if let Some(route) = route {
+            // Match the selected method's original pattern, not the first
+            // equivalent registration. Renaming the initial map would lose
+            // values when that pattern repeats a parameter name.
+            if let Some(pattern) = &route.pattern
+                && let Some(route_match) = pattern.matches(&req.path)
+            {
+                req.path_params = route_match.params;
+            }
+            return route.handler.call(cx, req).await;
         }
         self.method_not_allowed.call(cx, req).await
     }
@@ -3088,7 +3128,7 @@ impl Router {
 
     /// Register a route with the given pattern and method router.
     #[must_use]
-    pub fn route(mut self, pattern: &str, method_router: MethodRouter) -> Self {
+    pub fn route(mut self, pattern: &str, mut method_router: MethodRouter) -> Self {
         let pattern = RoutePattern::parse(pattern);
         // The same pattern registered again (`.route("/a", get(..))` then
         // `.route("/a", post(..))`) adds its methods to the existing route.
@@ -3096,11 +3136,14 @@ impl Router {
         // the second one's methods with 405.
         // Equivalent patterns (e.g. `/users/:id` and `/users/:user_id`) also
         // merge rather than shadowing each other (br-asupersync-vftw38 item 7).
-        if let Some((_, existing)) = self
+        if let Some((registered, existing)) = self
             .routes
             .iter_mut()
             .find(|(registered, _)| registered.is_equivalent(&pattern))
         {
+            if registered.raw != pattern.raw {
+                method_router.bind_pattern(&pattern);
+            }
             existing.merge(method_router);
             return self;
         }
@@ -3131,12 +3174,15 @@ impl Router {
     /// Merge another router's routes, nested mounts, and fallback into this router
     /// (br-asupersync-vftw38 item 7).
     fn merge_router(&mut self, other: Self) {
-        for (pattern, method_router) in other.routes {
-            if let Some((_, existing)) = self
+        for (pattern, mut method_router) in other.routes {
+            if let Some((registered, existing)) = self
                 .routes
                 .iter_mut()
                 .find(|(registered, _)| registered.is_equivalent(&pattern))
             {
+                if registered.raw != pattern.raw {
+                    method_router.bind_pattern(&pattern);
+                }
                 existing.merge(method_router);
             } else {
                 self.routes.push((pattern, method_router));
@@ -4400,8 +4446,7 @@ impl Router {
         entries: &mut Vec<RouteInfo>,
     ) {
         for (pattern, method_router) in &self.routes {
-            let full_pattern = join_route_pattern(prefix, &pattern.raw);
-            entries.extend(method_router.route_entries(&full_pattern, mount_prefix));
+            entries.extend(method_router.route_entries(pattern, prefix, mount_prefix));
         }
 
         for (nested_prefix, router) in &self.nested {
@@ -4437,7 +4482,6 @@ impl Router {
             .map(|policy| legacy_policy.map_or(policy, |legacy| policy.tightened_with(legacy)));
 
         for (pattern, method_router) in &self.routes {
-            let full_pattern = join_route_pattern(prefix, &pattern.raw);
             let effective_policy = meet_optional_policy_state(
                 router_policy,
                 method_router
@@ -4446,7 +4490,7 @@ impl Router {
             )
             .map(|policy| legacy_policy.map_or(policy, |legacy| policy.tightened_with(legacy)))
             .map(RequestBodyPolicyState::resolved);
-            for route in method_router.route_entries(&full_pattern, mount_prefix) {
+            for route in method_router.route_entries(pattern, prefix, mount_prefix) {
                 entries.push(RouteBodyPolicyInfo {
                     method: route.method,
                     pattern: route.pattern,

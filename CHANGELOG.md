@@ -99,6 +99,10 @@ artifacts.
 
 ### Fixed
 
+- **HTTP routing:** Equivalent route patterns registered for different methods
+  retain their own parameter names through typed extraction, middleware, HEAD
+  fallback and repeated nested mounts. Route and body-policy metadata also
+  report each method's original pattern. (`br-asupersync-vftw38`, C-H1.)
 - **Replay diagnosis:** Foata canonicalization now indexes the latest
   dependency layer for each resource instead of comparing every pair of
   events. Global fences and canonical event ordering are preserved while

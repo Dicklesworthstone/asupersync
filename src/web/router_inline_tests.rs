@@ -2054,6 +2054,260 @@
         );
     }
 
+    // br-asupersync-vftw38 C-H1: equivalent route shapes still retain each
+    // method's parameter names through dispatch, layering, nesting and metadata.
+    mod equivalent_method_patterns {
+        use super::*;
+        use crate::web::extract::Path;
+
+        fn echo_params(names: &'static [&'static str]) -> impl Handler {
+            FnHandler1::<_, Path<HashMap<String, String>>>::new(
+                move |Path(params): Path<HashMap<String, String>>| {
+                    names
+                        .iter()
+                        .map(|name| {
+                            format!(
+                                "{name}={}",
+                                params.get(*name).map(String::as_str).unwrap_or("<missing>"),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(";")
+                },
+            )
+        }
+
+        #[test]
+        fn typed_paths_and_middleware_use_each_methods_names() {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct ById {
+                id: u64,
+            }
+
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct ByUserId {
+                user_id: u64,
+            }
+
+            fn get_user(Path(path): Path<ById>) -> String {
+                format!("get:{}", path.id)
+            }
+
+            fn post_user(Path(path): Path<ByUserId>) -> String {
+                format!("post:{}", path.user_id)
+            }
+
+            struct ParamLayer;
+            struct ParamMiddleware<H>(H);
+
+            impl<H> Layer<H> for ParamLayer {
+                type Service = ParamMiddleware<H>;
+
+                fn layer(&self, inner: H) -> Self::Service {
+                    ParamMiddleware(inner)
+                }
+            }
+
+            impl<H: Handler> Handler for ParamMiddleware<H> {
+                fn call(
+                    &self,
+                    cx: &Cx,
+                    req: Request,
+                ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                    if req.method.eq_ignore_ascii_case("POST") {
+                        assert_eq!(
+                            req.path_params.get("user_id").map(String::as_str),
+                            Some("42")
+                        );
+                        assert!(!req.path_params.contains_key("id"));
+                    }
+                    self.0.call(cx, req)
+                }
+            }
+
+            let router = Router::new()
+                .route("/users/:id", get(FnHandler1::<_, Path<ById>>::new(get_user)))
+                .route(
+                    "/users/:user_id",
+                    post(FnHandler1::<_, Path<ByUserId>>::new(post_user)),
+                )
+                .layer(ParamLayer);
+
+            for (method, expected) in [
+                ("GET", "get:42"),
+                ("get", "get:42"),
+                ("POST", "post:42"),
+                ("pOsT", "post:42"),
+            ] {
+                let response = router.handle(Request::new(method, "/users/42"));
+                assert_eq!(response.status, StatusCode::OK, "{method}");
+                assert_eq!(response.body.as_ref(), expected.as_bytes(), "{method}");
+            }
+        }
+
+        #[test]
+        fn swapped_names_keep_positional_values_and_wildcard_tail() {
+            let router = Router::new()
+                .route("/:owner/:repo/*", get(echo_params(&["owner", "repo", "*"])))
+                .route("/:repo/:owner/*", post(echo_params(&["owner", "repo", "*"])));
+
+            for (method, expected) in [
+                ("GET", "owner=alice;repo=project;*=src/lib.rs"),
+                ("POST", "owner=project;repo=alice;*=src/lib.rs"),
+            ] {
+                let response = router.handle(Request::new(method, "/alice/project/src/lib.rs"));
+                assert_eq!(response.status, StatusCode::OK);
+                assert_eq!(response.body.as_ref(), expected.as_bytes());
+            }
+
+            let response = router.handle(Request::new("POST", "/alice/project"));
+            assert_eq!(response.body.as_ref(), b"owner=project;repo=alice;*=");
+        }
+
+        #[test]
+        fn repeated_source_names_do_not_erase_another_methods_values() {
+            let router = Router::new()
+                .route("/:id/:id", get(echo_params(&["id"])))
+                .route("/:first/:second", post(echo_params(&["first", "second"])));
+
+            let get_response = router.handle(Request::new("GET", "/one/two"));
+            assert_eq!(get_response.body.as_ref(), b"id=two");
+
+            let post_response = router.handle(Request::new("POST", "/one/two"));
+            assert_eq!(post_response.status, StatusCode::OK);
+            assert_eq!(post_response.body.as_ref(), b"first=one;second=two");
+        }
+
+        #[test]
+        fn head_uses_the_selected_get_or_explicit_head_pattern() {
+            let router = Router::new()
+                .route("/users/:post_id", post(echo_params(&["post_id"])))
+                .route("/users/:get_id", get(echo_params(&["get_id"])));
+
+            for method in ["HEAD", "head"] {
+                let response = router.handle(Request::new(method, "/users/42"));
+                assert_eq!(response.status, StatusCode::OK);
+                assert_eq!(response.body.as_ref(), b"get_id=42");
+            }
+            assert!(router.routes().iter().all(|route| route.method != "HEAD"));
+
+            let router = router.route(
+                "/users/:head_id",
+                MethodRouter::new().head(echo_params(&["head_id"])),
+            );
+            for method in ["HEAD", "hEaD"] {
+                let response = router.handle(Request::new(method, "/users/42"));
+                assert_eq!(response.status, StatusCode::OK);
+                assert_eq!(response.body.as_ref(), b"head_id=42");
+            }
+            assert_eq!(
+                router.handle(Request::new("GET", "/users/42")).body.as_ref(),
+                b"get_id=42"
+            );
+            let routes = router.routes();
+            let head = routes.iter().find(|route| route.method == "HEAD").unwrap();
+            assert_eq!(head.pattern, "/users/:head_id");
+        }
+
+        #[test]
+        fn duplicate_methods_keep_the_first_handler_and_pattern_in_metadata() {
+            let router = Router::new()
+                .route("/users/:original", get(echo_params(&["original"])))
+                .route(
+                    "/users/:later",
+                    get(FnHandler::new(created_handler)).post(echo_params(&["later"])),
+                );
+
+            assert_eq!(router.route_count(), 1);
+            let get_response = router.handle(Request::new("GET", "/users/42"));
+            assert_eq!(get_response.status, StatusCode::OK);
+            assert_eq!(get_response.body.as_ref(), b"original=42");
+            let post_response = router.handle(Request::new("POST", "/users/42"));
+            assert_eq!(post_response.body.as_ref(), b"later=42");
+
+            let routes = router.routes();
+            assert_eq!(routes.len(), 2);
+            let get = routes.iter().find(|route| route.method == "GET").unwrap();
+            assert_eq!(get.pattern, "/users/:original");
+            assert_eq!(get.handler_name, "FnHandler1");
+            assert_eq!(get.mount_prefix, None);
+            let post = routes.iter().find(|route| route.method == "POST").unwrap();
+            assert_eq!(post.pattern, "/users/:later");
+            let policies = router.route_body_policies();
+            let get_policy = policies.iter().find(|route| route.method == "GET").unwrap();
+            assert_eq!(get_policy.pattern, get.pattern);
+            assert_eq!(get_policy.handler_name, get.handler_name);
+
+            let denied = router.handle(Request::new("DELETE", "/users/42"));
+            assert_eq!(denied.status, StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(denied.header_value("allow"), Some("GET, POST"));
+        }
+
+        #[test]
+        fn repeated_nesting_preserves_already_merged_patterns_and_policy_metadata() {
+            let route_policy = RequestBodyPolicy::new().max_total_body_size(50);
+            let first = Router::new().route(
+                "/users/:id",
+                get(echo_params(&["id"])).with_body_policy(route_policy),
+            );
+            let second = Router::new()
+                .route(
+                    "/users/:user_id",
+                    get(FnHandler::new(created_handler))
+                        .post(echo_params(&["user_id"]))
+                        .with_body_policy(route_policy),
+                )
+                .route("/users/:name", put(echo_params(&["name"])));
+            let router = Router::new()
+                .nest("/api", Router::new().nest("/v1", first))
+                .nest("/api", Router::new().nest("/v1", second))
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(40));
+
+            assert_eq!(router.nested_router_count(), 1);
+            for (method, expected) in [
+                ("GET", "id=42"),
+                ("POST", "user_id=42"),
+                ("PUT", "name=42"),
+            ] {
+                let response = router.handle(Request::new(method, "/api/v1/users/42"));
+                assert_eq!(response.status, StatusCode::OK, "{method}");
+                assert_eq!(response.body.as_ref(), expected.as_bytes(), "{method}");
+            }
+
+            let routes = router.routes();
+            let metadata = routes
+                .iter()
+                .map(|route| {
+                    (
+                        route.method.as_str(),
+                        route.pattern.as_str(),
+                        route.mount_prefix.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                metadata,
+                vec![
+                    ("GET", "/api/v1/users/:id", Some("/api/v1")),
+                    ("PUT", "/api/v1/users/:name", Some("/api/v1")),
+                    ("POST", "/api/v1/users/:user_id", Some("/api/v1")),
+                ]
+            );
+            let policies = router.route_body_policies();
+            assert_eq!(policies.len(), routes.len());
+            for (route, policy) in routes.iter().zip(&policies) {
+                assert_eq!(policy.method, route.method);
+                assert_eq!(policy.pattern, route.pattern);
+                assert_eq!(policy.mount_prefix, route.mount_prefix);
+                assert_eq!(policy.handler_name, route.handler_name);
+                assert_eq!(policy.route_policy, Some(route_policy.resolved()));
+                assert_eq!(policy.effective_policy.unwrap().max_total_body_size, 40);
+            }
+        }
+    }
+
     #[test]
     fn strip_prefix_basic() {
         assert_eq!(
