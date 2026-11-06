@@ -730,6 +730,11 @@ struct BondDonateArgs {
     /// feedback until the receiver broadcasts its fail-closed commit receipt.
     #[arg(long = "to", value_name = "HOST:PORT")]
     to: String,
+    /// Carry authenticated RaptorQ symbols over the TCP control connection,
+    /// including repairs. Use this through an SSH forward when UDP is blocked.
+    /// Requires a receiver that supports bonded stream protocol v4.
+    #[arg(long)]
+    symbols_over_control: bool,
     /// Maximum transfer size in bytes.
     #[arg(long, default_value_t = DEFAULT_MAX_TRANSFER_BYTES)]
     max_bytes: u64,
@@ -854,7 +859,8 @@ struct BondPullArgs {
     /// --listen names a routable IP (then donors dial the --listen address
     /// itself). There is deliberately no inference from the SSH connection:
     /// the address this host uses to reach a donor says nothing about which
-    /// address that donor can reach this host on. Keep it explicit.
+    /// address that donor can reach this host on. Not needed for --transport
+    /// ssh, whose reverse forwards target the locally bound listener.
     #[arg(long, value_name = "IP:PORT")]
     advertise: Option<SocketAddr>,
     /// Local TCP control address the bonded receiver listens on.
@@ -875,6 +881,11 @@ struct BondPullArgs {
     /// SSH tunnel to the receiver control endpoint.
     #[arg(long, value_enum, default_value_t = BondDialPreference::Auto)]
     transport: BondDialPreference,
+    /// Donor-side loopback port for --transport ssh. Defaults to the bound
+    /// receiver control port. Choose another port if that port is already in
+    /// use on a donor; forwarding failures never fall back to direct dialing.
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    ssh_forward_port: Option<u16>,
     /// Extra raw OpenSSH option; repeat for multiple argv words.
     #[arg(long = "ssh-option")]
     ssh_options: Vec<String>,
@@ -2503,6 +2514,7 @@ fn run_bond_donate(mut args: BondDonateArgs) -> Result<(), String> {
         let source_root = bond_source_root(&descriptor_source)?;
         Ok::<_, String>((descriptor, source_root))
     }))?;
+    let symbols_over_control = args.symbols_over_control;
     let report = try_address_candidates(Transport::Rq, &control_addrs, |control_addr| {
         let descriptor = descriptor.clone();
         let source_root = source_root.clone();
@@ -2510,26 +2522,56 @@ fn run_bond_donate(mut args: BondDonateArgs) -> Result<(), String> {
         runtime
             .block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("bond donor cx");
-                transport_rq::donate_bonded(&cx, &descriptor, control_addr, &source_root, config)
+                if symbols_over_control {
+                    transport_rq::donate_bonded_over_control(
+                        &cx,
+                        &descriptor,
+                        control_addr,
+                        &source_root,
+                        config,
+                    )
                     .await
+                } else {
+                    transport_rq::donate_bonded(
+                        &cx,
+                        &descriptor,
+                        control_addr,
+                        &source_root,
+                        config,
+                    )
+                    .await
+                }
             }))
             .map_err(classify_rq_send_failure)
     })
     .map_err(|failure| failure.message)?;
     let elapsed = start.elapsed();
-    print_atp_metrics_line(
-        "bond-donate",
-        Transport::Rq,
-        report.spray.udp_send_acceleration.payload_bytes,
-        Some(report.symbols_sent),
-        Some(report.receipt.symbols_accepted),
-        report.feedback_rounds,
-        None,
-        report.spray.receiver_endpoints.len(),
+    if symbols_over_control {
+        eprintln!(
+            "[atp] progress metrics direction=bond-donate transport=rq \
+             symbol_transport=control-stream bytes=n/a throughput_bytes_per_sec=n/a \
+             symbols_sent={} symbols_accepted={} feedback_rounds={} fanout=1",
+            report.symbols_sent, report.receipt.symbols_accepted, report.feedback_rounds,
+        );
+    } else {
+        print_atp_metrics_line(
+            "bond-donate",
+            Transport::Rq,
+            report.spray.udp_send_acceleration.payload_bytes,
+            Some(report.symbols_sent),
+            Some(report.receipt.symbols_accepted),
+            report.feedback_rounds,
+            None,
+            report.spray.receiver_endpoints.len(),
+            Some(elapsed),
+        );
+        print_rq_udp_send_acceleration_line(&report.spray.udp_send_acceleration);
+    }
+    print_json(&bond_donate_json(
+        &report,
         Some(elapsed),
-    );
-    print_rq_udp_send_acceleration_line(&report.spray.udp_send_acceleration);
-    print_json(&bond_donate_json(&report, Some(elapsed)));
+        symbols_over_control,
+    ));
     if report.receipt.committed {
         Ok(())
     } else {
@@ -2663,7 +2705,7 @@ async fn bond_recv_serve(
     config: RqConfig,
     receive_options: transport_rq::RqReceiveOptions,
     peer_id: &str,
-    on_bound: Option<mpsc::Sender<SocketAddr>>,
+    on_bound: Option<mpsc::Sender<(SocketAddr, Cx)>>,
 ) -> Result<transport_rq::BondedReceiveReport, String> {
     create_receive_destination(dest).await?;
     let listener = TcpListener::bind(listen)
@@ -2675,7 +2717,9 @@ async fn bond_recv_serve(
         dest.display()
     );
     if let Some(ready) = on_bound {
-        let _ = ready.send(bound);
+        if ready.send((bound, cx.clone())).is_err() {
+            return Err("bonded receiver owner stopped before binding completed".to_string());
+        }
     }
     transport_rq::receive_bonded_with_options_and_advertised_ips(
         cx,
@@ -2776,6 +2820,29 @@ fn bond_pull_control_advertise(
     Ok(SocketAddr::new(listen.ip(), bound_port))
 }
 
+/// The target of a reverse forward is reached on the receiver host itself.
+/// A wildcard bind is dialed through the matching loopback family, without
+/// requiring a public advertisement or NAT hairpin routing.
+fn bond_pull_local_endpoint(bound: SocketAddr) -> SocketAddr {
+    let ip = match bound.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, bound.port())
+}
+
+fn bond_pull_control_endpoint(args: &BondPullArgs, bound_port: u16) -> Result<SocketAddr, String> {
+    if args.transport == BondDialPreference::Ssh {
+        Ok(bond_pull_local_endpoint(SocketAddr::new(
+            args.listen.ip(),
+            bound_port,
+        )))
+    } else {
+        bond_pull_control_advertise(args.advertise, args.listen, bound_port)
+    }
+}
+
 /// Remote argv for one `bond-donate` leg launched over SSH by `bond-pull`.
 fn bond_pull_donor_argv(args: &BondPullArgs, control: SocketAddr) -> Vec<String> {
     let mut argv = vec![
@@ -2801,6 +2868,9 @@ fn bond_pull_donor_argv(args: &BondPullArgs, control: SocketAddr) -> Vec<String>
     }
     if args.rq_allow_unauthenticated_lab {
         argv.push("--rq-allow-unauthenticated-lab".to_string());
+    }
+    if args.transport == BondDialPreference::Ssh {
+        argv.push("--symbols-over-control".to_string());
     }
     argv
 }
@@ -3008,52 +3078,79 @@ fn probe_donor_tailnet_ipv4(
     parse_tailscale_ip_line(&stdout)
 }
 
-/// The intended `ssh -L` local-forward plan for an SSH-tunnel donor whose UDP is
-/// assumed blocked (`z01bbr.4.4` D2).
+/// An SSH reverse forward for a donor whose UDP path is unavailable
+/// (br-asupersync-atp-channel-bonding-z01bbr.4.2).
 ///
-/// The donor would open a loopback listener that forwards TCP (and UDP-in-TCP)
-/// to the receiver's control endpoint, then dial `127.0.0.1:<local_port>`.
-/// Deriving this is a pure function of the chosen receiver endpoint so the
-/// decision is observable in the JSON report even while the live forward is
-/// stubbed (see [`run_bond_pull`]).
+/// The SSH client runs on the receiver. `-R` opens the donor-side loopback
+/// listener and returns its TCP traffic to the receiver's local control port.
+/// Both initial symbols and repairs use the explicitly negotiated v4 stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BondPullSshTunnel {
     /// Loopback port on the donor the forward listens on.
     local_port: u16,
     /// Receiver control endpoint the forward targets.
     receiver_endpoint: SocketAddr,
-    /// The `ssh -L` forward argument the live tunnel would install.
+    /// Complete diagnostic spelling of the requested reverse forward.
     forward_arg: String,
+    /// Value passed as the separate argument following `-R`.
+    forward_spec: String,
     /// The address the donor dials once the forward is live.
     donor_dial: SocketAddr,
 }
 
-/// Compute the `ssh -L` forward plan for a donor dialing `receiver_endpoint`.
-///
-/// The donor-side loopback port reuses the receiver control port so the forward
-/// is deterministic and unlikely to collide on a fresh donor host.
-fn bond_pull_ssh_tunnel_plan(receiver_endpoint: SocketAddr) -> BondPullSshTunnel {
-    let local_port = receiver_endpoint.port();
+/// Build a remote loopback forward; a port collision is an SSH startup error.
+fn bond_pull_ssh_tunnel_plan(receiver_endpoint: SocketAddr, local_port: u16) -> BondPullSshTunnel {
     let donor_dial = SocketAddr::new(
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         local_port,
     );
-    // Bracket IPv6 hosts: an `ssh -L` forward spec is colon-delimited, so a bare
+    // Bracket IPv6 hosts: an `ssh -R` forward spec is colon-delimited, so a bare
     // v6 address (`2001:db8::1`) is ambiguous to ssh — it needs `[2001:db8::1]`.
     let target_host = match receiver_endpoint.ip() {
         std::net::IpAddr::V4(v4) => v4.to_string(),
         std::net::IpAddr::V6(v6) => format!("[{v6}]"),
     };
-    let forward_arg = format!(
-        "-L 127.0.0.1:{local_port}:{target_host}:{}",
+    let forward_spec = format!(
+        "127.0.0.1:{local_port}:{target_host}:{}",
         receiver_endpoint.port()
     );
+    let forward_arg = format!("-R {forward_spec}");
     BondPullSshTunnel {
         local_port,
         receiver_endpoint,
         forward_arg,
+        forward_spec,
         donor_dial,
     }
+}
+
+/// OpenSSH takes the first `-o` value. Establish ownership and forwarding
+/// requirements before operator options, including in unauthenticated lab
+/// mode, which has no secret-stdin preflight to guard the child lifecycle.
+fn bond_pull_ssh_session_options(options: &[String]) -> Vec<String> {
+    let mut owned = vec![
+        "-o".to_string(),
+        "ForkAfterAuthentication=no".to_string(),
+        "-o".to_string(),
+        "StdinNull=no".to_string(),
+        "-o".to_string(),
+        "SessionType=default".to_string(),
+    ];
+    owned.extend_from_slice(options);
+    owned
+}
+
+fn bond_pull_ssh_forward_options(options: &[String], tunnel: &BondPullSshTunnel) -> Vec<String> {
+    let mut forwarded = vec![
+        "-o".to_string(),
+        "ExitOnForwardFailure=yes".to_string(),
+        "-o".to_string(),
+        "ClearAllForwardings=no".to_string(),
+        "-R".to_string(),
+        tunnel.forward_spec.clone(),
+    ];
+    forwarded.extend_from_slice(options);
+    forwarded
 }
 
 /// One donor leg launched by `bond-pull`.
@@ -3064,6 +3161,8 @@ struct BondPullDonorLeg {
     stderr: CapturedChildPipe,
     /// The transport family + dial endpoint this leg was launched with.
     choice: DonorPathChoice,
+    /// The forwarding plan passed to SSH, retained for the final receipt.
+    tunnel: Option<BondPullSshTunnel>,
 }
 
 fn terminate_bond_pull_legs(legs: &mut [BondPullDonorLeg]) {
@@ -3080,6 +3179,14 @@ fn terminate_bond_pull_legs(legs: &mut [BondPullDonorLeg]) {
 /// the explicit control address, and wait for the fail-closed commit.
 fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
     validate_receiver_sparse_platform(args.sparse_files)?;
+    if args.transport == BondDialPreference::Ssh {
+        // Validate before shell/descriptor probes too: lab mode must not turn
+        // the owned forward into a detached or replacement SSH session.
+        validate_ssh_secret_stdin_options(&args.ssh_options)?;
+        args.ssh_options = bond_pull_ssh_session_options(&args.ssh_options);
+    } else if args.ssh_forward_port.is_some() {
+        return Err("--ssh-forward-port requires --transport ssh".to_string());
+    }
     let receive_options = rq_receive_options(args.allow_special_files, args.sparse_files);
     let donors: Vec<String> = args
         .donors
@@ -3101,8 +3208,7 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
     // is also the explicit direct UDP advertisement; the receiver fills in its
     // actually-bound UDP fanout ports during enrollment. A distinct bind IP is
     // valid operator authority for a routed or NAT-mapped advertised address.
-    let control_advertise_hint =
-        bond_pull_control_advertise(args.advertise, args.listen, args.listen.port())?;
+    let control_advertise_hint = bond_pull_control_endpoint(&args, args.listen.port())?;
     let udp_bind_ip = args
         .udp_bind
         .clone()
@@ -3110,15 +3216,25 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
     let udp_bind_addr: IpAddr = udp_bind_ip
         .parse()
         .map_err(|error| format!("invalid UDP bind ip '{udp_bind_ip}': {error}"))?;
-    let local_tailnet = detect_local_tailnet().filter(|identity| {
-        let tailnet_ip = IpAddr::V4(identity.ipv4);
-        let control_accepts_tailnet = args.listen.ip() == tailnet_ip
-            || (args.listen.ip().is_unspecified() && args.listen.ip().is_ipv4());
-        let udp_accepts_tailnet = udp_bind_addr == tailnet_ip
-            || (udp_bind_addr.is_unspecified() && udp_bind_addr.is_ipv4());
-        control_accepts_tailnet && udp_accepts_tailnet
-    });
-    let mut receiver_udp_advertise = vec![control_advertise_hint.ip()];
+    let local_tailnet = if args.transport == BondDialPreference::Ssh {
+        None
+    } else {
+        detect_local_tailnet().filter(|identity| {
+            let tailnet_ip = IpAddr::V4(identity.ipv4);
+            let control_accepts_tailnet = args.listen.ip() == tailnet_ip
+                || (args.listen.ip().is_unspecified() && args.listen.ip().is_ipv4());
+            let udp_accepts_tailnet = udp_bind_addr == tailnet_ip
+                || (udp_bind_addr.is_unspecified() && udp_bind_addr.is_ipv4());
+            control_accepts_tailnet && udp_accepts_tailnet
+        })
+    };
+    let mut receiver_udp_advertise = vec![if args.transport == BondDialPreference::Ssh {
+        // The shared receiver still binds its UDP sockets, but v4 donors use
+        // only the forwarded stream. No external UDP advertisement is needed.
+        bond_pull_local_endpoint(SocketAddr::new(udp_bind_addr, 0)).ip()
+    } else {
+        control_advertise_hint.ip()
+    }];
     if let Some(identity) = &local_tailnet {
         let tailnet_ip = IpAddr::V4(identity.ipv4);
         if !receiver_udp_advertise.contains(&tailnet_ip) {
@@ -3165,7 +3281,7 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
 
     // Start the bonded receiver in-process and wait for its bound control
     // address before any donor is launched.
-    let (ready_tx, ready_rx) = mpsc::channel::<SocketAddr>();
+    let (ready_tx, ready_rx) = mpsc::channel::<(SocketAddr, Cx)>();
     let start = Instant::now();
     let receiver_thread = {
         let descriptor = descriptor.clone();
@@ -3199,9 +3315,12 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
             },
         )
     };
-    let bound = match ready_rx.recv_timeout(Duration::from_secs(30)) {
+    let (bound, receiver_cx) = match ready_rx.recv_timeout(Duration::from_secs(30)) {
         Ok(bound) => bound,
         Err(_) => {
+            // A late bind must see that its owner stopped waiting, instead of
+            // entering enrollment for donors that will never be launched.
+            drop(ready_rx);
             let error = match receiver_thread.join() {
                 Ok(Ok(_)) => "bonded receiver exited before binding".to_string(),
                 Ok(Err(error)) => error,
@@ -3210,7 +3329,16 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
             return Err(format!("bond-pull receiver failed to start: {error}"));
         }
     };
-    let control = bond_pull_control_advertise(args.advertise, args.listen, bound.port())?;
+    let control = match bond_pull_control_endpoint(&args, bound.port()) {
+        Ok(control) => control,
+        Err(error) => {
+            receiver_cx.cancel_with_reason(asupersync::types::CancelReason::user(
+                "bonded control endpoint unavailable",
+            ));
+            let _ = receiver_thread.join();
+            return Err(error);
+        }
+    };
 
     // Receiver dial endpoints. The receiver binds UDP on 0.0.0.0 by default, so
     // it can receive on its direct control IP or on its tailnet IP; advertise
@@ -3227,18 +3355,22 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
     // has no usable path.
     let mut donor_specs: Vec<DonorSpec> = Vec::with_capacity(donors.len());
     for (host, remote_shell) in donors.iter().zip(donor_shells) {
-        let donor_on_tailnet =
-            probe_donor_tailnet_ipv4(host, &args.ssh_options, remote_shell).is_some();
-        let choice = select_donor_path(args.transport.into(), &endpoints, donor_on_tailnet)
-            .ok_or_else(|| {
-                format!(
-                    "no usable {} dial transport for donor {host}: receiver advertised \
+        let donor_on_tailnet = args.transport != BondDialPreference::Ssh
+            && probe_donor_tailnet_ipv4(host, &args.ssh_options, remote_shell).is_some();
+        let Some(choice) = select_donor_path(args.transport.into(), &endpoints, donor_on_tailnet)
+        else {
+            receiver_cx.cancel_with_reason(asupersync::types::CancelReason::user(
+                "bonded donor path unavailable",
+            ));
+            let _ = receiver_thread.join();
+            return Err(format!(
+                "no usable {} dial transport for donor {host}: receiver advertised \
                      direct={:?} tailnet={:?}, donor_on_tailnet={donor_on_tailnet}",
-                    args.transport.as_str(),
-                    endpoints.direct,
-                    endpoints.tailnet,
-                )
-            })?;
+                args.transport.as_str(),
+                endpoints.direct,
+                endpoints.tailnet,
+            ));
+        };
         donor_specs.push(DonorSpec {
             host: host.clone(),
             shell: remote_shell,
@@ -3253,27 +3385,30 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
     let key = rq_auth_key(Some(&rq_auth));
     for spec in &donor_specs {
         let host = &spec.host;
-        // SSH-tunnel donors (UDP assumed blocked) would dial 127.0.0.1:<port>
-        // through an `ssh -L` local forward to the receiver control endpoint.
-        // TODO(z01bbr.8.3 H3): open the live `ssh -L` child + prove UDP-in-TCP
-        // over the forward against real NAT'd hosts. Until then the tunnel plan
-        // is computed and reported, but the leg falls back to a direct dial of
-        // the selected endpoint so the enrollment still reaches the receiver.
-        if spec.choice.transport == BondTransport::Ssh {
-            let tunnel = bond_pull_ssh_tunnel_plan(spec.choice.dial);
+        let tunnel = (spec.choice.transport == BondTransport::Ssh).then(|| {
+            bond_pull_ssh_tunnel_plan(
+                bond_pull_local_endpoint(bound),
+                args.ssh_forward_port.unwrap_or(bound.port()),
+            )
+        });
+        if let Some(tunnel) = &tunnel {
             eprintln!(
-                "atp: bond-pull donor {host} selected ssh-tunnel (would forward `{}` \
-                 then dial {}); live `ssh -L` not yet wired — falling back to a direct \
-                 dial of {}",
-                tunnel.forward_arg, tunnel.donor_dial, spec.choice.dial
+                "atp: bond-pull donor {host} using SSH reverse forward `{}`; \
+                 donor dials {} and carries symbols and repairs over the control stream",
+                tunnel.forward_arg, tunnel.donor_dial
             );
         }
-        let dial = spec.choice.dial;
+        let dial = tunnel
+            .as_ref()
+            .map_or(spec.choice.dial, |tunnel| tunnel.donor_dial);
         let argv = bond_pull_donor_argv(&args, dial);
-        let mut command = ssh_base_command(&args.ssh_options, host);
+        let ssh_options = tunnel.as_ref().map_or_else(
+            || args.ssh_options.clone(),
+            |tunnel| bond_pull_ssh_forward_options(&args.ssh_options, tunnel),
+        );
+        let mut command = ssh_base_command(&ssh_options, host);
         let remote_command =
-            match configure_remote_command(&mut command, &args.ssh_options, spec.shell, &argv, key)
-            {
+            match configure_remote_command(&mut command, &ssh_options, spec.shell, &argv, key) {
                 Ok(remote_command) => remote_command,
                 Err(error) => {
                     spawn_error = Some(format!(
@@ -3282,9 +3417,7 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
                     break;
                 }
             };
-        if let Err(error) =
-            preflight_ssh_secret_stdin(&args.ssh_options, host, &remote_command, key)
-        {
+        if let Err(error) = preflight_ssh_secret_stdin(&ssh_options, host, &remote_command, key) {
             spawn_error = Some(error);
             break;
         }
@@ -3322,7 +3455,11 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
                     child,
                     stdout,
                     stderr,
-                    choice: spec.choice,
+                    choice: DonorPathChoice {
+                        dial,
+                        ..spec.choice
+                    },
+                    tunnel,
                 });
             }
             Err(err) => {
@@ -3332,14 +3469,18 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
         }
     }
     if let Some(error) = spawn_error {
+        receiver_cx.cancel_with_reason(asupersync::types::CancelReason::user(
+            "bonded donor launch failed",
+        ));
         terminate_bond_pull_legs(&mut legs);
-        // The receiver thread fails closed on its own enrollment timeout; the
-        // process exits with this error either way.
+        let _ = receiver_thread.join();
         return Err(error);
     }
     drop(rq_auth);
 
-    // The receiver returns exactly when the transfer commits or fails closed.
+    // The receiver owns donor liveness and repair reassignment: a donor may
+    // exit after enrollment while survivors still commit the transfer. A
+    // failed SSH forward instead expires the bounded enrollment wait.
     let receive_result = match receiver_thread.join() {
         Ok(result) => result,
         Err(_) => {
@@ -3379,15 +3520,14 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
             "report": report,
             "stderr_tail": last_log_lines(&stderr, 5),
         });
-        if leg.choice.transport == BondTransport::Ssh {
-            let tunnel = bond_pull_ssh_tunnel_plan(leg.choice.dial);
+        if let Some(tunnel) = &leg.tunnel {
             donor_json["ssh_tunnel"] = serde_json::json!({
                 "local_port": tunnel.local_port,
                 "receiver_endpoint": tunnel.receiver_endpoint.to_string(),
                 "forward_arg": tunnel.forward_arg,
                 "donor_dial": tunnel.donor_dial.to_string(),
-                // Stubbed: the leg dialed the direct endpoint, not the tunnel.
-                "live_forward_wired": false,
+                "live_forward_wired": true,
+                "symbol_transport": "control-stream",
             });
         }
         donor_outcomes.push(donor_json);
@@ -9832,9 +9972,11 @@ fn rq_send_json(
 fn bond_donate_json(
     report: &transport_rq::BondedDonateReport,
     elapsed: Option<Duration>,
+    symbols_over_control: bool,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut receipt = serde_json::json!({
         "event": "atp_bond_donate", "transport": "rq",
+        "symbol_transport": if symbols_over_control { "control-stream" } else { "udp" },
         "transfer_id": report.transfer_id,
         "donor_index": report.donor_index,
         "donor_count": report.donor_count,
@@ -9874,7 +10016,18 @@ fn bond_donate_json(
             report.spray.receiver_endpoints.len(),
             elapsed,
         ),
-    })
+    });
+    if symbols_over_control {
+        // The public donor report retains its legacy UDP counters. Do not
+        // present their zero values as measured TCP bytes or throughput, or
+        // attribute the whole receiver's file bytes to each donor leg.
+        receipt["round0_payload_bytes"] = serde_json::Value::Null;
+        receipt["udp_send_acceleration"] = serde_json::Value::Null;
+        receipt["metrics"]["bytes"] = serde_json::Value::Null;
+        receipt["metrics"]["throughput_bytes_per_sec"] = serde_json::Value::Null;
+        receipt["metrics"]["chosen_fanout"] = serde_json::json!(1);
+    }
+    receipt
 }
 
 fn bond_recv_json(
@@ -14143,10 +14296,11 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             },
         };
 
-        let json = bond_donate_json(&report, Some(Duration::from_millis(10)));
+        let json = bond_donate_json(&report, Some(Duration::from_millis(10)), false);
 
         assert_eq!(json["event"], "atp_bond_donate");
         assert_eq!(json["transport"], "rq");
+        assert_eq!(json["symbol_transport"], "udp");
         assert_eq!(json["transfer_id"], "tid-bond");
         assert_eq!(json["donor_index"], 1);
         assert_eq!(json["donor_count"], 4);
@@ -14163,6 +14317,17 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert_eq!(json["pacing"]["clean_round0_ramp_enabled"], true);
         assert_eq!(json["metrics"]["chosen_fanout"], 1);
         assert_eq!(json["metrics"]["symbols_accepted"], 90);
+
+        let mut stream_report = report.clone();
+        stream_report.spray.receiver_endpoints.clear();
+        let stream = bond_donate_json(&stream_report, Some(Duration::from_millis(10)), true);
+        assert_eq!(stream["symbol_transport"], "control-stream");
+        assert_eq!(stream["symbols_sent"], 21);
+        assert_eq!(stream["metrics"]["chosen_fanout"], 1);
+        assert!(stream["round0_payload_bytes"].is_null());
+        assert!(stream["udp_send_acceleration"].is_null());
+        assert!(stream["metrics"]["bytes"].is_null());
+        assert!(stream["metrics"]["throughput_bytes_per_sec"].is_null());
     }
 
     #[test]
@@ -14234,6 +14399,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             remote_atp: "atp".to_string(),
             remote_shell: RemoteShell::Auto,
             transport: BondDialPreference::Auto,
+            ssh_forward_port: None,
             ssh_options: Vec::new(),
             descriptor_timeout_secs: 300,
             peer_id: "atp-bond-pull".to_string(),
@@ -14293,9 +14459,8 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         );
     }
 
-    /// The SSH network path is exercised by the in-process loopback e2e
-    /// (`bond_cli_two_donor_loopback_commits`); this pins the exact remote
-    /// argv `bond-pull` launches per donor and for the descriptor fetch.
+    /// Pin the remote argv independently of the native data-path tests. An
+    /// actual SSH server is required to prove forwarding across machines.
     #[test]
     fn bond_pull_remote_argv_carries_control_address_and_agreed_params() {
         let listen: SocketAddr = "0.0.0.0:0".parse().expect("listen addr");
@@ -14512,20 +14677,21 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     #[test]
     fn bond_pull_ssh_tunnel_plan_redirects_dial_to_loopback() {
         let control: SocketAddr = "192.0.2.7:8473".parse().expect("control addr");
-        let plan = bond_pull_ssh_tunnel_plan(control);
-        assert_eq!(plan.local_port, 8473);
+        let plan = bond_pull_ssh_tunnel_plan(control, 18473);
+        assert_eq!(plan.local_port, 18473);
         assert_eq!(plan.receiver_endpoint, control);
         assert_eq!(
             plan.donor_dial,
-            "127.0.0.1:8473".parse::<SocketAddr>().expect("loopback")
+            "127.0.0.1:18473".parse::<SocketAddr>().expect("loopback")
         );
-        assert_eq!(plan.forward_arg, "-L 127.0.0.1:8473:192.0.2.7:8473");
+        assert_eq!(plan.forward_arg, "-R 127.0.0.1:18473:192.0.2.7:8473");
+        assert_eq!(plan.forward_spec, "127.0.0.1:18473:192.0.2.7:8473");
 
-        // IPv6 control endpoints must be bracketed in the `-L` forward spec, else
+        // IPv6 control endpoints must be bracketed in the `-R` forward spec, else
         // the colon-delimited spec is ambiguous to ssh.
         let control_v6: SocketAddr = "[2001:db8::1]:8473".parse().expect("v6 control addr");
-        let plan_v6 = bond_pull_ssh_tunnel_plan(control_v6);
-        assert_eq!(plan_v6.forward_arg, "-L 127.0.0.1:8473:[2001:db8::1]:8473");
+        let plan_v6 = bond_pull_ssh_tunnel_plan(control_v6, 8473);
+        assert_eq!(plan_v6.forward_arg, "-R 127.0.0.1:8473:[2001:db8::1]:8473");
         assert_eq!(
             plan_v6.donor_dial,
             "127.0.0.1:8473".parse::<SocketAddr>().expect("loopback")
@@ -14534,6 +14700,146 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert_eq!(bond_transport_label(BondTransport::DirectIp), "direct");
         assert_eq!(bond_transport_label(BondTransport::Ssh), "ssh");
         assert_eq!(bond_transport_label(BondTransport::Tailscale), "tailscale");
+    }
+
+    #[test]
+    fn bond_pull_ssh_targets_the_local_listener_without_advertisement() {
+        for (listen, expected) in [
+            ("0.0.0.0:0", "127.0.0.1:45123"),
+            ("[::]:0", "[::1]:45123"),
+            ("192.0.2.9:0", "192.0.2.9:45123"),
+        ] {
+            let listen = listen.parse().expect("listen address");
+            let mut args = bond_pull_test_args(None, listen);
+            args.transport = BondDialPreference::Ssh;
+            let expected: SocketAddr = expected.parse().expect("local target");
+            assert_eq!(bond_pull_control_endpoint(&args, 45123).unwrap(), expected);
+
+            // A public/NAT advertisement must not replace the local target
+            // of a reverse forward initiated on this receiver host.
+            args.advertise = Some("203.0.113.7:8473".parse().unwrap());
+            assert_eq!(bond_pull_control_endpoint(&args, 45123).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn bond_pull_ssh_installs_the_forward_before_the_remote_command() {
+        let mut args = bond_pull_test_args(None, "0.0.0.0:0".parse().unwrap());
+        args.transport = BondDialPreference::Ssh;
+        let tunnel = bond_pull_ssh_tunnel_plan("127.0.0.1:45123".parse().unwrap(), 18473);
+        let options = bond_pull_ssh_session_options(&[
+            "-o".to_string(),
+            "ExitOnForwardFailure=no".to_string(),
+            "-o".to_string(),
+            "ClearAllForwardings=yes".to_string(),
+        ]);
+        let options = bond_pull_ssh_forward_options(&options, &tunnel);
+        validate_ssh_secret_stdin_options(&options).expect("generated SSH options are safe");
+        let donor_argv = bond_pull_donor_argv(&args, tunnel.donor_dial);
+        assert!(donor_argv.iter().any(|arg| arg == "--symbols-over-control"));
+        assert!(
+            !bond_pull_descriptor_argv(&args)
+                .iter()
+                .any(|arg| arg == "--symbols-over-control")
+        );
+
+        let remote = remote_shell_command(RemoteShell::Posix, &donor_argv).unwrap();
+        let mut command = ssh_base_command(&options, "donor@example.test");
+        command.arg(&remote);
+        let argv: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let position = |value: &str| argv.iter().position(|arg| arg == value).unwrap();
+        let forward = position("-R");
+        assert_eq!(argv[forward + 1], "127.0.0.1:18473:127.0.0.1:45123");
+        assert!(forward < position("--"));
+        assert!(position("--") < position("donor@example.test"));
+        assert_eq!(argv.last(), Some(&remote));
+        assert!(position("ExitOnForwardFailure=yes") < position("ExitOnForwardFailure=no"));
+        assert!(position("ClearAllForwardings=no") < position("ClearAllForwardings=yes"));
+        for required in [
+            "ForkAfterAuthentication=no",
+            "StdinNull=no",
+            "SessionType=default",
+        ] {
+            assert!(position(required) < position("--"));
+        }
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg == "-L" || arg == "-f" || arg == "-N")
+        );
+    }
+
+    #[test]
+    fn bond_pull_ssh_lab_mode_rejects_detached_sessions_before_probes() {
+        for option in [
+            "-f",
+            "-N",
+            "-n",
+            "-oForkAfterAuthentication=yes",
+            "-oSessionType=none",
+        ] {
+            let mut args = bond_pull_test_args(None, "0.0.0.0:0".parse().unwrap());
+            args.transport = BondDialPreference::Ssh;
+            args.ssh_options = vec![option.to_string()];
+            let expected =
+                validate_ssh_secret_stdin_options(&args.ssh_options).expect_err("unsafe option");
+            assert_eq!(
+                run_bond_pull(args).unwrap_err(),
+                expected,
+                "{option} must fail before any SSH command or receiver starts"
+            );
+        }
+    }
+
+    #[test]
+    fn bond_control_stream_flags_parse_and_reject_zero_forward_port() {
+        let parsed = Cli::try_parse_from([
+            "atp",
+            "bond-donate",
+            "/srv/payload.bin",
+            "--to",
+            "127.0.0.1:18473",
+            "--symbols-over-control",
+            "--rq-allow-unauthenticated-lab",
+        ])
+        .expect("explicit stream donor");
+        let Command::BondDonate(donor) = parsed.command else {
+            panic!("expected bond-donate");
+        };
+        assert!(donor.symbols_over_control);
+
+        let parse_pull = |port| {
+            Cli::try_parse_from([
+                "atp",
+                "bond-pull",
+                "/srv/payload.bin",
+                "/tmp/dst",
+                "--donors",
+                "donor@h1",
+                "--transport",
+                "ssh",
+                "--ssh-forward-port",
+                port,
+                "--rq-allow-unauthenticated-lab",
+            ])
+        };
+        let parsed = parse_pull("18473").expect("SSH pull without public advertisement");
+        let Command::BondPull(pull) = parsed.command else {
+            panic!("expected bond-pull");
+        };
+        assert_eq!(pull.ssh_forward_port, Some(18473));
+        assert!(pull.advertise.is_none());
+        assert!(parse_pull("0").is_err());
+
+        let mut direct = bond_pull_test_args(None, "0.0.0.0:0".parse().unwrap());
+        direct.ssh_forward_port = Some(18473);
+        assert_eq!(
+            run_bond_pull(direct).unwrap_err(),
+            "--ssh-forward-port requires --transport ssh"
+        );
     }
 
     /// MANDATORY trio e2e: two in-process donor legs (the exact
@@ -14640,7 +14946,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         .expect("bond e2e config");
         config.accept_timeout = Duration::from_secs(30);
 
-        let (ready_tx, ready_rx) = mpsc::channel::<SocketAddr>();
+        let (ready_tx, ready_rx) = mpsc::channel::<(SocketAddr, Cx)>();
         let receiver = {
             let source = recv_copy_source;
             let dest = dst_dir.clone();
@@ -14679,7 +14985,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                 },
             )
         };
-        let control = ready_rx
+        let (control, _receiver_cx) = ready_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("bonded receiver bound its control listener");
 
@@ -14785,7 +15091,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         for donor in [&report_a, &report_b] {
             assert!(donor.receipt.committed);
             assert!(donor.receipt.sha_ok && donor.receipt.merkle_ok);
-            let json = bond_donate_json(donor, Some(Duration::from_millis(1)));
+            let json = bond_donate_json(donor, Some(Duration::from_millis(1)), false);
             assert_eq!(json["committed"], true);
             assert_eq!(json["donor_count"], 2);
         }

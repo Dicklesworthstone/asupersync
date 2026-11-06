@@ -1807,7 +1807,18 @@ atp bond-pull /srv/payload /dest --donors alice@h1,bob@h2 \
 
 `bond-pull` starts the in-process bonded receiver, SSH-launches one `bond-donate` leg per donor host, and waits for the fail-closed commit — SHA/merkle-verified before anything lands in `/dest`.
 
-**Per-donor transport selection** (`--transport auto|tailscale|ssh|ip`): each donor's tailnet membership is probed over ssh, then a dial path is chosen per donor (`src/net/atp/bonding/transport_select.rs`). `auto` prefers a shared Tailscale path (CGNAT `100.64.0.0/10`) when both ends are on the tailnet, else a direct IP; `ip`/`tailscale` force a family; `ssh` tunnels the symbol stream. (The live `ssh -L` forward is the remaining real-multi-host step, tracked under `z01bbr.8.3`; today an ssh-selected leg reports its tunnel plan and falls back to a direct dial.) The chosen path per donor is recorded in the `atp_bond_pull` JSON receipt so a run is auditable after the fact.
+**Per-donor transport selection** (`--transport auto|tailscale|ssh|ip`): `auto` prefers a shared Tailscale path (CGNAT `100.64.0.0/10`) when both ends are on the tailnet, else a direct IP (`src/net/atp/bonding/transport_select.rs`). These paths use the existing UDP symbol protocol. Explicit `ssh` creates a live reverse TCP forward (`ssh -R`) on each donor and carries both initial symbols and repair rounds through it. The same owned SSH process runs the remote donor and holds its forward open. The chosen path and forward target are recorded in the `atp_bond_pull` JSON receipt.
+
+```bash
+# Receiver pulls through SSH when donor-to-receiver UDP is unavailable.
+# The forward targets the receiver's local listener; no public --advertise is needed.
+atp bond-pull /srv/payload /dest --donors alice@h1,bob@h2 \
+  --transport ssh --listen 127.0.0.1:0 --rq-auth-key-stdin < /path/to/rq-key.hex
+```
+
+SSH mode requires receiver and donor binaries with bonded control-stream protocol v4 support. The public `donate_bonded` API and UDP protocol v3 remain unchanged; `donate_bonded_over_control` and `bond-donate --symbols-over-control` explicitly select the new carrier, and a receiver can enroll both kinds of donor. The stream carries the same authenticated symbol encoding through the same validation and decoder as UDP. A donor that disconnects after enrollment can still have its repair work reassigned to surviving donors.
+
+The donor-side forward binds loopback on the receiver's chosen control port by default. Use `--ssh-forward-port <nonzero-port>` if that port is already occupied on a donor. Forward setup failure terminates that SSH leg and the receiver's bounded enrollment wait fails; it does not silently switch to direct dialing. `auto` does not yet probe UDP reachability or automatically retry through SSH. The real multi-host acceptance run remains tracked under `z01bbr.8.3`. Stream donor receipts report actual symbol counts; byte and throughput fields are `null` until separate stream byte accounting is available.
 
 **Programmatic use** — the `BondedTransfer` SDK builder drives a real bonded transfer over the same data path, cancel-correctly:
 
