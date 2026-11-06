@@ -2014,7 +2014,11 @@ fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError
 // ============================================================================
 
 mod multi_result;
-pub use multi_result::{MySqlMultiResultConnection, MySqlMultiResultLimits, MySqlResultSet};
+pub use multi_result::{
+    MySqlMultiResultConnection, MySqlMultiResultEvent, MySqlMultiResultLimits,
+    MySqlMultiResultStream, MySqlMultiResultStreamConfig, MySqlResultSet,
+    MySqlResultSetCompletion, MySqlResultSetMetadata,
+};
 
 /// Parsed MySQL connection URL.
 #[derive(Clone)]
