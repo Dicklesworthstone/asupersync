@@ -411,6 +411,143 @@ impl fmt::Debug for MySqlMultiResultConnection {
     }
 }
 
+/// Pool manager for isolated, bounded multi-result MySQL sessions.
+///
+/// Use this manager with [`crate::database::pool::AsyncDbPool`]. It negotiates
+/// the dedicated text/prepared multi-result profile while retaining the ordinary
+/// manager's release checks, prepared-statement checkout epochs, and optional
+/// session reset. An unfinished stream, poisoned exchange, open transaction, or
+/// changed autocommit mode is discarded instead of reset or recycled.
+///
+/// Session reset is opt-in, as on [`MySqlConnectionManager`]. Enable
+/// [`Self::reset_session_on_return`] when borrowers must not inherit session
+/// variables, temporary tables, advisory locks, or the selected database.
+/// Collected and streamed queries keep the same limits on every checkout.
+pub struct MySqlMultiResultConnectionManager {
+    manager: MySqlConnectionManager,
+    limits: MySqlMultiResultLimits,
+    #[cfg(feature = "tls")]
+    connector: Option<TlsConnector>,
+}
+
+impl fmt::Debug for MySqlMultiResultConnectionManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("MySqlMultiResultConnectionManager");
+        debug
+            .field("manager", &self.manager)
+            .field("limits", &self.limits);
+        #[cfg(feature = "tls")]
+        debug.field("explicit_tls_connector", &self.connector.is_some());
+        debug.finish_non_exhaustive()
+    }
+}
+
+impl MySqlMultiResultConnectionManager {
+    /// Create a manager with default aggregate limits and session reset disabled.
+    #[must_use]
+    pub fn new(options: MySqlConnectOptions) -> Self {
+        Self {
+            manager: MySqlConnectionManager::new(options),
+            limits: MySqlMultiResultLimits::default(),
+            #[cfg(feature = "tls")]
+            connector: None,
+        }
+    }
+
+    /// Set the aggregate query limits for every connection minted by this pool.
+    #[must_use]
+    pub fn with_limits(mut self, limits: MySqlMultiResultLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Isolate session state between borrowers using the ordinary MySQL reset.
+    ///
+    /// This captures the initial charset/collation and autocommit baseline,
+    /// then runs `COM_RESET_CONNECTION` and restores that baseline plus the
+    /// configured database before reuse. A nonempty initial database is needed
+    /// for reuse; otherwise returned sessions are discarded. Reset failures,
+    /// cancellation, and the connection's finite reset timeout also discard.
+    ///
+    /// Guard drop schedules the reset for checkout validation or the next
+    /// operation, including when validation is disabled. Use
+    /// [`crate::database::pool::AsyncPooledConnection::reset_and_return`] to
+    /// release server resources before the connection goes idle. An unfinished
+    /// result stream is never repaired by a reset: its session is discarded.
+    #[must_use]
+    pub fn reset_session_on_return(mut self, enabled: bool) -> Self {
+        self.manager = self.manager.reset_session_on_return(enabled);
+        self
+    }
+
+    /// Retain explicit TLS trust roots, pins, or client identity for new sessions.
+    ///
+    /// The connection's existing TLS transport also retains this connector for
+    /// separate KILL connections. As on the standalone multi-result constructor,
+    /// `ssl-mode=preferred` or `required` is necessary; `disabled` is rejected
+    /// before opening a socket. The server must offer TLS in either enabled mode.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn with_tls_connector(mut self, connector: TlsConnector) -> Self {
+        self.connector = Some(connector);
+        self
+    }
+
+    /// The authentication, database, timeout, and transport options in use.
+    #[must_use]
+    pub fn options(&self) -> &MySqlConnectOptions {
+        self.manager.options()
+    }
+
+    /// The aggregate limits applied independently to each query.
+    #[must_use]
+    pub const fn limits(&self) -> MySqlMultiResultLimits {
+        self.limits
+    }
+}
+
+impl crate::database::pool::AsyncConnectionManager for MySqlMultiResultConnectionManager {
+    type Connection = MySqlMultiResultConnection;
+    type Error = MySqlError;
+
+    async fn connect(&self, cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+        MySqlMultiResultConnection::connect_managed(
+            cx,
+            self.manager.options.clone(),
+            self.limits,
+            self.manager.reset_session_on_return,
+            #[cfg(feature = "tls")]
+            self.connector.clone(),
+        )
+        .await
+    }
+
+    async fn is_valid(&self, cx: &Cx, conn: &mut Self::Connection) -> bool {
+        crate::database::pool::AsyncConnectionManager::is_valid(
+            &self.manager,
+            cx,
+            &mut conn.connection,
+        )
+        .await
+    }
+
+    async fn reset_on_return(&self, cx: &Cx, conn: &mut Self::Connection) -> bool {
+        crate::database::pool::AsyncConnectionManager::reset_on_return(
+            &self.manager,
+            cx,
+            &mut conn.connection,
+        )
+        .await
+    }
+
+    fn release_check(&self, conn: &mut Self::Connection) -> bool {
+        crate::database::pool::AsyncConnectionManager::release_check(
+            &self.manager,
+            &mut conn.connection,
+        )
+    }
+}
+
 impl MySqlMultiResultConnection {
     /// Connect with default aggregate limits and the URL's authentication/TLS policy.
     pub async fn connect(cx: &Cx, url: &str) -> Outcome<Self, MySqlError> {
@@ -430,15 +567,15 @@ impl MySqlMultiResultConnection {
         options: MySqlConnectOptions,
         limits: MySqlMultiResultLimits,
     ) -> Outcome<Self, MySqlError> {
-        let connected = MySqlConnection::connect_bounded_with_capabilities(
+        Self::connect_managed(
             cx,
             options,
+            limits,
             false,
-            MULTI_RESULT_CAPABILITIES,
             #[cfg(feature = "tls")]
             None,
-        ).await;
-        Self::from_connected(connected, limits)
+        )
+        .await
     }
 
     /// Connect with explicit TLS trust roots, pins, or client identity.
@@ -449,14 +586,31 @@ impl MySqlMultiResultConnection {
         limits: MySqlMultiResultLimits,
         connector: TlsConnector,
     ) -> Outcome<Self, MySqlError> {
-        if options.ssl_mode == SslMode::Disabled {
+        Self::connect_managed(cx, options, limits, false, Some(connector)).await
+    }
+
+    async fn connect_managed(
+        cx: &Cx,
+        options: MySqlConnectOptions,
+        limits: MySqlMultiResultLimits,
+        capture_pool_session: bool,
+        #[cfg(feature = "tls")] connector: Option<TlsConnector>,
+    ) -> Outcome<Self, MySqlError> {
+        #[cfg(feature = "tls")]
+        if connector.is_some() && options.ssl_mode == SslMode::Disabled {
             return Outcome::Err(MySqlError::InvalidParameter(
                 "an explicit TLS connector requires ssl-mode=preferred or required".to_string(),
             ));
         }
         let connected = MySqlConnection::connect_bounded_with_capabilities(
-            cx, options, false, MULTI_RESULT_CAPABILITIES, Some(connector),
-        ).await;
+            cx,
+            options,
+            capture_pool_session,
+            MULTI_RESULT_CAPABILITIES,
+            #[cfg(feature = "tls")]
+            connector,
+        )
+        .await;
         Self::from_connected(connected, limits)
     }
 
@@ -578,6 +732,12 @@ impl MySqlMultiResultConnection {
         if self.connection.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
+        // A pool can disable checkout validation. Finish any deferred reset
+        // before flushing cached statements or claiming user-query ownership:
+        // failed or abandoned reset I/O must close without issuing KILL QUERY.
+        if let Err(error) = self.connection.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
+        }
         if let Err(error) = self.connection.forget_prepared_statements_before(cx, sql).await {
             return outcome_from_error(error);
         }
@@ -678,6 +838,11 @@ impl MySqlMultiResultConnection {
     ) -> Outcome<ResponseReader, MySqlError> {
         if self.connection.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+        // Match ordinary prepared-query admission: session reset precedes
+        // checkout-epoch checks, parameter handling, and in-flight ownership.
+        if let Err(error) = self.connection.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
         }
         self.connection.inner.query_in_flight.store(true, std::sync::atomic::Ordering::Release);
         let mut budget = ResultBudget::new(self.limits);
