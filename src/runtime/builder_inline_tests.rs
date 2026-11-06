@@ -3996,6 +3996,7 @@ worker_threads = 16
             None,
             BlockingQueuePolicy::Fifo,
             BlockingAdmissionPolicy::Unbounded,
+            None,
         )
         .expect("runtime construction continues without a reactor");
 
@@ -6981,4 +6982,38 @@ worker_threads = 16
                 );
             }
         }
+    }
+
+    #[test]
+    fn blocking_thread_stack_size_reaches_the_pool_and_defaults_to_the_platform() {
+        let stack_of = |builder: RuntimeBuilder| {
+            builder
+                .blocking_threads(0, 2)
+                .enable_platform_reactor(false)
+                .build()
+                .unwrap()
+                .blocking_handle()
+                .unwrap()
+                .thread_stack_size()
+        };
+        let three_mib = 3 * 1024 * 1024;
+        assert_eq!(
+            stack_of(RuntimeBuilder::new().blocking_thread_stack_size(three_mib)),
+            Some(three_mib)
+        );
+        // Remove the plant: nothing asked, nothing set, and 0 keeps the platform default.
+        assert_eq!(stack_of(RuntimeBuilder::new()), None);
+        assert_eq!(
+            stack_of(RuntimeBuilder::new().blocking_thread_stack_size(0)),
+            None
+        );
+        // A forbidding pool starts no thread, so it carries no stack size even when one was asked for.
+        assert_eq!(
+            stack_of(
+                RuntimeBuilder::new()
+                    .blocking_admission_policy(BlockingAdmissionPolicy::Forbidden)
+                    .blocking_thread_stack_size(three_mib)
+            ),
+            None
+        );
     }

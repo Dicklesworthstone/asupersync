@@ -934,3 +934,84 @@
             spawn_blocking(|| std::panic::panic_any("test panic")).await;
         });
     }
+
+    fn forbidden_pool() -> crate::runtime::BlockingPool {
+        crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        )
+    }
+
+    /// The entry point that returns the closure's own value has no error to return, so a forbidden pool makes
+    /// it panic; the closure is dropped unrun and is not run inline.
+    #[test]
+    fn spawn_blocking_on_a_forbidden_pool_panics_and_never_runs_the_closure() {
+        init_test("spawn_blocking_on_a_forbidden_pool_panics_and_never_runs_the_closure");
+        let pool = forbidden_pool();
+        let ran = Arc::new(AtomicU32::new(0));
+        let ran_in_closure = Arc::clone(&ran);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future::block_on(spawn_blocking_on_pool(pool.handle(), move || {
+                ran_in_closure.fetch_add(1, Ordering::SeqCst);
+                7_u32
+            }))
+        }));
+        let payload = outcome.expect_err("a forbidden pool must refuse");
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        assert!(message.contains("forbidden"), "{message}");
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "the closure must not run, inline or elsewhere"
+        );
+
+        // Remove the plant: a pool that was shut down, not forbidden, still takes the documented inline fallback.
+        let closed = crate::runtime::BlockingPool::new(1, 1);
+        let handle = closed.handle();
+        closed.shutdown();
+        assert_eq!(
+            future::block_on(spawn_blocking_on_pool(handle, || 7_u32)),
+            7
+        );
+        crate::test_complete!("spawn_blocking_on_a_forbidden_pool_panics_and_never_runs_the_closure");
+    }
+
+    /// The I/O entry point that can return an error does: `Unsupported`, and the closure never runs.
+    #[test]
+    fn spawn_blocking_io_off_worker_on_a_forbidden_pool_reports_unsupported_and_never_runs() {
+        init_test(
+            "spawn_blocking_io_off_worker_on_a_forbidden_pool_reports_unsupported_and_never_runs",
+        );
+        let pool = forbidden_pool();
+        let ran = Arc::new(AtomicU32::new(0));
+        let ran_in_closure = Arc::clone(&ran);
+        let result = future::block_on(spawn_blocking_io_off_worker(
+            Some(pool.handle()),
+            move || {
+                ran_in_closure.fetch_add(1, Ordering::SeqCst);
+                Ok(1_u32)
+            },
+        ));
+        let error = result.expect_err("a forbidden pool must refuse");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "the closure must not run");
+
+        // Remove the plant: an open pool runs the same kind of closure.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        let value = future::block_on(spawn_blocking_io_off_worker(Some(open.handle()), || {
+            Ok(5_u32)
+        }))
+        .expect("an open pool runs the closure");
+        assert_eq!(value, 5);
+        open.shutdown();
+        crate::test_complete!(
+            "spawn_blocking_io_off_worker_on_a_forbidden_pool_reports_unsupported_and_never_runs"
+        );
+    }

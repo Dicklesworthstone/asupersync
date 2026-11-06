@@ -363,6 +363,8 @@ struct BlockingPoolInner {
     sleep_fn: SleepFn,
     /// Thread name prefix.
     thread_name_prefix: String,
+    /// Stack size requested for every thread the pool starts; `None` leaves it to the platform.
+    thread_stack_size: Option<usize>,
     /// Callback when a thread starts.
     on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Callback when a thread stops.
@@ -597,6 +599,9 @@ impl BlockingPool {
     /// # Panics
     ///
     /// Panics under the same conditions as [`Self::with_config_and_queue_policy`].
+    ///
+    /// A [`BlockingAdmissionPolicy::Forbidden`] pool admits nothing, so it starts no thread: `min_threads` is
+    /// treated as 0 for it, and `max_threads` only has to be at least 1 to satisfy the checks above.
     #[must_use]
     pub fn with_config_and_policies(
         min_threads: usize,
@@ -604,6 +609,36 @@ impl BlockingPool {
         options: BlockingPoolOptions,
         queue_policy: BlockingQueuePolicy,
         admission_policy: BlockingAdmissionPolicy,
+    ) -> Self {
+        Self::with_config_policies_and_stack_size(
+            min_threads,
+            max_threads,
+            options,
+            queue_policy,
+            admission_policy,
+            None,
+        )
+    }
+
+    /// Like [`Self::with_config_and_policies`], with an explicit stack size for every thread the pool starts.
+    ///
+    /// The other constructors start their threads without one, so the platform chooses (for std, 2 MiB unless
+    /// `RUST_MIN_STACK` says otherwise, decided once per process). `Some(bytes)` passes `bytes` to
+    /// `std::thread::Builder::stack_size` for each thread, the eagerly started minimum included. `None`, and
+    /// `Some(0)`, keep the platform default. The size is the one requested: the operating system rounds it by
+    /// its own page and guard-page rules, and nothing here reads a live thread's stack back.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`Self::with_config_and_policies`].
+    #[must_use]
+    pub fn with_config_policies_and_stack_size(
+        min_threads: usize,
+        max_threads: usize,
+        options: BlockingPoolOptions,
+        queue_policy: BlockingQueuePolicy,
+        admission_policy: BlockingAdmissionPolicy,
+        thread_stack_size: Option<usize>,
     ) -> Self {
         assert!(max_threads > 0, "max_threads must be at least 1");
         assert!(
@@ -614,6 +649,13 @@ impl BlockingPool {
             !options.thread_name_prefix.contains('\0'),
             "thread_name_prefix may not contain interior NUL bytes"
         );
+        // A pool that forbids blocking work refuses every job before it is queued, so a thread started for a
+        // minimum would only sit idle. It starts none.
+        let min_threads = if admission_policy == BlockingAdmissionPolicy::Forbidden {
+            0
+        } else {
+            min_threads
+        };
 
         let affinity = BlockingPoolAffinityState::from_options(&options, queue_policy);
         let inner = Arc::new(BlockingPoolInner {
@@ -637,6 +679,7 @@ impl BlockingPool {
             time_getter: options.time_getter,
             sleep_fn: options.sleep_fn,
             thread_name_prefix: options.thread_name_prefix,
+            thread_stack_size: thread_stack_size.filter(|bytes| *bytes > 0),
             on_thread_start: options.on_thread_start,
             on_thread_stop: options.on_thread_stop,
             thread_handles: Mutex::new(Vec::with_capacity(max_threads)),
@@ -1038,6 +1081,12 @@ impl BlockingPoolHandle {
         }
 
         handle
+    }
+
+    /// Returns the stack size requested for the pool's threads, or `None` when the platform chooses it.
+    #[must_use]
+    pub fn thread_stack_size(&self) -> Option<usize> {
+        self.inner.thread_stack_size
     }
 
     /// Returns the number of pending tasks.
@@ -1449,6 +1498,10 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     let thread_id = inner.next_thread_id.fetch_add(1, Ordering::Relaxed);
     let name = format!("{}-blocking-{}", inner.thread_name_prefix, thread_id);
     let builder = thread::Builder::new().name(name);
+    let builder = match inner.thread_stack_size {
+        Some(bytes) => builder.stack_size(bytes),
+        None => builder,
+    };
     let assigned_cohort = inner
         .affinity
         .as_ref()

@@ -36,6 +36,19 @@ pub enum BlockingAdmissionPolicy {
         /// Maximum queued jobs; running jobs do not count toward this limit.
         max_queued: NonZeroUsize,
     },
+    /// Admit nothing and start no thread: every submission is refused with
+    /// [`BlockingSpawnErrorKind::Forbidden`] before its closure is accepted.
+    ///
+    /// For a runtime that must not run blocking work at all. A runtime built
+    /// with no pool is not the same thing: its contexts see no pool, and the
+    /// entry points that would otherwise run the closure inline on the calling
+    /// thread, or on a dedicated fallback thread, do exactly that. A forbidden
+    /// pool is inherited like any other, so those entry points can tell "no
+    /// pool" from "blocking is not allowed here" and refuse. Nothing is ever
+    /// queued, so no thread is ever started.
+    ///
+    /// It is opt-in, like `Bounded`: nothing selects it by default.
+    Forbidden,
 }
 
 /// Why a blocking submission was refused before its closure was accepted.
@@ -46,6 +59,15 @@ pub enum BlockingSpawnErrorKind {
     Saturated,
     /// Pool shutdown closed admission.
     Shutdown,
+    /// The pool's policy is [`BlockingAdmissionPolicy::Forbidden`]: no work is ever admitted.
+    Forbidden,
+}
+
+impl BlockingSpawnErrorKind {
+    /// Whether waiting can turn this refusal into an admission. It cannot for a closed or a forbidden pool.
+    const fn is_final(self) -> bool {
+        matches!(self, Self::Shutdown | Self::Forbidden)
+    }
 }
 
 /// Refused work, retaining the exact closure for retry or caller-owned disposal.
@@ -84,6 +106,9 @@ impl<F> fmt::Display for BlockingSpawnError<F> {
         match self.kind {
             BlockingSpawnErrorKind::Saturated => f.write_str("blocking queue is saturated"),
             BlockingSpawnErrorKind::Shutdown => f.write_str("blocking pool is shut down"),
+            BlockingSpawnErrorKind::Forbidden => {
+                f.write_str("blocking work is forbidden by this pool's admission policy")
+            }
         }
     }
 }
@@ -105,6 +130,11 @@ impl BlockingAdmission {
 
     /// Called under the pool coordination mutex for definitive admission.
     pub(super) fn refusal(&self, inner: &BlockingPoolInner) -> Option<BlockingSpawnErrorKind> {
+        // First, so a forbidden pool never reports `Shutdown`: that refusal hands the closure back, and the
+        // async entry points then run a handed-back closure inline.
+        if self.policy == BlockingAdmissionPolicy::Forbidden {
+            return Some(BlockingSpawnErrorKind::Forbidden);
+        }
         if inner.shutdown.load(Ordering::Acquire) {
             return Some(BlockingSpawnErrorKind::Shutdown);
         }
@@ -183,7 +213,8 @@ where
 /// An owned submission that waits asynchronously for queue capacity.
 ///
 /// The closure is never invoked on the polling thread. Saturation parks the
-/// future; shutdown returns the original work in `BlockingSpawnError`.
+/// future; shutdown, and a [`BlockingAdmissionPolicy::Forbidden`] pool, return
+/// the original work in `BlockingSpawnError` at once.
 /// Dropping a pending future unregisters its waker and drops its unsubmitted
 /// closure on the dropping thread. No slot is reserved while it is waiting.
 ///
@@ -258,7 +289,7 @@ where
                 this.remove_waiter();
                 return Poll::Ready(Ok(handle));
             }
-            Err(error) if error.kind == BlockingSpawnErrorKind::Shutdown => {
+            Err(error) if error.kind.is_final() => {
                 this.remove_waiter();
                 return Poll::Ready(Err(error));
             }
@@ -291,7 +322,7 @@ where
                 this.remove_waiter();
                 Poll::Ready(Ok(handle))
             }
-            Err(error) if error.kind == BlockingSpawnErrorKind::Shutdown => {
+            Err(error) if error.kind.is_final() => {
                 this.remove_waiter();
                 Poll::Ready(Err(error))
             }
@@ -384,6 +415,15 @@ impl BlockingPoolHandle {
     #[must_use]
     pub fn admission_policy(&self) -> BlockingAdmissionPolicy {
         self.inner.admission.policy
+    }
+
+    /// Whether this pool admits no work at all ([`BlockingAdmissionPolicy::Forbidden`]).
+    ///
+    /// The entry points that fall back to running a closure inline, or on a dedicated thread, when there is no
+    /// pool check this first: a forbidden pool is a decision, not an absence.
+    #[must_use]
+    pub(crate) fn forbids_blocking(&self) -> bool {
+        self.inner.admission.policy == BlockingAdmissionPolicy::Forbidden
     }
 
     /// Attempts submission, returning ownership on saturation or shutdown.

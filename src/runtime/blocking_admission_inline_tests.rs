@@ -497,3 +497,102 @@ fn drained_cancellation_retains_waiting_captures_until_a_blocking_worker_retires
         }
     });
 }
+
+fn forbidden_pool() -> BlockingPool {
+    BlockingPool::with_config_and_policies(
+        0,
+        1,
+        BlockingPoolOptions {
+            thread_name_prefix: "forbidden-admission".to_owned(),
+            ..Default::default()
+        },
+        BlockingQueuePolicy::Fifo,
+        BlockingAdmissionPolicy::Forbidden,
+    )
+}
+
+fn count_job(ran: &Arc<AtomicUsize>) -> impl FnOnce() + Send + 'static {
+    let ran = Arc::clone(ran);
+    move || {
+        ran.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn a_forbidden_pool_refuses_every_entry_point_unrun_and_starts_no_thread() {
+    bounded(|| {
+        let pool = forbidden_pool();
+        let handle = pool.handle();
+        assert_eq!(
+            handle.admission_policy(),
+            BlockingAdmissionPolicy::Forbidden
+        );
+        assert!(handle.forbids_blocking());
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        let refused = pool.try_spawn(count_job(&ran)).unwrap_err();
+        assert_eq!(refused.kind(), BlockingSpawnErrorKind::Forbidden);
+        let refused = handle.try_spawn(count_job(&ran)).unwrap_err();
+        assert_eq!(refused.kind(), BlockingSpawnErrorKind::Forbidden);
+        // The plain spawn path completes a cancelled handle and queues nothing.
+        let spawned = pool.spawn(count_job(&ran));
+        assert!(spawned.is_cancelled());
+        assert!(spawned.is_done());
+        // A waiting submission resolves at once: waiting cannot help, so it never parks.
+        let submitted = futures_lite::future::block_on(pool.submit(count_job(&ran)));
+        assert_eq!(
+            submitted.unwrap_err().kind(),
+            BlockingSpawnErrorKind::Forbidden
+        );
+
+        assert_eq!(pool.pending_count(), 0);
+        assert_eq!(pool.active_threads(), 0);
+        assert_eq!(pool.busy_threads(), 0);
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+
+        // A closed forbidden pool still says Forbidden: it must not hand work back as a shutdown, which the
+        // async entry points would run inline.
+        assert!(pool.shutdown_and_wait(WAIT));
+        assert_eq!(
+            pool.try_spawn(count_job(&ran)).unwrap_err().kind(),
+            BlockingSpawnErrorKind::Forbidden
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+
+        // Remove the plant: the same options with an unbounded policy run the job on a pool thread.
+        let open = BlockingPool::with_config_and_policies(
+            1,
+            1,
+            BlockingPoolOptions {
+                thread_name_prefix: "open-admission".to_owned(),
+                ..Default::default()
+            },
+            BlockingQueuePolicy::Fifo,
+            BlockingAdmissionPolicy::Unbounded,
+        );
+        assert!(!open.handle().forbids_blocking());
+        let task = open.try_spawn(count_job(&ran)).unwrap();
+        assert!(task.wait_timeout(WAIT));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(open.shutdown_and_wait(WAIT));
+    });
+}
+
+#[test]
+fn only_the_forbidden_policy_is_forbidden() {
+    let unbounded = BlockingAdmissionPolicy::default();
+    assert_eq!(unbounded, BlockingAdmissionPolicy::Unbounded);
+    assert_ne!(unbounded, BlockingAdmissionPolicy::Forbidden);
+    assert_ne!(policy(1), BlockingAdmissionPolicy::Forbidden);
+    assert!(BlockingSpawnErrorKind::Forbidden.is_final());
+    assert!(BlockingSpawnErrorKind::Shutdown.is_final());
+    assert!(!BlockingSpawnErrorKind::Saturated.is_final());
+    let bounded_pool = pool(1);
+    let handle = bounded_pool.handle();
+    assert_ne!(
+        handle.admission_policy(),
+        BlockingAdmissionPolicy::Forbidden
+    );
+    assert!(!handle.forbids_blocking());
+    assert!(bounded_pool.shutdown_and_wait(WAIT));
+}

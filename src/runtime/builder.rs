@@ -2676,6 +2676,9 @@ pub struct RuntimeBuilder {
     blocking_queue_policy: BlockingQueuePolicy,
     /// Explicit queue capacity without extending public config structs.
     blocking_admission_policy: BlockingAdmissionPolicy,
+    /// Explicit stack size of each blocking-pool thread, without extending public config structs. `None` leaves
+    /// the stack to the platform default.
+    blocking_thread_stack_size: Option<usize>,
     /// Set by [`RuntimeBuilder::resource_sampling`]: how often a sampler
     /// thread refreshes resource pressure (asupersync-1ir2em).
     resource_sampling: Option<Duration>,
@@ -2712,6 +2715,7 @@ impl RuntimeBuilder {
             blocking_sized: false,
             blocking_queue_policy: BlockingQueuePolicy::Fifo,
             blocking_admission_policy: BlockingAdmissionPolicy::Unbounded,
+            blocking_thread_stack_size: None,
             resource_sampling: None,
         }
     }
@@ -2957,10 +2961,30 @@ impl RuntimeBuilder {
     ///
     /// Direct `spawn` methods return a completed, cancelled handle on refusal.
     /// Use the pool handle's `try_spawn` to recover refused closures or `submit`
-    /// to await capacity. This has no effect when the pool is disabled.
+    /// to await capacity. This has no effect when the pool is disabled, except
+    /// for [`BlockingAdmissionPolicy::Forbidden`]: it keeps a pool that admits
+    /// nothing and starts no thread, whatever `blocking_threads` says, so that
+    /// contexts can tell "blocking is forbidden" from "there is no pool" and
+    /// refuse instead of running the closure inline.
     #[must_use]
     pub fn blocking_admission_policy(mut self, policy: BlockingAdmissionPolicy) -> Self {
         self.blocking_admission_policy = policy;
+        self
+    }
+
+    /// Set the stack size, in bytes, of each thread the blocking pool starts.
+    ///
+    /// By default the pool starts its threads without a stack size, so the platform chooses (for std, 2 MiB
+    /// unless `RUST_MIN_STACK` says otherwise, decided once per process), and [`Self::thread_stack_size`] does
+    /// not apply to them. Setting a size here passes it to `std::thread::Builder::stack_size` for every pool
+    /// thread. 0 keeps the platform default. It has no effect when the pool is disabled or forbidden, since no
+    /// thread starts.
+    ///
+    /// The figure is the size requested, not a measurement: the operating system rounds it to its own page
+    /// and guard-page rules, and nothing here reads a live thread's stack back.
+    #[must_use]
+    pub fn blocking_thread_stack_size(mut self, bytes: usize) -> Self {
+        self.blocking_thread_stack_size = (bytes > 0).then_some(bytes);
         self
     }
 
@@ -3509,6 +3533,7 @@ impl RuntimeBuilder {
             blocking_sized,
             blocking_queue_policy,
             blocking_admission_policy,
+            blocking_thread_stack_size,
             resource_sampling,
         } = self;
         #[cfg(target_arch = "wasm32")]
@@ -3573,6 +3598,7 @@ impl RuntimeBuilder {
             required_spawn_authorization,
             blocking_queue_policy,
             blocking_admission_policy,
+            blocking_thread_stack_size,
         )?;
         if capture_schedules {
             let trace = runtime
@@ -4196,6 +4222,7 @@ impl Runtime {
             None,
             BlockingQueuePolicy::Fifo,
             BlockingAdmissionPolicy::Unbounded,
+            None,
         )
     }
 
@@ -4216,6 +4243,7 @@ impl Runtime {
         required_spawn_authorization: Option<crate::security::key::AuthKey>,
         blocking_queue_policy: BlockingQueuePolicy,
         blocking_admission_policy: BlockingAdmissionPolicy,
+        blocking_thread_stack_size: Option<usize>,
     ) -> Result<Self, Error> {
         config.normalize();
         if let Some(monitor) = config.deadline_monitor.as_mut()
@@ -4257,6 +4285,7 @@ impl Runtime {
                 scheduler_evidence_sink,
                 blocking_queue_policy,
                 blocking_admission_policy,
+                blocking_thread_stack_size,
             );
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
@@ -4282,6 +4311,7 @@ impl Runtime {
                 scheduler_evidence_sink,
                 blocking_queue_policy,
                 blocking_admission_policy,
+                blocking_thread_stack_size,
             );
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
@@ -6398,6 +6428,7 @@ impl RuntimeInner {
         scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
         blocking_queue_policy: BlockingQueuePolicy,
         blocking_admission_policy: BlockingAdmissionPolicy,
+        blocking_thread_stack_size: Option<usize>,
     ) -> (Self, Vec<ThreeLaneWorker>) {
         // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape routes
         // internally below — the Sharded shape constructs a ShardedState
@@ -6559,6 +6590,7 @@ impl RuntimeInner {
             &config,
             blocking_queue_policy,
             blocking_admission_policy,
+            blocking_thread_stack_size,
         );
         if let Some(pool) = blocking_pool.as_ref() {
             let mut guard = state
@@ -6613,13 +6645,33 @@ impl RuntimeInner {
         crate::types::TaskId::from_arena(crate::util::ArenaIndex::new(index, 1))
     }
 
-    /// Creates the blocking pool if configured with non-zero max threads.
+    /// Creates the blocking pool if configured with non-zero max threads, or
+    /// if the admission policy is `Forbidden`, which keeps a pool that admits
+    /// nothing so that contexts inherit the decision.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn create_blocking_pool(
         config: &RuntimeConfig,
         queue_policy: BlockingQueuePolicy,
         admission_policy: BlockingAdmissionPolicy,
+        thread_stack_size: Option<usize>,
     ) -> Option<crate::runtime::blocking_pool::BlockingPool> {
+        if admission_policy == BlockingAdmissionPolicy::Forbidden {
+            // A pool needs a ceiling of at least one thread; this one never uses it. Every submission is
+            // refused before it is queued, so no thread is ever started.
+            let options = crate::runtime::blocking_pool::BlockingPoolOptions {
+                thread_name_prefix: format!("{}-blocking", config.thread_name_prefix),
+                ..Default::default()
+            };
+            return Some(
+                crate::runtime::blocking_pool::BlockingPool::with_config_and_policies(
+                    0,
+                    1,
+                    options,
+                    queue_policy,
+                    admission_policy,
+                ),
+            );
+        }
         if config.blocking.max_threads == 0 {
             return None;
         }
@@ -6635,13 +6687,16 @@ impl RuntimeInner {
                 .map(crate::runtime::config::WorkerCohortMapping::cohort_count),
             ..Default::default()
         };
-        Some(crate::runtime::blocking_pool::BlockingPool::with_config_and_policies(
-            config.blocking.min_threads,
-            config.blocking.max_threads,
-            options,
-            queue_policy,
-            admission_policy,
-        ))
+        Some(
+            crate::runtime::blocking_pool::BlockingPool::with_config_policies_and_stack_size(
+                config.blocking.min_threads,
+                config.blocking.max_threads,
+                options,
+                queue_policy,
+                admission_policy,
+                thread_stack_size,
+            ),
+        )
     }
 
     fn spawn_local<F>(&self, future: F) -> Result<LocalJoinHandle<F::Output>, SpawnError>

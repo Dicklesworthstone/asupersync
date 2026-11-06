@@ -23,7 +23,9 @@
 //! ```
 
 use crate::cx::Cx;
-use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
+use crate::runtime::blocking_pool::{
+    BlockingPoolHandle, BlockingSpawnErrorKind, BlockingTaskHandle,
+};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -673,6 +675,11 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
 /// A context without a pool runs the closure inline; without a current context,
 /// the closure runs on a dedicated thread. Pool workers do not inherit a `Cx`.
 ///
+/// A context whose pool is [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden)
+/// does neither: the closure is not run at all and the call panics, because this function returns
+/// the closure's own `T` and has no error to return. Use [`spawn_blocking_io`] or
+/// [`Cx::spawn_blocking`], which return an error instead.
+///
 /// # Type Bounds
 ///
 /// - `F: FnOnce() -> T + Send + 'static` - The closure must be sendable to another thread
@@ -686,7 +693,8 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
 /// # Panics
 ///
 /// If the blocking operation panics, the panic is captured and re-raised when
-/// the future is awaited.
+/// the future is awaited. Panics, without running the closure, when the
+/// context's blocking pool is forbidden (see above).
 pub async fn spawn_blocking<F, T>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
@@ -710,12 +718,40 @@ where
 /// Spawns a blocking I/O operation and returns a Future.
 ///
 /// Convenience wrapper around [`spawn_blocking`] for I/O operations.
+///
+/// A context whose pool is
+/// [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden)
+/// does not run the closure: the call returns an `Unsupported` error.
 pub async fn spawn_blocking_io<F, T>(f: F) -> std::io::Result<T>
 where
     F: FnOnce() -> std::io::Result<T> + Send + 'static,
     T: Send + 'static,
 {
+    if current_pool_forbids_blocking() {
+        return Err(forbidden_io_error());
+    }
     spawn_blocking(f).await
+}
+
+/// Whether the blocking pool the current context inherited forbids blocking work
+/// ([`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden)).
+///
+/// A context with no pool, and code outside any context, are not forbidden: they keep the inline and
+/// dedicated-thread fallbacks, so nothing changes for a runtime that does not choose the policy. The stored
+/// handle is read, not the public accessor, so a context whose spawn authority was restricted cannot step
+/// around the decision.
+pub(crate) fn current_pool_forbids_blocking() -> bool {
+    Cx::current()
+        .and_then(|cx| cx.blocking_pool_handle_for_inheritance())
+        .is_some_and(|pool| pool.forbids_blocking())
+}
+
+/// What an I/O entry point returns instead of running work on a forbidden pool.
+pub(crate) fn forbidden_io_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "blocking work is forbidden by this runtime's blocking admission policy",
+    )
 }
 
 /// Runs I/O without ever moving the syscall onto the polling thread.
@@ -751,9 +787,13 @@ where
         let handle = match admission.await {
             Ok(handle) => handle,
             Err(refused) => {
+                let forbidden = refused.kind() == BlockingSpawnErrorKind::Forbidden;
                 // Returning the unstarted work retires its result sender.
                 // The receiver then reports refusal, never executing f.
                 drop(refused);
+                if forbidden {
+                    return Err(forbidden_io_error());
+                }
                 return rx.await;
             }
         };
@@ -927,7 +967,19 @@ where
         Err(refused) => {
             // Saturation remains parked in admission. Only a closed pool
             // returns the closure, preserving the existing shutdown fallback.
+            // A forbidden pool hands it back too, but that is a decision, not
+            // a shutdown: the closure is dropped unrun, never run inline. This
+            // function returns the closure's own `T`, so it has no error to
+            // return and refuses by panicking. That is the backstop: the
+            // callers that can return an error (the file system, DNS, STUN,
+            // Kafka transactions, remote discovery) check `forbids_blocking`
+            // before they get here and return their own typed error.
+            let forbidden = refused.kind() == BlockingSpawnErrorKind::Forbidden;
             drop(refused);
+            assert!(
+                !forbidden,
+                "blocking work is forbidden by this runtime's blocking admission policy"
+            );
             return rx.await;
         }
     };

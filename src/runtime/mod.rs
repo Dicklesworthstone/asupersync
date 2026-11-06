@@ -160,6 +160,9 @@ pub mod io_driver;
 pub mod io_op;
 /// Proof-carrying decision-plane kernel for runtime controllers.
 pub mod kernel;
+/// Bounded worker, blocking, stack and queue caps for memory-poor targets (opt-in).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod legacy_profile;
 /// Pure opt-in memory-residency recommendation engine.
 pub mod memory_residency;
 /// Feature-gated runtime instrumentation counters (timer/sched_yield/park).

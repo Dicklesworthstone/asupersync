@@ -105,6 +105,7 @@
             time_getter: wall_clock_now,
             sleep_fn: blocking_thread_sleep,
             thread_name_prefix: "affinity-test".to_string(),
+            thread_stack_size: None,
             on_thread_start: None,
             on_thread_stop: None,
             thread_handles: Mutex::new(Vec::new()),
@@ -1137,6 +1138,7 @@
             time_getter: wall_clock_now,
             sleep_fn: blocking_thread_sleep,
             thread_name_prefix: "retire-test".to_string(),
+            thread_stack_size: None,
             on_thread_start: None,
             on_thread_stop: None,
             thread_handles: Mutex::new(Vec::new()),
@@ -1245,6 +1247,7 @@
             time_getter: wall_clock_now,
             sleep_fn: blocking_thread_sleep,
             thread_name_prefix: "max-test".to_string(),
+            thread_stack_size: None,
             on_thread_start: None,
             on_thread_stop: None,
             thread_handles: Mutex::new(Vec::new()),
@@ -1287,6 +1290,7 @@
             time_getter: wall_clock_now,
             sleep_fn: blocking_thread_sleep,
             thread_name_prefix: "overflow".to_string(),
+            thread_stack_size: None,
             on_thread_start: None,
             on_thread_stop: None,
             thread_handles: Mutex::new(Vec::new()),
@@ -2518,4 +2522,71 @@
             None,
             "a finished parked worker is joined"
         );
+    }
+
+    #[test]
+    fn forbidden_pool_starts_no_thread_even_when_asked_for_a_minimum() {
+        let forbidden = BlockingPool::with_config_and_policies(
+            1,
+            1,
+            BlockingPoolOptions::default(),
+            BlockingQueuePolicy::Fifo,
+            BlockingAdmissionPolicy::Forbidden,
+        );
+        assert_eq!(forbidden.active_threads(), 0);
+        assert_eq!(forbidden.handle().active_threads(), 0);
+        assert!(forbidden.handle().try_spawn(|| {}).is_err());
+        assert_eq!(
+            forbidden.active_threads(),
+            0,
+            "a refused job starts no thread"
+        );
+        forbidden.shutdown();
+
+        // Remove the plant: the same minimum on an ordinary pool still starts its thread at once.
+        let open = BlockingPool::with_config_and_policies(
+            1,
+            1,
+            BlockingPoolOptions::default(),
+            BlockingQueuePolicy::Fifo,
+            BlockingAdmissionPolicy::Unbounded,
+        );
+        assert_eq!(open.active_threads(), 1);
+        assert!(open.shutdown_and_wait(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn pool_records_the_stack_size_it_was_asked_to_give_its_threads() {
+        let build = |thread_stack_size| {
+            BlockingPool::with_config_policies_and_stack_size(
+                0,
+                1,
+                BlockingPoolOptions::default(),
+                BlockingQueuePolicy::Fifo,
+                BlockingAdmissionPolicy::Unbounded,
+                thread_stack_size,
+            )
+        };
+        let sized = build(Some(4 * 1024 * 1024));
+        assert_eq!(sized.handle().thread_stack_size(), Some(4 * 1024 * 1024));
+        // A thread started with that stack size still runs the job.
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_job = Arc::clone(&ran);
+        let job = sized.spawn(move || ran_in_job.store(true, Ordering::SeqCst));
+        job.wait();
+        assert!(ran.load(Ordering::SeqCst));
+        assert!(sized.shutdown_and_wait(Duration::from_secs(5)));
+
+        // Remove the plant: nothing asked, nothing recorded, and 0 means the platform default.
+        assert_eq!(build(None).handle().thread_stack_size(), None);
+        assert_eq!(build(Some(0)).handle().thread_stack_size(), None);
+        assert_eq!(BlockingPool::new(0, 1).handle().thread_stack_size(), None);
+        let existing = BlockingPool::with_config_and_policies(
+            0,
+            1,
+            BlockingPoolOptions::default(),
+            BlockingQueuePolicy::Fifo,
+            BlockingAdmissionPolicy::Unbounded,
+        );
+        assert_eq!(existing.handle().thread_stack_size(), None);
     }
