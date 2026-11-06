@@ -4,11 +4,11 @@ use super::*;
 use crate::cx::Cx;
 use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::sync::ContendedMutex;
+use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::types::{
     CancelKind, CapabilityBudget, CapabilityBudgetDimension, CapabilityBudgetRefusal,
-    CapabilityBudgetRequirements, Outcome, TaskId,
+    CapabilityBudgetRequirements, Outcome, RegionId, TaskId,
 };
-use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 fn runtime_for(case: u8) -> Runtime {
@@ -417,6 +417,431 @@ fn root_drain_publishes_parked_cancellation_without_a_worker_turn() {
                 "ROOT_DRAIN bead=asupersync-wcc1f5 workers={workers} sharded={sharded} parked_batch=true caller_published=true report={report:?}"
             );
         }
+    }
+}
+
+#[derive(Default)]
+struct CancellationDispatchObservation {
+    wake_calls: AtomicUsize,
+    drop_calls: AtomicUsize,
+    lock_was_available: AtomicBool,
+    released: AtomicBool,
+}
+
+struct HeldCancellationCallback {
+    state: Arc<ContendedMutex<RuntimeState>>,
+    entered: std::sync::mpsc::Sender<()>,
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    observed: Arc<CancellationDispatchObservation>,
+    pause_in_drop: bool,
+    panic_after_release: bool,
+}
+
+impl HeldCancellationCallback {
+    fn pause(&self) {
+        // Another native worker may briefly inspect the now-empty queue.
+        // Retry that contention while still bounding a callback-under-lock bug.
+        wait_until(
+            || self.state.try_lock().is_ok(),
+            "cancellation callback runs outside the state lock",
+        );
+        self.observed
+            .lock_was_available
+            .store(true, Ordering::Release);
+        self.entered.send(()).expect("publish entered callback");
+        let (released, changed) = &*self.gate;
+        let released = released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (released, _) = changed
+            .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.observed.released.store(*released, Ordering::Release);
+        assert!(
+            *released,
+            "test must release its held cancellation callback"
+        );
+        drop(released);
+        assert!(
+            !self.panic_after_release,
+            "contained cancellation callback panic"
+        );
+    }
+}
+
+impl std::task::Wake for HeldCancellationCallback {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.observed.wake_calls.fetch_add(1, Ordering::AcqRel);
+        if !self.pause_in_drop {
+            self.pause();
+        }
+    }
+}
+
+impl Drop for HeldCancellationCallback {
+    fn drop(&mut self) {
+        self.observed.drop_calls.fetch_add(1, Ordering::AcqRel);
+        if self.pause_in_drop {
+            self.pause();
+        }
+    }
+}
+
+struct ReleaseCancellationCallback(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl ReleaseCancellationCallback {
+    fn release(&self) {
+        let (released, changed) = &*self.0;
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        changed.notify_all();
+    }
+}
+
+impl Drop for ReleaseCancellationCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CancellationDispatchDriver {
+    Caller,
+    Worker,
+}
+
+#[derive(Clone, Copy)]
+enum CancellationDispatchPause {
+    Wake,
+    Drop,
+}
+
+fn assert_in_flight_cancellation_blocks_root_drain(
+    driver: CancellationDispatchDriver,
+    pause: CancellationDispatchPause,
+    panic_after_release: bool,
+    sharded: bool,
+) {
+    use crate::types::task_context::{CancelWakeEffects, CancelWaker, CancellationEffects};
+
+    let dispatch_by_worker = matches!(driver, CancellationDispatchDriver::Worker);
+    let pause_in_drop = matches!(pause, CancellationDispatchPause::Drop);
+    // Hold every worker in the caller case: only the first shutdown call can
+    // have taken the batch. In the worker case no shutdown call runs until
+    // the native dispatch callback proves that its batch has left the queue.
+    let held = (!dispatch_by_worker).then(|| HeldDrainWorkers::new(2, sharded));
+    let runtime = held.as_ref().map_or_else(
+        || {
+            RuntimeBuilder::multi_thread()
+                .worker_threads(2)
+                .with_sharded_state(sharded)
+                .build()
+                .expect("build native cancellation-dispatch runtime")
+        },
+        |held| held.runtime.clone(),
+    );
+    assert_eq!(
+        runtime.shutdown_drained(Duration::ZERO).outcome,
+        RootDrainOutcome::Quiescent
+    );
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let observed = Arc::new(CancellationDispatchObservation::default());
+
+    std::thread::scope(|threads| {
+        // Release before the scoped join even if a regression assertion fails.
+        let release = ReleaseCancellationCallback(Arc::clone(&gate));
+        let target = Arc::new(CancelWaker::new(Waker::from(Arc::new(
+            HeldCancellationCallback {
+                state: Arc::clone(&runtime.inner.state),
+                entered: entered_tx,
+                gate: Arc::clone(&gate),
+                observed: Arc::clone(&observed),
+                pause_in_drop,
+                panic_after_release,
+            },
+        ))));
+        runtime
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .defer_cancel_dispatch(CancellationEffects::new(
+                Vec::new(),
+                CancelWakeEffects::new(smallvec::smallvec![target]),
+            ));
+        let first_drain = (!dispatch_by_worker)
+            .then(|| threads.spawn(|| runtime.shutdown_drained(Duration::ZERO)));
+        entered_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the native deferred callback reached its held boundary");
+        assert!(observed.lock_was_available.load(Ordering::Acquire));
+        assert_eq!(observed.wake_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            observed.drop_calls.load(Ordering::Acquire),
+            usize::from(pause_in_drop)
+        );
+        {
+            let state = runtime.inner.state.lock().unwrap();
+            assert!(state.region(runtime.inner.root_region).is_none());
+            assert!(!state.has_deferred_cancel_dispatches(), "batch was taken");
+        }
+        assert!(
+            !runtime.is_quiescent(),
+            "taking a cancellation batch cannot retire its running callback"
+        );
+        let report = runtime.shutdown_drained(Duration::ZERO);
+        assert_eq!(
+            report.outcome,
+            RootDrainOutcome::TimedOut,
+            "a concurrent drain must wait for callback and target retirement"
+        );
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.live_regions, 0);
+        assert_eq!(report.pending_obligations, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.queued_finalizers, 0);
+        assert!(!report.has_pending_obligation_posts);
+
+        release.release();
+        if let Some(first_drain) = first_drain {
+            assert_eq!(
+                first_drain.join().expect("first drain completes").outcome,
+                RootDrainOutcome::Quiescent
+            );
+        } else {
+            wait_until(
+                || runtime.is_quiescent(),
+                "worker dispatch retires its callback completion token",
+            );
+        }
+    });
+
+    assert!(observed.released.load(Ordering::Acquire));
+    assert_eq!(observed.wake_calls.load(Ordering::Acquire), 1);
+    assert_eq!(observed.drop_calls.load(Ordering::Acquire), 1);
+    assert_eq!(
+        runtime.shutdown_drained(Duration::ZERO).outcome,
+        RootDrainOutcome::Quiescent
+    );
+    assert!(runtime.is_quiescent());
+}
+
+#[test]
+fn root_drain_waits_for_another_callers_deferred_cancellation_wake() {
+    assert_in_flight_cancellation_blocks_root_drain(
+        CancellationDispatchDriver::Caller,
+        CancellationDispatchPause::Wake,
+        false,
+        false,
+    );
+}
+
+#[test]
+fn root_drain_waits_for_another_callers_panicking_cancellation_destructor() {
+    assert_in_flight_cancellation_blocks_root_drain(
+        CancellationDispatchDriver::Caller,
+        CancellationDispatchPause::Drop,
+        true,
+        true,
+    );
+}
+
+#[test]
+fn root_drain_waits_for_worker_dispatch_even_when_the_waker_panics() {
+    assert_in_flight_cancellation_blocks_root_drain(
+        CancellationDispatchDriver::Worker,
+        CancellationDispatchPause::Wake,
+        true,
+        false,
+    );
+}
+
+#[test]
+fn root_drain_waits_for_worker_owned_cancellation_destructors() {
+    assert_in_flight_cancellation_blocks_root_drain(
+        CancellationDispatchDriver::Worker,
+        CancellationDispatchPause::Drop,
+        false,
+        true,
+    );
+}
+
+struct HeldRootCancellationMetrics {
+    entered: std::sync::mpsc::Sender<RegionId>,
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    calls: Arc<AtomicUsize>,
+    completed: Arc<AtomicBool>,
+}
+
+impl crate::observability::metrics::MetricsProvider for HeldRootCancellationMetrics {
+    fn task_spawned(&self, _: RegionId, _: TaskId) {}
+
+    fn task_completed(
+        &self,
+        _: TaskId,
+        _: crate::observability::metrics::OutcomeKind,
+        _: Duration,
+    ) {
+    }
+
+    fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+
+    fn region_closed(&self, _: RegionId, _: Duration) {}
+
+    fn cancellation_requested(&self, region: RegionId, kind: CancelKind) {
+        assert_eq!(kind, CancelKind::Shutdown);
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        self.entered
+            .send(region)
+            .expect("publish root cancellation");
+        let (released, changed) = &*self.gate;
+        let released = released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (released, _) = changed
+            .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.completed.store(*released, Ordering::Release);
+    }
+
+    fn drain_completed(&self, _: RegionId, _: Duration) {}
+
+    fn deadline_set(&self, _: RegionId, _: Duration) {}
+
+    fn deadline_exceeded(&self, _: RegionId) {}
+
+    fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+
+    fn deadline_violation(&self, _: &str, _: Duration) {}
+
+    fn deadline_remaining(&self, _: &str, _: Duration) {}
+
+    fn checkpoint_interval(&self, _: &str, _: Duration) {}
+
+    fn task_stuck_detected(&self, _: &str) {}
+
+    fn obligation_created(&self, _: RegionId) {}
+
+    fn obligation_discharged(&self, _: RegionId) {}
+
+    fn obligation_leaked(&self, _: RegionId) {}
+
+    fn scheduler_tick(&self, _: usize, _: Duration) {}
+
+    fn wants_scheduler_ticks(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn root_drain_waits_for_another_callers_initial_cancellation_metrics() {
+    for current_thread in [true, false] {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicBool::new(false));
+        let builder = if current_thread {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::multi_thread()
+                .worker_threads(2)
+                .with_sharded_state(true)
+        };
+        let runtime = builder
+            .metrics(HeldRootCancellationMetrics {
+                entered: entered_tx,
+                gate: Arc::clone(&gate),
+                calls: Arc::clone(&calls),
+                completed: Arc::clone(&completed),
+            })
+            .build()
+            .expect("build native runtime with a held cancellation metric");
+
+        std::thread::scope(|threads| {
+            let release = ReleaseCancellationCallback(Arc::clone(&gate));
+            let first_drain = threads.spawn(|| runtime.shutdown_drained(Duration::ZERO));
+            let cancelled = entered_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("initial root cancellation reached its metrics callback");
+            assert_eq!(cancelled, runtime.inner.root_region);
+            {
+                let mut available_state = None;
+                wait_until(
+                    || {
+                        available_state = runtime.inner.state.try_lock().ok();
+                        available_state.is_some()
+                    },
+                    "root cancellation callback runs outside the state lock",
+                );
+                let state = available_state.expect("state lock became available");
+                assert!(state.region(cancelled).is_none(), "the empty root closed");
+                assert!(!state.has_deferred_cancel_dispatches());
+            }
+            assert!(!completed.load(Ordering::Acquire));
+            assert!(
+                !runtime.is_quiescent(),
+                "the initial root cancellation has not finished publishing"
+            );
+            assert_eq!(
+                runtime.shutdown_drained(Duration::ZERO).outcome,
+                RootDrainOutcome::TimedOut,
+                "a second drain cannot certify the first drain's unfinished callback"
+            );
+            release.release();
+            assert_eq!(
+                first_drain
+                    .join()
+                    .expect("initial root drain completes")
+                    .outcome,
+                RootDrainOutcome::Quiescent
+            );
+        });
+
+        assert!(completed.load(Ordering::Acquire));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(runtime.is_quiescent());
+        assert_eq!(
+            runtime.shutdown_drained(Duration::ZERO).outcome,
+            RootDrainOutcome::Quiescent
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
+}
+
+#[test]
+fn abandoned_deferred_cancellation_never_certifies_quiescence() {
+    use crate::types::task_context::CancellationEffects;
+
+    for abandon_at in 0..3 {
+        let mut state = RuntimeState::new();
+        assert!(state.is_quiescent());
+        state.defer_cancel_dispatch(CancellationEffects::ready(Vec::new()));
+        let batch = state
+            .take_deferred_cancel_dispatches()
+            .pop()
+            .expect("one queued batch");
+        assert!(!state.has_deferred_cancel_dispatches());
+        match abandon_at {
+            0 => drop(batch),
+            1 => {
+                let (_tasks, wakes) = batch.into_parts();
+                drop(wakes);
+            }
+            _ => {
+                let (_tasks, wakes) = batch.into_parts();
+                wakes.suppress();
+            }
+        }
+        assert!(
+            !state.is_quiescent(),
+            "an abandoned dispatch has no completion receipt: stage={abandon_at}"
+        );
     }
 }
 

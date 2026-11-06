@@ -2418,6 +2418,62 @@ impl fmt::Display for LeakedObligationInfo {
     }
 }
 
+/// A runtime-owned cancellation batch stays live through post-lock
+/// publication. Its completion token follows the callbacks; merely taking
+/// or abandoning the batch must never certify quiescence.
+#[derive(Debug)]
+#[must_use = "tracked cancellation must finish post-lock dispatch"]
+pub(crate) struct TrackedCancellationEffects {
+    effects: CancellationEffects<Vec<(TaskId, u8)>>,
+    outstanding: Arc<AtomicUsize>,
+}
+
+impl TrackedCancellationEffects {
+    pub(crate) fn into_parts(self) -> (Vec<(TaskId, u8)>, TrackedCancellationWakes) {
+        let (tasks, wakes) = self.effects.into_parts();
+        (
+            tasks,
+            TrackedCancellationWakes {
+                wakes,
+                outstanding: self.outstanding,
+            },
+        )
+    }
+}
+
+/// Only successful completion of the existing panic-contained dispatch
+/// boundary retires this token. Dropping or suppressing it keeps the count
+/// outstanding, matching `CancelWakeEffects`' fail-closed abandonment semantics.
+#[derive(Debug)]
+#[must_use = "tracked cancellation callbacks must be dispatched outside locks"]
+pub(crate) struct TrackedCancellationWakes {
+    wakes: CancelWakeEffects,
+    outstanding: Arc<AtomicUsize>,
+}
+
+impl TrackedCancellationWakes {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.wakes.is_empty()
+    }
+
+    pub(crate) fn stamp_drains(&self) {
+        self.wakes.stamp_drains();
+    }
+
+    pub(crate) fn dispatch(self) {
+        // dispatch() returns only after all observer callbacks, wake calls,
+        // and retained target destructors have run inside their unwind guards.
+        // An unexpected unwind before that boundary must retain the count.
+        self.wakes.dispatch();
+        self.outstanding.fetch_sub(1, Ordering::Release);
+    }
+
+    pub(crate) fn suppress(self) {
+        self.wakes.suppress();
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ObligationLeakError {
     task_id: Option<TaskId>,
@@ -2548,7 +2604,11 @@ pub struct RuntimeState {
     /// value, principally `RegionRunner::drop`. The state-lock owner must take
     /// these batches, publish their task ids, and dispatch their Wakers only
     /// after releasing the outer lock.
-    pending_cancel_dispatches: Vec<CancellationEffects<Vec<(TaskId, u8)>>>,
+    pending_cancel_dispatches: Vec<TrackedCancellationEffects>,
+    /// Root-drain and queued or in-flight deferred cancellation batches.
+    /// Taking the queue clears the scheduler hint, but cancellation remains
+    /// live until callbacks and retained targets finish outside state locks.
+    outstanding_cancel_dispatches: Arc<AtomicUsize>,
     /// Lock-free scheduler hint that avoids taking the state lock when the
     /// deferred cancellation queue is empty.
     pending_cancel_dispatch_ready: Arc<AtomicBool>,
@@ -2763,6 +2823,10 @@ impl std::fmt::Debug for RuntimeState {
                 &self.pending_cancel_dispatches.len(),
             )
             .field(
+                "outstanding_cancel_dispatches",
+                &self.outstanding_cancel_dispatches.load(Ordering::Acquire),
+            )
+            .field(
                 "has_pending_cancel_dispatch_coordinator",
                 &self.pending_cancel_dispatch_coordinator.is_some(),
             )
@@ -2855,6 +2919,7 @@ impl RuntimeState {
             spawn_gateway: None,
             obligation_gateway: None,
             pending_cancel_dispatches: Vec::new(),
+            outstanding_cancel_dispatches: Arc::new(AtomicUsize::new(0)),
             pending_cancel_dispatch_ready: Arc::new(AtomicBool::new(false)),
             pending_cancel_dispatch_coordinator: None,
             task_watches: crate::monitor::TaskWatches::default(),
@@ -4237,7 +4302,8 @@ impl RuntimeState {
         effects: CancellationEffects<Vec<(TaskId, u8)>>,
     ) {
         self.pending_cancel_dispatches.reserve(1);
-        self.pending_cancel_dispatches.push(effects);
+        let tracked = self.track_cancel_dispatch(effects);
+        self.pending_cancel_dispatches.push(tracked);
         self.pending_cancel_dispatch_ready
             .store(true, Ordering::Release);
         if let Some(coordinator) = self
@@ -4249,6 +4315,25 @@ impl RuntimeState {
             // This closes the final-check/park race without invoking an
             // arbitrary notifier or reactor callback beneath RuntimeState.
             coordinator.wake_one_parker();
+        }
+    }
+
+    /// Tracks a batch before its producer releases the outer state lock.
+    /// Direct root-drain publication needs the same completion token as the
+    /// deferred queue: cancelling an empty root can remove its region before
+    /// its returned metrics and Waker callbacks have run.
+    pub(crate) fn track_cancel_dispatch(
+        &self,
+        effects: CancellationEffects<Vec<(TaskId, u8)>>,
+    ) -> TrackedCancellationEffects {
+        self.outstanding_cancel_dispatches
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .expect("cancellation dispatch count exhausted");
+        TrackedCancellationEffects {
+            effects,
+            outstanding: Arc::clone(&self.outstanding_cancel_dispatches),
         }
     }
 
@@ -4316,11 +4401,20 @@ impl RuntimeState {
         self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
     }
 
+    /// Returns whether a root-drain or deferred cancellation batch is queued
+    /// or still being dispatched. The scheduler hint above only means there
+    /// is a batch left to take; quiescence requires this stronger check.
+    #[inline]
+    pub(crate) fn has_outstanding_cancel_dispatches(&self) -> bool {
+        self.outstanding_cancel_dispatches.load(Ordering::Acquire) != 0
+    }
+
     /// Takes callback-free cancellation batches for post-unlock publication
-    /// and dispatch by the state-lock owner.
+    /// and dispatch by the state-lock owner. Each batch retains its completion
+    /// token until its post-lock callback dispatch finishes.
     pub(crate) fn take_deferred_cancel_dispatches(
         &mut self,
-    ) -> Vec<CancellationEffects<Vec<(TaskId, u8)>>> {
+    ) -> Vec<TrackedCancellationEffects> {
         let pending = std::mem::take(&mut self.pending_cancel_dispatches);
         self.pending_cancel_dispatch_ready
             .store(false, Ordering::Release);
@@ -8367,6 +8461,7 @@ impl RuntimeState {
     /// A runtime is quiescent when:
     /// - No live tasks are running
     /// - No pending obligations exist
+    /// - No root-drain or deferred cancellation batch is still outstanding
     /// - No I/O sources are registered (if I/O driver is present)
     /// - No region is still in the close lifecycle
     #[must_use]
@@ -8411,7 +8506,7 @@ impl RuntimeState {
         // early if any preceding condition is already false.
         self.live_task_count() == 0
             && obligations.resolve_ref(&self.obligations).pending_count() == 0
-            && self.pending_cancel_dispatches.is_empty()
+            && !self.has_outstanding_cancel_dispatches()
             && self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty)
             && regions.resolve_ref(&self.regions).iter().all(|(_, r)| {
                 r.finalizers_empty()
