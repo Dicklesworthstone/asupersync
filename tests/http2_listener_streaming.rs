@@ -45,6 +45,8 @@ const INITIAL_WINDOW: usize = 65_535;
 
 #[path = "http2_listener_streaming/obligation_tests.rs"]
 mod obligation_tests;
+#[path = "http2_listener_streaming/router_produced_tests.rs"]
+mod router_produced_tests;
 
 fn run(workers: usize, future: impl Future<Output = ()> + 'static) {
     let builder = if workers == 1 {

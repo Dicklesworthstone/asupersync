@@ -849,8 +849,10 @@ impl Http2StreamSlot {
 
 /// Request-scoped authoring handle for a supervised HTTP/2 response body.
 ///
-/// The handle is available only through
-/// [`crate::web::Router::into_http2_produced_handler`]. Registration is
+/// The handle is available through
+/// [`crate::web::Router::into_http2_produced_handler`] and, with
+/// `http2-streaming`, `Router::into_http2_streaming_produced_handler`.
+/// The latter can retain a live request body inside its producer. Registration is
 /// deferred: it creates no channel and polls no producer until the HTTP/2
 /// listener validates the final response head and supplies its request-derived
 /// [`Cx`].

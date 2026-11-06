@@ -3740,6 +3740,72 @@ impl Router {
         }
     }
 
+    /// Convert this router into an HTTP/2 handler with live ingress and egress.
+    ///
+    /// Use with
+    /// [`crate::http::h2::listener::Http2Listener::bind_streaming_produced_with_config`]
+    /// and [`crate::http::h2::listener::Http2Listener::run_streaming_produced`].
+    /// A route can extract both [`crate::web::Http2StreamResponder`] and
+    /// [`crate::web::StreamingRawBody`], then move that body into its response
+    /// producer. The listener supervises both directions in the same request
+    /// region, with independent bounded queues and HTTP/2 flow control. No
+    /// buffering, body collector, detached task, or second owner is introduced.
+    ///
+    /// Unclaimed input is dropped at dispatch completion. Claimed input may
+    /// outlive dispatch inside the producer; peer reset, cancellation, and
+    /// shutdown retain the listener's normal drain contract. Ordinary buffered
+    /// responses remain supported. Synchronous buffered request extractors
+    /// refuse live input, as on [`Self::into_http2_streaming_handler`].
+    /// Use [`Self::into_http2_streaming_produced_parts`] to bind static route
+    /// limits before the listener admits the request body and region.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn into_http2_streaming_produced_handler(
+        self,
+    ) -> impl Fn(StreamingServerRequest) -> Http2ProducedHandlerFuture + Clone + Send + Sync + 'static {
+        let router = Arc::new(self);
+        move |request| {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                let Some(cx) = Cx::current() else {
+                    return http2_produced_refusal("request context unavailable");
+                };
+                router.handle_http2_streaming_produced_request_with_cx(&cx, request).await
+            })
+        }
+    }
+
+    /// Bind HTTP/2 live input and produced output to static route admission.
+    ///
+    /// Pass both returned values to
+    /// [`crate::http::h2::listener::Http2Listener::bind_streaming_produced_with_config`].
+    /// Admission and dispatch share one immutable router, including nested
+    /// route precedence and the monotonic server/router/route body policy.
+    /// Request-local middleware can tighten the admitted limit further.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn into_http2_streaming_produced_parts(
+        self,
+        config: Http2StreamingListenerConfig,
+    ) -> (
+        impl Fn(StreamingServerRequest) -> Http2ProducedHandlerFuture + Clone + Send + Sync + 'static,
+        Http2StreamingListenerConfig,
+    ) {
+        let router = Arc::new(self);
+        let admission = Arc::clone(&router);
+        let config = config.with_request_body_policy(move |head| admission.http2_streaming_body_policy(head));
+        let handler = move |request| -> Http2ProducedHandlerFuture {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                let Some(cx) = Cx::current() else {
+                    return http2_produced_refusal("request context unavailable");
+                };
+                router.handle_http2_streaming_produced_request_with_cx(&cx, request).await
+            })
+        };
+        (handler, config)
+    }
+
     /// Dispatch one listener request through this router with an explicit
     /// capability context.
     ///
@@ -3868,7 +3934,33 @@ impl Router {
         cx: &Cx,
         request: HttpRequest,
     ) -> Http2ProducedResponse {
-        let mut request = web_request_from_http(request);
+        self.handle_http2_produced_web_request_with_cx(cx, web_request_from_http(request)).await
+    }
+
+    /// Dispatch live HTTP/2 input and bind its response producer to the same Cx.
+    ///
+    /// The private one-shot input slot is guarded through dispatch. Extracting
+    /// the body transfers its ownership to the handler or producer; an
+    /// unclaimed body is dropped even if middleware retains a request clone.
+    /// Response-head binding and tracing use the ordinary H2 produced path.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    pub async fn handle_http2_streaming_produced_request_with_cx(
+        &self,
+        cx: &Cx,
+        request: StreamingServerRequest,
+    ) -> Http2ProducedResponse {
+        let Some((request, _body_control)) = web_request_from_streaming_http(request) else {
+            return http2_produced_refusal("streaming request body slot collision");
+        };
+        self.handle_http2_produced_web_request_with_cx(cx, request).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn handle_http2_produced_web_request_with_cx(
+        &self,
+        cx: &Cx,
+        mut request: Request,
+    ) -> Http2ProducedResponse {
         let slot = Http2StreamSlot::default();
         request.extensions.insert_typed(slot.clone());
 
