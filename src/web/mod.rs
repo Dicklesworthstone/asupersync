@@ -252,6 +252,8 @@ pub use extract::{
     State, TypedHeader, UserAgent,
 };
 #[cfg(not(target_arch = "wasm32"))]
+pub use compress::{StreamingCompression, StreamingCompressionConfig};
+#[cfg(not(target_arch = "wasm32"))]
 pub use extract::{CollectedStreamingRawBody, DecodedStreamingBody, StreamingRawBody, StreamingRawBodyCollectError};
 pub use handler::{
     AsyncCxFnHandler, AsyncCxFnHandler1, AsyncCxFnHandler2, AsyncCxFnHandler3, AsyncCxFnHandler4,

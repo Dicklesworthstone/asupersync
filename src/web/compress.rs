@@ -38,6 +38,11 @@ use super::extract::Request;
 use super::handler::Handler;
 use super::response::{Response, StatusCode};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod streaming;
+#[cfg(not(target_arch = "wasm32"))]
+pub use streaming::{StreamingCompression, StreamingCompressionConfig};
+
 /// Policy governing response compression behavior.
 #[derive(Debug, Clone)]
 pub struct CompressionPolicy {

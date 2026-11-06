@@ -24,6 +24,7 @@ use crate::bytes::{Buf, Bytes, BytesCursor};
 use crate::stream::Stream;
 
 pub use super::decode::{ContentDecodeError, ContentDecodeLimits, ContentDecodedBody};
+pub use super::encode::{ContentEncodeError, ContentEncodeLimits, ContentEncodedBody};
 
 /// A frame of body content: either data or trailers.
 ///

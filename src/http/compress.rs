@@ -79,6 +79,22 @@ pub(crate) fn decompression_limit_error(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, DecompressionLimitExceeded(message))
 }
 
+/// Typed marker for output-cap refusals, distinct from malformed codec input.
+#[derive(Debug)]
+pub(crate) struct CompressionLimitExceeded;
+
+impl fmt::Display for CompressionLimitExceeded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("compressed size exceeds limit")
+    }
+}
+
+impl std::error::Error for CompressionLimitExceeded {}
+
+fn compression_limit_error() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, CompressionLimitExceeded)
+}
+
 /// Supported content encodings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentEncoding {
@@ -390,6 +406,16 @@ pub trait Compressor: Send {
     /// Compress a chunk of input data, appending compressed bytes to `output`.
     fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()>;
 
+    /// Publish buffered bytes without ending the compressed representation.
+    ///
+    /// The default preserves existing third-party implementations that only
+    /// promise output at `finish`. Built-in gzip, deflate, and Brotli codecs
+    /// implement an incremental flush for explicitly streamed responses.
+    /// Buffered compression paths do not call this hook.
+    fn flush(&mut self, _output: &mut Vec<u8>) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Flush any buffered data and write the compression trailer.
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()>;
 
@@ -454,9 +480,9 @@ impl Compressor for LimitedIdentityCompressor {
         let next_emitted = self
             .emitted
             .checked_add(input.len())
-            .ok_or_else(|| limit_error("compressed size exceeds limit"))?;
+            .ok_or_else(compression_limit_error)?;
         if next_emitted > self.max_size {
-            return Err(limit_error("compressed size exceeds limit"));
+            return Err(compression_limit_error());
         }
         output.extend_from_slice(input);
         self.emitted = next_emitted;
@@ -543,7 +569,7 @@ impl LimitedWriter {
 
     fn limit_error(&self) -> io::Error {
         match self.output {
-            LimitedOutput::Compressed => limit_error("compressed size exceeds limit"),
+            LimitedOutput::Compressed => compression_limit_error(),
             LimitedOutput::Decompressed => decompression_limit_error("decompressed size exceeds limit"),
         }
     }
@@ -587,6 +613,7 @@ const BROTLI_DEFAULT_QUALITY: u32 = 5;
 #[cfg(feature = "compression")]
 const BROTLI_DEFAULT_LGWIN: u32 = 22;
 
+#[cfg(feature = "compression")]
 fn limit_error(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -605,10 +632,10 @@ fn append_limited_output(
 ) -> io::Result<()> {
     let next_emitted = emitted
         .checked_add(chunk.len())
-        .ok_or_else(|| limit_error("compressed size exceeds limit"))?;
+        .ok_or_else(compression_limit_error)?;
     if let Some(max) = max_size {
         if next_emitted > max {
-            return Err(limit_error("compressed size exceeds limit"));
+            return Err(compression_limit_error());
         }
     }
     output.append(chunk);
@@ -691,6 +718,16 @@ impl Compressor for GzipCompressor {
         use io::Write;
         self.refresh_remaining_limit();
         self.encoder.write_all(input)?;
+        self.drain_output_buffer(output)
+    }
+
+    fn flush(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        if self.finished {
+            return Ok(());
+        }
+        self.refresh_remaining_limit();
+        self.encoder.flush()?;
         self.drain_output_buffer(output)
     }
 
@@ -889,6 +926,16 @@ impl Compressor for DeflateCompressor {
         use io::Write;
         self.refresh_remaining_limit();
         self.encoder.write_all(input)?;
+        self.drain_output_buffer(output)
+    }
+
+    fn flush(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        if self.finished {
+            return Ok(());
+        }
+        self.refresh_remaining_limit();
+        self.encoder.flush()?;
         self.drain_output_buffer(output)
     }
 
@@ -1169,6 +1216,16 @@ impl Compressor for BrotliCompressor {
         use io::Write;
         self.refresh_remaining_limit();
         self.encoder.write_all(input)?;
+        self.refresh_remaining_limit();
+        self.encoder.flush()?;
+        self.drain_output_buffer(output)
+    }
+
+    fn flush(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        if self.finished {
+            return Ok(());
+        }
         self.refresh_remaining_limit();
         self.encoder.flush()?;
         self.drain_output_buffer(output)

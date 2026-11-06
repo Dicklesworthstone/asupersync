@@ -28,6 +28,9 @@ use crate::http::h2::listener::{Http2BodySender, Http2ProducedResponse};
 #[cfg(not(target_arch = "wasm32"))]
 use super::extract::{ExtractionError, FromRequestParts, Request};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod body;
+
 // ─── Status Codes ────────────────────────────────────────────────────────────
 
 /// HTTP status code.
