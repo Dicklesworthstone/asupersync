@@ -2187,48 +2187,22 @@ impl InactivationDecoder {
     /// is provided for direct decoder testing.
     #[must_use]
     pub fn constraint_symbols(&self) -> Vec<ReceivedSymbol> {
-        let s = self.params.s;
-        let h = self.params.h;
         let symbol_size = self.params.symbol_size;
-        let base_rows = s + h;
 
-        // Reuse the encoder's exact precode rows without constructing its K'
-        // systematic LT rows. Decoding and rank feedback need only S+H here;
-        // a full matrix would allocate L squared cells for every new analysis.
-        let constraints = ConstraintMatrix::build_precode(&self.params, self.seed);
-
-        let mut result = Vec::with_capacity(base_rows);
-
-        // Extract the first S+H rows (LDPC + HDPC constraints)
-        for row in 0..base_rows {
-            let (columns, coefficients) = Self::constraint_row_equation(&constraints, row);
-            result.push(ReceivedSymbol {
+        // Use the encoder's authoritative coefficient writes, retaining the
+        // LDPC rows sparsely and moving each canonical row directly into the
+        // decoder. No dense LDPC or systematic LT matrix is needed.
+        ConstraintMatrix::sparse_precode_rows(&self.params, self.seed)
+            .into_iter()
+            .enumerate()
+            .map(|(row, equation)| ReceivedSymbol {
                 esi: row as u32,
                 is_source: false,
-                columns,
-                coefficients,
+                columns: equation.columns,
+                coefficients: equation.coefficients,
                 data: vec![0u8; symbol_size],
-            });
-        }
-
-        result
-    }
-
-    /// Extract a sparse equation from a constraint matrix row.
-    fn constraint_row_equation(
-        constraints: &ConstraintMatrix,
-        row: usize,
-    ) -> (Vec<usize>, Vec<Gf256>) {
-        let mut columns = Vec::new();
-        let mut coefficients = Vec::new();
-        for col in 0..constraints.cols {
-            let coeff = constraints.get(row, col);
-            if !coeff.is_zero() {
-                columns.push(col);
-                coefficients.push(coeff);
-            }
-        }
-        (columns, coefficients)
+            })
+            .collect()
     }
 
     /// Phase 1: Peeling (belief propagation).

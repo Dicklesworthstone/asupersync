@@ -400,7 +400,7 @@ std::thread_local! {
         const { std::cell::Cell::new(usize::MAX) };
 }
 
-/// Bound matrix allocations in a regression test before allocating the cells.
+/// Bound dense matrix and HDPC scratch allocations before allocating the cells.
 /// The thread-local guard does not affect concurrently running tests.
 #[cfg(test)]
 pub(crate) fn with_constraint_matrix_cell_limit<T>(
@@ -418,6 +418,100 @@ pub(crate) fn with_constraint_matrix_cell_limit<T>(
     let _restore =
         RestoreLimit(CONSTRAINT_MATRIX_CELL_LIMIT.with(|limit| limit.replace(max_cells)));
     operation()
+}
+
+#[cfg(test)]
+fn check_constraint_coefficient_cells(cells: usize) {
+    CONSTRAINT_MATRIX_CELL_LIMIT.with(|limit| {
+        assert!(
+            cells <= limit.get(),
+            "dense coefficients request {cells} cells, exceeding the test limit {}",
+            limit.get()
+        );
+    });
+}
+
+/// Coefficient writes shared by the dense encoder and sparse decoder precode.
+/// Assignment and GF(256) addition are separate because repeated circulant
+/// connections cancel, while repeated identity/PI assignments remain present.
+trait ConstraintCoefficientWriter {
+    fn set(&mut self, row: usize, col: usize, value: Gf256);
+    fn add_assign(&mut self, row: usize, col: usize, value: Gf256);
+}
+
+impl ConstraintCoefficientWriter for ConstraintMatrix {
+    fn set(&mut self, row: usize, col: usize, value: Gf256) {
+        Self::set(self, row, col, value);
+    }
+
+    fn add_assign(&mut self, row: usize, col: usize, value: Gf256) {
+        Self::add_assign(self, row, col, value);
+    }
+}
+
+/// A precode equation in canonical column order with zero terms omitted.
+#[derive(Debug, Default)]
+pub(crate) struct PrecodeRow {
+    pub(crate) columns: Vec<usize>,
+    pub(crate) coefficients: Vec<Gf256>,
+}
+
+enum CoefficientUpdate {
+    Assign,
+    Add,
+}
+
+impl PrecodeRow {
+    fn update(&mut self, col: usize, value: Gf256, update: CoefficientUpdate) {
+        // LDPC circulant writes and HDPC row writes arrive in ascending column
+        // order. Only collisions and a wrapped PI pair need a binary search.
+        let position = if self.columns.last().is_none_or(|&last| last < col) {
+            Err(self.columns.len())
+        } else {
+            self.columns.binary_search(&col)
+        };
+        match position {
+            Ok(index) => {
+                let value = match update {
+                    CoefficientUpdate::Assign => value,
+                    CoefficientUpdate::Add => self.coefficients[index] + value,
+                };
+                if value.is_zero() {
+                    self.columns.remove(index);
+                    self.coefficients.remove(index);
+                } else {
+                    self.coefficients[index] = value;
+                }
+            }
+            Err(index) if !value.is_zero() => {
+                self.columns.insert(index, col);
+                self.coefficients.insert(index, value);
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+struct SparsePrecodeRows {
+    rows: Vec<PrecodeRow>,
+}
+
+impl SparsePrecodeRows {
+    fn new(row_count: usize) -> Self {
+        Self {
+            rows: (0..row_count).map(|_| PrecodeRow::default()).collect(),
+        }
+    }
+}
+
+impl ConstraintCoefficientWriter for SparsePrecodeRows {
+    fn set(&mut self, row: usize, col: usize, value: Gf256) {
+        self.rows[row].update(col, value, CoefficientUpdate::Assign);
+    }
+
+    fn add_assign(&mut self, row: usize, col: usize, value: Gf256) {
+        self.rows[row].update(col, value, CoefficientUpdate::Add);
+    }
 }
 
 impl ConstraintMatrix {
@@ -447,13 +541,7 @@ impl ConstraintMatrix {
             .checked_mul(cols)
             .expect("constraint matrix dimensions (rows * cols) overflow usize");
         #[cfg(test)]
-        CONSTRAINT_MATRIX_CELL_LIMIT.with(|limit| {
-            assert!(
-                n <= limit.get(),
-                "constraint matrix requests {n} coefficient cells, exceeding the test limit {}",
-                limit.get()
-            );
-        });
+        check_constraint_coefficient_cells(n);
         Self {
             data: vec![Gf256::ZERO; n],
             rows,
@@ -514,12 +602,27 @@ impl ConstraintMatrix {
     /// source and repair symbols supply the decoder's remaining equations, so
     /// materializing the `K'` systematic LT rows would allocate an otherwise
     /// unused `K' * L` coefficient buffer (br-asupersync-w9yojl).
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn build_precode(params: &SystematicParams, seed: u64) -> Self {
         let mut matrix = Self::zeros(params.s + params.h, params.l);
         build_ldpc_rows(&mut matrix, params, seed);
         build_hdpc_rows(&mut matrix, params, seed);
         matrix
+    }
+
+    /// Generate decoder precode equations without a dense LDPC matrix.
+    ///
+    /// Both representations use the same coefficient writers. The only dense
+    /// scratch is the existing HDPC recurrence, with `H * (K' + S)` cells;
+    /// LDPC storage follows its nonzero terms instead of allocating `S * L`
+    /// cells (br-asupersync-w9yojl).
+    #[must_use]
+    pub(crate) fn sparse_precode_rows(params: &SystematicParams, seed: u64) -> Vec<PrecodeRow> {
+        let mut precode = SparsePrecodeRows::new(params.s + params.h);
+        build_ldpc_rows(&mut precode, params, seed);
+        build_hdpc_rows(&mut precode, params, seed);
+        precode.rows
     }
 
     /// Solve the system A·C = D using Gaussian elimination over GF(256).
@@ -667,7 +770,11 @@ fn gf256_mul_slice_inplace(data: &mut [u8], c: Gf256) {
 ///    the RFC circulant pattern with step `a = 1 + floor(i/S)`.
 /// 2. `I_S`: row `i` has coefficient 1 in column `B+i`.
 /// 3. `G_LDPC,2`: each row connects to two PI columns at `W..W+P`.
-fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
+fn build_ldpc_rows(
+    matrix: &mut impl ConstraintCoefficientWriter,
+    params: &SystematicParams,
+    _seed: u64,
+) {
     let s = params.s;
     let b = params.b;
     let w = params.w;
@@ -712,7 +819,11 @@ fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
 /// - MT is an H x (K'+S) matrix built from the RFC 6330 Rand function
 /// - GAMMA is an H x H lower-triangular matrix with GAMMA[i][j] = alpha^(i-j)
 /// - Each HDPC row r has a 1 in column K'+S+r (identity block)
-fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
+fn build_hdpc_rows(
+    matrix: &mut impl ConstraintCoefficientWriter,
+    params: &SystematicParams,
+    _seed: u64,
+) {
     use crate::raptorq::rfc6330::rand;
 
     let s = params.s;
@@ -728,6 +839,11 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
     // Step 1: Build G_HDPC directly with the RFC recurrence used by the
     // reference implementation. It is equivalent to GAMMA x MT but avoids a
     // transposition-prone explicit matrix multiply.
+    #[cfg(test)]
+    check_constraint_coefficient_cells(
+        h.checked_mul(ks)
+            .expect("HDPC scratch dimensions overflow usize"),
+    );
     let mut hdpc = vec![vec![Gf256::ZERO; ks]; h];
     for (row_idx, row) in hdpc.iter_mut().enumerate() {
         row[ks - 1] = Gf256::ALPHA.pow((row_idx % 255) as u8);

@@ -802,6 +802,7 @@
             for seed in [0, 42, u64::MAX] {
                 let full = ConstraintMatrix::build(&params, seed);
                 let precode = ConstraintMatrix::build_precode(&params, seed);
+                let sparse = ConstraintMatrix::sparse_precode_rows(&params, seed);
                 let precode_cells = (params.s + params.h) * params.l;
 
                 assert_eq!(precode.rows, params.s + params.h, "K={k}, seed={seed}");
@@ -812,6 +813,149 @@
                     &full.data[..precode_cells],
                     "precode coefficients differ from the encoder at K={k}, seed={seed}"
                 );
+                assert_eq!(sparse.len(), params.s + params.h);
+                for (row, equation) in sparse.iter().enumerate() {
+                    let expected: Vec<_> = (0..params.l)
+                        .filter_map(|col| {
+                            let value = full.get(row, col);
+                            (!value.is_zero()).then_some((col, value))
+                        })
+                        .collect();
+                    let actual: Vec<_> = equation
+                        .columns
+                        .iter()
+                        .copied()
+                        .zip(equation.coefficients.iter().copied())
+                        .collect();
+                    assert_eq!(equation.columns.len(), equation.coefficients.len());
+                    assert_eq!(actual, expected, "K={k}, seed={seed}, row={row}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_precode_writer_preserves_assignment_and_xor_collisions() {
+        use CoefficientUpdate::{Add, Assign};
+
+        let mut dense = ConstraintMatrix::zeros(2, 9);
+        let mut sparse = SparsePrecodeRows::new(2);
+        // Include an out-of-order insertion, repeated assignments, XOR
+        // cancellation/reinsertion, and zero writes to present/absent columns.
+        let writes = [
+            (Assign, 0, 5, 7),
+            (Assign, 0, 5, 7),
+            (Assign, 0, 2, 11),
+            (Add, 0, 5, 7),
+            (Add, 0, 5, 19),
+            (Assign, 0, 5, 3),
+            (Add, 0, 5, 7),
+            (Assign, 0, 5, 0),
+            (Add, 0, 1, 0),
+            (Assign, 0, 8, 1),
+            (Assign, 0, 7, 1),
+            (Add, 0, 2, 11),
+            (Assign, 1, 6, 29),
+            (Add, 1, 6, 29),
+            (Assign, 1, 0, 0),
+            (Add, 1, 0, 1),
+        ];
+        for (step, (update, row, col, value)) in writes.into_iter().enumerate() {
+            let value = Gf256::new(value);
+            match update {
+                Assign => {
+                    dense.set(row, col, value);
+                    sparse.set(row, col, value);
+                }
+                Add => {
+                    dense.add_assign(row, col, value);
+                    sparse.add_assign(row, col, value);
+                }
+            }
+            for (row, equation) in sparse.rows.iter().enumerate() {
+                let expected: Vec<_> = (0..dense.cols)
+                    .filter_map(|col| {
+                        let value = dense.get(row, col);
+                        (!value.is_zero()).then_some((col, value))
+                    })
+                    .collect();
+                let actual: Vec<_> = equation
+                    .columns
+                    .iter()
+                    .copied()
+                    .zip(equation.coefficients.iter().copied())
+                    .collect();
+                assert_eq!(equation.columns.len(), equation.coefficients.len());
+                assert_eq!(actual, expected, "write={step}, row={row}");
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_precode_matches_bounded_reference_for_every_rfc_table_entry() {
+        // The reference uses ordered maps for LDPC and only H*L dense cells
+        // for HDPC. It checks every supported shape without ever constructing
+        // an S*L or L*L matrix for a large source block.
+        struct ReferenceRows {
+            ldpc: Vec<std::collections::BTreeMap<usize, Gf256>>,
+            hdpc: ConstraintMatrix,
+        }
+
+        impl ConstraintCoefficientWriter for ReferenceRows {
+            fn set(&mut self, row: usize, col: usize, value: Gf256) {
+                if row < self.ldpc.len() {
+                    if value.is_zero() {
+                        self.ldpc[row].remove(&col);
+                    } else {
+                        self.ldpc[row].insert(col, value);
+                    }
+                } else {
+                    self.hdpc.set(row - self.ldpc.len(), col, value);
+                }
+            }
+
+            fn add_assign(&mut self, row: usize, col: usize, value: Gf256) {
+                if row < self.ldpc.len() {
+                    let previous = self.ldpc[row].get(&col).copied().unwrap_or(Gf256::ZERO);
+                    self.set(row, col, previous + value);
+                } else {
+                    self.hdpc.add_assign(row - self.ldpc.len(), col, value);
+                }
+            }
+        }
+
+        for &(k_prime, _, _, _, _) in SYSTEMATIC_INDEX_TABLE {
+            let params = SystematicParams::for_source_block(k_prime as usize, 1);
+            let (sparse, reference) = with_constraint_matrix_cell_limit(params.h * params.l, || {
+                let sparse = ConstraintMatrix::sparse_precode_rows(&params, 42);
+                let mut reference = ReferenceRows {
+                    ldpc: (0..params.s).map(|_| std::collections::BTreeMap::new()).collect(),
+                    hdpc: ConstraintMatrix::zeros(params.h, params.l),
+                };
+                build_ldpc_rows(&mut reference, &params, 42);
+                build_hdpc_rows(&mut reference, &params, 42);
+                (sparse, reference)
+            });
+            assert_eq!(sparse.len(), params.s + params.h);
+            for (row, equation) in sparse.iter().enumerate() {
+                let expected: Vec<_> = if row < params.s {
+                    reference.ldpc[row].iter().map(|(&col, &value)| (col, value)).collect()
+                } else {
+                    (0..params.l)
+                        .filter_map(|col| {
+                            let value = reference.hdpc.get(row - params.s, col);
+                            (!value.is_zero()).then_some((col, value))
+                        })
+                        .collect()
+                };
+                let actual: Vec<_> = equation
+                    .columns
+                    .iter()
+                    .copied()
+                    .zip(equation.coefficients.iter().copied())
+                    .collect();
+                assert_eq!(equation.columns.len(), equation.coefficients.len());
+                assert_eq!(actual, expected, "K'={k_prime}, row={row}");
             }
         }
     }

@@ -126,16 +126,18 @@ mod tests {
     fn max_rfc_block_constraint_symbols_bound_matrix_allocation() {
         let decoder = InactivationDecoder::new(56_403, 1, 42);
         let params = &decoder.params;
-        let precode_cells = (params.s + params.h) * params.l;
+        let hdpc_scratch_cells = params.h * (params.k_prime + params.s);
         // At the largest RFC block, the old L*L construction requests over
-        // three billion cells. Fail before that allocation if it is restored;
-        // the decoder needs only the roughly 51 MiB precode coefficient area.
-        assert_eq!(precode_cells, 52_911_898);
+        // three billion cells and dense precode still needs over 50 million.
+        // The sparse path needs only the existing HDPC recurrence scratch;
+        // reject either dense matrix before allocation if it is restored.
+        assert_eq!(hdpc_scratch_cells, 916_960);
+        assert!((params.s + params.h) * params.l > 50_000_000);
         assert!(params.l * params.l > 3_000_000_000);
-        let constraints =
-            crate::raptorq::systematic::with_constraint_matrix_cell_limit(precode_cells, || {
-                decoder.constraint_symbols()
-            });
+        let constraints = crate::raptorq::systematic::with_constraint_matrix_cell_limit(
+            hdpc_scratch_cells,
+            || decoder.constraint_symbols(),
+        );
 
         assert_eq!(constraints.len(), params.s + params.h);
         for (row, symbol) in constraints.iter().enumerate() {
