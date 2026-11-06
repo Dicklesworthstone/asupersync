@@ -535,12 +535,12 @@ pub struct DecodingPipeline {
     /// per-symbol log lines while still giving operators a visible
     /// signal that auth is off.
     verify_auth_disabled_warned: bool,
-    /// br-asupersync-w9yojl: the last rank analysis of each block, keyed on
-    /// the block's received symbol set. A rank depends only on which
-    /// equations are present, so a feedback round that saw no new symbol for
-    /// a block reuses it instead of rebuilding the block's whole constraint
-    /// system. At most one entry per block.
-    rank_cache: parking_lot::Mutex<HashMap<u8, (BlockSymbolsKey, Option<RankStatus>)>>,
+    /// br-asupersync-w9yojl: the last exact rank analysis of each block.
+    /// Every change to its retained symbols or plan invalidates the entry,
+    /// including temporary ownership transfer to a decode job. Unchanged
+    /// feedback needs only this lookup, without scanning or hashing the
+    /// pipeline's symbol map. At most one entry per block, including failures.
+    rank_cache: parking_lot::Mutex<HashMap<u8, Option<RankStatus>>>,
     /// Rank analyses actually run, for the rank-cache tests.
     #[cfg(test)]
     rank_analyses: std::sync::atomic::AtomicUsize,
@@ -633,6 +633,9 @@ impl DecodingPipeline {
         )?;
         validate_object_params_layout(params, &plans)?;
         let block_plan_by_sbn = block_plan_index_by_sbn(&plans);
+        if self.block_plans.as_ref() != Some(&plans) {
+            self.rank_cache.get_mut().clear();
+        }
         self.object_id = Some(params.object_id);
         self.object_size = Some(params.object_size);
         self.block_plans = Some(plans);
@@ -861,6 +864,7 @@ impl DecodingPipeline {
                 block_progress,
                 threshold_reached: _,
             } => {
+                self.rank_cache.get_mut().remove(&sbn);
                 self.accepted_symbols_total = self.accepted_symbols_total.saturating_add(1);
                 if !self.config.verify_auth {
                     self.skipped_verifications = self.skipped_verifications.saturating_add(1);
@@ -1138,6 +1142,9 @@ impl DecodingPipeline {
         }
 
         let symbols = self.symbols.take_block_symbols(sbn);
+        if !symbols.is_empty() {
+            self.rank_cache.get_mut().remove(&sbn);
+        }
         if symbols.len() < block_plan.k {
             self.restore_decode_symbols(sbn, symbols);
             return None;
@@ -1331,10 +1338,14 @@ impl DecodingPipeline {
     }
 
     fn restore_decode_symbols(&mut self, sbn: u8, symbols: Vec<Symbol>) {
+        let mut changed = false;
         for symbol in symbols {
             self.inflight_decode_symbols.remove(&symbol.id());
             debug_assert_eq!(symbol.sbn(), sbn);
-            let _ = self.symbols.restore_retained(symbol);
+            changed |= self.symbols.restore_retained(symbol);
+        }
+        if changed {
+            self.rank_cache.get_mut().remove(&sbn);
         }
     }
 
@@ -1372,6 +1383,7 @@ impl DecodingPipeline {
         self.forget_inflight_decode_symbols_for_block(sbn);
         self.symbols.clear_block(sbn);
         self.block_symbol_counts.remove(&sbn);
+        self.rank_cache.get_mut().remove(&sbn);
     }
 
     fn block_plan(&self, sbn: u8) -> Option<&BlockPlan> {
@@ -1384,11 +1396,8 @@ impl DecodingPipeline {
         // The ATP QUIC receiver asks for every block's status on every
         // feedback round; an unchanged block reuses its last analysis
         // (br-asupersync-w9yojl).
-        let key = BlockSymbolsKey::of(&block_plan, self.symbols.symbols_for_block(sbn));
-        if let Some((cached_key, status)) = self.rank_cache.lock().get(&sbn) {
-            if *cached_key == key {
-                return *status;
-            }
+        if let Some(status) = self.rank_cache.lock().get(&sbn) {
+            return *status;
         }
         #[cfg(test)]
         self.rank_analyses
@@ -1396,7 +1405,7 @@ impl DecodingPipeline {
         let symbols: Vec<Symbol> = self.symbols.symbols_for_block(sbn).cloned().collect();
         let status =
             rank_status_for_block(&block_plan, &symbols, usize::from(self.config.symbol_size)).ok();
-        self.rank_cache.lock().insert(sbn, (key, status));
+        self.rank_cache.lock().insert(sbn, status);
         status
     }
 
@@ -1437,46 +1446,11 @@ impl DecodingPipeline {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockPlan {
     sbn: u8,
     len: usize,
     k: usize,
-}
-
-/// What a block's rank analysis depends on: its plan and the identity and
-/// length of each received symbol (payload bytes do not change a rank). The
-/// two order-independent hash folds make a changed symbol set look different.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BlockSymbolsKey {
-    k: usize,
-    len: usize,
-    count: usize,
-    sum: u64,
-    xor: u64,
-}
-
-impl BlockSymbolsKey {
-    fn of<'a>(plan: &BlockPlan, symbols: impl Iterator<Item = &'a Symbol>) -> Self {
-        use std::hash::{Hash, Hasher};
-        let mut key = Self {
-            k: plan.k,
-            len: plan.len,
-            count: 0,
-            sum: 0,
-            xor: 0,
-        };
-        for symbol in symbols {
-            let mut hasher = std::hash::DefaultHasher::new();
-            symbol.id().hash(&mut hasher);
-            symbol.len().hash(&mut hasher);
-            let hash = hasher.finish();
-            key.count += 1;
-            key.sum = key.sum.wrapping_add(hash);
-            key.xor ^= hash.rotate_left(29).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        }
-        key
-    }
 }
 
 fn plan_blocks(

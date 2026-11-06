@@ -1402,6 +1402,290 @@
         crate::test_complete!("block_status_reuses_the_rank_analysis_until_the_block_changes");
     }
 
+    fn rank_analysis_count(decoder: &DecodingPipeline) -> usize {
+        decoder
+            .rank_analyses
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn assert_block_rank_matches_fresh(decoder: &DecodingPipeline, sbn: u8) -> BlockStatus {
+        let status = decoder.block_status(sbn).expect("known block");
+        let symbols: Vec<Symbol> = decoder.symbols.symbols_for_block(sbn).cloned().collect();
+        let fresh = rank_status_for_block(
+            decoder.block_plan(sbn).expect("block plan"),
+            &symbols,
+            usize::from(decoder.config.symbol_size),
+        )
+        .ok();
+        assert_eq!(status.rank, fresh.map(|rank| rank.rank), "block {sbn}");
+        assert_eq!(
+            status.rank_deficit,
+            fresh.map(|rank| rank.deficit),
+            "block {sbn}"
+        );
+        status
+    }
+
+    #[test]
+    fn block_status_rank_cache_isolates_changes_and_rejected_admission() {
+        init_test("block_status_rank_cache_isolates_changes_and_rejected_admission");
+        let config = encoding_config();
+        let object_id = ObjectId::new_for_test(121);
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            max_buffered_symbols: 2,
+            ..DecodingConfig::without_auth()
+        });
+        decoder
+            .set_object_params(ObjectParams::new(object_id, 2048, 256, 2, 4))
+            .expect("two block layout");
+        let source = |sbn, esi| {
+            AuthenticatedSymbol::new_unauthenticated(Symbol::new(
+                SymbolId::new(object_id, sbn, esi),
+                vec![0; 256],
+                SymbolKind::Source,
+            ))
+        };
+        for sbn in [0, 1] {
+            assert!(matches!(
+                decoder.feed(source(sbn, 0)).expect("feed"),
+                SymbolAcceptResult::Accepted { received: 1, .. }
+            ));
+            assert_block_rank_matches_fresh(&decoder, sbn);
+        }
+        assert_eq!(rank_analysis_count(&decoder), 2);
+
+        assert_eq!(
+            decoder.feed(source(0, 0)).expect("duplicate"),
+            SymbolAcceptResult::Duplicate
+        );
+        assert_eq!(
+            decoder.feed(source(0, 4)).expect("invalid ESI"),
+            SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata)
+        );
+        for sbn in [0, 1] {
+            assert_block_rank_matches_fresh(&decoder, sbn);
+        }
+        assert_eq!(
+            rank_analysis_count(&decoder),
+            2,
+            "refusals retain both caches"
+        );
+
+        assert!(matches!(
+            decoder.feed(source(0, 1)).expect("new source"),
+            SymbolAcceptResult::Accepted { received: 2, .. }
+        ));
+        assert_block_rank_matches_fresh(&decoder, 1);
+        assert_eq!(
+            rank_analysis_count(&decoder),
+            2,
+            "other block stays cached"
+        );
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(rank_analysis_count(&decoder), 3);
+
+        assert_eq!(
+            decoder.feed(source(0, 2)).expect("block cap"),
+            SymbolAcceptResult::Rejected(RejectReason::MemoryLimitReached)
+        );
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(
+            rank_analysis_count(&decoder),
+            3,
+            "capped intake changes no rows"
+        );
+        crate::test_complete!("block_status_rank_cache_isolates_changes_and_rejected_admission");
+    }
+
+    #[test]
+    fn block_status_rank_cache_tracks_layout_changes_and_failed_analysis() {
+        init_test("block_status_rank_cache_tracks_layout_changes_and_failed_analysis");
+        let config = encoding_config();
+        let object_id = ObjectId::new_for_test(122);
+        let mut decoder = decoder_with_params(&config, object_id, 1024, 1.5, 1);
+        let original = ObjectParams::new(object_id, 1024, 256, 1, 4);
+        for esi in [0, 3] {
+            let symbol = Symbol::new(
+                SymbolId::new(object_id, 0, esi),
+                vec![0; 256],
+                SymbolKind::Source,
+            );
+            let _ = decoder
+                .feed(AuthenticatedSymbol::new_unauthenticated(symbol))
+                .expect("source before layout change");
+        }
+        let first = assert_block_rank_matches_fresh(&decoder, 0);
+        assert!(first.rank.is_some());
+        assert_eq!(rank_analysis_count(&decoder), 1);
+
+        decoder.set_object_params(original).expect("same layout");
+        assert!(
+            decoder
+                .set_object_params(ObjectParams::new(object_id, 1024, 128, 1, 8))
+                .is_err()
+        );
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(
+            rank_analysis_count(&decoder),
+            1,
+            "unchanged and refused plans retain rank"
+        );
+
+        decoder
+            .set_object_params(ObjectParams::new(object_id, 512, 256, 1, 2))
+            .expect("smaller layout");
+        // Previously admitted source ESI 3 cannot belong to the new K=2
+        // layout. Cache the failed analysis too, without a stale rank hit.
+        let invalid = assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!((invalid.rank, invalid.rank_deficit), (None, None));
+        assert_eq!(rank_analysis_count(&decoder), 2);
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(
+            rank_analysis_count(&decoder),
+            2,
+            "failed analysis is cached"
+        );
+
+        decoder.set_object_params(original).expect("restore layout");
+        let restored = assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(
+            (restored.rank, restored.rank_deficit),
+            (first.rank, first.rank_deficit)
+        );
+        assert_eq!(rank_analysis_count(&decoder), 3);
+        decoder
+            .set_object_params(ObjectParams::new(object_id, 1023, 256, 1, 4))
+            .expect("changed tail length with the same K");
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(
+            rank_analysis_count(&decoder),
+            4,
+            "tail length belongs to the plan"
+        );
+        crate::test_complete!("block_status_rank_cache_tracks_layout_changes_and_failed_analysis");
+    }
+
+    #[test]
+    fn block_status_rank_cache_tracks_decode_ownership_and_restoration() {
+        init_test("block_status_rank_cache_tracks_decode_ownership_and_restoration");
+        let config = encoding_config();
+        let object_id = ObjectId::new_for_test(123);
+        let mut decoder = decoder_with_params(&config, object_id, 1024, 1.5, 1);
+        let source = |esi| {
+            Symbol::new(
+                SymbolId::new(object_id, 0, esi),
+                vec![0; 256],
+                SymbolKind::Source,
+            )
+        };
+        for esi in 0..3 {
+            let _ = decoder
+                .feed(AuthenticatedSymbol::new_unauthenticated(source(esi)))
+                .expect("partial source feed");
+        }
+        let partial = assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(partial.symbols_received, 3);
+        assert_eq!(rank_analysis_count(&decoder), 1);
+
+        let admitted = decoder
+            .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(source(3)))
+            .expect("complete sources start a deferred job");
+        let DeferredSymbolAcceptResult::Decode(job) = admitted else {
+            panic!("expected decode job, got {admitted:?}");
+        };
+        let in_flight = assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(in_flight.state, BlockStateKind::Decoding);
+        assert_eq!(in_flight.symbols_received, 0, "job owns the payloads");
+        assert_eq!(rank_analysis_count(&decoder), 2);
+        assert!(in_flight.rank < partial.rank);
+        assert!(matches!(
+            decoder
+                .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(source(0)))
+                .expect("inflight duplicate"),
+            DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Duplicate)
+        ));
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(rank_analysis_count(&decoder), 2);
+
+        decoder.restore_decode_job(job);
+        let restored = assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(restored.state, BlockStateKind::Collecting);
+        assert_eq!(restored.symbols_received, 4);
+        assert_eq!(restored.rank_deficit, Some(0));
+        assert_eq!(rank_analysis_count(&decoder), 3);
+        decoder.restore_decode_symbols(0, vec![source(0)]);
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(
+            rank_analysis_count(&decoder),
+            3,
+            "duplicate restore changes no rows"
+        );
+
+        for (failed, state) in [
+            (false, BlockStateKind::Collecting),
+            (true, BlockStateKind::Failed),
+        ] {
+            let before = rank_analysis_count(&decoder);
+            let job = decoder.prepare_decode_job(0, false).expect("owned job");
+            assert_block_rank_matches_fresh(&decoder, 0);
+            assert_eq!(rank_analysis_count(&decoder), before + 1);
+            let reason = if failed {
+                RejectReason::InvalidMetadata
+            } else {
+                RejectReason::InsufficientRank
+            };
+            let outcome = BlockDecodeOutcome {
+                sbn: 0,
+                input_symbols: job.symbols.len(),
+                retain_decoded_block: false,
+                kind: BlockDecodeKind::SourceComplete,
+                elapsed: Duration::ZERO,
+                resolution: if failed {
+                    BlockDecodeResolution::Failed {
+                        reason,
+                        symbols: job.symbols,
+                    }
+                } else {
+                    BlockDecodeResolution::Retry {
+                        reason,
+                        symbols: job.symbols,
+                    }
+                },
+            };
+            assert!(matches!(
+                decoder.finish_decode_job_deferred(outcome),
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(_))
+            ));
+            let after = assert_block_rank_matches_fresh(&decoder, 0);
+            assert_eq!(after.state, state);
+            assert_eq!(
+                (after.rank, after.rank_deficit),
+                (restored.rank, restored.rank_deficit)
+            );
+            assert_eq!(rank_analysis_count(&decoder), before + 2);
+        }
+
+        let job = decoder.prepare_decode_job(0, false).expect("final job");
+        assert_block_rank_matches_fresh(&decoder, 0);
+        let before_completion = rank_analysis_count(&decoder);
+        let outcome = run_block_decode_job(job);
+        assert!(matches!(
+            decoder.finish_decode_job(outcome),
+            SymbolAcceptResult::BlockComplete { .. }
+        ));
+        assert!(
+            !decoder.rank_cache.lock().contains_key(&0),
+            "completion drops the cache"
+        );
+        let complete = assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(complete.state, BlockStateKind::Decoded);
+        assert_eq!(complete.symbols_received, 0);
+        assert_eq!(rank_analysis_count(&decoder), before_completion + 1);
+        crate::test_complete!("block_status_rank_cache_tracks_decode_ownership_and_restoration");
+    }
+
     #[test]
     fn block_status_decoded_after_complete() {
         init_test("block_status_decoded_after_complete");
