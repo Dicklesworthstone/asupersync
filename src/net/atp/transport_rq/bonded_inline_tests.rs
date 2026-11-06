@@ -47,6 +47,274 @@
         .with_symbol_auth(SecurityContext::for_testing(214))
     }
 
+    fn bonded_probe_fixture(
+        auth: Option<&SecurityContext>,
+    ) -> (BondedProbeHello, BondedProbeChallenge) {
+        let mut hello = BondedProbeHello {
+            protocol: BONDED_PATH_PROBE_PROTOCOL,
+            transfer_id: "probeTransfer".to_string(),
+            symbol_size: 1400,
+            symbol_auth: auth.is_some(),
+            timeout_millis: 1000,
+            client_nonce: [3; 32],
+            auth_tag: None,
+        };
+        hello.auth_tag = bonded_probe_auth_tag(auth, BONDED_PROBE_HELLO_DOMAIN, &hello).unwrap();
+        let mut challenge = BondedProbeChallenge {
+            protocol: BONDED_PATH_PROBE_PROTOCOL,
+            client_nonce: hello.client_nonce,
+            server_nonce: [5; 32],
+            udp_ports: vec![12345, 23456],
+            auth_tag: None,
+        };
+        challenge.auth_tag = bonded_probe_auth_tag(
+            auth, BONDED_PROBE_CHALLENGE_DOMAIN, &(&hello, &challenge),
+        ).unwrap();
+        (hello, challenge)
+    }
+
+    #[test]
+    fn bonded_probe_datagrams_bind_session_port_authentication_and_full_size() {
+        let key = SecurityContext::for_testing(214);
+        let wrong_key = SecurityContext::for_testing(215);
+        for auth in [None, Some(&key)] {
+            let (hello, challenge) = bonded_probe_fixture(auth);
+            let session = bonded_probe_session(&hello, &challenge).unwrap();
+            for symbol_size in [1, 16, 1400] {
+                let packet = encode_bonded_probe_datagram(&session, 12345, symbol_size, auth);
+                let symbol = Symbol::new(
+                    SymbolId::new(ObjectId::new_for_test(91), 0, 0),
+                    vec![7; usize::from(symbol_size)], SymbolKind::Source,
+                );
+                let real_symbol = encode_bonded_donor_datagram(7, 0, &symbol, auth);
+                assert_eq!(packet.len(), real_symbol.len(), "probe must exercise symbol-sized UDP");
+                assert!(valid_bonded_probe_datagram(&packet, 12345, &session, symbol_size, auth));
+                assert!(!valid_bonded_probe_datagram(&packet, 23456, &session, symbol_size, auth));
+                assert!(!valid_bonded_probe_datagram(&packet, 12345, &[0; 16], symbol_size, auth));
+                assert!(!valid_bonded_probe_datagram(&packet, 12345, &session, symbol_size + 1, auth));
+                let mut trailing = packet.clone();
+                trailing.push(0);
+                assert!(!valid_bonded_probe_datagram(&trailing, 12345, &session, symbol_size, auth));
+                if auth.is_some() {
+                    assert!(!valid_bonded_probe_datagram(
+                        &packet, 12345, &session, symbol_size, Some(&wrong_key),
+                    ));
+                    let mut corrupted = packet;
+                    *corrupted.last_mut().unwrap() ^= 1;
+                    assert!(!valid_bonded_probe_datagram(
+                        &corrupted, 12345, &session, symbol_size, auth,
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bonded_probe_control_authentication_rejects_replay_tamper_and_cross_domain_tags() {
+        let key = SecurityContext::for_testing(214);
+        let (hello, challenge) = bonded_probe_fixture(Some(&key));
+        let mut unsigned = hello.clone();
+        unsigned.auth_tag = None;
+        verify_bonded_probe_auth(Some(&key), BONDED_PROBE_HELLO_DOMAIN, &unsigned, hello.auth_tag)
+            .expect("valid hello");
+        assert!(verify_bonded_probe_auth(
+            Some(&key), BONDED_PROBE_UDP_DOMAIN, &unsigned, hello.auth_tag,
+        ).is_err(), "a hello tag cannot authorize a UDP probe");
+        unsigned.timeout_millis += 1;
+        assert!(verify_bonded_probe_auth(
+            Some(&key), BONDED_PROBE_HELLO_DOMAIN, &unsigned, hello.auth_tag,
+        ).is_err());
+
+        let mut unsigned_challenge = challenge.clone();
+        unsigned_challenge.auth_tag = None;
+        verify_bonded_probe_auth(
+            Some(&key), BONDED_PROBE_CHALLENGE_DOMAIN,
+            &(&hello, &unsigned_challenge), challenge.auth_tag,
+        ).expect("valid challenge");
+        let mut replayed_hello = hello.clone();
+        replayed_hello.client_nonce[0] ^= 1;
+        assert!(verify_bonded_probe_auth(
+            Some(&key), BONDED_PROBE_CHALLENGE_DOMAIN,
+            &(&replayed_hello, &unsigned_challenge), challenge.auth_tag,
+        ).is_err(), "a prior session's challenge is not a fresh reachability proof");
+        unsigned_challenge.udp_ports[0] += 1;
+        assert!(verify_bonded_probe_auth(
+            Some(&key), BONDED_PROBE_CHALLENGE_DOMAIN,
+            &(&hello, &unsigned_challenge), challenge.auth_tag,
+        ).is_err(), "receiver UDP ports are authenticated before any send");
+        assert!(verify_bonded_probe_auth(
+            Some(&key), BONDED_PROBE_HELLO_DOMAIN, &hello, None,
+        ).is_err(), "missing tags cannot downgrade configured authentication");
+        assert!(validate_bonded_probe_ports(&[12345, 12345]).is_err());
+        assert!(validate_bonded_probe_ports(&[0]).is_err());
+    }
+
+    #[test]
+    fn bonded_probe_pending_operation_wakes_on_external_cancellation() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct WakeCount(AtomicUsize);
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+            fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let cx = Cx::for_testing();
+        let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut pending = std::pin::pin!(bounded_bonded_probe(
+            &cx, Duration::from_secs(10), std::future::pending::<Result<(), RqError>>(),
+        ));
+        assert!(pending.as_mut().poll(&mut task_cx).is_pending());
+        let before = wakes.0.load(Ordering::SeqCst);
+        cx.cancel_with_reason(crate::types::CancelReason::user("cancel parked path probe"));
+        assert!(wakes.0.load(Ordering::SeqCst) > before);
+        assert!(matches!(pending.as_mut().poll(&mut task_cx), Poll::Ready(Err(RqError::Cancelled))));
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn bonded_probe_path_mtu_failure_is_narrowly_classified() {
+        assert!(bonded_probe_exceeds_path_mtu(&std::io::Error::from_raw_os_error(
+            libc::EMSGSIZE,
+        )));
+        for code in [libc::EACCES, libc::EINVAL, libc::EIO] {
+            assert!(!bonded_probe_exceeds_path_mtu(&std::io::Error::from_raw_os_error(code)));
+        }
+    }
+
+    #[test]
+    fn bonded_probe_partial_evidence_requires_the_actual_socket_and_fresh_mac() {
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let receiver = thread::spawn(move || {
+            let runtime = RuntimeBuilder::multi_thread()
+                .worker_threads(2)
+                .enable_platform_reactor(true)
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let auth = SecurityContext::for_testing(214);
+                let mut descriptor = bonded_enrollment_descriptor();
+                descriptor.transfer_id = "probeTransfer".to_string();
+                descriptor.symbol_size = 1400;
+                let mut udp = RqReceiverUdpFanout::bind("127.0.0.1".parse().unwrap(), 3, 1 << 20)
+                    .await?;
+                let ports = udp.local_ports()?;
+                let listener = TcpListener::bind("127.0.0.1:0").await?;
+                addr_tx.send(listener.local_addr()?).unwrap();
+                bounded_bonded_probe(&cx, Duration::from_secs(5), async {
+                    let (stream, _) = listener.accept().await?;
+                    let mut control = FrameTransport::new(stream);
+                    let hello = control.recv().await?;
+                    serve_bonded_path_probe(
+                        &cx, &mut control, &hello, &descriptor, Some(&auth), &mut udp,
+                        &ports, 0, Duration::from_secs(2),
+                    ).await
+                }).await
+            }))
+        });
+        let addr = addr_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            bounded_bonded_probe(&cx, Duration::from_secs(3), async {
+                let auth = SecurityContext::for_testing(214);
+                let wrong_key = SecurityContext::for_testing(215);
+                let (hello, _) = bonded_probe_fixture(Some(&auth));
+                let mut control = FrameTransport::new(TcpStream::connect(addr).await?);
+                control.send(&json_frame(FrameType::Handshake, &hello)?).await?;
+                let frame = control.recv().await?;
+                assert_eq!(frame.frame_type(), FrameType::PathChallenge);
+                let challenge: BondedProbeChallenge = parse_json(&frame)?;
+                let session = bonded_probe_session(&hello, &challenge)?;
+                let ports = &challenge.udp_ports;
+                assert_eq!(ports.len(), 3);
+                let mut udp = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap()).await?;
+                let probes = [
+                    (ports[0], encode_bonded_probe_datagram(&session, ports[0], 1400, Some(&auth))),
+                    // A valid MAC naming port 1 cannot confirm port 1 when the
+                    // datagram actually arrives at port 0.
+                    (ports[0], encode_bonded_probe_datagram(&session, ports[1], 1400, Some(&auth))),
+                    (ports[1], encode_bonded_probe_datagram(&[0; 16], ports[1], 1400, Some(&auth))),
+                    (ports[2], encode_bonded_probe_datagram(&session, ports[2], 1400, Some(&wrong_key))),
+                ];
+                for _ in 0..3 {
+                    for (port, packet) in &probes {
+                        udp.send_to(packet, SocketAddr::new(addr.ip(), *port)).await?;
+                    }
+                }
+                let frame = control.recv().await?;
+                assert_eq!(frame.frame_type(), FrameType::PathResponse);
+                let result: BondedProbeResult = parse_json(&frame)?;
+                let mut unsigned = result.clone();
+                unsigned.auth_tag = None;
+                verify_bonded_probe_auth(
+                    Some(&auth), BONDED_PROBE_RESULT_DOMAIN,
+                    &(&hello, &challenge, &unsigned), result.auth_tag,
+                )?;
+                assert_eq!(result.confirmed_ports, vec![ports[0]]);
+                assert!(result.reason.is_some());
+                Ok::<(), RqError>(())
+            }).await
+        })).unwrap();
+        receiver.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn bonded_probe_after_enrollment_preserves_queued_symbol_datagrams() {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            bounded_bonded_probe(&cx, Duration::from_secs(3), async {
+                let auth = SecurityContext::for_testing(214);
+                let (hello, _) = bonded_probe_fixture(Some(&auth));
+                let mut descriptor = bonded_enrollment_descriptor();
+                descriptor.transfer_id = hello.transfer_id.clone();
+                descriptor.symbol_size = hello.symbol_size;
+                let mut udp = RqReceiverUdpFanout::bind("127.0.0.1".parse().unwrap(), 1, 1 << 20)
+                    .await?;
+                let ports = udp.local_ports()?;
+                let symbol = Symbol::new(
+                    SymbolId::new(ObjectId::new_for_test(91), 0, 0),
+                    vec![7; 1400], SymbolKind::Source,
+                );
+                let packet = encode_bonded_donor_datagram(7, 0, &symbol, Some(&auth));
+                let mut sender = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap()).await?;
+                sender.send_to(
+                    &packet, SocketAddr::new("127.0.0.1".parse().unwrap(), ports[0]),
+                ).await?;
+                let listener = TcpListener::bind("127.0.0.1:0").await?;
+                let _client = TcpStream::connect(listener.local_addr()?).await?;
+                let (stream, _) = listener.accept().await?;
+                let mut control = FrameTransport::new(stream);
+                let hello = json_frame(FrameType::Handshake, &hello)?;
+                let result = serve_bonded_path_probe(
+                    &cx, &mut control, &hello, &descriptor, Some(&auth), &mut udp,
+                    &ports, 1, Duration::from_secs(1),
+                ).await;
+                assert!(matches!(result, Err(RqError::HandshakeRejected(_))));
+                let mut received = vec![0; packet.len() + 1];
+                let (socket, len) = std::future::poll_fn(|task_cx| {
+                    udp.poll_recv_any(task_cx, &mut received)
+                }).await?;
+                assert_eq!(socket, 0);
+                assert_eq!(&received[..len], packet.as_slice());
+                Ok::<(), RqError>(())
+            }).await
+        })).unwrap();
+    }
+
     /// asupersync-atp-channel-bonding-z01bbr.4.2: a stream frame is a bounded
     /// carrier for the authenticated UDP envelope, never a new admission path.
     #[test]
@@ -1168,6 +1436,179 @@
             config,
             BondedSymbolTransport::Datagram,
         )
+    }
+
+    fn run_bonded_probe(
+        transfer_id: String,
+        control_addr: SocketAddr,
+        config: RqConfig,
+    ) -> Result<BondedPathProbeReport, RqError> {
+        let runtime = RuntimeBuilder::multi_thread().worker_threads(2)
+            .enable_platform_reactor(true).build().expect("probe runtime");
+        let result = runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("probe cx");
+            probe_bonded_path(&cx, &transfer_id, control_addr, &config, Duration::from_secs(2)).await
+        }));
+        let drained = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(drained.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+        assert_eq!(drained.live_tasks, 0);
+        assert_eq!(drained.pending_obligations, 0);
+        result
+    }
+
+    fn spawn_bonded_probe_receiver(
+        descriptor: BondTransferDescriptor,
+        dest: PathBuf,
+        config: RqConfig,
+        udp_blocked: bool,
+    ) -> (SocketAddr, thread::JoinHandle<Result<BondedReceiveReport, RqError>>) {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let receiver = thread::spawn(move || {
+            let runtime = RuntimeBuilder::multi_thread().worker_threads(2)
+                .enable_platform_reactor(true).build().expect("probe receiver runtime");
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("probe receiver cx");
+                let listener = TcpListener::bind("0.0.0.0:0").await?;
+                let ip = if udp_blocked { "127.0.0.2" } else { "127.0.0.1" }
+                    .parse::<std::net::IpAddr>().unwrap();
+                let addr = SocketAddr::new(ip, listener.local_addr()?.port());
+                ready_tx.send(addr).unwrap();
+                // TCP accepts on both loopback IPs; the actual UDP sockets
+                // bind only .1. A .2 probe therefore has a working control
+                // path and a genuinely unreachable UDP destination.
+                receive_bonded_with_preflight_timeout(
+                    &cx, &descriptor, &dest, &listener, "127.0.0.1", 1, config,
+                    "probe-receiver", None, RqReceiveOptions::default(), &[ip],
+                    Duration::from_secs(20),
+                ).await
+            }))
+        });
+        (ready_rx.recv_timeout(Duration::from_secs(10)).unwrap(), receiver)
+    }
+
+    #[test]
+    fn bonded_probe_confirms_every_socket_without_consuming_a_donor_slot() {
+        assert_bonded_probe_then_commit(false);
+    }
+
+    #[test]
+    fn bonded_probe_blocked_udp_can_fall_back_to_a_stream_donor() {
+        assert_bonded_probe_then_commit(true);
+    }
+
+    #[test]
+    fn bonded_probe_preflight_expiration_and_owner_cancellation_bound_initial_accept() {
+        use std::future::{Future, poll_fn};
+
+        for cancel_owner in [false, true] {
+            let config = bonded_auth_config();
+            let root = bonded_e2e_tmp(if cancel_owner { "probe_cancel" } else { "probe_expire" });
+            let src = root.join("src");
+            let dest = root.join("dest");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::create_dir_all(&dest).unwrap();
+            std::fs::write(src.join("payload.bin"), b"never staged").unwrap();
+            let descriptor = bonded_e2e_descriptor(&src, &["payload.bin"], "payload.bin", false, &config);
+            let preflight_timeout = if cancel_owner {
+                Duration::from_secs(60)
+            } else {
+                Duration::from_millis(150)
+            };
+            let (parked_tx, parked_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let receive_dest = dest.clone();
+            let receiver = thread::spawn(move || {
+                let runtime = RuntimeBuilder::multi_thread()
+                    .worker_threads(2)
+                    .enable_platform_reactor(true)
+                    .build()
+                    .unwrap();
+                let result = runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().unwrap();
+                    let listener = TcpListener::bind("127.0.0.1:0").await?;
+                    let mut receive = std::pin::pin!(receive_bonded_with_preflight_timeout(
+                        &cx, &descriptor, &receive_dest, &listener, "127.0.0.1", 1,
+                        config, "probe-deadline", None, RqReceiveOptions::default(),
+                        &[], preflight_timeout,
+                    ));
+                    let mut announced = false;
+                    poll_fn(|task_cx| {
+                        let result = receive.as_mut().poll(task_cx);
+                        if !announced {
+                            assert!(result.is_pending(), "receiver should park before any donor arrives");
+                            parked_tx.send(cx.clone()).unwrap();
+                            announced = true;
+                        }
+                        result
+                    }).await
+                }));
+                let drained = runtime.shutdown_drained(Duration::from_secs(5));
+                assert_eq!(drained.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+                assert_eq!(drained.live_tasks, 0);
+                assert_eq!(drained.pending_obligations, 0);
+                done_tx.send(()).unwrap();
+                result
+            });
+            let owner = parked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if cancel_owner {
+                owner.cancel_with_reason(crate::types::CancelReason::user("probe owner failed"));
+            }
+            // Both outcomes must finish far sooner than the ordinary 30s
+            // accept timeout or the cancellation case's 60s preflight budget.
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let result = receiver.join().unwrap();
+            if cancel_owner {
+                assert!(matches!(result, Err(RqError::Cancelled)));
+            } else {
+                assert!(matches!(result, Err(RqError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut));
+            }
+            assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0);
+        }
+    }
+
+    fn assert_bonded_probe_then_commit(udp_blocked: bool) {
+        let mut config = bonded_auth_config();
+        config.udp_fanout = 3;
+        let root = bonded_e2e_tmp(if udp_blocked { "probe_blocked" } else { "probe_open" });
+        let src = root.join("src");
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        let payload = bonded_e2e_payload(32_007);
+        std::fs::write(src.join("payload.bin"), &payload).unwrap();
+        let descriptor = bonded_e2e_descriptor(&src, &["payload.bin"], "payload.bin", false, &config);
+        let (addr, receiver) = spawn_bonded_probe_receiver(
+            descriptor.clone(), dest.clone(), config.clone(), udp_blocked,
+        );
+        // A bad key is an authentication failure, not permission to fall back
+        // on an unauthenticated or supposedly blocked route. It consumes no
+        // donor slot, so a subsequent valid probe and transfer can still run.
+        let wrong = config.clone().with_symbol_auth(SecurityContext::for_testing(215));
+        assert!(matches!(
+            run_bonded_probe(descriptor.transfer_id.clone(), addr, wrong),
+            Err(RqError::Authentication(_)),
+        ));
+        let report = run_bonded_probe(descriptor.transfer_id.clone(), addr, config.clone())
+            .expect("a valid probe reports reachability");
+        assert_eq!(report.udp_reachable, !udp_blocked);
+        assert_eq!(report.receiver_endpoints.len(), 3);
+        assert!(report.receiver_endpoints.iter().all(|endpoint| endpoint.ip() == addr.ip()));
+        assert_eq!(report.confirmed_endpoints, if udp_blocked { 0 } else { 3 });
+        assert_eq!(report.reason.is_some(), udp_blocked);
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "probing must not stage or commit");
+        let carrier = if report.udp_reachable {
+            BondedSymbolTransport::Datagram
+        } else {
+            BondedSymbolTransport::Control
+        };
+        let donor = run_bonded_donor_with_transport(descriptor, addr, src, config, carrier).unwrap();
+        assert_eq!(donor.donor_index, 0);
+        assert_eq!(donor.donor_count, 1);
+        assert!(donor.receipt.committed);
+        let received = receiver.join().unwrap().unwrap();
+        assert_eq!(received.enrolled_donors, 1);
+        assert!(received.committed);
+        assert_eq!(std::fs::read(dest.join("payload.bin")).unwrap(), payload);
     }
 
     fn run_bonded_donor_with_transport(

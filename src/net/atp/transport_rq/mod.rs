@@ -522,9 +522,10 @@ macro_rules! bondtrace {
 // after the trace macros so the child module can use them.
 mod bonded;
 pub use bonded::{
-    ATP_RQ_BONDED_PROTOCOL, ATP_RQ_BONDED_STREAM_PROTOCOL, BondedDonateReport, BondedReceiveReport,
-    donate_bonded, donate_bonded_over_control, receive_bonded, receive_bonded_with_options,
-    receive_bonded_with_options_and_advertised_ips,
+    ATP_RQ_BONDED_PROTOCOL, ATP_RQ_BONDED_STREAM_PROTOCOL, BondedDonateReport,
+    BondedPathProbeReport, BondedReceiveReport, donate_bonded, donate_bonded_over_control,
+    probe_bonded_path, receive_bonded, receive_bonded_with_options,
+    receive_bonded_with_options_and_advertised_ips, receive_bonded_with_preflight_timeout,
 };
 
 /// Transport tuning knobs.

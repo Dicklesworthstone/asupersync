@@ -232,6 +232,441 @@ pub struct BondedDonateReport {
     pub receipt: ReceiveReceipt,
 }
 
+/// Result of a pre-enrollment probe on the receiver's actual UDP fanout.
+///
+/// Every endpoint uses the connected control peer's IP. A successful probe
+/// confirms every port with a full-sized symbol-shaped datagram; it does not
+/// enroll a donor, decode data, or create a staging directory. Reachability is
+/// a point-in-time observation, not a guarantee against later path failures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BondedPathProbeReport {
+    /// Whether all advertised fanout ports received a valid probe.
+    pub udp_reachable: bool,
+    /// Candidate UDP endpoints tested, in the receiver's fanout order.
+    pub receiver_endpoints: Vec<SocketAddr>,
+    /// Distinct fanout ports that received a correctly authenticated probe.
+    pub confirmed_endpoints: usize,
+    /// Why UDP was not selected; absent when every endpoint was confirmed.
+    pub reason: Option<String>,
+}
+
+// A probe is a separate, short-lived control exchange, never a donor protocol
+// version. Existing version-3/version-4 hello and welcome bytes stay unchanged.
+const BONDED_PATH_PROBE_PROTOCOL: u32 = 0x4250_0001;
+const BONDED_PROBE_FRAME_LIMIT: u64 = 16 * 1024;
+const BONDED_PROBE_MAX_TIMEOUT: Duration = Duration::from_secs(10);
+const BONDED_PROBE_MAX_UDP_PAYLOAD: usize = 65_507;
+const BONDED_PROBE_MAGIC: &[u8; 4] = b"BPR1";
+const BONDED_PROBE_PREFIX: usize = 4 + 16 + 2;
+const BONDED_PROBE_HELLO_DOMAIN: &[u8] = b"atp-bonded-path-probe-hello-v1";
+const BONDED_PROBE_CHALLENGE_DOMAIN: &[u8] = b"atp-bonded-path-probe-challenge-v1";
+const BONDED_PROBE_UDP_DOMAIN: &[u8] = b"atp-bonded-path-probe-udp-v1";
+const BONDED_PROBE_RESULT_DOMAIN: &[u8] = b"atp-bonded-path-probe-result-v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BondedProbeHello {
+    protocol: u32,
+    transfer_id: String,
+    symbol_size: u16,
+    symbol_auth: bool,
+    timeout_millis: u32,
+    client_nonce: [u8; 32],
+    auth_tag: Option<[u8; TAG_SIZE]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BondedProbeChallenge {
+    protocol: u32,
+    client_nonce: [u8; 32],
+    server_nonce: [u8; 32],
+    udp_ports: Vec<u16>,
+    auth_tag: Option<[u8; TAG_SIZE]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BondedProbeResult {
+    protocol: u32,
+    client_nonce: [u8; 32],
+    server_nonce: [u8; 32],
+    confirmed_ports: Vec<u16>,
+    reason: Option<String>,
+    auth_tag: Option<[u8; TAG_SIZE]>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BondedProbeRefusal {
+    authentication: bool,
+    reason: String,
+}
+
+fn bonded_probe_auth_tag<T: Serialize>(
+    context: Option<&SecurityContext>,
+    domain: &[u8],
+    message: &T,
+) -> Result<Option<[u8; TAG_SIZE]>, RqError> {
+    let bytes = serde_json::to_vec(message)
+        .map_err(|error| RqError::Frame(format!("serialize bonded path probe: {error}")))?;
+    Ok(context.map(|context| *context.sign_domain_payload(domain, &bytes).as_bytes()))
+}
+
+fn verify_bonded_probe_auth<T: Serialize>(
+    context: Option<&SecurityContext>,
+    domain: &[u8],
+    message: &T,
+    tag: Option<[u8; TAG_SIZE]>,
+) -> Result<(), RqError> {
+    let bytes = serde_json::to_vec(message)
+        .map_err(|error| RqError::Frame(format!("serialize bonded path probe: {error}")))?;
+    match (context, tag) {
+        (Some(context), Some(tag))
+            if context.verify_domain_payload(
+                domain,
+                &bytes,
+                &AuthenticationTag::from_bytes(tag),
+            ) =>
+        {
+            Ok(())
+        }
+        (None, None) => Ok(()),
+        _ => Err(RqError::Authentication(
+            "bonded path probe authentication failed".to_string(),
+        )),
+    }
+}
+
+fn bonded_probe_session(
+    hello: &BondedProbeHello,
+    challenge: &BondedProbeChallenge,
+) -> Result<[u8; 16], RqError> {
+    let bytes = serde_json::to_vec(&(hello, challenge))
+        .map_err(|error| RqError::Frame(format!("serialize bonded path session: {error}")))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"ATP-BONDED-PATH-PROBE-SESSION-V1\0");
+    hasher.update(bytes);
+    let mut session = [0; 16];
+    session.copy_from_slice(&hasher.finalize()[..16]);
+    Ok(session)
+}
+
+fn bonded_probe_packet_size(symbol_size: u16, authenticated: bool) -> usize {
+    usize::from(symbol_size)
+        + if authenticated {
+            AUTH_DGRAM_HEADER
+        } else {
+            DGRAM_HEADER
+        }
+}
+
+fn bonded_probe_exceeds_path_mtu(error: &std::io::Error) -> bool {
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    {
+        error.raw_os_error() == Some(libc::EMSGSIZE)
+    }
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE)
+    }
+    #[cfg(not(any(all(unix, not(target_arch = "wasm32")), windows)))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+fn encode_bonded_probe_datagram(
+    session: &[u8; 16],
+    port: u16,
+    symbol_size: u16,
+    context: Option<&SecurityContext>,
+) -> Vec<u8> {
+    let mut packet = vec![0; bonded_probe_packet_size(symbol_size, context.is_some())];
+    packet[..4].copy_from_slice(BONDED_PROBE_MAGIC);
+    packet[4..20].copy_from_slice(session);
+    packet[20..22].copy_from_slice(&port.to_be_bytes());
+    if let Some(context) = context {
+        let tag_offset = packet.len() - TAG_SIZE;
+        let tag = context.sign_domain_payload(BONDED_PROBE_UDP_DOMAIN, &packet[..tag_offset]);
+        packet[tag_offset..].copy_from_slice(tag.as_bytes());
+    }
+    packet
+}
+
+fn valid_bonded_probe_datagram(
+    packet: &[u8],
+    actual_port: u16,
+    session: &[u8; 16],
+    symbol_size: u16,
+    context: Option<&SecurityContext>,
+) -> bool {
+    if packet.len() != bonded_probe_packet_size(symbol_size, context.is_some())
+        || packet.len() < BONDED_PROBE_PREFIX
+        || packet[..4] != *BONDED_PROBE_MAGIC
+        || packet[4..20] != *session
+        || packet[20..22] != actual_port.to_be_bytes()
+    {
+        return false;
+    }
+    let payload_end = packet.len() - if context.is_some() { TAG_SIZE } else { 0 };
+    if packet[BONDED_PROBE_PREFIX..payload_end]
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return false;
+    }
+    context.is_none_or(|context| {
+        let mut tag = [0; TAG_SIZE];
+        tag.copy_from_slice(&packet[payload_end..]);
+        context.verify_domain_payload(
+            BONDED_PROBE_UDP_DOMAIN,
+            &packet[..payload_end],
+            &AuthenticationTag::from_bytes(tag),
+        )
+    })
+}
+
+fn validate_bonded_probe_ports(ports: &[u16]) -> Result<(), RqError> {
+    let unique: BTreeSet<_> = ports.iter().copied().collect();
+    if ports.is_empty()
+        || ports.len() > MAX_BONDING_RECEIVER_ENDPOINTS
+        || unique.len() != ports.len()
+        || unique.contains(&0)
+    {
+        return Err(RqError::Frame(
+            "bonded path probe advertised invalid or duplicate UDP ports".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// One absolute deadline covers a probe, including cancellation while sockets
+/// are pending. A probe never waits for its timeout merely to notice a cancelled
+/// external Cx, and cancellation masks remain authoritative.
+async fn bounded_bonded_probe<T>(
+    cx: &Cx,
+    timeout: Duration,
+    operation: impl std::future::Future<Output = Result<T, RqError>>,
+) -> Result<T, RqError> {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let mut operation = std::pin::pin!(crate::time::timeout(cx.now(), timeout, operation));
+    let mut cancellation = crate::channel::OwnedCancelRegistration::new(cx.clone());
+    poll_fn(|task_cx| {
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(RqError::Cancelled));
+        }
+        let result = operation.as_mut().poll(task_cx);
+        if result.is_pending() {
+            cancellation.refresh(task_cx.waker());
+        }
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(RqError::Cancelled));
+        }
+        match result {
+            Poll::Ready(Ok(result)) => Poll::Ready(result),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(RqError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "bonded path probe exceeded its absolute deadline",
+            )))),
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
+}
+
+/// Probe a direct UDP path before any donor enrolls in a bonded receive.
+///
+/// The control endpoint is explicit caller authority. UDP probes target only
+/// that same IP, using the receiver's actual bound fanout ports. Fresh nonces
+/// and separate MAC domains bind the hello, challenge, full-sized UDP probes,
+/// and result to this transfer. Missing/invalid authentication and protocol
+/// mismatches are fatal errors; they are never reported as blocked UDP.
+///
+/// `config.symbol_size` must match the receiver's bonded descriptor, since
+/// reachability is tested with the exact eventual symbol datagram size.
+///
+/// The timeout must be between one millisecond and ten seconds and bounds the
+/// whole call. A valid partial/negative result permits the caller to choose
+/// [`donate_bonded_over_control`]. An explicit trusted-lab auth opt-out is
+/// honored, without silently downgrading a configured key. This call neither
+/// consumes a donor index nor writes any transfer data.
+pub async fn probe_bonded_path(
+    cx: &Cx,
+    transfer_id: &str,
+    control_addr: SocketAddr,
+    config: &RqConfig,
+    timeout: Duration,
+) -> Result<BondedPathProbeReport, RqError> {
+    if timeout < Duration::from_millis(1) || timeout > BONDED_PROBE_MAX_TIMEOUT {
+        return Err(RqError::Source(
+            "bonded path probe timeout must be between 1ms and 10s".to_string(),
+        ));
+    }
+    if transfer_id.is_empty()
+        || transfer_id.len() > 64
+        || !transfer_id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        || config.symbol_size == 0
+        || control_addr.port() == 0
+        || control_addr.ip().is_unspecified()
+        || control_addr.ip().is_multicast()
+        || matches!(control_addr.ip(), std::net::IpAddr::V4(ip) if ip.is_broadcast())
+    {
+        return Err(RqError::Source(
+            "bonded path probe requires a valid transfer, symbol size, and unicast endpoint"
+                .to_string(),
+        ));
+    }
+    let auth = config.symbol_auth_context()?;
+    bounded_bonded_probe(cx, timeout, async {
+        let stream = TcpStream::connect(control_addr).await?;
+        let mut control = FrameTransport::new(stream);
+        control.codec = AtpFrameCodec::with_max_frame_size(BONDED_PROBE_FRAME_LIMIT);
+        let mut hello = BondedProbeHello {
+            protocol: BONDED_PATH_PROBE_PROTOCOL,
+            transfer_id: transfer_id.to_string(),
+            symbol_size: config.symbol_size,
+            symbol_auth: auth.is_some(),
+            timeout_millis: u32::try_from(timeout.as_millis()).unwrap_or(10_000),
+            client_nonce: *fresh_rq_delta_nonce(cx, b"bonded-path-probe-client", None)?.as_bytes(),
+            auth_tag: None,
+        };
+        hello.auth_tag = bonded_probe_auth_tag(auth.as_ref(), BONDED_PROBE_HELLO_DOMAIN, &hello)?;
+        control
+            .send(&json_frame(FrameType::Handshake, &hello)?)
+            .await?;
+        let frame = control.recv().await?;
+        if frame.frame_type() == FrameType::Error {
+            let refusal: BondedProbeRefusal = parse_json(&frame)?;
+            return Err(if refusal.authentication {
+                RqError::Authentication(refusal.reason)
+            } else {
+                RqError::HandshakeRejected(refusal.reason)
+            });
+        }
+        if frame.frame_type() != FrameType::PathChallenge {
+            return Err(RqError::Unexpected {
+                got: frame.frame_type(),
+                expected: "bonded probe PathChallenge",
+            });
+        }
+        let challenge: BondedProbeChallenge = parse_json(&frame)?;
+        let mut unsigned_challenge = challenge.clone();
+        unsigned_challenge.auth_tag = None;
+        verify_bonded_probe_auth(
+            auth.as_ref(),
+            BONDED_PROBE_CHALLENGE_DOMAIN,
+            &(&hello, &unsigned_challenge),
+            challenge.auth_tag,
+        )?;
+        if challenge.protocol != BONDED_PATH_PROBE_PROTOCOL
+            || challenge.client_nonce != hello.client_nonce
+            || challenge.server_nonce == [0; 32]
+            || challenge.server_nonce == hello.client_nonce
+        {
+            return Err(RqError::Frame(
+                "invalid bonded path probe challenge".to_string(),
+            ));
+        }
+        validate_bonded_probe_ports(&challenge.udp_ports)?;
+        let receiver_endpoints: Vec<_> = challenge
+            .udp_ports
+            .iter()
+            .map(|port| {
+                let mut endpoint = control_addr;
+                endpoint.set_port(*port);
+                endpoint
+            })
+            .collect();
+        let session = bonded_probe_session(&hello, &challenge)?;
+        if bonded_probe_packet_size(config.symbol_size, auth.is_some())
+            <= BONDED_PROBE_MAX_UDP_PAYLOAD
+        {
+            let bind_ip = if control_addr.is_ipv4() {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+            } else {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+            };
+            let mut udp = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
+            // Repeat each full-sized probe to tolerate an isolated lost packet.
+            // No receipt is sent by UDP, so this cannot amplify traffic toward
+            // a spoofed source; confirmation returns only on the owned TCP leg.
+            'probe_attempts: for attempt in 0..3 {
+                for endpoint in &receiver_endpoints {
+                    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+                    let packet = encode_bonded_probe_datagram(
+                        &session,
+                        endpoint.port(),
+                        config.symbol_size,
+                        auth.as_ref(),
+                    );
+                    let written = match udp.send_to(&packet, *endpoint).await {
+                        Ok(written) => written,
+                        Err(error) if bonded_probe_exceeds_path_mtu(&error) => {
+                            // A valid symbol can exceed this route's MTU even
+                            // below UDP's payload ceiling. Await the receiver's
+                            // authenticated negative result instead of treating
+                            // this path capability as a protocol failure.
+                            break 'probe_attempts;
+                        }
+                        Err(error) => return Err(RqError::Io(error)),
+                    };
+                    if written != packet.len() {
+                        return Err(RqError::Io(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "incomplete bonded UDP probe",
+                        )));
+                    }
+                }
+                if attempt != 2 {
+                    crate::time::Sleep::after(cx.now(), Duration::from_millis(20)).await;
+                }
+            }
+        }
+        let frame = control.recv().await?;
+        if frame.frame_type() != FrameType::PathResponse {
+            return Err(RqError::Unexpected {
+                got: frame.frame_type(),
+                expected: "bonded probe PathResponse",
+            });
+        }
+        let result: BondedProbeResult = parse_json(&frame)?;
+        let mut unsigned_result = result.clone();
+        unsigned_result.auth_tag = None;
+        verify_bonded_probe_auth(
+            auth.as_ref(),
+            BONDED_PROBE_RESULT_DOMAIN,
+            &(&hello, &challenge, &unsigned_result),
+            result.auth_tag,
+        )?;
+        let confirmed: BTreeSet<_> = result.confirmed_ports.iter().copied().collect();
+        if result.protocol != BONDED_PATH_PROBE_PROTOCOL
+            || result.client_nonce != hello.client_nonce
+            || result.server_nonce != challenge.server_nonce
+            || confirmed.len() != result.confirmed_ports.len()
+            || !confirmed
+                .iter()
+                .all(|port| challenge.udp_ports.contains(port))
+        {
+            return Err(RqError::Frame(
+                "invalid bonded path probe result".to_string(),
+            ));
+        }
+        let udp_reachable = confirmed.len() == receiver_endpoints.len();
+        if udp_reachable != result.reason.is_none() {
+            return Err(RqError::Frame(
+                "contradictory bonded path probe result".to_string(),
+            ));
+        }
+        Ok(BondedPathProbeReport {
+            udp_reachable,
+            receiver_endpoints,
+            confirmed_endpoints: confirmed.len(),
+            reason: result.reason,
+        })
+    })
+    .await
+}
+
 /// Rebuild the wire [`TransferManifest`] a bonded descriptor was derived from.
 ///
 /// The descriptor is `TransferManifest` fields + agreed object params, so this
@@ -606,6 +1041,170 @@ fn bonded_donor_hello_refusal(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn serve_bonded_path_probe(
+    cx: &Cx,
+    control: &mut FrameTransport<TcpStream>,
+    hello_frame: &Frame,
+    descriptor: &BondTransferDescriptor,
+    auth: Option<&SecurityContext>,
+    udp: &mut RqReceiverUdpFanout,
+    udp_ports: &[u16],
+    enrolled_donors: usize,
+    accept_timeout: Duration,
+) -> Result<(), RqError> {
+    if enrolled_donors != 0 {
+        // A version-3 donor can spray immediately after its welcome. Reading
+        // probes here would consume that donor's legitimate queued symbols.
+        return Err(RqError::HandshakeRejected(
+            "bonded path probes must finish before the first donor enrolls".to_string(),
+        ));
+    }
+    if hello_frame.payload().len() as u64 > BONDED_PROBE_FRAME_LIMIT {
+        return Err(RqError::Frame(
+            "bonded path probe hello is too large".to_string(),
+        ));
+    }
+    let hello: BondedProbeHello = parse_json(hello_frame)?;
+    if hello.protocol != BONDED_PATH_PROBE_PROTOCOL
+        || hello.client_nonce == [0; 32]
+        || hello.timeout_millis == 0
+        || u64::from(hello.timeout_millis) > BONDED_PROBE_MAX_TIMEOUT.as_millis() as u64
+    {
+        return Err(RqError::Frame(
+            "invalid bonded path probe hello".to_string(),
+        ));
+    }
+    if hello.transfer_id != descriptor.transfer_id || hello.symbol_size != descriptor.symbol_size {
+        return Err(RqError::HandshakeRejected(
+            "bonded path probe transfer or symbol geometry does not match receiver".to_string(),
+        ));
+    }
+    if hello.symbol_auth != auth.is_some() {
+        return Err(RqError::Authentication(
+            "bonded path probe authentication posture does not match receiver".to_string(),
+        ));
+    }
+    let mut unsigned_hello = hello.clone();
+    unsigned_hello.auth_tag = None;
+    verify_bonded_probe_auth(
+        auth,
+        BONDED_PROBE_HELLO_DOMAIN,
+        &unsigned_hello,
+        hello.auth_tag,
+    )?;
+    validate_bonded_probe_ports(udp_ports)?;
+    if udp.len() != udp_ports.len() {
+        return Err(RqError::Source(
+            "bonded path probe ports do not match the bound UDP fanout".to_string(),
+        ));
+    }
+    control.codec = AtpFrameCodec::with_max_frame_size(BONDED_PROBE_FRAME_LIMIT);
+    let timeout = Duration::from_millis(u64::from(hello.timeout_millis)).min(accept_timeout);
+    bounded_bonded_probe(cx, timeout, async {
+        let mut challenge = BondedProbeChallenge {
+            protocol: BONDED_PATH_PROBE_PROTOCOL,
+            client_nonce: hello.client_nonce,
+            server_nonce: *fresh_rq_delta_nonce(
+                cx,
+                b"bonded-path-probe-receiver",
+                Some(TransferNonce::new(hello.client_nonce)),
+            )?
+            .as_bytes(),
+            udp_ports: udp_ports.to_vec(),
+            auth_tag: None,
+        };
+        challenge.auth_tag = bonded_probe_auth_tag(
+            auth,
+            BONDED_PROBE_CHALLENGE_DOMAIN,
+            &(&hello, &challenge),
+        )?;
+        control
+            .send(&json_frame(FrameType::PathChallenge, &challenge)?)
+            .await?;
+        let session = bonded_probe_session(&hello, &challenge)?;
+        let packet_size = bonded_probe_packet_size(hello.symbol_size, auth.is_some());
+        let mut confirmed = vec![false; udp_ports.len()];
+        let reason = if packet_size > BONDED_PROBE_MAX_UDP_PAYLOAD {
+            Some("full-sized symbol exceeds the portable UDP payload limit".to_string())
+        } else {
+            use std::future::{Future, poll_fn};
+            use std::pin::Pin;
+            use std::task::Poll;
+
+            // Leave half the requested budget for the challenge/result RTT and
+            // sender setup. Incoming packets never reset this absolute timer.
+            let mut deadline = crate::time::Sleep::after(cx.now(), timeout / 2);
+            loop {
+                cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+                let batch = poll_fn(|task_cx| {
+                    if Pin::new(&mut deadline).poll(task_cx).is_ready() {
+                        return Poll::Ready(Ok(None));
+                    }
+                    udp.poll_recv_batch_any(task_cx, RQ_INBOUND_PUMP_BATCH, packet_size)
+                        .map(|result| result.map(Some))
+                })
+                .await?;
+                let Some((socket_index, mut batch)) = batch else {
+                    break;
+                };
+                let actual_port = udp_ports[socket_index];
+                if batch.packets.iter().any(|packet| {
+                    !packet.possibly_truncated
+                        && valid_bonded_probe_datagram(
+                            &packet.payload,
+                            actual_port,
+                            &session,
+                            hello.symbol_size,
+                            auth,
+                        )
+                }) {
+                    confirmed[socket_index] = true;
+                }
+                udp.recycle_recv_batch(&mut batch, RQ_INBOUND_PUMP_BATCH);
+                if confirmed.iter().all(|seen| *seen) {
+                    break;
+                }
+                // A continuously readable socket cannot suppress cancellation
+                // or timer progress, or monopolize this runtime worker.
+                crate::runtime::yield_now().await;
+            }
+            (!confirmed.iter().all(|seen| *seen)).then(|| {
+                "not every receiver UDP fanout port received a valid full-sized probe".to_string()
+            })
+        };
+        let mut result = BondedProbeResult {
+            protocol: BONDED_PATH_PROBE_PROTOCOL,
+            client_nonce: hello.client_nonce,
+            server_nonce: challenge.server_nonce,
+            confirmed_ports: udp_ports
+                .iter()
+                .zip(&confirmed)
+                .filter_map(|(port, seen)| seen.then_some(*port))
+                .collect(),
+            reason,
+            auth_tag: None,
+        };
+        result.auth_tag = bonded_probe_auth_tag(
+            auth,
+            BONDED_PROBE_RESULT_DOMAIN,
+            &(&hello, &challenge, &result),
+        )?;
+        control
+            .send(&json_frame(FrameType::PathResponse, &result)?)
+            .await?;
+        bondtrace!(
+            "receiver: path_probe transfer_id={} confirmed_ports={} total_ports={} udp_reachable={}",
+            descriptor.transfer_id,
+            result.confirmed_ports.len(),
+            udp_ports.len(),
+            result.confirmed_ports.len() == udp_ports.len(),
+        );
+        Ok(())
+    })
+    .await
+}
+
 /// Accept and enroll donor control connections until every expected donor is
 /// registered. Invalid hellos are rejected without consuming a donor slot.
 #[allow(clippy::too_many_arguments)]
@@ -614,46 +1213,70 @@ async fn accept_bonded_donors(
     control_listener: &TcpListener,
     control_plane: &mut BondingReceiverControlPlane,
     descriptor: &BondTransferDescriptor,
-    symbol_auth_enabled: bool,
+    symbol_auth: Option<&SecurityContext>,
+    udp: &mut RqReceiverUdpFanout,
     udp_ports: &[u16],
     peer_id: &str,
     accept_timeout: Duration,
+    preflight_timeout: Option<Duration>,
 ) -> Result<Vec<BondedDonorConn>, RqError> {
     let expected = control_plane.registry().expected_donor_count();
     let mut conns = Vec::with_capacity(usize::try_from(expected).unwrap_or(0));
     let mut attempts_left = expected.saturating_mul(8).saturating_add(8);
+    let mut probe_attempts_left = expected.saturating_mul(4).saturating_add(8);
+    let preflight_started = cx.now();
     while !control_plane.is_complete() {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        let preflight_remaining = || -> Result<Option<Duration>, RqError> {
+            if !conns.is_empty() {
+                return Ok(None);
+            }
+            let Some(timeout) = preflight_timeout else {
+                return Ok(None);
+            };
+            let elapsed = Duration::from_nanos(cx.now().duration_since(preflight_started));
+            timeout
+                .checked_sub(elapsed)
+                .filter(|remaining| !remaining.is_zero())
+                .map(Some)
+                .ok_or_else(|| {
+                    RqError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "bonded receiver preflight deadline expired before first donor enrollment",
+                    ))
+                })
+        };
         if attempts_left == 0 {
             return Err(RqError::HandshakeRejected(
                 "bonded enrollment gave up: too many rejected donor hellos".to_string(),
             ));
         }
         attempts_left -= 1;
-        let (stream, peer) = match crate::time::timeout(
-            cx.now(),
-            accept_timeout,
-            control_listener.accept(),
-        )
+        let accept_window = preflight_remaining()?.unwrap_or(accept_timeout);
+        let (stream, peer) = match bounded_bonded_probe(cx, accept_window, async {
+            control_listener.accept().await.map_err(RqError::Io)
+        })
         .await
         {
-            Ok(Ok(accepted)) => accepted,
-            Ok(Err(err)) => return Err(RqError::Io(err)),
-            Err(_elapsed) => {
+            Ok(accepted) => accepted,
+            Err(RqError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
                 return Err(RqError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     format!(
-                        "bonded enrollment timed out after {accept_timeout:?} with {} of {expected} donors",
+                        "bonded enrollment timed out after {accept_window:?} with {} of {expected} donors",
                         control_plane.registry().enrolled_count()
                     ),
                 )));
             }
+            Err(error) => return Err(error),
         };
         let mut control = FrameTransport::new(stream);
-        let hello_frame = match crate::time::timeout(cx.now(), accept_timeout, control.recv()).await
-        {
-            Ok(Ok(frame)) => frame,
-            Ok(Err(_)) | Err(_) => continue,
+        let hello_timeout = preflight_remaining()?
+            .map_or(accept_timeout, |remaining| remaining.min(accept_timeout));
+        let hello_frame = match bounded_bonded_probe(cx, hello_timeout, control.recv()).await {
+            Ok(frame) => frame,
+            Err(RqError::Cancelled) => return Err(RqError::Cancelled),
+            Err(_) => continue,
         };
         let reject = |reason: String| BondedDonorWelcome {
             accepted: false,
@@ -665,31 +1288,91 @@ async fn accept_bonded_donors(
             udp_ports: Vec::new(),
         };
         if hello_frame.frame_type() != FrameType::Handshake {
-            let _ = control
-                .send(&json_frame(
-                    FrameType::HandshakeAck,
-                    &reject("expected bonded Handshake frame".to_string()),
-                )?)
+            let rejection = json_frame(
+                FrameType::HandshakeAck,
+                &reject("expected bonded Handshake frame".to_string()),
+            )?;
+            let _ =
+                send_bonded_enrollment_frame(cx, &mut control, &rejection, preflight_remaining()?)
+                    .await;
+            continue;
+        }
+        #[derive(Deserialize)]
+        struct ProtocolIdentity {
+            protocol: u32,
+        }
+        let is_probe = serde_json::from_slice::<ProtocolIdentity>(hello_frame.payload())
+            .is_ok_and(|identity| identity.protocol == BONDED_PATH_PROBE_PROTOCOL);
+        if is_probe {
+            let result = if probe_attempts_left == 0 {
+                Err(RqError::HandshakeRejected(
+                    "bonded path probe budget exhausted".to_string(),
+                ))
+            } else {
+                probe_attempts_left -= 1;
+                // Validly identified probes have a separate bounded budget;
+                // they never consume donor slots or donor-rejection attempts.
+                attempts_left = attempts_left.saturating_add(1);
+                serve_bonded_path_probe(
+                    cx,
+                    &mut control,
+                    &hello_frame,
+                    descriptor,
+                    symbol_auth,
+                    udp,
+                    udp_ports,
+                    conns.len(),
+                    preflight_remaining()?
+                        .map_or(accept_timeout, |remaining| remaining.min(accept_timeout)),
+                )
+                .await
+            };
+            if let Err(error) = result {
+                if matches!(error, RqError::Cancelled) {
+                    return Err(error);
+                }
+                let refusal = json_frame(
+                    FrameType::Error,
+                    &BondedProbeRefusal {
+                        authentication: matches!(error, RqError::Authentication(_)),
+                        reason: error.to_string(),
+                    },
+                )?;
+                // Even an invalid/slow probe cannot park the enrollment loop.
+                let _ = bounded_bonded_probe(
+                    cx,
+                    preflight_remaining()?.map_or(Duration::from_millis(100), |remaining| {
+                        remaining.min(Duration::from_millis(100))
+                    }),
+                    control.send(&refusal),
+                )
                 .await;
+            }
             continue;
         }
         let hello: BondedDonorHello = match parse_json(&hello_frame) {
             Ok(hello) => hello,
             Err(_) => {
-                let _ = control
-                    .send(&json_frame(
-                        FrameType::HandshakeAck,
-                        &reject("malformed bonded hello".to_string()),
-                    )?)
-                    .await;
+                let rejection = json_frame(
+                    FrameType::HandshakeAck,
+                    &reject("malformed bonded hello".to_string()),
+                )?;
+                let _ = send_bonded_enrollment_frame(
+                    cx,
+                    &mut control,
+                    &rejection,
+                    preflight_remaining()?,
+                )
+                .await;
                 continue;
             }
         };
-        let refusal = bonded_donor_hello_refusal(&hello, descriptor, symbol_auth_enabled);
+        let refusal = bonded_donor_hello_refusal(&hello, descriptor, symbol_auth.is_some());
         if let Some(reason) = refusal {
-            let _ = control
-                .send(&json_frame(FrameType::HandshakeAck, &reject(reason))?)
-                .await;
+            let rejection = json_frame(FrameType::HandshakeAck, &reject(reason))?;
+            let _ =
+                send_bonded_enrollment_frame(cx, &mut control, &rejection, preflight_remaining()?)
+                    .await;
             continue;
         }
         let symbol_transport = if hello.protocol == ATP_RQ_BONDED_STREAM_PROTOCOL {
@@ -704,12 +1387,14 @@ async fn accept_bonded_donors(
         let enrollment = match control_plane.enroll_next_donor(&hello.offer) {
             Ok(enrollment) => enrollment,
             Err(err) => {
-                let _ = control
-                    .send(&json_frame(
-                        FrameType::HandshakeAck,
-                        &reject(err.to_string()),
-                    )?)
-                    .await;
+                let rejection = json_frame(FrameType::HandshakeAck, &reject(err.to_string()))?;
+                let _ = send_bonded_enrollment_frame(
+                    cx,
+                    &mut control,
+                    &rejection,
+                    preflight_remaining()?,
+                )
+                .await;
                 continue;
             }
         };
@@ -717,20 +1402,19 @@ async fn accept_bonded_donors(
             "receiver: donor_admitted {}",
             serde_json::to_string(&enrollment.admission_trace()).unwrap_or_default()
         );
-        control
-            .send(&json_frame(
-                FrameType::HandshakeAck,
-                &BondedDonorWelcome {
-                    accepted: true,
-                    reason: None,
-                    peer_id: peer_id.to_string(),
-                    donor_index: enrollment.donor_index,
-                    donor_count: enrollment.assignment.donor_count,
-                    assignment: Some(enrollment.assignment.clone()),
-                    udp_ports: udp_ports.to_vec(),
-                },
-            )?)
-            .await?;
+        let welcome = json_frame(
+            FrameType::HandshakeAck,
+            &BondedDonorWelcome {
+                accepted: true,
+                reason: None,
+                peer_id: peer_id.to_string(),
+                donor_index: enrollment.donor_index,
+                donor_count: enrollment.assignment.donor_count,
+                assignment: Some(enrollment.assignment.clone()),
+                udp_ports: udp_ports.to_vec(),
+            },
+        )?;
+        send_bonded_enrollment_frame(cx, &mut control, &welcome, preflight_remaining()?).await?;
         conns.push(BondedDonorConn {
             donor_index: enrollment.donor_index,
             control,
@@ -741,6 +1425,18 @@ async fn accept_bonded_donors(
         });
     }
     Ok(conns)
+}
+
+async fn send_bonded_enrollment_frame(
+    cx: &Cx,
+    control: &mut FrameTransport<TcpStream>,
+    frame: &Frame,
+    preflight_remaining: Option<Duration>,
+) -> Result<(), RqError> {
+    match preflight_remaining {
+        Some(remaining) => bounded_bonded_probe(cx, remaining, control.send(frame)).await,
+        None => control.send(frame).await,
+    }
 }
 
 enum BondedReady {
@@ -1351,11 +2047,87 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
     control_listener: &TcpListener,
     udp_bind_ip: &str,
     expected_donors: u32,
+    config: RqConfig,
+    peer_id: &str,
+    progress: Option<mpsc::Sender<BondedTransferProgress>>,
+    options: RqReceiveOptions,
+    advertised_udp_ips: &[std::net::IpAddr],
+) -> Result<BondedReceiveReport, RqError> {
+    receive_bonded_inner(
+        cx,
+        descriptor,
+        dest_dir,
+        control_listener,
+        udp_bind_ip,
+        expected_donors,
+        config,
+        peer_id,
+        progress,
+        options,
+        advertised_udp_ips,
+        None,
+    )
+    .await
+}
+
+/// Receive a bonded transfer with a separate, absolute preflight allowance.
+///
+/// An orchestrator may probe several remote paths before launching any donor.
+/// This deadline bounds that entire initial phase, including probe replies,
+/// until the first donor enrolls. Subsequent enrollment and transfer-stall
+/// deadlines still use [`RqConfig::accept_timeout`]. The existing receiver
+/// entry points retain their original per-accept timeout behavior.
+#[allow(clippy::too_many_arguments)]
+pub async fn receive_bonded_with_preflight_timeout(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    dest_dir: &Path,
+    control_listener: &TcpListener,
+    udp_bind_ip: &str,
+    expected_donors: u32,
+    config: RqConfig,
+    peer_id: &str,
+    progress: Option<mpsc::Sender<BondedTransferProgress>>,
+    options: RqReceiveOptions,
+    advertised_udp_ips: &[std::net::IpAddr],
+    preflight_timeout: Duration,
+) -> Result<BondedReceiveReport, RqError> {
+    if preflight_timeout.is_zero() {
+        return Err(RqError::Source(
+            "bonded preflight timeout must be positive".to_string(),
+        ));
+    }
+    receive_bonded_inner(
+        cx,
+        descriptor,
+        dest_dir,
+        control_listener,
+        udp_bind_ip,
+        expected_donors,
+        config,
+        peer_id,
+        progress,
+        options,
+        advertised_udp_ips,
+        Some(preflight_timeout),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn receive_bonded_inner(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    dest_dir: &Path,
+    control_listener: &TcpListener,
+    udp_bind_ip: &str,
+    expected_donors: u32,
     mut config: RqConfig,
     peer_id: &str,
     progress: Option<mpsc::Sender<BondedTransferProgress>>,
     options: RqReceiveOptions,
     advertised_udp_ips: &[std::net::IpAddr],
+    preflight_timeout: Option<Duration>,
 ) -> Result<BondedReceiveReport, RqError> {
     options.validate()?;
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
@@ -1438,10 +2210,12 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
         control_listener,
         &mut control_plane,
         descriptor,
-        symbol_auth_enabled,
+        symbol_auth.as_ref(),
+        &mut udp,
         &udp_ports,
         peer_id,
         config.accept_timeout,
+        preflight_timeout,
     ))
     .await?;
     let enrolled_donors = u32::try_from(conns.len()).unwrap_or(u32::MAX);
