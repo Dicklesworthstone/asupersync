@@ -10741,3 +10741,43 @@ fn receiver_refuses_entry_geometry_before_allocating_receive_state() {
         "{err:?}"
     );
 }
+
+#[test]
+fn forbidden_blocking_pool_refuses_the_rq_metadata_read_and_an_open_pool_runs_it() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let file = root.path().join("payload.bin");
+    std::fs::write(&file, b"payload").unwrap();
+    let policy = MetadataPolicy::portable();
+
+    let forbidden = crate::runtime::BlockingPool::with_config_and_policies(
+        0,
+        1,
+        crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+        crate::runtime::BlockingQueuePolicy::Fifo,
+        crate::runtime::BlockingAdmissionPolicy::Forbidden,
+    );
+    let refused = {
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        futures_lite::future::block_on(read_rq_entry_metadata(&file, &policy))
+    };
+    match refused {
+        Err(RqError::Source(message)) => assert!(
+            message.contains("forbidden by this runtime's blocking admission policy"),
+            "{message}"
+        ),
+        Err(other) => panic!("expected a source refusal, got {other:?}"),
+        Ok(_) => panic!("a forbidden pool must refuse before the metadata is read"),
+    }
+    forbidden.shutdown();
+
+    // Remove the plant: the same read over an ordinary pool runs.
+    let open = crate::runtime::BlockingPool::new(1, 1);
+    let read = {
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        futures_lite::future::block_on(read_rq_entry_metadata(&file, &policy))
+    };
+    assert!(read.is_ok());
+    assert!(open.shutdown_and_wait(Duration::from_secs(5)));
+}

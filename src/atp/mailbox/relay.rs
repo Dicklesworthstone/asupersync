@@ -211,10 +211,20 @@ impl RelayClient {
     }
 
     /// Send message to relay and await response.
+    ///
+    /// Under a runtime whose blocking admission policy is `Forbidden` this returns
+    /// [`MailboxError::RelayError`] without connecting.
     pub async fn send_message(&self, message: RelayMessage) -> MailboxResult<RelayResponse> {
         let endpoint = self.endpoint;
         let timeout = self.timeout;
         let credentials = self.credentials.clone();
+        // A runtime that forbids blocking work is refused before the connect is scheduled: nothing is
+        // sent and the closure never runs. No pool and no context keep today's path.
+        if crate::runtime::spawn_blocking::current_pool_forbids_blocking() {
+            return Err(MailboxError::RelayError {
+                message: crate::runtime::spawn_blocking::forbidden_io_error().to_string(),
+            });
+        }
         spawn_blocking(move || send_relay_message_blocking(endpoint, timeout, credentials, message))
             .await
     }

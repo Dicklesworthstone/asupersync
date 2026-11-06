@@ -55,6 +55,25 @@ const fn windows_attributes_contain_reparse_point(attributes: u32) -> bool {
     attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
+/// Refuse, before any filesystem work starts, when the runtime forbids blocking work.
+///
+/// The helpers below hand their work to the blocking pool through the free `spawn_blocking`, which returns
+/// the closure's own value and so can only panic on a forbidden pool. Those that can return an error call
+/// this first and return the refusal instead. A context with no pool, and code outside any context, are not
+/// refused: nothing changes for a runtime that does not choose the policy.
+///
+/// # Errors
+///
+/// Returns a [`StreamingError`] carrying the shared "blocking work is forbidden" message.
+pub(crate) fn refuse_if_blocking_forbidden() -> Result<(), StreamingError> {
+    if crate::runtime::spawn_blocking::current_pool_forbids_blocking() {
+        return Err(StreamingError::new(
+            crate::runtime::spawn_blocking::forbidden_io_error().to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Return whether `path` is a symbolic link or a Windows reparse point without
 /// following it.
 ///
@@ -69,7 +88,7 @@ const fn windows_attributes_contain_reparse_point(attributes: u32) -> bool {
 /// inspected.
 pub async fn path_is_link_or_reparse(path: &Path) -> std::io::Result<bool> {
     let path = path.to_path_buf();
-    crate::runtime::spawn_blocking(move || path_is_link_or_reparse_sync(&path)).await
+    crate::runtime::spawn_blocking_io(move || path_is_link_or_reparse_sync(&path)).await
 }
 
 /// Synchronous counterpart of [`path_is_link_or_reparse`] for filesystem walks
@@ -177,7 +196,7 @@ pub enum PathLinkKind {
 /// Returns the underlying metadata or Windows reparse-tag inspection error.
 pub async fn classify_path_link(path: &Path) -> io::Result<PathLinkKind> {
     let path = path.to_path_buf();
-    crate::runtime::spawn_blocking(move || classify_path_link_sync(&path)).await
+    crate::runtime::spawn_blocking_io(move || classify_path_link_sync(&path)).await
 }
 
 /// Synchronous counterpart of [`classify_path_link`].
@@ -2338,6 +2357,7 @@ pub async fn read_entry_metadata(
     abs_path: &Path,
     policy: &MetadataPolicy,
 ) -> Result<EntryMetadata, StreamingError> {
+    refuse_if_blocking_forbidden()?;
     let path_buf = abs_path.to_path_buf();
     let policy = policy.clone();
     crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path_buf, &policy)).await
@@ -2355,6 +2375,7 @@ pub async fn capture_directory_metadata_manifest(
     root: &Path,
     policy: &MetadataPolicy,
 ) -> Result<DirectoryMetadataManifest, StreamingError> {
+    refuse_if_blocking_forbidden()?;
     let root = root.to_path_buf();
     let policy = policy.clone();
     crate::runtime::spawn_blocking(move || capture_directory_metadata_manifest_sync(&root, &policy))
@@ -2763,6 +2784,7 @@ pub async fn read_entry_metadata(
     abs_path: &Path,
     policy: &MetadataPolicy,
 ) -> Result<EntryMetadata, StreamingError> {
+    refuse_if_blocking_forbidden()?;
     let path_buf = abs_path.to_path_buf();
     let policy = policy.clone();
     crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path_buf, &policy)).await
@@ -2849,6 +2871,7 @@ pub async fn read_entry_metadata(
     abs_path: &Path,
     policy: &MetadataPolicy,
 ) -> Result<EntryMetadata, StreamingError> {
+    refuse_if_blocking_forbidden()?;
     let path_buf = abs_path.to_path_buf();
     let policy = policy.clone();
     crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path_buf, &policy)).await
@@ -2882,6 +2905,7 @@ pub fn read_entry_metadata_sync(
 pub(crate) async fn inode_key_if_regular(
     abs_path: &Path,
 ) -> Result<Option<HardlinkIdentity>, StreamingError> {
+    refuse_if_blocking_forbidden()?;
     let path_buf = abs_path.to_path_buf();
     crate::runtime::spawn_blocking(move || inode_key_if_regular_sync(&path_buf)).await
 }
@@ -2915,6 +2939,7 @@ pub(crate) fn inode_key_if_regular_sync(
 pub(crate) async fn inode_key_if_regular(
     abs_path: &Path,
 ) -> Result<Option<HardlinkIdentity>, StreamingError> {
+    refuse_if_blocking_forbidden()?;
     let path_buf = abs_path.to_path_buf();
     crate::runtime::spawn_blocking(move || inode_key_if_regular_sync(&path_buf)).await
 }
@@ -3027,6 +3052,7 @@ pub async fn apply_entry_metadata(
     out_path: &Path,
     meta: &EntryMetadata,
 ) -> Result<MetadataApplyReport, StreamingError> {
+    refuse_if_blocking_forbidden()?;
     let path_buf = out_path.to_path_buf();
     let meta = meta.clone();
     crate::runtime::spawn_blocking(move || apply_entry_metadata_sync(&path_buf, &meta)).await
@@ -3144,6 +3170,7 @@ pub async fn apply_entry_metadata(
     out_path: &Path,
     meta: &EntryMetadata,
 ) -> Result<MetadataApplyReport, StreamingError> {
+    refuse_if_blocking_forbidden()?;
     let path = out_path.to_path_buf();
     let meta = meta.clone();
     crate::runtime::spawn_blocking(move || apply_entry_metadata_sync(&path, &meta)).await
@@ -3317,6 +3344,7 @@ pub fn apply_entry_metadata_sync(
 /// Returns [`StreamingError`] if `mkfifo` or the mode application fails.
 #[cfg(unix)]
 pub async fn recreate_fifo(out_path: &Path, mode: u32) -> Result<(), StreamingError> {
+    refuse_if_blocking_forbidden()?;
     let perm_bits = mode & 0o7777;
     let path_buf = out_path.to_path_buf();
     crate::runtime::spawn_blocking(move || {

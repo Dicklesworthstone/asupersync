@@ -114,6 +114,7 @@ use crate::net::atp::transport_common::codec::{self, CodecOffer, CompressionMode
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 #[cfg(any(feature = "tls", test))]
 use crate::net::atp::transport_common::metadata::read_entry_metadata;
+use crate::net::atp::transport_common::metadata::refuse_if_blocking_forbidden;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
     commit_symlink_transactionally, create_directory_tree_durably, path_is_link_or_reparse,
@@ -4880,6 +4881,7 @@ async fn prepare_source_manifest(
         quic_join_relative(Path::new("base"), &source_entry.rel_path)?;
     }
     let planned = {
+        refuse_if_blocking_forbidden()?;
         let policy = config.metadata_policy.clone();
         let preserve_hardlinks = config.preserve_hardlinks;
         let max_transfer_bytes = config.max_transfer_bytes;
@@ -10695,6 +10697,7 @@ async fn apply_quic_metadata_verified(
     out_path: &Path,
     metadata: &EntryMetadata,
 ) -> Result<MetadataApplyReport, QuicTransportError> {
+    refuse_if_blocking_forbidden()?;
     let out_path = out_path.to_path_buf();
     let metadata = metadata.clone();
     crate::runtime::spawn_blocking(move || {

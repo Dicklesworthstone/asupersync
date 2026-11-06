@@ -559,12 +559,23 @@ impl BondTransferDescriptor {
     /// Covers single-file-per-entry copies (the common case and every directory
     /// tree). A coalesced (E-15 `members`) entry's bytes are reassembled by the
     /// donor before this call; that reassembly is out of Phase-A scope.
+    ///
+    /// Under a runtime whose blocking admission policy is `Forbidden`, a topology entry's check is
+    /// refused as [`BondProofError::Io`] before it is scheduled; the entry is not inspected.
     pub async fn prove_local_holding(&self, root_dir: &Path) -> Result<(), BondProofError> {
         self.validate()?;
         let mut buf = vec![0u8; BOND_HASH_BUFFER_SIZE];
         let mut digests: Vec<EntryDigest> = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             if let Some(metadata) = self.topology_metadata_for_entry(entry)? {
+                // A runtime that forbids blocking work is refused before the check is scheduled: the entry is
+                // never inspected, so the refusal says nothing about it. No pool and no context keep today's path.
+                if crate::runtime::spawn_blocking::current_pool_forbids_blocking() {
+                    return Err(BondProofError::Io {
+                        rel_path: entry.rel_path.clone(),
+                        message: crate::runtime::spawn_blocking::forbidden_io_error().to_string(),
+                    });
+                }
                 let root_dir = root_dir.to_path_buf();
                 let entry = entry.clone();
                 let metadata = metadata.clone();

@@ -25,6 +25,7 @@
 
 use super::{ContentId, Cx, DeltaContentKey, MAX_COMPRESSED_CHUNK_RAW, TransportError};
 use crate::net::atp::transport_common::delta::read_full_chunk;
+use crate::net::atp::transport_common::metadata::refuse_if_blocking_forbidden;
 use crate::net::atp::transport_common::read_bounded_chunk;
 use std::future::{Future, poll_fn};
 use std::path::PathBuf;
@@ -52,6 +53,7 @@ impl BaselineChunk {
     ) -> Result<(), TransportError> {
         run_io(cx, async {
             check_io(cx)?;
+            refuse_if_blocking_forbidden()?;
             let length = chunk_length(key)?;
             self.offset
                 .checked_add(key.size_bytes)

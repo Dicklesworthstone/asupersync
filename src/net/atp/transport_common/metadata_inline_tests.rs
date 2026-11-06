@@ -1540,3 +1540,97 @@ fn presynced_regular_install_rejects_a_socket_substituted_after_sync() {
     assert_eq!(std::fs::read(&retained).unwrap(), b"synced payload");
     assert!(!std::fs::symlink_metadata(&staged).unwrap().is_file());
 }
+
+#[cfg(unix)]
+#[test]
+fn forbidden_blocking_pool_refuses_metadata_helpers_before_touching_the_filesystem() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn refused<T>(result: Result<T, StreamingError>) -> String {
+        match result {
+            Err(error) => error.message().to_owned(),
+            Ok(_) => panic!("a forbidden pool must refuse before running the work"),
+        }
+    }
+
+    let root = tempfile::tempdir().expect("temporary directory");
+    let file = root.path().join("payload.bin");
+    std::fs::write(&file, b"payload").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let fifo = root.path().join("pipe");
+    let policy = MetadataPolicy::portable();
+    let mut wanted =
+        read_entry_metadata_sync(&file, &policy).expect("read metadata outside any context");
+    wanted.unix_mode = Some(0o600);
+
+    let forbidden = crate::runtime::BlockingPool::with_config_and_policies(
+        0,
+        1,
+        crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+        crate::runtime::BlockingQueuePolicy::Fifo,
+        crate::runtime::BlockingAdmissionPolicy::Forbidden,
+    );
+    // A spawn-restricted context hides the public pool handle; the refusal must not depend on it.
+    let mut cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+    cx.runtime_mask = crate::cx::cap::CapMask::none();
+    let (link, class, read, manifest, inode, apply, mkfifo) = {
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        futures_lite::future::block_on(async {
+            (
+                path_is_link_or_reparse(&file).await,
+                classify_path_link(&file).await,
+                read_entry_metadata(&file, &policy).await,
+                capture_directory_metadata_manifest(root.path(), &policy).await,
+                inode_key_if_regular(&file).await,
+                apply_entry_metadata(&file, &wanted).await,
+                recreate_fifo(&fifo, 0o600).await,
+            )
+        })
+    };
+    assert_eq!(
+        link.err().map(|error| error.kind()),
+        Some(io::ErrorKind::Unsupported)
+    );
+    assert_eq!(
+        class.err().map(|error| error.kind()),
+        Some(io::ErrorKind::Unsupported)
+    );
+    for message in [
+        refused(read),
+        refused(manifest),
+        refused(inode),
+        refused(apply),
+        refused(mkfifo),
+    ] {
+        assert!(
+            message.contains("forbidden by this runtime's blocking admission policy"),
+            "{message}"
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
+        0o644,
+        "the refused apply must not touch the file"
+    );
+    assert!(
+        std::fs::symlink_metadata(&fifo).is_err(),
+        "the refused mkfifo must not create anything"
+    );
+    forbidden.shutdown();
+
+    // Remove the plant: the same calls over an ordinary pool run.
+    let open = crate::runtime::BlockingPool::new(1, 1);
+    {
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        futures_lite::future::block_on(async {
+            assert!(matches!(path_is_link_or_reparse(&file).await, Ok(false)));
+            assert!(read_entry_metadata(&file, &policy).await.is_ok());
+            assert!(matches!(inode_key_if_regular(&file).await, Ok(Some(_))));
+            assert!(apply_entry_metadata(&file, &wanted).await.is_ok());
+            assert!(recreate_fifo(&fifo, 0o600).await.is_ok());
+        });
+    }
+    assert!(std::fs::symlink_metadata(&fifo).is_ok());
+    assert!(open.shutdown_and_wait(std::time::Duration::from_secs(5)));
+}

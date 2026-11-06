@@ -3967,3 +3967,41 @@ fn regular_publication_cancellation_does_not_wait_for_unrelated_capacity() {
     assert!(!base.exists());
     assert_eq!(std::fs::read(root.join("000.part")).unwrap(), b"file 0");
 }
+
+#[test]
+fn forbidden_blocking_pool_refuses_the_link_check_and_an_open_pool_runs_it() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let file = root.path().join("plain.bin");
+    std::fs::write(&file, b"plain").unwrap();
+
+    let forbidden = crate::runtime::BlockingPool::with_config_and_policies(
+        0,
+        1,
+        crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+        crate::runtime::BlockingQueuePolicy::Fifo,
+        crate::runtime::BlockingAdmissionPolicy::Forbidden,
+    );
+    let refused = {
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        futures_lite::future::block_on(reject_existing_link_or_reparse(&file))
+    };
+    match refused {
+        Err(TransportError::Source(message)) => assert!(
+            message.contains("forbidden by this runtime's blocking admission policy"),
+            "{message}"
+        ),
+        other => panic!("a forbidden pool must refuse with a source error, got {other:?}"),
+    }
+    forbidden.shutdown();
+
+    // Remove the plant: the same check over an ordinary pool runs and accepts a plain file.
+    let open = crate::runtime::BlockingPool::new(1, 1);
+    let accepted = {
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        futures_lite::future::block_on(reject_existing_link_or_reparse(&file))
+    };
+    assert!(accepted.is_ok(), "{accepted:?}");
+    assert!(open.shutdown_and_wait(Duration::from_secs(5)));
+}

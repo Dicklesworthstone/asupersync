@@ -105,6 +105,7 @@ use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::apply_entry_metadata;
 #[cfg(unix)]
 use crate::net::atp::transport_common::metadata::apply_entry_metadata_sync;
+use crate::net::atp::transport_common::metadata::refuse_if_blocking_forbidden;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata,
     FileKind, HardlinkIdentity, MetadataApplyReport, PathLinkKind, StagedFileSync, SyncedStagedFile,
@@ -5065,6 +5066,7 @@ async fn read_rq_entry_metadata(
     path: &Path,
     policy: &MetadataPolicy,
 ) -> Result<EntryMetadata, RqError> {
+    refuse_if_blocking_forbidden().map_err(|error| RqError::Source(error.into_message()))?;
     let path = path.to_path_buf();
     let policy = policy.clone();
     crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path, &policy))
@@ -5542,6 +5544,7 @@ async fn capture_source_metadata(
     policy: &MetadataPolicy,
     preserve_hardlinks: bool,
 ) -> Result<(), RqError> {
+    refuse_if_blocking_forbidden().map_err(|error| RqError::Source(error.into_message()))?;
     let paths = entries
         .iter()
         .map(|entry| entry.abs_path.clone())
@@ -5622,6 +5625,7 @@ async fn capture_rq_directory_metadata_manifest(
         return Ok(manifest);
     }
 
+    refuse_if_blocking_forbidden().map_err(|error| RqError::Source(error.into_message()))?;
     let directories = empty_directories.to_vec();
     let policy = policy.clone();
     let captured = crate::runtime::spawn_blocking(move || {
@@ -14323,6 +14327,7 @@ async fn apply_rq_entry_metadata(
         };
         let verify_exact = matches!(metadata.file_kind, FileKind::Regular)
             && (metadata.unix_mode.is_some() || metadata.mtime_unix_secs.is_some());
+        refuse_if_blocking_forbidden().map_err(|error| RqError::Source(error.into_message()))?;
         let (report, observed) = crate::runtime::spawn_blocking(move || {
             let report = apply_entry_metadata_sync(&out_path, &metadata)?;
             let observed = verify_exact

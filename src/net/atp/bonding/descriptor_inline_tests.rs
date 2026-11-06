@@ -452,6 +452,80 @@
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn bonded_topology_local_holding_on_a_forbidden_blocking_pool_is_refused_before_the_entry_is_checked()
+     {
+        use std::os::unix::fs::symlink;
+
+        let mut desc = descriptor_for(&[(0, "empty-dir", b"")]);
+        desc.metadata = Some(RqMetadataManifest {
+            version: 1,
+            commitment_hex: "77".repeat(32),
+            entries: Vec::new(),
+            directories: Some(DirectoryMetadataManifest {
+                root: None,
+                entries: vec![DirectoryMetadataEntry {
+                    rel_path: "empty-dir".to_string(),
+                    metadata: EntryMetadata {
+                        file_kind: FileKind::Directory,
+                        ..EntryMetadata::default()
+                    },
+                }],
+            }),
+        });
+
+        // A symlink where the descriptor requires an empty directory: when the check runs it is an EntryMismatch.
+        let drifted = tempfile::tempdir().expect("drifted donor root");
+        std::fs::create_dir(drifted.path().join("actual-dir")).expect("create actual directory");
+        symlink("actual-dir", drifted.path().join("empty-dir")).expect("create directory symlink");
+        // A real empty directory: when the check runs it passes.
+        let matching = tempfile::tempdir().expect("matching donor root");
+        std::fs::create_dir(matching.path().join("empty-dir")).expect("create empty directory");
+
+        let expected = crate::runtime::spawn_blocking::forbidden_io_error().to_string();
+        let forbidden = crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        );
+        {
+            let cx =
+                crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+            let _current = crate::cx::Cx::set_current(Some(cx));
+            // Neither answer comes from the entry: a drifted copy is not an EntryMismatch and a matching one is not
+            // accepted, so the topology check never ran.
+            for root in [drifted.path(), matching.path()] {
+                assert_eq!(
+                    futures_lite::future::block_on(desc.prove_local_holding(root)),
+                    Err(BondProofError::Io {
+                        rel_path: "empty-dir".to_string(),
+                        message: expected.clone(),
+                    })
+                );
+            }
+        }
+        forbidden.shutdown();
+
+        // Remove the plant: with an open pool of the default policy the same two copies get their real answers.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        {
+            let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+            let _current = crate::cx::Cx::set_current(Some(cx));
+            assert_eq!(
+                futures_lite::future::block_on(desc.prove_local_holding(drifted.path())),
+                Err(BondProofError::EntryMismatch {
+                    rel_path: "empty-dir".to_string(),
+                })
+            );
+            futures_lite::future::block_on(desc.prove_local_holding(matching.path()))
+                .expect("an open pool still proves a matching directory");
+        }
+        open.shutdown();
+    }
+
     #[test]
     fn entry_block_geometry_clamps_zero_symbol_and_block_inputs() {
         let mut desc = descriptor_for(&[(2, "payload.bin", b"abc")]);

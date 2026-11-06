@@ -155,3 +155,56 @@
         }
         Ok(())
     }
+
+    #[test]
+    fn send_message_on_a_forbidden_blocking_pool_is_refused_and_never_connects() -> TestResult {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let endpoint = listener.local_addr()?;
+        let client = RelayClient::new(endpoint).with_timeout(Duration::from_millis(200));
+        let expected = crate::runtime::spawn_blocking::forbidden_io_error().to_string();
+
+        let forbidden = crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        );
+        {
+            let cx =
+                crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+            let _current = crate::cx::Cx::set_current(Some(cx));
+            let refused = futures_lite::future::block_on(client.send_message(RelayMessage::Status));
+            assert!(
+                matches!(&refused, Err(MailboxError::RelayError { message }) if *message == expected),
+                "a forbidden pool is a typed relay refusal: {refused:?}"
+            );
+            // test_connection folds every error into "not connected"; it must not connect either.
+            assert!(!futures_lite::future::block_on(client.test_connection())?);
+        }
+        assert!(
+            matches!(listener.accept(), Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock),
+            "a forbidden pool must not even connect"
+        );
+        forbidden.shutdown();
+
+        // Remove the plant: with an open pool of the default policy the same call connects (nothing serves the
+        // listener, so it then times out), and the connection reaches the listener.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        {
+            let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+            let _current = crate::cx::Cx::set_current(Some(cx));
+            let outcome = futures_lite::future::block_on(client.send_message(RelayMessage::Status));
+            assert!(
+                outcome.is_err(),
+                "an unanswered relay is an error: {outcome:?}"
+            );
+        }
+        assert!(
+            listener.accept().is_ok(),
+            "the permitted path still connects"
+        );
+        open.shutdown();
+        Ok(())
+    }

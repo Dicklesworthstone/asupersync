@@ -60,6 +60,7 @@ use crate::net::atp::transport_common::codec::{
     self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability, EntryCompression,
 };
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
+use crate::net::atp::transport_common::metadata::refuse_if_blocking_forbidden;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
     commit_symlink_transactionally, create_directory_tree_durably, path_is_link_or_reparse,
@@ -3609,6 +3610,7 @@ async fn capture_entry_metadata(
     let mut primaries = HardlinkPrimaries::new();
     for batch in entries.chunks(METADATA_BATCH_ENTRIES) {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        refuse_if_blocking_forbidden()?;
         let policy = config.metadata_policy.clone();
         let preserve_hardlinks = config.preserve_hardlinks;
         let paths: Vec<(String, PathBuf)> = batch
@@ -3733,6 +3735,7 @@ async fn hash_content_entries(
     let (mut total, mut next, mut open) = (0u64, 0usize, None);
     while next < jobs.len() {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        refuse_if_blocking_forbidden()?;
         let task_jobs = std::sync::Arc::clone(&jobs);
         let mut moved_buf = std::mem::take(&mut task_buf);
         let moved_open = open.take();
@@ -5274,6 +5277,7 @@ async fn reject_destination_link_prefix_cached(
     // received file (br-asupersync-dfdwyt). The components before an unsafe
     // one are still checked first.
     if !pending.is_empty() {
+        refuse_if_blocking_forbidden()?;
         crate::runtime::spawn_blocking(move || check_link_prefixes_sync(&pending)).await?;
     }
     unsafe_component.map_or(Ok(()), Err)
@@ -5725,6 +5729,7 @@ fn is_plain_regular_entry(metadata: Option<&EntryMetadata>) -> bool {
 }
 
 async fn reject_existing_link_or_reparse(path: &Path) -> Result<(), TransportError> {
+    refuse_if_blocking_forbidden()?;
     let path = path.to_path_buf();
     crate::runtime::spawn_blocking(move || reject_existing_link_or_reparse_sync(&path)).await
 }
