@@ -5657,7 +5657,10 @@ where
     ///
     /// Returns [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
     /// when this Cx carries no
-    /// spawn gateway or region counter. Admission-time denials (region
+    /// spawn gateway or region counter, and when its blocking pool is
+    /// [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden):
+    /// no task is admitted and the closure is dropped unrun, not run inline.
+    /// Admission-time denials (region
     /// closing, quota) resolve through the returned handle as
     /// `JoinError::Cancelled`. Never panics.
     pub fn spawn_blocking<F, R>(
@@ -5669,6 +5672,12 @@ where
         R: Send + 'static,
     {
         let pool = self.blocking_pool_handle();
+        if pool
+            .as_ref()
+            .is_some_and(BlockingPoolHandle::forbids_blocking)
+        {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        }
         self.spawn_cancellation_dominant(move |child| async move {
             match pool {
                 Some(pool) => {
@@ -5692,8 +5701,10 @@ where
     ///
     /// Returns [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
     /// when this Cx carries no
-    /// spawn gateway, or when `scope` carries no pending-spawn counter for
-    /// its region (see [`Cx::spawn_in`]). Admission-time denials resolve
+    /// spawn gateway, when `scope` carries no pending-spawn counter for
+    /// its region (see [`Cx::spawn_in`]), and when its blocking pool is
+    /// [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden)
+    /// (as for [`Cx::spawn_blocking`]). Admission-time denials resolve
     /// through the returned handle as `JoinError::Cancelled`. Never panics.
     pub fn spawn_blocking_in<F, R, P>(
         &self,
@@ -5706,6 +5717,12 @@ where
         R: Send + 'static,
     {
         let pool = self.blocking_pool_handle();
+        if pool
+            .as_ref()
+            .is_some_and(BlockingPoolHandle::forbids_blocking)
+        {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        }
         self.spawn_in_cancellation_dominant(scope, move |child| async move {
             match pool {
                 Some(pool) => {

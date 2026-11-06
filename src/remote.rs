@@ -7151,7 +7151,11 @@ where
         if cx.checkpoint().is_err() {
             return Ok(report);
         }
-        let Some(blocking_pool) = cx.blocking_pool_handle() else {
+        // A pool that forbids blocking work is no pool for this driver: it polls discovery on the pool.
+        let Some(blocking_pool) = cx
+            .blocking_pool_handle()
+            .filter(|pool| !pool.forbids_blocking())
+        else {
             return Err(NativeRemoteDiscoveryError::BlockingPoolUnavailable {
                 destination: self.destination.clone(),
                 report,

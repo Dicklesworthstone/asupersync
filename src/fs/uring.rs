@@ -1680,6 +1680,12 @@ impl IoUringFile {
         // Match File's placement policy without restoring restricted SPAWN
         // authority. A rejected pool or absent pool retains the inline fallback.
         match crate::cx::Cx::current().and_then(|cx| cx.blocking_pool_handle_for_inheritance()) {
+            // A runtime that forbids blocking work gets an error, not the inline run below and not a panic.
+            Some(pool) if pool.forbids_blocking() => {
+                Box::pin(std::future::ready(Err::<T, io::Error>(
+                    crate::runtime::spawn_blocking::forbidden_io_error(),
+                )))
+            }
             Some(pool) => Box::pin(crate::runtime::spawn_blocking::spawn_blocking_on_pool(
                 pool, run,
             )),

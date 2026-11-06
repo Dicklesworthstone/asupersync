@@ -734,6 +734,12 @@ impl File {
         // placement, as spawn_blocking does, without granting the caller a
         // public submission handle or restoring any restricted capability.
         match crate::cx::Cx::current().and_then(|cx| cx.blocking_pool_handle_for_inheritance()) {
+            // A runtime that forbids blocking work gets an error, not the inline run below and not a panic.
+            Some(pool) if pool.forbids_blocking() => {
+                Box::pin(std::future::ready(Err::<T, io::Error>(
+                    crate::runtime::spawn_blocking::forbidden_io_error(),
+                )))
+            }
             Some(pool) => Box::pin(crate::runtime::spawn_blocking::spawn_blocking_on_pool(
                 pool, run,
             )),

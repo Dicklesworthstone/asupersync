@@ -777,7 +777,12 @@ mod managed_execution {
                 }
                 AppCxCapabilityV1::Remote => caps.remote && cx.has_remote(),
                 AppCxCapabilityV1::Registry => cx.registry_handle().is_some(),
-                AppCxCapabilityV1::Blocking => caps.spawn && cx.blocking_pool_handle().is_some(),
+                AppCxCapabilityV1::Blocking => {
+                    caps.spawn
+                        && cx
+                            .blocking_pool_handle()
+                            .is_some_and(|pool| !pool.forbids_blocking())
+                }
                 // These families need an explicitly supplied, kind-matched
                 // named handle. Independent driver checks still apply.
                 AppCxCapabilityV1::Database

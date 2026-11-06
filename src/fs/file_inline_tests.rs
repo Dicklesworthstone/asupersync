@@ -728,3 +728,41 @@
         });
         crate::test_complete!("test_shared_arc_file_handles_support_seek_and_async_read");
     }
+
+    #[test]
+    fn file_operations_on_a_forbidden_blocking_pool_return_unsupported_and_touch_nothing() {
+        init_test("file_operations_on_a_forbidden_blocking_pool_return_unsupported_and_touch_nothing");
+        let pool = crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        );
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("forbidden.txt");
+            // An owned async method goes through `spawn_blocking_io`.
+            let created = File::create(&path).await;
+            assert_eq!(
+                created.err().map(|error| error.kind()),
+                Some(io::ErrorKind::Unsupported)
+            );
+            assert!(!path.exists(), "the closure must not have run");
+            // A poll-trait call goes through the helper that offloads to the pool.
+            std::fs::write(&path, b"hello").unwrap();
+            let mut file = File::from_std(std::fs::File::open(&path).unwrap());
+            let mut buf = [0u8; 5];
+            let read = file.read(&mut buf).await;
+            assert_eq!(
+                read.err().map(|error| error.kind()),
+                Some(io::ErrorKind::Unsupported)
+            );
+        });
+        pool.shutdown();
+        crate::test_complete!(
+            "file_operations_on_a_forbidden_blocking_pool_return_unsupported_and_touch_nothing"
+        );
+    }

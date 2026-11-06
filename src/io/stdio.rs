@@ -269,6 +269,7 @@ impl InFlight {
                 let kind = match refused.kind() {
                     crate::runtime::BlockingSpawnErrorKind::Saturated => io::ErrorKind::WouldBlock,
                     crate::runtime::BlockingSpawnErrorKind::Shutdown => io::ErrorKind::Other,
+                    crate::runtime::BlockingSpawnErrorKind::Forbidden => io::ErrorKind::Unsupported,
                 };
                 drop(refused);
                 return Err(io::Error::new(
