@@ -622,3 +622,143 @@
             }
         });
     }
+
+    fn capture_panic_message(f: impl FnOnce()) -> String {
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            .expect_err("incomplete capture must panic, not verify a retained tail");
+        panic
+            .downcast_ref::<String>()
+            .expect("capture diagnostic is a formatted string")
+            .clone()
+    }
+
+    /// The production automatic-growth bound is exercised with a small limit
+    /// so this regression needs only nine events (br-asupersync-iwbef2).
+    #[test]
+    fn trace_capture_limit_rejects_an_incomplete_reference_without_rerunning() {
+        init_test("trace_capture_limit_rejects_an_incomplete_reference_without_rerunning");
+        let calls = AtomicUsize::new(0);
+        let message = capture_panic_message(|| {
+            let _ = capture_reference_with_limit(
+                LabConfig::new(42).trace_capacity(4),
+                &|runtime| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    for i in 0..9 {
+                        record_message(runtime, format!("event {i}"));
+                    }
+                },
+                8,
+            );
+        });
+        assert!(message.contains("incomplete determinism trace capture"), "{message}");
+        assert!(message.contains("phase=reference seed=42"), "{message}");
+        assert!(message.contains("recorded=9 retained=4"), "{message}");
+        assert!(message.contains("automatic_capacity_limit=8"), "{message}");
+        assert!(message.contains("LabConfig::trace_capacity"), "{message}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        crate::test_complete!(
+            "trace_capture_limit_rejects_an_incomplete_reference_without_rerunning"
+        );
+    }
+
+    #[test]
+    fn trace_capture_recapture_that_grows_again_is_rejected() {
+        init_test("trace_capture_recapture_that_grows_again_is_rejected");
+        let calls = AtomicUsize::new(0);
+        let message = capture_panic_message(|| {
+            let _ = DeterminismOracle::new().verify(
+                LabConfig::new(42).trace_capacity(2),
+                |runtime| {
+                    let run = calls.fetch_add(1, Ordering::SeqCst);
+                    let events = if run == 0 { 3 } else { 4 };
+                    for i in 0..events {
+                        record_message(runtime, format!("event {i}"));
+                    }
+                },
+            );
+        });
+        assert!(message.contains("phase=reference recapture seed=42"), "{message}");
+        assert!(message.contains("recorded=4 retained=3"), "{message}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "no unbounded retry loop");
+        crate::test_complete!("trace_capture_recapture_that_grows_again_is_rejected");
+    }
+
+    // Imported events can retain their sequence numbers. An extra prefix
+    // followed by the same four imported events has an identical ring tail.
+    fn record_imported_tail(runtime: &LabRuntime, extra_prefix: bool) {
+        if extra_prefix {
+            runtime.trace().push_event(TraceEvent::new(
+                0,
+                Time::ZERO,
+                TraceEventKind::UserTrace,
+                TraceData::Message("extra prefix".to_string()),
+            ));
+        }
+        for seq in 1..=4 {
+            runtime.trace().push_event(TraceEvent::new(
+                seq,
+                Time::ZERO,
+                TraceEventKind::UserTrace,
+                TraceData::Message(format!("tail {seq}")),
+            ));
+        }
+    }
+
+    #[test]
+    fn trace_capture_comparison_cannot_pass_with_an_identical_truncated_tail() {
+        init_test("trace_capture_comparison_cannot_pass_with_an_identical_truncated_tail");
+        let calls = AtomicUsize::new(0);
+        let message = capture_panic_message(|| {
+            let _ = DeterminismOracle::new().verify(
+                LabConfig::new(42).trace_capacity(4),
+                |runtime| {
+                    let run = calls.fetch_add(1, Ordering::SeqCst);
+                    record_imported_tail(runtime, run != 0);
+                },
+            );
+        });
+        assert!(message.contains("phase=comparison seed=42"), "{message}");
+        assert!(message.contains("recorded=5 retained=4"), "{message}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        crate::test_complete!(
+            "trace_capture_comparison_cannot_pass_with_an_identical_truncated_tail"
+        );
+    }
+
+    #[test]
+    fn trace_capture_is_checked_for_every_multi_run_comparison() {
+        init_test("trace_capture_is_checked_for_every_multi_run_comparison");
+        let calls = AtomicUsize::new(0);
+        let message = capture_panic_message(|| {
+            assert_deterministic_multi(&LabConfig::new(42).trace_capacity(4), 3, |runtime| {
+                let run = calls.fetch_add(1, Ordering::SeqCst);
+                record_imported_tail(runtime, run == 2);
+            });
+        });
+        assert!(message.contains("phase=multi-run comparison seed=42"), "{message}");
+        assert!(message.contains("recorded=5 retained=4"), "{message}");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        crate::test_complete!("trace_capture_is_checked_for_every_multi_run_comparison");
+    }
+
+    #[test]
+    fn trace_capture_accepts_an_explicit_capacity_above_the_automatic_limit() {
+        init_test("trace_capture_accepts_an_explicit_capacity_above_the_automatic_limit");
+        let calls = AtomicUsize::new(0);
+        let (config, trace) = capture_reference_with_limit(
+            LabConfig::new(42).trace_capacity(9),
+            &|runtime| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                for i in 0..9 {
+                    record_message(runtime, format!("event {i}"));
+                }
+            },
+            8,
+        );
+        assert_eq!(config.trace_capacity, 9);
+        assert_eq!(trace.len(), 9);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        crate::test_complete!(
+            "trace_capture_accepts_an_explicit_capacity_above_the_automatic_limit"
+        );
+    }

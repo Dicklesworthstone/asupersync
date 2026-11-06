@@ -462,8 +462,10 @@ impl fmt::Display for TraceEventSummary {
 /// This oracle runs a program twice with identical configuration and
 /// verifies that the traces are identical. When the first run records more
 /// events than the configured trace buffer keeps, the program runs once more
-/// with a buffer that holds them all, so the comparison covers the whole
-/// trace and not only the buffer's newest events.
+/// with a buffer that holds them all, up to an automatic capacity limit of
+/// 1,048,576 events. Any incomplete recapture or comparison panics instead of
+/// comparing only the buffer's newest events. A larger capacity can be
+/// explicitly configured with [`LabConfig::trace_capacity()`].
 #[derive(Debug, Default)]
 pub struct DeterminismOracle {
     /// Number of context events to include before divergence.
@@ -494,13 +496,21 @@ impl DeterminismOracle {
     /// # Returns
     ///
     /// `Ok(())` if traces are identical, `Err(DeterminismViolation)` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the reference exceeds the automatic recapture limit, or the
+    /// single recapture or comparison run still loses events. Increase
+    /// [`LabConfig::trace_capacity()`] so every event is retained. Incomplete
+    /// capture is insufficient evidence, not an observed determinism violation.
     pub fn verify<F>(&self, config: LabConfig, program: F) -> Result<(), Box<DeterminismViolation>>
     where
         F: Fn(&mut LabRuntime),
     {
         let (config, trace1) = capture_reference(config, &program);
         // Second run with the config the reference was captured under
-        let (trace2, _) = run_and_summarize(&config, &program);
+        let (trace2, recorded) = run_and_summarize(&config, &program);
+        assert_complete_capture(&config, trace2.len(), recorded, "comparison");
         self.compare_traces(&trace1, &trace2)
     }
 
@@ -554,6 +564,16 @@ impl DeterminismOracle {
 /// configured buffer (see [`capture_reference`]).
 const FULL_TRACE_EVENT_LIMIT: u64 = 1 << 20;
 
+fn assert_complete_capture(config: &LabConfig, retained: usize, recorded: u64, phase: &str) {
+    assert!(
+        u64::try_from(retained) == Ok(recorded),
+        "incomplete determinism trace capture: phase={phase} seed={} \
+         recorded={recorded} retained={retained}; increase \
+         LabConfig::trace_capacity(...) so the complete trace fits",
+        config.seed
+    );
+}
+
 /// Runs `program` on a fresh runtime built from `config`. Returns the
 /// summaries of the events its trace buffer kept and the number of events it
 /// recorded, kept or evicted.
@@ -563,13 +583,12 @@ where
 {
     let mut runtime = LabRuntime::new(config.clone());
     program(&mut runtime);
-    let trace = runtime.trace();
-    let summaries = trace
-        .snapshot()
+    let (events, recorded) = runtime.trace().snapshot_with_stats();
+    let summaries = events
         .into_iter()
         .map(|e| TraceEventSummary::from_event(&e))
         .collect();
-    (summaries, trace.total_pushed())
+    (summaries, recorded)
 }
 
 /// Runs `program` once for the reference trace. Returns the config the runs
@@ -579,21 +598,48 @@ where
 /// overflowed buffers compared only their newest events: runs that diverged
 /// and converged again passed. A first run that overflowed is repeated with a
 /// buffer that holds every event it recorded (up to
-/// [`FULL_TRACE_EVENT_LIMIT`]), and that config is returned.
+/// [`FULL_TRACE_EVENT_LIMIT`]), and that config is returned. A reference too
+/// large to recapture, or a recapture that grows again, fails explicitly.
 fn capture_reference<F>(config: LabConfig, program: &F) -> (LabConfig, Vec<TraceEventSummary>)
+where
+    F: Fn(&mut LabRuntime),
+{
+    capture_reference_with_limit(config, program, FULL_TRACE_EVENT_LIMIT)
+}
+
+fn capture_reference_with_limit<F>(
+    config: LabConfig,
+    program: &F,
+    automatic_capacity_limit: u64,
+) -> (LabConfig, Vec<TraceEventSummary>)
 where
     F: Fn(&mut LabRuntime),
 {
     let (trace, recorded) = run_and_summarize(&config, program);
     let kept = u64::try_from(trace.len()).unwrap_or(u64::MAX);
-    if recorded <= kept || recorded > FULL_TRACE_EVENT_LIMIT {
+    if recorded == kept {
         return (config, trace);
     }
-    let Ok(capacity) = usize::try_from(recorded) else {
-        return (config, trace);
-    };
+    assert!(
+        recorded <= automatic_capacity_limit,
+        "incomplete determinism trace capture: phase=reference seed={} \
+         recorded={recorded} retained={kept} \
+         automatic_capacity_limit={automatic_capacity_limit}; increase \
+         LabConfig::trace_capacity(...) so the complete trace fits",
+        config.seed
+    );
+    let capacity = usize::try_from(recorded).unwrap_or_else(|_| {
+        panic!(
+            "incomplete determinism trace capture: phase=reference seed={} \
+             recorded={recorded} retained={kept}; the required trace capacity \
+             cannot fit this platform's usize; use a smaller scenario or \
+             a platform with a larger address space",
+            config.seed
+        )
+    });
     let config = config.trace_capacity(capacity);
-    let (trace, _) = run_and_summarize(&config, program);
+    let (trace, recorded) = run_and_summarize(&config, program);
+    assert_complete_capture(&config, trace.len(), recorded, "reference recapture");
     (config, trace)
 }
 
@@ -613,7 +659,8 @@ where
 ///
 /// # Panics
 ///
-/// Panics if the traces differ between runs.
+/// Panics if the traces differ between runs, or if capture is incomplete after
+/// the bounded reference recapture described in [`DeterminismOracle::verify`].
 pub fn assert_deterministic<F>(config: LabConfig, program: F)
 where
     F: Fn(&mut LabRuntime),
@@ -631,11 +678,13 @@ where
 ///
 /// Runs the program `runs` times and verifies all traces are identical. As
 /// in [`DeterminismOracle::verify`], a first run that overflows the trace
-/// buffer is repeated with a buffer that holds every event.
+/// buffer is repeated once with a buffer that holds every event, up to the
+/// automatic capacity limit. Every comparison requires a complete trace.
 ///
 /// # Panics
 ///
-/// Panics if any trace differs from the first.
+/// Panics if `runs` is less than two, if any trace differs from the first, or
+/// if the bounded reference capture or any comparison loses trace events.
 pub fn assert_deterministic_multi<F>(config: &LabConfig, runs: usize, program: F)
 where
     F: Fn(&mut LabRuntime),
@@ -649,7 +698,8 @@ where
 
     // Compare each subsequent run
     for run in 2..=runs {
-        let (trace, _) = run_and_summarize(&config, &program);
+        let (trace, recorded) = run_and_summarize(&config, &program);
+        assert_complete_capture(&config, trace.len(), recorded, "multi-run comparison");
 
         if let Err(violation) = oracle.compare_traces(&reference_trace, &trace) {
             panic!(
@@ -668,7 +718,8 @@ where
 ///
 /// # Panics
 ///
-/// Panics when `seeds` is empty or any seed produces divergent traces.
+/// Panics when `seeds` is empty, any seed produces divergent traces, or trace
+/// capture is incomplete as described in [`DeterminismOracle::verify`].
 pub fn assert_deterministic_for_seeds<I, F>(seeds: I, program: F)
 where
     I: IntoIterator<Item = u64>,

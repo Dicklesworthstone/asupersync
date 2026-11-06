@@ -99,6 +99,13 @@ artifacts.
 
 ### Fixed
 
+- **Complete lab traces:** Schedule, DPOR and topology exploration now reject
+  evicted trace prefixes before classifying runs, with additive
+  `with_trace_capacity(...)` builders for larger captures. An incomplete
+  capture also prevents later reuse from silently skipping the failed seed.
+  Determinism checks reject incomplete reference recaptures and comparison
+  runs instead of accepting matching retained tails.
+  (`br-asupersync-iwbef2`, LOW6.)
 - **HTTP routing:** Equivalent route patterns registered for different methods
   retain their own parameter names through typed extraction, middleware, HEAD
   fallback and repeated nested mounts. Route and body-policy metadata also

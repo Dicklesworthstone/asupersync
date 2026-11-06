@@ -1086,3 +1086,193 @@
         assert!(explorer.conformal_calibrator().is_none());
         assert!(explorer.conformal_reports().is_empty());
     }
+
+    // br-asupersync-iwbef2: different prefixes converge to the same four
+    // events. A four-slot buffer must not turn them into the same class.
+    fn record_prefix_and_shared_tail(runtime: &LabRuntime) {
+        let prefix = format!("prefix for seed {}", runtime.config().seed);
+        for message in std::iter::once(prefix).chain((0..4).map(|i| format!("tail {i}"))) {
+            runtime.trace().record_event(|seq| {
+                TraceEvent::new(
+                    seq,
+                    Time::ZERO,
+                    TraceEventKind::UserTrace,
+                    TraceData::Message(message),
+                )
+            });
+        }
+    }
+
+    fn assert_incomplete_exploration(
+        result: std::thread::Result<ExplorationReport>,
+        calls: usize,
+    ) {
+        let panic = result.expect_err("an evicted prefix must stop exploration");
+        let message = panic
+            .downcast_ref::<String>()
+            .expect("capture diagnostic is a formatted string");
+        assert!(message.contains("incomplete exploration trace capture"), "{message}");
+        assert!(message.contains("seed="), "{message}");
+        assert!(message.contains("recorded=5 retained=4"), "{message}");
+        assert!(message.contains("with_trace_capacity"), "{message}");
+        assert_eq!(calls, 1, "a failed capture must not re-run the closure");
+    }
+
+    fn assert_poisoned_exploration(result: std::thread::Result<ExplorationReport>) {
+        let panic = result.expect_err("a failed seed must not be skipped after catching overflow");
+        let message = panic
+            .downcast_ref::<String>()
+            .expect("capture diagnostic is a formatted string");
+        assert!(
+            message.contains("cannot resume exploration after incomplete trace capture"),
+            "{message}"
+        );
+        assert!(message.contains("create a new explorer"), "{message}");
+    }
+
+    #[test]
+    fn schedule_trace_capture_overflow_does_not_publish_coverage() {
+        let calls = std::cell::Cell::new(0);
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(42, 12))
+            .with_trace_capacity(4);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explorer.explore(|runtime| {
+                calls.set(calls.get() + 1);
+                record_prefix_and_shared_tail(runtime);
+            })
+        }));
+
+        assert_incomplete_exploration(result, calls.get());
+        let coverage = explorer.coverage();
+        assert_eq!(coverage.total_runs, 0);
+        assert_eq!(coverage.equivalence_classes, 0);
+        assert!(coverage.class_run_counts.is_empty());
+        assert!(!coverage.saturation.saturated);
+        assert!(explorer.results().is_empty());
+
+        explorer = explorer.with_trace_capacity(5);
+        let retry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explorer.explore(|_| calls.set(calls.get() + 1))
+        }));
+        assert_poisoned_exploration(retry);
+        assert_eq!(calls.get(), 1, "raising capacity must not silently skip or re-run a seed");
+    }
+
+    #[test]
+    fn dpor_trace_capture_overflow_does_not_analyze_a_tail() {
+        let calls = std::cell::Cell::new(0);
+        let mut explorer = DporExplorer::new(ExplorerConfig::new(42, 12))
+            .with_trace_capacity(4);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explorer.explore(|runtime| {
+                calls.set(calls.get() + 1);
+                record_prefix_and_shared_tail(runtime);
+            })
+        }));
+
+        assert_incomplete_exploration(result, calls.get());
+        let coverage = explorer.dpor_coverage();
+        assert_eq!(coverage.base.total_runs, 0);
+        assert_eq!(coverage.base.equivalence_classes, 0);
+        assert!(coverage.base.class_run_counts.is_empty());
+        assert!(!coverage.base.saturation.saturated);
+        assert_eq!(coverage.total_races, 0);
+        assert_eq!(coverage.total_hb_races, 0);
+        assert_eq!(coverage.total_backtrack_points, 0);
+        assert_eq!(coverage.sleep_pruned, 0);
+        assert!(coverage.estimated_class_trend.is_empty());
+
+        explorer = explorer.with_trace_capacity(5);
+        let retry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explorer.explore(|_| calls.set(calls.get() + 1))
+        }));
+        assert_poisoned_exploration(retry);
+        assert_eq!(calls.get(), 1, "an empty work queue must not hide the failed seed");
+    }
+
+    #[test]
+    fn topology_trace_capture_overflow_does_not_score_a_tail() {
+        let calls = std::cell::Cell::new(0);
+        let mut explorer = TopologyExplorer::new(ExplorerConfig::new(42, 12))
+            .with_trace_capacity(4);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explorer.explore(|runtime| {
+                calls.set(calls.get() + 1);
+                record_prefix_and_shared_tail(runtime);
+            })
+        }));
+
+        assert_incomplete_exploration(result, calls.get());
+        let report = explorer.build_report();
+        assert_eq!(report.total_runs, 0);
+        assert_eq!(report.unique_classes, 0);
+        assert!(report.coverage.class_run_counts.is_empty());
+        assert!(!report.coverage.saturation.saturated);
+        assert!(explorer.ledgers.is_empty());
+        assert!(explorer.seen_classes.is_empty());
+
+        explorer = explorer.with_trace_capacity(5);
+        let retry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explorer.explore(|_| calls.set(calls.get() + 1))
+        }));
+        assert_poisoned_exploration(retry);
+        assert_eq!(calls.get(), 1, "the remaining frontier must not hide the failed seed");
+    }
+
+    #[test]
+    fn trace_capture_overflow_after_progress_cannot_publish_a_partial_success() {
+        let calls = std::cell::Cell::new(0);
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(42, 2))
+            .with_trace_capacity(5);
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explorer.explore(|runtime| {
+                calls.set(calls.get() + 1);
+                record_prefix_and_shared_tail(runtime);
+                if calls.get() == 2 {
+                    runtime.trace().record_event(|seq| {
+                        TraceEvent::new(
+                            seq,
+                            Time::ZERO,
+                            TraceEventKind::UserTrace,
+                            TraceData::Message("one more event".to_string()),
+                        )
+                    });
+                }
+            })
+        }));
+        let panic = failure.expect_err("the second run exceeds capacity");
+        let message = panic.downcast_ref::<String>().expect("capture diagnostic");
+        assert!(message.contains("seed=43 recorded=6 retained=5"), "{message}");
+        assert_eq!(calls.get(), 2);
+        assert_eq!(explorer.coverage().total_runs, 1);
+        assert_eq!(explorer.coverage().equivalence_classes, 1);
+
+        explorer = explorer.with_trace_capacity(6);
+        let retry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            explorer.explore(|_| calls.set(calls.get() + 1))
+        }));
+        assert_poisoned_exploration(retry);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(explorer.results().len(), 1, "only the complete first run is retained");
+    }
+
+    #[test]
+    fn larger_trace_capture_preserves_distinct_prefixes_in_all_explorers() {
+        let config = ExplorerConfig::new(42, 2);
+        let mut schedule = ScheduleExplorer::new(config.clone()).with_trace_capacity(5);
+        let mut dpor = DporExplorer::new(config.clone()).with_trace_capacity(5);
+        let mut topology = TopologyExplorer::new(config).with_trace_capacity(5);
+        assert!(dpor.enqueue_seed_back(43));
+
+        let reports = [
+            schedule.explore(|runtime| record_prefix_and_shared_tail(runtime)),
+            dpor.explore(|runtime| record_prefix_and_shared_tail(runtime)),
+            topology.explore(|runtime| record_prefix_and_shared_tail(runtime)),
+        ];
+        for report in reports {
+            assert_eq!(report.total_runs, 2);
+            assert_eq!(report.unique_classes, 2, "both prefixes must be retained");
+            assert!(!report.has_violations());
+            assert_ne!(report.runs[0].fingerprint, report.runs[1].fingerprint);
+        }
+    }

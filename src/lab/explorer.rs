@@ -63,6 +63,38 @@ const DEFAULT_SATURATION_WINDOW: usize = 10;
 const DEFAULT_UNEXPLORED_LIMIT: usize = 5;
 const DEFAULT_DERIVED_SEEDS: usize = 4;
 
+/// An evicted prefix cannot establish equivalence, races, or saturation.
+/// Do not re-run the closure to recover it: exploration closures may have
+/// external side effects even though they implement `Fn`.
+fn complete_trace(
+    runtime: &LabRuntime,
+    seed: u64,
+    phase: &str,
+    incomplete_capture: &mut bool,
+) -> Vec<TraceEvent> {
+    let (events, recorded) = runtime.trace().snapshot_with_stats();
+    let retained = events.len();
+    let complete = u64::try_from(retained) == Ok(recorded);
+    // The seed has already been consumed by the exploration queue. If the
+    // caller catches the panic, it must not resume and silently skip that run.
+    *incomplete_capture |= !complete;
+    assert!(
+        complete,
+        "incomplete exploration trace capture: phase={phase} seed={seed} recorded={recorded} \
+         retained={retained}; increase the explorer's with_trace_capacity(...) \
+         and start a new exploration; the test closure was not re-run"
+    );
+    events
+}
+
+fn assert_exploration_ready(incomplete_capture: bool, phase: &str) {
+    assert!(
+        !incomplete_capture,
+        "cannot resume exploration after incomplete trace capture: phase={phase}; \
+         create a new explorer with sufficient with_trace_capacity(...)"
+    );
+}
+
 /// Exploration mode: baseline seed-sweep or topology-prioritized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExplorationMode {
@@ -496,6 +528,8 @@ impl UnexploredSeedJson {
 /// detecting invariant violations.
 pub struct ScheduleExplorer {
     config: ExplorerConfig,
+    trace_capacity: usize,
+    incomplete_capture: bool,
     explored_seeds: BTreeSet<u64>,
     known_fingerprints: BTreeSet<u64>,
     class_counts: BTreeMap<u64, usize>,
@@ -510,8 +544,11 @@ impl ScheduleExplorer {
     /// Create a new explorer with the given configuration.
     #[must_use]
     pub fn new(config: ExplorerConfig) -> Self {
+        let trace_capacity = LabConfig::new(config.base_seed).trace_capacity;
         Self {
             config,
+            trace_capacity,
+            incomplete_capture: false,
             explored_seeds: BTreeSet::new(),
             known_fingerprints: BTreeSet::new(),
             class_counts: BTreeMap::new(),
@@ -521,6 +558,17 @@ impl ScheduleExplorer {
             conformal: None,
             conformal_reports: Vec::new(),
         }
+    }
+
+    /// Set the maximum trace events retained for each run.
+    ///
+    /// The default is [`LabConfig`]'s trace capacity. A run that exceeds this
+    /// bound panics before contributing coverage; it is never silently re-run.
+    /// Changing capacity does not reset an explorer after incomplete capture.
+    #[must_use]
+    pub fn with_trace_capacity(mut self, capacity: usize) -> Self {
+        self.trace_capacity = capacity;
+        self
     }
 
     /// Calibrate each run's oracle metrics with split conformal prediction.
@@ -571,6 +619,14 @@ impl ScheduleExplorer {
     /// each run. It should set up tasks, schedule them, and call
     /// `run_until_quiescent()` (or equivalent).
     ///
+    /// # Panics
+    ///
+    /// Panics if a run's trace exceeds its capacity. Increase
+    /// [`Self::with_trace_capacity`] before starting a new exploration.
+    /// The test closure is not re-run to recover evicted events.
+    /// An explorer that previously lost events also panics on reuse; construct
+    /// a new instance instead of skipping the failed seed.
+    ///
     /// # Example
     ///
     /// ```
@@ -591,6 +647,7 @@ impl ScheduleExplorer {
     where
         F: Fn(&mut LabRuntime),
     {
+        assert_exploration_ready(self.incomplete_capture, "seed-sweep");
         for run_idx in 0..self.config.max_runs {
             let seed = self.config.base_seed.wrapping_add(run_idx as u64);
             self.run_once(seed, &test);
@@ -609,7 +666,7 @@ impl ScheduleExplorer {
         }
 
         // Build config for this run.
-        let mut lab_config = LabConfig::new(seed);
+        let mut lab_config = LabConfig::new(seed).trace_capacity(self.trace_capacity);
         lab_config = lab_config.worker_count(self.config.worker_count);
         if let Some(max) = Some(self.config.max_steps_per_run) {
             lab_config = lab_config.max_steps(max);
@@ -626,7 +683,12 @@ impl ScheduleExplorer {
         let steps = runtime.steps();
 
         // Compute trace fingerprint.
-        let trace_events: Vec<TraceEvent> = runtime.trace().snapshot();
+        let trace_events = complete_trace(
+            &runtime,
+            seed,
+            "seed-sweep",
+            &mut self.incomplete_capture,
+        );
         let fingerprint = if trace_events.is_empty() {
             // Use seed as fingerprint if no trace events (recording disabled).
             seed
@@ -745,6 +807,8 @@ impl ScheduleExplorer {
 /// chains without additional iterative-deepening proof machinery.
 pub struct DporExplorer {
     config: ExplorerConfig,
+    trace_capacity: usize,
+    incomplete_capture: bool,
     /// Seeds pending exploration (derived from backtrack points).
     work_queue: VecDeque<u64>,
     /// Seeds already queued for exploration.
@@ -802,12 +866,15 @@ impl DporExplorer {
     /// Create a new DPOR explorer with the given configuration.
     #[must_use]
     pub fn new(config: ExplorerConfig) -> Self {
+        let trace_capacity = LabConfig::new(config.base_seed).trace_capacity;
         let mut work_queue = VecDeque::new();
         work_queue.push_back(config.base_seed);
         let mut pending_seeds = BTreeSet::new();
         pending_seeds.insert(config.base_seed);
         Self {
             config,
+            trace_capacity,
+            incomplete_capture: false,
             work_queue,
             pending_seeds,
             explored_seeds: BTreeSet::new(),
@@ -825,15 +892,35 @@ impl DporExplorer {
         }
     }
 
+    /// Set the maximum trace events retained for each run.
+    ///
+    /// The default is [`LabConfig`]'s trace capacity. A run that exceeds this
+    /// bound panics before coverage or race analysis; it is never re-run.
+    /// Changing capacity does not reset an explorer after incomplete capture.
+    #[must_use]
+    pub fn with_trace_capacity(mut self, capacity: usize) -> Self {
+        self.trace_capacity = capacity;
+        self
+    }
+
     /// Run DPOR-guided exploration.
     ///
     /// The `test` closure receives a freshly constructed `LabRuntime` for each
     /// run. Exploration continues until the work queue is empty or `max_runs`
     /// is reached.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a run's trace exceeds its capacity. Increase
+    /// [`Self::with_trace_capacity`] before starting a new exploration.
+    /// The test closure is not re-run to recover evicted events.
+    /// An explorer that previously lost events also panics on reuse; construct
+    /// a new instance instead of skipping the failed seed.
     pub fn explore<F>(&mut self, test: F) -> ExplorationReport
     where
         F: Fn(&mut LabRuntime),
     {
+        assert_exploration_ready(self.incomplete_capture, "dpor");
         while self.results.len() < self.config.max_runs {
             let Some(seed) = self.work_queue.pop_front() else {
                 break;
@@ -908,7 +995,7 @@ impl DporExplorer {
     where
         F: Fn(&mut LabRuntime),
     {
-        let mut lab_config = LabConfig::new(seed);
+        let mut lab_config = LabConfig::new(seed).trace_capacity(self.trace_capacity);
         lab_config = lab_config.worker_count(self.config.worker_count);
         if let Some(max) = Some(self.config.max_steps_per_run) {
             lab_config = lab_config.max_steps(max);
@@ -921,7 +1008,7 @@ impl DporExplorer {
         test(&mut runtime);
 
         let steps = runtime.steps();
-        let trace_events: Vec<TraceEvent> = runtime.trace().snapshot();
+        let trace_events = complete_trace(&runtime, seed, "dpor", &mut self.incomplete_capture);
 
         let monoid = TraceMonoid::from_events(&trace_events);
         let fingerprint = monoid.class_fingerprint();
@@ -1076,6 +1163,8 @@ impl DporExplorer {
 /// given the same configuration and test closure.
 pub struct TopologyExplorer {
     config: ExplorerConfig,
+    trace_capacity: usize,
+    incomplete_capture: bool,
     /// Priority queue: (score, seed). Highest score popped first.
     frontier: BinaryHeap<(TopologicalScore, u64)>,
     /// Best known score for each seed still queued in the frontier.
@@ -1100,6 +1189,7 @@ impl TopologyExplorer {
     /// Create a new topology explorer with the given configuration.
     #[must_use]
     pub fn new(config: ExplorerConfig) -> Self {
+        let trace_capacity = LabConfig::new(config.base_seed).trace_capacity;
         let mut frontier = BinaryHeap::new();
         let mut pending_frontier = BTreeMap::new();
         // Seed the frontier with initial seeds, all scored at zero.
@@ -1111,6 +1201,8 @@ impl TopologyExplorer {
         }
         Self {
             config,
+            trace_capacity,
+            incomplete_capture: false,
             frontier,
             pending_frontier,
             explored_seeds: BTreeSet::new(),
@@ -1124,13 +1216,33 @@ impl TopologyExplorer {
         }
     }
 
+    /// Set the maximum trace events retained for each run.
+    ///
+    /// The default is [`LabConfig`]'s trace capacity. A run that exceeds this
+    /// bound panics before coverage or topology analysis; it is never re-run.
+    /// Changing capacity does not reset an explorer after incomplete capture.
+    #[must_use]
+    pub fn with_trace_capacity(mut self, capacity: usize) -> Self {
+        self.trace_capacity = capacity;
+        self
+    }
+
     /// Run topology-prioritized exploration.
     ///
     /// The `test` closure receives a freshly constructed `LabRuntime` for each run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a run's trace exceeds its capacity. Increase
+    /// [`Self::with_trace_capacity`] before starting a new exploration.
+    /// The test closure is not re-run to recover evicted events.
+    /// An explorer that previously lost events also panics on reuse; construct
+    /// a new instance instead of skipping the failed seed.
     pub fn explore<F>(&mut self, test: F) -> ExplorationReport
     where
         F: Fn(&mut LabRuntime),
     {
+        assert_exploration_ready(self.incomplete_capture, "topology");
         while self.results.len() < self.config.max_runs {
             let Some((score, seed)) = self.frontier.pop() else {
                 break;
@@ -1154,7 +1266,7 @@ impl TopologyExplorer {
     where
         F: Fn(&mut LabRuntime),
     {
-        let mut lab_config = LabConfig::new(seed);
+        let mut lab_config = LabConfig::new(seed).trace_capacity(self.trace_capacity);
         lab_config = lab_config.worker_count(self.config.worker_count);
         if let Some(max) = Some(self.config.max_steps_per_run) {
             lab_config = lab_config.max_steps(max);
@@ -1167,7 +1279,7 @@ impl TopologyExplorer {
         test(&mut runtime);
 
         let steps = runtime.steps();
-        let trace_events: Vec<TraceEvent> = runtime.trace().snapshot();
+        let trace_events = complete_trace(&runtime, seed, "topology", &mut self.incomplete_capture);
 
         let fingerprint = if trace_events.is_empty() {
             seed
