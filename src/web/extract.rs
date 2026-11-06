@@ -44,6 +44,11 @@ use serde::forward_to_deserialize_any;
 
 const MALFORMED_HEADER_CODE: &str = "[ASUP-E503]";
 
+#[cfg(not(target_arch = "wasm32"))]
+mod decoded_body;
+#[cfg(not(target_arch = "wasm32"))]
+pub use decoded_body::DecodedStreamingBody;
+
 // ─── Request Type ────────────────────────────────────────────────────────────
 
 /// An incoming HTTP request.

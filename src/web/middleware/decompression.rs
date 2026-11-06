@@ -30,6 +30,107 @@ impl RequestContentCodings {
     }
 }
 
+/// Resolve the public header projection and any still-authoritative repeated
+/// wire fields once, for buffered middleware and explicit streaming extraction.
+pub(crate) fn request_content_decoder(request: &Request) -> io::Result<ContentDecoder> {
+    let mut fields = request.headers.iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
+    let current = fields.next().map(|(_, value)| value.as_str());
+    if fields.next().is_some() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "ambiguous request content encoding order"));
+    }
+    match (current, request.extensions.get_typed::<RequestContentCodings>()) {
+        (Some(current), Some(original)) if original.unchanged(request, current) => {
+            ContentDecoder::from_request_fields(original.fields.iter().map(String::as_str))
+        }
+        _ => ContentDecoder::from_request_fields(current),
+    }
+}
+
+/// Configure explicitly decoded live uploads for [`crate::web::DecodedStreamingBody`].
+///
+/// This layer only installs limits. It leaves the encoded headers and raw
+/// body untouched, so a [`crate::web::StreamingRawBody`] extractor still sees
+/// the original wire bytes. The dedicated decoded extractor parses coding
+/// fields, checks availability, and takes the single body consumer. Its
+/// effective encoded and decoded limits also meet the router's body policy.
+/// No decoding is enabled merely by installing this configuration.
+///
+/// Use this on streaming routes in place of [`RequestDecompressionLayer`],
+/// whose existing buffered-body contract continues to reject encoded streams.
+/// Decoded bytes are provisional until successful EOF; the handler must
+/// observe all terminal errors before committing upload side effects.
+///
+/// # Example
+///
+/// ```no_run
+/// use asupersync::bytes::Buf;
+/// use asupersync::http::body::{Body, ContentDecodeError, ContentDecodeLimits};
+/// use asupersync::http::h1::stream::IncomingBodyError;
+/// use asupersync::web::{AsyncCxFnHandler1, DecodedStreamingBody, Response, Router, StatusCode, post};
+/// use asupersync::web::middleware::StreamingRequestDecompressionLayer;
+/// use std::future::poll_fn;
+/// use std::pin::Pin;
+///
+/// let upload = AsyncCxFnHandler1::new(|_cx, mut body: DecodedStreamingBody| async move {
+///     let mut total = 0;
+///     while let Some(frame) = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
+///         match frame {
+///             Ok(frame) => if let Some(data) = frame.data_ref() { total += data.remaining(); },
+///             Err(error) => return Response::new(
+///                 if error.is_limit_exceeded() || matches!(error,
+///                     ContentDecodeError::Body(IncomingBodyError::BodyTooLarge { .. }
+///                         | IncomingBodyError::QueueFrameTooLarge { .. }))
+///                 { StatusCode::PAYLOAD_TOO_LARGE } else { StatusCode::BAD_REQUEST },
+///                 "upload rejected",
+///             ),
+///         }
+///     }
+///     Response::new(StatusCode::OK, format!("accepted {total} decoded bytes"))
+/// });
+/// let app = Router::new().route("/upload", post(upload))
+///     .layer(StreamingRequestDecompressionLayer::new(ContentDecodeLimits::new(1024 * 1024, 4 * 1024 * 1024)));
+/// # let _ = app;
+/// ```
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy)]
+pub struct StreamingRequestDecompressionLayer {
+    limits: crate::http::body::ContentDecodeLimits,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StreamingRequestDecompressionLayer {
+    /// Install mandatory input/output bounds without transforming the request.
+    #[must_use]
+    pub const fn new(limits: crate::http::body::ContentDecodeLimits) -> Self {
+        Self { limits }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<H: Handler> Layer<H> for StreamingRequestDecompressionLayer {
+    type Service = StreamingRequestDecompressionMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        StreamingRequestDecompressionMiddleware { inner, limits: self.limits }
+    }
+}
+
+/// Handler adapter installing [`StreamingRequestDecompressionLayer`] limits.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct StreamingRequestDecompressionMiddleware<H> {
+    inner: H,
+    limits: crate::http::body::ContentDecodeLimits,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<H: Handler> Handler for StreamingRequestDecompressionMiddleware<H> {
+    fn call(&self, cx: &Cx, mut request: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        request.extensions.insert_typed(self.limits);
+        self.inner.call(cx, request)
+    }
+}
+
 /// Decode bounded, buffered request bodies before invoking a handler.
 ///
 /// The encoded body must fit `max_encoded_bytes`; every decoded stage and
@@ -139,18 +240,7 @@ fn decode_request(request: &mut Request, limits: RequestDecompressionLayer) -> R
             return Err(refused(StatusCode::PAYLOAD_TOO_LARGE, "encoded request body exceeds limit"));
         }
     }
-    let mut fields = request.headers.iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
-    let current = fields.next().map(|(_, value)| value.as_str());
-    if fields.next().is_some() {
-        return Err(refused(StatusCode::BAD_REQUEST, "ambiguous request content encoding order"));
-    }
-    let decoder = match (current, request.extensions.get_typed::<RequestContentCodings>()) {
-        (Some(current), Some(original)) if original.unchanged(request, current) => {
-            ContentDecoder::from_request_fields(original.fields.iter().map(String::as_str))
-        }
-        _ => ContentDecoder::from_request_fields(current),
-    }.map_err(decode_refusal)?;
+    let decoder = request_content_decoder(request).map_err(decode_refusal)?;
     // The decoder owns the resolved coding sequence. Release the original
     // encoded allocation now, including when prior middleware replaced it.
     request.extensions.remove_typed::<RequestContentCodings>();

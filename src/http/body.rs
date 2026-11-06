@@ -23,6 +23,8 @@ use std::task::{Context, Poll};
 use crate::bytes::{Buf, Bytes, BytesCursor};
 use crate::stream::Stream;
 
+pub use super::decode::{ContentDecodeError, ContentDecodeLimits, ContentDecodedBody};
+
 /// A frame of body content: either data or trailers.
 ///
 /// HTTP bodies are delivered as a stream of frames. Most frames contain

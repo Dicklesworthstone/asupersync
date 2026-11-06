@@ -109,7 +109,11 @@ use super::response::{IntoResponse, Redirect, Response, StatusCode};
 
 mod decompression;
 pub use decompression::{RequestDecompressionLayer, RequestDecompressionMiddleware};
+#[cfg(not(target_arch = "wasm32"))]
+pub use decompression::{StreamingRequestDecompressionLayer, StreamingRequestDecompressionMiddleware};
 pub(crate) use decompression::RequestContentCodings;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use decompression::request_content_decoder;
 
 // ─── CorsMiddleware ─────────────────────────────────────────────────────────
 

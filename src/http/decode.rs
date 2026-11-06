@@ -1,4 +1,9 @@
-//! Explicit, bounded content decoding shared by buffered HTTP messages.
+//! Explicit, bounded content decoding shared by buffered and streaming HTTP messages.
+
+mod body;
+pub use body::{ContentDecodeError, ContentDecodeLimits, ContentDecodedBody};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use body::ContentDecodePlan;
 
 use super::compress::{ContentEncoding, DecompressionLimit, Decompressor};
 use super::{Method, Response};
