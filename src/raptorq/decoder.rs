@@ -285,6 +285,36 @@ impl DecodeError {
     }
 }
 
+/// Failure facts retained for the receive pipeline without changing public errors.
+/// A singular matrix can mean either a missing pivot or a proved contradiction;
+/// only the former can be repaired by receiving additional equations.
+#[derive(Debug)]
+pub(crate) struct DecodeAttemptFailure {
+    pub(crate) error: DecodeError,
+    contradiction_row: Option<usize>,
+    resource_exhausted: bool,
+}
+
+impl DecodeAttemptFailure {
+    pub(crate) fn is_recoverable(&self) -> bool {
+        self.contradiction_row.is_none() && !self.resource_exhausted && self.error.is_recoverable()
+    }
+
+    pub(crate) const fn is_resource_exhausted(&self) -> bool {
+        self.resource_exhausted
+    }
+}
+
+impl From<DecodeError> for DecodeAttemptFailure {
+    fn from(error: DecodeError) -> Self {
+        Self {
+            resource_exhausted: matches!(error, DecodeError::ComputeBudgetExhausted { .. }),
+            error,
+            contradiction_row: None,
+        }
+    }
+}
+
 /// Decode statistics for observability.
 #[derive(Debug, Clone, Default)]
 pub struct DecodeStats {
@@ -1744,6 +1774,16 @@ impl InactivationDecoder {
         symbols: &[ReceivedSymbol],
         object_id: Option<&ObjectId>,
     ) -> Result<DecodeResult, DecodeError> {
+        self.decode_classified(symbols, object_id)
+            .map_err(|failure| failure.error)
+    }
+
+    /// Preserve contradiction and resource facts for pipeline retry policy.
+    pub(crate) fn decode_classified(
+        &self,
+        symbols: &[ReceivedSymbol],
+        object_id: Option<&ObjectId>,
+    ) -> Result<DecodeResult, DecodeAttemptFailure> {
         self.validate_input(symbols, object_id)?;
 
         // Build decoder state
@@ -1753,7 +1793,7 @@ impl InactivationDecoder {
         Self::peel(&mut state);
 
         // Phase 2: Inactivation + Gaussian elimination
-        self.inactivate_and_solve(&mut state)?;
+        self.inactivate_and_solve_classified(&mut state)?;
 
         let DecoderState { solved, stats, .. } = state;
         self.verify_decoded_output(symbols, &solved)?;
@@ -2356,8 +2396,16 @@ impl InactivationDecoder {
     }
 
     /// Phase 2: Inactivation + Gaussian elimination.
-    #[allow(clippy::too_many_lines)]
     fn inactivate_and_solve(&self, state: &mut DecoderState) -> Result<(), DecodeError> {
+        self.inactivate_and_solve_classified(state)
+            .map_err(|failure| failure.error)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn inactivate_and_solve_classified(
+        &self,
+        state: &mut DecoderState,
+    ) -> Result<(), DecodeAttemptFailure> {
         let symbol_size = self.params.symbol_size;
 
         // Collect remaining unsolved columns
@@ -2386,7 +2434,16 @@ impl InactivationDecoder {
             .enumerate()
             .filter_map(|(i, eq)| if eq.used { None } else { Some(i) })
             .collect();
-        let (dense_rows, dropped_zero_rows) = build_dense_core_rows(state, &unused_eqs, &unsolved)?;
+        let (dense_rows, dropped_zero_rows) = build_dense_core_rows(state, &unused_eqs, &unsolved)
+            .map_err(|error| {
+                let contradiction_row = match &error {
+                    DecodeError::SingularMatrix { row } => Some(*row),
+                    _ => None,
+                };
+                let mut failure = DecodeAttemptFailure::from(error);
+                failure.contradiction_row = contradiction_row;
+                failure
+            })?;
         state.stats.dense_core_dropped_rows += dropped_zero_rows;
         validate_dense_core_rhs_widths(state, &dense_rows, symbol_size)?;
 
@@ -2417,7 +2474,7 @@ impl InactivationDecoder {
 
         if n_rows < n_cols {
             reactivate_unsolved_columns(state, &unsolved);
-            return Err(singular_matrix_error(&unsolved, n_rows));
+            return Err(singular_matrix_error(&unsolved, n_rows).into());
         }
 
         // Build flat row-major dense matrix A and RHS vector b.
@@ -2432,7 +2489,9 @@ impl InactivationDecoder {
                     required: n_cols,
                 };
                 reactivate_unsolved_columns(state, &unsolved);
-                return Err(err);
+                let mut failure = DecodeAttemptFailure::from(err);
+                failure.resource_exhausted = true;
+                return Err(failure);
             }
         };
         let mut a = vec![Gf256::ZERO; total_cells];
@@ -2481,6 +2540,7 @@ impl InactivationDecoder {
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
+        let mut contradiction_row = None;
         loop {
             pivot_row.fill(usize::MAX);
 
@@ -2560,10 +2620,18 @@ impl InactivationDecoder {
                 }
             }
 
-            if elimination_error.is_none() {
-                if let Some(row) = first_inconsistent_dense_row(&a, n_rows, n_cols, &b) {
+            // A missing pivot does not erase an already-proven zero-row
+            // contradiction elsewhere in the matrix. Preserve the public
+            // pivot error, but retain the equation witness for retry policy.
+            if let Some(row) = first_inconsistent_dense_row(&a, n_rows, n_cols, &b) {
+                contradiction_row = Some(dense_rows.get(row).copied().unwrap_or(row));
+                if elimination_error.is_none() {
                     elimination_error = Some(inconsistent_matrix_error(&dense_rows, row));
                 }
+            } else if elimination_error.is_none()
+                && let Some(row) = contradiction_row
+            {
+                elimination_error = Some(DecodeError::SingularMatrix { row });
             }
 
             // Record work performed in this attempt, even if we fallback or fail.
@@ -2610,7 +2678,9 @@ impl InactivationDecoder {
                 }
                 restore_dense_rows_into_state(state, &dense_rows, &dense_rhs_snapshot, symbol_size);
                 reactivate_unsolved_columns(state, &unsolved);
-                return Err(err);
+                let mut failure = DecodeAttemptFailure::from(err);
+                failure.contradiction_row = contradiction_row;
+                return Err(failure);
             }
             break;
         }
@@ -2633,7 +2703,7 @@ impl InactivationDecoder {
             if prow < n_rows {
                 state.solved[col] = Some(std::mem::take(&mut b[prow]));
             } else {
-                return Err(singular_matrix_error(dense_cols, dense_col));
+                return Err(singular_matrix_error(dense_cols, dense_col).into());
             }
         }
 

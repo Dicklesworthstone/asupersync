@@ -3520,6 +3520,74 @@ mod tests {
     }
 
     #[test]
+    fn classified_singular_failure_distinguishes_rank_from_contradiction() {
+        let decoder = InactivationDecoder::new(8, 16, 4242);
+        let params = decoder.params().clone();
+
+        // Equal equations and equal payloads only lack a pivot. More repair
+        // equations can supply it, so preserve the ordinary retry behavior.
+        let mut deficient = make_rank_deficient_state(&params, 16, 3, 7);
+        deficient.rhs[1] = deficient.rhs[0].clone();
+        let failure = decoder
+            .inactivate_and_solve_classified(&mut deficient)
+            .unwrap_err();
+        assert_eq!(failure.error, DecodeError::SingularMatrix { row: 7 });
+        assert!(failure.is_recoverable());
+        assert_eq!(failure.contradiction_row, None);
+        assert!(!failure.is_resource_exhausted());
+
+        // The same missing pivot also exists here, but elimination proves
+        // that the equal equations have contradictory payloads. Preserve the
+        // public pivot error while retaining that stronger private witness
+        // through the conservative fallback.
+        let mut inconsistent = make_rank_deficient_state(&params, 16, 3, 7);
+        let failure = decoder
+            .inactivate_and_solve_classified(&mut inconsistent)
+            .unwrap_err();
+        assert_eq!(failure.error, DecodeError::SingularMatrix { row: 7 });
+        assert!(!failure.is_recoverable());
+        assert!(failure.contradiction_row.is_some());
+        assert!(!failure.is_resource_exhausted());
+        assert!(inconsistent.stats.hard_regime_fallbacks > 0);
+    }
+
+    #[test]
+    fn classified_failure_keeps_constant_and_eliminated_row_witnesses() {
+        let decoder = InactivationDecoder::new(8, 16, 6161);
+        let params = decoder.params().clone();
+        for mut state in [
+            make_dense_core_prunable_state(&params, 16, 3, 7, 0x01),
+            make_inconsistent_overdetermined_state(&params, 16, 3, 7),
+        ] {
+            let failure = decoder
+                .inactivate_and_solve_classified(&mut state)
+                .unwrap_err();
+            assert_eq!(failure.error, DecodeError::SingularMatrix { row: 2 });
+            assert_eq!(failure.contradiction_row, Some(2));
+            assert!(!failure.is_recoverable());
+            assert!(!failure.is_resource_exhausted());
+        }
+    }
+
+    #[test]
+    fn classified_compute_exhaustion_keeps_public_budget_diagnostics() {
+        let mut budget = ComputeBudget::new(12);
+        budget.consume(10).unwrap();
+        let failure = DecodeAttemptFailure::from(budget.consume(5).unwrap_err());
+        assert_eq!(
+            failure.error,
+            DecodeError::ComputeBudgetExhausted {
+                used: 10,
+                requested: 5,
+                max: 12,
+            }
+        );
+        assert!(!failure.is_recoverable());
+        assert!(failure.is_resource_exhausted());
+        assert_eq!(failure.contradiction_row, None);
+    }
+
+    #[test]
     fn baseline_failure_triggers_deterministic_hard_regime_fallback() {
         let decoder = InactivationDecoder::new(8, 1, 4242);
         let params = decoder.params().clone();

@@ -3362,3 +3362,383 @@
         }
         crate::test_complete!("honest_symbols_never_inconsistent_across_stale_requeue_cycles");
     }
+
+
+    mod repair_failure_tests {
+        use super::*;
+
+        const K: usize = 8;
+        const SIZE: usize = 8;
+        const REPAIRS: usize = 32;
+
+        struct Fixture {
+            object_id: ObjectId,
+            sbn: u8,
+            data: Vec<u8>,
+            sources: Vec<Symbol>,
+            repairs: Vec<Symbol>,
+            security: crate::security::SecurityContext,
+        }
+
+        impl Fixture {
+            fn new(sbn: u8) -> Self {
+                let object_id = ObjectId::new_for_test(201);
+                let data: Vec<_> = (0..K * SIZE)
+                    .map(|index| (index * 13 + usize::from(sbn) * 17) as u8)
+                    .collect();
+                let config = crate::config::EncodingConfig {
+                    symbol_size: SIZE as u16,
+                    max_block_size: K * SIZE,
+                    repair_overhead: 1.0,
+                    encoding_parallelism: 1,
+                    decoding_parallelism: 1,
+                };
+                let pool = SymbolPool::new(PoolConfig {
+                    symbol_size: SIZE as u16,
+                    initial_size: 64,
+                    max_size: 64,
+                    allow_growth: false,
+                    growth_increment: 0,
+                });
+                let mut encoder = EncodingPipeline::new(config, pool);
+                let (mut sources, mut repairs): (Vec<_>, Vec<_>) = encoder
+                    .encode_single_block_with_repair(object_id, sbn, &data, REPAIRS + 8)
+                    .map(|encoded| encoded.expect("encode fixture").into_symbol())
+                    .partition(|symbol| symbol.kind() == SymbolKind::Source);
+                sources.sort_by_key(Symbol::esi);
+                repairs.sort_by_key(Symbol::esi);
+                assert_eq!(sources.len(), K);
+                assert_eq!(repairs.len(), REPAIRS + 8);
+                Self {
+                    object_id,
+                    sbn,
+                    data,
+                    sources,
+                    repairs,
+                    security: crate::security::SecurityContext::for_testing(201),
+                }
+            }
+
+            fn pipeline(&self, blocks: u16, capacity: usize) -> DecodingPipeline {
+                let mut pipeline = DecodingPipeline::with_auth(
+                    DecodingConfig {
+                        symbol_size: SIZE as u16,
+                        max_block_size: K * SIZE,
+                        repair_overhead: 1.0,
+                        min_overhead: REPAIRS - 1,
+                        max_buffered_symbols: capacity,
+                        block_timeout: Duration::from_secs(30),
+                        verify_auth: true,
+                    },
+                    self.security.clone(),
+                );
+                pipeline
+                    .set_object_params(ObjectParams::new(
+                        self.object_id,
+                        u64::from(blocks) * (K * SIZE) as u64,
+                        SIZE as u16,
+                        blocks,
+                        K as u16,
+                    ))
+                    .expect("fixture parameters");
+                pipeline
+            }
+
+            fn signed(&self, symbol: &Symbol) -> AuthenticatedSymbol {
+                let signed = self.security.sign_symbol(symbol);
+                let tag = *signed.tag();
+                // Exercise receiver-side HMAC verification, not a preverified
+                // shortcut: authenticated senders can still send corrupt FEC.
+                AuthenticatedSymbol::from_parts(signed.into_symbol(), tag)
+            }
+
+            fn attempt_symbols(&self, corrupt: bool) -> Vec<Symbol> {
+                let mut symbols = self.sources[1..].to_vec();
+                symbols.extend(self.repairs[..REPAIRS].iter().cloned());
+                if corrupt {
+                    let repair = &symbols[K - 1];
+                    let mut payload = repair.data().to_vec();
+                    payload[0] ^= 0x80;
+                    symbols[K - 1] =
+                        Symbol::new(repair.id(), payload, SymbolKind::Repair);
+                }
+                symbols
+            }
+
+            fn pending_attempt(&self, pipeline: &mut DecodingPipeline) -> BlockDecodeJob {
+                let mut pending = None;
+                for symbol in self.attempt_symbols(true) {
+                    match pipeline.feed_deferred(self.signed(&symbol)).expect("feed") {
+                        DeferredSymbolAcceptResult::Immediate(
+                            SymbolAcceptResult::Accepted { .. },
+                        ) => assert!(pending.is_none()),
+                        DeferredSymbolAcceptResult::Decode(job) => {
+                            assert!(pending.replace(job).is_none());
+                        }
+                        other => panic!("unexpected admission: {other:?}"),
+                    }
+                }
+                pending.expect("overdetermined repair attempt")
+            }
+
+            fn assert_latched(&self, pipeline: &DecodingPipeline, reason: RejectReason) {
+                assert_eq!(pipeline.block_repair_failure(self.sbn), Some(reason));
+                assert_eq!(
+                    pipeline.block_symbol_counts[&self.sbn].source_symbols,
+                    K - 1
+                );
+                assert_eq!(pipeline.block_symbol_counts[&self.sbn].repair_symbols, 0);
+                let progress = pipeline.symbols.block_progress(self.sbn).unwrap();
+                assert_eq!(progress.source_symbols, K - 1);
+                assert_eq!(progress.repair_symbols, 0);
+                assert!(pipeline
+                    .inflight_decode_symbols
+                    .iter()
+                    .all(|id| id.sbn() != self.sbn));
+                let status = crate::raptorq::systematic::with_constraint_matrix_cell_limit(
+                    0,
+                    || pipeline.block_status(self.sbn).unwrap(),
+                );
+                assert_eq!(status.state, BlockStateKind::Failed);
+                assert_eq!(status.rank_deficit, Some(1));
+                assert_eq!(pipeline.skipped_verifications(), 0);
+            }
+        }
+
+        #[test]
+        fn corrupt_repair_latches_and_full_buffer_recovers_from_missing_source() {
+            init_test("corrupt_repair_latches_and_full_buffer_recovers_from_missing_source");
+            let fixture = Fixture::new(0);
+            let healthy = fixture.attempt_symbols(false);
+            // Prove the tampered row is redundant: the other honest equations
+            // already determine the original block, so its changed byte is a
+            // contradiction, not an alternative consistent source object.
+            let without_tampered: Vec<_> = healthy
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != K - 1)
+                .map(|(_, symbol)| symbol.clone())
+                .collect();
+            let plan = BlockPlan { sbn: 0, len: K * SIZE, k: K };
+            assert_eq!(
+                rank_status_for_block(&plan, &without_tampered, SIZE).unwrap().deficit,
+                0
+            );
+
+            let mut control = fixture.pipeline(1, K - 1 + REPAIRS);
+            let mut last = None;
+            for symbol in healthy {
+                last = Some(control.feed(fixture.signed(&symbol)).unwrap());
+            }
+            assert_eq!(
+                last,
+                Some(SymbolAcceptResult::BlockComplete {
+                    block_sbn: 0,
+                    data: fixture.data.clone(),
+                })
+            );
+            assert_eq!(control.into_data().unwrap(), fixture.data);
+
+            let mut pipeline = fixture.pipeline(1, K - 1 + REPAIRS);
+            for symbol in fixture.attempt_symbols(true) {
+                last = Some(pipeline.feed(fixture.signed(&symbol)).unwrap());
+            }
+            assert_eq!(
+                last,
+                Some(SymbolAcceptResult::Rejected(RejectReason::InconsistentEquations))
+            );
+            fixture.assert_latched(&pipeline, RejectReason::InconsistentEquations);
+            let accepted = pipeline.progress().symbols_received;
+
+            crate::raptorq::systematic::with_constraint_matrix_cell_limit(0, || {
+                for repair in &fixture.repairs[REPAIRS..] {
+                    assert_eq!(
+                        pipeline.feed(fixture.signed(repair)).unwrap(),
+                        SymbolAcceptResult::Rejected(RejectReason::InconsistentEquations)
+                    );
+                }
+                assert_eq!(pipeline.progress().symbols_received, accepted);
+                assert_eq!(
+                    pipeline.feed(fixture.signed(&fixture.sources[0])).unwrap(),
+                    SymbolAcceptResult::BlockComplete {
+                        block_sbn: 0,
+                        data: fixture.data.clone(),
+                    }
+                );
+            });
+            assert_eq!(pipeline.block_repair_failure(0), None);
+            assert!(pipeline.inflight_decode_symbols.is_empty());
+            assert_eq!(pipeline.skipped_verifications(), 0);
+            assert_eq!(pipeline.into_data().unwrap(), fixture.data);
+        }
+
+        #[test]
+        fn deferred_corruption_retires_buffered_repairs_and_preserves_other_blocks() {
+            init_test("deferred_corruption_retires_buffered_repairs_and_preserves_other_blocks");
+            let fixture = Fixture::new(0);
+            let sibling = Fixture::new(1);
+            let mut pipeline = fixture.pipeline(2, K + REPAIRS + 3);
+            let job = fixture.pending_attempt(&mut pipeline);
+            for source in &sibling.sources[..K - 1] {
+                assert!(matches!(
+                    pipeline.feed(sibling.signed(source)).unwrap(),
+                    SymbolAcceptResult::Accepted { .. }
+                ));
+            }
+            assert_eq!(pipeline.block_status(1).unwrap().rank_deficit, Some(1));
+            assert!(pipeline.rank_cache.lock().contains_key(&1));
+            assert!(matches!(
+                pipeline.feed_deferred(fixture.signed(&fixture.repairs[REPAIRS])).unwrap(),
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted { .. })
+            ));
+
+            let outcome = run_block_decode_job(job);
+            assert!(matches!(
+                &outcome.resolution,
+                BlockDecodeResolution::Failed {
+                    reason: RejectReason::InconsistentEquations,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                pipeline.finish_decode_job_deferred(outcome),
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
+                    RejectReason::InconsistentEquations
+                ))
+            ));
+            fixture.assert_latched(&pipeline, RejectReason::InconsistentEquations);
+            assert!(pipeline.rank_cache.lock().contains_key(&1));
+            assert_eq!(pipeline.block_repair_failure(1), None);
+            assert_eq!(pipeline.block_status(1).unwrap().state, BlockStateKind::Collecting);
+
+            for (block, source) in [(&fixture, &fixture.sources[0]), (&sibling, &sibling.sources[K - 1])] {
+                assert_eq!(
+                    pipeline.feed(block.signed(source)).unwrap(),
+                    SymbolAcceptResult::BlockComplete {
+                        block_sbn: block.sbn,
+                        data: block.data.clone(),
+                    }
+                );
+            }
+            let mut expected = fixture.data;
+            expected.extend_from_slice(&sibling.data);
+            assert_eq!(pipeline.into_data().unwrap(), expected);
+        }
+
+        #[test]
+        fn deferred_corruption_uses_sources_arriving_during_solve_without_another_fec_attempt() {
+            init_test("deferred_corruption_uses_sources_arriving_during_solve_without_another_fec_attempt");
+            let fixture = Fixture::new(0);
+            let mut pipeline = fixture.pipeline(1, K + REPAIRS + 3);
+            let job = fixture.pending_attempt(&mut pipeline);
+            assert!(matches!(
+                pipeline.feed_deferred(fixture.signed(&fixture.sources[0])).unwrap(),
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted { .. })
+            ));
+            let outcome = run_block_decode_job(job);
+            let DeferredSymbolAcceptResult::Decode(completion) =
+                pipeline.finish_decode_job_deferred(outcome)
+            else {
+                panic!("new complete source set must get a completion job");
+            };
+            assert_eq!(completion.repair_failure, Some(RejectReason::InconsistentEquations));
+            assert!(completion.symbols.iter().all(|symbol| symbol.kind() == SymbolKind::Source));
+            let outcome = crate::raptorq::systematic::with_constraint_matrix_cell_limit(
+                0,
+                || run_block_decode_job(completion),
+            );
+            assert_eq!(outcome.kind, BlockDecodeKind::SourceComplete);
+            assert_eq!(
+                pipeline.finish_decode_job(outcome),
+                SymbolAcceptResult::BlockComplete { block_sbn: 0, data: fixture.data.clone() }
+            );
+            assert_eq!(pipeline.block_repair_failure(0), None);
+            assert_eq!(pipeline.into_data().unwrap(), fixture.data);
+        }
+
+        #[test]
+        fn latched_source_completion_does_not_requeue_on_stale_layout_without_new_input() {
+            init_test("latched_source_completion_does_not_requeue_on_stale_layout_without_new_input");
+            let fixture = Fixture::new(0);
+            let mut pipeline = fixture.pipeline(1, K - 1 + REPAIRS);
+            let job = fixture.pending_attempt(&mut pipeline);
+            assert_eq!(
+                pipeline.finish_decode_job(run_block_decode_job(job)),
+                SymbolAcceptResult::Rejected(RejectReason::InconsistentEquations)
+            );
+            pipeline
+                .set_object_params(ObjectParams::new(fixture.object_id, 32, SIZE as u16, 1, 4))
+                .unwrap();
+            // The old source count exceeds the new K, but canonical ESI 0 is
+            // still missing. This job cannot actually complete the new layout.
+            let job = pipeline.prepare_decode_job(0, true).expect("stale count permits a job");
+            let outcome = crate::raptorq::systematic::with_constraint_matrix_cell_limit(
+                0,
+                || run_block_decode_job(job),
+            );
+            assert!(matches!(
+                pipeline.finish_decode_job_deferred(outcome),
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
+                    RejectReason::InconsistentEquations
+                ))
+            ));
+            assert!(matches!(pipeline.blocks[&0].state, BlockDecodingState::Failed));
+            assert!(pipeline.inflight_decode_symbols.is_empty());
+            let result = crate::raptorq::systematic::with_constraint_matrix_cell_limit(0, || {
+                pipeline.feed(fixture.signed(&fixture.sources[0])).unwrap()
+            });
+            assert_eq!(
+                result,
+                SymbolAcceptResult::BlockComplete { block_sbn: 0, data: fixture.data[..32].to_vec() }
+            );
+        }
+
+        #[test]
+        fn terminal_failure_does_not_resurrect_repairs_from_a_stale_owned_job() {
+            init_test("terminal_failure_does_not_resurrect_repairs_from_a_stale_owned_job");
+            let fixture = Fixture::new(0);
+            for reason in [RejectReason::InconsistentEquations, RejectReason::MemoryLimitReached] {
+                let mut pipeline = fixture.pipeline(1, K - 1 + REPAIRS);
+                let job = fixture.pending_attempt(&mut pipeline);
+                let stale_job = job.clone();
+                // Inject a terminal worker outcome to cover both pipeline
+                // policies; real contradiction detection is tested above,
+                // and budget exhaustion classification in decoder_tests.
+                let outcome = BlockDecodeOutcome {
+                    sbn: job.sbn,
+                    input_symbols: job.symbols.len(),
+                    retain_decoded_block: true,
+                    kind: BlockDecodeKind::RaptorQRepair,
+                    elapsed: Duration::ZERO,
+                    resolution: BlockDecodeResolution::Failed { reason, symbols: job.symbols },
+                };
+                assert_eq!(pipeline.finish_decode_job(outcome), SymbolAcceptResult::Rejected(reason));
+                pipeline.restore_decode_job(stale_job.clone());
+                fixture.assert_latched(&pipeline, reason);
+
+                let stale_retry = BlockDecodeOutcome {
+                    sbn: stale_job.sbn,
+                    input_symbols: stale_job.symbols.len(),
+                    retain_decoded_block: true,
+                    kind: BlockDecodeKind::RaptorQRepair,
+                    elapsed: Duration::ZERO,
+                    resolution: BlockDecodeResolution::Retry {
+                        reason: RejectReason::InsufficientRank,
+                        symbols: stale_job.symbols,
+                    },
+                };
+                assert!(matches!(
+                    pipeline.finish_decode_job_deferred(stale_retry),
+                    DeferredSymbolAcceptResult::Immediate(_)
+                ));
+                fixture.assert_latched(&pipeline, reason);
+                let result = crate::raptorq::systematic::with_constraint_matrix_cell_limit(0, || {
+                    pipeline.feed(fixture.signed(&fixture.sources[0])).unwrap()
+                });
+                assert_eq!(
+                    result,
+                    SymbolAcceptResult::BlockComplete { block_sbn: 0, data: fixture.data.clone() }
+                );
+            }
+        }
+    }
