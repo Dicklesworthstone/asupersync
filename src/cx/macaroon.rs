@@ -768,6 +768,9 @@ impl MacaroonToken {
     ///
     /// This operation does NOT require the root key — any holder
     /// can add caveats.
+    ///
+    /// This legacy method does not enforce token wire limits or reject bound
+    /// discharges. Use [`Self::try_add_caveat`] for checked attenuation.
     #[must_use]
     pub fn add_caveat(mut self, predicate: CaveatPredicate) -> Self {
         let pred_bytes = predicate.to_bytes();
@@ -777,6 +780,34 @@ impl MacaroonToken {
         self.signature = MacaroonSignature::from_bytes(*new_sig.as_bytes());
         self.caveats.push(Caveat::first_party(predicate));
         self
+    }
+
+    /// Add a first-party caveat while preserving binary encodability.
+    ///
+    /// Like [`Self::add_caveat`], this requires only the token, not the root
+    /// key. It checks the complete token before extending the HMAC chain:
+    /// every length-prefixed field must fit in `u16`, including the complete
+    /// encoded predicate, and the result may contain at most 64 caveats of
+    /// either kind. String lengths are measured in UTF-8 bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttenuationError`] if a bound discharge is supplied or any
+    /// existing or new field exceeds the binary format's limits. Discharges
+    /// must be attenuated before binding them to the final authorizing token.
+    pub fn try_add_caveat(self, predicate: CaveatPredicate) -> Result<Self, AttenuationError> {
+        if self.bound {
+            return Err(AttenuationError::AlreadyBound);
+        }
+        if self.caveats.len() >= MAX_TOKEN_CAVEATS {
+            return Err(AttenuationError::TooManyCaveats {
+                actual: self.caveats.len().saturating_add(1),
+                max: MAX_TOKEN_CAVEATS,
+            });
+        }
+        self.validate_wire_fields()?;
+        validate_predicate_wire_field(&predicate, self.caveats.len())?;
+        Ok(self.add_caveat(predicate))
     }
 
     /// Returns true if `self` is exactly `parent` attenuated by one
@@ -931,26 +962,35 @@ impl MacaroonToken {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn has_encodable_wire_fields(&self) -> bool {
-        let maximum = usize::from(u16::MAX);
-        self.identifier.len() <= maximum
-            && self.location.len() <= maximum
-            && self.caveats.len() <= MAX_TOKEN_CAVEATS
-            && self.caveats.iter().all(|caveat| match caveat {
-                Caveat::FirstParty { predicate } => match predicate {
-                    CaveatPredicate::ResourceScope(pattern) => pattern.len() <= maximum - 3,
-                    CaveatPredicate::Custom(key, value) => {
-                        key.len() <= maximum - 5 && value.len() <= maximum - 5 - key.len()
-                    }
-                    _ => true,
-                },
+        self.validate_wire_fields().is_ok()
+    }
+
+    fn validate_wire_fields(&self) -> Result<(), AttenuationError> {
+        validate_wire_field("identifier", None, self.identifier.len())?;
+        validate_wire_field("location", None, self.location.len())?;
+        if self.caveats.len() > MAX_TOKEN_CAVEATS {
+            return Err(AttenuationError::TooManyCaveats {
+                actual: self.caveats.len(),
+                max: MAX_TOKEN_CAVEATS,
+            });
+        }
+        for (index, caveat) in self.caveats.iter().enumerate() {
+            match caveat {
+                Caveat::FirstParty { predicate } => {
+                    validate_predicate_wire_field(predicate, index)?;
+                }
                 Caveat::ThirdParty {
                     location,
                     identifier,
                     vid,
                 } => {
-                    location.len() <= maximum && identifier.len() <= maximum && vid.len() <= maximum
+                    validate_wire_field("location", Some(index), location.len())?;
+                    validate_wire_field("identifier", Some(index), identifier.len())?;
+                    validate_wire_field("vid", Some(index), vid.len())?;
                 }
-            })
+            }
+        }
+        Ok(())
     }
 
     /// Bind a discharge macaroon to this authorizing macaroon.
@@ -1808,6 +1848,99 @@ impl fmt::Display for VerificationError {
 }
 
 impl std::error::Error for VerificationError {}
+
+/// A refusal from [`MacaroonToken::try_add_caveat`].
+///
+/// Error details contain only field names, indices, and lengths, never token
+/// contents or signatures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AttenuationError {
+    /// A discharge must be attenuated before binding it to its authorizing token.
+    AlreadyBound,
+    /// The resulting token would exceed the decoder's caveat-count limit.
+    TooManyCaveats {
+        /// Number of caveats the resulting token would contain.
+        actual: usize,
+        /// Maximum supported number of first- and third-party caveats combined.
+        max: usize,
+    },
+    /// A length-prefixed field cannot be represented in the binary format.
+    FieldTooLarge {
+        /// The field name: `identifier`, `location`, `predicate`, or `vid`.
+        field: &'static str,
+        /// Zero-based caveat index, or `None` for a top-level token field.
+        caveat_index: Option<usize>,
+        /// Encoded byte length, including internal predicate framing if present.
+        actual: usize,
+        /// Maximum supported encoded byte length.
+        max: usize,
+    },
+}
+
+impl fmt::Display for AttenuationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyBound => f.write_str("cannot attenuate a bound macaroon discharge"),
+            Self::TooManyCaveats { actual, max } => {
+                write!(f, "attenuated macaroon has {actual} caveats; maximum is {max}")
+            }
+            Self::FieldTooLarge {
+                field,
+                caveat_index,
+                actual,
+                max,
+            } => {
+                if let Some(index) = caveat_index {
+                    write!(f, "macaroon caveat {index} ")?;
+                } else {
+                    f.write_str("macaroon ")?;
+                }
+                write!(f, "{field} is {actual} bytes; wire format maximum is {max}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AttenuationError {}
+
+fn validate_wire_field(
+    field: &'static str,
+    caveat_index: Option<usize>,
+    actual: usize,
+) -> Result<(), AttenuationError> {
+    let max = usize::from(u16::MAX);
+    if actual > max {
+        return Err(AttenuationError::FieldTooLarge {
+            field,
+            caveat_index,
+            actual,
+            max,
+        });
+    }
+    Ok(())
+}
+
+fn validate_predicate_wire_field(
+    predicate: &CaveatPredicate,
+    index: usize,
+) -> Result<(), AttenuationError> {
+    // The outer u16 frame encloses the tag and the predicate's own length
+    // prefixes. Checking each string alone misses this combined limit.
+    let encoded_len = match predicate {
+        CaveatPredicate::ResourceScope(pattern) => pattern.len().saturating_add(3),
+        CaveatPredicate::Custom(key, value) => {
+            key.len().saturating_add(value.len()).saturating_add(5)
+        }
+        CaveatPredicate::MaxUses(_) => 5,
+        CaveatPredicate::TimeBefore(_)
+        | CaveatPredicate::TimeAfter(_)
+        | CaveatPredicate::RegionScope(_)
+        | CaveatPredicate::TaskScope(_)
+        | CaveatPredicate::RateLimit { .. } => 9,
+    };
+    validate_wire_field("predicate", Some(index), encoded_len)
+}
 
 // ---------------------------------------------------------------------------
 // BindError — br-asupersync-00ze7h

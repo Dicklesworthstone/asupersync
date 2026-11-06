@@ -2188,6 +2188,74 @@
     }
 
     #[test]
+    fn cx_attenuate_stops_at_the_wire_caveat_limit_without_changing_parent() {
+        let key = test_root_key();
+        let mut token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler")
+            .add_third_party_caveat("authority", "approval", &key);
+        for _ in 1..63 {
+            token = token.add_caveat(CaveatPredicate::MaxUses(1));
+        }
+        let cx = test_cx().with_macaroon(token.clone());
+        let full = cx.attenuate_time_limit(100).expect("the 64th caveat fits");
+        let full_token = full.macaroon().expect("attenuated token").clone();
+        assert_eq!(full_token.caveat_count(), 64);
+        assert_eq!(
+            MacaroonToken::from_binary(&full_token.to_binary()),
+            Some(full_token.clone())
+        );
+        assert!(full.attenuate_time_limit(50).is_none());
+        assert_eq!(full.macaroon(), Some(&full_token));
+        assert_eq!(cx.macaroon(), Some(&token));
+    }
+
+    #[test]
+    fn cx_attenuate_rejects_oversized_outer_predicate_frames() {
+        let key = test_root_key();
+        let max = usize::from(u16::MAX);
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let cx = test_cx().with_macaroon(token.clone());
+        for predicate in [
+            CaveatPredicate::ResourceScope("x".repeat(max - 2)),
+            CaveatPredicate::Custom("é".repeat(16_384), "v".repeat(32_768)),
+        ] {
+            assert!(predicate.validate().is_ok());
+            assert!(cx.attenuate(predicate).is_none());
+            assert_eq!(cx.macaroon(), Some(&token));
+        }
+
+        let child = cx
+            .attenuate_scope("é".repeat((max - 3) / 2))
+            .expect("the maximum UTF-8 predicate frame fits");
+        let child_token = child.macaroon().expect("attenuated token");
+        assert_eq!(
+            MacaroonToken::from_binary(&child_token.to_binary()).as_ref(),
+            Some(child_token)
+        );
+        assert!(child_token.verify_signature(&key));
+    }
+
+    #[test]
+    fn cx_attenuate_rejects_invalid_parent_tokens() {
+        let key = test_root_key();
+        let max = usize::from(u16::MAX);
+        let oversized = "é".repeat(32_768);
+        let plain = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let bound = plain.bind_for_request(&plain).expect("unbound token");
+        for token in [
+            MacaroonToken::mint(&key, &oversized, "cx/scheduler"),
+            plain
+                .clone()
+                .add_third_party_caveat("authority", &oversized, &key),
+            plain.add_caveat(CaveatPredicate::ResourceScope("x".repeat(max - 2))),
+            bound,
+        ] {
+            let cx = test_cx().with_macaroon(token.clone());
+            assert!(cx.attenuate(CaveatPredicate::MaxUses(1)).is_none());
+            assert_eq!(cx.macaroon(), Some(&token));
+        }
+    }
+
+    #[test]
     fn cx_attenuate_from_budget_returns_none_without_macaroon() {
         let cx = test_cx();
         assert!(cx.attenuate_from_budget().is_none());

@@ -1944,8 +1944,9 @@ impl<Caps> Cx<Caps> {
     /// context is unchanged. This does **not** require the root key —
     /// any holder can add caveats (but nobody can remove them).
     ///
-    /// Returns `None` if no macaroon is attached or the caveat cannot be
-    /// encoded in the macaroon wire format.
+    /// Returns `None` if no macaroon is attached, the token is a bound
+    /// discharge, or the resulting token exceeds the macaroon wire format's
+    /// field lengths or 64-caveat limit.
     #[must_use]
     pub fn attenuate(&self, predicate: super::macaroon::CaveatPredicate) -> Option<Self> {
         let token = self.handles.macaroon.as_ref()?;
@@ -1958,7 +1959,17 @@ impl<Caps> Cx<Caps> {
             return None;
         }
 
-        let attenuated = MacaroonToken::clone(token).add_caveat(predicate.clone());
+        let attenuated = match MacaroonToken::clone(token).try_add_caveat(predicate.clone()) {
+            Ok(attenuated) => attenuated,
+            Err(_error) => {
+                error!(
+                    token_id = %token.identifier(),
+                    error = %_error,
+                    "macaroon attenuation rejected invalid token or caveat"
+                );
+                return None;
+            }
+        };
         if !attenuated.is_direct_attenuation_of(token, &predicate) {
             error!(
                 token_id = %token.identifier(),

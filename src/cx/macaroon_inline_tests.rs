@@ -197,6 +197,203 @@
     }
 
     #[test]
+    fn checked_attenuation_preserves_legacy_chain_and_wire_format() {
+        let key = test_root_key();
+        let mut checked = MacaroonToken::mint(&key, "cap", "loc");
+        let mut legacy = checked.clone();
+        for predicate in [
+            CaveatPredicate::TimeBefore(100),
+            CaveatPredicate::TimeAfter(1),
+            CaveatPredicate::RegionScope(42),
+            CaveatPredicate::TaskScope(7),
+            CaveatPredicate::MaxUses(3),
+            CaveatPredicate::ResourceScope("api/**".into()),
+            CaveatPredicate::RateLimit {
+                max_count: 10,
+                window_secs: 60,
+            },
+            CaveatPredicate::Custom("env".into(), "test".into()),
+        ] {
+            legacy = legacy.add_caveat(predicate.clone());
+            checked = checked.try_add_caveat(predicate).expect("encodable caveat");
+            assert_eq!(checked, legacy);
+            assert!(checked.verify_signature(&key));
+            assert_eq!(
+                MacaroonToken::from_binary(&checked.to_binary()),
+                Some(checked.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn checked_attenuation_counts_first_and_third_party_caveats_together() {
+        let key = test_root_key();
+        let caveat_key = AuthKey::from_seed(43);
+        let mut parent = MacaroonToken::mint(&key, "cap", "loc")
+            .add_third_party_caveat("authority", "approval", &caveat_key);
+        for _ in 1..MAX_TOKEN_CAVEATS - 1 {
+            parent = parent.add_caveat(CaveatPredicate::MaxUses(1));
+        }
+        let full = parent
+            .try_add_caveat(CaveatPredicate::TimeBefore(100))
+            .expect("the 64th caveat fits");
+        assert_eq!(full.caveat_count(), MAX_TOKEN_CAVEATS);
+        assert!(full.verify_signature(&key));
+        assert_eq!(
+            MacaroonToken::from_binary(&full.to_binary()),
+            Some(full.clone())
+        );
+        assert_eq!(
+            full.clone().try_add_caveat(CaveatPredicate::MaxUses(1)),
+            Err(AttenuationError::TooManyCaveats {
+                actual: MAX_TOKEN_CAVEATS + 1,
+                max: MAX_TOKEN_CAVEATS,
+            })
+        );
+
+        // The infallible API retains its existing behavior for compatibility.
+        let legacy = full.add_caveat(CaveatPredicate::MaxUses(1));
+        assert_eq!(legacy.caveat_count(), MAX_TOKEN_CAVEATS + 1);
+        assert!(MacaroonToken::from_binary(&legacy.to_binary()).is_none());
+    }
+
+    #[test]
+    fn checked_attenuation_bounds_complete_predicate_frames_in_utf8_bytes() {
+        let key = test_root_key();
+        let max = usize::from(u16::MAX);
+        let unicode_pattern = "é".repeat((max - 3) / 2);
+        let unicode_key = "é".repeat(16_384);
+        let value = "v".repeat(max - 5 - unicode_key.len());
+        for (valid, oversized) in [
+            (
+                CaveatPredicate::ResourceScope(unicode_pattern.clone()),
+                CaveatPredicate::ResourceScope(format!("{unicode_pattern}x")),
+            ),
+            (
+                CaveatPredicate::Custom(unicode_key.clone(), value.clone()),
+                CaveatPredicate::Custom(unicode_key, format!("{value}x")),
+            ),
+            (
+                CaveatPredicate::Custom("k".repeat(max - 5), String::new()),
+                CaveatPredicate::Custom("k".repeat(max - 4), String::new()),
+            ),
+            (
+                CaveatPredicate::Custom(String::new(), "v".repeat(max - 5)),
+                CaveatPredicate::Custom(String::new(), "v".repeat(max - 4)),
+            ),
+        ] {
+            let parent = MacaroonToken::mint(&key, "cap", "loc");
+            let child = parent
+                .clone()
+                .try_add_caveat(valid)
+                .expect("maximum frame fits");
+            assert!(child.verify_signature(&key));
+            assert_eq!(MacaroonToken::from_binary(&child.to_binary()), Some(child));
+            assert!(
+                oversized.validate().is_ok(),
+                "individual strings fit, but the complete predicate frame does not"
+            );
+            assert_eq!(
+                parent.try_add_caveat(oversized),
+                Err(AttenuationError::FieldTooLarge {
+                    field: "predicate",
+                    caveat_index: Some(0),
+                    actual: max + 1,
+                    max,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn checked_attenuation_validates_inherited_fields_before_encoding() {
+        let key = test_root_key();
+        let caveat_key = AuthKey::from_seed(43);
+        let max = usize::from(u16::MAX);
+        let oversized = "é".repeat(32_768);
+        assert_eq!(oversized.len(), max + 1);
+        let plain = MacaroonToken::mint(&key, "cap", "loc");
+        for (parent, field, caveat_index) in [
+            (
+                MacaroonToken::mint(&key, &oversized, "loc"),
+                "identifier",
+                None,
+            ),
+            (
+                MacaroonToken::mint(&key, "cap", &oversized),
+                "location",
+                None,
+            ),
+            (
+                plain
+                    .clone()
+                    .add_third_party_caveat(&oversized, "approval", &caveat_key),
+                "location",
+                Some(0),
+            ),
+            (
+                plain
+                    .clone()
+                    .add_third_party_caveat("authority", &oversized, &caveat_key),
+                "identifier",
+                Some(0),
+            ),
+            (
+                plain
+                    .clone()
+                    .add_caveat(CaveatPredicate::ResourceScope("x".repeat(max - 2))),
+                "predicate",
+                Some(0),
+            ),
+            (
+                plain.add_caveat(CaveatPredicate::Custom(
+                    "k".repeat(32_768),
+                    "v".repeat(max - 4 - 32_768),
+                )),
+                "predicate",
+                Some(0),
+            ),
+        ] {
+            assert_eq!(
+                parent.try_add_caveat(CaveatPredicate::MaxUses(1)),
+                Err(AttenuationError::FieldTooLarge {
+                    field,
+                    caveat_index,
+                    actual: max + 1,
+                    max,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn checked_attenuation_accepts_maximum_token_and_third_party_fields() {
+        let key = test_root_key();
+        let caveat_key = AuthKey::from_seed(43);
+        let maximum = format!("{}x", "é".repeat(32_767));
+        assert_eq!(maximum.len(), usize::from(u16::MAX));
+        let token = MacaroonToken::mint(&key, &maximum, &maximum)
+            .add_third_party_caveat(&maximum, &maximum, &caveat_key)
+            .try_add_caveat(CaveatPredicate::MaxUses(1))
+            .expect("separate length-prefixed fields may each reach the limit");
+        assert!(token.verify_signature(&key));
+        assert_eq!(MacaroonToken::from_binary(&token.to_binary()), Some(token));
+    }
+
+    #[test]
+    fn checked_attenuation_refuses_bound_discharges() {
+        let key = test_root_key();
+        let auth = MacaroonToken::mint(&key, "cap", "loc");
+        let discharge = MacaroonToken::mint(&key, "approval", "authority");
+        let bound = auth.bind_for_request(&discharge).expect("unbound discharge");
+        assert_eq!(
+            bound.clone().try_add_caveat(CaveatPredicate::MaxUses(1)),
+            Err(AttenuationError::AlreadyBound)
+        );
+        assert!(bound.add_caveat(CaveatPredicate::MaxUses(1)).is_bound());
+    }
+
+    #[test]
     fn direct_attenuation_check_requires_parent_prefix_and_expected_signature() {
         let key = test_root_key();
         let parent = MacaroonToken::mint(&key, "cap", "loc")
