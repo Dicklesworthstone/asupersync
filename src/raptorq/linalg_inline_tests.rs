@@ -697,6 +697,97 @@
     }
 
     #[test]
+    fn streamed_rank_rows_match_independent_column_reduction() {
+        // A column-first elimination oracle deliberately differs from the
+        // production row-at-a-time basis reducer. Exercise nonunit pivots,
+        // dependent/zero rows, rectangular matrices, and empty dimensions.
+        fn reference_profile(input: &[Vec<Gf256>], columns: usize) -> GaussianRankProfile {
+            let mut rows = input.to_vec();
+            let mut pivot_columns = Vec::new();
+            for column in 0..columns {
+                let pivot_row = pivot_columns.len();
+                let Some(found) = (pivot_row..rows.len())
+                    .find(|&row| !rows[row][column].is_zero())
+                else {
+                    continue;
+                };
+                rows.swap(pivot_row, found);
+                let inverse = rows[pivot_row][column].inv();
+                for value in &mut rows[pivot_row][column..] {
+                    *value *= inverse;
+                }
+                let normalized = rows[pivot_row].clone();
+                for row in rows.iter_mut().skip(pivot_row + 1) {
+                    let factor = row[column];
+                    for index in column..columns {
+                        row[index] += normalized[index] * factor;
+                    }
+                }
+                pivot_columns.push(column);
+            }
+            let free_columns = (0..columns)
+                .filter(|column| !pivot_columns.contains(column))
+                .collect();
+            GaussianRankProfile {
+                rows: input.len(),
+                columns,
+                rank: pivot_columns.len(),
+                deficit: columns - pivot_columns.len(),
+                pivot_columns,
+                free_columns,
+            }
+        }
+
+        let mut rng = DetRng::new(0x7261_6e6b_726f_7773);
+        for columns in 0..=12 {
+            for row_count in 0..=16 {
+                let mut rows: Vec<Vec<Gf256>> = (0..row_count)
+                    .map(|row| {
+                        (0..columns)
+                            .map(|column| {
+                                if column % 4 == 1 || row % 5 == 0 {
+                                    Gf256::ZERO
+                                } else {
+                                    Gf256::new(rng.next_u64() as u8)
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                if row_count > 3 {
+                    rows[3] = rows[1]
+                        .iter()
+                        .zip(&rows[2])
+                        .map(|(&a, &b)| a + b * Gf256::new(19))
+                        .collect();
+                }
+                let expected = reference_profile(&rows, columns);
+                let actual = coefficient_rank_profile_rows(rows, columns);
+                assert_eq!(actual, expected, "rows={row_count}, columns={columns}");
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_rank_counts_rows_even_after_the_basis_is_full() {
+        let mut generated = 0;
+        let rows = (0..64).map(|index| {
+            generated += 1;
+            match index {
+                0 => vec![Gf256::new(7), Gf256::ZERO],
+                1 => vec![Gf256::ZERO, Gf256::new(11)],
+                _ => vec![Gf256::new(7), Gf256::new(11)],
+            }
+        });
+        let profile = coefficient_rank_profile_rows(rows, 2);
+        assert_eq!(generated, 64);
+        assert_eq!(profile.rows, 64);
+        assert_eq!(profile.rank, 2);
+        assert_eq!(profile.pivot_columns, vec![0, 1]);
+        assert!(profile.free_columns.is_empty());
+    }
+
+    #[test]
     fn row_nonzero_count_works() {
         assert_eq!(row_nonzero_count(&[0, 0, 0]), 0);
         assert_eq!(row_nonzero_count(&[1, 0, 2]), 2);

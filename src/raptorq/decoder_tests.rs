@@ -92,6 +92,142 @@ mod tests {
     }
 
     #[test]
+    fn constraint_symbols_match_full_precode_equations() {
+        for k in [1, 11, 101, 257] {
+            let symbol_size = 17;
+            let decoder = InactivationDecoder::new(k, symbol_size, 0xC0FFEE);
+            let full = ConstraintMatrix::build(&decoder.params, decoder.seed);
+            let constraints = decoder.constraint_symbols();
+            assert_eq!(constraints.len(), decoder.params.s + decoder.params.h);
+
+            for (row, symbol) in constraints.iter().enumerate() {
+                let expected: Vec<_> = (0..full.cols)
+                    .filter_map(|col| {
+                        let coefficient = full.get(row, col);
+                        (!coefficient.is_zero()).then_some((col, coefficient))
+                    })
+                    .collect();
+                let actual: Vec<_> = symbol
+                    .columns
+                    .iter()
+                    .copied()
+                    .zip(symbol.coefficients.iter().copied())
+                    .collect();
+                assert_eq!(actual, expected, "K={k}, constraint row={row}");
+                assert_eq!(symbol.columns.len(), symbol.coefficients.len());
+                assert_eq!(symbol.esi, row as u32);
+                assert!(!symbol.is_source);
+                assert_eq!(symbol.data, vec![0; symbol_size]);
+            }
+        }
+    }
+
+    #[test]
+    fn max_rfc_block_constraint_symbols_bound_matrix_allocation() {
+        let decoder = InactivationDecoder::new(56_403, 1, 42);
+        let params = &decoder.params;
+        let precode_cells = (params.s + params.h) * params.l;
+        // At the largest RFC block, the old L*L construction requests over
+        // three billion cells. Fail before that allocation if it is restored;
+        // the decoder needs only the roughly 51 MiB precode coefficient area.
+        assert_eq!(precode_cells, 52_911_898);
+        assert!(params.l * params.l > 3_000_000_000);
+        let constraints =
+            crate::raptorq::systematic::with_constraint_matrix_cell_limit(precode_cells, || {
+                decoder.constraint_symbols()
+            });
+
+        assert_eq!(constraints.len(), params.s + params.h);
+        for (row, symbol) in constraints.iter().enumerate() {
+            assert_eq!(symbol.esi, row as u32);
+            assert!(!symbol.is_source);
+            assert_eq!(symbol.data, vec![0]);
+            assert_eq!(symbol.columns.len(), symbol.coefficients.len());
+            assert!(symbol.columns.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(symbol.columns.iter().all(|&col| col < params.l));
+            assert!(symbol.coefficients.iter().all(|value| !value.is_zero()));
+
+            // Each precode row keeps its RFC check-symbol identity column.
+            let identity_col = if row < params.s {
+                params.b + row
+            } else {
+                params.k_prime + row
+            };
+            let identity = symbol
+                .columns
+                .binary_search(&identity_col)
+                .expect("precode row contains its identity column");
+            assert_eq!(symbol.coefficients[identity], Gf256::ONE);
+        }
+    }
+
+    #[test]
+    fn rank_profile_matches_dense_decoder_state_for_partial_and_mixed_blocks() {
+        for k in [1, 4, 10, 11, 13, 49, 50, 101] {
+            let symbol_size = 8;
+            let decoder = InactivationDecoder::new(k, symbol_size, 0xC0FFEE);
+            let mut received = decoder.constraint_symbols();
+            let precode_rows = received.len();
+            // An all-zero source has zero source/repair payloads, so the
+            // coefficient comparison also passes the payload-consistency
+            // admission checks. Withhold half the sources to exercise repair.
+            received.extend(
+                (0..k)
+                    .step_by(2)
+                    .map(|esi| ReceivedSymbol::source(esi as u32, vec![0; symbol_size])),
+            );
+            let partial_rows = received.len();
+            for esi in k..k + 6 {
+                let (columns, coefficients) = decoder.repair_equation(esi as u32).unwrap();
+                received.push(ReceivedSymbol::repair(
+                    esi as u32,
+                    columns,
+                    coefficients,
+                    vec![0; symbol_size],
+                ));
+            }
+            // Repeated equations must contribute rows but no extra rank.
+            received.push(received.last().unwrap().clone());
+
+            for row_count in [0, precode_rows, partial_rows, received.len()] {
+                for reversed in [false, true] {
+                    let mut symbols = received[..row_count].to_vec();
+                    if reversed {
+                        symbols.reverse();
+                    }
+                    // Exercise the pre-existing solve-state construction as
+                    // the reference, including its implicit K..K' zero rows.
+                    let state = decoder.build_state(&symbols);
+                    let dense: Vec<Vec<u8>> = state
+                        .equations
+                        .iter()
+                        .map(|equation| {
+                            let mut row = vec![0; decoder.params.l];
+                            for &(column, coefficient) in &equation.terms {
+                                row[column] ^= coefficient.raw();
+                            }
+                            row
+                        })
+                        .collect();
+                    let rows: Vec<&[u8]> = dense.iter().map(Vec::as_slice).collect();
+                    let expected =
+                        crate::raptorq::linalg::coefficient_rank_profile(&rows, decoder.params.l);
+                    let actual = decoder.rank_profile(&symbols).unwrap();
+                    assert_eq!(
+                        actual, expected,
+                        "K={k}, received={row_count}, reversed={reversed}"
+                    );
+                    assert_eq!(
+                        actual.rows,
+                        row_count + decoder.params.k_prime - decoder.params.k,
+                        "implicit padding row count at K={k}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rank_status_tracks_missing_source_symbol_deficit() {
         let decoder = InactivationDecoder::new(4, 8, 11);
         let mut symbols = decoder.constraint_symbols();

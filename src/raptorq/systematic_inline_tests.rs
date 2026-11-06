@@ -793,6 +793,30 @@
     }
 
     #[test]
+    fn precode_matrix_matches_full_prefix_across_rfc_parameters() {
+        // Cover exact and padded K', LDPC size transitions, and the first
+        // transition from ten to eleven HDPC rows. The established full
+        // encoder matrix is the differential oracle for every coefficient.
+        for k in [1, 10, 11, 49, 50, 101, 102, 1049, 1050] {
+            let params = SystematicParams::for_source_block(k, 17);
+            for seed in [0, 42, u64::MAX] {
+                let full = ConstraintMatrix::build(&params, seed);
+                let precode = ConstraintMatrix::build_precode(&params, seed);
+                let precode_cells = (params.s + params.h) * params.l;
+
+                assert_eq!(precode.rows, params.s + params.h, "K={k}, seed={seed}");
+                assert_eq!(precode.cols, params.l, "K={k}, seed={seed}");
+                assert_eq!(precode.data.len(), precode_cells, "K={k}, seed={seed}");
+                assert_eq!(
+                    precode.data.as_slice(),
+                    &full.data[..precode_cells],
+                    "precode coefficients differ from the encoder at K={k}, seed={seed}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn encoder_creates_successfully() {
         let k = 4;
         let symbol_size = 32;

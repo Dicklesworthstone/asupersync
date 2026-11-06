@@ -394,6 +394,32 @@ pub struct ConstraintMatrix {
     pub cols: usize,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static CONSTRAINT_MATRIX_CELL_LIMIT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// Bound matrix allocations in a regression test before allocating the cells.
+/// The thread-local guard does not affect concurrently running tests.
+#[cfg(test)]
+pub(crate) fn with_constraint_matrix_cell_limit<T>(
+    max_cells: usize,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreLimit(usize);
+
+    impl Drop for RestoreLimit {
+        fn drop(&mut self) {
+            CONSTRAINT_MATRIX_CELL_LIMIT.with(|limit| limit.set(self.0));
+        }
+    }
+
+    let _restore =
+        RestoreLimit(CONSTRAINT_MATRIX_CELL_LIMIT.with(|limit| limit.replace(max_cells)));
+    operation()
+}
+
 impl ConstraintMatrix {
     /// Create a zero matrix.
     ///
@@ -420,6 +446,14 @@ impl ConstraintMatrix {
         let n = rows
             .checked_mul(cols)
             .expect("constraint matrix dimensions (rows * cols) overflow usize");
+        #[cfg(test)]
+        CONSTRAINT_MATRIX_CELL_LIMIT.with(|limit| {
+            assert!(
+                n <= limit.get(),
+                "constraint matrix requests {n} coefficient cells, exceeding the test limit {}",
+                limit.get()
+            );
+        });
         Self {
             data: vec![Gf256::ZERO; n],
             rows,
@@ -471,6 +505,20 @@ impl ConstraintMatrix {
         // LT constraints for systematic symbols (rows S+H..S+H+K')
         build_lt_rows(&mut matrix, params, seed);
 
+        matrix
+    }
+
+    /// Build only the LDPC and HDPC rows needed by the decoder.
+    ///
+    /// These are exactly the first `S + H` rows of [`Self::build`]. Received
+    /// source and repair symbols supply the decoder's remaining equations, so
+    /// materializing the `K'` systematic LT rows would allocate an otherwise
+    /// unused `K' * L` coefficient buffer (br-asupersync-w9yojl).
+    #[must_use]
+    pub(crate) fn build_precode(params: &SystematicParams, seed: u64) -> Self {
+        let mut matrix = Self::zeros(params.s + params.h, params.l);
+        build_ldpc_rows(&mut matrix, params, seed);
+        build_hdpc_rows(&mut matrix, params, seed);
         matrix
     }
 

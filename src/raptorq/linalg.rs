@@ -897,13 +897,32 @@ pub struct GaussianRankProfile {
 /// coefficient matrix even when a unique solution is impossible.
 #[must_use]
 pub fn coefficient_rank_profile(matrix: &[&[u8]], columns: usize) -> GaussianRankProfile {
-    let mut basis = vec![None::<Vec<Gf256>>; columns];
-
-    for row_data in matrix {
+    let rows = matrix.iter().map(|row_data| {
         let mut row = vec![Gf256::ZERO; columns];
         for (column, slot) in row.iter_mut().enumerate() {
             *slot = Gf256::new(row_data.get(column).copied().unwrap_or(0));
         }
+        row
+    });
+    coefficient_rank_profile_rows(rows, columns)
+}
+
+/// Reduce coefficient rows as they are produced, retaining only basis rows.
+///
+/// Internal callers that already generate owned coefficients can move each row
+/// into the reducer instead of materializing a second dense input matrix. Every
+/// row must have exactly `columns` entries. Row order and pivot selection match
+/// [`coefficient_rank_profile`], including dependent rows and zero-width inputs.
+pub(crate) fn coefficient_rank_profile_rows(
+    matrix: impl IntoIterator<Item = Vec<Gf256>>,
+    columns: usize,
+) -> GaussianRankProfile {
+    let mut basis = vec![None::<Vec<Gf256>>; columns];
+    let mut rows = 0;
+
+    for mut row in matrix {
+        debug_assert_eq!(row.len(), columns);
+        rows += 1;
 
         for pivot in 0..columns {
             if row[pivot].is_zero() {
@@ -938,7 +957,7 @@ pub fn coefficient_rank_profile(matrix: &[&[u8]], columns: usize) -> GaussianRan
     let rank = pivot_columns.len();
 
     GaussianRankProfile {
-        rows: matrix.len(),
+        rows,
         columns,
         rank,
         deficit: columns.saturating_sub(rank),

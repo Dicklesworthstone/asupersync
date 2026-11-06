@@ -12,7 +12,7 @@
 //! - Same received symbols in same order produce identical decode results
 
 use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
-use crate::raptorq::linalg::{GaussianRankProfile, coefficient_rank_profile};
+use crate::raptorq::linalg::{GaussianRankProfile, coefficient_rank_profile_rows};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -22,6 +22,7 @@ use crate::raptorq::systematic::{ConstraintMatrix, SystematicError, SystematicPa
 use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
 
+use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -1791,8 +1792,17 @@ impl InactivationDecoder {
         symbols: &[ReceivedSymbol],
     ) -> Result<GaussianRankProfile, DecodeError> {
         self.validate_rank_input(symbols)?;
-        let state = self.build_state(symbols);
-        Ok(equation_rank_profile(&state.equations, self.params.l))
+        // Rank depends only on coefficients. Do not build a solve state: it
+        // clones every payload, allocates padded zero RHS buffers, and retains
+        // all equations even though rank reduction consumes them one at a time.
+        let received = symbols
+            .iter()
+            .map(|symbol| self.received_symbol_equation(symbol));
+        let padding = self.implicit_padding_equations();
+        Ok(equation_rank_profile(
+            received.chain(padding),
+            self.params.l,
+        ))
     }
 
     /// Decode using the bounded wavefront pipeline.
@@ -2094,15 +2104,9 @@ impl InactivationDecoder {
         // appends padded LT rows K..K' with an explicit zero RHS; synthesize
         // those rows here so the direct decoder path matches the encoder's
         // constraint system even when callers only provide real source symbols.
-        for esi in self.params.k..self.params.k_prime {
-            // Skip ESIs that don't fit in u32 to avoid panic (extremely large k_prime)
-            if let Ok(esi_u32) = u32::try_from(esi) {
-                let (columns, coefficients) = self.systematic_equation(esi_u32);
-                equations.push(Equation::new(columns, coefficients));
-                rhs.push(vec![0u8; symbol_size]);
-            }
-            // Note: skipping out-of-range ESIs may affect decoding correctness
-            // for pathological parameter combinations
+        for equation in self.implicit_padding_equations() {
+            equations.push(equation);
+            rhs.push(vec![0u8; symbol_size]);
         }
 
         DecoderState {
@@ -2188,8 +2192,10 @@ impl InactivationDecoder {
         let symbol_size = self.params.symbol_size;
         let base_rows = s + h;
 
-        // Build the constraint matrix (same as encoder uses)
-        let constraints = ConstraintMatrix::build(&self.params, self.seed);
+        // Reuse the encoder's exact precode rows without constructing its K'
+        // systematic LT rows. Decoding and rank feedback need only S+H here;
+        // a full matrix would allocate L squared cells for every new analysis.
+        let constraints = ConstraintMatrix::build_precode(&self.params, self.seed);
 
         let mut result = Vec::with_capacity(base_rows);
 
@@ -2987,6 +2993,16 @@ impl InactivationDecoder {
         }
     }
 
+    fn implicit_padding_equations(&self) -> impl Iterator<Item = Equation> + '_ {
+        (self.params.k..self.params.k_prime).filter_map(|esi| {
+            // Admitted RFC parameters fit u32. Preserve the solve path's
+            // treatment of an out-of-range ESI for pathological parameters.
+            let esi = u32::try_from(esi).ok()?;
+            let (columns, coefficients) = self.systematic_equation(esi);
+            Some(Equation::new(columns, coefficients))
+        })
+    }
+
     fn reconstruct_source_symbols(
         &self,
         intermediate: &[Option<Vec<u8>>],
@@ -3154,18 +3170,20 @@ fn equation_rank(equations: &[Equation], column_count: usize) -> usize {
     equation_rank_profile(equations, column_count).rank
 }
 
-fn equation_rank_profile(equations: &[Equation], column_count: usize) -> GaussianRankProfile {
-    let mut dense_rows = Vec::with_capacity(equations.len());
-    for equation in equations {
-        let mut row = vec![0u8; column_count];
+fn equation_rank_profile<I>(equations: I, column_count: usize) -> GaussianRankProfile
+where
+    I: IntoIterator,
+    I::Item: Borrow<Equation>,
+{
+    let rows = equations.into_iter().map(|equation| {
+        let mut row = vec![Gf256::ZERO; column_count];
+        let equation = equation.borrow();
         for &(col_idx, coefficient) in &equation.terms {
-            row[col_idx] ^= coefficient.raw();
+            row[col_idx] += coefficient;
         }
-        dense_rows.push(row);
-    }
-    let dense_refs: Vec<&[u8]> = dense_rows.iter().map(Vec::as_slice).collect();
-
-    coefficient_rank_profile(&dense_refs, column_count)
+        row
+    });
+    coefficient_rank_profile_rows(rows, column_count)
 }
 
 fn rebuild_dense_matrix_from_equations(
