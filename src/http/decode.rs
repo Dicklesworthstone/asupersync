@@ -67,30 +67,11 @@ impl Response {
         request_method: &Method,
         limit: DecompressionLimit,
     ) -> io::Result<()> {
-        if request_method.as_str() == "HEAD"
-            || (request_method.as_str() == "CONNECT" && (200..300).contains(&self.status))
-            || (100..200).contains(&self.status)
-            || matches!(self.status, 204 | 205 | 304)
-        {
+        let Some(decoder) = ContentDecoder::for_response(request_method, self.status, &self.headers)? else {
             return Ok(());
-        }
-
-        let decoder = ContentDecoder::from_fields(self.headers.iter().filter_map(|(name, value)| {
-            name.eq_ignore_ascii_case("content-encoding").then_some(value.as_str())
-        }))?;
+        };
         if decoder.is_identity() {
             return check_size(self.body.len(), limit);
-        }
-        if self.status == 206
-            || self
-                .headers
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case("content-range"))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "cannot decode an encoded partial representation",
-            ));
         }
         // A body declared empty (Content-Length: 0) with a content coding holds
         // no encoded data: it is the empty representation, which other clients
@@ -119,6 +100,34 @@ pub(crate) struct ContentDecoder {
 }
 
 impl ContentDecoder {
+    /// Apply one response policy to both buffered and streamed decoding.
+    /// `None` means representation metadata belongs to a bodyless response.
+    pub(crate) fn for_response(
+        request_method: &Method,
+        status: u16,
+        headers: &[(String, String)],
+    ) -> io::Result<Option<Self>> {
+        if request_method.as_str() == "HEAD"
+            || (request_method.as_str() == "CONNECT" && (200..300).contains(&status))
+            || (100..200).contains(&status)
+            || matches!(status, 204 | 205 | 304)
+        {
+            return Ok(None);
+        }
+        let decoder = Self::from_fields(headers.iter().filter_map(|(name, value)| {
+            name.eq_ignore_ascii_case("content-encoding").then_some(value.as_str())
+        }))?;
+        if !decoder.is_identity()
+            && (status == 206 || headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-range")))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot decode an encoded partial representation",
+            ));
+        }
+        Ok(Some(decoder))
+    }
+
     pub(crate) fn from_fields<'a>(fields: impl IntoIterator<Item = &'a str>) -> io::Result<Self> {
         Ok(Self { codings: content_codings(fields, false)? })
     }
@@ -167,7 +176,7 @@ impl ContentDecoder {
 
 // Whether the message framing declared the body empty: at least one
 // Content-Length field, and every one of them 0.
-fn declared_empty(headers: &[(String, String)]) -> bool {
+pub(crate) fn declared_empty(headers: &[(String, String)]) -> bool {
     let mut lengths = headers
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))

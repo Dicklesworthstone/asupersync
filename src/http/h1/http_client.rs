@@ -62,6 +62,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod decoded;
+#[cfg(not(target_arch = "wasm32"))]
+pub use decoded::{DecodedClientIncomingBody, DecodedClientStreamingResponse};
+
 const CONNECT_MAX_HEADERS_SIZE: usize = 64 * 1024;
 /// Maximum number of cookies stored per host (RFC 6265 recommends at least 50).
 const MAX_COOKIES_PER_HOST: usize = 64;
@@ -2339,12 +2344,28 @@ impl HttpClient {
     async fn execute_with_redirects_pooled_streaming(
         &self,
         cx: &Cx,
+        method: Method,
+        parsed: ParsedUrl,
+        extra_headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        deadline: &PooledStreamDeadline,
+    ) -> Result<PooledClientStreamingResponse, ClientError> {
+        self.execute_with_redirects_pooled_streaming_method(
+            cx, method, parsed, extra_headers, body, deadline,
+        ).await.map(|(_, response)| response)
+    }
+
+    /// Keep the final method authoritative for response representation policy:
+    /// a redirect can turn CONNECT or POST into GET, while HEAD stays HEAD.
+    async fn execute_with_redirects_pooled_streaming_method(
+        &self,
+        cx: &Cx,
         mut method: Method,
         mut parsed: ParsedUrl,
         mut extra_headers: Vec<(String, String)>,
         mut body: Vec<u8>,
         deadline: &PooledStreamDeadline,
-    ) -> Result<PooledClientStreamingResponse, ClientError> {
+    ) -> Result<(Method, PooledClientStreamingResponse), ClientError> {
         let mut origin = None;
         let mut redirect_count = 0_u32;
         loop {
@@ -2360,10 +2381,10 @@ impl HttpClient {
                 )
                 .await?;
             if !is_redirect(response.head.status) {
-                return Ok(response);
+                return Ok((method, response));
             }
             let max = match &self.config.redirect_policy {
-                RedirectPolicy::None => return Ok(response),
+                RedirectPolicy::None => return Ok((method, response)),
                 RedirectPolicy::Limited(max) | RedirectPolicy::SameOrigin(max) => *max,
             };
             if redirect_count >= max {
@@ -2373,11 +2394,11 @@ impl HttpClient {
                 });
             }
             let Some(location) = get_header(&response.head.headers, "location") else {
-                return Ok(response);
+                return Ok((method, response));
             };
             let next_parsed = ParsedUrl::parse(&resolve_redirect(&parsed, &location))?;
             if !redirect_policy_allows_target(&self.config.redirect_policy, &parsed, &next_parsed) {
-                return Ok(response);
+                return Ok((method, response));
             }
             let next_method = redirect_method(response.head.status, &method);
             // Unread redirect bodies release admission before the next hop.

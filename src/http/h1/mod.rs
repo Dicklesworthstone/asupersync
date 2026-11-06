@@ -39,6 +39,8 @@ pub use http_client::{
     PooledClientIncomingBody, PooledClientStreamingResponse, RedirectPolicy, RetryPolicy, Scheme,
 };
 #[cfg(not(target_arch = "wasm32"))]
+pub use http_client::{DecodedClientIncomingBody, DecodedClientStreamingResponse};
+#[cfg(not(target_arch = "wasm32"))]
 pub use listener::{Http1Listener, Http1ListenerConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{
