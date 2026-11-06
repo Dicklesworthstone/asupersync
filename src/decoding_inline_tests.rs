@@ -1592,6 +1592,273 @@
         status
     }
 
+    fn rank_basis_test_pipeline(k: usize, blocks: usize) -> DecodingPipeline {
+        let object_id = ObjectId::new_for_test(127);
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: 8,
+            max_block_size: k * 8,
+            repair_overhead: 100.0,
+            min_overhead: 0,
+            ..DecodingConfig::without_auth()
+        });
+        pipeline
+            .set_object_params(ObjectParams::new(
+                object_id,
+                (k * blocks * 8) as u64,
+                8,
+                blocks as u16,
+                k as u16,
+            ))
+            .unwrap();
+        pipeline
+    }
+
+    fn feed_rank_basis_symbol(
+        decoder: &mut DecodingPipeline,
+        sbn: u8,
+        esi: u32,
+        kind: SymbolKind,
+    ) {
+        let symbol = Symbol::new(
+            SymbolId::new(decoder.object_id.unwrap(), sbn, esi),
+            vec![0; usize::from(decoder.config.symbol_size)],
+            kind,
+        );
+        assert!(matches!(
+            decoder
+                .feed(AuthenticatedSymbol::new_unauthenticated(symbol))
+                .unwrap(),
+            SymbolAcceptResult::Accepted { .. }
+        ));
+    }
+
+    fn rank_basis_work(decoder: &DecodingPipeline) -> (usize, usize) {
+        (
+            decoder
+                .rank_basis_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            decoder
+                .rank_basis_rows_added
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn assert_rank_basis_budget(decoder: &DecodingPipeline) {
+        let cache = decoder.rank_basis_cache.lock();
+        let represented_bytes = cache.fixed_bytes()
+            + cache
+                .entries
+                .iter()
+                .map(|entry| {
+                    entry.basis.retained_bytes()
+                        + entry.processed_esis.len() * std::mem::size_of::<u32>()
+                })
+                .sum::<usize>();
+        assert!(represented_bytes <= cache.reserved_bytes);
+        assert!(cache.reserved_bytes <= cache.byte_limit);
+        assert!(cache.entries.len() <= cache.entry_limit);
+    }
+
+    #[test]
+    fn mixed_rank_basis_adds_only_new_equations_below_k() {
+        let k = 11;
+        let mut decoder = rank_basis_test_pipeline(k, 1);
+        for esi in [0, 2] {
+            feed_rank_basis_symbol(&mut decoder, 0, esi, SymbolKind::Source);
+            assert_block_rank_matches_fresh(&decoder, 0);
+            assert_eq!(rank_basis_work(&decoder), (0, 0));
+        }
+        feed_rank_basis_symbol(&mut decoder, 0, k as u32, SymbolKind::Repair);
+        assert_block_rank_matches_fresh(&decoder, 0);
+        let params = InactivationDecoder::new(k, 8, 0).params().clone();
+        let initial_rows = params.s + params.h + params.k_prime - k + 3;
+        assert_eq!(rank_basis_work(&decoder), (1, initial_rows));
+        assert_rank_basis_budget(&decoder);
+
+        for (added, (esi, kind)) in [
+            (k as u32 + 1, SymbolKind::Repair),
+            (1, SymbolKind::Source),
+            (k as u32 + 2, SymbolKind::Repair),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            feed_rank_basis_symbol(&mut decoder, 0, esi, kind);
+            let status = assert_block_rank_matches_fresh(&decoder, 0);
+            assert!(status.symbols_received < k);
+            assert_eq!(rank_basis_work(&decoder), (1, initial_rows + added + 1));
+            assert_rank_basis_budget(&decoder);
+        }
+        let work = rank_basis_work(&decoder);
+        for _ in 0..3 {
+            assert_block_rank_matches_fresh(&decoder, 0);
+        }
+        assert_eq!(rank_basis_work(&decoder), work);
+    }
+
+    #[test]
+    fn rank_basis_budget_reserves_growth_evicts_and_falls_back_to_exact_rank() {
+        let k = 11;
+        let mut decoder = rank_basis_test_pipeline(k, 2);
+        let columns = InactivationDecoder::new(k, 8, 0).params().l;
+        let one_symbol = CachedBlockRankBasis::required_bytes(columns, 1).unwrap();
+        let mut cache = RankBasisCache::with_limits(usize::MAX, 2);
+        cache.byte_limit = cache.fixed_bytes() + 2 * one_symbol;
+        *decoder.rank_basis_cache.get_mut() = cache;
+
+        for sbn in [0, 1] {
+            feed_rank_basis_symbol(&mut decoder, sbn, k as u32, SymbolKind::Repair);
+            assert_block_rank_matches_fresh(&decoder, sbn);
+            assert_rank_basis_budget(&decoder);
+        }
+        assert_eq!(decoder.rank_basis_cache.lock().entries.len(), 2);
+        let work = rank_basis_work(&decoder);
+        feed_rank_basis_symbol(&mut decoder, 0, k as u32 + 1, SymbolKind::Repair);
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(rank_basis_work(&decoder), (work.0, work.1 + 1));
+        {
+            let cache = decoder.rank_basis_cache.lock();
+            assert_eq!(cache.entries.len(), 1);
+            assert_eq!(cache.entries[0].plan.sbn, 0);
+        }
+        assert_rank_basis_budget(&decoder);
+
+        feed_rank_basis_symbol(&mut decoder, 1, k as u32 + 1, SymbolKind::Repair);
+        assert_block_rank_matches_fresh(&decoder, 1);
+        assert_eq!(rank_basis_work(&decoder).0, 3);
+        assert_rank_basis_budget(&decoder);
+
+        {
+            let cache = decoder.rank_basis_cache.get_mut();
+            cache.clear();
+            cache.byte_limit = cache.fixed_bytes() + one_symbol - 1;
+        }
+        let work = rank_basis_work(&decoder);
+        feed_rank_basis_symbol(&mut decoder, 0, k as u32 + 2, SymbolKind::Repair);
+        let status = assert_block_rank_matches_fresh(&decoder, 0);
+        assert!(status.rank.is_some(), "over-budget blocks keep exact feedback");
+        assert_eq!(rank_basis_work(&decoder), work);
+        assert!(decoder.rank_basis_cache.lock().entries.is_empty());
+        assert_rank_basis_budget(&decoder);
+
+        let max_columns = InactivationDecoder::new(56_403, 1, 0).params().l;
+        let max_required = CachedBlockRankBasis::required_bytes(max_columns, 1).unwrap();
+        assert!(!RankBasisCache::default().can_retain(max_required));
+    }
+
+    #[test]
+    fn rank_basis_lru_limits_total_entries_and_rebuilds_evicted_blocks() {
+        let k = 4;
+        let mut decoder = rank_basis_test_pipeline(k, RANK_BASIS_CACHE_ENTRY_LIMIT + 1);
+        for sbn in 0..RANK_BASIS_CACHE_ENTRY_LIMIT {
+            feed_rank_basis_symbol(&mut decoder, sbn as u8, k as u32, SymbolKind::Repair);
+            assert_block_rank_matches_fresh(&decoder, sbn as u8);
+            assert_rank_basis_budget(&decoder);
+        }
+        feed_rank_basis_symbol(&mut decoder, 0, k as u32 + 1, SymbolKind::Repair);
+        assert_block_rank_matches_fresh(&decoder, 0);
+        let work = rank_basis_work(&decoder);
+        let newest = RANK_BASIS_CACHE_ENTRY_LIMIT as u8;
+        feed_rank_basis_symbol(&mut decoder, newest, k as u32, SymbolKind::Repair);
+        assert_block_rank_matches_fresh(&decoder, newest);
+        {
+            let cache = decoder.rank_basis_cache.lock();
+            assert_eq!(cache.entries.len(), RANK_BASIS_CACHE_ENTRY_LIMIT);
+            assert!(cache.entries.iter().any(|entry| entry.plan.sbn == 0));
+            assert!(cache.entries.iter().any(|entry| entry.plan.sbn == newest));
+            assert!(!cache.entries.iter().any(|entry| entry.plan.sbn == 1));
+        }
+        feed_rank_basis_symbol(&mut decoder, 1, k as u32 + 1, SymbolKind::Repair);
+        assert_block_rank_matches_fresh(&decoder, 1);
+        assert_eq!(rank_basis_work(&decoder).0, work.0 + 2);
+        assert_rank_basis_budget(&decoder);
+    }
+
+    #[test]
+    fn rank_basis_releases_failed_validation_and_rebuilds_removed_rows() {
+        let k = 11;
+        let mut decoder = rank_basis_test_pipeline(k, 1);
+        feed_rank_basis_symbol(&mut decoder, 0, 0, SymbolKind::Source);
+        feed_rank_basis_symbol(&mut decoder, 0, k as u32, SymbolKind::Repair);
+        assert_block_rank_matches_fresh(&decoder, 0);
+        let original_work = rank_basis_work(&decoder);
+        let source_id = SymbolId::new(decoder.object_id.unwrap(), 0, 0);
+        let original = decoder.symbols.remove(&source_id).unwrap();
+        assert!(matches!(
+            decoder
+                .symbols
+                .insert(Symbol::new(source_id, vec![0; 7], SymbolKind::Source)),
+            InsertResult::Inserted { .. }
+        ));
+        // Bypass admission solely to verify that reusing coefficients never
+        // skips validation of an existing payload. Keep the old basis intact.
+        decoder.rank_cache.get_mut().remove(&0);
+        let invalid = assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(invalid.rank, None);
+        assert_eq!(rank_basis_work(&decoder), original_work);
+        {
+            let cache = decoder.rank_basis_cache.lock();
+            assert!(cache.entries.is_empty());
+            assert_eq!(cache.reserved_bytes, cache.fixed_bytes());
+        }
+        decoder.symbols.remove(&source_id).unwrap();
+        assert!(matches!(
+            decoder.symbols.insert(original),
+            InsertResult::Inserted { .. }
+        ));
+        decoder.rank_cache.get_mut().remove(&0);
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(rank_basis_work(&decoder).0, original_work.0 + 1);
+
+        decoder.symbols.remove(&source_id).unwrap();
+        decoder.rank_cache.get_mut().remove(&0);
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(rank_basis_work(&decoder).0, original_work.0 + 2);
+        assert_eq!(
+            decoder.rank_basis_cache.lock().entries[0]
+                .processed_esis
+                .as_ref(),
+            &[k as u32]
+        );
+        assert_rank_basis_budget(&decoder);
+    }
+
+    #[test]
+    fn rank_basis_invalidates_for_decode_ownership_layout_and_completion() {
+        let k = 4;
+        let mut decoder = rank_basis_test_pipeline(k, 1);
+        feed_rank_basis_symbol(&mut decoder, 0, 0, SymbolKind::Source);
+        for esi in k..k + 3 {
+            feed_rank_basis_symbol(&mut decoder, 0, esi as u32, SymbolKind::Repair);
+        }
+        let original = assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(rank_basis_work(&decoder).0, 1);
+        let job = decoder.prepare_decode_job(0, false).unwrap();
+        assert!(decoder.rank_basis_cache.lock().entries.is_empty());
+        assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(rank_basis_work(&decoder).0, 1);
+        decoder.restore_decode_job(job);
+        let restored = assert_block_rank_matches_fresh(&decoder, 0);
+        assert_eq!(
+            (restored.rank, restored.rank_deficit),
+            (original.rank, original.rank_deficit)
+        );
+        assert_eq!(rank_basis_work(&decoder).0, 2);
+        let object_id = decoder.object_id.unwrap();
+        for (len, block_k, builds) in [(16, 2, 3), (32, 4, 4)] {
+            decoder
+                .set_object_params(ObjectParams::new(object_id, len, 8, 1, block_k))
+                .unwrap();
+            assert!(decoder.rank_basis_cache.lock().entries.is_empty());
+            assert_block_rank_matches_fresh(&decoder, 0);
+            assert_eq!(rank_basis_work(&decoder).0, builds);
+        }
+        decoder.mark_block_complete(0, None);
+        assert!(!decoder.rank_cache.lock().contains_key(&0));
+        assert!(decoder.rank_basis_cache.lock().entries.is_empty());
+        assert_rank_basis_budget(&decoder);
+    }
+
     #[test]
     fn block_status_rank_cache_isolates_changes_and_rejected_admission() {
         init_test("block_status_rank_cache_isolates_changes_and_rejected_admission");

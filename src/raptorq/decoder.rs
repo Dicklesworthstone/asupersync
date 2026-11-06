@@ -12,7 +12,9 @@
 //! - Same received symbols in same order produce identical decode results
 
 use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
-use crate::raptorq::linalg::{GaussianRankProfile, coefficient_rank_profile_rows};
+use crate::raptorq::linalg::{
+    CoefficientRankBasis, GaussianRankProfile, coefficient_rank_profile_rows,
+};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -1805,6 +1807,49 @@ impl InactivationDecoder {
         ))
     }
 
+    /// Build an exact reusable coefficient basis for a complete received set.
+    ///
+    /// Callers retaining this basis must reserve its worst-case full-rank
+    /// storage before construction. Payloads are validated but never retained.
+    pub(crate) fn rank_basis(
+        &self,
+        symbols: &[ReceivedSymbol],
+    ) -> Result<CoefficientRankBasis, DecodeError> {
+        self.validate_rank_input(symbols)?;
+        let mut basis = CoefficientRankBasis::new(self.params.l);
+        let received = symbols
+            .iter()
+            .map(|symbol| self.received_symbol_equation(symbol));
+        for equation in received.chain(self.implicit_padding_equations()) {
+            basis.add_row(equation_coefficient_row(&equation, self.params.l));
+        }
+        Ok(basis)
+    }
+
+    /// Extend a basis with genuinely new rows after validating the full set.
+    ///
+    /// The owner must discard the basis if prior equations or decoder
+    /// parameters changed. Revalidating old payloads preserves admission
+    /// semantics even when the coefficient basis is already full-rank.
+    pub(crate) fn extend_rank_basis(
+        &self,
+        basis: &mut CoefficientRankBasis,
+        symbols: &[ReceivedSymbol],
+        added_indices: &[usize],
+    ) -> Result<RankStatus, DecodeError> {
+        self.validate_rank_input(symbols)?;
+        assert_eq!(basis.columns(), self.params.l, "rank basis shape changed");
+        for &index in added_indices {
+            let equation = self.received_symbol_equation(&symbols[index]);
+            basis.add_row(equation_coefficient_row(&equation, self.params.l));
+        }
+        Ok(RankStatus {
+            rank: basis.rank(),
+            columns: basis.columns(),
+            deficit: basis.columns() - basis.rank(),
+        })
+    }
+
     /// Decode using the bounded wavefront pipeline.
     ///
     /// Instead of sequential assembly→peel→solve, this pipeline fuses
@@ -3144,19 +3189,22 @@ fn equation_rank(equations: &[Equation], column_count: usize) -> usize {
     equation_rank_profile(equations, column_count).rank
 }
 
+fn equation_coefficient_row(equation: &Equation, column_count: usize) -> Vec<Gf256> {
+    let mut row = vec![Gf256::ZERO; column_count];
+    for &(column, coefficient) in &equation.terms {
+        row[column] += coefficient;
+    }
+    row
+}
+
 fn equation_rank_profile<I>(equations: I, column_count: usize) -> GaussianRankProfile
 where
     I: IntoIterator,
     I::Item: Borrow<Equation>,
 {
-    let rows = equations.into_iter().map(|equation| {
-        let mut row = vec![Gf256::ZERO; column_count];
-        let equation = equation.borrow();
-        for &(col_idx, coefficient) in &equation.terms {
-            row[col_idx] += coefficient;
-        }
-        row
-    });
+    let rows = equations
+        .into_iter()
+        .map(|equation| equation_coefficient_row(equation.borrow(), column_count));
     coefficient_rank_profile_rows(rows, column_count)
 }
 

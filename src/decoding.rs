@@ -11,11 +11,12 @@ use crate::raptorq::decoder::{
     DecodeError as RaptorDecodeError, InactivationDecoder, MAX_ALLOWED_ESI, RankStatus,
     ReceivedSymbol,
 };
+use crate::raptorq::linalg::CoefficientRankBasis;
 use crate::raptorq::systematic::{SystematicError, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 const REPAIR_RETENTION_MIN_SLACK: usize = 128;
@@ -499,6 +500,112 @@ impl PipelineBlockCounts {
     }
 }
 
+// Reserve worst-case full-rank storage before retaining a basis. The cap
+// covers represented row/slot bytes, ESI snapshots, and fixed cache metadata;
+// allocator bookkeeping and temporary validation buffers are not included.
+const RANK_BASIS_CACHE_BYTE_LIMIT: usize = 64 * 1024 * 1024;
+const RANK_BASIS_CACHE_ENTRY_LIMIT: usize = 16;
+
+#[derive(Debug)]
+struct CachedBlockRankBasis {
+    plan: BlockPlan,
+    seed: u64,
+    symbol_size: usize,
+    processed_esis: Box<[u32]>,
+    basis: CoefficientRankBasis,
+    reserved_bytes: usize,
+}
+
+impl CachedBlockRankBasis {
+    fn required_bytes(columns: usize, symbol_count: usize) -> Option<usize> {
+        CoefficientRankBasis::max_retained_bytes(columns)?
+            .checked_add(symbol_count.checked_mul(std::mem::size_of::<u32>())?)
+    }
+}
+
+#[derive(Debug)]
+struct RankBasisCache {
+    entries: VecDeque<CachedBlockRankBasis>,
+    reserved_bytes: usize,
+    byte_limit: usize,
+    entry_limit: usize,
+}
+
+impl Default for RankBasisCache {
+    fn default() -> Self {
+        Self::with_limits(RANK_BASIS_CACHE_BYTE_LIMIT, RANK_BASIS_CACHE_ENTRY_LIMIT)
+    }
+}
+
+impl RankBasisCache {
+    fn with_limits(byte_limit: usize, entry_limit: usize) -> Self {
+        let entries = VecDeque::with_capacity(entry_limit);
+        let reserved_bytes = std::mem::size_of::<Self>()
+            + entries.capacity() * std::mem::size_of::<CachedBlockRankBasis>();
+        Self {
+            entries,
+            reserved_bytes,
+            byte_limit,
+            entry_limit,
+        }
+    }
+
+    fn fixed_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.entries.capacity() * std::mem::size_of::<CachedBlockRankBasis>()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.reserved_bytes = self.fixed_bytes();
+    }
+
+    fn take(&mut self, sbn: u8) -> Option<CachedBlockRankBasis> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.plan.sbn == sbn)?;
+        let entry = self.entries.remove(index)?;
+        self.reserved_bytes -= entry.reserved_bytes;
+        Some(entry)
+    }
+
+    fn remove(&mut self, sbn: u8) {
+        drop(self.take(sbn));
+    }
+
+    fn can_retain(&self, required_bytes: usize) -> bool {
+        self.entry_limit != 0
+            && self
+                .fixed_bytes()
+                .checked_add(required_bytes)
+                .is_some_and(|total| total <= self.byte_limit)
+    }
+
+    fn reserve(&mut self, required_bytes: usize) -> bool {
+        if !self.can_retain(required_bytes) {
+            return false;
+        }
+        while self.entries.len() >= self.entry_limit
+            || required_bytes > self.byte_limit.saturating_sub(self.reserved_bytes)
+        {
+            let Some(evicted) = self.entries.pop_front() else {
+                return false;
+            };
+            self.reserved_bytes -= evicted.reserved_bytes;
+        }
+        true
+    }
+
+    fn insert(&mut self, entry: CachedBlockRankBasis) {
+        self.remove(entry.plan.sbn);
+        if self.reserve(entry.reserved_bytes) {
+            self.reserved_bytes += entry.reserved_bytes;
+            self.entries.push_back(entry);
+        }
+    }
+}
+
 #[derive(Debug)]
 enum BlockDecodingState {
     Collecting,
@@ -541,6 +648,12 @@ pub struct DecodingPipeline {
     /// feedback needs only this lookup, without scanning or hashing the
     /// pipeline's symbol map. At most one entry per block, including failures.
     rank_cache: parking_lot::Mutex<HashMap<u8, Option<RankStatus>>>,
+    /// Append-only coefficient bases shared by all blocks under one memory cap.
+    rank_basis_cache: parking_lot::Mutex<RankBasisCache>,
+    #[cfg(test)]
+    rank_basis_builds: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    rank_basis_rows_added: std::sync::atomic::AtomicUsize,
     /// Rank analyses actually run, for the rank-cache tests.
     #[cfg(test)]
     rank_analyses: std::sync::atomic::AtomicUsize,
@@ -579,6 +692,11 @@ impl DecodingPipeline {
             skipped_verifications: 0,
             verify_auth_disabled_warned: false,
             rank_cache: parking_lot::Mutex::new(HashMap::new()),
+            rank_basis_cache: parking_lot::Mutex::new(RankBasisCache::default()),
+            #[cfg(test)]
+            rank_basis_builds: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            rank_basis_rows_added: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             rank_analyses: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -635,6 +753,7 @@ impl DecodingPipeline {
         let block_plan_by_sbn = block_plan_index_by_sbn(&plans);
         if self.block_plans.as_ref() != Some(&plans) {
             self.rank_cache.get_mut().clear();
+            self.rank_basis_cache.get_mut().clear();
         }
         self.object_id = Some(params.object_id);
         self.object_size = Some(params.object_size);
@@ -1143,7 +1262,7 @@ impl DecodingPipeline {
 
         let symbols = self.symbols.take_block_symbols(sbn);
         if !symbols.is_empty() {
-            self.rank_cache.get_mut().remove(&sbn);
+            self.invalidate_block_rank(sbn);
         }
         if symbols.len() < block_plan.k {
             self.restore_decode_symbols(sbn, symbols);
@@ -1345,7 +1464,7 @@ impl DecodingPipeline {
             changed |= self.symbols.restore_retained(symbol);
         }
         if changed {
-            self.rank_cache.get_mut().remove(&sbn);
+            self.invalidate_block_rank(sbn);
         }
     }
 
@@ -1383,7 +1502,12 @@ impl DecodingPipeline {
         self.forget_inflight_decode_symbols_for_block(sbn);
         self.symbols.clear_block(sbn);
         self.block_symbol_counts.remove(&sbn);
+        self.invalidate_block_rank(sbn);
+    }
+
+    fn invalidate_block_rank(&mut self, sbn: u8) {
         self.rank_cache.get_mut().remove(&sbn);
+        self.rank_basis_cache.get_mut().remove(sbn);
     }
 
     fn block_plan(&self, sbn: u8) -> Option<&BlockPlan> {
@@ -1404,9 +1528,123 @@ impl DecodingPipeline {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let symbols: Vec<Symbol> = self.symbols.symbols_for_block(sbn).cloned().collect();
         let status =
-            rank_status_for_block(&block_plan, &symbols, usize::from(self.config.symbol_size)).ok();
+            self.rank_status_with_basis(&block_plan, &symbols, usize::from(self.config.symbol_size));
         self.rank_cache.lock().insert(sbn, status);
         status
+    }
+
+    fn rank_status_with_basis(
+        &self,
+        plan: &BlockPlan,
+        symbols: &[Symbol],
+        symbol_size: usize,
+    ) -> Option<RankStatus> {
+        // Preserve the cheap exact systematic path and its conservative
+        // validation fallthrough before allocating any retained coefficient row.
+        if plan.k == 0
+            || symbols
+                .iter()
+                .all(|symbol| symbol.kind() == SymbolKind::Source)
+        {
+            self.rank_basis_cache.lock().remove(plan.sbn);
+            return rank_status_for_block(plan, symbols, symbol_size).ok();
+        }
+
+        let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
+        let seed = seed_for_block(object_id, plan.sbn);
+        let decoder = InactivationDecoder::new(plan.k, symbol_size, seed);
+        let mut cache = self.rank_basis_cache.lock();
+        let required_bytes =
+            CachedBlockRankBasis::required_bytes(decoder.params().l, symbols.len());
+        let Some(required_bytes) = required_bytes.filter(|bytes| cache.can_retain(*bytes)) else {
+            cache.remove(plan.sbn);
+            drop(cache);
+            return rank_status_for_block(plan, symbols, symbol_size).ok();
+        };
+
+        let mut current_esis: Vec<u32> = symbols.iter().map(Symbol::esi).collect();
+        current_esis.sort_unstable();
+        if current_esis.windows(2).any(|esis| esis[0] == esis[1]) {
+            cache.remove(plan.sbn);
+            drop(cache);
+            return rank_status_for_block(plan, symbols, symbol_size).ok();
+        }
+        let received = match received_symbols_for_block(plan, symbols, &decoder) {
+            Ok(received) => received,
+            Err(_) => {
+                cache.remove(plan.sbn);
+                return None;
+            }
+        };
+        let previous = cache.take(plan.sbn).filter(|entry| {
+            entry.plan == *plan
+                && entry.seed == seed
+                && entry.symbol_size == symbol_size
+                && entry
+                    .processed_esis
+                    .iter()
+                    .all(|esi| current_esis.binary_search(esi).is_ok())
+        });
+        // Growing the boxed ESI snapshot can evict another block even when
+        // this basis already exists. Reserve before reducing new equations.
+        if !cache.reserve(required_bytes) {
+            drop(previous);
+            drop(cache);
+            return decoder.rank_status(&received).ok();
+        }
+        let basis = if let Some(mut previous) = previous {
+            let constraint_rows = decoder.params().s + decoder.params().h;
+            let added_indices: Vec<usize> = symbols
+                .iter()
+                .enumerate()
+                .filter(|(_, symbol)| {
+                    previous
+                        .processed_esis
+                        .binary_search(&symbol.esi())
+                        .is_err()
+                })
+                .map(|(index, _)| constraint_rows + index)
+                .collect();
+            // Validate every current payload before mutating a reusable basis,
+            // including old rows and duplicates at a full-rank prefix.
+            decoder
+                .extend_rank_basis(&mut previous.basis, &received, &added_indices)
+                .ok()?;
+            #[cfg(test)]
+            self.rank_basis_rows_added.fetch_add(
+                added_indices.len(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            previous.basis
+        } else {
+            let basis = decoder.rank_basis(&received).ok()?;
+            #[cfg(test)]
+            {
+                self.rank_basis_builds
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.rank_basis_rows_added
+                    .fetch_add(basis.rows(), std::sync::atomic::Ordering::Relaxed);
+            }
+            basis
+        };
+        let status = RankStatus {
+            rank: basis.rank(),
+            columns: basis.columns(),
+            deficit: basis.columns() - basis.rank(),
+        };
+        debug_assert!(
+            basis.retained_bytes() + current_esis.len() * std::mem::size_of::<u32>()
+                <= required_bytes
+        );
+        cache.insert(CachedBlockRankBasis {
+            plan: plan.clone(),
+            seed,
+            symbol_size,
+            processed_esis: current_esis.into_boxed_slice(),
+            basis,
+            reserved_bytes: required_bytes,
+        });
+        Some(status)
     }
 
     /// Returns missing systematic source symbols for incomplete blocks.

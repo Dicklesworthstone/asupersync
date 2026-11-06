@@ -907,6 +907,114 @@ pub fn coefficient_rank_profile(matrix: &[&[u8]], columns: usize) -> GaussianRan
     coefficient_rank_profile_rows(rows, columns)
 }
 
+/// Reusable exact row-echelon basis for coefficient-only feedback.
+///
+/// A new equation reduces against the retained pivots without replaying earlier
+/// equations. Fixed-width boxed rows make retained coefficient storage explicit;
+/// callers that cache this state must admit it against a memory budget first.
+#[derive(Debug)]
+pub(crate) struct CoefficientRankBasis {
+    basis: Box<[Option<Box<[Gf256]>>]>,
+    columns: usize,
+    rows: usize,
+    rank: usize,
+}
+
+impl CoefficientRankBasis {
+    pub(crate) fn new(columns: usize) -> Self {
+        Self {
+            basis: vec![None; columns].into_boxed_slice(),
+            columns,
+            rows: 0,
+            rank: 0,
+        }
+    }
+
+    /// Add one full-width row, including its contribution to the input count.
+    /// Dependent rows do not allocate another retained basis vector.
+    pub(crate) fn add_row(&mut self, mut row: Vec<Gf256>) {
+        debug_assert_eq!(row.len(), self.columns);
+        self.rows += 1;
+        // Once every column has a pivot, additional coefficient rows cannot
+        // change rank or its profile. Still count them for diagnostic parity.
+        if self.rank == self.columns {
+            return;
+        }
+
+        for pivot in 0..self.columns {
+            if row[pivot].is_zero() {
+                continue;
+            }
+
+            if let Some(basis_row) = self.basis[pivot].as_ref() {
+                let factor = row[pivot];
+                for (column, value) in row.iter_mut().enumerate().skip(pivot) {
+                    *value += basis_row[column] * factor;
+                }
+            } else {
+                let inv = row[pivot].inv();
+                for value in row.iter_mut().skip(pivot) {
+                    *value *= inv;
+                }
+                self.basis[pivot] = Some(row.into_boxed_slice());
+                self.rank += 1;
+                break;
+            }
+        }
+    }
+
+    pub(crate) const fn columns(&self) -> usize {
+        self.columns
+    }
+
+    pub(crate) const fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub(crate) const fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// Bytes represented by this value and its retained arrays, excluding
+    /// allocator bookkeeping and the temporary row being reduced.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.columns * std::mem::size_of::<Option<Box<[Gf256]>>>()
+            + self.rank * self.columns * std::mem::size_of::<Gf256>()
+    }
+
+    /// Conservative full-rank storage admission bound, checked for overflow.
+    pub(crate) fn max_retained_bytes(columns: usize) -> Option<usize> {
+        let slots = columns.checked_mul(std::mem::size_of::<Option<Box<[Gf256]>>>())?;
+        let coefficients = columns
+            .checked_mul(columns)?
+            .checked_mul(std::mem::size_of::<Gf256>())?;
+        std::mem::size_of::<Self>()
+            .checked_add(slots)?
+            .checked_add(coefficients)
+    }
+
+    pub(crate) fn profile(&self) -> GaussianRankProfile {
+        let mut pivot_columns = Vec::with_capacity(self.rank());
+        let mut free_columns = Vec::with_capacity(self.columns() - self.rank());
+        for (column, basis_row) in self.basis.iter().enumerate() {
+            if basis_row.is_some() {
+                pivot_columns.push(column);
+            } else {
+                free_columns.push(column);
+            }
+        }
+        GaussianRankProfile {
+            rows: self.rows(),
+            columns: self.columns(),
+            rank: self.rank(),
+            deficit: self.columns() - self.rank(),
+            pivot_columns,
+            free_columns,
+        }
+    }
+}
+
 /// Reduce coefficient rows as they are produced, retaining only basis rows.
 ///
 /// Internal callers that already generate owned coefficients can move each row
@@ -917,53 +1025,11 @@ pub(crate) fn coefficient_rank_profile_rows(
     matrix: impl IntoIterator<Item = Vec<Gf256>>,
     columns: usize,
 ) -> GaussianRankProfile {
-    let mut basis = vec![None::<Vec<Gf256>>; columns];
-    let mut rows = 0;
-
-    for mut row in matrix {
-        debug_assert_eq!(row.len(), columns);
-        rows += 1;
-
-        for pivot in 0..columns {
-            if row[pivot].is_zero() {
-                continue;
-            }
-
-            if let Some(basis_row) = basis[pivot].as_ref() {
-                let factor = row[pivot];
-                for (column, value) in row.iter_mut().enumerate().skip(pivot) {
-                    *value += basis_row[column] * factor;
-                }
-            } else {
-                let inv = row[pivot].inv();
-                for value in row.iter_mut().skip(pivot) {
-                    *value *= inv;
-                }
-                basis[pivot] = Some(row);
-                break;
-            }
-        }
+    let mut basis = CoefficientRankBasis::new(columns);
+    for row in matrix {
+        basis.add_row(row);
     }
-
-    let mut pivot_columns = Vec::new();
-    let mut free_columns = Vec::new();
-    for (column, basis_row) in basis.iter().enumerate() {
-        if basis_row.is_some() {
-            pivot_columns.push(column);
-        } else {
-            free_columns.push(column);
-        }
-    }
-    let rank = pivot_columns.len();
-
-    GaussianRankProfile {
-        rows,
-        columns,
-        rank,
-        deficit: columns.saturating_sub(rank),
-        pivot_columns,
-        free_columns,
-    }
+    basis.profile()
 }
 
 /// Computes the GF(256) coefficient rank of a dense matrix.

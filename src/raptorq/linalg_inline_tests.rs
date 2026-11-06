@@ -762,10 +762,62 @@
                         .collect();
                 }
                 let expected = reference_profile(&rows, columns);
+                let mut incremental = CoefficientRankBasis::new(columns);
+                assert_eq!(incremental.profile(), reference_profile(&[], columns));
+                for (index, row) in rows.iter().enumerate() {
+                    incremental.add_row(row.clone());
+                    assert_eq!(
+                        incremental.profile(),
+                        reference_profile(&rows[..=index], columns),
+                        "incremental prefix={}, columns={columns}",
+                        index + 1,
+                    );
+                    assert!(incremental.retained_bytes()
+                        <= CoefficientRankBasis::max_retained_bytes(columns).unwrap());
+                }
                 let actual = coefficient_rank_profile_rows(rows, columns);
                 assert_eq!(actual, expected, "rows={row_count}, columns={columns}");
             }
         }
+    }
+
+    #[test]
+    fn incremental_rank_basis_retains_only_independent_fixed_width_rows() {
+        let columns = 3;
+        let mut basis = CoefficientRankBasis::new(columns);
+        let empty_bytes = basis.retained_bytes();
+        let row_bytes = columns * std::mem::size_of::<Gf256>();
+        for pivot in 0..columns {
+            // Spare input capacity must not inflate the retained cache entry.
+            let mut row = Vec::with_capacity(1024);
+            row.resize(columns, Gf256::ZERO);
+            row[pivot] = Gf256::new(7);
+            let repeated = row.clone();
+            basis.add_row(row);
+            assert_eq!(basis.rank(), pivot + 1);
+            assert_eq!(basis.retained_bytes(), empty_bytes + (pivot + 1) * row_bytes);
+            for _ in 0..8 {
+                basis.add_row(repeated.clone());
+            }
+            assert_eq!(basis.retained_bytes(), empty_bytes + (pivot + 1) * row_bytes);
+        }
+        assert_eq!(basis.rows(), 27);
+        assert_eq!(basis.profile().deficit, 0);
+        assert_eq!(
+            basis.retained_bytes(),
+            CoefficientRankBasis::max_retained_bytes(columns).unwrap()
+        );
+
+        let mut zero_width = CoefficientRankBasis::new(0);
+        let zero_bytes = zero_width.retained_bytes();
+        for _ in 0..3 {
+            zero_width.add_row(Vec::new());
+        }
+        assert_eq!(zero_width.rows(), 3);
+        assert_eq!(zero_width.rank(), 0);
+        assert_eq!(zero_width.retained_bytes(), zero_bytes);
+        assert_eq!(CoefficientRankBasis::max_retained_bytes(0), Some(zero_bytes));
+        assert_eq!(CoefficientRankBasis::max_retained_bytes(usize::MAX), None);
     }
 
     #[test]

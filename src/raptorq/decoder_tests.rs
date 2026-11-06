@@ -230,6 +230,100 @@ mod tests {
     }
 
     #[test]
+    fn incremental_rank_basis_matches_fresh_profiles_after_each_equation() {
+        for k in [1, 4, 11, 13, 50] {
+            let symbol_size = 8;
+            let decoder = InactivationDecoder::new(k, symbol_size, 0xC0FFEE);
+            let mut received = decoder.constraint_symbols();
+            let mut basis = decoder.rank_basis(&received).unwrap();
+            assert_eq!(basis.profile(), decoder.rank_profile(&received).unwrap());
+
+            let mut incoming: Vec<ReceivedSymbol> = (0..k)
+                .step_by(2)
+                .map(|esi| ReceivedSymbol::source(esi as u32, vec![0; symbol_size]))
+                .collect();
+            for esi in k..k + 5 {
+                let (columns, coefficients) = decoder.repair_equation(esi as u32).unwrap();
+                incoming.push(ReceivedSymbol::repair(
+                    esi as u32,
+                    columns,
+                    coefficients,
+                    vec![0; symbol_size],
+                ));
+            }
+            incoming.extend(
+                (1..k)
+                    .step_by(2)
+                    .map(|esi| ReceivedSymbol::source(esi as u32, vec![0; symbol_size])),
+            );
+            incoming.push(incoming.last().unwrap().clone());
+
+            for symbol in incoming {
+                let previous_rows = basis.rows();
+                let added_index = received.len();
+                received.push(symbol);
+                let status = decoder
+                    .extend_rank_basis(&mut basis, &received, &[added_index])
+                    .unwrap();
+                let expected = decoder.rank_profile(&received).unwrap();
+                assert_eq!(basis.rows(), previous_rows + 1, "K={k}");
+                assert_eq!(basis.profile(), expected, "K={k}, rows={}", received.len());
+                assert_eq!(status.rank, expected.rank);
+                assert_eq!(status.columns, expected.columns);
+                assert_eq!(status.deficit, expected.deficit);
+            }
+
+            received.reverse();
+            let status = decoder
+                .extend_rank_basis(&mut basis, &received, &[])
+                .unwrap();
+            assert_eq!(basis.profile(), decoder.rank_profile(&received).unwrap());
+            assert_eq!(status.deficit, 0);
+        }
+    }
+
+    #[test]
+    fn incremental_rank_basis_validates_old_payloads_before_mutating_even_at_full_rank() {
+        let decoder = InactivationDecoder::new(4, 8, 11);
+        let mut received = decoder.constraint_symbols();
+        let source_index = received.len();
+        received.extend((0..4).map(|esi| ReceivedSymbol::source(esi, vec![0; 8])));
+        let (columns, coefficients) = decoder.repair_equation(4).unwrap();
+        received.push(ReceivedSymbol::repair(4, columns, coefficients, vec![0; 8]));
+        let mut basis = decoder.rank_basis(&received).unwrap();
+        assert_eq!(basis.rank(), basis.columns());
+        let before = basis.profile();
+
+        for index in [source_index, received.len() - 1] {
+            let mut conflict = received[index].clone();
+            conflict.data[0] = 1;
+            let mut invalid = received.clone();
+            invalid.push(conflict);
+            let error = decoder
+                .extend_rank_basis(&mut basis, &invalid, &[invalid.len() - 1])
+                .unwrap_err();
+            assert!(matches!(error, DecodeError::CorruptDecodedOutput { .. }));
+            assert_eq!(
+                basis.profile(),
+                before,
+                "rejected duplicate payload must leave the old basis untouched"
+            );
+        }
+
+        let mut invalid = received;
+        invalid[source_index].data.pop();
+        assert!(matches!(
+            decoder.extend_rank_basis(&mut basis, &invalid, &[]),
+            Err(DecodeError::SymbolSizeMismatch { .. })
+        ));
+        assert_eq!(
+            basis.profile(),
+            before,
+            "old malformed rows must still be validated without new equations"
+        );
+    }
+
+    #[test]
     fn rank_status_tracks_missing_source_symbol_deficit() {
         let decoder = InactivationDecoder::new(4, 8, 11);
         let mut symbols = decoder.constraint_symbols();
