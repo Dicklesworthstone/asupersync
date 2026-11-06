@@ -1414,6 +1414,333 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct PoolCreationGate {
+        entered: AtomicBool,
+        released: AtomicBool,
+        dropped: std::sync::atomic::AtomicUsize,
+        waker: PoolMutex<Option<Waker>>,
+    }
+
+    struct PoolCreationWait(Arc<PoolCreationGate>);
+
+    impl Future for PoolCreationWait {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<()> {
+            if self.0.released.load(Ordering::Acquire) {
+                return Poll::Ready(());
+            }
+            let incoming = task_cx.waker().clone();
+            let retired = self.0.waker.lock().replace(incoming);
+            drop(retired);
+            self.0.entered.store(true, Ordering::Release);
+            if self.0.released.load(Ordering::Acquire) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for PoolCreationWait {
+        fn drop(&mut self) {
+            let waker = self.0.waker.lock().take();
+            self.0.dropped.fetch_add(1, Ordering::AcqRel);
+            drop(waker);
+        }
+    }
+
+    struct ParkedFirstPoolFactory {
+        gate: Arc<PoolCreationGate>,
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ParkedFirstPoolFactory {
+        fn new(gate: Arc<PoolCreationGate>) -> Self {
+            Self {
+                gate,
+                attempts: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl AsyncResourceFactory for ParkedFirstPoolFactory {
+        type Resource = u32;
+        type Error = std::io::Error;
+
+        fn create(&self) -> Pin<Box<dyn Future<Output = Result<u32, Self::Error>> + Send + '_>> {
+            let first = self.attempts.fetch_add(1, Ordering::AcqRel) == 0;
+            let gate = Arc::clone(&self.gate);
+            Box::pin(async move {
+                if first {
+                    PoolCreationWait(gate).await;
+                }
+                Ok(73)
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct PoolAcquireWake(std::sync::atomic::AtomicUsize);
+
+    impl Wake for PoolAcquireWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn pool_creation_cancel_wakes_and_releases_capacity_without_time_advance() {
+        init_test("pool_creation_cancel_wakes_and_releases_capacity_without_time_advance");
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cancelled = test_cx_with_timer(timer.clone());
+        let successor_cx = test_cx_with_timer(timer);
+        let _current = Cx::set_current(Some(cancelled.clone()));
+        let gate = Arc::new(PoolCreationGate::default());
+        let pool = GenericPool::with_time_getter(
+            ParkedFirstPoolFactory::new(Arc::clone(&gate)),
+            PoolConfig::with_max_size(1).acquire_timeout(Duration::from_secs(3600)),
+            test_pool_time_now,
+        );
+        let first_wake = Arc::new(PoolAcquireWake::default());
+        let first_waker = Waker::from(Arc::clone(&first_wake));
+        let mut first_context = Context::from_waker(&first_waker);
+        let mut first = pool.acquire(&cancelled);
+        assert!(first.as_mut().poll(&mut first_context).is_pending());
+        assert!(gate.entered.load(Ordering::Acquire));
+        assert_eq!(pool.state.lock().creating, 1);
+
+        let successor_wake = Arc::new(PoolAcquireWake::default());
+        let successor_waker = Waker::from(Arc::clone(&successor_wake));
+        let mut successor_context = Context::from_waker(&successor_waker);
+        let mut successor = pool.acquire(&successor_cx);
+        assert!(successor.as_mut().poll(&mut successor_context).is_pending());
+        assert_eq!(pool.stats().waiters, 1);
+
+        cancelled.cancel_fast(crate::types::CancelKind::User);
+        assert!(
+            first_wake.0.load(Ordering::Acquire) > 0,
+            "cancellation alone wakes creation"
+        );
+        assert!(matches!(
+            first.as_mut().poll(&mut first_context),
+            Poll::Ready(Err(PoolError::Cancelled))
+        ));
+        assert!(
+            !gate.released.load(Ordering::Acquire),
+            "the factory was never released"
+        );
+        assert_eq!(gate.dropped.load(Ordering::Acquire), 1);
+        assert!(gate.waker.lock().is_none());
+        assert_eq!(pool.state.lock().creating, 0);
+        assert_eq!(pool.stats().active, 0);
+        assert!(cancelled.inner.read().cancel_waker_registrations.is_empty());
+        assert!(
+            successor_wake.0.load(Ordering::Acquire) > 0,
+            "released capacity wakes its FIFO waiter"
+        );
+        let Poll::Ready(Ok(resource)) = successor.as_mut().poll(&mut successor_context) else {
+            panic!("successor must acquire the cancelled creation slot");
+        };
+        assert_eq!(*resource, 73);
+        resource.return_to_pool();
+        let stats = pool.stats();
+        assert_eq!((stats.active, stats.idle, stats.waiters), (0, 1, 0));
+        assert_eq!(stats.total_acquisitions, 1);
+        assert_eq!(
+            cancelled.now(),
+            Time::ZERO,
+            "no timeout or timer advancement supplied progress"
+        );
+    }
+
+    #[test]
+    fn pool_creation_cancelled_ready_value_is_destroyed_before_checkout() {
+        init_test("pool_creation_cancelled_ready_value_is_destroyed_before_checkout");
+        let cx = Cx::for_testing();
+        let factory_cx = cx.clone();
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resource_dropped = Arc::clone(&dropped);
+        let pool = GenericPool::new(
+            move || {
+                let factory_cx = factory_cx.clone();
+                let resource_dropped = Arc::clone(&resource_dropped);
+                async move {
+                    factory_cx.cancel_fast(crate::types::CancelKind::User);
+                    Ok::<_, std::io::Error>(PoolResourceDropProbe {
+                        on_drop: Box::new(move || {
+                            resource_dropped.fetch_add(1, Ordering::AcqRel);
+                        }),
+                    })
+                }
+            },
+            PoolConfig::with_max_size(1),
+        );
+        assert!(matches!(
+            futures_lite::future::block_on(pool.acquire(&cx)),
+            Err(PoolError::Cancelled)
+        ));
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+        assert_eq!(pool.state.lock().creating, 0);
+        let stats = pool.stats();
+        assert_eq!(
+            (stats.active, stats.idle, stats.waiters, stats.total),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(stats.total_acquisitions, 0);
+    }
+
+    #[test]
+    fn pool_creation_future_drop_cancellation_is_observed_before_checkout() {
+        init_test("pool_creation_future_drop_cancellation_is_observed_before_checkout");
+        struct CancelWhenRetired(Cx);
+        impl Future for CancelWhenRetired {
+            type Output = Result<u32, std::io::Error>;
+
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                Poll::Ready(Ok(73))
+            }
+        }
+        impl Drop for CancelWhenRetired {
+            fn drop(&mut self) {
+                self.0.cancel_fast(crate::types::CancelKind::User);
+            }
+        }
+        let cx = Cx::for_testing();
+        let factory_cx = cx.clone();
+        let pool = GenericPool::new(
+            move || CancelWhenRetired(factory_cx.clone()),
+            PoolConfig::with_max_size(1),
+        );
+        assert!(matches!(
+            futures_lite::future::block_on(pool.acquire(&cx)),
+            Err(PoolError::Cancelled)
+        ));
+        assert_eq!(pool.state.lock().creating, 0);
+        assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.stats().total_acquisitions, 0);
+    }
+
+    #[test]
+    fn dropping_pool_creation_retires_cancellation_registration() {
+        init_test("dropping_pool_creation_retires_cancellation_registration");
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let cx = test_cx_with_timer(timer);
+        let _current = Cx::set_current(Some(cx.clone()));
+        let gate = Arc::new(PoolCreationGate::default());
+        let pool = GenericPool::new(
+            ParkedFirstPoolFactory::new(Arc::clone(&gate)),
+            PoolConfig::with_max_size(1),
+        );
+        let mut acquisition = pool.acquire(&cx);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(acquisition.as_mut().poll(&mut context).is_pending());
+        assert!(!cx.inner.read().cancel_waker_registrations.is_empty());
+        drop(acquisition);
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        assert!(gate.waker.lock().is_none());
+        assert_eq!(gate.dropped.load(Ordering::Acquire), 1);
+        assert_eq!(pool.state.lock().creating, 0);
+        assert_eq!(pool.stats().total, 0);
+    }
+
+    #[test]
+    fn pool_capacity_wait_observes_external_context_cancellation() {
+        init_test("pool_capacity_wait_observes_external_context_cancellation");
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let holder_cx = test_cx_with_timer(timer.clone());
+        let waiter_cx = test_cx_with_timer(timer);
+        let _current = Cx::set_current(Some(waiter_cx.clone()));
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+        let held = futures_lite::future::block_on(pool.acquire(&holder_cx)).unwrap();
+        let wake = Arc::new(PoolAcquireWake::default());
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut context = Context::from_waker(&waker);
+        let mut acquisition = pool.acquire(&waiter_cx);
+        assert!(acquisition.as_mut().poll(&mut context).is_pending());
+        assert_eq!(pool.stats().waiters, 1);
+        waiter_cx.cancel_fast(crate::types::CancelKind::User);
+        assert!(wake.0.load(Ordering::Acquire) > 0);
+        assert!(matches!(
+            acquisition.as_mut().poll(&mut context),
+            Poll::Ready(Err(PoolError::Cancelled))
+        ));
+        assert!(waiter_cx.inner.read().cancel_waker_registrations.is_empty());
+        let stats = pool.stats();
+        assert_eq!((stats.active, stats.idle, stats.waiters), (1, 0, 0));
+        held.return_to_pool();
+        assert_eq!(pool.stats().idle, 1);
+    }
+
+    #[test]
+    fn pool_creation_observes_cancellation_only_after_unmasking() {
+        init_test("pool_creation_observes_cancellation_only_after_unmasking");
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let cx = test_cx_with_timer(timer);
+        let _current = Cx::set_current(Some(cx.clone()));
+        let gate = Arc::new(PoolCreationGate::default());
+        let pool = GenericPool::new(
+            ParkedFirstPoolFactory::new(Arc::clone(&gate)),
+            PoolConfig::with_max_size(1),
+        );
+        let mut acquisition = pool.acquire(&cx);
+        let mut context = Context::from_waker(Waker::noop());
+        cx.masked(|| {
+            assert!(acquisition.as_mut().poll(&mut context).is_pending());
+            cx.cancel_fast(crate::types::CancelKind::User);
+            assert!(acquisition.as_mut().poll(&mut context).is_pending());
+            assert_eq!(gate.dropped.load(Ordering::Acquire), 0);
+            assert_eq!(pool.state.lock().creating, 1);
+        });
+        assert!(matches!(
+            acquisition.as_mut().poll(&mut context),
+            Poll::Ready(Err(PoolError::Cancelled))
+        ));
+        assert_eq!(gate.dropped.load(Ordering::Acquire), 1);
+        assert_eq!(pool.stats().total, 0);
+    }
+
+    #[test]
+    fn pool_cancellation_during_healthy_idle_checkout_rolls_back() {
+        init_test("pool_cancellation_during_healthy_idle_checkout_rolls_back");
+        let cx = Cx::for_testing();
+        let health_cx = cx.clone();
+        let pool = GenericPool::new(
+            simple_factory,
+            PoolConfig::with_max_size(1).health_check_on_acquire(true),
+        )
+        .with_health_check(move |_| {
+            health_cx.cancel_fast(crate::types::CancelKind::User);
+            true
+        });
+        let healthy_cx = Cx::for_testing();
+        futures_lite::future::block_on(pool.acquire(&healthy_cx))
+            .unwrap()
+            .return_to_pool();
+        assert!(matches!(
+            futures_lite::future::block_on(pool.acquire(&cx)),
+            Err(PoolError::Cancelled)
+        ));
+        let stats = pool.stats();
+        assert_eq!(
+            (stats.active, stats.idle, stats.waiters, stats.total),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            stats.total_acquisitions, 1,
+            "the cancelled checkout is rolled back"
+        );
+    }
+
     #[test]
     fn pool_idle_expiry_drops_resource_after_unlock() {
         init_test("pool_idle_expiry_drops_resource_after_unlock");

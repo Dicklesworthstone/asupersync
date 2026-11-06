@@ -277,6 +277,8 @@ pub trait Pool: Send + Sync {
     /// # Cancel-Safety
     ///
     /// - Cancelled while waiting: no resource is leaked.
+    /// - [`GenericPool`] also observes cancellation while a resource factory is
+    ///   pending, without waiting for the factory or acquisition timeout.
     /// - Cancelled after acquisition: the `PooledResource` returns on drop.
     fn acquire<'a>(
         &'a self,
@@ -2244,6 +2246,41 @@ where
         fut.await.map_err(|e| PoolError::CreateFailed(e.into()))
     }
 
+    /// Observe cancellation during an acquire's factory or capacity wait.
+    ///
+    /// Factories need not carry a Cx, and a timeout expires only at its actual
+    /// deadline. Give each pending operation its own cancellation registration
+    /// so cancellation alone wakes it, including outside a runtime task. Keep
+    /// checkpoints authoritative so cancellation masks retain their semantics.
+    async fn wait_for_acquire_operation<T>(
+        cx: &Cx,
+        operation: impl Future<Output = T>,
+    ) -> Result<T, PoolError> {
+        let mut operation = std::pin::pin!(operation);
+        let mut cancellation = None;
+        std::future::poll_fn(|task_cx| {
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(PoolError::Cancelled));
+            }
+
+            let polled = operation.as_mut().poll(task_cx);
+            if polled.is_pending() {
+                cancellation
+                    .get_or_insert_with(|| crate::channel::OwnedCancelRegistration::new(cx.clone()))
+                    .refresh(task_cx.waker());
+            }
+
+            // The factory, or a Waker clone/retirement callback during
+            // registration, may have cancelled the caller. Do not hand out a
+            // resource produced in that race or miss a pre-registration cancel.
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(PoolError::Cancelled));
+            }
+            polled.map(Ok)
+        })
+        .await
+    }
+
     /// Compute the remaining time for an acquire attempt after applying both
     /// the pool timeout and any tighter deadline carried by the caller's `Cx`.
     fn remaining_acquire_timeout(
@@ -2487,6 +2524,10 @@ where
                         true
                     };
 
+                    if cx.checkpoint().is_err() {
+                        return Err(PoolError::Cancelled);
+                    }
+
                     if !is_healthy {
                         checkout.reject_unhealthy();
                         continue;
@@ -2502,6 +2543,9 @@ where
                         Duration::from_nanos(get_now().duration_since(acquire_start));
 
                     let acquired_at = (self.time_getter)();
+                    if cx.checkpoint().is_err() {
+                        return Err(PoolError::Cancelled);
+                    }
                     let pooled = PooledResource::new_with_timestamps(
                         resource,
                         self.return_tx.clone(),
@@ -2564,9 +2608,18 @@ where
                         };
                     }
 
-                    let create_result =
-                        crate::time::timeout(now, remaining, self.create_resource()).await;
-                    let resource = match create_result {
+                    let create_result = Self::wait_for_acquire_operation(
+                        cx,
+                        crate::time::timeout(now, remaining, self.create_resource()),
+                    )
+                    .await;
+                    // Dropping a completed factory or its wake registration
+                    // can also run user code. Check again before committing the
+                    // reserved slot or publishing the factory's result.
+                    if cx.checkpoint().is_err() {
+                        return Err(PoolError::Cancelled);
+                    }
+                    let resource = match create_result? {
                         Ok(Ok(res)) => res,
                         Ok(Err(e)) => return Err(e),
                         Err(_) => {
@@ -2602,6 +2655,9 @@ where
                     }
 
                     let acquired_at = (self.time_getter)();
+                    if cx.checkpoint().is_err() {
+                        return Err(PoolError::Cancelled);
+                    }
                     let pooled = PooledResource::new_with_timestamps(
                         resource,
                         self.return_tx.clone(),
@@ -2655,10 +2711,21 @@ where
                     cx,
                     completed: false,
                 };
-                if crate::time::timeout(now, remaining, wait_fut)
-                    .await
-                    .is_err()
+                let timed_out = match Self::wait_for_acquire_operation(
+                    cx,
+                    crate::time::timeout(now, remaining, wait_fut),
+                )
+                .await
                 {
+                    Ok(result) => result.is_err(),
+                    Err(error) => {
+                        self.record_wait_time(Duration::from_nanos(
+                            get_now().duration_since(wait_started),
+                        ));
+                        return Err(error);
+                    }
+                };
+                if timed_out {
                     let wait_duration =
                         Duration::from_nanos(get_now().duration_since(wait_started));
                     if cx.checkpoint().is_err() {
