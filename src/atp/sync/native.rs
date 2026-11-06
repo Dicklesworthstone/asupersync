@@ -33,6 +33,8 @@ use std::path::{Component, Path, PathBuf};
 mod apply;
 pub use apply::{
     NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectorySyncReport,
+    NativeDirectoryRecoveryEntry, NativeDirectoryRecoveryReceipt, NativeDirectoryRecoveryReport,
+    NativeDirectoryRecoveryState, PreparedNativeDirectoryRecovery, prepare_native_directory_recovery,
 };
 
 /// Resource limits for each root inventory and each copied file.

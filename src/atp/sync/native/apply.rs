@@ -23,6 +23,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use xattr::FileExt;
 
+mod recovery;
+pub use recovery::{
+    NativeDirectoryRecoveryEntry, NativeDirectoryRecoveryReceipt, NativeDirectoryRecoveryReport,
+    NativeDirectoryRecoveryState, PreparedNativeDirectoryRecovery, prepare_native_directory_recovery,
+};
+
 /// Last actual filesystem boundary reached by an action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
