@@ -6004,6 +6004,7 @@ fn finish_quic_decode_outcome(
     decode_stats: &mut QuicDecodeStats,
     started_at: Instant,
 ) -> Result<bool, QuicTransportError> {
+    let block_sbn = outcome.sbn();
     let result = {
         let Some(pipeline) = decoder.pipeline.as_mut() else {
             return Ok(false);
@@ -6019,6 +6020,19 @@ fn finish_quic_decode_outcome(
         SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed) => Err(
             QuicTransportError::Integrity("symbol authentication failed".to_string()),
         ),
+        // A genuine rank deficit keeps its usable rows for fresh repair.
+        // Definitive FEC failures stay pending only when the pipeline has
+        // latched this exact block for canonical source recovery.
+        SymbolAcceptResult::Rejected(RejectReason::InsufficientRank) => Ok(false),
+        SymbolAcceptResult::Rejected(
+            reason @ (RejectReason::InconsistentEquations | RejectReason::MemoryLimitReached),
+        ) if decoder
+            .pipeline
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.block_repair_failure(block_sbn) == Some(reason)) =>
+        {
+            Ok(false)
+        }
         SymbolAcceptResult::Rejected(reason) => Err(QuicTransportError::Control(format!(
             "RaptorQ decoder rejected deferred block: {reason:?}"
         ))),
@@ -6942,6 +6956,89 @@ struct QuicRepairRequestAccounting {
     request_gap_to_target_symbols: u64,
 }
 
+/// Select one wire-compatible request kind per round. Existing senders reject
+/// mixed repair/source requests. Prioritize canonical source recovery for
+/// retired repair cohorts; healthy blocks retain their fountain repair path.
+fn quic_feedback_requests(
+    decoders: &[QuicEntryDecoder],
+    config: &QuicConfig,
+    limit: usize,
+    round_loss_fraction: Option<f64>,
+    feedback_round: u32,
+) -> (
+    Vec<QuicBlockRepairRequest>,
+    Vec<QuicSourceSymbolRequest>,
+    QuicRepairRequestAccounting,
+) {
+    // The older request helpers use zero as "unbounded", never as an exhausted
+    // budget. Normalize that sentinel once so both wire modes remain capped.
+    let round_limit = if limit == 0 {
+        MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND
+    } else {
+        limit.min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND)
+    };
+    let source_limit = round_limit.min(MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND);
+    let source_symbols = source_recovery_symbol_requests(decoders, source_limit);
+    if !source_symbols.is_empty() {
+        return (
+            Vec::new(),
+            source_symbols,
+            QuicRepairRequestAccounting::default(),
+        );
+    }
+
+    let (repair_blocks, accounting) = block_repair_requests_with_accounting(
+        decoders,
+        config,
+        round_limit,
+        round_loss_fraction,
+        feedback_round,
+    );
+    let source_symbols = if repair_blocks.is_empty() {
+        source_symbol_requests(decoders, source_limit)
+    } else {
+        Vec::new()
+    };
+    (repair_blocks, source_symbols, accounting)
+}
+
+fn source_recovery_symbol_requests(
+    decoders: &[QuicEntryDecoder],
+    limit: usize,
+) -> Vec<QuicSourceSymbolRequest> {
+    let mut requests = Vec::new();
+    for decoder in decoders {
+        if decoder.complete {
+            continue;
+        }
+        let Some(pipeline) = decoder.pipeline.as_ref() else {
+            continue;
+        };
+        let remaining = if limit == 0 {
+            0
+        } else {
+            limit.saturating_sub(requests.len())
+        };
+        if limit != 0 && remaining == 0 {
+            break;
+        }
+        // The pipeline skips healthy plans before enumerating ESIs, applies
+        // the remaining budget before allocation grows, and excludes sources
+        // already owned by decode jobs.
+        requests.extend(
+            pipeline
+                .missing_source_symbols_for_recovery(remaining)
+                .into_iter()
+                .map(|MissingSourceSymbol { sbn, esi }| QuicSourceSymbolRequest {
+                    entry: decoder.index,
+                    sbn,
+                    esi,
+                }),
+        );
+    }
+    requests
+}
+
 #[allow(dead_code)]
 fn block_repair_requests(
     decoders: &[QuicEntryDecoder],
@@ -6991,6 +7088,9 @@ fn block_repair_requests_with_accounting(
                 break 'decoders;
             }
             let sbn = u8::try_from(block_index).unwrap_or(u8::MAX);
+            if pipeline.block_repair_failure(sbn).is_some() {
+                continue;
+            }
             let status_deficit = pipeline.block_status(sbn).and_then(|status| {
                 if matches!(
                     status.state,
@@ -11014,18 +11114,13 @@ async fn receive_native_symbol_round(
         receiver_round_loss_fraction(round_stats.observed, round_complete.round_symbols_sent);
     let round = (*feedback_rounds).saturating_add(1);
     let repair_symbol_round_cap = quic_repair_symbol_round_cap(config, round_loss_fraction);
-    let (repair_blocks, repair_accounting) = block_repair_requests_with_accounting(
+    let (repair_blocks, source_symbols, repair_accounting) = quic_feedback_requests(
         decoders,
         config,
         repair_symbol_round_cap,
         round_loss_fraction,
         round,
     );
-    let source_symbols = if repair_blocks.is_empty() {
-        source_symbol_requests(decoders, MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND)
-    } else {
-        Vec::new()
-    };
     let progress = quic_pending_decode_progress(decoders, &pending, config);
     let need = QuicNeedMore {
         feedback_round: round,
@@ -11247,18 +11342,13 @@ async fn receive_native_multi_peer_symbol_round(
     let round_loss_fraction = receiver_round_loss_fraction(round_stats.observed, total_symbols_sent);
     let round = (*feedback_rounds).saturating_add(1);
     let repair_symbol_round_cap = quic_repair_symbol_round_cap(config, round_loss_fraction);
-    let (repair_blocks, repair_accounting) = block_repair_requests_with_accounting(
+    let (repair_blocks, source_symbols, repair_accounting) = quic_feedback_requests(
         decoders,
         config,
         repair_symbol_round_cap,
         round_loss_fraction,
         round,
     );
-    let source_symbols = if repair_blocks.is_empty() {
-        source_symbol_requests(decoders, MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND)
-    } else {
-        Vec::new()
-    };
     let progress = quic_pending_decode_progress(decoders, &pending, config);
     let need = QuicNeedMore {
         feedback_round: round,

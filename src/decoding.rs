@@ -1643,8 +1643,11 @@ impl DecodingPipeline {
         self.rank_analyses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let symbols: Vec<Symbol> = self.symbols.symbols_for_block(sbn).cloned().collect();
-        let status =
-            self.rank_status_with_basis(&block_plan, &symbols, usize::from(self.config.symbol_size));
+        let status = self.rank_status_with_basis(
+            &block_plan,
+            &symbols,
+            usize::from(self.config.symbol_size),
+        );
         self.rank_cache.lock().insert(sbn, status);
         status
     }
@@ -1727,10 +1730,8 @@ impl DecodingPipeline {
                 .extend_rank_basis(&mut previous.basis, &received, &added_indices)
                 .ok()?;
             #[cfg(test)]
-            self.rank_basis_rows_added.fetch_add(
-                added_indices.len(),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            self.rank_basis_rows_added
+                .fetch_add(added_indices.len(), std::sync::atomic::Ordering::Relaxed);
             previous.basis
         } else {
             let basis = decoder.rank_basis(&received).ok()?;
@@ -1771,6 +1772,26 @@ impl DecodingPipeline {
     /// datagrams. `limit == 0` means unbounded.
     #[must_use]
     pub fn missing_source_symbols(&self, limit: usize) -> Vec<MissingSourceSymbol> {
+        self.missing_source_symbols_matching(limit, |_| true)
+    }
+
+    /// Missing canonical sources for blocks whose repair cohorts were retired.
+    /// Filter plans before scanning source ESIs so healthy blocks consume no
+    /// recovery buffer or request budget. A zero limit remains unbounded.
+    #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn missing_source_symbols_for_recovery(
+        &self,
+        limit: usize,
+    ) -> Vec<MissingSourceSymbol> {
+        self.missing_source_symbols_matching(limit, |sbn| self.block_repair_failure(sbn).is_some())
+    }
+
+    fn missing_source_symbols_matching(
+        &self,
+        limit: usize,
+        include_block: impl Fn(u8) -> bool,
+    ) -> Vec<MissingSourceSymbol> {
         let Some(object_id) = self.object_id else {
             return Vec::new();
         };
@@ -1780,7 +1801,7 @@ impl DecodingPipeline {
 
         let mut missing = Vec::new();
         for plan in plans {
-            if self.completed_blocks.contains(&plan.sbn) {
+            if self.completed_blocks.contains(&plan.sbn) || !include_block(plan.sbn) {
                 continue;
             }
             for esi in 0..plan.k {

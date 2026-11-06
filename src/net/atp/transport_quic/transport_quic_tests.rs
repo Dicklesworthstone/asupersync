@@ -6644,6 +6644,518 @@ mod tests {
         assert_eq!(stats.paths.total_duplicates, 2);
     }
 
+    fn prepare_quic_poisoned_decode_job(
+        decoder: &mut QuicEntryDecoder,
+        config: &QuicConfig,
+        sbn: u8,
+        block_data: &[u8],
+        retained_sources: &[u32],
+    ) -> BlockDecodeJob {
+        let k = block_data.len().div_ceil(usize::from(config.symbol_size));
+        assert!(retained_sources.len() < k);
+        let params = object_params_for(
+            decoder.object_id,
+            decoder.size,
+            config.symbol_size,
+            config.max_block_size,
+        );
+        let mut encoder = encoding_pipeline(config);
+        let encoded: Vec<Symbol> = encoder
+            .encode_single_block_with_repair(decoder.object_id, sbn, block_data, 40)
+            .map(|symbol| symbol.expect("encode poisoned-block fixture").into_symbol())
+            .collect();
+        let mut received: Vec<Symbol> = encoded
+            .iter()
+            .filter(|symbol| symbol.kind().is_source() && retained_sources.contains(&symbol.esi()))
+            .cloned()
+            .collect();
+        let poison_index = received.len();
+        received.extend(
+            encoded
+                .iter()
+                .filter(|symbol| symbol.kind().is_repair())
+                .take(k + 31 - retained_sources.len())
+                .cloned(),
+        );
+        assert_eq!(received.len(), k + 31);
+
+        // Prove that the honest equations excluding the poisoned row already
+        // determine the entire block. Flipping that row therefore creates a
+        // contradiction, rather than relying on a likely random repair rank.
+        let mut probe = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: 100.0,
+            ..DecodingConfig::without_auth()
+        });
+        probe.set_object_params(params).unwrap();
+        for (index, symbol) in received.iter().enumerate() {
+            if index != poison_index {
+                assert!(matches!(
+                    probe
+                        .feed(AuthenticatedSymbol::new_unauthenticated(symbol.clone()))
+                        .unwrap(),
+                    SymbolAcceptResult::Accepted { .. }
+                ));
+            }
+        }
+        assert_eq!(probe.block_status(sbn).unwrap().rank_deficit, Some(0));
+
+        let poisoned = &received[poison_index];
+        let mut payload = poisoned.data().to_vec();
+        payload[0] ^= 0x80;
+        received[poison_index] = Symbol::new(poisoned.id(), payload, SymbolKind::Repair);
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: 1.0,
+            min_overhead: 31,
+            ..DecodingConfig::without_auth()
+        });
+        pipeline.set_object_params(params).unwrap();
+        let mut pending = None;
+        for symbol in received {
+            match pipeline
+                .feed_deferred(AuthenticatedSymbol::new_unauthenticated(symbol))
+                .unwrap()
+            {
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted { .. }) => {
+                    assert!(pending.is_none());
+                }
+                DeferredSymbolAcceptResult::Decode(job) => {
+                    assert!(pending.replace(job).is_none());
+                }
+                other => panic!("unexpected poisoned-fixture admission: {other:?}"),
+            }
+        }
+        assert_eq!(pipeline.block_repair_failure(sbn), None);
+        decoder.pipeline = Some(pipeline);
+        pending.expect("overdetermined poisoned block must produce an owned decode job")
+    }
+
+    fn latch_quic_repair_failure(
+        decoder: &mut QuicEntryDecoder,
+        config: &QuicConfig,
+        sbn: u8,
+        block_data: &[u8],
+        retained_sources: &[u32],
+    ) {
+        let job =
+            prepare_quic_poisoned_decode_job(decoder, config, sbn, block_data, retained_sources);
+        let mut stats = QuicDecodeStats::default();
+        assert!(
+            !finish_quic_decode_outcome(
+                decoder,
+                run_block_decode_job(job),
+                &mut stats,
+                Instant::now(),
+            )
+            .expect("a definitive FEC failure must remain pending for source feedback")
+        );
+        assert_eq!(
+            decoder.pipeline.as_ref().unwrap().block_repair_failure(sbn),
+            Some(RejectReason::InconsistentEquations)
+        );
+    }
+
+    #[test]
+    fn quic_feedback_recovers_poisoned_blocks_with_sources_then_resumes_healthy_repairs() {
+        let config = QuicConfig {
+            symbol_size: 8,
+            max_block_size: 64,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![
+            ("healthy.bin".to_string(), varied_bytes(64, 17)),
+            ("recover.bin".to_string(), varied_bytes(64, 29)),
+        ];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).unwrap();
+        let encoders = encoders_from_entries(&manifest, &entries, &config).unwrap();
+        let cx = Cx::for_testing();
+        let mut decode_stats = QuicDecodeStats::default();
+        let job = prepare_quic_poisoned_decode_job(
+            &mut decoders[1],
+            &config,
+            0,
+            &entries[1].1,
+            &[4, 5, 6, 7],
+        );
+        assert_eq!(
+            decoders[1]
+                .pipeline
+                .as_ref()
+                .unwrap()
+                .block_repair_failure(0),
+            None
+        );
+        assert!(
+            !finish_quic_decode_outcome(
+                &mut decoders[1],
+                run_block_decode_job(job),
+                &mut decode_stats,
+                Instant::now(),
+            )
+            .expect("deferred corruption must not abort before source feedback")
+        );
+        assert!(!decoders[1].complete);
+        assert_eq!(decode_stats.decode_count, 0);
+        assert_eq!(
+            decoders[1]
+                .pipeline
+                .as_ref()
+                .unwrap()
+                .block_repair_failure(0),
+            Some(RejectReason::InconsistentEquations)
+        );
+
+        let healthy_repairs = block_repair_requests(&decoders, &config, 8, None);
+        assert_eq!(healthy_repairs.len(), 1);
+        assert_eq!(healthy_repairs[0].entry, 0);
+        for round in 1..=2 {
+            let (repair_blocks, source_symbols, accounting) =
+                quic_feedback_requests(&decoders, &config, 2, None, round);
+            assert!(repair_blocks.is_empty());
+            assert_eq!(source_symbols.len(), 2);
+            assert!(source_symbols.iter().all(|request| request.entry == 1));
+            assert_eq!(source_symbols[0].esi, (round - 1) * 2);
+            assert_eq!(source_symbols[1].esi, (round - 1) * 2 + 1);
+            assert_eq!(accounting, QuicRepairRequestAccounting::default());
+            let need = QuicNeedMore {
+                feedback_round: round,
+                pending: pending_entries(&decoders),
+                repair_blocks,
+                source_symbols,
+                repair_symbol_round_cap: Some(2),
+                ..QuicNeedMore::default()
+            };
+            validate_need_more_feedback(&manifest, &config, &need)
+                .expect("existing senders accept exclusive source recovery rounds");
+            assert_eq!(quic_need_more_response_mode(&need), "source_retransmit");
+            for request in need.source_symbols {
+                let source = source_symbol_for_request(&encoders[1], request, &config).unwrap();
+                assert!(
+                    feed_authenticated_symbol_deferred(
+                        &cx,
+                        &mut decoders[1],
+                        AuthenticatedSymbol::new_unauthenticated(source),
+                        &config,
+                        &mut decode_stats,
+                        false,
+                        1,
+                    )
+                    .expect("source recovery must survive deferred completion handling")
+                );
+            }
+        }
+        assert_eq!(decode_stats.decode_count, 1);
+        assert!(decoders[1].complete);
+        assert_eq!(decoders[1].data, entries[1].1);
+        assert!(!decoders[0].complete);
+        let (repairs, sources, accounting) = quic_feedback_requests(&decoders, &config, 8, None, 3);
+        assert!(sources.is_empty());
+        assert_eq!(repairs.len(), 1);
+        assert_eq!(repairs[0].entry, 0);
+        assert!(accounting.requested_repair_symbols > 0);
+    }
+
+    #[test]
+    fn quic_deferred_rank_deficit_stays_pending_for_fresh_repairs() {
+        let config = QuicConfig {
+            symbol_size: 8,
+            max_block_size: 16,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("rank-retry.bin".to_string(), vec![0; 16])];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).unwrap();
+        let raptor = crate::raptorq::decoder::InactivationDecoder::new(2, 8, 0);
+        let mut equations = std::collections::BTreeMap::new();
+        let mut duplicate = None;
+        // Distinct wire ESIs can carry the same canonical equation. Matching
+        // zero payloads make this a genuine rank deficit, with no corruption.
+        // Search only a bounded RFC tuple domain; no dense solves run here.
+        for esi in 2..8194 {
+            let (columns, coefficients) = raptor.repair_equation(esi).unwrap();
+            let mut terms: Vec<_> = columns
+                .into_iter()
+                .zip(coefficients.into_iter().map(|value| value.raw()))
+                .collect();
+            terms.sort_unstable();
+            if let Some(first) = equations.insert(terms, esi) {
+                duplicate = Some([first, esi]);
+                break;
+            }
+        }
+        let duplicate = duplicate.expect("small RFC block has a repeated repair equation");
+        assert_ne!(duplicate[0], duplicate[1]);
+
+        let mut pending = None;
+        for esi in duplicate {
+            let symbol = Symbol::new(
+                SymbolId::new(decoders[0].object_id, 0, esi),
+                vec![0; 8],
+                SymbolKind::Repair,
+            );
+            match decoders[0]
+                .pipeline
+                .as_mut()
+                .unwrap()
+                .feed_deferred(AuthenticatedSymbol::new_unauthenticated(symbol))
+                .unwrap()
+            {
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted { .. }) => {
+                    assert!(pending.is_none());
+                }
+                DeferredSymbolAcceptResult::Decode(job) => {
+                    assert!(pending.replace(job).is_none());
+                }
+                other => panic!("unexpected rank-retry admission: {other:?}"),
+            }
+        }
+        let job = pending.expect("K repair rows must start an owned decode job");
+        let mut stats = QuicDecodeStats::default();
+        assert!(
+            !finish_quic_decode_outcome(
+                &mut decoders[0],
+                run_block_decode_job(job),
+                &mut stats,
+                Instant::now(),
+            )
+            .expect("genuine rank deficiency must not abort the transfer")
+        );
+        assert!(!decoders[0].complete);
+        assert_eq!(stats.decode_count, 0);
+        let pipeline = decoders[0].pipeline.as_ref().unwrap();
+        assert_eq!(pipeline.block_repair_failure(0), None);
+        let status = pipeline.block_status(0).unwrap();
+        assert_eq!(status.state, BlockStateKind::Collecting);
+        assert!(status.rank_deficit.is_some_and(|deficit| deficit > 0));
+        let (repairs, sources, accounting) = quic_feedback_requests(&decoders, &config, 4, None, 1);
+        assert!(sources.is_empty());
+        assert!(!repairs.is_empty());
+        assert!(accounting.requested_repair_symbols > 0);
+        validate_need_more_feedback(
+            &manifest,
+            &config,
+            &QuicNeedMore {
+                pending: pending_entries(&decoders),
+                repair_blocks: repairs,
+                repair_symbol_round_cap: Some(4),
+                ..QuicNeedMore::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn quic_source_recovery_caps_requests_across_entries_and_normalizes_zero_limit() {
+        let config = QuicConfig {
+            symbol_size: 8,
+            max_block_size: 64,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![
+            ("healthy.bin".to_string(), varied_bytes(64, 3)),
+            ("first.bin".to_string(), varied_bytes(64, 7)),
+            ("second.bin".to_string(), varied_bytes(64, 11)),
+        ];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).unwrap();
+        for index in [1, 2] {
+            latch_quic_repair_failure(
+                &mut decoders[index],
+                &config,
+                0,
+                &entries[index].1,
+                &[4, 5, 6, 7],
+            );
+        }
+        for (limit, expected) in [(1, 1), (5, 5), (0, 8), (usize::MAX, 8)] {
+            let (repairs, sources, accounting) =
+                quic_feedback_requests(&decoders, &config, limit, Some(0.5), 1);
+            assert!(repairs.is_empty());
+            assert_eq!(sources.len(), expected);
+            assert_eq!(accounting.requested_repair_symbols, 0);
+            assert!(sources.len() <= MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND);
+            assert!(sources.iter().all(|request| request.entry != 0));
+            if limit == 5 {
+                assert_eq!(
+                    sources.iter().filter(|request| request.entry == 1).count(),
+                    4
+                );
+                assert_eq!(
+                    sources.iter().filter(|request| request.entry == 2).count(),
+                    1
+                );
+            }
+            let need = QuicNeedMore {
+                pending: pending_entries(&decoders),
+                source_symbols: sources,
+                ..QuicNeedMore::default()
+            };
+            validate_need_more_feedback(&manifest, &config, &need).unwrap();
+        }
+    }
+
+    #[test]
+    fn quic_source_recovery_filters_before_limit_and_excludes_inflight_sources() {
+        let config = QuicConfig {
+            symbol_size: 8,
+            max_block_size: 64,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("two-blocks.bin".to_string(), varied_bytes(128, 37))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).unwrap();
+        let encoders = encoders_from_entries(&manifest, &entries, &config).unwrap();
+        latch_quic_repair_failure(
+            &mut decoders[0],
+            &config,
+            1,
+            &entries[0].1[64..],
+            &[1, 2, 3, 4, 5, 6, 7],
+        );
+        let job = {
+            let pipeline = decoders[0].pipeline.as_mut().unwrap();
+            assert_eq!(
+                pipeline.missing_source_symbols(1),
+                vec![MissingSourceSymbol { sbn: 0, esi: 0 }]
+            );
+            assert_eq!(
+                pipeline.missing_source_symbols_for_recovery(1),
+                vec![MissingSourceSymbol { sbn: 1, esi: 0 }],
+                "a healthy earlier block cannot consume the recovery limit"
+            );
+            let source = source_symbol_for_request(
+                &encoders[0],
+                QuicSourceSymbolRequest {
+                    entry: 0,
+                    sbn: 1,
+                    esi: 0,
+                },
+                &config,
+            )
+            .unwrap();
+            let DeferredSymbolAcceptResult::Decode(job) = pipeline
+                .feed_deferred(AuthenticatedSymbol::new_unauthenticated(source))
+                .unwrap()
+            else {
+                panic!("the final source must produce a source-completion job");
+            };
+            assert!(pipeline.missing_source_symbols_for_recovery(1).is_empty());
+            assert!(pipeline.missing_source_symbols_for_recovery(0).is_empty());
+            assert_eq!(
+                pipeline.missing_source_symbols(1),
+                vec![MissingSourceSymbol { sbn: 0, esi: 0 }],
+                "the public query still includes healthy blocks"
+            );
+            job
+        };
+        let (repairs, sources, _) = quic_feedback_requests(&decoders, &config, 8, None, 2);
+        assert!(sources.is_empty());
+        assert!(!repairs.is_empty());
+        assert!(repairs.iter().all(|request| request.sbn == 0));
+        assert_eq!(
+            decoders[0]
+                .pipeline
+                .as_mut()
+                .unwrap()
+                .finish_decode_job(run_block_decode_job(job)),
+            SymbolAcceptResult::BlockComplete {
+                block_sbn: 1,
+                data: entries[0].1[64..].to_vec(),
+            }
+        );
+        assert!(
+            decoders[0]
+                .pipeline
+                .as_ref()
+                .unwrap()
+                .missing_source_symbols_for_recovery(0)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn quic_source_recovery_uses_final_block_k_and_sender_padding() {
+        let config = QuicConfig {
+            symbol_size: 8,
+            max_block_size: 64,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("partial.bin".to_string(), varied_bytes(75, 41))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).unwrap();
+        let encoders = encoders_from_entries(&manifest, &entries, &config).unwrap();
+        latch_quic_repair_failure(&mut decoders[0], &config, 1, &entries[0].1[64..], &[]);
+        let (repairs, sources, _) = quic_feedback_requests(&decoders, &config, 0, None, 1);
+        assert!(repairs.is_empty());
+        assert_eq!(
+            sources,
+            vec![
+                QuicSourceSymbolRequest {
+                    entry: 0,
+                    sbn: 1,
+                    esi: 0,
+                },
+                QuicSourceSymbolRequest {
+                    entry: 0,
+                    sbn: 1,
+                    esi: 1,
+                },
+            ]
+        );
+        let need = QuicNeedMore {
+            pending: pending_entries(&decoders),
+            source_symbols: sources,
+            ..QuicNeedMore::default()
+        };
+        validate_need_more_feedback(&manifest, &config, &need).unwrap();
+        let cx = Cx::for_testing();
+        for request in need.source_symbols {
+            let memory_source = source_symbol_for_request(&encoders[0], request, &config).unwrap();
+            let native_source = block_on(native_source_symbol_for_request(
+                &cx,
+                &encoders[0],
+                request,
+                &config,
+            ))
+            .unwrap();
+            assert_eq!(native_source.id(), memory_source.id());
+            assert_eq!(native_source.data(), memory_source.data());
+            if request.esi == 1 {
+                assert_eq!(&native_source.data()[..3], &entries[0].1[72..]);
+                assert!(native_source.data()[3..].iter().all(|byte| *byte == 0));
+            }
+            assert!(
+                feed_authenticated_symbol(
+                    &mut decoders[0],
+                    AuthenticatedSymbol::new_unauthenticated(native_source),
+                )
+                .unwrap()
+            );
+        }
+        let pipeline = decoders[0].pipeline.as_ref().unwrap();
+        assert_eq!(pipeline.block_repair_failure(1), None);
+        assert_eq!(
+            pipeline.block_status(1).unwrap().state,
+            BlockStateKind::Decoded
+        );
+        let (repairs, sources, _) = quic_feedback_requests(&decoders, &config, 8, None, 2);
+        assert!(sources.is_empty());
+        assert!(repairs.iter().all(|request| request.sbn == 0));
+        assert!(
+            !repairs.is_empty(),
+            "the healthy first block keeps fountain repair"
+        );
+    }
+
     #[test]
     fn quic_receiver_feedback_synthesizes_missing_source_symbol_requests() {
         let config = QuicConfig {

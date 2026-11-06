@@ -12554,24 +12554,17 @@ async fn run_receiver_session(
                 config.max_feedback_rounds,
                 pending.len(),
             )?;
-            // Request fountain-robust FRESH repair (not fragile specific-source re-send). RaptorQ is
-            // a fountain code: any K independent symbols decode a block, so fresh repair symbols
-            // (new ESIs, generated via the sender's per-block repair cursor) fill a block's deficit
-            // regardless of WHICH specific source symbols were lost — and they are always valid.
-            // The old specific-source path (`source_symbols`) over-reported missing symbols (it
-            // recomputes the deficit before the paced datagrams the reliable ObjectComplete raced
-            // ahead of have settled) AND could request `esi >= block_k` for the last partial block,
-            // which made the sender's `native_source_symbol_for_request` error out and die, so the
-            // receiver idled to a timeout. `repair_blocks` routes the sender to fresh repair for
-            // the incomplete source blocks only, so a single final block is not starved by complete
-            // blocks in the same pending entry.
+            // Healthy blocks request fresh fountain repair. A block with a
+            // retired repair cohort instead requests its exact missing
+            // canonical sources, using the pipeline's per-block K. Keep each
+            // feedback round in one request mode for existing sender support.
             let round_loss_fraction = super::receiver_round_loss_fraction(
                 round_symbols_observed,
                 round_complete.round_symbols_sent,
             );
             let repair_symbol_round_cap =
                 super::quic_repair_symbol_round_cap(config, round_loss_fraction);
-            let (repair_blocks, repair_accounting) = super::block_repair_requests_with_accounting(
+            let (repair_blocks, source_symbols, repair_accounting) = super::quic_feedback_requests(
                 &decoders,
                 config,
                 repair_symbol_round_cap,
@@ -12583,7 +12576,7 @@ async fn run_receiver_session(
                 feedback_round: next_feedback_round,
                 pending,
                 repair_blocks,
-                source_symbols: Vec::new(),
+                source_symbols,
                 round_symbols_observed: Some(round_symbols_observed),
                 round_loss_fraction,
                 round_symbols_accepted: Some(round_symbols_accepted),
