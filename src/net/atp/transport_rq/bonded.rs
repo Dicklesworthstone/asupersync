@@ -438,6 +438,45 @@ fn validate_bonded_probe_ports(ports: &[u16]) -> Result<(), RqError> {
     Ok(())
 }
 
+/// Observe the explicitly supplied owner while a reversible operation is parked.
+/// Native socket futures otherwise consult only the ambient task's context,
+/// which can be a different cancellation authority. Never use this adapter
+/// around publication or post-commit receipt delivery.
+async fn bonded_precommit_wait<T, E>(
+    cx: &Cx,
+    operation: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, RqError>
+where
+    RqError: From<E>,
+{
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let mut operation = std::pin::pin!(operation);
+    let mut cancellation = crate::channel::OwnedCancelRegistration::new(cx.clone());
+    poll_fn(|task_cx| {
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(RqError::Cancelled));
+        }
+        match Future::poll(operation.as_mut(), task_cx) {
+            // Preserve an observed result, including a terminal Proof, even
+            // when cancellation is published during this successful poll.
+            Poll::Ready(result) => Poll::Ready(result.map_err(RqError::from)),
+            Poll::Pending => {
+                cancellation.refresh(task_cx.waker());
+                // Close the race between the first checkpoint and subscribing.
+                // checkpoint(), rather than the raw flag, honors owner masks.
+                if cx.checkpoint().is_err() {
+                    Poll::Ready(Err(RqError::Cancelled))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    })
+    .await
+}
+
 /// One absolute deadline covers a probe, including cancellation while sockets
 /// are pending. A probe never waits for its timeout merely to notice a cancelled
 /// external Cx, and cancellation masks remain authoritative.
@@ -446,30 +485,15 @@ async fn bounded_bonded_probe<T>(
     timeout: Duration,
     operation: impl std::future::Future<Output = Result<T, RqError>>,
 ) -> Result<T, RqError> {
-    use std::future::{Future, poll_fn};
-    use std::task::Poll;
-
-    let mut operation = std::pin::pin!(crate::time::timeout(cx.now(), timeout, operation));
-    let mut cancellation = crate::channel::OwnedCancelRegistration::new(cx.clone());
-    poll_fn(|task_cx| {
-        if cx.checkpoint().is_err() {
-            return Poll::Ready(Err(RqError::Cancelled));
-        }
-        let result = operation.as_mut().poll(task_cx);
-        if result.is_pending() {
-            cancellation.refresh(task_cx.waker());
-        }
-        if cx.checkpoint().is_err() {
-            return Poll::Ready(Err(RqError::Cancelled));
-        }
-        match result {
-            Poll::Ready(Ok(result)) => Poll::Ready(result),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(RqError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "bonded path probe exceeded its absolute deadline",
-            )))),
-            Poll::Pending => Poll::Pending,
-        }
+    bonded_precommit_wait(cx, async {
+        crate::time::timeout(cx.now(), timeout, operation)
+            .await
+            .map_err(|_| {
+                RqError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "bonded path probe exceeded its absolute deadline",
+                ))
+            })?
     })
     .await
 }
@@ -1435,7 +1459,7 @@ async fn send_bonded_enrollment_frame(
 ) -> Result<(), RqError> {
     match preflight_remaining {
         Some(remaining) => bounded_bonded_probe(cx, remaining, control.send(frame)).await,
-        None => control.send(frame).await,
+        None => bonded_precommit_wait(cx, control.send(frame)).await,
     }
 }
 
@@ -1591,7 +1615,7 @@ async fn pump_bonded_round(
                     *symbols_accepted = (*symbols_accepted).saturating_add(1);
                 }
             } else {
-                handle_bonded_donor_frame(conns, conn_index, round, frame).await?;
+                handle_bonded_donor_frame(cx, conns, conn_index, round, frame).await?;
             }
             stall_sleep.reset_after(cx.now_for_observability(), stall_window);
             continue;
@@ -1600,33 +1624,36 @@ async fn pump_bonded_round(
             return Ok(());
         }
 
-        let ready = poll_fn(|task_cx| {
-            if Pin::new(&mut stall_sleep).poll(task_cx).is_ready() {
-                return Poll::Ready(Ok::<BondedReady, std::io::Error>(BondedReady::Stalled));
-            }
-            // Alternate carrier priority: a continuously ready UDP socket
-            // must not starve stream donors, or vice versa.
-            if prefer_control
-                && let Some(ready) =
-                    poll_bonded_control_reads(conns, &mut cbuf, next_control, task_cx)
-            {
-                return Poll::Ready(Ok(ready));
-            }
-            match udp.poll_recv_batch_any(task_cx, RQ_INBOUND_PUMP_BATCH, packet_size) {
-                Poll::Ready(Ok((_socket_index, batch))) => {
-                    return Poll::Ready(Ok(BondedReady::Udp(batch)));
+        let ready = bonded_precommit_wait(
+            cx,
+            poll_fn(|task_cx| {
+                if Pin::new(&mut stall_sleep).poll(task_cx).is_ready() {
+                    return Poll::Ready(Ok::<BondedReady, std::io::Error>(BondedReady::Stalled));
                 }
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => {}
-            }
-            if !prefer_control
-                && let Some(ready) =
-                    poll_bonded_control_reads(conns, &mut cbuf, next_control, task_cx)
-            {
-                return Poll::Ready(Ok(ready));
-            }
-            Poll::Pending
-        })
+                // Alternate carrier priority: a continuously ready UDP socket
+                // must not starve stream donors, or vice versa.
+                if prefer_control
+                    && let Some(ready) =
+                        poll_bonded_control_reads(conns, &mut cbuf, next_control, task_cx)
+                {
+                    return Poll::Ready(Ok(ready));
+                }
+                match udp.poll_recv_batch_any(task_cx, RQ_INBOUND_PUMP_BATCH, packet_size) {
+                    Poll::Ready(Ok((_socket_index, batch))) => {
+                        return Poll::Ready(Ok(BondedReady::Udp(batch)));
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => {}
+                }
+                if !prefer_control
+                    && let Some(ready) =
+                        poll_bonded_control_reads(conns, &mut cbuf, next_control, task_cx)
+                {
+                    return Poll::Ready(Ok(ready));
+                }
+                Poll::Pending
+            }),
+        )
         .await?;
 
         match ready {
@@ -1696,6 +1723,7 @@ async fn pump_bonded_round(
 
 /// Apply one decoded donor control frame to the receiver round state.
 async fn handle_bonded_donor_frame(
+    cx: &Cx,
     conns: &mut [BondedDonorConn],
     conn_index: usize,
     round: u32,
@@ -1717,8 +1745,10 @@ async fn handle_bonded_donor_frame(
         FrameType::KeepAlive => {
             let keep_alive =
                 Frame::empty(FrameType::KeepAlive).map_err(|e| RqError::Frame(e.to_string()))?;
-            if conns[conn_index].control.send(&keep_alive).await.is_err() {
-                conns[conn_index].reject_control();
+            match bonded_precommit_wait(cx, conns[conn_index].control.send(&keep_alive)).await {
+                Ok(()) => {}
+                Err(RqError::Cancelled) => return Err(RqError::Cancelled),
+                Err(_) => conns[conn_index].reject_control(),
             }
         }
         FrameType::Close => {
@@ -1771,20 +1801,23 @@ async fn drain_bonded_round_tail(
 
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        let ready = poll_fn(|task_cx| {
-            if Pin::new(&mut hard_sleep).poll(task_cx).is_ready() {
-                return Poll::Ready(Ok::<Option<usize>, std::io::Error>(None));
-            }
-            match udp.poll_recv_any(task_cx, &mut rbuf) {
-                Poll::Ready(Ok((_socket_index, n))) => return Poll::Ready(Ok(Some(n))),
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => {}
-            }
-            if Pin::new(&mut quiet_sleep).poll(task_cx).is_ready() {
-                return Poll::Ready(Ok(None));
-            }
-            Poll::Pending
-        })
+        let ready = bonded_precommit_wait(
+            cx,
+            poll_fn(|task_cx| {
+                if Pin::new(&mut hard_sleep).poll(task_cx).is_ready() {
+                    return Poll::Ready(Ok::<Option<usize>, std::io::Error>(None));
+                }
+                match udp.poll_recv_any(task_cx, &mut rbuf) {
+                    Poll::Ready(Ok((_socket_index, n))) => return Poll::Ready(Ok(Some(n))),
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => {}
+                }
+                if Pin::new(&mut quiet_sleep).poll(task_cx).is_ready() {
+                    return Poll::Ready(Ok(None));
+                }
+                Poll::Pending
+            }),
+        )
         .await?;
 
         let Some(n) = ready else {
@@ -2466,7 +2499,12 @@ async fn receive_bonded_inner(
             };
             if let Ok(proof) = json_frame(FrameType::Proof, &receipt) {
                 for conn in conns.iter_mut().filter(|conn| conn.alive) {
-                    let _ = conn.control.send(&proof).await;
+                    if matches!(
+                        bonded_precommit_wait(cx, conn.control.send(&proof)).await,
+                        Err(RqError::Cancelled)
+                    ) {
+                        return Err(RqError::Cancelled);
+                    }
                 }
             }
             return Err(RqError::NoConvergence {
@@ -2667,14 +2705,18 @@ async fn receive_bonded_inner(
                     blocks: donor_blocks,
                 },
             )?;
-            if conn.control.send(&frame).await.is_err() {
-                bondtrace!(
-                    "receiver: donor_dead_on_feedback donor_index={} round={}",
-                    conn.donor_index,
-                    round
-                );
-                conn.reject_control();
-                continue;
+            match bonded_precommit_wait(cx, conn.control.send(&frame)).await {
+                Ok(()) => {}
+                Err(RqError::Cancelled) => return Err(RqError::Cancelled),
+                Err(_) => {
+                    bondtrace!(
+                        "receiver: donor_dead_on_feedback donor_index={} round={}",
+                        conn.donor_index,
+                        round
+                    );
+                    conn.reject_control();
+                    continue;
+                }
             }
             conn.round_done = false;
         }
@@ -2922,47 +2964,46 @@ async fn donate_bonded_with_transport(
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
 
-    let stream = match crate::time::timeout(
-        cx.now(),
-        config.accept_timeout,
-        TcpStream::connect(control_addr),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(err)) => return Err(RqError::Io(err)),
-        Err(_elapsed) => {
-            return Err(RqError::Io(std::io::Error::new(
+    let stream = bonded_precommit_wait(cx, async {
+        match crate::time::timeout(
+            cx.now(),
+            config.accept_timeout,
+            TcpStream::connect(control_addr),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(RqError::Io),
+            Err(_elapsed) => Err(RqError::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!("bonded donor connect to {control_addr} timed out"),
-            )));
+            ))),
         }
-    };
+    })
+    .await?;
     let mut control = FrameTransport::new(stream);
-    control
-        .send(&json_frame(
-            FrameType::Handshake,
-            &BondedDonorHello {
-                protocol: symbol_transport.protocol(),
-                transfer_id: descriptor.transfer_id.clone(),
-                merkle_root_hex: descriptor.merkle_root_hex.clone(),
-                metadata_commitment_hex,
-                symbol_size: descriptor.symbol_size,
-                max_block_size: descriptor.max_block_size,
-                symbol_auth: symbol_auth_enabled,
-                offer: BondingHandshake::v1_static(
-                    [
-                        BondTransport::DirectIp,
-                        BondTransport::Ssh,
-                        BondTransport::Tailscale,
-                    ],
-                    MAX_BONDING_DONORS,
-                    symbol_auth_enabled,
-                ),
-            },
-        )?)
-        .await?;
-    let ack = control.recv().await?;
+    let hello = json_frame(
+        FrameType::Handshake,
+        &BondedDonorHello {
+            protocol: symbol_transport.protocol(),
+            transfer_id: descriptor.transfer_id.clone(),
+            merkle_root_hex: descriptor.merkle_root_hex.clone(),
+            metadata_commitment_hex,
+            symbol_size: descriptor.symbol_size,
+            max_block_size: descriptor.max_block_size,
+            symbol_auth: symbol_auth_enabled,
+            offer: BondingHandshake::v1_static(
+                [
+                    BondTransport::DirectIp,
+                    BondTransport::Ssh,
+                    BondTransport::Tailscale,
+                ],
+                MAX_BONDING_DONORS,
+                symbol_auth_enabled,
+            ),
+        },
+    )?;
+    bonded_precommit_wait(cx, control.send(&hello)).await?;
+    let ack = bonded_precommit_wait(cx, control.recv()).await?;
     if ack.frame_type() != FrameType::HandshakeAck {
         return Err(RqError::Unexpected {
             got: ack.frame_type(),
@@ -2995,13 +3036,16 @@ async fn donate_bonded_with_transport(
                         "bonded welcome advertised no receiver UDP endpoints".to_string(),
                     )
                 })?;
-            donate_path(
+            bonded_precommit_wait(
                 cx,
-                descriptor,
-                &assignment,
-                primary,
-                source_root,
-                config.clone(),
+                donate_path(
+                    cx,
+                    descriptor,
+                    &assignment,
+                    primary,
+                    source_root,
+                    config.clone(),
+                ),
             )
             .await?
         }
@@ -3013,75 +3057,82 @@ async fn donate_bonded_with_transport(
                 .validate()
                 .map_err(|error| RqError::HandshakeRejected(error.to_string()))?;
             validate_bonded_receiver_udp_endpoints(&assignment.receiver_udp_endpoints)?;
-            donate_bonded_control_path(
+            bonded_precommit_wait(
                 cx,
-                descriptor,
-                &assignment,
-                source_root,
-                config.clone(),
-                &mut control,
+                donate_bonded_control_path(
+                    cx,
+                    descriptor,
+                    &assignment,
+                    source_root,
+                    config.clone(),
+                    &mut control,
+                ),
             )
             .await?
         }
     };
     let mut symbols_sent = spray.symbols_sent;
-    control
-        .send(&json_frame(
-            FrameType::ObjectComplete,
-            &BondedRoundComplete {
-                round: 0,
-                donor_index: assignment.donor_index,
-                symbols_sent,
-            },
-        )?)
-        .await?;
+    let round_complete = json_frame(
+        FrameType::ObjectComplete,
+        &BondedRoundComplete {
+            round: 0,
+            donor_index: assignment.donor_index,
+            symbols_sent,
+        },
+    )?;
+    bonded_precommit_wait(cx, control.send(&round_complete)).await?;
 
     let mut feedback_rounds = 0u32;
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        let frame = control.recv().await?;
+        let frame = bonded_precommit_wait(cx, control.recv()).await?;
         match frame.frame_type() {
             FrameType::ObjectRequest => {
                 let need: BondedNeedMore = parse_json(&frame)?;
                 feedback_rounds = feedback_rounds.max(need.round);
                 let sent = match symbol_transport {
                     BondedSymbolTransport::Datagram => {
-                        bonded_donor_execute_need_more(
+                        bonded_precommit_wait(
                             cx,
-                            descriptor,
-                            &assignment,
-                            source_root,
-                            &config,
-                            symbol_auth.as_ref(),
-                            &need,
+                            bonded_donor_execute_need_more(
+                                cx,
+                                descriptor,
+                                &assignment,
+                                source_root,
+                                &config,
+                                symbol_auth.as_ref(),
+                                &need,
+                            ),
                         )
                         .await?
                     }
                     BondedSymbolTransport::Control => {
-                        bonded_donor_execute_need_more_on(
+                        bonded_precommit_wait(
                             cx,
-                            descriptor,
-                            &assignment,
-                            source_root,
-                            &config,
-                            symbol_auth.as_ref(),
-                            &need,
-                            Some(&mut control),
+                            bonded_donor_execute_need_more_on(
+                                cx,
+                                descriptor,
+                                &assignment,
+                                source_root,
+                                &config,
+                                symbol_auth.as_ref(),
+                                &need,
+                                Some(&mut control),
+                            ),
                         )
                         .await?
                     }
                 };
                 symbols_sent = symbols_sent.saturating_add(sent);
-                control
-                    .send(&json_frame(
-                        FrameType::ObjectComplete,
-                        &BondedRoundComplete {
-                            round: need.round,
-                            donor_index: assignment.donor_index,
-                            symbols_sent,
-                        },
-                    )?)
-                    .await?;
+                let round_complete = json_frame(
+                    FrameType::ObjectComplete,
+                    &BondedRoundComplete {
+                        round: need.round,
+                        donor_index: assignment.donor_index,
+                        symbols_sent,
+                    },
+                )?;
+                bonded_precommit_wait(cx, control.send(&round_complete)).await?;
             }
             FrameType::Proof => {
                 let receipt: ReceiveReceipt = parse_json(&frame)?;
@@ -3099,12 +3150,9 @@ async fn donate_bonded_with_transport(
                 });
             }
             FrameType::KeepAlive => {
-                control
-                    .send(
-                        &Frame::empty(FrameType::KeepAlive)
-                            .map_err(|e| RqError::Frame(e.to_string()))?,
-                    )
-                    .await?;
+                let keep_alive = Frame::empty(FrameType::KeepAlive)
+                    .map_err(|e| RqError::Frame(e.to_string()))?;
+                bonded_precommit_wait(cx, control.send(&keep_alive)).await?;
             }
             FrameType::Close => {
                 return Err(RqError::Io(std::io::Error::new(

@@ -174,6 +174,41 @@
         assert!(matches!(pending.as_mut().poll(&mut task_cx), Poll::Ready(Err(RqError::Cancelled))));
     }
 
+    #[test]
+    fn bonded_precommit_wait_preserves_ready_result_when_owner_cancels_during_poll() {
+        let owner = Cx::for_testing();
+        let result = futures_lite::future::block_on(bonded_precommit_wait(&owner, async {
+            owner.cancel_with_reason(crate::types::CancelReason::user("proof arrived concurrently"));
+            Frame::empty(FrameType::Proof).map_err(|error| RqError::Frame(error.to_string()))
+        })).unwrap();
+        assert_eq!(result.frame_type(), FrameType::Proof);
+        assert!(owner.is_cancel_requested());
+    }
+
+    #[test]
+    fn bonded_precommit_wait_honors_masked_owner_and_closes_pending_registration_race() {
+        use std::future::{Future, poll_fn};
+        use std::task::{Context, Poll, Waker};
+
+        let owner = Cx::for_testing();
+        let mut task_cx = Context::from_waker(Waker::noop());
+        let mut waiting = std::pin::pin!(bonded_precommit_wait(
+            &owner, std::future::pending::<Result<(), RqError>>(),
+        ));
+        owner.masked(|| {
+            owner.cancel_with_reason(crate::types::CancelReason::user("masked owner"));
+            assert!(waiting.as_mut().poll(&mut task_cx).is_pending());
+        });
+        assert!(matches!(waiting.as_mut().poll(&mut task_cx), Poll::Ready(Err(RqError::Cancelled))));
+
+        let racing_owner = Cx::for_testing();
+        let mut racing = std::pin::pin!(bonded_precommit_wait(&racing_owner, poll_fn(|_| {
+            racing_owner.cancel_with_reason(crate::types::CancelReason::user("before registration"));
+            Poll::<Result<(), RqError>>::Pending
+        })));
+        assert!(matches!(racing.as_mut().poll(&mut task_cx), Poll::Ready(Err(RqError::Cancelled))));
+    }
+
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     #[test]
     fn bonded_probe_path_mtu_failure_is_narrowly_classified() {
@@ -1454,6 +1489,336 @@
         assert_eq!(drained.live_tasks, 0);
         assert_eq!(drained.pending_obligations, 0);
         result
+    }
+
+    #[derive(Default)]
+    struct BondedPendingWitness {
+        milestone: std::sync::atomic::AtomicBool,
+        waiter: std::sync::Mutex<Option<std::task::Waker>>,
+    }
+
+    impl BondedPendingWitness {
+        fn reached(&self) -> bool {
+            self.milestone.load(std::sync::atomic::Ordering::Acquire)
+        }
+
+        fn mark(&self) {
+            self.milestone.store(true, std::sync::atomic::Ordering::Release);
+            let waiter = self.waiter.lock().unwrap().take();
+            if let Some(waiter) = waiter {
+                waiter.wake();
+            }
+        }
+    }
+
+    async fn observe_bonded_pending<F: std::future::Future>(
+        operation: F,
+        witness: Arc<BondedPendingWitness>,
+        parked: mpsc::Sender<()>,
+    ) -> F::Output {
+        use std::future::{Future, poll_fn};
+
+        let mut operation = std::pin::pin!(operation);
+        let mut announced = false;
+        poll_fn(|task_cx| {
+            if !announced {
+                *witness.waiter.lock().unwrap() = Some(task_cx.waker().clone());
+            }
+            let result = Future::poll(operation.as_mut(), task_cx);
+            if !announced && result.is_pending() && witness.reached() {
+                announced = true;
+                parked.send(()).unwrap();
+            }
+            if announced || result.is_ready() {
+                let waiter = witness.waiter.lock().unwrap().take();
+                drop(waiter);
+            }
+            result
+        }).await
+    }
+
+    struct BondedNativeControl {
+        stream: std::net::TcpStream,
+        codec: AtpFrameCodec,
+        buffered: BytesMut,
+    }
+
+    impl BondedNativeControl {
+        fn new(stream: std::net::TcpStream) -> Self {
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            Self { stream, codec: AtpFrameCodec::new(), buffered: BytesMut::new() }
+        }
+
+        fn send(&mut self, frame: &Frame) {
+            use std::io::Write;
+            self.stream.write_all(&frame.to_wire_bytes().unwrap()).unwrap();
+        }
+
+        fn receive(&mut self) -> Frame {
+            use std::io::Read;
+            loop {
+                if let Some(frame) = self.codec.decode(&mut self.buffered).unwrap() {
+                    return frame;
+                }
+                let mut bytes = [0; 4096];
+                let len = self.stream.read(&mut bytes).unwrap();
+                assert_ne!(len, 0, "peer closed before the expected bonded frame");
+                self.buffered.extend_from_slice(&bytes[..len]);
+            }
+        }
+    }
+
+    fn accept_bonded_native_peer(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        listener.set_nonblocking(true).unwrap();
+        let started = Instant::now();
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(started.elapsed() < Duration::from_secs(5), "donor never connected");
+                    thread::park_timeout(Duration::from_millis(1));
+                }
+                Err(error) => panic!("native bonded accept failed: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bonded_donor_explicit_owner_cancels_a_parked_welcome() {
+        for carrier in [BondedSymbolTransport::Datagram, BondedSymbolTransport::Control] {
+            assert_bonded_donor_owner_cancellation(carrier, false);
+        }
+    }
+
+    #[test]
+    fn bonded_donor_explicit_owner_cancels_parked_feedback() {
+        for carrier in [BondedSymbolTransport::Datagram, BondedSymbolTransport::Control] {
+            assert_bonded_donor_owner_cancellation(carrier, true);
+        }
+    }
+
+    fn assert_bonded_donor_owner_cancellation(carrier: BondedSymbolTransport, feedback: bool) {
+        let config = bonded_lab_config();
+        let root = bonded_e2e_tmp("donor_owner_cancel");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("payload.bin"), b"owned cancellation must not commit").unwrap();
+        let descriptor = bonded_e2e_descriptor(&root, &["payload.bin"], "payload.bin", false, &config);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let witness = Arc::new(BondedPendingWitness::default());
+        let peer_witness = Arc::clone(&witness);
+        let runtime = RuntimeBuilder::multi_thread().worker_threads(2)
+            .enable_platform_reactor(true).build().unwrap();
+        // Dropping the sender also releases the peer if an assertion unwinds.
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let peer = thread::spawn(move || {
+            let mut control = BondedNativeControl::new(accept_bonded_native_peer(&listener));
+            let frame = control.receive();
+            assert_eq!(frame.frame_type(), FrameType::Handshake);
+            let hello: BondedDonorHello = parse_json(&frame).unwrap();
+            assert_eq!(hello.protocol, carrier.protocol());
+            let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            if feedback {
+                let mut plane = BondingReceiverControlPlane::new(
+                    BondingHandshake::v1_static([BondTransport::DirectIp], 1, false),
+                    1, vec![udp.local_addr().unwrap()], None,
+                ).unwrap();
+                let enrollment = plane.enroll_next_donor(&hello.offer).unwrap();
+                control.send(&json_frame(FrameType::HandshakeAck, &BondedDonorWelcome {
+                    accepted: true, reason: None, peer_id: "held-receiver".to_string(),
+                    donor_index: 0, donor_count: 1, assignment: Some(enrollment.assignment),
+                    udp_ports: vec![udp.local_addr().unwrap().port()],
+                }).unwrap());
+                loop {
+                    let frame = control.receive();
+                    if frame.frame_type() == FrameType::ObjectComplete {
+                        let complete: BondedRoundComplete = parse_json(&frame).unwrap();
+                        assert!(complete.symbols_sent > 0);
+                        break;
+                    }
+                    assert_eq!(carrier, BondedSymbolTransport::Control);
+                    assert_eq!(frame.frame_type(), FrameType::ObjectData);
+                }
+            }
+            peer_witness.mark();
+            // Keep the socket open and silent until the observed cancellation
+            // result. Neither EOF nor a peer timeout can satisfy the witness.
+            let _ = release_rx.recv();
+        });
+        let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+        let operation_owner = owner.clone();
+        let (parked_tx, parked_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let donor = runtime.handle().spawn(async move {
+            let ambient = Cx::current().unwrap();
+            assert_ne!(ambient.task_id(), operation_owner.task_id());
+            let result = observe_bonded_pending(
+                donate_bonded_with_transport(&operation_owner, &descriptor, addr, &root, config, carrier),
+                witness, parked_tx,
+            ).await;
+            assert!(!ambient.is_cancel_requested());
+            assert!(ambient.checkpoint().is_ok());
+            done_tx.send(()).unwrap();
+            result
+        });
+        parked_rx.recv_timeout(Duration::from_secs(5)).expect("donor parked at wire milestone");
+        owner.cancel_with_reason(crate::types::CancelReason::user("explicit donor owner"));
+        let prompt = done_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+        drop(release_tx);
+        let result = runtime.block_on(donor);
+        peer.join().unwrap();
+        let drained = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(drained.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+        assert_eq!(drained.live_tasks, 0);
+        assert_eq!(drained.pending_obligations, 0);
+        assert!(prompt, "owner cancellation must retire before releasing the peer");
+        assert!(matches!(result, Err(RqError::Cancelled)));
+    }
+
+    #[test]
+    fn bonded_receiver_explicit_owner_cancels_parked_data_intake() {
+        for carrier in [BondedSymbolTransport::Datagram, BondedSymbolTransport::Control] {
+            let config = bonded_lab_config();
+            let root = bonded_e2e_tmp("receiver_owner_cancel");
+            let src = root.join("src");
+            let dest = root.join("dest");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::create_dir_all(&dest).unwrap();
+            std::fs::write(src.join("payload.bin"), b"never published").unwrap();
+            let descriptor = bonded_e2e_descriptor(&src, &["payload.bin"], "payload.bin", false, &config);
+            let mut hello = bonded_enrollment_hello(&descriptor);
+            hello.protocol = carrier.protocol();
+            let witness = Arc::new(BondedPendingWitness::default());
+            let peer_witness = Arc::clone(&witness);
+            let runtime = RuntimeBuilder::multi_thread().worker_threads(2)
+                .enable_platform_reactor(true).build().unwrap();
+            let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+            let operation_owner = owner.clone();
+            let receive_dest = dest.clone();
+            let (addr_tx, addr_rx) = mpsc::channel();
+            let (parked_tx, parked_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let receiver = runtime.handle().spawn(async move {
+                let ambient = Cx::current().unwrap();
+                assert_ne!(ambient.task_id(), operation_owner.task_id());
+                let listener = TcpListener::bind("127.0.0.1:0").await?;
+                addr_tx.send(listener.local_addr()?).unwrap();
+                let result = observe_bonded_pending(
+                    receive_bonded(&operation_owner, &descriptor, &receive_dest, &listener,
+                        "127.0.0.1", 1, config, "cancel-receiver", None),
+                    witness, parked_tx,
+                ).await;
+                assert!(!ambient.is_cancel_requested());
+                assert!(ambient.checkpoint().is_ok());
+                done_tx.send(()).unwrap();
+                result
+            });
+            let addr = addr_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let peer = thread::spawn(move || {
+                let stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
+                let mut control = BondedNativeControl::new(stream);
+                control.send(&json_frame(FrameType::Handshake, &hello).unwrap());
+                let frame = control.receive();
+                assert_eq!(frame.frame_type(), FrameType::HandshakeAck);
+                let welcome: BondedDonorWelcome = parse_json(&frame).unwrap();
+                assert!(welcome.accepted);
+                control.send(&Frame::empty(FrameType::KeepAlive).unwrap());
+                assert_eq!(control.receive().frame_type(), FrameType::KeepAlive);
+                // The echo proves staging setup finished and the receiver
+                // entered its data pump. Wake it once to witness Pending there.
+                peer_witness.mark();
+                let _ = release_rx.recv();
+            });
+            parked_rx.recv_timeout(Duration::from_secs(5)).expect("receiver data pump parked");
+            owner.cancel_with_reason(crate::types::CancelReason::user("explicit receiver owner"));
+            let prompt = done_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            drop(release_tx);
+            let result = runtime.block_on(receiver);
+            peer.join().unwrap();
+            let drained = runtime.shutdown_drained(Duration::from_secs(5));
+            assert_eq!(drained.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+            assert_eq!(drained.live_tasks, 0);
+            assert_eq!(drained.pending_obligations, 0);
+            assert!(prompt, "owner cancellation must not await a peer event or stall timeout");
+            assert!(matches!(result, Err(RqError::Cancelled)));
+            assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "no output or staging survives");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bonded_control_backpressure_observes_explicit_owner_cancellation() {
+        use std::future::{Future, poll_fn};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let runtime = RuntimeBuilder::multi_thread().worker_threads(2)
+            .enable_platform_reactor(true).build().unwrap();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let peer = thread::spawn(move || {
+            let stream = accept_bonded_native_peer(&listener);
+            socket2::SockRef::from(&stream).set_recv_buffer_size(4096).unwrap();
+            // A real TCP peer holds the receive window closed. It never reads
+            // payload and cannot release the tested write before cancellation.
+            let _ = release_rx.recv();
+        });
+        let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+        let operation_owner = owner.clone();
+        let (parked_tx, parked_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let sender = runtime.handle().spawn(async move {
+            let ambient = Cx::current().unwrap();
+            assert_ne!(ambient.task_id(), operation_owner.task_id());
+            let stream = TcpStream::connect(addr).await?;
+            socket2::SockRef::from(&stream).set_send_buffer_size(4096)?;
+            let mut control = FrameTransport::new(stream);
+            let symbol = Symbol::new(
+                SymbolId::new(ObjectId::new_for_test(91), 0, 0),
+                vec![0x5a; usize::from(u16::MAX)], SymbolKind::Source,
+            );
+            let frame = Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData,
+                encode_bonded_donor_datagram(7, 0, &symbol, None))
+                .map_err(|error| RqError::Frame(error.to_string()))?;
+            let result = {
+                // Same phase-level adapter as the donor spray/repair paths.
+                // The only possible Pending inside this phase is a real
+                // framed socket write, not connection setup, file I/O or pacing.
+                let mut send = std::pin::pin!(bonded_precommit_wait(&operation_owner, async {
+                    for _ in 0..1024 {
+                        control.send(&frame).await?;
+                    }
+                    Err::<(), RqError>(RqError::Source("TCP writes never backpressured".to_string()))
+                }));
+                let mut announced = false;
+                poll_fn(|task_cx| {
+                    let result = send.as_mut().poll(task_cx);
+                    if result.is_pending() && !announced {
+                        announced = true;
+                        parked_tx.send(()).unwrap();
+                    }
+                    result
+                }).await
+            };
+            assert!(!ambient.is_cancel_requested());
+            assert!(ambient.checkpoint().is_ok());
+            done_tx.send(()).unwrap();
+            result
+        });
+        parked_rx.recv_timeout(Duration::from_secs(5)).expect("real TCP write backpressured");
+        owner.cancel_with_reason(crate::types::CancelReason::user("explicit stream owner"));
+        let prompt = done_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+        drop(release_tx);
+        let result = runtime.block_on(sender);
+        peer.join().unwrap();
+        let drained = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(drained.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+        assert_eq!(drained.live_tasks, 0);
+        assert_eq!(drained.pending_obligations, 0);
+        assert!(prompt, "backpressure must not delay owner cancellation until the peer closes");
+        assert!(matches!(result, Err(RqError::Cancelled)));
     }
 
     fn spawn_bonded_probe_receiver(
