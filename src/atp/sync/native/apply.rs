@@ -188,7 +188,7 @@ impl PreparedNativeDirectorySync {
     }
 }
 
-fn apply_owned(
+pub(super) fn apply_owned(
     cx: &Cx,
     mut prepared: PreparedNativeDirectorySync,
     authorization: DestructiveAuthorization,

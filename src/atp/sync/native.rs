@@ -31,10 +31,15 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 mod apply;
+mod session;
 pub use apply::{
     NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectorySyncReport,
     NativeDirectoryRecoveryEntry, NativeDirectoryRecoveryReceipt, NativeDirectoryRecoveryReport,
     NativeDirectoryRecoveryState, PreparedNativeDirectoryRecovery, prepare_native_directory_recovery,
+};
+pub use session::{
+    NativeDirectorySessionReport, NativeDirectoryStatePublication, NativeDirectorySyncSession,
+    PreparedNativeDirectorySessionSync,
 };
 
 /// Resource limits for each root inventory and each copied file.
@@ -332,48 +337,55 @@ async fn prepare_native_directory(
     }
     cx.scoped_fs()
         .run_io(move |worker| {
-            Ok((|| {
-                let local_root = NativeRoot::open(&local_path)?;
-                let remote_root = NativeRoot::open(&remote_path)?;
-                disjoint_roots(&local_root, &remote_root)?;
-                let local = scan_root(&worker, local_root, limits)?;
-                let remote = scan_root(&worker, remote_root, limits)?;
-                disjoint_inventories(&local, &remote)?;
-                // Local may have changed while remote was being scanned.
-                local.root.revalidate()?;
-                revalidate_stamps(&worker, &local)?;
-                let (baseline, domain): (&DirectoryManifest, &[u8]) = match &basis {
-                    NativePlanBaseline::Common(baseline) => {
-                        (baseline, b"asupersync.native-directory-plan.v1\0")
-                    }
-                    NativePlanBaseline::Destination => {
-                        (&remote.manifest, b"asupersync.native-directory-mirror-plan.v1\0")
-                    }
-                };
-                let preview =
-                    plan_bidirectional_sync(baseline, &local.manifest, &remote.manifest)
-                        .map_err(NativeDirectoryError::Plan)?;
-                let mut identity = Sha256::new();
-                identity.update(domain);
-                identity.update(baseline.tree_root());
-                for snapshot in [&local, &remote] {
-                    identity.update(snapshot.root.path.as_os_str().as_encoded_bytes());
-                    identity.update([0]);
-                    identity.update(snapshot.root.identity.device.to_be_bytes());
-                    identity.update(snapshot.root.identity.inode.to_be_bytes());
-                    identity.update(snapshot.manifest.tree_root());
-                }
-                Ok(PreparedNativeDirectorySync {
-                    local,
-                    remote,
-                    limits,
-                    preview,
-                    plan_id: hex::encode(identity.finalize()),
-                })
-            })())
+            Ok(prepare_native_directory_owned(&worker, basis, &local_path, &remote_path, limits))
         })
         .await
         .map_err(NativeDirectoryError::Runtime)?
+}
+
+fn prepare_native_directory_owned(
+    cx: &Cx,
+    basis: NativePlanBaseline,
+    local_path: &Path,
+    remote_path: &Path,
+    limits: NativeDirectoryLimits,
+) -> Result<PreparedNativeDirectorySync, NativeDirectoryError> {
+    let local_root = NativeRoot::open(local_path)?;
+    let remote_root = NativeRoot::open(remote_path)?;
+    disjoint_roots(&local_root, &remote_root)?;
+    let local = scan_root(cx, local_root, limits)?;
+    let remote = scan_root(cx, remote_root, limits)?;
+    disjoint_inventories(&local, &remote)?;
+    // Local may have changed while remote was being scanned.
+    local.root.revalidate()?;
+    revalidate_stamps(cx, &local)?;
+    let (baseline, domain): (&DirectoryManifest, &[u8]) = match &basis {
+        NativePlanBaseline::Common(baseline) => {
+            (baseline, b"asupersync.native-directory-plan.v1\0")
+        }
+        NativePlanBaseline::Destination => {
+            (&remote.manifest, b"asupersync.native-directory-mirror-plan.v1\0")
+        }
+    };
+    let preview = plan_bidirectional_sync(baseline, &local.manifest, &remote.manifest)
+        .map_err(NativeDirectoryError::Plan)?;
+    let mut identity = Sha256::new();
+    identity.update(domain);
+    identity.update(baseline.tree_root());
+    for snapshot in [&local, &remote] {
+        identity.update(snapshot.root.path.as_os_str().as_encoded_bytes());
+        identity.update([0]);
+        identity.update(snapshot.root.identity.device.to_be_bytes());
+        identity.update(snapshot.root.identity.inode.to_be_bytes());
+        identity.update(snapshot.manifest.tree_root());
+    }
+    Ok(PreparedNativeDirectorySync {
+        local,
+        remote,
+        limits,
+        preview,
+        plan_id: hex::encode(identity.finalize()),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
