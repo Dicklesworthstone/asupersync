@@ -1269,10 +1269,15 @@ impl ServerRequestRegion {
     ///
     /// Protocol drivers that already receive `&Cx` should use this constructor
     /// instead of relying on ambient task-local state. The child inherits the
-    /// connection's drivers and runtime capability mask, receives independent
-    /// cancellation state, and installs the tightened request budget without
-    /// any capability escalation. It also inherits the connection's spawn
-    /// route, so tasks it spawns belong to the connection's region.
+    /// connection's complete handle bundle, capability/resource restrictions,
+    /// and task and region identity. Its budget is the meet of the requested
+    /// budget and the connection's current budget, so it cannot loosen either
+    /// deadline or quota. Spawned work belongs to the connection's region.
+    ///
+    /// Cancellation state remains independent. Protocol adapters forward
+    /// connection cancellation through [`Self::run_with_protocol_drain`]'s
+    /// `conn_cx` argument or their own cancellation race; cancelling this
+    /// request alone never cancels the connection.
     #[must_use]
     pub fn mint_from_connection(
         protocol: &'static str,
@@ -1297,18 +1302,7 @@ impl ServerRequestRegion {
         // the request subtree and can restore relinquished capabilities
         // (br-asupersync-m8xsjx H1/L3).
         if let Some(ambient) = ambient {
-            // Retain every task-local handle, including obligation admission
-            // and explicit capability budgets. Reconstructing a partial Cx
-            // here would silently shed those restrictions and accounting.
-            let cx = ambient.derive_cancel_scope();
-            let budget = cx.budget().meet(budget);
-            {
-                let mut inner = cx.inner.write();
-                inner.budget = budget;
-                // This independent context begins checkpoint accounting at
-                // its tightened snapshot, as other minted requests do.
-                inner.budget_baseline = budget;
-            }
+            let cx = Self::child_cx_from_connection(ambient, budget);
             if let Some(reason) = ambient.observable_cancel_reason() {
                 cx.inherit_cancel(&reason);
             }
@@ -1330,38 +1324,18 @@ impl ServerRequestRegion {
     }
 
     fn child_cx_from_connection(connection_cx: &Cx, budget: Budget) -> Cx {
-        let region = connection_cx.region_id();
-        let task = connection_cx.task_id();
-        let mut cx = Cx::new_with_drivers(
-            region,
-            task,
-            budget,
-            Some(connection_cx.child_observability(region, task)),
-            connection_cx.io_driver_handle(),
-            connection_cx.io_cap_handle(),
-            connection_cx.timer_driver(),
-            Some(connection_cx.child_entropy(task)),
-        )
-        .with_blocking_pool_handle(connection_cx.blocking_pool_handle())
-        .with_logical_clock(connection_cx.logical_clock_handle());
-        // A runtime-owned connection lends its spawn route: work the handler
-        // spawns is admitted into the connection's region, under that
-        // region's pending-spawn accounting. Without it `cx.spawn` from a
-        // request context failed with RuntimeUnavailable
-        // (br-asupersync-vqppo5). A detached connection context, which has
-        // no gateway, stays as it was.
-        if let Some(gateway) = connection_cx.spawn_gateway_handle() {
-            cx = cx
-                .with_spawn_gateway(Some(gateway))
-                .with_pending_spawn_counter(connection_cx.pending_spawn_counter_handle());
+        // Keep every task-local handle and resource envelope, including the
+        // region's obligation admission, registry and spawn accounting. A
+        // partial constructor can lose those without changing the bit mask.
+        let cx = connection_cx.derive_request_scope();
+        let budget = cx.budget().meet(budget);
+        {
+            let mut inner = cx.inner.write();
+            inner.budget = budget;
+            // The derived context begins its independent checkpoint ledger
+            // at this tightened snapshot, without replenishing its caller.
+            inner.budget_baseline = budget;
         }
-        if let Some(trace) = connection_cx.trace_buffer() {
-            cx.set_trace_buffer(trace);
-        }
-        if let Some(history) = connection_cx.loser_drain_history_handle() {
-            cx.set_loser_drain_history_handle(history);
-        }
-        cx.runtime_mask = connection_cx.runtime_mask;
         cx
     }
 

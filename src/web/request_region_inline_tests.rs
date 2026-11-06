@@ -892,6 +892,398 @@
                     RootDrainOutcome::Quiescent);
             }
         }
+
+
+        #[test]
+        fn native_request_metadata_isolated_from_caller_and_sibling_requests() {
+            native(|owner| async move {
+                owner.set_request_id("connection");
+                for explicit in [false, true] {
+                    let request = || {
+                        if explicit {
+                            ServerRequestRegion::mint_from_connection(
+                                "metadata-test", Budget::INFINITE, owner.now(), &owner,
+                            )
+                        } else {
+                            ServerRequestRegion::mint("metadata-test", Budget::INFINITE, owner.now())
+                                .unwrap()
+                        }
+                    };
+                    let first = request();
+                    let second = request();
+                    assert_eq!(first.cx().request_id().as_deref(), Some("connection"));
+                    assert_eq!(second.cx().request_id().as_deref(), Some("connection"));
+                    first.cx().set_request_id("first");
+                    second.cx().set_request_id("second");
+                    assert_eq!(first.cx().request_id().as_deref(), Some("first"));
+                    assert_eq!(second.cx().request_id().as_deref(), Some("second"));
+                    assert_eq!(owner.request_id().as_deref(), Some("connection"));
+                    assert_eq!(Cx::current().unwrap().request_id().as_deref(), Some("connection"));
+                }
+            });
+        }
+
+        async fn explicit_http1_keeps_connection_authority(cx: Cx, allow_spawn: bool) {
+            use crate::cx::registry::{NameRegistry, RegistryHandle};
+            use crate::http::h1::server::{HostPolicy, Http1Config, Http1StreamingServer};
+            use crate::http::h1::types::Response as HttpResponse;
+
+            let deadline = cx.now() + Duration::from_secs(60);
+            let envelope = crate::types::CapabilityBudget::new().with_io_bytes(256);
+            let mut spec = ChildRegionSpec::inherit().with_budget(
+                Budget::INFINITE.with_deadline(deadline)
+                    .with_poll_quota(10_000).with_cost_quota(5_000),
+            );
+            spec.capability_budget = Some(envelope);
+            let region = cx.open_child_region(spec).await.unwrap();
+            let region_id = region.region_id();
+            let mut task = region.cx().spawn(move |owner| async move {
+                let registry = RegistryHandle::new(Arc::new(NameRegistry::new()));
+                let pressure = Arc::new(crate::types::SystemPressure::with_headroom(0.5));
+                let explicit = owner.clone()
+                    .with_registry_handle(Some(registry.clone()))
+                    .with_pressure(Arc::clone(&pressure));
+                let explicit = if allow_spawn {
+                    let _guard = explicit.restrict::<cap::CapSet<true, true, true, false, false>>()
+                        .set_current_restricted();
+                    Cx::current().unwrap()
+                } else {
+                    let _guard = explicit.restrict::<cap::CapSet<false, true, true, false, false>>()
+                        .set_current_restricted();
+                    Cx::current().unwrap()
+                };
+                // The polling task remains fully capable. Only the explicit
+                // connection argument carries these handles and restrictions.
+                assert!(Cx::current().unwrap().capabilities().io);
+                let owner_task = owner.task_id();
+                let now = explicit.now();
+                let retained = Arc::new(parking_lot::Mutex::new(None));
+                let retained_by_handler = Arc::clone(&retained);
+                let calls = Arc::new(AtomicUsize::new(0));
+                let handler_calls = Arc::clone(&calls);
+                let config = Http1Config::default()
+                    .host_policy(HostPolicy::AllowList(vec!["localhost".to_owned()]))
+                    .request_timeout(Some(Duration::from_secs(300)));
+                let server = Http1StreamingServer::with_config(move |request_cx: Cx, request| {
+                    let registry = registry.clone();
+                    let pressure = Arc::clone(&pressure);
+                    let retained = Arc::clone(&retained_by_handler);
+                    let calls = Arc::clone(&handler_calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let ambient = Cx::current().unwrap();
+                        assert_eq!(ambient.region_id(), region_id);
+                        assert_eq!(ambient.task_id(), owner_task);
+                        assert_eq!(request_cx.region_id(), region_id);
+                        assert_eq!(request_cx.task_id(), owner_task);
+                        assert_eq!(request_cx.now(), now);
+                        assert_eq!(request_cx.budget().deadline, Some(deadline));
+                        assert_eq!(request_cx.capability_budget(), envelope);
+                        assert_eq!(ambient.capability_budget(), envelope);
+                        assert_eq!(request_cx.capabilities().spawn, allow_spawn);
+                        assert!(!request_cx.capabilities().io);
+                        assert!(!ambient.capabilities().io);
+                        assert!(!ambient.capabilities().remote);
+                        assert!(Arc::ptr_eq(&request_cx.registry_handle().unwrap().as_arc(),
+                            &registry.as_arc()));
+                        assert!(Arc::ptr_eq(&request_cx.pressure_handle().unwrap(), &pressure));
+                        let obligation = request_cx.try_register_obligation_checked(
+                            ObligationKind::IoOp, owner_task,
+                        ).unwrap().expect("explicit HTTP requests retain runtime obligation admission");
+                        assert_eq!(obligation.region(), region_id);
+                        assert!(obligation.commit());
+
+                        if allow_spawn {
+                            let mut child = request_cx.spawn(move |child_cx| async move {
+                                assert_eq!(child_cx.region_id(), region_id);
+                                assert_eq!(child_cx.capability_budget(), envelope);
+                                assert!(!child_cx.capabilities().io);
+                                assert!(Arc::ptr_eq(&child_cx.registry_handle().unwrap().as_arc(),
+                                    &registry.as_arc()));
+                                assert!(Arc::ptr_eq(&child_cx.pressure_handle().unwrap(), &pressure));
+                            }).unwrap();
+                            child.join(&request_cx).await.unwrap();
+                        } else {
+                            let factories = Arc::new(AtomicUsize::new(0));
+                            let invoked = Arc::clone(&factories);
+                            assert!(matches!(request_cx.spawn(move |_| {
+                                invoked.fetch_add(1, Ordering::SeqCst);
+                                async {}
+                            }), Err(crate::runtime::SpawnError::RuntimeUnavailable)));
+                            assert_eq!(factories.load(Ordering::SeqCst), 0);
+                        }
+                        *retained.lock() = Some(request_cx);
+                        HttpResponse::new(200, "OK", request.head.uri.into_bytes())
+                    }
+                }, config);
+                let request = b"GET /authority HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+                let mut transport = std::io::Cursor::new(request.to_vec());
+                let state = server.serve(&explicit, &mut transport).await.unwrap();
+                assert_eq!(state.requests_served, 1);
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                let wire = &transport.get_ref()[request.len()..];
+                assert!(wire.starts_with(b"HTTP/1.1 200 OK\r\n"));
+                assert!(wire.ends_with(b"/authority"));
+                assert!(!explicit.is_cancel_requested());
+                assert!(!owner.is_cancel_requested());
+                let request_cx = retained.lock().take().unwrap();
+                request_cx
+            }).unwrap();
+            let retired_request = task.join(&cx).await.unwrap();
+            assert!(matches!(retired_request.try_register_obligation_checked(
+                ObligationKind::IoOp, retired_request.task_id(),
+            ), Err(crate::runtime::obligation_mailbox::ObligationAdmissionError::HolderNotLive)),
+                "a retained request cannot register untracked work after its actual holder retires");
+            region.close().await.unwrap();
+        }
+
+        #[test]
+        fn native_explicit_http1_streaming_preserves_connection_authority_and_obligation_liveness() {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100_000)));
+            native_with_timer(Some(TimerDriverHandle::with_virtual_clock(clock)), |cx| async move {
+                for allow_spawn in [true, false] {
+                    explicit_http1_keeps_connection_authority(cx.clone(), allow_spawn).await;
+                }
+            });
+        }
+
+        async fn explicit_request_keeps_budget_and_protocol_cancellation(cx: Cx) {
+            let budget = Budget::INFINITE.with_deadline(cx.now() + Duration::from_secs(30))
+                .with_poll_quota(1_000).with_cost_quota(50).with_priority(192);
+            let region = cx.open_child_region(ChildRegionSpec::inherit().with_budget(budget))
+                .await.unwrap();
+            let mut task = region.cx().spawn(move |owner| async move {
+                let now = owner.now();
+                let inherited = owner.budget();
+                let loose = ServerRequestRegion::mint_from_connection(
+                    "explicit-test", Budget::INFINITE, now, &owner,
+                );
+                assert_eq!(loose.cx().budget(), inherited);
+                let tighter = Budget::INFINITE.with_deadline(now + Duration::from_secs(5))
+                    .with_poll_quota(17).with_cost_quota(11).with_priority(240);
+                let tight = ServerRequestRegion::mint_from_connection(
+                    "explicit-test", tighter, now, &owner,
+                );
+                assert_eq!(tight.cx().budget(), tighter);
+                tight.cancel_timeout("request timeout leaves connection usable");
+                assert!(!owner.is_cancel_requested());
+                assert_eq!(owner.budget(), inherited);
+
+                let connection = owner.derive_cancel_scope();
+                let request = ServerRequestRegion::mint_from_connection(
+                    "explicit-test", Budget::INFINITE, now, &connection,
+                );
+                let (started, mut handler_started) = oneshot::channel();
+                let mut running = Box::pin(request.run_with_protocol_drain(
+                    RequestBudgetSource::Inherited, Some(connection.clone()),
+                    Duration::from_secs(1), async move {
+                        let call = Cx::current().unwrap();
+                        parked_until_cancelled(&call, started).await;
+                        assert!(call.cancelled_by(CancelKind::ParentCancelled));
+                        42_u8
+                    },
+                ));
+                let mut ready = pin!(handler_started.recv(&owner));
+                poll_fn(|task| {
+                    assert!(running.as_mut().poll(task).is_pending());
+                    ready.as_mut().poll(task)
+                }).await.unwrap();
+                connection.cancel_with(CancelKind::User, Some("explicit connection closed"));
+                assert!(matches!(running.await, ServerHopOutcome::Ok(42)),
+                    "the existing protocol drain must preserve a completed cleanup response");
+                assert!(!owner.is_cancel_requested());
+
+                let refused: ServerHopOutcome<()> = ServerRequestRegion::mint_from_connection(
+                    "explicit-test", Budget::INFINITE, now, &connection,
+                ).run_with_protocol_drain(
+                    RequestBudgetSource::Inherited, Some(connection), Duration::ZERO,
+                    async { panic!("a cancelled explicit connection cannot start its handler") },
+                ).await;
+                assert!(matches!(refused, ServerHopOutcome::Cancelled));
+            }).unwrap();
+            task.join(&cx).await.unwrap();
+            region.close().await.unwrap();
+        }
+
+        #[test]
+        fn native_explicit_request_clamps_budget_and_keeps_protocol_cancellation_independent() {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(110_000)));
+            native_with_timer(Some(TimerDriverHandle::with_virtual_clock(clock)),
+                explicit_request_keeps_budget_and_protocol_cancellation);
+        }
+
+        struct MaskWakeProbe {
+            parent: Cx,
+            calls: AtomicUsize,
+            lock_held: std::sync::atomic::AtomicBool,
+        }
+
+        impl MaskWakeProbe {
+            fn new(parent: Cx) -> Self {
+                Self {
+                    parent,
+                    calls: AtomicUsize::new(0),
+                    lock_held: std::sync::atomic::AtomicBool::new(false),
+                }
+            }
+
+            fn record(&self) {
+                if self.parent.inner.try_read().is_none() {
+                    self.lock_held.store(true, Ordering::SeqCst);
+                }
+                self.calls.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl std::task::Wake for MaskWakeProbe {
+            fn wake(self: Arc<Self>) {
+                self.record();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.record();
+            }
+        }
+
+        #[test]
+        fn native_mask_exit_wakes_parked_minted_requests_after_outermost_unmask() {
+            #[derive(Clone, Copy)]
+            enum Cancellation {
+                BeforeMask,
+                WhileMasked,
+                DeferredWhileMasked,
+            }
+
+            native(|owner| async move {
+                for cancellation in [
+                    Cancellation::BeforeMask,
+                    Cancellation::WhileMasked,
+                    Cancellation::DeferredWhileMasked,
+                ] {
+                    // This logical parent has no scheduler cancellation Waker;
+                    // only the instrumented request subscribes to its state.
+                    let parent = owner.derive_cancel_scope();
+                    if matches!(cancellation, Cancellation::BeforeMask) {
+                        parent.cancel_with(CancelKind::User, Some("masked request parent"));
+                    }
+                    let probe = Arc::new(MaskWakeProbe::new(parent.clone()));
+                    let waker = std::task::Waker::from(Arc::clone(&probe));
+                    let mut task = std::task::Context::from_waker(&waker);
+                    let (request, mut running) = parent.masked(|| {
+                        let _ambient = Cx::set_current(Some(parent.clone()));
+                        let request = ServerRequestRegion::mint(
+                            "masked-parent-test", Budget::INFINITE, parent.now(),
+                        ).unwrap();
+                        let mut running = Box::pin(request.instrumented(
+                            RequestBudgetSource::Inherited,
+                            async {
+                                let request_cx = Cx::current().unwrap();
+                                request_cx.cancelled().await;
+                                request_cx.cancel_reason().unwrap()
+                            },
+                        ));
+                        assert!(running.as_mut().poll(&mut task).is_pending());
+                        assert_eq!(parent.inner.read().cancel_waker_registrations.len(), 1);
+                        assert_eq!(request.cx().inner.read().cancel_waker_registrations.len(), 1);
+                        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+
+                        match cancellation {
+                            Cancellation::BeforeMask => {}
+                            Cancellation::WhileMasked => {
+                                parent.cancel_with(CancelKind::User, Some("masked request parent"));
+                                assert_eq!(probe.calls.swap(0, Ordering::SeqCst), 1);
+                                // Consume the original wake while cancellation
+                                // remains hidden by the outer mask.
+                                assert!(running.as_mut().poll(&mut task).is_pending());
+                            }
+                            Cancellation::DeferredWhileMasked => {
+                                // Model the same deferred wake debt created by
+                                // checkpoint-budget cancellation.
+                                parent.set_cancel_internal(true);
+                                assert!(parent.inner.read().cancel_wakers_pending);
+                            }
+                        }
+
+                        parent.masked(|| {
+                            assert!(running.as_mut().poll(&mut task).is_pending());
+                            assert!(!request.cx().is_cancel_requested());
+                        });
+                        assert_eq!(probe.calls.load(Ordering::SeqCst), 0,
+                            "an inner mask exit cannot publish observable cancellation");
+                        if matches!(cancellation, Cancellation::DeferredWhileMasked) {
+                            assert!(parent.inner.read().cancel_wakers_pending,
+                                "inner mask exit must preserve deferred wake debt");
+                        }
+                        (request, running)
+                    });
+
+                    assert_eq!(probe.calls.load(Ordering::SeqCst), 1,
+                        "outermost mask exit must wake a parked derived request");
+                    assert!(!probe.lock_held.load(Ordering::SeqCst),
+                        "a cancellation callback must not run under the Cx lock");
+                    assert!(!parent.inner.read().cancel_wakers_pending);
+                    let Poll::Ready(reason) = running.as_mut().poll(&mut task) else {
+                        panic!("the unmasked request must observe parent cancellation");
+                    };
+                    let expected = if matches!(cancellation, Cancellation::DeferredWhileMasked) {
+                        CancelKind::ParentCancelled
+                    } else {
+                        CancelKind::User
+                    };
+                    assert_eq!(reason.kind, expected);
+                    drop(running);
+                    assert!(parent.inner.read().cancel_waker_registrations.is_empty());
+                    assert!(request.cx().inner.read().cancel_waker_registrations.is_empty());
+                    assert!(!owner.is_cancel_requested());
+                }
+            });
+        }
+
+        #[test]
+        fn native_mask_exit_does_not_wake_uncancelled_or_dropped_request_waiters() {
+            native(|owner| async move {
+                for drop_while_masked in [false, true] {
+                    let parent = owner.derive_cancel_scope();
+                    if drop_while_masked {
+                        parent.cancel_with(CancelKind::User, Some("drop masked request"));
+                    }
+                    let probe = Arc::new(MaskWakeProbe::new(parent.clone()));
+                    let waker = std::task::Waker::from(Arc::clone(&probe));
+                    let mut task = std::task::Context::from_waker(&waker);
+                    let (request, running) = parent.masked(|| {
+                        let _ambient = Cx::set_current(Some(parent.clone()));
+                        let request = ServerRequestRegion::mint(
+                            "masked-drop-test", Budget::INFINITE, parent.now(),
+                        ).unwrap();
+                        let mut running = Box::pin(request.instrumented(
+                            RequestBudgetSource::Inherited,
+                            async {
+                                let request_cx = Cx::current().unwrap();
+                                request_cx.cancelled().await;
+                            },
+                        ));
+                        assert!(running.as_mut().poll(&mut task).is_pending());
+                        let running = if drop_while_masked {
+                            drop(running);
+                            None
+                        } else {
+                            Some(running)
+                        };
+                        (request, running)
+                    });
+                    assert_eq!(probe.calls.load(Ordering::SeqCst), 0,
+                        "unmasking cannot wake an uncancelled or retired waiter");
+                    drop(running);
+                    assert!(parent.inner.read().cancel_waker_registrations.is_empty());
+                    assert!(request.cx().inner.read().cancel_waker_registrations.is_empty());
+                    parent.cancel_with(CancelKind::User, Some("after waiter retirement"));
+                    assert_eq!(probe.calls.load(Ordering::SeqCst), 0,
+                        "dropping instrumentation must retire its parent subscription");
+                    assert!(!probe.lock_held.load(Ordering::SeqCst));
+                    assert!(!owner.is_cancel_requested());
+                }
+            });
+        }
     }
 
     #[test]

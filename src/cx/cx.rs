@@ -735,13 +735,26 @@ impl Drop for MaskGuard<'_> {
     /// Implements `inv.cancel.mask_monotone` (#12): mask_depth only decreases
     /// during cancel processing. `saturating_sub` ensures no underflow.
     fn drop(&mut self) {
-        let mut inner = self.inner.write();
-        inner.mask_depth = inner.mask_depth.saturating_sub(1);
-        drop(inner);
+        let effects = {
+            let mut inner = self.inner.write();
+            let outermost = inner.mask_depth == 1;
+            inner.mask_depth = inner.mask_depth.saturating_sub(1);
+            if outermost && inner.is_cancel_requested() {
+                // A waiter may have consumed the original cancellation wake
+                // while it was masked. Making cancellation observable again
+                // must wake the current subscribers after releasing the lock.
+                let wakers = inner.cancel_waker_snapshot();
+                inner.cancel_wakers_pending = false;
+                crate::types::task_context::CancelWakeEffects::new(wakers)
+            } else {
+                crate::types::task_context::CancelWakeEffects::empty()
+            }
+        };
         super::cancel_observation::record(
             self.inner,
             super::cancel_observation::CancelObservation::MaskExit,
         );
+        effects.dispatch();
     }
 }
 
@@ -4192,6 +4205,28 @@ impl<Caps> Cx<Caps> {
             runtime_mask: self.runtime_mask,
             _caps: PhantomData,
         }
+    }
+
+    /// Derives one logical request without creating another runtime task.
+    ///
+    /// Retains the task's complete authority and resource envelope while
+    /// giving the request independent cancellation and diagnostic state.
+    /// The observability and entropy forks match request construction's
+    /// historical behavior: sibling request IDs/spans cannot overwrite one
+    /// another, and deterministic entropy forks keep their admission order.
+    /// The caller still forwards parent cancellation and tightens the budget.
+    #[must_use]
+    pub(crate) fn derive_request_scope(&self) -> Self {
+        let mut request = self.derive_cancel_scope();
+        let region = request.region_id();
+        let task = request.task_id();
+        request.observability = Arc::new(parking_lot::RwLock::new(
+            self.child_observability(region, task),
+        ));
+        // User entropy forks are contained by child_entropy and run without
+        // holding either context's lock.
+        Arc::make_mut(&mut request.handles).entropy = self.child_entropy(task);
+        request
     }
 
     /// The reason to pass on to derived scopes, if this context's
