@@ -1680,6 +1680,33 @@ fn rank_status_for_block(
     let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
     let block_seed = seed_for_block(object_id, plan.sbn);
     let decoder = InactivationDecoder::new(plan.k, symbol_size, block_seed);
+
+    // RFC 6330 Section 5.6 chooses J so the full systematic matrix A is
+    // invertible. Its precode rows, K..K' padding rows, and any distinct
+    // subset of canonical source rows are therefore independent: their rank
+    // is S + H + (K' - K) + received_sources = L - K + received_sources.
+    // Recheck the current plan because metadata can change after admission.
+    // Leave duplicates, malformed rows, and every repair-bearing set on the
+    // general path so its validation and error precedence remain unchanged.
+    if symbols.len() <= plan.k
+        && symbols.iter().all(|symbol| {
+            symbol.kind() == SymbolKind::Source
+                && (symbol.esi() as usize) < plan.k
+                && symbol.len() == symbol_size
+        })
+    {
+        let source_esis: HashSet<_> = symbols.iter().map(Symbol::esi).collect();
+        if source_esis.len() == symbols.len() {
+            let columns = decoder.params().l;
+            let deficit = plan.k - source_esis.len();
+            return Ok(RankStatus {
+                rank: columns - deficit,
+                columns,
+                deficit,
+            });
+        }
+    }
+
     let received = received_symbols_for_block(plan, symbols, &decoder)?;
     decoder.rank_status(&received).map_err(|err| match err {
         RaptorDecodeError::SymbolSizeMismatch { expected, actual } => {

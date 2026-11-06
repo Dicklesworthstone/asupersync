@@ -1344,6 +1344,172 @@
         crate::test_complete!("block_status_collecting_after_partial_feed");
     }
 
+    #[test]
+    fn source_only_rank_matches_general_analysis_for_subsets_and_padding() {
+        let object_id = ObjectId::new_for_test(124);
+        let symbol_size = 8;
+        for k in [1, 4, 10, 11, 13, 49, 50, 101] {
+            let plan = BlockPlan {
+                sbn: 3,
+                len: k * symbol_size,
+                k,
+            };
+            let source_sets = [
+                Vec::new(),
+                vec![0],
+                vec![k - 1],
+                (0..k).step_by(2).collect(),
+                (0..k - 1).collect(),
+                (0..k).collect(),
+            ];
+            for esis in source_sets {
+                let sources: Vec<_> = esis
+                    .iter()
+                    .map(|&esi| {
+                        Symbol::new(
+                            SymbolId::new(object_id, plan.sbn, esi as u32),
+                            vec![esi as u8; symbol_size],
+                            SymbolKind::Source,
+                        )
+                    })
+                    .collect();
+                for reversed in [false, true] {
+                    let mut symbols = sources.clone();
+                    if reversed {
+                        symbols.reverse();
+                    }
+                    let received_object = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
+                    let decoder = InactivationDecoder::new(
+                        k,
+                        symbol_size,
+                        seed_for_block(received_object, plan.sbn),
+                    );
+                    // Call the general coefficient path directly, including
+                    // real precode and implicit padding, as the rank oracle.
+                    let received = received_symbols_for_block(&plan, &symbols, &decoder).unwrap();
+                    let expected = decoder.rank_status(&received).unwrap();
+                    let actual = crate::raptorq::systematic::with_constraint_matrix_cell_limit(
+                        0,
+                        || rank_status_for_block(&plan, &symbols, symbol_size),
+                    )
+                    .unwrap();
+                    assert_eq!(actual, expected, "K={k}, ESIs={esis:?}, reversed={reversed}");
+                    assert_eq!(actual.deficit, k - esis.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_only_rank_keeps_general_validation_for_duplicates_invalid_and_mixed_rows() {
+        fn assert_general_fallback(plan: &BlockPlan, symbols: &[Symbol], symbol_size: usize) {
+            let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
+            let decoder = InactivationDecoder::new(
+                plan.k,
+                symbol_size,
+                seed_for_block(object_id, plan.sbn),
+            );
+            let actual = rank_status_for_block(plan, symbols, symbol_size);
+            let received = match received_symbols_for_block(plan, symbols, &decoder) {
+                Ok(received) => received,
+                Err(expected) => {
+                    assert_eq!(actual.unwrap_err().to_string(), expected.to_string());
+                    return;
+                }
+            };
+            match (actual, decoder.rank_status(&received)) {
+                (Ok(actual), Ok(expected)) => assert_eq!(actual, expected),
+                (
+                    Err(DecodingError::SymbolSizeMismatch { expected, actual }),
+                    Err(RaptorDecodeError::SymbolSizeMismatch {
+                        expected: reference_expected,
+                        actual: reference_actual,
+                    }),
+                ) => {
+                    assert_eq!(usize::from(expected), reference_expected);
+                    assert_eq!(actual, reference_actual);
+                }
+                (Err(DecodingError::MatrixInversionFailed { reason }), Err(expected)) => {
+                    assert_eq!(reason, format!("{expected:?}"));
+                }
+                (actual, expected) => {
+                    panic!("pipeline/general mismatch: actual={actual:?}, expected={expected:?}");
+                }
+            }
+        }
+
+        let object_id = ObjectId::new_for_test(125);
+        let symbol_size = 4;
+        let plan = BlockPlan {
+            sbn: 0,
+            len: 44,
+            k: 11,
+        };
+        let source = |esi, data| {
+            Symbol::new(
+                SymbolId::new(object_id, plan.sbn, esi),
+                data,
+                SymbolKind::Source,
+            )
+        };
+        let repair = |esi| {
+            Symbol::new(
+                SymbolId::new(object_id, plan.sbn, esi),
+                vec![0; symbol_size],
+                SymbolKind::Repair,
+            )
+        };
+        let cases = [
+            vec![source(0, vec![0; symbol_size]), source(0, vec![0; symbol_size])],
+            vec![source(0, vec![0; symbol_size]), source(0, vec![1; symbol_size])],
+            vec![source(11, vec![0; symbol_size])],
+            vec![source(u32::MAX, vec![0; symbol_size])],
+            vec![source(0, vec![0; symbol_size - 1])],
+            // Metadata validation precedes payload-size validation in the
+            // existing general path, even when the short payload is first.
+            vec![source(0, vec![0; symbol_size - 1]), source(11, vec![0; symbol_size])],
+            vec![source(0, vec![0; symbol_size]), repair(11)],
+            vec![repair(11), repair(11)],
+            vec![repair(10)],
+            vec![source(0, vec![0; symbol_size - 1]), repair(11)],
+        ];
+        for symbols in cases {
+            assert_general_fallback(&plan, &symbols, symbol_size);
+        }
+
+        // Preserve the pre-existing K=0 result before any row validation or
+        // decoder construction, including when rows are otherwise malformed.
+        let empty_plan = BlockPlan { sbn: 0, len: 0, k: 0 };
+        assert_eq!(
+            rank_status_for_block(&empty_plan, &[source(u32::MAX, vec![])], symbol_size).unwrap(),
+            RankStatus { rank: 0, columns: 0, deficit: 0 }
+        );
+    }
+
+    #[test]
+    fn max_rfc_source_only_rank_avoids_dense_coefficient_allocation() {
+        let k = 56_403;
+        let symbol_size = 1;
+        let object_id = ObjectId::new_for_test(126);
+        let plan = BlockPlan { sbn: 0, len: k, k };
+        let symbols: Vec<_> = (0..k)
+            .filter(|&esi| esi != k / 2)
+            .map(|esi| {
+                Symbol::new(
+                    SymbolId::new(object_id, plan.sbn, esi as u32),
+                    vec![0; symbol_size],
+                    SymbolKind::Source,
+                )
+            })
+            .collect();
+        let actual = crate::raptorq::systematic::with_constraint_matrix_cell_limit(0, || {
+            rank_status_for_block(&plan, &symbols, symbol_size)
+        })
+        .unwrap();
+        let columns = SystematicParams::for_source_block(k, symbol_size).l;
+        assert_eq!(actual, RankStatus { rank: columns - 1, columns, deficit: 1 });
+    }
+
     /// br-asupersync-w9yojl: the ATP QUIC receiver asks for every block's
     /// status on every feedback round, and atpd's listener does not
     /// authenticate clients. A round that saw no new symbol for a block
