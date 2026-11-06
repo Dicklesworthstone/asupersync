@@ -296,6 +296,241 @@
         );
     }
 
+    // Keep the former all-pairs definition as an independent small-input
+    // oracle for the indexed implementation. Both use the existing resource
+    // classification; this reference deliberately retains every dependency.
+    fn pairwise_replay_canonicalization(events: &[ReplayEvent]) -> Vec<ReplayEvent> {
+        let mut layered = Vec::with_capacity(events.len());
+        for (index, event) in events.iter().enumerate() {
+            let (global, resources) = replay_event_resources(event);
+            let layer = layered
+                .iter()
+                .filter(|(_, previous, _)| {
+                    let (previous_global, previous_resources) = replay_event_resources(previous);
+                    global
+                        || previous_global
+                        || resources
+                            .iter()
+                            .any(|resource| previous_resources.contains(resource))
+                })
+                .map(|(layer, _, _)| *layer + 1)
+                .max()
+                .unwrap_or(0);
+            layered.push((layer, event.clone(), index));
+        }
+        layered.sort_by_key(|(layer, event, index)| {
+            (*layer, replay_event_sort_key(event), *index)
+        });
+        layered.into_iter().map(|(_, event, _)| event).collect()
+    }
+
+    fn replay_canonicalization_corpus() -> Vec<ReplayEvent> {
+        vec![
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(2),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskYielded {
+                task: CompactTaskId(1),
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(1),
+                outcome: 0,
+            },
+            ReplayEvent::TaskSpawned {
+                task: CompactTaskId(2),
+                region: CompactRegionId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TimeAdvanced {
+                from_nanos: 0,
+                to_nanos: 1,
+            },
+            ReplayEvent::TimerCreated {
+                timer_id: 1,
+                deadline_nanos: 9,
+            },
+            ReplayEvent::TimerFired { timer_id: 1 },
+            ReplayEvent::TimerCancelled { timer_id: 1 },
+            ReplayEvent::IoReady {
+                token: 1,
+                readiness: 1,
+            },
+            ReplayEvent::IoResult { token: 1, bytes: 9 },
+            ReplayEvent::IoError { token: 1, kind: 3 },
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::RngValue { value: 9 },
+            ReplayEvent::ChaosInjection {
+                kind: 0,
+                task: Some(CompactTaskId(1)),
+                data: 1,
+            },
+            ReplayEvent::ChaosInjection {
+                kind: 0,
+                task: None,
+                data: 1,
+            },
+            ReplayEvent::RegionCreated {
+                region: CompactRegionId(1),
+                parent: None,
+                at_tick: 0,
+            },
+            ReplayEvent::RegionCreated {
+                region: CompactRegionId(2),
+                parent: Some(CompactRegionId(1)),
+                at_tick: 0,
+            },
+            ReplayEvent::RegionCreated {
+                region: CompactRegionId(1),
+                parent: Some(CompactRegionId(1)),
+                at_tick: 0,
+            },
+            ReplayEvent::RegionClosed {
+                region: CompactRegionId(1),
+                outcome: 0,
+            },
+            ReplayEvent::RegionCancelled {
+                region: CompactRegionId(1),
+                cancel_kind: 1,
+            },
+            ReplayEvent::WakerWake {
+                task: CompactTaskId(1),
+            },
+            ReplayEvent::WakerBatchWake { count: 1 },
+            ReplayEvent::Checkpoint {
+                sequence: 0,
+                time_nanos: 0,
+                active_tasks: 1,
+                active_regions: 1,
+            },
+        ]
+    }
+
+    #[test]
+    fn replay_canonicalization_matches_pairwise_reference() {
+        let corpus = replay_canonicalization_corpus();
+        assert!(canonicalize_replay_events(&[]).is_empty());
+        for first in &corpus {
+            assert_eq!(
+                canonicalize_replay_events(std::slice::from_ref(first)),
+                vec![first.clone()]
+            );
+            for second in &corpus {
+                for third in &corpus {
+                    let events = [first.clone(), second.clone(), third.clone()];
+                    assert_eq!(
+                        canonicalize_replay_events(&events),
+                        pairwise_replay_canonicalization(&events),
+                        "dependency triple: {events:?}"
+                    );
+                }
+            }
+        }
+
+        // Longer deterministic walks exercise transitive chains and several
+        // fences, without adding a wall-clock performance assertion.
+        for seed in 0..32_u64 {
+            let mut state = seed;
+            let events: Vec<_> = (0..96)
+                .map(|_| {
+                    state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                    corpus[(state >> 32) as usize % corpus.len()].clone()
+                })
+                .collect();
+            assert_eq!(
+                canonicalize_replay_events(&events),
+                pairwise_replay_canonicalization(&events),
+                "mixed replay seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_canonicalization_preserves_global_fences_and_resource_domains() {
+        let events = vec![
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(9),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskYielded {
+                task: CompactTaskId(9),
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(9),
+                outcome: 0,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(2),
+                at_tick: 0,
+            },
+            ReplayEvent::RngSeed { seed: 123 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(7),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::Checkpoint {
+                sequence: 0,
+                time_nanos: 0,
+                active_tasks: 1,
+                active_regions: 1,
+            },
+            ReplayEvent::RegionCreated {
+                region: CompactRegionId(4),
+                parent: Some(CompactRegionId(4)),
+                at_tick: 0,
+            },
+            ReplayEvent::RegionClosed {
+                region: CompactRegionId(4),
+                outcome: 0,
+            },
+            ReplayEvent::TimerCreated {
+                timer_id: 4,
+                deadline_nanos: 1,
+            },
+            ReplayEvent::IoReady {
+                token: 4,
+                readiness: 1,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(4),
+                at_tick: 0,
+            },
+        ];
+        // The first fence follows the deepest chain, not the most recent
+        // event. After the second fence, task/timer/I/O/region id 4 remain
+        // independent; a duplicate region inside one event adds no layer.
+        let expected: Vec<_> = [3, 0, 1, 2, 4, 6, 5, 7, 12, 10, 11, 8, 9]
+            .into_iter()
+            .map(|index| events[index].clone())
+            .collect();
+        assert_eq!(canonicalize_replay_events(&events), expected);
+    }
+
+    #[test]
+    fn replay_trace_diagnostics_accept_large_independent_reorderings() {
+        let events: Vec<_> = (0..16_384)
+            .map(|id| ReplayEvent::TaskScheduled {
+                task: CompactTaskId(id),
+                at_tick: 0,
+            })
+            .collect();
+        let reversed = events.iter().rev().cloned().collect();
+        let expected = make_trace(42, events);
+        let actual = make_trace(42, reversed);
+        assert!(
+            diagnose_replay_trace_divergence(&expected, &actual, &DiagnosticConfig::default())
+                .is_none()
+        );
+    }
+
     #[test]
     fn replay_trace_diagnostics_report_actual_after_context() {
         let expected = make_trace(

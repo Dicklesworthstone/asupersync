@@ -24,7 +24,7 @@
 use crate::trace::replay::{ReplayEvent, ReplayTrace};
 use crate::trace::replayer::DivergenceError;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 // =============================================================================
@@ -648,14 +648,37 @@ fn trace_exhausted_summary(index: usize, side: &str) -> EventSummary {
 
 fn canonicalize_replay_events(events: &[ReplayEvent]) -> Vec<ReplayEvent> {
     let mut layered = Vec::with_capacity(events.len());
+    let mut resource_next_layers = BTreeMap::new();
+    let mut global_floor = 0;
+    let mut next_global_layer = 0;
 
     for (source_index, event) in events.iter().enumerate() {
-        let layer = layered
-            .iter()
-            .filter(|(_, previous, _)| replay_events_dependent(previous, event))
-            .map(|(previous_layer, _, _)| *previous_layer + 1)
-            .max()
-            .unwrap_or(0);
+        let (global, resources) = replay_event_resources(event);
+        // Events touching the same resource form a strictly increasing chain
+        // of layers, so its latest layer subsumes every earlier dependency.
+        // A global event depends on the maximum layer of *all* prior events,
+        // including an older deep chain followed by independent shallow work.
+        let layer = if global {
+            next_global_layer
+        } else {
+            resources
+                .iter()
+                .filter_map(|resource| resource_next_layers.get(resource).copied())
+                .fold(global_floor, usize::max)
+        };
+        let next_layer = layer + 1;
+        if global {
+            global_floor = next_layer;
+            // The fence now dominates all earlier per-resource dependencies.
+            resource_next_layers.clear();
+        } else {
+            // Resolve the layer before updating any resource: one event may
+            // mention the same region as both its child and its parent.
+            for resource in resources {
+                resource_next_layers.insert(resource, next_layer);
+            }
+        }
+        next_global_layer = next_global_layer.max(next_layer);
 
         layered.push((layer, event.clone(), source_index));
     }
@@ -672,17 +695,6 @@ fn canonicalize_replay_events(events: &[ReplayEvent]) -> Vec<ReplayEvent> {
     );
 
     layered.into_iter().map(|(_, event, _)| event).collect()
-}
-
-fn replay_events_dependent(left: &ReplayEvent, right: &ReplayEvent) -> bool {
-    let (left_global, left_resources) = replay_event_resources(left);
-    let (right_global, right_resources) = replay_event_resources(right);
-
-    left_global
-        || right_global
-        || left_resources
-            .iter()
-            .any(|resource| right_resources.contains(resource))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

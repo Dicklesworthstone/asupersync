@@ -97,6 +97,14 @@ artifacts.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Replay diagnosis:** Foata canonicalization now indexes the latest
+  dependency layer for each resource instead of comparing every pair of
+  events. Global fences and canonical event ordering are preserved while
+  dependency tracking and sorting take O(n log n) work.
+  (`br-asupersync-tjr6s9`, M6.)
+
 ## [v0.6.2] - 2026-11-03
 
 ### Fixed: QUIC request retransmission storms (ATP)
