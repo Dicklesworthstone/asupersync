@@ -718,6 +718,24 @@ fn build_producer(
         .map_err(|err| map_rdkafka_error(&err, None))
 }
 
+/// Refuses, before a native Kafka call would start work of its own, when the runtime forbids blocking work.
+///
+/// The decision rides the pool handle the context inherited. A spawn-restricted context hides that handle from
+/// [`Cx::blocking_pool_handle`], and `run_kafka_blocking` then starts a dedicated thread, so this reads the
+/// stored handle instead. The error is the existing `Io` variant, as for any failed native call.
+#[cfg(any(feature = "kafka", test))]
+pub(crate) fn refuse_when_blocking_forbidden(cx: &Cx) -> Result<(), KafkaError> {
+    if cx
+        .blocking_pool_handle_for_inheritance()
+        .is_some_and(|pool| pool.forbids_blocking())
+    {
+        return Err(KafkaError::Io(
+            crate::runtime::spawn_blocking::forbidden_io_error(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(any(feature = "kafka", test))]
 pub(crate) async fn run_kafka_blocking<F, T>(cx: &Cx, f: F) -> T
 where
@@ -3146,6 +3164,11 @@ async fn run_owned_transaction_op<F>(
 where
     F: FnOnce() -> Result<(), KafkaError> + Send + 'static,
 {
+    // A runtime that forbids blocking work never starts the native call. The guard's own error path settles the
+    // operation, exactly as for a call that failed, and the error is the existing `Io` variant.
+    if let Err(error) = refuse_when_blocking_forbidden(cx) {
+        return operation.complete(Err(error));
+    }
     run_kafka_blocking(cx, move || {
         operation.started = true;
         let result = f();

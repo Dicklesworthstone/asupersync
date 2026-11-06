@@ -3921,3 +3921,127 @@
         // - This prevents credentials from persisting in memory after use
         // - Addresses HIGH security risk of plaintext password storage
     }
+
+    #[test]
+    fn transaction_operation_on_a_forbidden_blocking_pool_is_refused_with_a_typed_error_and_runs_nothing()
+     {
+        let forbidden_pool = crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        );
+        let producer = transaction_test_producer();
+        let generation = producer.activate_transaction().unwrap();
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(forbidden_pool.handle()));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let operation = TransactionOperationGuard::claim(
+            &producer.state,
+            generation,
+            TransactionOperation::Finalize,
+        )
+        .unwrap();
+        let ran_in_closure = Arc::clone(&ran);
+        let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+            ran_in_closure.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        match poll_transaction_test(future.as_mut()) {
+            std::task::Poll::Ready(Err(KafkaError::Io(error))) => {
+                assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+            }
+            other => panic!("a forbidden pool must refuse at once with an Io error, got {other:?}"),
+        }
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "the native call must not start"
+        );
+        assert!(
+            !producer.state.lock().operation_in_flight,
+            "the refused operation must not wedge the producer"
+        );
+        forbidden_pool.shutdown();
+
+        // Remove the plant: the same operation on an open pool runs its closure.
+        let producer = transaction_test_producer();
+        let generation = producer.activate_transaction().unwrap();
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let operation = TransactionOperationGuard::claim(
+            &producer.state,
+            generation,
+            TransactionOperation::Finalize,
+        )
+        .unwrap();
+        let ran_in_closure = Arc::clone(&ran);
+        let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+            ran_in_closure.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        let _ = poll_transaction_test(future.as_mut());
+        assert!(wait_transaction_test(|| ran.load(Ordering::SeqCst) == 1));
+        drop(future);
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_spawn_restricted_context_does_not_hide_a_forbidden_pool_from_the_kafka_guard() {
+        let forbidden_pool = crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        );
+        let mut cx = Cx::for_testing().with_blocking_pool_handle(Some(forbidden_pool.handle()));
+        cx.runtime_mask = crate::cx::cap::CapMask::none();
+        assert!(
+            cx.blocking_pool_handle().is_none(),
+            "the restriction hides the public handle, which is the case under test"
+        );
+        match refuse_when_blocking_forbidden(&cx) {
+            Err(KafkaError::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::Unsupported),
+            other => panic!("a restricted context must still see the forbidden pool, got {other:?}"),
+        }
+
+        // The owned transaction path refuses too, and runs nothing.
+        let producer = transaction_test_producer();
+        let generation = producer.activate_transaction().unwrap();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let operation = TransactionOperationGuard::claim(
+            &producer.state,
+            generation,
+            TransactionOperation::Finalize,
+        )
+        .unwrap();
+        let ran_in_closure = Arc::clone(&ran);
+        let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+            ran_in_closure.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        match poll_transaction_test(future.as_mut()) {
+            std::task::Poll::Ready(Err(KafkaError::Io(error))) => {
+                assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+            }
+            other => panic!("a restricted context must still be refused at once, got {other:?}"),
+        }
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "the native call must not start"
+        );
+        assert!(
+            !producer.state.lock().operation_in_flight,
+            "the refused operation must not wedge the producer"
+        );
+        forbidden_pool.shutdown();
+
+        // Remove the plant: the same restriction over an ordinary pool is not a refusal.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        let mut cx = Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+        cx.runtime_mask = crate::cx::cap::CapMask::none();
+        assert!(refuse_when_blocking_forbidden(&cx).is_ok());
+        assert!(open.shutdown_and_wait(Duration::from_secs(5)));
+    }

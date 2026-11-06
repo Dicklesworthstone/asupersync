@@ -22,7 +22,9 @@ use crate::messaging::kafka::{
     is_loopback_bootstrap_server,
 };
 #[cfg(feature = "kafka")]
-use crate::messaging::kafka::{apply_security_config, redacted_config_message};
+use crate::messaging::kafka::{
+    apply_security_config, redacted_config_message, refuse_when_blocking_forbidden,
+};
 #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 use crate::messaging::kafka::{
     deterministic_broker_end_offset, deterministic_broker_fetch, deterministic_broker_notify,
@@ -1698,6 +1700,7 @@ impl KafkaConsumer {
         #[cfg(feature = "kafka")]
         if let Some((consumer, broker_ops)) = self.broker_backend() {
             let topic_list: Vec<String> = normalized.iter().cloned().collect();
+            refuse_when_blocking_forbidden(cx)?;
             crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
                 let topic_refs: Vec<&str> = topic_list.iter().map(String::as_str).collect();
@@ -1826,6 +1829,7 @@ impl KafkaConsumer {
         #[cfg(feature = "kafka")]
         if let Some((consumer, broker_ops)) = self.broker_backend() {
             let assignment_list: Vec<TopicPartitionOffset> = assignments.to_vec();
+            refuse_when_blocking_forbidden(cx)?;
             crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
                 if assignment_list.is_empty() {
@@ -2092,6 +2096,7 @@ impl KafkaConsumer {
                         remaining.min(MAX_BROKER_POLL_SLICE)
                     };
 
+                    refuse_when_blocking_forbidden(cx)?;
                     let outcome_res = crate::runtime::spawn_blocking::spawn_blocking_on_thread({
                         let consumer = consumer.clone();
                         let broker_ops = Arc::clone(&broker_ops);
@@ -2327,6 +2332,7 @@ impl KafkaConsumer {
             let state = Arc::clone(&self.state);
             let closed = Arc::clone(&self.closed);
             let group_id = self.config.group_id.clone();
+            refuse_when_blocking_forbidden(cx)?;
             crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
                 if closed.load(Ordering::Acquire) {
@@ -2424,6 +2430,7 @@ impl KafkaConsumer {
             let commit_batch = normalized.clone();
             let config = &self.config;
 
+            refuse_when_blocking_forbidden(cx)?;
             retry_consumer_operation(cx, config, || {
                 // Clone owned handles per attempt so the synchronous
                 // `commit(CommitMode::Sync)` runs on the blocking pool via a
@@ -2505,6 +2512,7 @@ impl KafkaConsumer {
             let partition = tpo.partition;
             let offset = tpo.offset;
             let buffered_outcome = Arc::clone(&self.buffered_outcome);
+            refuse_when_blocking_forbidden(cx)?;
             crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
                 consumer
@@ -2541,6 +2549,8 @@ impl KafkaConsumer {
         if !was_closed {
             #[cfg(feature = "kafka")]
             if let Some((consumer, broker_ops)) = self.broker_backend() {
+                // The consumer is already marked closed, so a refusal here skips only the native group leave.
+                refuse_when_blocking_forbidden(cx)?;
                 crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                     use rdkafka::consumer::RebalanceProtocol;
                     let _guard = broker_ops.lock();

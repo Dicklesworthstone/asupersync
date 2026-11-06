@@ -174,3 +174,51 @@
         *lock.lock() = true;
         cvar.notify_one();
     }
+
+    #[test]
+    fn lookup_all_on_a_forbidden_blocking_pool_returns_unsupported_and_resolves_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingAddrs(Arc<AtomicUsize>);
+
+        impl ToSocketAddrs for CountingAddrs {
+            type Iter = std::vec::IntoIter<SocketAddr>;
+
+            fn to_socket_addrs(&self) -> io::Result<Self::Iter> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(vec!["127.0.0.1:9092".parse().unwrap()].into_iter())
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let forbidden = crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        );
+        {
+            let cx = Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+            let _current = Cx::set_current(Some(cx));
+            let result = future::block_on(lookup_all(CountingAddrs(Arc::clone(&calls))));
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no lookup may run on a thread"
+        );
+        forbidden.shutdown();
+
+        // Remove the plant: with an open pool the same lookup runs once and resolves.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        {
+            let cx = Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+            let _current = Cx::set_current(Some(cx));
+            let resolved = future::block_on(lookup_all(CountingAddrs(Arc::clone(&calls))));
+            assert_eq!(resolved.unwrap().len(), 1);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        open.shutdown();
+    }

@@ -2286,6 +2286,177 @@
     }
 
     #[test]
+    fn resolver_blocking_dns_on_a_forbidden_pool_is_refused_and_the_closure_never_runs() {
+        init_test(
+            "resolver_blocking_dns_on_a_forbidden_pool_is_refused_and_the_closure_never_runs",
+        );
+        let ran = Arc::new(AtomicUsize::new(0));
+        let expected = crate::runtime::spawn_blocking::forbidden_io_error().to_string();
+
+        let forbidden = crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        );
+        {
+            let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+            let _guard = Cx::set_current(Some(cx));
+            let counter = Arc::clone(&ran);
+            let result = future::block_on(spawn_blocking_dns(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, DnsError>(())
+            }));
+            crate::assert_with_log!(
+                matches!(result, Err(DnsError::Io(ref message)) if *message == expected),
+                "a forbidden pool is a typed I/O refusal carrying the shared message",
+                expected.clone(),
+                format!("{result:?}")
+            );
+        }
+        crate::assert_with_log!(
+            ran.load(Ordering::SeqCst) == 0,
+            "the lookup closure must never run on a forbidden pool",
+            0,
+            ran.load(Ordering::SeqCst)
+        );
+        forbidden.shutdown();
+
+        // Remove the plant: with an open pool of the default policy the same closure runs once, on a dedicated thread.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        {
+            let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+            let _guard = Cx::set_current(Some(cx));
+            let current_id = std::thread::current().id();
+            let counter = Arc::clone(&ran);
+            let thread_id = future::block_on(spawn_blocking_dns(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, DnsError>(std::thread::current().id())
+            }))
+            .expect("an open pool still runs the lookup");
+            crate::assert_with_log!(
+                thread_id != current_id,
+                "the permitted path still uses a dedicated thread",
+                false,
+                thread_id == current_id
+            );
+        }
+        crate::assert_with_log!(
+            ran.load(Ordering::SeqCst) == 1,
+            "the open-pool control runs the closure exactly once",
+            1,
+            ran.load(Ordering::SeqCst)
+        );
+        open.shutdown();
+
+        crate::test_complete!(
+            "resolver_blocking_dns_on_a_forbidden_pool_is_refused_and_the_closure_never_runs"
+        );
+    }
+
+    #[test]
+    fn resolver_lookups_on_a_forbidden_pool_send_no_query_and_an_open_pool_still_resolves() {
+        init_test(
+            "resolver_lookups_on_a_forbidden_pool_send_no_query_and_an_open_pool_still_resolves",
+        );
+        let mut zone = BTreeMap::new();
+        zone.insert(
+            ("blocked.example.test".to_string(), 1),
+            vec![TestDnsRecord::A {
+                ttl: 30,
+                addr: Ipv4Addr::new(192, 0, 2, 9),
+            }],
+        );
+        let server = TestDnsServer::start(zone, false);
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![server.addr],
+            cache_enabled: false,
+            retries: 0,
+            timeout: Duration::from_secs(2),
+            ..ResolverConfig::default()
+        });
+        // The default configuration: no nameservers, the system-resolver path.
+        let system_resolver = Resolver::with_config(ResolverConfig {
+            cache_enabled: false,
+            retries: 0,
+            timeout: Duration::from_secs(2),
+            ..ResolverConfig::default()
+        });
+        let expected = crate::runtime::spawn_blocking::forbidden_io_error().to_string();
+
+        let forbidden = crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        );
+        {
+            let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+            let _guard = Cx::set_current(Some(cx));
+            future::block_on(async {
+                let results = [
+                    system_resolver
+                        .lookup_ip("blocked.example.test")
+                        .await
+                        .map(|_| ()),
+                    resolver.lookup_ip("blocked.example.test").await.map(|_| ()),
+                    resolver.lookup_mx("blocked.example.test").await.map(|_| ()),
+                    resolver
+                        .lookup_srv("_sip._tcp.blocked.example.test")
+                        .await
+                        .map(|_| ()),
+                    resolver
+                        .lookup_txt("blocked.example.test")
+                        .await
+                        .map(|_| ()),
+                ];
+                for (which, result) in results.iter().enumerate() {
+                    crate::assert_with_log!(
+                        matches!(result, Err(DnsError::Io(message)) if *message == expected),
+                        "every blocking lookup is refused with the shared message",
+                        which,
+                        format!("{result:?}")
+                    );
+                }
+            });
+        }
+        crate::assert_with_log!(
+            server.udp_queries() == 0,
+            "a forbidden pool must not send a single query",
+            0,
+            server.udp_queries()
+        );
+        forbidden.shutdown();
+
+        // Remove the plant: the same resolver under an open pool of the default policy resolves and queries once.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        {
+            let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+            let _guard = Cx::set_current(Some(cx));
+            let lookup =
+                future::block_on(async { resolver.lookup_ip("blocked.example.test").await })
+                    .expect("an open pool still resolves");
+            assert_eq!(
+                lookup.addresses(),
+                &[IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))]
+            );
+        }
+        crate::assert_with_log!(
+            server.udp_queries() >= 1,
+            "the permitted path still queries the nameserver",
+            true,
+            server.udp_queries()
+        );
+        open.shutdown();
+
+        crate::test_complete!(
+            "resolver_lookups_on_a_forbidden_pool_send_no_query_and_an_open_pool_still_resolves"
+        );
+    }
+
+    #[test]
     fn error_display_formats() {
         init_test("error_display_formats");
 

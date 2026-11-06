@@ -96,6 +96,10 @@ where
     F: FnOnce() -> io::Result<T> + Send + 'static,
     T: Send + 'static,
 {
+    // A runtime that forbids blocking work resolves nothing: the lookup would run on a dedicated thread.
+    if crate::runtime::spawn_blocking::current_pool_forbids_blocking() {
+        return Err(crate::runtime::spawn_blocking::forbidden_io_error());
+    }
     if let Some(cx) = Cx::current() {
         if cx.blocking_pool_handle().is_some() {
             return unless_cancelled(&cx, spawn_blocking(f)).await;

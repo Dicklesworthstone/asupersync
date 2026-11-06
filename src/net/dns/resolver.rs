@@ -14,6 +14,16 @@
 //! UDP/TCP on the blocking pool.
 //! The additive `lookup_*_native` methods use the runtime reactor instead;
 //! they require explicit nameservers and an owning native I/O context.
+//!
+//! # Blocking Admission
+//!
+//! Every blocking lookup above is scheduled through one function, `spawn_blocking_dns`. When the
+//! current context inherited a blocking pool whose admission policy is
+//! [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden), it
+//! refuses before scheduling anything: the lookup returns [`DnsError::Io`] carrying the shared
+//! "blocking work is forbidden" message, no thread is created and the lookup closure is dropped
+//! unrun. The refusal is not cached. A context with no pool, and code outside any context, keep
+//! the dedicated-thread path, and so does an open pool.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -34,7 +44,9 @@ use super::cache::{CacheConfig, CacheStats, DnsCache};
 use super::error::DnsError;
 use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
 use crate::net::TcpStream;
-use crate::runtime::spawn_blocking::spawn_blocking_on_thread;
+use crate::runtime::spawn_blocking::{
+    current_pool_forbids_blocking, forbidden_io_error, spawn_blocking_on_thread,
+};
 use crate::time::{Elapsed, Sleep};
 use crate::types::Time;
 use crate::util::{EntropySource, OsEntropy};
@@ -746,6 +758,11 @@ where
 {
     // Gated like net::lookup_all; then a dedicated thread a cancelled caller stops waiting for.
     crate::cx::io_gate::require_ambient_io("net::dns::Resolver")?;
+    // A runtime that forbids blocking work is refused here, before anything is scheduled: `f` is dropped
+    // unrun and no thread is created. The same predicate and message as the pool-backed I/O entry points.
+    if current_pool_forbids_blocking() {
+        return Err(DnsError::from(forbidden_io_error()));
+    }
     unless_cancelled(crate::cx::Cx::current(), spawn_blocking_on_thread(f)).await
 }
 

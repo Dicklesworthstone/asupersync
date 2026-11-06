@@ -143,6 +143,13 @@ impl StunClient {
         let local_addr = self.local_addr;
         let transaction_id = Self::transaction_id(local_addr, server);
 
+        // A runtime that forbids blocking work sends nothing: the request would run on a blocking thread.
+        if crate::runtime::spawn_blocking::current_pool_forbids_blocking() {
+            return Outcome::Err(StunError::Network(
+                "blocking work is forbidden by this runtime's blocking admission policy".to_owned(),
+            ));
+        }
+
         match spawn_blocking(move || {
             let request = encode_binding_request(transaction_id);
             let socket = std::net::UdpSocket::bind(local_addr)
