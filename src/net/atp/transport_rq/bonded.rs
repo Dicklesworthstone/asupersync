@@ -14,7 +14,9 @@
 //!
 //! The UDP symbol datagrams are exactly the wire format [`donate_path`]
 //! emits; the control plane reuses the ATP frame codec with JSON payloads
-//! (the single-source receiver's convention).
+//! (the single-source receiver's convention). Protocol-v4 donors carry those
+//! same authenticated datagrams inside bounded control-stream frames, so an
+//! SSH TCP forward can carry both the initial spray and subsequent repairs.
 
 // This split implementation intentionally uses its parent module's private
 // protocol machinery as one cohesive unit.
@@ -57,6 +59,68 @@ fn bonded_need_more_block_repair_cap(k: u32) -> usize {
 /// Version 3 binds the protocol-v4 metadata commitment and RaptorQ geometry
 /// during enrollment.
 pub const ATP_RQ_BONDED_PROTOCOL: u32 = 3;
+
+/// Additive bonded protocol for symbols carried on the control stream.
+///
+/// The hello and welcome retain their existing field layouts. This explicit
+/// version changes only the symbol carrier: `ObjectData` frames contain the
+/// existing symbol datagram bytes. Version-3 UDP donors remain supported, and
+/// older receivers reject this version before any symbols are sent.
+///
+/// Implements the reliable carrier for `asupersync-atp-channel-bonding-z01bbr.4.2`.
+pub const ATP_RQ_BONDED_STREAM_PROTOCOL: u32 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BondedSymbolTransport {
+    Datagram,
+    Control,
+}
+
+impl BondedSymbolTransport {
+    const fn protocol(self) -> u32 {
+        match self {
+            Self::Datagram => ATP_RQ_BONDED_PROTOCOL,
+            Self::Control => ATP_RQ_BONDED_STREAM_PROTOCOL,
+        }
+    }
+}
+
+/// Bound every post-enrollment donor frame before the codec waits for its
+/// payload. Small control metadata needs at most 4 KiB; a symbol needs its
+/// fixed authentication header plus ATP's bounded frame-header overhead.
+fn bonded_control_frame_limit(symbol_size: u16) -> u64 {
+    (u64::from(symbol_size) + AUTH_DGRAM_HEADER as u64 + 32).max(4096)
+}
+
+/// The stream carrier accepts exactly one complete datagram per data frame.
+/// Authentication and shared decoder admission still happen in the ordinary
+/// bonded datagram path, after this framing check.
+fn bonded_control_datagram(
+    frame: &Frame,
+    tag: u64,
+    auth_required: bool,
+    symbol_size: u16,
+) -> Result<&[u8], RqError> {
+    if frame.frame_type() != FrameType::ObjectData {
+        return Err(RqError::Unexpected {
+            got: frame.frame_type(),
+            expected: "ObjectData",
+        });
+    }
+    let payload = frame.payload();
+    let parsed =
+        parse_symbol_header_checked(payload, tag, auth_required, Some(usize::from(symbol_size)))
+            .map_err(|error| RqError::Frame(format!("invalid bonded control symbol: {error:?}")))?;
+    if parsed.payload_len != usize::from(symbol_size)
+        || payload.len() != parsed.header_len + parsed.payload_len
+        || payload[21] > 1
+    {
+        return Err(RqError::Frame(
+            "bonded control data must contain exactly one canonical full-sized symbol".to_string(),
+        ));
+    }
+    Ok(payload)
+}
 
 /// Donor → receiver bonded hello (`FrameType::Handshake` payload).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,8 +269,18 @@ struct BondedDonorConn {
     donor_index: u32,
     control: FrameTransport<TcpStream>,
     peer: SocketAddr,
+    symbol_transport: BondedSymbolTransport,
     alive: bool,
     round_done: bool,
+}
+
+impl BondedDonorConn {
+    fn reject_control(&mut self) {
+        self.alive = false;
+        // Wake a donor blocked on stream backpressure instead of retaining an
+        // unread socket until the surviving donors finish the whole transfer.
+        let _ = self.control.stream.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// Receiver-side per-block feedback state.
@@ -494,9 +568,9 @@ fn bonded_donor_hello_refusal(
     descriptor: &BondTransferDescriptor,
     symbol_auth_enabled: bool,
 ) -> Option<String> {
-    if hello.protocol != ATP_RQ_BONDED_PROTOCOL {
+    if hello.protocol != ATP_RQ_BONDED_PROTOCOL && hello.protocol != ATP_RQ_BONDED_STREAM_PROTOCOL {
         Some(format!(
-            "unsupported bonded protocol {} (this peer speaks {ATP_RQ_BONDED_PROTOCOL})",
+            "unsupported bonded protocol {} (this peer speaks {ATP_RQ_BONDED_PROTOCOL} and {ATP_RQ_BONDED_STREAM_PROTOCOL})",
             hello.protocol
         ))
     } else if hello.transfer_id != descriptor.transfer_id {
@@ -618,6 +692,15 @@ async fn accept_bonded_donors(
                 .await;
             continue;
         }
+        let symbol_transport = if hello.protocol == ATP_RQ_BONDED_STREAM_PROTOCOL {
+            // The hello has been fully decoded. Preserve any coalesced bytes
+            // while replacing the decoder's large default frame allowance.
+            control.codec =
+                AtpFrameCodec::with_max_frame_size(bonded_control_frame_limit(hello.symbol_size));
+            BondedSymbolTransport::Control
+        } else {
+            BondedSymbolTransport::Datagram
+        };
         let enrollment = match control_plane.enroll_next_donor(&hello.offer) {
             Ok(enrollment) => enrollment,
             Err(err) => {
@@ -652,11 +735,53 @@ async fn accept_bonded_donors(
             donor_index: enrollment.donor_index,
             control,
             peer,
+            symbol_transport,
             alive: true,
             round_done: false,
         });
     }
     Ok(conns)
+}
+
+enum BondedReady {
+    Udp(crate::net::UdpRecvBatch),
+    Control { conn_index: usize, len: usize },
+    ControlClosed { conn_index: usize },
+    Stalled,
+}
+
+/// Poll donors from a rotating cursor so a busy stream cannot indefinitely
+/// delay another donor's symbols, round marker, or disconnect notification.
+fn poll_bonded_control_reads(
+    conns: &mut [BondedDonorConn],
+    buffer: &mut [u8],
+    start: usize,
+    task_cx: &mut std::task::Context<'_>,
+) -> Option<BondedReady> {
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    for offset in 0..conns.len() {
+        let conn_index = (start + offset) % conns.len();
+        let conn = &mut conns[conn_index];
+        if !conn.alive {
+            continue;
+        }
+        let mut read_buf = ReadBuf::new(buffer);
+        match Pin::new(&mut conn.control.stream).poll_read(task_cx, &mut read_buf) {
+            Poll::Ready(Ok(())) => {
+                let len = read_buf.filled().len();
+                return Some(if len == 0 {
+                    BondedReady::ControlClosed { conn_index }
+                } else {
+                    BondedReady::Control { conn_index, len }
+                });
+            }
+            Poll::Ready(Err(_)) => return Some(BondedReady::ControlClosed { conn_index }),
+            Poll::Pending => {}
+        }
+    }
+    None
 }
 
 /// Pump donor symbols and control frames until every live donor has marked the
@@ -682,16 +807,11 @@ async fn pump_bonded_round(
     use std::pin::Pin;
     use std::task::Poll;
 
-    enum BondedReady {
-        Udp(crate::net::UdpRecvBatch),
-        Control { conn_index: usize, len: usize },
-        ControlClosed { conn_index: usize },
-        Stalled,
-    }
-
     let packet_size = usize::from(symbol_size) + AUTH_DGRAM_HEADER + 64;
     let mut cbuf = vec![0u8; 65536];
     let mut stall_sleep = crate::time::Sleep::after(cx.now_for_observability(), stall_window);
+    let mut next_control = 0;
+    let mut prefer_control = false;
 
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
@@ -700,31 +820,101 @@ async fn pump_bonded_round(
         }
         let _ = drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?;
 
-        // Drain any control frame a prior read already buffered before parking.
+        // Drain one already-buffered frame, rotating donors between frames.
+        // Each read below is bounded, so an entire source file is never queued
+        // while another donor is still enrolling or the receiver is decoding.
         let mut buffered: Option<(usize, Frame)> = None;
-        for (conn_index, conn) in conns.iter_mut().enumerate() {
+        for offset in 0..conns.len() {
+            let conn_index = (next_control + offset) % conns.len();
+            let conn = &mut conns[conn_index];
             if !conn.alive {
                 continue;
             }
-            if let Some(frame) = conn
-                .control
-                .codec
-                .decode(&mut conn.control.rbuf)
-                .map_err(|e| RqError::Frame(e.to_string()))?
-            {
-                buffered = Some((conn_index, frame));
-                break;
+            match conn.control.codec.decode(&mut conn.control.rbuf) {
+                Ok(Some(frame)) => {
+                    buffered = Some((conn_index, frame));
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) if conn.symbol_transport == BondedSymbolTransport::Control => {
+                    bondtrace!(
+                        "receiver: invalid_stream_frame donor_index={} error={error}",
+                        conn.donor_index
+                    );
+                    conn.reject_control();
+                }
+                Err(error) => return Err(RqError::Frame(error.to_string())),
             }
         }
         if let Some((conn_index, frame)) = buffered {
-            handle_bonded_donor_frame(conns, conn_index, round, frame).await?;
+            next_control = (conn_index + 1) % conns.len();
+            prefer_control = false;
+            if frame.frame_type() == FrameType::ObjectData {
+                if conns[conn_index].symbol_transport != BondedSymbolTransport::Control {
+                    conns[conn_index].reject_control();
+                    continue;
+                }
+                let payload = match bonded_control_datagram(
+                    &frame,
+                    tag,
+                    symbol_auth.is_some(),
+                    symbol_size,
+                ) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        bondtrace!(
+                            "receiver: invalid_stream_symbol donor_index={} error={error}",
+                            conns[conn_index].donor_index
+                        );
+                        conns[conn_index].reject_control();
+                        continue;
+                    }
+                };
+                let ingest = feed_bonded_datagram_to_decoders(
+                    cx,
+                    payload,
+                    payload.len(),
+                    tag,
+                    symbol_auth,
+                    donor_count,
+                    blocks,
+                    symbol_set,
+                    retention,
+                    decoders,
+                    symbol_size,
+                )
+                .await?;
+                if !ingest.observed {
+                    // This reliable stream identifies its sender. Invalid
+                    // authentication or admission closes that donor without
+                    // poisoning the shared set or extending its stall timer.
+                    conns[conn_index].reject_control();
+                    continue;
+                }
+                if ingest.accepted {
+                    *symbols_accepted = (*symbols_accepted).saturating_add(1);
+                }
+            } else {
+                handle_bonded_donor_frame(conns, conn_index, round, frame).await?;
+            }
             stall_sleep.reset_after(cx.now_for_observability(), stall_window);
             continue;
+        }
+        if conns.iter().all(|conn| !conn.alive || conn.round_done) {
+            return Ok(());
         }
 
         let ready = poll_fn(|task_cx| {
             if Pin::new(&mut stall_sleep).poll(task_cx).is_ready() {
                 return Poll::Ready(Ok::<BondedReady, std::io::Error>(BondedReady::Stalled));
+            }
+            // Alternate carrier priority: a continuously ready UDP socket
+            // must not starve stream donors, or vice versa.
+            if prefer_control
+                && let Some(ready) =
+                    poll_bonded_control_reads(conns, &mut cbuf, next_control, task_cx)
+            {
+                return Poll::Ready(Ok(ready));
             }
             match udp.poll_recv_batch_any(task_cx, RQ_INBOUND_PUMP_BATCH, packet_size) {
                 Poll::Ready(Ok((_socket_index, batch))) => {
@@ -733,25 +923,11 @@ async fn pump_bonded_round(
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {}
             }
-            for (conn_index, conn) in conns.iter_mut().enumerate() {
-                if !conn.alive {
-                    continue;
-                }
-                let mut read_buf = ReadBuf::new(&mut cbuf);
-                match Pin::new(&mut conn.control.stream).poll_read(task_cx, &mut read_buf) {
-                    Poll::Ready(Ok(())) => {
-                        let len = read_buf.filled().len();
-                        return Poll::Ready(Ok(if len == 0 {
-                            BondedReady::ControlClosed { conn_index }
-                        } else {
-                            BondedReady::Control { conn_index, len }
-                        }));
-                    }
-                    Poll::Ready(Err(_)) => {
-                        return Poll::Ready(Ok(BondedReady::ControlClosed { conn_index }));
-                    }
-                    Poll::Pending => {}
-                }
+            if !prefer_control
+                && let Some(ready) =
+                    poll_bonded_control_reads(conns, &mut cbuf, next_control, task_cx)
+            {
+                return Poll::Ready(Ok(ready));
             }
             Poll::Pending
         })
@@ -759,6 +935,7 @@ async fn pump_bonded_round(
 
         match ready {
             BondedReady::Udp(mut batch) => {
+                prefer_control = true;
                 let mut progressed = false;
                 for packet in &batch.packets {
                     let ingest = feed_bonded_datagram_to_decoders(
@@ -786,20 +963,26 @@ async fn pump_bonded_round(
                 }
             }
             BondedReady::Control { conn_index, len } => {
+                next_control = (conn_index + 1) % conns.len();
+                prefer_control = false;
                 conns[conn_index]
                     .control
                     .rbuf
                     .extend_from_slice(&cbuf[..len]);
-                stall_sleep.reset_after(cx.now_for_observability(), stall_window);
+                if conns[conn_index].symbol_transport == BondedSymbolTransport::Datagram {
+                    stall_sleep.reset_after(cx.now_for_observability(), stall_window);
+                }
             }
             BondedReady::ControlClosed { conn_index } => {
+                next_control = (conn_index + 1) % conns.len();
+                prefer_control = false;
                 bondtrace!(
                     "receiver: donor_dead donor_index={} peer={} round={}",
                     conns[conn_index].donor_index,
                     conns[conn_index].peer,
                     round
                 );
-                conns[conn_index].alive = false;
+                conns[conn_index].reject_control();
                 stall_sleep.reset_after(cx.now_for_observability(), stall_window);
             }
             BondedReady::Stalled => {
@@ -839,12 +1022,12 @@ async fn handle_bonded_donor_frame(
             let keep_alive =
                 Frame::empty(FrameType::KeepAlive).map_err(|e| RqError::Frame(e.to_string()))?;
             if conns[conn_index].control.send(&keep_alive).await.is_err() {
-                conns[conn_index].alive = false;
+                conns[conn_index].reject_control();
             }
         }
         FrameType::Close => {
             // Donor is leaving gracefully; survivors absorb its share.
-            conns[conn_index].alive = false;
+            conns[conn_index].reject_control();
         }
         other => {
             bondtrace!(
@@ -852,7 +1035,7 @@ async fn handle_bonded_donor_frame(
                 conns[conn_index].donor_index,
                 other
             );
-            conns[conn_index].alive = false;
+            conns[conn_index].reject_control();
         }
     }
     Ok(())
@@ -1716,7 +1899,7 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
                     conn.donor_index,
                     round
                 );
-                conn.alive = false;
+                conn.reject_control();
                 continue;
             }
             conn.round_done = false;
@@ -1893,10 +2076,67 @@ pub async fn donate_bonded(
     source_root: &Path,
     config: RqConfig,
 ) -> Result<BondedDonateReport, RqError> {
+    donate_bonded_with_transport(
+        cx,
+        descriptor,
+        control_addr,
+        source_root,
+        config,
+        BondedSymbolTransport::Datagram,
+    )
+    .await
+}
+
+/// Donate every source and repair symbol over the owned TCP control stream.
+///
+/// This is the reliable carrier for an SSH forward when UDP cannot reach the
+/// receiver. It opens no UDP sockets and does not send to advertised UDP
+/// endpoints. Each bounded `ObjectData` frame carries the same authenticated
+/// symbol representation as [`donate_bonded`]; receiver deduplication,
+/// retention, decoding, and final verification remain shared with UDP donors.
+/// A receiver can enroll both kinds of donor in one transfer.
+///
+/// The explicit [`ATP_RQ_BONDED_STREAM_PROTOCOL`] hello makes older receivers
+/// reject this mode before data transmission. There is no automatic fallback
+/// to an unforwarded socket or to UDP. Each write awaits stream backpressure;
+/// dropping this future closes its connection, allowing surviving donors to
+/// recover its assigned work. Authentication follows the supplied [`RqConfig`]
+/// and its explicit trusted-transport opt-out, just as for UDP donors.
+pub async fn donate_bonded_over_control(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    control_addr: SocketAddr,
+    source_root: &Path,
+    config: RqConfig,
+) -> Result<BondedDonateReport, RqError> {
+    donate_bonded_with_transport(
+        cx,
+        descriptor,
+        control_addr,
+        source_root,
+        config,
+        BondedSymbolTransport::Control,
+    )
+    .await
+}
+
+async fn donate_bonded_with_transport(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    control_addr: SocketAddr,
+    source_root: &Path,
+    mut config: RqConfig,
+    symbol_transport: BondedSymbolTransport,
+) -> Result<BondedDonateReport, RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
     descriptor
         .validate()
         .map_err(|err| RqError::Source(format!("bonded descriptor invalid: {err}")))?;
+    if symbol_transport == BondedSymbolTransport::Control {
+        // Both stream rounds use the agreed descriptor's geometry, including
+        // repairs after the caller supplied default transport tuning.
+        apply_bonded_descriptor_config(descriptor, &mut config)?;
+    }
     let manifest = manifest_from_bonded_descriptor(descriptor);
     validate_manifest(&manifest, &config)?;
     let metadata_commitment_hex = manifest
@@ -1929,7 +2169,7 @@ pub async fn donate_bonded(
         .send(&json_frame(
             FrameType::Handshake,
             &BondedDonorHello {
-                protocol: ATP_RQ_BONDED_PROTOCOL,
+                protocol: symbol_transport.protocol(),
                 transfer_id: descriptor.transfer_id.clone(),
                 merkle_root_hex: descriptor.merkle_root_hex.clone(),
                 metadata_commitment_hex,
@@ -1966,30 +2206,50 @@ pub async fn donate_bonded(
     let mut assignment = welcome.assignment.ok_or_else(|| {
         RqError::Frame("bonded welcome accepted but carried no donor assignment".to_string())
     })?;
-    // The unauthenticated v3 control welcome cannot redirect UDP spray to an
-    // arbitrary third party. Select only the advertised IP that matches the
-    // already-established control path, retaining all of that IP's fanout
-    // ports. Legacy wildcard assignments remain compatible via the separately
-    // carried port list plus the connected control IP.
-    assignment.receiver_udp_endpoints =
-        select_bonded_receiver_udp_path(&assignment, &welcome.udp_ports, control_addr)?;
-    let primary = assignment
-        .receiver_udp_endpoints
-        .first()
-        .copied()
-        .ok_or_else(|| {
-            RqError::Frame("bonded welcome advertised no receiver UDP endpoints".to_string())
-        })?;
-
-    let spray = donate_path(
-        cx,
-        descriptor,
-        &assignment,
-        primary,
-        source_root,
-        config.clone(),
-    )
-    .await?;
+    let spray = match symbol_transport {
+        BondedSymbolTransport::Datagram => {
+            // The unauthenticated v3 welcome cannot redirect UDP spray to an
+            // arbitrary third party. Preserve its control-path affinity rule.
+            assignment.receiver_udp_endpoints =
+                select_bonded_receiver_udp_path(&assignment, &welcome.udp_ports, control_addr)?;
+            let primary = assignment
+                .receiver_udp_endpoints
+                .first()
+                .copied()
+                .ok_or_else(|| {
+                    RqError::Frame(
+                        "bonded welcome advertised no receiver UDP endpoints".to_string(),
+                    )
+                })?;
+            donate_path(
+                cx,
+                descriptor,
+                &assignment,
+                primary,
+                source_root,
+                config.clone(),
+            )
+            .await?
+        }
+        BondedSymbolTransport::Control => {
+            // Validate bounded assignment metadata but do not interpret its
+            // UDP IPs as routes. An SSH forward's loopback control peer need
+            // not match any of the receiver's public UDP advertisements.
+            assignment
+                .validate()
+                .map_err(|error| RqError::HandshakeRejected(error.to_string()))?;
+            validate_bonded_receiver_udp_endpoints(&assignment.receiver_udp_endpoints)?;
+            donate_bonded_control_path(
+                cx,
+                descriptor,
+                &assignment,
+                source_root,
+                config.clone(),
+                &mut control,
+            )
+            .await?
+        }
+    };
     let mut symbols_sent = spray.symbols_sent;
     control
         .send(&json_frame(
@@ -2010,16 +2270,33 @@ pub async fn donate_bonded(
             FrameType::ObjectRequest => {
                 let need: BondedNeedMore = parse_json(&frame)?;
                 feedback_rounds = feedback_rounds.max(need.round);
-                let sent = bonded_donor_execute_need_more(
-                    cx,
-                    descriptor,
-                    &assignment,
-                    source_root,
-                    &config,
-                    symbol_auth.as_ref(),
-                    &need,
-                )
-                .await?;
+                let sent = match symbol_transport {
+                    BondedSymbolTransport::Datagram => {
+                        bonded_donor_execute_need_more(
+                            cx,
+                            descriptor,
+                            &assignment,
+                            source_root,
+                            &config,
+                            symbol_auth.as_ref(),
+                            &need,
+                        )
+                        .await?
+                    }
+                    BondedSymbolTransport::Control => {
+                        bonded_donor_execute_need_more_on(
+                            cx,
+                            descriptor,
+                            &assignment,
+                            source_root,
+                            &config,
+                            symbol_auth.as_ref(),
+                            &need,
+                            Some(&mut control),
+                        )
+                        .await?
+                    }
+                };
                 symbols_sent = symbols_sent.saturating_add(sent);
                 control
                     .send(&json_frame(
@@ -2071,6 +2348,142 @@ pub async fn donate_bonded(
     }
 }
 
+/// Initial source-first spray using the same schedule and symbol encoder as
+/// `donate_path`, with one bounded, backpressured frame instead of a UDP batch.
+async fn donate_bonded_control_path(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    assignment: &DonorAssignment,
+    source_root: &Path,
+    mut config: RqConfig,
+    control: &mut FrameTransport<TcpStream>,
+) -> Result<BondedDonorSendReport, RqError> {
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    assignment
+        .validate()
+        .map_err(|error| RqError::Coding(format!("invalid bonded donor assignment: {error}")))?;
+    descriptor
+        .prove_local_holding(source_root)
+        .await
+        .map_err(|error| RqError::Source(format!("bonded donor byte proof failed: {error}")))?;
+    apply_bonded_descriptor_config(descriptor, &mut config)?;
+    let symbol_auth = config.symbol_auth_context()?;
+    if assignment.requires_symbol_auth() && symbol_auth.is_none() {
+        return Err(RqError::Authentication(
+            "bonded donor assignment requires symbol auth but RqConfig allowed unauthenticated symbols"
+                .to_string(),
+        ));
+    }
+    let repair_symbols_per_block = bonded_initial_repair_symbols_per_block(&config)?;
+    let schedule = schedule_bonded_donor_spray(descriptor, assignment, repair_symbols_per_block)
+        .map_err(|error| RqError::Coding(format!("bonded donor spray schedule failed: {error}")))?;
+    let pacing_decision = bonded_donor_round0_pacing_decision(&descriptor.transfer_id, &config, 1);
+    let mut pacing_report = pacing_decision.report;
+    let mut pacer = RqSprayPacer::new_round0(pacing_decision.pacing, &config, false);
+    let mut symbols_sent = 0u64;
+    let mut source_symbols_sent = 0u64;
+    let mut repair_symbols_sent = 0u64;
+    let mut dropper = 0u32;
+    let tag = transfer_tag(&descriptor.transfer_id);
+
+    for block in &schedule.blocks {
+        cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        let entry = descriptor
+            .entry_by_index(block.geometry.entry_index)
+            .ok_or_else(|| {
+                RqError::Coding(format!(
+                    "bonded donor schedule references unknown entry {}",
+                    block.geometry.entry_index
+                ))
+            })?;
+        let entry_path = bonded_donor_entry_path(source_root, &entry.rel_path)?;
+        let block_start =
+            usize::try_from(block.geometry.block_start).map_err(|_| RqError::TooLarge {
+                size: block.geometry.block_start,
+                max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            })?;
+        let block_len =
+            usize::try_from(block.geometry.block_bytes).map_err(|_| RqError::TooLarge {
+                size: block.geometry.block_bytes,
+                max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            })?;
+        let block_bytes = read_source_range(&entry_path, block_start, block_len).await?;
+        for emission in block.iter_symbol_emissions(schedule.donor_index) {
+            let symbol = encode_bonded_donor_emission(emission, &block_bytes, &config)?;
+            let before = symbols_sent;
+            send_bonded_control_datagram(
+                cx,
+                control,
+                &mut symbols_sent,
+                &mut dropper,
+                tag,
+                block.geometry.entry_index,
+                &symbol,
+                &config,
+                &mut pacer,
+                symbol_auth.as_ref(),
+            )
+            .await?;
+            let sent = symbols_sent.saturating_sub(before);
+            match emission.symbol_kind() {
+                SymbolKind::Source => {
+                    source_symbols_sent = source_symbols_sent.saturating_add(sent);
+                }
+                SymbolKind::Repair => {
+                    repair_symbols_sent = repair_symbols_sent.saturating_add(sent);
+                }
+            }
+        }
+    }
+    pacing_report.final_rate_bytes_per_sec = pacer.pacing().rate_bytes_per_sec();
+    Ok(BondedDonorSendReport {
+        transfer_id: descriptor.transfer_id.clone(),
+        donor_index: assignment.donor_index,
+        donor_count: assignment.donor_count,
+        receiver_endpoints: Vec::new(),
+        entries: descriptor.entries.len(),
+        blocks: schedule.blocks.len(),
+        source_symbols_sent,
+        repair_symbols_sent,
+        symbols_sent,
+        pacing: pacing_report,
+        udp_send_acceleration: UdpSendAccelerationReport::default(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_bonded_control_datagram(
+    cx: &Cx,
+    control: &mut FrameTransport<TcpStream>,
+    symbols_sent: &mut u64,
+    dropper: &mut u32,
+    tag: u64,
+    entry: u32,
+    symbol: &Symbol,
+    config: &RqConfig,
+    pacer: &mut RqSprayPacer,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<(), RqError> {
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    if config.debug_drop_one_in > 0 {
+        *dropper = dropper.wrapping_add(1);
+        if *dropper % config.debug_drop_one_in == 0 {
+            return Ok(());
+        }
+    }
+    pacer.before_send(cx).await?;
+    let datagram = encode_bonded_donor_datagram(tag, entry, symbol, symbol_auth);
+    let frame = Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, datagram)
+        .map_err(|error| RqError::Frame(error.to_string()))?;
+    // Await every write: a blocked forward owns only one symbol frame, never
+    // a source-file-sized queue. The receiver drains these frames before the
+    // donor's ordered ObjectComplete marker can end the round.
+    control.send(&frame).await?;
+    pacer.observe_datagram_sent();
+    *symbols_sent = symbols_sent.saturating_add(1);
+    Ok(())
+}
+
 /// Serve one receiver `BondedNeedMore`: retransmit the requested source ESIs
 /// and emit this donor's receiver-allocated repair window for each block,
 /// through the same emission encoder and pacing as [`donate_path`].
@@ -2083,35 +2496,62 @@ async fn bonded_donor_execute_need_more(
     symbol_auth: Option<&SecurityContext>,
     need: &BondedNeedMore,
 ) -> Result<u64, RqError> {
+    bonded_donor_execute_need_more_on(
+        cx,
+        descriptor,
+        assignment,
+        source_root,
+        config,
+        symbol_auth,
+        need,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn bonded_donor_execute_need_more_on(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    assignment: &DonorAssignment,
+    source_root: &Path,
+    config: &RqConfig,
+    symbol_auth: Option<&SecurityContext>,
+    need: &BondedNeedMore,
+    mut control: Option<&mut FrameTransport<TcpStream>>,
+) -> Result<u64, RqError> {
     if need.blocks.is_empty() {
         return Ok(0);
     }
-    let receiver_endpoints = assignment.receiver_udp_endpoints.clone();
-    let Some(first_endpoint) = receiver_endpoints.first().copied() else {
-        return Err(RqError::Frame(
-            "bonded donor assignment has no receiver UDP endpoints".to_string(),
-        ));
-    };
-    let local_unspec = if first_endpoint.ip().is_ipv4() {
-        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-    } else {
-        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
-    };
-    let mut sockets = Vec::with_capacity(receiver_endpoints.len());
-    for endpoint in &receiver_endpoints {
-        let sock = UdpSocket::bind(SocketAddr::new(local_unspec, 0)).await?;
-        sock.connect(*endpoint).await?;
-        let _ = sock.tune_buffers(UdpBufferConfig {
-            send_buffer_bytes: Some(16 * 1024 * 1024),
-            recv_buffer_bytes: None,
-        });
-        sockets.push(sock);
+    let mut sockets = Vec::new();
+    if control.is_none() {
+        let receiver_endpoints = &assignment.receiver_udp_endpoints;
+        let Some(first_endpoint) = receiver_endpoints.first().copied() else {
+            return Err(RqError::Frame(
+                "bonded donor assignment has no receiver UDP endpoints".to_string(),
+            ));
+        };
+        let local_unspec = if first_endpoint.ip().is_ipv4() {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        } else {
+            std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+        };
+        for endpoint in receiver_endpoints {
+            let sock = UdpSocket::bind(SocketAddr::new(local_unspec, 0)).await?;
+            sock.connect(*endpoint).await?;
+            let _ = sock.tune_buffers(UdpBufferConfig {
+                send_buffer_bytes: Some(16 * 1024 * 1024),
+                recv_buffer_bytes: None,
+            });
+            sockets.push(sock);
+        }
     }
 
+    let fanout = sockets.len().max(1);
     let pacing_decision =
-        bonded_donor_round0_pacing_decision(&descriptor.transfer_id, config, sockets.len());
+        bonded_donor_round0_pacing_decision(&descriptor.transfer_id, config, fanout);
     let mut pacer = RqSprayPacer::new_round0(pacing_decision.pacing, config, false);
-    let mut send_batch = RqPendingSendBatch::new(sockets.len());
+    let mut send_batch = RqPendingSendBatch::new(fanout);
     let mut symbols_sent = 0u64;
     let mut rr = 0usize;
     let mut dropper = 0u32;
@@ -2217,26 +2657,44 @@ async fn bonded_donor_execute_need_more(
         );
         for emission in emissions {
             let symbol = encode_bonded_donor_emission(emission, &block_bytes, config)?;
-            queue_bonded_donor_datagram(
-                cx,
-                &mut sockets,
-                &mut rr,
-                &mut symbols_sent,
-                &mut dropper,
-                tag,
-                geometry.entry_index,
-                &symbol,
-                config,
-                &mut pacer,
-                symbol_auth,
-                &mut send_batch,
-                &mut udp_send_acceleration,
-            )
-            .await?;
+            if let Some(control) = control.as_deref_mut() {
+                send_bonded_control_datagram(
+                    cx,
+                    control,
+                    &mut symbols_sent,
+                    &mut dropper,
+                    tag,
+                    geometry.entry_index,
+                    &symbol,
+                    config,
+                    &mut pacer,
+                    symbol_auth,
+                )
+                .await?;
+            } else {
+                queue_bonded_donor_datagram(
+                    cx,
+                    &mut sockets,
+                    &mut rr,
+                    &mut symbols_sent,
+                    &mut dropper,
+                    tag,
+                    geometry.entry_index,
+                    &symbol,
+                    config,
+                    &mut pacer,
+                    symbol_auth,
+                    &mut send_batch,
+                    &mut udp_send_acceleration,
+                )
+                .await?;
+            }
         }
     }
-    let report = send_batch.flush(&mut sockets, &mut symbols_sent).await?;
-    udp_send_acceleration.observe_flush_report(report);
+    if control.is_none() {
+        let report = send_batch.flush(&mut sockets, &mut symbols_sent).await?;
+        udp_send_acceleration.observe_flush_report(report);
+    }
     Ok(symbols_sent)
 }
 

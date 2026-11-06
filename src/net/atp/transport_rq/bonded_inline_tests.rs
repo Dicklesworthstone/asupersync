@@ -47,6 +47,74 @@
         .with_symbol_auth(SecurityContext::for_testing(214))
     }
 
+    /// asupersync-atp-channel-bonding-z01bbr.4.2: a stream frame is a bounded
+    /// carrier for the authenticated UDP envelope, never a new admission path.
+    #[test]
+    fn bonded_control_frames_require_one_canonical_symbol() {
+        let auth = SecurityContext::for_testing(214);
+        let symbol = Symbol::new(
+            SymbolId::new(ObjectId::new_for_test(91), 0, 5),
+            vec![0x5a; 16],
+            SymbolKind::Source,
+        );
+        let tag = 0xfeed_beef_dead_cafe;
+        let packet = encode_bonded_donor_datagram(tag, 0, &symbol, Some(&auth));
+        let frame = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::ObjectData,
+            packet.clone(),
+        )
+        .expect("bounded data frame");
+        assert_eq!(
+            bonded_control_datagram(&frame, tag, true, 16).expect("canonical symbol"),
+            packet.as_slice()
+        );
+        assert!(bonded_control_datagram(&frame, tag + 1, true, 16).is_err());
+        assert!(bonded_control_datagram(&frame, tag, true, 17).is_err());
+
+        let mut truncated = packet.clone();
+        truncated.pop();
+        let mut trailing = packet.clone();
+        trailing.push(0);
+        let mut invalid_kind = packet;
+        invalid_kind[21] = 2;
+        for malformed in [truncated, trailing, invalid_kind] {
+            let frame = Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, malformed)
+                .expect("well-framed malformed symbol");
+            assert!(bonded_control_datagram(&frame, tag, true, 16).is_err());
+        }
+        let unauthenticated = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::ObjectData,
+            encode_bonded_donor_datagram(tag, 0, &symbol, None),
+        )
+        .expect("unauthenticated frame");
+        assert!(bonded_control_datagram(&unauthenticated, tag, true, 16).is_err());
+        assert!(bonded_control_datagram(&unauthenticated, tag, false, 16).is_ok());
+    }
+
+    #[test]
+    fn bonded_control_codec_rejects_oversize_from_the_header() {
+        let limit = bonded_control_frame_limit(DEFAULT_SYMBOL_SIZE);
+        let oversized = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::ObjectData,
+            vec![0; usize::try_from(limit).expect("small frame bound") + 1],
+        )
+        .expect("below the general ATP frame limit");
+        let mut wire = oversized.to_wire_bytes().expect("encode oversize frame");
+        wire.truncate(oversized.header.encoded_len());
+        let mut buffered = BytesMut::from(wire.as_slice());
+        let mut codec = AtpFrameCodec::with_max_frame_size(limit);
+        assert!(
+            matches!(
+                codec.decode(&mut buffered),
+                Err(crate::net::atp::protocol::FrameError::FrameTooLarge { .. })
+            ),
+            "the receiver must reject before waiting for an oversized payload"
+        );
+    }
+
     #[test]
     fn wrong_key_datagram_is_counted_without_poisoning_authenticated_admission() {
         let verifier = SecurityContext::for_testing(214);
@@ -1031,6 +1099,26 @@
         thread::JoinHandle<Result<BondedReceiveReport, RqError>>,
         crate::observability::LogCollector,
     ) {
+        spawn_bonded_receiver_with_advertisement(
+            descriptor,
+            dest_dir,
+            expected_donors,
+            config,
+            Vec::new(),
+        )
+    }
+
+    fn spawn_bonded_receiver_with_advertisement(
+        descriptor: BondTransferDescriptor,
+        dest_dir: PathBuf,
+        expected_donors: u32,
+        config: RqConfig,
+        advertised_udp_ips: Vec<std::net::IpAddr>,
+    ) -> (
+        SocketAddr,
+        thread::JoinHandle<Result<BondedReceiveReport, RqError>>,
+        crate::observability::LogCollector,
+    ) {
         let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
         let logs = crate::observability::LogCollector::new(256)
             .with_min_level(crate::observability::LogLevel::Trace);
@@ -1047,7 +1135,7 @@
                 let listener = TcpListener::bind("127.0.0.1:0").await?;
                 let addr = listener.local_addr()?;
                 addr_tx.send(addr).expect("send bonded control addr");
-                receive_bonded(
+                receive_bonded_with_options_and_advertised_ips(
                     &cx,
                     &descriptor,
                     &dest_dir,
@@ -1057,6 +1145,8 @@
                     config,
                     "bonded-receiver",
                     None,
+                    RqReceiveOptions::default(),
+                    &advertised_udp_ips,
                 )
                 .await
             }))
@@ -1071,15 +1161,46 @@
         source_root: PathBuf,
         config: RqConfig,
     ) -> Result<BondedDonateReport, RqError> {
+        run_bonded_donor_with_transport(
+            descriptor,
+            control_addr,
+            source_root,
+            config,
+            BondedSymbolTransport::Datagram,
+        )
+    }
+
+    fn run_bonded_donor_with_transport(
+        descriptor: BondTransferDescriptor,
+        control_addr: SocketAddr,
+        source_root: PathBuf,
+        config: RqConfig,
+        symbol_transport: BondedSymbolTransport,
+    ) -> Result<BondedDonateReport, RqError> {
         let runtime = RuntimeBuilder::multi_thread()
             .worker_threads(2)
             .enable_platform_reactor(true)
             .build()
             .expect("bonded donor runtime");
-        runtime.block_on(runtime.handle().spawn(async move {
+        let result = runtime.block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("bonded donor cx");
-            donate_bonded(&cx, &descriptor, control_addr, &source_root, config).await
-        }))
+            match symbol_transport {
+                BondedSymbolTransport::Datagram => {
+                    donate_bonded(&cx, &descriptor, control_addr, &source_root, config).await
+                }
+                BondedSymbolTransport::Control => {
+                    donate_bonded_over_control(&cx, &descriptor, control_addr, &source_root, config)
+                        .await
+                }
+            }
+        }));
+        if symbol_transport == BondedSymbolTransport::Control {
+            let drained = runtime.shutdown_drained(Duration::from_secs(5));
+            assert_eq!(drained.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+            assert_eq!(drained.live_tasks, 0);
+            assert_eq!(drained.pending_obligations, 0);
+        }
+        result
     }
 
     fn bonded_enrollment_descriptor() -> BondTransferDescriptor {
@@ -1122,6 +1243,22 @@
                 false,
             ),
         }
+    }
+
+    #[test]
+    fn bonded_enrollment_negotiates_stream_carrier_explicitly() {
+        let descriptor = bonded_enrollment_descriptor();
+        let mut hello = bonded_enrollment_hello(&descriptor);
+        assert_eq!(hello.protocol, 3, "the UDP wire version must stay unchanged");
+        assert!(bonded_donor_hello_refusal(&hello, &descriptor, false).is_none());
+        hello.protocol = ATP_RQ_BONDED_STREAM_PROTOCOL;
+        assert!(bonded_donor_hello_refusal(&hello, &descriptor, false).is_none());
+        hello.protocol = ATP_RQ_BONDED_STREAM_PROTOCOL + 1;
+        assert!(
+            bonded_donor_hello_refusal(&hello, &descriptor, false)
+                .expect("unknown carrier rejected")
+                .contains("unsupported bonded protocol")
+        );
     }
 
     #[test]
@@ -1422,6 +1559,163 @@
         );
     }
 
+    /// asupersync-atp-channel-bonding-z01bbr.4.2: both source and feedback
+    /// traffic can share an authenticated control stream even when the
+    /// receiver's advertised UDP endpoints are unreachable from the donor.
+    #[test]
+    fn bonded_control_donors_commit_without_a_reachable_udp_path() {
+        assert_bonded_control_carriers_commit(false);
+    }
+
+    #[test]
+    fn bonded_mixed_udp_and_control_donors_share_one_decoder() {
+        assert_bonded_control_carriers_commit(true);
+    }
+
+    #[test]
+    fn bonded_control_rejects_wrong_key_without_committing_or_leaking_tasks() {
+        let receiver_config = bonded_auth_config();
+        let root = bonded_e2e_tmp("control_wrong_key");
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::create_dir_all(&dst_dir).expect("create dst dir");
+        let payload = bonded_e2e_payload(96_007);
+        std::fs::write(src_dir.join("payload.bin"), payload).expect("write payload");
+        let descriptor = bonded_e2e_descriptor(
+            &src_dir,
+            &["payload.bin"],
+            "payload.bin",
+            false,
+            &receiver_config,
+        );
+        let (addr, receiver, _) =
+            spawn_bonded_receiver(descriptor.clone(), dst_dir.clone(), 1, receiver_config);
+        let wrong_key = bonded_auth_config().with_symbol_auth(SecurityContext::for_testing(215));
+        let donor = run_bonded_donor_with_transport(
+            descriptor,
+            addr,
+            src_dir,
+            wrong_key,
+            BondedSymbolTransport::Control,
+        );
+        assert!(donor.is_err(), "a rejected stream must release its writer");
+        assert!(matches!(
+            receiver.join().expect("receiver thread"),
+            Err(RqError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+        assert!(!dst_dir.join("payload.bin").exists());
+    }
+
+    fn assert_bonded_control_carriers_commit(mixed: bool) {
+        let config = bonded_auth_config();
+        let root = bonded_e2e_tmp(if mixed {
+            "mixed_carriers"
+        } else {
+            "control_only"
+        });
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::create_dir_all(&dst_dir).expect("create dst dir");
+        let payload = bonded_e2e_payload(200_003);
+        std::fs::write(src_dir.join("payload.bin"), &payload).expect("write payload");
+        let descriptor =
+            bonded_e2e_descriptor(&src_dir, &["payload.bin"], "payload.bin", false, &config);
+        // These UDP sockets bind specifically to 127.0.0.1. Sending a symbol
+        // to 127.0.0.2 cannot reach them. It also fails v3 control-IP affinity,
+        // proving that stream donors never select or create a UDP route.
+        let advertised = if mixed {
+            Vec::new()
+        } else {
+            vec!["127.0.0.2".parse().expect("unbound loopback address")]
+        };
+        let (addr, recv_handle, _) = spawn_bonded_receiver_with_advertisement(
+            descriptor.clone(),
+            dst_dir.clone(),
+            2,
+            config.clone(),
+            advertised,
+        );
+        let first_transport = if mixed {
+            BondedSymbolTransport::Datagram
+        } else {
+            BondedSymbolTransport::Control
+        };
+        let first = {
+            let descriptor = descriptor.clone();
+            let src = src_dir.clone();
+            let config = config.clone();
+            thread::spawn(move || {
+                run_bonded_donor_with_transport(descriptor, addr, src, config, first_transport)
+            })
+        };
+        let second = thread::spawn(move || {
+            // The descriptor, not the caller's transport defaults, must
+            // determine the wire geometry for stream source and repair.
+            let config = RqConfig {
+                max_block_size: 512 * 1024,
+                symbol_size: DEFAULT_SYMBOL_SIZE / 2,
+                ..config
+            };
+            run_bonded_donor_with_transport(
+                descriptor,
+                addr,
+                src_dir,
+                config,
+                BondedSymbolTransport::Control,
+            )
+        });
+        let first = first
+            .join()
+            .expect("first donor thread")
+            .expect("first donor");
+        let second = second
+            .join()
+            .expect("second donor thread")
+            .expect("second donor");
+        let received = recv_handle
+            .join()
+            .expect("receiver thread")
+            .expect("receiver");
+        assert!(received.committed);
+        assert_eq!(received.enrolled_donors, 2);
+        assert_eq!(received.bytes_received, payload.len() as u64);
+        assert_eq!(
+            std::fs::read(dst_dir.join("payload.bin")).expect("committed bytes"),
+            payload
+        );
+        assert_eq!(received.donor_ingress.len(), 2);
+        assert!(
+            received
+                .donor_ingress
+                .iter()
+                .all(|(_, stats)| stats.symbols_accepted > 0)
+        );
+        for donor in [&first, &second] {
+            assert!(donor.receipt.committed && donor.receipt.sha_ok && donor.receipt.merkle_ok);
+            assert!(donor.spray.source_symbols_sent > 0);
+            assert!(donor.symbols_sent >= donor.spray.symbols_sent);
+        }
+        assert_ne!(first.donor_index, second.donor_index);
+        let stream_reports = if mixed {
+            vec![&second]
+        } else {
+            vec![&first, &second]
+        };
+        for donor in stream_reports {
+            assert!(donor.spray.receiver_endpoints.is_empty());
+            assert_eq!(
+                donor.spray.symbols_sent,
+                donor.spray.source_symbols_sent + donor.spray.repair_symbols_sent
+            );
+            assert_eq!(donor.spray.udp_send_acceleration.flushes, 0);
+        }
+        if mixed {
+            assert!(!first.spray.receiver_endpoints.is_empty());
+        }
+    }
+
     /// Two authenticated donors must converge despite a third enrolled donor
     /// spraying correctly framed symbols under the wrong key. The focused
     /// admission test above proves those packets increment the schedule-owned
@@ -1559,6 +1853,15 @@
     /// commits byte-identical.
     #[test]
     fn bonded_receive_survives_donor_death_via_repair_reallocation() {
+        assert_bonded_receive_survives_donor_death(BondedSymbolTransport::Datagram);
+    }
+
+    #[test]
+    fn bonded_control_survivor_reallocates_a_disconnected_donors_repair_windows() {
+        assert_bonded_receive_survives_donor_death(BondedSymbolTransport::Control);
+    }
+
+    fn assert_bonded_receive_survives_donor_death(symbol_transport: BondedSymbolTransport) {
         let config = bonded_lab_config();
         let root = bonded_e2e_tmp("donor_death");
         let src_dir = root.join("src");
@@ -1571,8 +1874,18 @@
         let descriptor =
             bonded_e2e_descriptor(&src_dir, &["payload.bin"], "payload.bin", false, &config);
 
-        let (addr, recv_handle, _) =
-            spawn_bonded_receiver(descriptor.clone(), dst_dir.clone(), 2, config.clone());
+        let advertised = if symbol_transport == BondedSymbolTransport::Control {
+            vec!["127.0.0.2".parse().expect("unbound loopback address")]
+        } else {
+            Vec::new()
+        };
+        let (addr, recv_handle, _) = spawn_bonded_receiver_with_advertisement(
+            descriptor.clone(),
+            dst_dir.clone(),
+            2,
+            config.clone(),
+            advertised,
+        );
 
         // Lossy survivor donor: HALF its datagrams are deterministically
         // dropped, so every block carries a deficit into the feedback rounds
@@ -1582,11 +1895,17 @@
         let survivor = {
             let descriptor = descriptor.clone();
             let src = src_dir.clone();
-            let lossy = RqConfig {
+            let mut lossy = RqConfig {
                 debug_drop_one_in: 2,
                 ..config.clone()
             };
-            thread::spawn(move || run_bonded_donor(descriptor, addr, src, lossy))
+            if symbol_transport == BondedSymbolTransport::Control {
+                lossy.max_block_size = 512 * 1024;
+                lossy.symbol_size = DEFAULT_SYMBOL_SIZE / 2;
+            }
+            thread::spawn(move || {
+                run_bonded_donor_with_transport(descriptor, addr, src, lossy, symbol_transport)
+            })
         };
 
         // Dying donor: enrolls, sprays a CLEAN round 0 (earning the dominant
@@ -1612,7 +1931,7 @@
                         .send(&json_frame(
                             FrameType::Handshake,
                             &BondedDonorHello {
-                                protocol: ATP_RQ_BONDED_PROTOCOL,
+                                protocol: symbol_transport.protocol(),
                                 transfer_id: descriptor.transfer_id.clone(),
                                 merkle_root_hex: descriptor.merkle_root_hex.clone(),
                                 metadata_commitment_hex: descriptor
@@ -1636,15 +1955,31 @@
                     let welcome: BondedDonorWelcome = parse_json(&ack)?;
                     assert!(welcome.accepted, "dying donor must enroll first");
                     let mut assignment = welcome.assignment.expect("assignment");
-                    assignment.receiver_udp_endpoints = welcome
-                        .udp_ports
-                        .iter()
-                        .map(|&port| SocketAddr::new(addr.ip(), port))
-                        .collect();
+                    if symbol_transport == BondedSymbolTransport::Datagram {
+                        assignment.receiver_udp_endpoints = welcome
+                            .udp_ports
+                            .iter()
+                            .map(|&port| SocketAddr::new(addr.ip(), port))
+                            .collect();
+                    }
                     let primary = assignment.receiver_udp_endpoints[0];
-                    let spray =
-                        donate_path(&cx, &descriptor, &assignment, primary, &src, config.clone())
-                            .await?;
+                    let spray = match symbol_transport {
+                        BondedSymbolTransport::Datagram => {
+                            donate_path(&cx, &descriptor, &assignment, primary, &src, config.clone())
+                                .await?
+                        }
+                        BondedSymbolTransport::Control => {
+                            donate_bonded_control_path(
+                                &cx,
+                                &descriptor,
+                                &assignment,
+                                &src,
+                                config.clone(),
+                                &mut control,
+                            )
+                            .await?
+                        }
+                    };
                     control
                         .send(&json_frame(
                             FrameType::ObjectComplete,

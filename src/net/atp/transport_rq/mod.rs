@@ -522,8 +522,9 @@ macro_rules! bondtrace {
 // after the trace macros so the child module can use them.
 mod bonded;
 pub use bonded::{
-    ATP_RQ_BONDED_PROTOCOL, BondedDonateReport, BondedReceiveReport, donate_bonded, receive_bonded,
-    receive_bonded_with_options, receive_bonded_with_options_and_advertised_ips,
+    ATP_RQ_BONDED_PROTOCOL, ATP_RQ_BONDED_STREAM_PROTOCOL, BondedDonateReport, BondedReceiveReport,
+    donate_bonded, donate_bonded_over_control, receive_bonded, receive_bonded_with_options,
+    receive_bonded_with_options_and_advertised_ips,
 };
 
 /// Transport tuning knobs.
@@ -3354,7 +3355,7 @@ pub struct BondedDonorSendReport {
     pub donor_index: u32,
     /// Total donor count in the active assignment.
     pub donor_count: u32,
-    /// Receiver UDP endpoints this donor connected to.
+    /// Receiver UDP endpoints this donor connected to; empty for control-stream symbols.
     pub receiver_endpoints: Vec<SocketAddr>,
     /// Descriptor entries considered for spray.
     pub entries: usize,
@@ -3364,7 +3365,7 @@ pub struct BondedDonorSendReport {
     pub source_symbols_sent: u64,
     /// Repair/FEC symbols emitted.
     pub repair_symbols_sent: u64,
-    /// Total UDP datagrams emitted by the donor.
+    /// Total symbols emitted by the donor, through UDP datagrams or control frames.
     pub symbols_sent: u64,
     /// Pacing decision used for the donor's initial source-first spray.
     pub pacing: BondedDonorPacingReport,
