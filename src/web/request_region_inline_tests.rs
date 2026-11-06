@@ -606,6 +606,292 @@
         fn native_scoped_request_drop_closes_parked_handler_and_descendants() {
             native(abandoning_request_closes_subtree);
         }
+
+        async fn timed_grpc_keeps_request_ownership(cx: Cx, peer_timeout: bool) {
+            use crate::bytes::Bytes;
+            use crate::grpc::Server;
+            use crate::grpc::streaming::{Request as GrpcRequest, Response as GrpcResponse};
+
+            let request_deadline = cx.now() + Duration::from_secs(100);
+            let envelope = crate::types::CapabilityBudget::new().with_io_bytes(128);
+            let mut spec = ChildRegionSpec::inherit().with_budget(
+                Budget::INFINITE.with_deadline(request_deadline)
+                    .with_poll_quota(10_000).with_cost_quota(50_000),
+            );
+            spec.capability_budget = Some(envelope);
+            let request_region = cx.open_child_region(spec).await.unwrap();
+            let request_region_id = request_region.region_id();
+            let (cleanup_ready, mut cleanup) = oneshot::channel();
+            let (release, mut released) = oneshot::channel();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let child_drops = Arc::clone(&drops);
+            let finalizers = Arc::new(AtomicUsize::new(0));
+            let finalizer_count = Arc::clone(&finalizers);
+            let cleanup_cx = cx.clone();
+            let mut handler = request_region.cx().spawn(move |owner| async move {
+                let server = if peer_timeout {
+                    Server::builder().build()
+                } else {
+                    Server::builder().default_timeout(Duration::from_secs(300)).build()
+                };
+                let mut request = GrpcRequest::new(Bytes::from_static(b"owned grpc reply"));
+                if peer_timeout {
+                    request.metadata_mut().insert("grpc-timeout", "300S");
+                }
+                let owner_task = owner.task_id();
+                let inherited = owner.budget();
+                let owner_now = owner.now();
+                let restricted = owner.restrict::<cap::CapSet<true, true, true, false, false>>();
+                let response = restricted.with_ambient(server.dispatch_unary(
+                    request,
+                    move |request| async move {
+                        // This is the public timed gRPC path that used to
+                        // replace an admitted request with a runtime-root Cx.
+                        let call = Cx::current().unwrap();
+                        assert_eq!(call.region_id(), request_region_id);
+                        assert_eq!(call.task_id(), owner_task);
+                        assert_eq!(call.now(), owner_now);
+                        assert_eq!(call.budget().deadline, Some(request_deadline));
+                        assert_eq!(call.budget().poll_quota, inherited.poll_quota);
+                        assert_eq!(call.budget().cost_quota, inherited.cost_quota);
+                        assert_eq!(call.capability_budget(), envelope);
+                        assert!(!call.capabilities().io);
+                        assert!(!call.capabilities().remote);
+                        let obligation = call.try_register_obligation_checked(
+                            ObligationKind::IoOp, owner_task,
+                        ).unwrap().expect("timed dispatch retains authoritative obligation admission");
+                        assert_eq!(obligation.region(), request_region_id);
+                        assert_eq!(obligation.holder(), owner_task);
+                        assert!(obligation.commit());
+                        assert!(Runtime::current_handle().unwrap()
+                            .register_sync_finalizer_for_testing(call.region_id(), move || {
+                                finalizer_count.fetch_add(1, Ordering::SeqCst);
+                            }));
+                        let (started, mut child_started) = oneshot::channel();
+                        let _child = call.spawn(move |child_cx| async move {
+                            let _dropped = Dropped(child_drops);
+                            assert_eq!(child_cx.region_id(), request_region_id);
+                            assert_eq!(child_cx.capability_budget(), envelope);
+                            assert!(!child_cx.capabilities().io);
+                            parked_until_cancelled(&child_cx, started).await;
+                            let mut ready = Some(cleanup_ready);
+                            let mut wait = pin!(released.recv(&cleanup_cx));
+                            poll_fn(|task| match wait.as_mut().poll(task) {
+                                Poll::Ready(result) => Poll::Ready(result.unwrap()),
+                                Poll::Pending => {
+                                    if let Some(ready) = ready.take() {
+                                        ready.send_blocking(()).unwrap();
+                                    }
+                                    Poll::Pending
+                                }
+                            }).await;
+                        }).unwrap();
+                        child_started.recv(&call).await.unwrap();
+                        Ok::<_, crate::grpc::Status>(GrpcResponse::new(request.into_inner()))
+                    },
+                )).await.unwrap();
+                assert_eq!(response.into_inner(), Bytes::from_static(b"owned grpc reply"));
+                assert!(!owner.is_cancel_requested());
+            }).unwrap();
+            handler.join(&cx).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(finalizers.load(Ordering::SeqCst), 0);
+
+            // The original request owner, not runtime shutdown, must cancel
+            // and drain the task spawned by the gRPC handler.
+            let mut closing = Box::pin(request_region.close());
+            let mut cleanup_wait = pin!(cleanup.recv(&cx));
+            poll_fn(|task| {
+                assert!(closing.as_mut().poll(task).is_pending(),
+                    "request close cannot finish while gRPC descendant cleanup is parked");
+                cleanup_wait.as_mut().poll(task)
+            }).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(finalizers.load(Ordering::SeqCst), 0);
+            release.send_blocking(()).unwrap();
+            closing.await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(finalizers.load(Ordering::SeqCst), 1);
+            assert!(!cx.is_cancel_requested());
+        }
+
+        #[test]
+        fn native_timed_grpc_dispatch_keeps_children_in_the_admitted_request_region() {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(50_000)));
+            native_with_timer(Some(TimerDriverHandle::with_virtual_clock(clock)), |cx| async move {
+                for peer_timeout in [false, true] {
+                    timed_grpc_keeps_request_ownership(cx.clone(), peer_timeout).await;
+                }
+            });
+        }
+
+        async fn timed_grpc_observes_parent_cancellation(cx: Cx, logical_parent: bool) {
+            use crate::bytes::Bytes;
+            use crate::grpc::Server;
+            use crate::grpc::streaming::{Request as GrpcRequest, Response as GrpcResponse};
+
+            let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let (parent_ready, mut parent) = oneshot::channel();
+            let (started, mut handler_started) = oneshot::channel();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let handler_drops = Arc::clone(&drops);
+            let mut task = region.cx().spawn(move |owner| async move {
+                let caller = if logical_parent {
+                    // This same-task cancellation scope has no scheduler
+                    // cancellation Waker. The adapter must subscribe to it.
+                    owner.derive_cancel_scope()
+                } else {
+                    owner.clone()
+                };
+                parent_ready.send_blocking(caller.clone()).unwrap();
+                let server = Server::builder().default_timeout(Duration::from_secs(300)).build();
+                let response = caller.with_ambient(server.dispatch_unary(
+                    GrpcRequest::new(Bytes::from_static(b"cleanup reply")),
+                    move |request| async move {
+                        let _dropped = Dropped(handler_drops);
+                        let call = Cx::current().unwrap();
+                        parked_until_cancelled(&call, started).await;
+                        let reason = call.cancel_reason().unwrap();
+                        assert_eq!(reason.kind, CancelKind::User);
+                        assert_eq!(reason.message.as_deref(), Some("owning request cancelled"));
+                        Ok::<_, crate::grpc::Status>(GrpcResponse::new(request.into_inner()))
+                    },
+                )).await.unwrap();
+                assert_eq!(response.into_inner(), Bytes::from_static(b"cleanup reply"));
+                if logical_parent {
+                    assert!(!owner.is_cancel_requested());
+                } else {
+                    assert!(owner.checkpoint().is_err());
+                }
+            }).unwrap();
+            let caller = parent.recv(&cx).await.unwrap();
+            handler_started.recv(&cx).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            caller.cancel_with(CancelKind::User, Some("owning request cancelled"));
+            task.join(&cx).await.unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            region.close().await.unwrap();
+            assert!(!cx.is_cancel_requested());
+        }
+
+        #[test]
+        fn native_timed_grpc_dispatch_wakes_for_owner_and_logical_parent_cancellation() {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(90_000)));
+            native_with_timer(Some(TimerDriverHandle::with_virtual_clock(clock)), |cx| async move {
+                for logical_parent in [false, true] {
+                    timed_grpc_observes_parent_cancellation(cx.clone(), logical_parent).await;
+                }
+            });
+        }
+
+        async fn minted_request_retains_ambient_limits(cx: Cx) {
+            let deadline = cx.now() + Duration::from_secs(30);
+            let region = cx.open_child_region(
+                ChildRegionSpec::inherit().with_budget(
+                    Budget::INFINITE.with_deadline(deadline)
+                        .with_poll_quota(512).with_cost_quota(80).with_priority(192),
+                ),
+            ).await.unwrap();
+            let mut task = region.cx().spawn(move |owner| async move {
+                let now = owner.now();
+                let inherited = owner.budget();
+                let loose = ServerRequestRegion::mint("mint-test", Budget::INFINITE, now).unwrap();
+                assert_eq!(loose.cx().region_id(), owner.region_id());
+                assert_eq!(loose.cx().task_id(), owner.task_id());
+                assert_eq!(loose.cx().budget(), inherited,
+                    "an unconstrained nested request cannot replenish its caller's budget");
+
+                let tighter_deadline = now + Duration::from_secs(5);
+                let tight = ServerRequestRegion::mint(
+                    "mint-test",
+                    Budget::INFINITE.with_deadline(tighter_deadline)
+                        .with_poll_quota(17).with_cost_quota(11).with_priority(240),
+                    now,
+                ).unwrap();
+                assert_eq!(tight.cx().budget().deadline, Some(tighter_deadline));
+                assert_eq!(tight.cx().budget().poll_quota, 17);
+                assert_eq!(tight.cx().budget().cost_quota, Some(11));
+                assert_eq!(tight.cx().budget().priority, 240);
+                assert_eq!(owner.budget(), inherited);
+                tight.cancel_timeout("independent logical request cancellation");
+                assert!(tight.cx().is_cancel_requested());
+                assert!(!owner.is_cancel_requested(),
+                    "minting must not alias the caller's cancellation state");
+
+                let no_caps = {
+                    let _restricted = owner.restrict::<cap::None>().set_current_restricted();
+                    ServerRequestRegion::mint("mint-test", Budget::INFINITE, now).unwrap()
+                };
+                // Test the retained value after the guard ends. A restricted
+                // ambient lookup alone could hide an escaped full-cap Cx.
+                assert!(owner.capabilities().spawn);
+                assert!(!no_caps.cx().capabilities().spawn);
+                assert!(!no_caps.cx().capabilities().io);
+                assert!(!no_caps.cx().capabilities().remote);
+                assert!(no_caps.cx().timer_driver().is_none());
+                assert_eq!(no_caps.cx().budget(), inherited);
+                let invoked = Arc::new(AtomicUsize::new(0));
+                let calls = Arc::clone(&invoked);
+                assert!(matches!(no_caps.cx().spawn(move |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    async {}
+                }), Err(crate::runtime::SpawnError::RuntimeUnavailable)));
+                assert_eq!(invoked.load(Ordering::SeqCst), 0);
+
+                owner.cancel_with(CancelKind::User, Some("cancelled before nested mint"));
+                let cancelled = ServerRequestRegion::mint("mint-test", Budget::INFINITE, now).unwrap();
+                assert!(cancelled.cx().is_cancel_requested(),
+                    "minting cannot resurrect an already-cancelled ambient task");
+                assert_eq!(cancelled.cx().cancel_reason(), owner.cancel_reason());
+                let masked = owner.masked(|| {
+                    ServerRequestRegion::mint("mint-test", Budget::INFINITE, now).unwrap()
+                });
+                assert!(!masked.cx().is_cancel_requested(),
+                    "a masked parent's cancellation is not yet observable");
+                masked.instrumented(RequestBudgetSource::Inherited, async {
+                    assert!(Cx::current().unwrap().checkpoint().is_err(),
+                        "the first handler poll inherits cancellation after the mask lifts");
+                }).await;
+                assert!(owner.checkpoint().is_err());
+            }).unwrap();
+            task.join(&cx).await.unwrap();
+            region.close().await.unwrap();
+        }
+
+        #[test]
+        fn native_minted_request_preserves_ambient_limits_and_restrictions() {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(80_000)));
+            native_with_timer(Some(TimerDriverHandle::with_virtual_clock(clock)),
+                minted_request_retains_ambient_limits);
+        }
+
+        #[test]
+        fn native_mint_without_task_context_retains_runtime_fallback() {
+            for workers in [1, 2] {
+                let (send, receive) = mpsc::channel();
+                let budget = Budget::INFINITE.with_poll_quota(73).with_cost_quota(19);
+                let builder = if workers == 1 {
+                    RuntimeBuilder::current_thread()
+                } else {
+                    RuntimeBuilder::new().worker_threads(workers)
+                };
+                let runtime = builder.on_thread_start(move || {
+                    let no_task = Cx::current().is_none();
+                    let context = ServerRequestRegion::mint("root-fallback", budget, Time::ZERO)
+                        .map(|region| (region.cx().region_id(), region.cx().budget(),
+                            region.cx().timer_driver().is_some()));
+                    let _ = send.send((no_task, context));
+                }).build().unwrap();
+                let root = runtime.request_cx_with_budget(Budget::INFINITE).region_id();
+                for _ in 0..workers {
+                    let (no_task, context) = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+                    assert!(no_task, "worker startup precedes task-context installation");
+                    assert_eq!(context, Some((root, budget, true)));
+                }
+                assert_eq!(runtime.shutdown_drained(Duration::from_secs(5)).outcome,
+                    RootDrainOutcome::Quiescent);
+            }
+        }
     }
 
     #[test]

@@ -780,6 +780,7 @@ impl Drop for ScopedRequestOwner {
 #[pin_project::pin_project]
 pub struct AmbientCxScope<F> {
     cx: Cx,
+    cancel_parent: Option<ConnectionCancelWaker>,
     #[pin]
     inner: F,
 }
@@ -792,8 +793,27 @@ impl<F: Future> Future for AmbientCxScope<F> {
         task_cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         let this = self.project();
+        if let Some(parent) = this.cancel_parent.as_mut() {
+            if this.cx.is_cancel_requested() {
+                parent.clear();
+            } else {
+                // Register before observing the reason so cancellation cannot
+                // strand a handler parked exclusively on the derived context.
+                parent.refresh(task_cx.waker());
+                if let Some(reason) = parent.cx.observable_cancel_reason() {
+                    this.cx.inherit_cancel(&reason);
+                    parent.clear();
+                }
+            }
+        }
         let _guard = Cx::set_current(Some(this.cx.clone()));
-        this.inner.poll(task_cx)
+        let result = this.inner.poll(task_cx);
+        if result.is_ready()
+            && let Some(parent) = this.cancel_parent.as_mut()
+        {
+            parent.clear();
+        }
+        result
     }
 }
 
@@ -806,6 +826,10 @@ impl<F: Future> Future for AmbientCxScope<F> {
 /// [`Self::finish`] (gRPC server hop).
 pub struct ServerRequestRegion {
     cx: Cx,
+    /// Ambient-derived logical contexts retain one-way task cancellation.
+    /// Actual body contexts and explicit connection adapters supervise their
+    /// own cancellation and leave this empty.
+    cancel_parent: Option<Cx>,
     started_at: Time,
     protocol: &'static str,
     /// Set once `server.budget_consumed` has been emitted, so the event fires
@@ -1199,20 +1223,27 @@ impl ServerRequestRegion {
         })
     }
 
-    /// Mints a request region through the runtime boundary.
+    /// Derives a request context from the task currently handling the request.
     ///
-    /// Uses `Runtime::current_request_cx_with_budget` so the request Cx
-    /// inherits the runtime's drivers and capability mask (non-escalating;
-    /// see br-asupersync-ovztin). Returns `None` when no runtime is
-    /// installed on the current thread — callers must preserve their
-    /// legacy non-region path in that case. Test builds fall back to a
-    /// detached request context so lab/unit tests can exercise the region
-    /// without a full runtime.
+    /// An ambient [`Cx`] supplies the existing region, spawn route, drivers,
+    /// capability restrictions, and budget ceiling. The requested budget can
+    /// only tighten that ceiling. Observable parent cancellation is inherited
+    /// immediately and while the instrumented handler runs; cancelling this
+    /// context does not cancel the calling task. This constructor does not
+    /// create a child region; spawned work belongs to the ambient region,
+    /// whose owner remains responsible for closing it. Use `Self::run_scoped`
+    /// for independently owned request execution on native runtimes.
+    ///
+    /// Only a call without an ambient task context falls back to the installed
+    /// runtime's root request context. Returns `None` when neither is present.
+    /// Test builds additionally permit a detached context for plain unit tests.
     #[must_use]
     pub fn mint(protocol: &'static str, budget: Budget, now: Time) -> Option<Self> {
-        let cx = Self::mint_cx(budget)?;
+        let cancel_parent = Cx::current();
+        let cx = Self::mint_cx(budget, cancel_parent.as_ref())?;
         Some(Self {
             cx,
+            cancel_parent,
             started_at: now,
             protocol,
             consumed: AtomicBool::new(false),
@@ -1227,6 +1258,7 @@ impl ServerRequestRegion {
         Self {
             owned_drain_timer: cx.timer_driver(),
             cx,
+            cancel_parent: None,
             started_at: now,
             protocol,
             consumed: AtomicBool::new(false),
@@ -1250,6 +1282,7 @@ impl ServerRequestRegion {
     ) -> Self {
         Self {
             cx: Self::child_cx_from_connection(connection_cx, budget),
+            cancel_parent: None,
             started_at: now,
             protocol,
             consumed: AtomicBool::new(false),
@@ -1257,20 +1290,32 @@ impl ServerRequestRegion {
         }
     }
 
-    fn mint_cx(budget: Budget) -> Option<Cx> {
-        if let Some(cx) = crate::runtime::Runtime::current_request_cx_with_budget(budget) {
+    fn mint_cx(budget: Budget, ambient: Option<&Cx>) -> Option<Cx> {
+        // A protocol adapter may already be inside an admitted request region.
+        // Prefer that task's authority over the runtime handle: reconstructing
+        // a root context here sends a timed gRPC handler's children outside
+        // the request subtree and can restore relinquished capabilities
+        // (br-asupersync-m8xsjx H1/L3).
+        if let Some(ambient) = ambient {
+            // Retain every task-local handle, including obligation admission
+            // and explicit capability budgets. Reconstructing a partial Cx
+            // here would silently shed those restrictions and accounting.
+            let cx = ambient.derive_cancel_scope();
+            let budget = cx.budget().meet(budget);
+            {
+                let mut inner = cx.inner.write();
+                inner.budget = budget;
+                // This independent context begins checkpoint accounting at
+                // its tightened snapshot, as other minted requests do.
+                inner.budget_baseline = budget;
+            }
+            if let Some(reason) = ambient.observable_cancel_reason() {
+                cx.inherit_cancel(&reason);
+            }
             return Some(cx);
         }
-        // No runtime handle (e.g. serving inside a `LabRuntime` task):
-        // derive from the ambient task context instead. The request cx
-        // gets a fresh `CxInner` (independent cancel state + the tightened
-        // budget) while inheriting the ambient drivers (the lab virtual
-        // timer under `LabRuntime`, so deadlines stay deterministic),
-        // trace buffer, observability/entropy forks, and — critically —
-        // the ambient runtime mask, so this path cannot escalate
-        // capabilities (br-asupersync-ovztin).
-        if let Some(ambient) = Cx::current() {
-            return Some(Self::child_cx_from_connection(&ambient, budget));
+        if let Some(cx) = crate::runtime::Runtime::current_request_cx_with_budget(budget) {
+            return Some(cx);
         }
         // Last resort, test builds only: a detached request context so
         // plain unit tests can exercise the region without any runtime.
@@ -1340,6 +1385,7 @@ impl ServerRequestRegion {
         self.emit_installed(source);
         AmbientCxScope {
             cx: self.cx.clone(),
+            cancel_parent: self.cancel_parent.clone().map(ConnectionCancelWaker::new),
             inner: fut,
         }
     }
@@ -1493,6 +1539,13 @@ impl ServerRequestRegion {
         Fut: Future<Output = R>,
     {
         self.emit_installed(source);
+        if let Some(reason) = self
+            .cancel_parent
+            .as_ref()
+            .and_then(Cx::observable_cancel_reason)
+        {
+            self.cx.inherit_cancel(&reason);
+        }
 
         // Pre-handler gate: a cancelled region must not start new work. A
         // checkpoint past the request's deadline cancels it with Deadline;
@@ -1522,6 +1575,7 @@ impl ServerRequestRegion {
 
         let mut fut = std::pin::pin!(AmbientCxScope {
             cx: self.cx.clone(),
+            cancel_parent: self.cancel_parent.clone().map(ConnectionCancelWaker::new),
             inner: CatchUnwind { inner: fut },
         });
         let mut connection_cancel_waker = conn_cx.map(ConnectionCancelWaker::new);
