@@ -707,7 +707,8 @@ fn scoped_race_second_submission_refusal_drains_the_first_late_admission() {
 
 #[test]
 fn scoped_race_missing_gateway_refuses_before_either_factory_runs() {
-    let owner = Cx::detached_cancel_context();
+    let (mut lab, owner, root, gate) = fixture(0x5C_2A00);
+    let owner = owner.with_spawn_gateway(None);
     let calls = Arc::new(AtomicUsize::new(0));
     let left_calls = Arc::clone(&calls);
     let right_calls = Arc::clone(&calls);
@@ -726,4 +727,6 @@ fn scoped_race_missing_gateway_refuses_before_either_factory_runs() {
         Poll::Ready(Err(ScopedRaceError::Spawn(SpawnError::RuntimeUnavailable)))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    drop(race);
+    finish_fixture(&mut lab, root, &gate);
 }
