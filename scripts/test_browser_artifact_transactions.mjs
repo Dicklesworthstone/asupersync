@@ -217,11 +217,11 @@ async function consistent(store) {
   return records;
 }
 
-async function corruptStoredIndex(env, store) {
+async function corruptStoredValue(env, store, logical = "__artifact_index__") {
   if (store.storage.backend === "localstorage") {
-    const rawKey = [...env.values.keys()].find((key) => logicalKey(key) === "__artifact_index__" &&
+    const rawKey = [...env.values.keys()].find((key) => logicalKey(key) === logical &&
       Buffer.from(key.split(":").at(-2), "base64url").toString("utf8") === store.namespace);
-    assert.ok(rawKey, "the index must already be persisted");
+    assert.ok(rawKey, "the value must already be persisted");
     // Use the real host decoder: Buffer.from is deliberately more permissive
     // than the browser atob boundary for invalid Base64.
     env.host.atob = atob;
@@ -241,9 +241,9 @@ async function corruptStoredIndex(env, store) {
       transaction.onabort = () => reject(transaction.error);
       const request = objectStore.getAllKeys();
       request.onsuccess = () => {
-        const rawKey = request.result.find((key) => logicalKey(key) === "__artifact_index__" &&
+        const rawKey = request.result.find((key) => logicalKey(key) === logical &&
           Buffer.from(key.split(":").at(-2), "base64url").toString("utf8") === store.namespace);
-        assert.ok(rawKey, "the index must already be persisted");
+        assert.ok(rawKey, "the value must already be persisted");
         // A foreign client can store structured-cloneable non-byte values.
         objectStore.put({ invalid: "not a BrowserStorage byte value" }, rawKey);
       };
@@ -417,7 +417,7 @@ for (const backend of ["localstorage", "indexeddb"]) {
     const other = env.store({}, "other");
     await store.persistArtifact(custom("original"));
     await other.persistArtifact(custom("untouched"));
-    await corruptStoredIndex(env, store);
+    await corruptStoredValue(env, store);
     assert.equal(await store.clearArtifacts(), 1);
     assert.deepEqual(ids(await consistent(store)), []);
     assert.deepEqual(ids(await consistent(other)), ["untouched"]);
@@ -429,7 +429,7 @@ for (const backend of ["localstorage", "indexeddb"]) {
     const env = await environment(backend);
     const store = env.store();
     await store.persistArtifact(custom("original"));
-    await corruptStoredIndex(env, store);
+    await corruptStoredValue(env, store);
     for (const operation of [
       () => store.listArtifacts(),
       () => store.exportArchive(),
@@ -450,6 +450,56 @@ for (const backend of ["localstorage", "indexeddb"]) {
     await assert.rejects(store.clearArtifacts(), (error) => artifactError(error, "storage_failed"));
     assert.deepEqual(ids(await consistent(store)), ["original"]);
     assert.equal(bytesText((await store.exportArtifact("original")).bytes), "original");
+  });
+
+  test(`${backend}: truncated and oversized payloads cannot export as complete artifacts`, async () => {
+    const env = await environment(backend);
+    const store = env.store();
+    await store.persistArtifact(custom("original", "original payload"));
+    await store.persistArtifact(custom("untouched"));
+    const index = JSON.parse(bytesText(await store.storage.get(store.namespace, "__artifact_index__")));
+    const entry = index.entries.find((item) => item.id === "original");
+    const original = await store.storage.get(store.namespace, entry.payloadKey);
+    for (const damaged of [new Uint8Array(), original.slice(0, -1), new Uint8Array(original.length + 1)]) {
+      await store.storage.set(store.namespace, entry.payloadKey, damaged);
+      await assert.rejects(store.exportArtifact("original"), (error) => artifactError(error, "corrupt_index"));
+      await assert.rejects(store.exportArchive(), (error) => artifactError(error, "corrupt_index"));
+      assert.equal(bytesText((await store.exportArtifact("untouched")).bytes), "untouched");
+      assert.deepEqual(Array.from(await store.storage.get(store.namespace, entry.payloadKey)), Array.from(damaged),
+        "export failures must leave the damaged bytes available for explicit recovery");
+      assert.deepEqual(ids(await store.listArtifacts()), ["original", "untouched"]);
+    }
+    await store.storage.set(store.namespace, entry.payloadKey, original);
+    assert.deepEqual(ids(await consistent(store)), ["original", "untouched"]);
+  });
+
+  test(`${backend}: undecodable payloads report corruption without discarding valid artifacts`, async () => {
+    const env = await environment(backend);
+    const store = env.store();
+    await store.persistArtifact(custom("original"));
+    await store.persistArtifact(custom("untouched"));
+    const index = JSON.parse(bytesText(await store.storage.get(store.namespace, "__artifact_index__")));
+    const entry = index.entries.find((item) => item.id === "original");
+    await corruptStoredValue(env, store, entry.payloadKey);
+    await assert.rejects(store.exportArtifact("original"), (error) => artifactError(error, "corrupt_index"));
+    await assert.rejects(store.exportArchive(), (error) => artifactError(error, "corrupt_index"));
+    assert.equal(bytesText((await store.exportArtifact("untouched")).bytes), "untouched");
+    assert.equal((await store.storage.listKeys(store.namespace)).length, 3);
+    assert.equal(await store.deleteArtifact("original"), true);
+    assert.deepEqual(ids(await consistent(store)), ["untouched"]);
+    await store.persistArtifact(custom("original", "recovered"));
+    assert.equal(bytesText((await store.exportArtifact("original")).bytes), "recovered");
+  });
+
+  test(`${backend}: payload read I/O failures remain retryable storage failures`, async () => {
+    const env = await environment(backend);
+    const store = env.store();
+    await store.persistArtifact(custom("original"));
+    for (const operation of [() => store.exportArtifact("original"), () => store.exportArchive()]) {
+      env.failGet((key) => key?.startsWith("artifact:"));
+      await assert.rejects(operation(), (error) => artifactError(error, "storage_failed"));
+      assert.deepEqual(ids(await consistent(store)), ["original"]);
+    }
   });
 }
 

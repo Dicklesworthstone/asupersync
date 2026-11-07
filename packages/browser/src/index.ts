@@ -7338,7 +7338,7 @@ export class BrowserArtifactStore {
           error.code === BROWSER_ARTIFACT_OPERATION_FAILED_CODE) throw error;
       throw this.operationError(
         operation,
-        error instanceof BrowserArtifactValueDecodeError && error.key === BROWSER_ARTIFACT_INDEX_KEY
+        error instanceof BrowserArtifactValueDecodeError
           ? "corrupt_index" : browserArtifactFailureReasonFromError(error, "storage_failed"),
         errorMessage(error),
       );
@@ -7642,6 +7642,23 @@ export class BrowserArtifactStore {
     });
   }
 
+  private validatePayload(
+    bytes: Uint8Array | null,
+    entry: BrowserArtifactIndexEntry,
+    operation: "export" | "export_archive",
+  ): Uint8Array {
+    if (bytes === null) {
+      throw this.operationError(operation, "corrupt_index",
+        `browser artifact index references missing payload storage for ${entry.id}`, entry.id);
+    }
+    if (bytes.byteLength !== entry.byteLength) {
+      throw this.operationError(operation, "corrupt_index",
+        `browser artifact ${entry.id} has ${bytes.byteLength} payload bytes but its index records ${entry.byteLength}`,
+        entry.id);
+    }
+    return bytes;
+  }
+
   async exportArtifact(id: string): Promise<BrowserArtifactExport> {
     const normalizedId = normalizeBrowserArtifactId(id);
     const { entry, bytes } = await this.transaction<{ entry: BrowserArtifactIndexEntry; bytes: Uint8Array }>(
@@ -7654,11 +7671,7 @@ export class BrowserArtifactStore {
               `browser artifact ${normalizedId} was not found in the current retention window`, normalizedId);
           }
           transaction.get(entry.payloadKey, (bytes) => {
-            if (bytes === null) {
-              throw this.operationError("export", "corrupt_index",
-                `browser artifact index references missing payload storage for ${normalizedId}`, normalizedId);
-            }
-            finish({ entry, bytes });
+            finish({ entry, bytes: this.validatePayload(bytes, entry, "export") });
           });
         });
       },
@@ -7682,13 +7695,10 @@ export class BrowserArtifactStore {
           if (remaining === 0) { finish(entries); return; }
           index.entries.forEach((entry, offset) => {
             transaction.get(entry.payloadKey, (bytes) => {
-              if (bytes === null) {
-                throw this.operationError("export_archive", "corrupt_index",
-                  `browser artifact index references missing payload storage for ${entry.id}`, entry.id);
-              }
+              const payload = this.validatePayload(bytes, entry, "export_archive");
               entries[offset] = {
                 artifact: stripBrowserArtifactRecord(entry),
-                payloadBase64: encodeBrowserStorageBytes(bytes, this.storage.globalObject),
+                payloadBase64: encodeBrowserStorageBytes(payload, this.storage.globalObject),
               };
               remaining -= 1;
               if (remaining === 0) finish(entries);
