@@ -104,8 +104,8 @@ pub enum ChildRegionError {
     /// There is no gateway to carry the mint command, so derivation fails
     /// closed instead of inventing ambient authority.
     NoRuntimeGateway,
-    /// The owning runtime shut down before or while the mint was pending,
-    /// or the caller's runtime capability mask forbids region spawning.
+    /// The owning runtime shut down before or while an operation was pending,
+    /// or the caller's runtime capability mask forbids the requested operation.
     RuntimeUnavailable,
     /// The authoritative mint rejected the child region (parent closed,
     /// missing, at capacity, or under resource pressure).
@@ -451,6 +451,9 @@ impl<Caps> ChildRegion<Caps> {
     /// Begins the close protocol like [`ChildRegion::close`], but waits at
     /// most `bound` on the runtime's clock (virtual time under the lab
     /// runtime) for the region to reach `Closed`.
+    /// The clock and timer belong to this region's context, even when the
+    /// close is polled outside its runtime or under another ambient context.
+    /// A context with no timer driver uses the wall clock.
     ///
     /// Cancellation is cooperative, so `close` waits forever for a task that
     /// never reaches a checkpoint or a cancel-aware await. `close_within`
@@ -464,7 +467,9 @@ impl<Caps> ChildRegion<Caps> {
     ///
     /// Fails closed like [`ChildRegion::close`] when no runtime gateway is
     /// wired or the owning runtime is gone before a command could be
-    /// enqueued or answered.
+    /// enqueued or answered. A runtime capability mask that denies time also
+    /// returns [`ChildRegionError::RuntimeUnavailable`]; the drop backstop
+    /// still requests the region's close.
     pub async fn close_within(
         mut self,
         bound: Duration,
@@ -472,23 +477,53 @@ impl<Caps> ChildRegion<Caps> {
     where
         Caps: crate::cx::cap::HasTime,
     {
+        // An absent driver may use the legacy wall-clock fallback; denied
+        // time authority must not acquire that fallback implicitly.
+        if !self.cx.runtime_mask.has(crate::cx::cap::CapMask::TIME) {
+            return Err(ChildRegionError::RuntimeUnavailable);
+        }
+        let timer = self.cx.timer_driver();
+        let started = timer.as_ref().map_or_else(
+            crate::time::raw_wall_now,
+            crate::time::TimerDriverHandle::now,
+        );
+        let deadline = started + bound;
         // As in close(): this is the close the Drop backstop exists for.
         self.closed = true;
-        let started = self.cx.now();
         self.enqueue(RegionCommand::Close {
             region_id: self.region_id,
         })?;
-        let quiescent = match crate::time::timeout(started, bound, self.quiescence()).await {
-            Ok(closed) => {
-                closed?;
-                true
-            }
-            // The timeout checks its deadline before polling the region, so
-            // a region that reached Closed in time, but was polled late,
-            // would still read as timed out.
-            Err(_elapsed) => self.close_notify.lock().closed,
+        let quiescent = {
+            let mut closing = self.quiescence();
+            let mut deadline_wait = None;
+            std::future::poll_fn(|task| {
+                // An already-closed region remains quiescent even if this
+                // poll happens after the deadline or the bound is zero.
+                if let Poll::Ready(closed) = Pin::new(&mut closing).poll(task) {
+                    return Poll::Ready(closed.map(|()| true));
+                }
+                let wait = deadline_wait.get_or_insert_with(|| {
+                    timer.as_ref().map_or_else(
+                        || crate::time::Sleep::with_wall_clock(deadline),
+                        |timer| crate::time::Sleep::with_timer_driver(deadline, timer.clone()),
+                    )
+                });
+                // Closing is cancellation cleanup: only actual expiry, not
+                // cancellation of this or an ambient Cx, ends the bound.
+                if Pin::new(wait).poll_deadline(task).is_ready() {
+                    return Poll::Ready(Ok(self.close_notify.lock().closed));
+                }
+                Poll::Pending
+            })
+            .await?
         };
-        let elapsed = Duration::from_nanos(self.cx.now().duration_since(started));
+        // Drop the deadline registration before querying stragglers, and use
+        // the same captured clock for the entire measurement.
+        let finished = timer.as_ref().map_or_else(
+            crate::time::raw_wall_now,
+            crate::time::TimerDriverHandle::now,
+        );
+        let elapsed = Duration::from_nanos(finished.duration_since(started));
         let (outcome, stragglers) = if quiescent {
             (ChildRegionCloseOutcome::Quiescent, Vec::new())
         } else {

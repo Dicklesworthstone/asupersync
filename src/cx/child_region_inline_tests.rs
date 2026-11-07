@@ -1096,3 +1096,300 @@
             assert!(lab.state.region(root).is_none());
         }
     }
+
+    /// Bounded close follows the owning region's clock even when a monitor
+    /// polls it outside that runtime (br-asupersync-issue65-criticisms-kpmoy5.2.4).
+    #[cfg(not(target_arch = "wasm32"))]
+    mod close_clock_tests {
+        use super::*;
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::runtime::TaskHandle;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::Time;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::task::Waker;
+
+        type ReleaseGate = Arc<(AtomicBool, Mutex<Option<Waker>>)>;
+
+        fn parked_child(
+            seed: u64,
+            start: Time,
+        ) -> (LabRuntime, ChildRegion, TaskHandle<()>, ReleaseGate) {
+            let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(4096));
+            lab.advance_time_to(start);
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let gate = Arc::new((AtomicBool::new(false), Mutex::new(None)));
+            let task_gate = Arc::clone(&gate);
+            let slot = Arc::new(Mutex::new(None));
+            let owner_slot = Arc::clone(&slot);
+            let (owner, _join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let child = Cx::current()
+                        .expect("lab owner context")
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .expect("child region");
+                    let body = child
+                        .cx()
+                        .spawn(move |_task_cx| Released(task_gate))
+                        .expect("spawn cancellation-blind straggler");
+                    // Keep the handle alive until the test finishes so its
+                    // drop cannot cancel admission before the body's first poll.
+                    *owner_slot.lock() = Some((child, body));
+                })
+                .expect("create owner");
+            lab.scheduler.lock().schedule(owner, 0);
+            lab.run_until_idle();
+            let (child, body) = slot.lock().take().expect("owner published child");
+            assert!(gate.1.lock().is_some(), "the straggler actually parked");
+            (lab, child, body, gate)
+        }
+
+        fn foreign_context(start: Time) -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
+            let clock = Arc::new(VirtualClock::new());
+            clock.advance_to(start);
+            let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            cx.set_cancel_reason(CancelReason::shutdown());
+            (cx, clock, driver)
+        }
+
+        fn poll_under<F: Future>(
+            future: Pin<&mut F>,
+            context: &mut Context<'_>,
+            ambient: Option<&Cx>,
+        ) -> Poll<F::Output> {
+            let _ambient = ambient.map(|cx| Cx::set_current(Some(cx.clone())));
+            if ambient.is_none() {
+                assert!(Cx::current().is_none(), "polling outside every runtime");
+            }
+            future.poll(context)
+        }
+
+        fn ready_report<F>(
+            future: Pin<&mut F>,
+            context: &mut Context<'_>,
+            ambient: Option<&Cx>,
+        ) -> ChildRegionCloseReport
+        where
+            F: Future<Output = Result<ChildRegionCloseReport, ChildRegionError>>,
+        {
+            match poll_under(future, context, ambient) {
+                Poll::Ready(Ok(report)) => report,
+                other => panic!("expected a completed bounded close, got {other:?}"),
+            }
+        }
+
+        fn release_and_drain(
+            lab: &mut LabRuntime,
+            gate: &ReleaseGate,
+            close_state: &Arc<Mutex<RegionCloseState>>,
+        ) {
+            gate.0.store(true, Ordering::SeqCst);
+            let waker = gate.1.lock().take().expect("parked straggler's waker");
+            waker.wake();
+            lab.run_until_idle();
+            assert!(close_state.lock().closed, "the owned straggler drains");
+            assert_eq!(lab.state.live_task_count(), 0);
+        }
+
+        #[test]
+        fn bounded_close_uses_owner_timer_outside_ambient_runtime() {
+            for (seed, ambient_start, advance_ambient) in [
+                (0x34_C500, None, false),
+                (0x34_C501, Some(Time::ZERO), false),
+                (0x34_C502, Some(Time::from_secs(10_000)), true),
+            ] {
+                let start = Time::from_secs(5_000);
+                let bound = Duration::from_millis(50);
+                let deadline = start + bound;
+                let (mut lab, child, straggler, gate) = parked_child(seed, start);
+                let owner_timer = child.cx().timer_driver().expect("owner timer");
+                let close_state = Arc::clone(&child.close_notify);
+                let straggler_id = straggler.task_id();
+                // A cleanup deadline must not become a cancellation checkpoint.
+                child.cx().set_cancel_reason(CancelReason::shutdown());
+                let ambient = ambient_start.map(foreign_context);
+                let ambient_cx = ambient.as_ref().map(|(cx, _, _)| cx);
+                let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+                let waker = Waker::from(Arc::clone(&wakes));
+                let mut context = Context::from_waker(&waker);
+                let mut closing = Box::pin(child.close_within(bound));
+
+                assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
+                assert_eq!(owner_timer.next_deadline(), Some(deadline));
+                assert_eq!(owner_timer.pending_count(), 1);
+                lab.run_until_idle();
+                assert!(!close_state.lock().closed);
+                let before_foreign = wakes.0.load(Ordering::SeqCst);
+                if let Some((_, clock, driver)) = &ambient {
+                    assert!(driver.is_empty(), "no timer belongs to the foreign runtime");
+                    if advance_ambient {
+                        clock.advance_to(Time::from_secs(20_000));
+                    }
+                    assert_eq!(driver.process_timers(), 0);
+                    assert_eq!(wakes.0.load(Ordering::SeqCst), before_foreign);
+                }
+                assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
+
+                lab.advance_time_to(deadline.saturating_sub_nanos(1));
+                assert_eq!(owner_timer.process_timers(), 0);
+                assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
+                let before_expiry = wakes.0.load(Ordering::SeqCst);
+                lab.advance_time_to(deadline);
+                assert_eq!(owner_timer.process_timers(), 1);
+                assert!(wakes.0.load(Ordering::SeqCst) > before_expiry);
+                // Expiry asks the owning scheduler for its live-task snapshot.
+                assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
+                lab.run_until_idle();
+                let report = ready_report(closing.as_mut(), &mut context, ambient_cx);
+                assert_eq!(report.outcome, ChildRegionCloseOutcome::TimedOut);
+                assert_eq!(report.elapsed, bound);
+                assert_eq!(report.stragglers, vec![straggler_id]);
+                assert!(owner_timer.is_empty(), "completion disarms before future drop");
+                if let Some((_, _, driver)) = &ambient {
+                    assert!(driver.is_empty());
+                }
+                release_and_drain(&mut lab, &gate, &close_state);
+            }
+        }
+
+        #[test]
+        fn bounded_close_cleans_timer_when_quiescence_wins() {
+            let start = Time::from_secs(5_000);
+            let (mut lab, child, _straggler, gate) = parked_child(0x34_C503, start);
+            let timer = child.cx().timer_driver().unwrap();
+            let close_state = Arc::clone(&child.close_notify);
+            let mut context = Context::from_waker(Waker::noop());
+            let mut closing = Box::pin(child.close_within(Duration::from_millis(50)));
+            assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            lab.run_until_idle();
+            lab.advance_time_to(start + Duration::from_millis(25));
+            release_and_drain(&mut lab, &gate, &close_state);
+            let report = ready_report(closing.as_mut(), &mut context, None);
+            assert_eq!(report.outcome, ChildRegionCloseOutcome::Quiescent);
+            assert_eq!(report.elapsed, Duration::from_millis(25));
+            assert!(report.stragglers.is_empty());
+            assert!(timer.is_empty(), "quiescence disarms before future drop");
+        }
+
+        #[test]
+        fn dropping_bounded_close_disarms_timer_but_retains_straggler() {
+            let (mut lab, child, _straggler, gate) =
+                parked_child(0x34_C504, Time::from_secs(5_000));
+            let timer = child.cx().timer_driver().unwrap();
+            let close_state = Arc::clone(&child.close_notify);
+            let mut context = Context::from_waker(Waker::noop());
+            let mut closing = Box::pin(child.close_within(Duration::from_secs(3_600)));
+            assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            drop(closing);
+            assert!(timer.is_empty());
+            lab.run_until_idle();
+            assert!(!close_state.lock().closed, "dropping the wait does not detach the task");
+            assert_eq!(lab.state.live_task_count(), 1);
+            release_and_drain(&mut lab, &gate, &close_state);
+        }
+
+        #[test]
+        fn bounded_close_handles_zero_and_saturated_bounds() {
+            for (seed, start, bound, expected_elapsed) in [
+                (0x34_C505, Time::from_secs(5_000), Duration::ZERO, Duration::ZERO),
+                (
+                    0x34_C506,
+                    Time::MAX.saturating_sub_nanos(1_000_000),
+                    Duration::MAX,
+                    Duration::from_millis(1),
+                ),
+            ] {
+                let (mut lab, child, straggler, gate) = parked_child(seed, start);
+                let timer = child.cx().timer_driver().unwrap();
+                let close_state = Arc::clone(&child.close_notify);
+                let mut context = Context::from_waker(Waker::noop());
+                let mut closing = Box::pin(child.close_within(bound));
+                assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
+                if bound.is_zero() {
+                    assert!(timer.is_empty(), "zero bound never arms a timer");
+                } else {
+                    // Start inside the timer wheel's horizon while overflowing
+                    // the requested duration, so the saturated deadline is exact.
+                    assert_eq!(timer.next_deadline(), Some(Time::MAX));
+                    lab.advance_time_to(Time::MAX);
+                    assert_eq!(timer.process_timers(), 1);
+                    assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
+                }
+                lab.run_until_idle();
+                let report = ready_report(closing.as_mut(), &mut context, None);
+                assert_eq!(report.outcome, ChildRegionCloseOutcome::TimedOut);
+                assert_eq!(report.elapsed, expected_elapsed);
+                assert_eq!(report.stragglers, vec![straggler.task_id()]);
+                assert!(timer.is_empty());
+                release_and_drain(&mut lab, &gate, &close_state);
+            }
+        }
+
+        #[test]
+        fn bounded_close_refuses_denied_time_but_still_requests_cleanup() {
+            let (mut lab, mut child, _straggler, gate) =
+                parked_child(0x34_C507, Time::from_secs(5_000));
+            let timer = child.cx().timer_driver().unwrap();
+            let close_state = Arc::clone(&child.close_notify);
+            child.cx.runtime_mask = crate::cx::cap::CapMask::none();
+            let (ambient, _, foreign_timer) = foreign_context(Time::from_secs(10_000));
+            let mut context = Context::from_waker(Waker::noop());
+            let mut closing = Box::pin(child.close_within(Duration::from_millis(50)));
+            assert!(matches!(
+                poll_under(closing.as_mut(), &mut context, Some(&ambient)),
+                Poll::Ready(Err(ChildRegionError::RuntimeUnavailable))
+            ));
+            assert!(timer.is_empty());
+            assert!(foreign_timer.is_empty());
+            drop(closing);
+            lab.run_until_idle();
+            release_and_drain(&mut lab, &gate, &close_state);
+        }
+
+        #[test]
+        fn bounded_close_without_driver_uses_explicit_wall_clock() {
+            let (mut lab, mut child, _straggler, gate) =
+                parked_child(0x34_C508, Time::from_secs(5_000));
+            let owner_timer = child.cx().timer_driver().unwrap();
+            let close_state = Arc::clone(&child.close_notify);
+            // Preserve the real admitted region and gateway, but model a
+            // principal whose authorized context has no timer driver.
+            child.cx = Cx::new_with_drivers(
+                child.region_id(),
+                child.cx().task_id(),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let (ambient, _, foreign_timer) = foreign_context(Time::MAX);
+            let mut context = Context::from_waker(Waker::noop());
+            let mut closing = Box::pin(child.close_within(Duration::from_secs(3_600)));
+            assert!(poll_under(closing.as_mut(), &mut context, Some(&ambient)).is_pending());
+            lab.run_until_idle();
+            assert!(
+                poll_under(closing.as_mut(), &mut context, Some(&ambient)).is_pending(),
+                "a saturated foreign clock cannot expire a wall-clock bound"
+            );
+            assert!(owner_timer.is_empty());
+            assert!(foreign_timer.is_empty());
+            drop(closing);
+            release_and_drain(&mut lab, &gate, &close_state);
+        }
+    }
