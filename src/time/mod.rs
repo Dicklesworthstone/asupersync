@@ -2,6 +2,7 @@
 //!
 //! This module provides core time-based operations for async programming:
 //! - [`Sleep`]: A future that completes after a deadline
+//! - [`sleep_cx`]: A fallible sleep with explicit time authority and cancellation
 //! - [`TimeoutFuture`]: A wrapper that adds a timeout to any future
 //! - [`Interval`]: A repeating timer that yields at a fixed period
 //!
@@ -58,6 +59,7 @@ mod interval;
 pub mod intrusive_wheel;
 pub mod replay;
 mod sleep;
+mod sleep_cx;
 mod timeout_future;
 pub mod utc;
 mod wheel;
@@ -79,6 +81,7 @@ pub(crate) use sleep::raw_wall_now;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use sleep::wasm_monotonic_nanos;
 pub use sleep::{Sleep, sleep, sleep_until, wall_now};
+pub use sleep_cx::{SleepError, sleep_cx, sleep_until_cx};
 pub use timeout_future::{TimeoutFuture, timeout, timeout_at};
 pub use utc::{format_unix_nanos_http_date, format_unix_nanos_rfc3339};
 pub use wheel::{

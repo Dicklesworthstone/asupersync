@@ -261,3 +261,100 @@ fn dropping_scope_timeout_future_aborts_spawned_task() {
         "dropping a Scope::timeout future must abort the spawned task"
     );
 }
+
+// The error-returning sleep is an opt-in path through the sleep/timeout policy
+// in asupersync-combinator-time-audit-fqdvqn. Legacy Sleep and Scope::timeout
+// keep their existing output and late-value policies.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn fallible_sleep_stops_at_scope_timeout_before_running_subsequent_effects() {
+    use asupersync::time::{SleepError, sleep_cx, timeout};
+    use asupersync::types::CancelKind;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+
+    struct Cleanup(Arc<AtomicUsize>);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for workers in [1, 2] {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::multi_thread().worker_threads(workers)
+            };
+            let runtime = builder.build().expect("fallible sleep runtime");
+            let completed = Arc::new(AtomicBool::new(false));
+            let completion = Arc::clone(&completed);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("runtime task context");
+                let cleanup_runs = Arc::new(AtomicUsize::new(0));
+                let subsequent_effects = Arc::new(AtomicUsize::new(0));
+                let parked = Arc::new(AtomicBool::new(false));
+                let task_cleanup = Arc::clone(&cleanup_runs);
+                let task_effects = Arc::clone(&subsequent_effects);
+                let task_parked = Arc::clone(&parked);
+                let scope = cx.scope();
+                let operation = scope.timeout::<(), SleepError, _, _>(
+                    &cx,
+                    Duration::from_millis(250),
+                    move |task_cx| async move {
+                        let _cleanup = Cleanup(task_cleanup);
+                        let mut waiting =
+                            Box::pin(sleep_cx(&task_cx, Duration::from_secs(3600)));
+                        std::future::poll_fn(|task| {
+                            let polled = waiting.as_mut().poll(task);
+                            if polled.is_pending() {
+                                task_parked.store(true, Ordering::Release);
+                            }
+                            polled
+                        })
+                        .await?;
+                        task_effects.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                );
+                let result = timeout(cx.now(), Duration::from_secs(10), operation)
+                    .await
+                    .expect("Scope::timeout must not drain the original one-hour sleep")
+                    .expect("spawn sleeping operation");
+
+                assert!(parked.load(Ordering::Acquire), "sleep must actually park");
+                assert!(
+                    matches!(
+                        result.into_result(),
+                        Err(TimedError::Error(SleepError::Cancelled(reason)))
+                            if reason.kind == CancelKind::Timeout
+                    ),
+                    "the acknowledged timeout must preserve the typed sleep error"
+                );
+                assert_eq!(subsequent_effects.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    cleanup_runs.load(Ordering::SeqCst),
+                    1,
+                    "the sleeping operation must finish cleanup before the timeout returns"
+                );
+                completion.store(true, Ordering::Release);
+            }));
+            assert!(completed.load(Ordering::Acquire), "scenario must complete");
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            done_tx.send(()).expect("watchdog receiver");
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                runner.join().expect("fallible sleep scope timeout scenario");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("fallible sleep scope timeout exceeded its external watchdog");
+            }
+        }
+    }
+}
