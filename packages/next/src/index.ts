@@ -234,6 +234,19 @@ export const NEXT_EDGE_BRIDGE_ENVIRONMENTS = ["edge_runtime"] as const;
 
 type BrowserOutcome<T = unknown> = Outcome<T, AbiFailure>;
 
+function nextBootstrapCleanupError(error: unknown): string {
+  try {
+    return String(error).slice(0, 1024);
+  } catch {
+    return "cleanup threw an unprintable value";
+  }
+}
+
+interface NextRuntimeInitializationAttempt {
+  result: Promise<BrowserOutcome<RegionHandle>>;
+  cancelled: BrowserOutcome<never> | null;
+}
+
 function supportsWasmRuntime(environment: NextRenderEnvironment): boolean {
   return environment === "client_hydrated";
 }
@@ -626,6 +639,7 @@ function nextClientBrowserRuntimeOptions(
     healthPolicy: options.healthPolicy,
     healthScopeKey: options.healthScopeKey,
     now: options.now,
+    fetchAuthority: options.fetchAuthority,
   };
 }
 
@@ -861,6 +875,7 @@ export class NextEdgeBridgeAdapter {
 export class NextClientBootstrapAdapter {
   private runtime: BrowserRuntime | null = null;
   private scope: RegionHandle | null = null;
+  private initializationAttempt: NextRuntimeInitializationAttempt | null = null;
   private readonly logEvents: NextBootstrapLogEvent[] = [];
   private snapshotState: NextBootstrapSnapshot;
 
@@ -894,6 +909,7 @@ export class NextClientBootstrapAdapter {
   beginHydration(): NextBootstrapLogEvent {
     const from = this.captureTransitionPoint();
     this.transitionTo("hydrating", "beginHydration");
+    this.invalidateRuntimeScope("begin_hydration_scope_reset");
     return this.recordEvent("begin_hydration", from);
   }
 
@@ -905,61 +921,143 @@ export class NextClientBootstrapAdapter {
   }
 
   async initializeRuntime(): Promise<BrowserOutcome<RegionHandle>> {
-    assertNextRuntimeSupport(
-      "client",
-      detectNextRuntimeSupport("client", this.options.globalObject),
+    if (this.initializationAttempt) {
+      return this.initializationAttempt.result;
+    }
+
+    let resolve!: (outcome: BrowserOutcome<RegionHandle>) => void;
+    let reject!: (reason: unknown) => void;
+    const result = new Promise<BrowserOutcome<RegionHandle>>((onResolve, onReject) => {
+      resolve = onResolve;
+      reject = onReject;
+    });
+    const attempt: NextRuntimeInitializationAttempt = { result, cancelled: null };
+    // Publish before support detection, option getters, or the factory can reenter.
+    this.initializationAttempt = attempt;
+    void this.initializeRuntimeAttempt(attempt).then(
+      (outcome) => {
+        if (this.initializationAttempt === attempt) {
+          this.initializationAttempt = null;
+        }
+        resolve(attempt.cancelled ?? outcome);
+      },
+      (error: unknown) => {
+        if (this.initializationAttempt === attempt) {
+          this.initializationAttempt = null;
+        }
+        if (attempt.cancelled) {
+          resolve(attempt.cancelled);
+        } else {
+          reject(error);
+        }
+      },
     );
+    return result;
+  }
 
-    if (this.snapshotState.phase === "runtime_ready" && this.scope) {
-      return OutcomeFactory.ok(this.scope);
-    }
-
-    if (this.snapshotState.phase === "runtime_ready") {
-      this.cleanupHandles();
-      this.snapshotState.runtimeInitialized = false;
-      this.forceTransition("hydrated");
-      this.snapshotState.environment = "client_hydrated";
-    }
-
-    if (
-      !supportsWasmRuntime(this.snapshotState.environment) ||
-      this.snapshotState.phase !== "hydrated"
-    ) {
-      throw createNextBootstrapStateError(
-        "initializeRuntime",
-        this.snapshotState.phase,
-        `initializeRuntime requires a hydrated client boundary; current phase is ${this.snapshotState.phase}`,
+  private async initializeRuntimeAttempt(
+    attempt: NextRuntimeInitializationAttempt,
+  ): Promise<BrowserOutcome<RegionHandle>> {
+    let ownedRuntime: BrowserRuntime | null = null;
+    let ownedScope: RegionHandle | null = null;
+    try {
+      assertNextRuntimeSupport(
+        "client",
+        detectNextRuntimeSupport("client", this.options.globalObject),
       );
+      if (attempt.cancelled) {
+        return attempt.cancelled;
+      }
+
+      if (this.snapshotState.phase === "runtime_ready" && this.scope) {
+        return OutcomeFactory.ok(this.scope);
+      }
+
+      if (this.snapshotState.phase === "runtime_ready") {
+        this.snapshotState.runtimeInitialized = false;
+        this.forceTransition("hydrated");
+        this.snapshotState.environment = "client_hydrated";
+        this.cleanupHandles();
+        if (attempt.cancelled) {
+          return attempt.cancelled;
+        }
+      }
+
+      if (
+        !supportsWasmRuntime(this.snapshotState.environment) ||
+        this.snapshotState.phase !== "hydrated"
+      ) {
+        throw createNextBootstrapStateError(
+          "initializeRuntime",
+          this.snapshotState.phase,
+          `initializeRuntime requires a hydrated client boundary; current phase is ${this.snapshotState.phase}`,
+        );
+      }
+
+      const from = this.captureTransitionPoint();
+      const runtimeOptions = nextClientBrowserRuntimeOptions(this.options);
+      if (attempt.cancelled) {
+        return attempt.cancelled;
+      }
+      this.snapshotState.runtimeInitAttempts += 1;
+      const runtime = await createBrowserRuntime(runtimeOptions);
+      if (runtime.outcome === "ok") {
+        ownedRuntime = runtime.value;
+      }
+      if (attempt.cancelled) {
+        return attempt.cancelled;
+      }
+      if (runtime.outcome !== "ok") {
+        this.markRuntimeFailure(formatOutcomeFailure(runtime), from);
+        return attempt.cancelled ?? runtime;
+      }
+
+      const label = this.options.label ?? "next-client-bootstrap";
+      const consumerVersion = runtime.value.consumerVersion;
+      if (attempt.cancelled) {
+        return attempt.cancelled;
+      }
+      const entered = runtime.value.enterScope(label, consumerVersion);
+      if (entered.outcome === "ok") {
+        ownedScope = entered.value;
+      }
+      if (attempt.cancelled) {
+        return attempt.cancelled;
+      }
+      if (entered.outcome !== "ok") {
+        ownedRuntime = null;
+        this.closeHandles(runtime.value, null);
+        if (attempt.cancelled) {
+          return attempt.cancelled;
+        }
+        this.markRuntimeFailure(formatOutcomeFailure(entered), from);
+        return attempt.cancelled ?? entered;
+      }
+
+      this.runtime = runtime.value;
+      this.scope = entered.value;
+      ownedRuntime = null;
+      ownedScope = null;
+      this.transitionTo("runtime_ready", "initializeRuntime");
+      this.snapshotState.runtimeInitialized = true;
+      this.snapshotState.runtimeInitSuccesses += 1;
+      this.snapshotState.activeScopeGeneration += 1;
+      this.snapshotState.lastError = null;
+      this.recordEvent("initialize_runtime", from);
+      // A log hook may close this owner and start another initialization.
+      if (attempt.cancelled) {
+        return attempt.cancelled;
+      }
+      return OutcomeFactory.ok(entered.value);
+    } catch (error) {
+      if (attempt.cancelled) {
+        return attempt.cancelled;
+      }
+      throw error;
+    } finally {
+      // Stale completions only dispose handles they have not published.
+      this.closeHandles(ownedRuntime, ownedScope);
     }
-
-    const from = this.captureTransitionPoint();
-    this.snapshotState.runtimeInitAttempts += 1;
-
-    const runtime = await createBrowserRuntime(nextClientBrowserRuntimeOptions(this.options));
-    if (runtime.outcome !== "ok") {
-      this.markRuntimeFailure(formatOutcomeFailure(runtime), from);
-      return runtime;
-    }
-
-    const entered = runtime.value.enterScope(
-      this.options.label ?? "next-client-bootstrap",
-      this.options.consumerVersion,
-    );
-    if (entered.outcome !== "ok") {
-      runtime.value.close(this.options.consumerVersion);
-      this.markRuntimeFailure(formatOutcomeFailure(entered), from);
-      return entered;
-    }
-
-    this.runtime = runtime.value;
-    this.scope = entered.value;
-    this.transitionTo("runtime_ready", "initializeRuntime");
-    this.snapshotState.runtimeInitialized = true;
-    this.snapshotState.runtimeInitSuccesses += 1;
-    this.snapshotState.activeScopeGeneration += 1;
-    this.snapshotState.lastError = null;
-    this.recordEvent("initialize_runtime", from);
-    return OutcomeFactory.ok(entered.value);
   }
 
   async ensureRuntimeReady(): Promise<BrowserOutcome<RegionHandle>> {
@@ -989,6 +1087,7 @@ export class NextClientBootstrapAdapter {
       );
     }
     this.transitionTo("runtime_failed", "runtimeInitFailed");
+    this.invalidateInitialization(reason);
     this.snapshotState.runtimeFailureCount += 1;
     this.snapshotState.lastError = reason;
     return this.recordEvent("runtime_init_failed", from, reason);
@@ -996,42 +1095,45 @@ export class NextClientBootstrapAdapter {
 
   cancelBootstrap(reason: string): NextBootstrapLogEvent {
     const from = this.captureTransitionPoint();
+    this.invalidateInitialization(reason);
     this.snapshotState.cancellationCount += 1;
     this.snapshotState.runtimeFailureCount += 1;
-    this.cleanupHandles();
     this.forceTransition("runtime_failed");
     this.snapshotState.runtimeInitialized = false;
     this.snapshotState.lastError = reason;
+    this.cleanupHandles();
     return this.recordEvent("cancel_bootstrap", from, reason);
   }
 
   hydrationMismatch(reason: string): NextBootstrapLogEvent {
     const from = this.captureTransitionPoint();
+    this.invalidateInitialization(reason);
     this.snapshotState.hydrationMismatchCount += 1;
     this.snapshotState.runtimeFailureCount += 1;
-    this.cleanupHandles();
     this.forceTransition("runtime_failed");
     this.snapshotState.runtimeInitialized = false;
     this.snapshotState.lastError = reason;
+    this.cleanupHandles();
     return this.recordEvent("hydration_mismatch", from, reason);
   }
 
   recover(action: NextBootstrapRecoveryAction): NextBootstrapLogEvent {
     const from = this.captureTransitionPoint();
+    this.snapshotState.lastRecoveryAction = action;
     switch (action) {
       case "none":
         break;
       case "reset_to_hydrating":
         this.snapshotState.environment = "client_ssr";
-        this.snapshotState.runtimeInitialized = false;
         this.forceTransition("hydrating");
+        this.invalidateRuntimeScope("reset_to_hydrating");
         break;
       case "retry_runtime_init":
         this.snapshotState.environment = "client_hydrated";
         this.forceTransition("hydrated");
+        this.invalidateRuntimeScope("retry_runtime_init");
         break;
     }
-    this.snapshotState.lastRecoveryAction = action;
     return this.recordEvent("recover", from, action, undefined, action);
   }
 
@@ -1045,9 +1147,9 @@ export class NextClientBootstrapAdapter {
         break;
       case "hard_navigation":
         this.snapshotState.hardNavigationCount += 1;
-        this.invalidateRuntimeScope("hard_navigation_scope_reset");
         this.snapshotState.environment = "client_ssr";
         this.forceTransition("server_rendered");
+        this.invalidateRuntimeScope("hard_navigation_scope_reset");
         break;
       case "popstate":
         this.snapshotState.popstateNavigationCount += 1;
@@ -1057,9 +1159,9 @@ export class NextClientBootstrapAdapter {
             this.snapshotState.phase === "runtime_ready"
           )
         ) {
-          this.invalidateRuntimeScope("popstate_scope_reset");
           this.snapshotState.environment = "client_ssr";
           this.forceTransition("server_rendered");
+          this.invalidateRuntimeScope("popstate_scope_reset");
         }
         break;
     }
@@ -1075,9 +1177,9 @@ export class NextClientBootstrapAdapter {
   hotReload(): NextBootstrapLogEvent {
     const from = this.captureTransitionPoint();
     this.snapshotState.hotReloadCount += 1;
-    this.invalidateRuntimeScope("hot_reload_scope_reset");
     this.snapshotState.environment = "client_ssr";
     this.forceTransition("hydrating");
+    this.invalidateRuntimeScope("hot_reload_scope_reset");
     return this.recordEvent("hot_reload", from);
   }
 
@@ -1092,10 +1194,10 @@ export class NextClientBootstrapAdapter {
     }
 
     this.snapshotState.cacheRevalidationCount += 1;
-    if (this.snapshotState.phase === "runtime_ready") {
-      this.invalidateRuntimeScope("cache_revalidation_scope_reset");
+    if (this.snapshotState.phase === "runtime_ready" || this.initializationAttempt) {
       this.snapshotState.environment = "client_hydrated";
       this.forceTransition("hydrated");
+      this.invalidateRuntimeScope("cache_revalidation_scope_reset");
     }
 
     return this.recordEvent("cache_revalidated", from);
@@ -1103,12 +1205,13 @@ export class NextClientBootstrapAdapter {
 
   close(reason = "manual_close"): NextBootstrapLogEvent {
     const from = this.captureTransitionPoint();
-    const failures = this.cleanupHandles();
+    this.invalidateInitialization(reason);
     this.snapshotState.runtimeInitialized = false;
     if (this.snapshotState.phase === "runtime_ready") {
       this.forceTransition("hydrated");
       this.snapshotState.environment = "client_hydrated";
     }
+    const failures = this.cleanupHandles();
     this.snapshotState.lastError = failures.length > 0 ? `${reason}; ${failures.join("; ")}` : null;
     return this.recordEvent("close_runtime", from, this.snapshotState.lastError ?? reason);
   }
@@ -1150,15 +1253,16 @@ export class NextClientBootstrapAdapter {
       environment: NextRenderEnvironment;
     },
   ): void {
-    this.cleanupHandles();
     this.forceTransition("runtime_failed");
     this.snapshotState.runtimeFailureCount += 1;
     this.snapshotState.runtimeInitialized = false;
     this.snapshotState.lastError = detail;
+    this.cleanupHandles();
     this.recordEvent("runtime_init_failed", from, detail);
   }
 
   private invalidateRuntimeScope(reason: string): void {
+    this.invalidateInitialization(reason);
     if (this.snapshotState.runtimeInitialized) {
       this.snapshotState.scopeInvalidationCount += 1;
       this.snapshotState.runtimeReinitRequiredCount += 1;
@@ -1166,27 +1270,58 @@ export class NextClientBootstrapAdapter {
       this.snapshotState.lastInvalidatedScopeGeneration = this.snapshotState.activeScopeGeneration;
       this.snapshotState.lastError = reason;
     }
-    this.cleanupHandles();
     this.snapshotState.runtimeInitialized = false;
+    this.cleanupHandles();
+  }
+
+  private invalidateInitialization(reason: string): void {
+    const attempt = this.initializationAttempt;
+    if (attempt) {
+      attempt.cancelled = OutcomeFactory.cancelled({
+        kind: "next_bootstrap_invalidated",
+        phase: "completed",
+        origin_region: "next-client-bootstrap",
+        origin_task: null,
+        timestamp_nanos: 0,
+        message: reason,
+        truncated: false,
+      });
+      this.initializationAttempt = null;
+    }
   }
 
   private cleanupHandles(): string[] {
+    const scope = this.scope;
+    const runtime = this.runtime;
+    // Close callbacks must never observe or clear a newer owner's handles.
+    this.scope = null;
+    this.runtime = null;
+    return this.closeHandles(runtime, scope);
+  }
+
+  private closeHandles(runtime: BrowserRuntime | null, scope: RegionHandle | null): string[] {
     const failures: string[] = [];
 
-    if (this.scope) {
-      const closeScope = this.scope.close(this.options.consumerVersion);
-      if (closeScope.outcome !== "ok") {
-        failures.push(`scope_close=${formatOutcomeFailure(closeScope)}`);
+    if (scope) {
+      try {
+        const closeScope = scope.close(scope.consumerVersion);
+        if (closeScope.outcome !== "ok") {
+          failures.push(`scope_close=${formatOutcomeFailure(closeScope)}`);
+        }
+      } catch (error) {
+        failures.push(`scope_close=${nextBootstrapCleanupError(error)}`);
       }
-      this.scope = null;
     }
 
-    if (this.runtime) {
-      const closeRuntime = this.runtime.close(this.options.consumerVersion);
-      if (closeRuntime.outcome !== "ok") {
-        failures.push(`runtime_close=${formatOutcomeFailure(closeRuntime)}`);
+    if (runtime) {
+      try {
+        const closeRuntime = runtime.close(runtime.consumerVersion);
+        if (closeRuntime.outcome !== "ok") {
+          failures.push(`runtime_close=${formatOutcomeFailure(closeRuntime)}`);
+        }
+      } catch (error) {
+        failures.push(`runtime_close=${nextBootstrapCleanupError(error)}`);
       }
-      this.runtime = null;
     }
 
     return failures;
