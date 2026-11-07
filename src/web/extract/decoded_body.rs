@@ -3,7 +3,9 @@
 use super::{ExtractionError, FromRequest, Request, StreamingRawBody, parse_content_length};
 use crate::Cx;
 use crate::bytes::BytesCursor;
-use crate::http::body::{Body, ContentDecodeError, ContentDecodeLimits, ContentDecodedBody, Frame, SizeHint};
+use crate::http::body::{
+    Body, ContentDecodeError, ContentDecodeLimits, ContentDecodedBody, Frame, SizeHint,
+};
 use crate::http::decode::{ContentDecodePlan, is_limit_error};
 use crate::http::h1::stream::IncomingBodyError;
 use crate::web::middleware::{RequestContentCodings, request_content_decoder};
@@ -58,25 +60,53 @@ impl DecodedStreamingBody {
         limits: ContentDecodeLimits,
     ) -> Result<Self, ExtractionError> {
         if cx.checkpoint().is_err() {
-            return Err(ExtractionError::new(StatusCode::CLIENT_CLOSED_REQUEST, "request cancelled"));
+            return Err(ExtractionError::new(
+                StatusCode::CLIENT_CLOSED_REQUEST,
+                "request cancelled",
+            ));
         }
-        let limits = limits.tightened(request.body_policy().map_or(usize::MAX, |policy| policy.max_total_body_size));
+        let limits = limits.tightened(
+            request
+                .body_policy()
+                .map_or(usize::MAX, |policy| policy.max_total_body_size),
+        );
         let decoder = request_content_decoder(&request).map_err(decoding_extraction_error)?;
         let identity = decoder.is_identity();
         if !identity && request.header("content-range").is_some() {
-            return Err(ExtractionError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "encoded partial request bodies are unsupported"));
+            return Err(ExtractionError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "encoded partial request bodies are unsupported",
+            ));
         }
 
         let mut length = None;
-        for (_, value) in request.headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case("content-length")) {
+        for (_, value) in request
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        {
             let declared = parse_content_length(value).map_err(|_| {
-                ExtractionError::new(StatusCode::BAD_REQUEST, "invalid encoded request content length")
+                ExtractionError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid encoded request content length",
+                )
             })?;
-            if length.replace(declared).is_some_and(|previous| previous != declared) {
-                return Err(ExtractionError::new(StatusCode::BAD_REQUEST, "conflicting encoded request content length"));
+            if length
+                .replace(declared)
+                .is_some_and(|previous| previous != declared)
+            {
+                return Err(ExtractionError::new(
+                    StatusCode::BAD_REQUEST,
+                    "conflicting encoded request content length",
+                ));
             }
-            if declared > limits.max_encoded_bytes() || (identity && declared > limits.max_decoded_bytes()) {
-                return Err(ExtractionError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body exceeds content decoding limits"));
+            if declared > limits.max_encoded_bytes()
+                || (identity && declared > limits.max_decoded_bytes())
+            {
+                return Err(ExtractionError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body exceeds content decoding limits",
+                ));
             }
         }
 
@@ -84,8 +114,11 @@ impl DecodedStreamingBody {
         let plan = ContentDecodePlan::new(decoder, limits).map_err(decoding_extraction_error)?;
         request.extensions.remove_typed::<RequestContentCodings>();
         let raw = StreamingRawBody::take_from_request(&request)?;
-        raw.inner.tighten_max_body_size(u64::try_from(limits.max_encoded_bytes()).unwrap_or(u64::MAX));
-        Ok(Self { inner: Mutex::new(ContentDecodedBody::from_plan(raw, plan).with_cx(cx)) })
+        raw.inner
+            .tighten_max_body_size(u64::try_from(limits.max_encoded_bytes()).unwrap_or(u64::MAX));
+        Ok(Self {
+            inner: Mutex::new(ContentDecodedBody::from_plan(raw, plan).with_cx(cx)),
+        })
     }
 
     /// Return the effective encoded and per-stage decoded ceilings.
@@ -101,9 +134,16 @@ impl DecodedStreamingBody {
     }
 
     fn configured_limits(request: &Request) -> Result<ContentDecodeLimits, ExtractionError> {
-        request.extensions.get_typed::<ContentDecodeLimits>().copied().ok_or_else(|| {
-            ExtractionError::new(StatusCode::INTERNAL_SERVER_ERROR, "decoded streaming body requires explicit content decoding limits")
-        })
+        request
+            .extensions
+            .get_typed::<ContentDecodeLimits>()
+            .copied()
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "decoded streaming body requires explicit content decoding limits",
+                )
+            })
     }
 }
 
@@ -111,7 +151,10 @@ impl FromRequest for DecodedStreamingBody {
     fn from_request(request: Request) -> Result<Self, ExtractionError> {
         let limits = Self::configured_limits(&request)?;
         let cx = Cx::current().ok_or_else(|| {
-            ExtractionError::new(StatusCode::INTERNAL_SERVER_ERROR, "decoded streaming body requires an explicit or current context")
+            ExtractionError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "decoded streaming body requires an explicit or current context",
+            )
         })?;
         Self::from_request_with_limits(&cx, request, limits)
     }
@@ -119,9 +162,14 @@ impl FromRequest for DecodedStreamingBody {
     fn from_request_with_cx<'a>(
         cx: &'a Cx,
         request: Request,
-    ) -> impl std::future::Future<Output = Result<Self, ExtractionError>> + Send + 'a {
-        std::future::ready(Self::configured_limits(&request)
-            .and_then(|limits| Self::from_request_with_limits(cx, request, limits)))
+    ) -> impl std::future::Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    where
+        Self: Send + 'a,
+    {
+        std::future::ready(
+            Self::configured_limits(&request)
+                .and_then(|limits| Self::from_request_with_limits(cx, request, limits)),
+        )
     }
 }
 
@@ -129,7 +177,10 @@ impl Body for DecodedStreamingBody {
     type Data = BytesCursor;
     type Error = ContentDecodeError<IncomingBodyError>;
 
-    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         Pin::new(self.get_mut().inner.get_mut()).poll_frame(cx)
     }
 
@@ -144,10 +195,19 @@ impl Body for DecodedStreamingBody {
 
 fn decoding_extraction_error(error: io::Error) -> ExtractionError {
     if is_limit_error(&error) {
-        ExtractionError::new(StatusCode::PAYLOAD_TOO_LARGE, "decoded request body exceeds resource limit")
+        ExtractionError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "decoded request body exceeds resource limit",
+        )
     } else if error.kind() == io::ErrorKind::Unsupported {
-        ExtractionError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported request content encoding")
+        ExtractionError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported request content encoding",
+        )
     } else {
-        ExtractionError::new(StatusCode::BAD_REQUEST, "malformed request content encoding")
+        ExtractionError::new(
+            StatusCode::BAD_REQUEST,
+            "malformed request content encoding",
+        )
     }
 }

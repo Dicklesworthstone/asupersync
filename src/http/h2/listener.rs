@@ -46,6 +46,7 @@ use crate::server::shutdown::{
     ShutdownStats,
 };
 use crate::stream::Stream;
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(feature = "tls")]
 use crate::tls::{TlsAcceptor, TlsStream};
 #[cfg(feature = "tls")]
@@ -65,7 +66,6 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -1900,16 +1900,20 @@ where
         .is_some_and(|finished| finished.lock().is_some())
     {
         use crate::types::Outcome;
-        match (closed.descendant_panic, closed.cleanup_outcome, closed.outcome) {
+        match (
+            closed.descendant_panic,
+            closed.cleanup_outcome,
+            closed.outcome,
+        ) {
             (Some(panic), _, _)
             | (_, Some(Outcome::Panicked(panic)), _)
             | (_, _, Outcome::Panicked(panic)) => Some(panic.to_string()),
-            (_, Some(cleanup), _) if !matches!(cleanup, Outcome::Ok(())) => {
-                Some(format!("HTTP/2 produced request cleanup failed: {cleanup:?}"))
-            }
-            (_, _, Outcome::Err(error)) => {
-                Some(format!("HTTP/2 produced request descendant failed: {error:?}"))
-            }
+            (_, Some(cleanup), _) if !matches!(cleanup, Outcome::Ok(())) => Some(format!(
+                "HTTP/2 produced request cleanup failed: {cleanup:?}"
+            )),
+            (_, _, Outcome::Err(error)) => Some(format!(
+                "HTTP/2 produced request descendant failed: {error:?}"
+            )),
             // Closing deliberately cancels remaining descendants. That
             // aggregate cancellation alone is not a failed finalizer.
             _ => None,
@@ -2635,9 +2639,10 @@ fn poll_produced_body_event(
         // prevent service setup, its initial metadata, or an early error from
         // making progress.
         if state.pending_initial_response.is_some() {
-            return state.body.poll_initial_headers(task_cx).map(|headers| {
-                Some(ProducedBodyEvent::InitialHeaders { stream_id, headers })
-            });
+            return state
+                .body
+                .poll_initial_headers(task_cx)
+                .map(|headers| Some(ProducedBodyEvent::InitialHeaders { stream_id, headers }));
         }
         if state.body_eof || state.pending_trailers.is_some() {
             return Poll::Pending;
@@ -3131,8 +3136,7 @@ async fn dispatch_owned_h2_response<F, Fut>(
     resp_tx: &mpsc::Sender<FunnelItem>,
     guard: InFlightRequestGuard,
     suppress_response_body: bool,
-)
-where
+) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = H2DispatchResponse> + Send + 'static,
 {
@@ -3265,7 +3269,8 @@ where
                     )
                     .into_h2_response(),
                     Ok(OwnedH2HopCompletion {
-                        hop: ServerHopOutcome::Cancelled
+                        hop:
+                            ServerHopOutcome::Cancelled
                             | ServerHopOutcome::ConnectionLost
                             | ServerHopOutcome::Ok(OwnedH2Response::Produced(_)),
                         ..
@@ -3278,7 +3283,9 @@ where
                         invalid_h2_response_fallback()
                     }
                     Err(error) => {
-                        cx.trace(&format!("h2_owned_handler_admission_or_close_failed: {error}"));
+                        cx.trace(&format!(
+                            "h2_owned_handler_admission_or_close_failed: {error}"
+                        ));
                         invalid_h2_response_fallback()
                     }
                     _ => invalid_h2_response_fallback(),
@@ -3295,7 +3302,7 @@ where
     // The request Cx may be cancelled. Cleanup publication belongs to its
     // coordinator and happens only after the retirement barrier above.
     if let Ok(permit) = resp_tx.reserve(cx).await {
-        if signal.phase() as u8 < ShutdownPhase::ForceClosing as u8 {
+        if (signal.phase() as u8) < ShutdownPhase::ForceClosing as u8 {
             let _ = permit.try_send(item);
         }
     }
@@ -3743,7 +3750,13 @@ async fn h2_tcp_transport(
         return Ok(Some(H2Transport::Tls(Box::new(tls))));
     }
     #[cfg(not(feature = "tls"))]
-    let _ = (task_cx, shutdown_signal, transport_timeouts, peer_addr, stats);
+    let _ = (
+        task_cx,
+        shutdown_signal,
+        transport_timeouts,
+        peer_addr,
+        stats,
+    );
     Ok(Some(H2Transport::Plain(socket)))
 }
 
@@ -3962,12 +3975,8 @@ where
             let now = Cx::current()
                 .and_then(|cx| cx.timer_driver())
                 .map_or_else(crate::time::wall_now, |timer| timer.now());
-            let flow_control_at = flow_control_progress.next_deadline(
-                &conn,
-                &response_guards,
-                &produced_bodies,
-                now,
-            );
+            let flow_control_at =
+                flow_control_progress.next_deadline(&conn, &response_guards, &produced_bodies, now);
             // Arm the stage-2 finalize deadline once, when the stage-1 GOAWAY is
             // outstanding; keep it fixed across loop iterations so active traffic
             // cannot reset the window.
@@ -4280,9 +4289,16 @@ where
                     );
                 }
                 DriverEvent::FlowControlTimeout(stream_id) => {
-                    reset_flow_control_stream(stream_id, &mut conn, &task_cx, &request_owners,
-                        &mut produced_bodies, &mut associated_pushes,
-                        #[cfg(feature = "http2-streaming")] &mut incoming);
+                    reset_flow_control_stream(
+                        stream_id,
+                        &mut conn,
+                        &task_cx,
+                        &request_owners,
+                        &mut produced_bodies,
+                        &mut associated_pushes,
+                        #[cfg(feature = "http2-streaming")]
+                        &mut incoming,
+                    );
                 }
                 DriverEvent::Frame(None) => {
                     // Peer closed the transport.
@@ -4644,20 +4660,30 @@ where
                             continue;
                         };
                         let queued = headers
-                            .map_err(|_| H2Error::connection(
-                                ErrorCode::InternalError,
-                                "produced response initial headers were not published",
-                            ))
+                            .map_err(|_| {
+                                H2Error::connection(
+                                    ErrorCode::InternalError,
+                                    "produced response initial headers were not published",
+                                )
+                            })
                             .and_then(|headers| {
                                 for (name, value) in headers.iter() {
-                                    let value = value.to_str().map_err(|_| H2Error::connection(
-                                        ErrorCode::InternalError,
-                                        "invalid produced response initial header value",
-                                    ))?;
-                                    response.headers.push((name.as_str().to_owned(), value.to_owned()));
+                                    let value = value.to_str().map_err(|_| {
+                                        H2Error::connection(
+                                            ErrorCode::InternalError,
+                                            "invalid produced response initial header value",
+                                        )
+                                    })?;
+                                    response
+                                        .headers
+                                        .push((name.as_str().to_owned(), value.to_owned()));
                                 }
                                 validate_h2_produced_response_for_queue(&response)?;
-                                conn.send_headers(stream_id, h2_headers_from_response(&response)?, false)
+                                conn.send_headers(
+                                    stream_id,
+                                    h2_headers_from_response(&response)?,
+                                    false,
+                                )
                             });
                         if queued.is_err() {
                             record_h2_body_diagnostic(
@@ -5517,7 +5543,11 @@ impl<F> Http2Listener<F> {
     {
         config.validate()?;
         let tcp_listener = TcpListener::bind(addr).await?;
-        Ok(Self::from_listener_streaming_produced(tcp_listener, handler, config))
+        Ok(Self::from_listener_streaming_produced(
+            tcp_listener,
+            handler,
+            config,
+        ))
     }
 
     /// Create a live-input, produced-response listener from an existing TCP
@@ -6049,10 +6079,7 @@ impl<F> Http2Listener<F> {
         let accept_result = loop {
             let owner_cancelled = owner_cancel.is_requested();
             let coordinator_cancelled = coordinator_cancel.is_requested();
-            if self.shutdown_signal.is_shutting_down()
-                || owner_cancelled
-                || coordinator_cancelled
-            {
+            if self.shutdown_signal.is_shutting_down() || owner_cancelled || coordinator_cancelled {
                 break Ok(());
             }
 

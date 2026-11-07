@@ -3475,9 +3475,18 @@ fn cancel_request_strengthens_existing_reason() {
 
 fn requested_cleanup(state: &RuntimeState, task: TaskId) -> (&CancelReason, Budget) {
     match &state.task(task).expect("live cleanup task").state {
-        TaskState::CancelRequested { reason, cleanup_budget }
-        | TaskState::Cancelling { reason, cleanup_budget }
-        | TaskState::Finalizing { reason, cleanup_budget } => (reason, *cleanup_budget),
+        TaskState::CancelRequested {
+            reason,
+            cleanup_budget,
+        }
+        | TaskState::Cancelling {
+            reason,
+            cleanup_budget,
+        }
+        | TaskState::Finalizing {
+            reason,
+            cleanup_budget,
+        } => (reason, *cleanup_budget),
         other => panic!("expected cancellation cleanup, got {other:?}"),
     }
 }
@@ -3518,8 +3527,8 @@ fn shutdown_cleanup_budget_preserves_descendant_ceilings_and_absolute_deadlines(
         let child = create_child_region(&mut state, root);
         let grandchild = create_child_region(&mut state, child);
         let sibling = create_child_region(&mut state, root);
-        let tasks = [root, child, grandchild, sibling]
-            .map(|region| insert_task(&mut state, region));
+        let tasks =
+            [root, child, grandchild, sibling].map(|region| insert_task(&mut state, region));
         let root_ceiling = Budget::INFINITE
             .with_poll_quota(33)
             .with_cost_quota(55)
@@ -3528,8 +3537,18 @@ fn shutdown_cleanup_budget_preserves_descendant_ceilings_and_absolute_deadlines(
             .with_poll_quota(child_polls)
             .with_cost_quota(0)
             .with_deadline(Time::from_nanos(500));
-        assert!(state.region(child).unwrap().tighten_shutdown_budget(child_ceiling));
-        assert!(state.region(grandchild).unwrap().tighten_shutdown_budget(Budget::INFINITE));
+        assert!(
+            state
+                .region(child)
+                .unwrap()
+                .tighten_shutdown_budget(child_ceiling)
+        );
+        assert!(
+            state
+                .region(grandchild)
+                .unwrap()
+                .tighten_shutdown_budget(Budget::INFINITE)
+        );
         state.now = Time::from_nanos(100);
         let shutdown = CancelReason::shutdown().with_timestamp(state.now);
         let (_, wakes) = state
@@ -3557,9 +3576,18 @@ fn shutdown_cleanup_budget_preserves_descendant_ceilings_and_absolute_deadlines(
         for (task, budget) in tasks.into_iter().zip(expected) {
             assert_eq!(requested_cleanup(&state, task).1, budget);
         }
-        assert_eq!(state.region(root).unwrap().shutdown_budget(), Some(root_ceiling));
-        assert_eq!(state.region(child).unwrap().shutdown_budget(), Some(child_ceiling));
-        assert_eq!(state.region(grandchild).unwrap().shutdown_budget(), Some(child_ceiling));
+        assert_eq!(
+            state.region(root).unwrap().shutdown_budget(),
+            Some(root_ceiling)
+        );
+        assert_eq!(
+            state.region(child).unwrap().shutdown_budget(),
+            Some(child_ceiling)
+        );
+        assert_eq!(
+            state.region(grandchild).unwrap().shutdown_budget(),
+            Some(child_ceiling)
+        );
     }
 }
 
@@ -3588,18 +3616,36 @@ fn repeated_subtree_shutdown_tightens_every_cleanup_phase_without_rewriting_attr
     wakes.dispatch();
     for task in tasks {
         let (reason, budget) = requested_cleanup(&state, task);
-        assert_eq!(reason, &first_reason, "same-kind attribution still keeps the earlier request");
+        assert_eq!(
+            reason, &first_reason,
+            "same-kind attribution still keeps the earlier request"
+        );
         assert_eq!(budget, shutdown.cleanup_budget());
-        assert!(scheduled.contains(&(task, 255)), "tightening must republish cleanup urgency");
+        assert!(
+            scheduled.contains(&(task, 255)),
+            "tightening must republish cleanup urgency"
+        );
     }
-    assert!(matches!(state.task(tasks[0]).unwrap().state, TaskState::CancelRequested { .. }));
-    assert!(matches!(state.task(tasks[1]).unwrap().state, TaskState::Cancelling { .. }));
-    assert!(matches!(state.task(tasks[2]).unwrap().state, TaskState::Finalizing { .. }));
+    assert!(matches!(
+        state.task(tasks[0]).unwrap().state,
+        TaskState::CancelRequested { .. }
+    ));
+    assert!(matches!(
+        state.task(tasks[1]).unwrap().state,
+        TaskState::Cancelling { .. }
+    ));
+    assert!(matches!(
+        state.task(tasks[2]).unwrap().state,
+        TaskState::Finalizing { .. }
+    ));
 
     let weaker = CancelReason::timeout().with_timestamp(Time::from_nanos(30));
     let (scheduled, wakes) = state.cancel_request(root, &weaker, None).into_parts();
     wakes.dispatch();
-    assert!(scheduled.is_empty(), "a weaker repeat adds no cancellation publication");
+    assert!(
+        scheduled.is_empty(),
+        "a weaker repeat adds no cancellation publication"
+    );
     for task in tasks {
         assert_eq!(requested_cleanup(&state, task).1, shutdown.cleanup_budget());
     }
@@ -3633,7 +3679,10 @@ fn cascading_cleanup_preserves_non_shutdown_reason_budgets() {
         assert_eq!(child_reason.kind, CancelKind::ParentCancelled);
         assert_eq!(child_reason.origin_region, root);
         assert_eq!(child_reason.root_cause(), &reason);
-        assert_eq!(child_budget, CancelReason::parent_cancelled().cleanup_budget());
+        assert_eq!(
+            child_budget,
+            CancelReason::parent_cancelled().cleanup_budget()
+        );
         wakes.dispatch();
     }
 }
@@ -11339,8 +11388,8 @@ impl MetricsProvider for PanicRecordingMetrics {
 /// runtimes (current_thread and multi_thread).
 #[test]
 fn task_panics_reach_the_metrics_provider() {
-    use crate::runtime::RuntimeBuilder;
     use crate::runtime::JoinError;
+    use crate::runtime::RuntimeBuilder;
 
     init_test_logging();
     for workers in [None, Some(2)] {
@@ -11571,4 +11620,47 @@ fn task_entropy_does_not_depend_on_first_use_order() {
         a_first,
         b_first
     );
+}
+
+#[test]
+fn track_cancel_dispatch_reaches_the_last_count_and_never_stores_over_a_full_counter() {
+    let state = RuntimeState::new();
+    let track = || {
+        state.track_cancel_dispatch(crate::types::task_context::CancellationEffects::ready(
+            Vec::<(TaskId, u8)>::new(),
+        ))
+    };
+    assert!(!state.has_outstanding_cancel_dispatches());
+    let (_, wakes) = track().into_parts();
+    assert_eq!(
+        state.outstanding_cancel_dispatches.load(Ordering::Acquire),
+        1
+    );
+    wakes.dispatch();
+    assert!(
+        !state.has_outstanding_cancel_dispatches(),
+        "a dispatched batch retires its token"
+    );
+
+    state
+        .outstanding_cancel_dispatches
+        .store(usize::MAX - 1, Ordering::Release);
+    let last = track();
+    assert_eq!(
+        state.outstanding_cancel_dispatches.load(Ordering::Acquire),
+        usize::MAX
+    );
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(track));
+    let payload = refused.expect_err("a full counter must refuse another batch");
+    let expected = format!("cancellation dispatch count exhausted: {}", usize::MAX);
+    assert_eq!(
+        payload.downcast_ref::<String>().map(String::as_str),
+        Some(expected.as_str())
+    );
+    assert_eq!(
+        state.outstanding_cancel_dispatches.load(Ordering::Acquire),
+        usize::MAX,
+        "the refused batch must not wrap or move the counter"
+    );
+    drop(last);
 }

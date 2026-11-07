@@ -41,6 +41,7 @@ use crate::runtime::{
     BlockingPoolHandle, ObligationAbortInfo, ObligationCommitInfo, ObligationLeakInfo,
     ObligationTable, RegionTable, TaskTable,
 };
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::time::TimerDriverHandle;
 use crate::trace::buffer::TerminalCancellationState;
 use crate::trace::distributed::{LogicalClockMode, LogicalTime};
@@ -65,7 +66,6 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -3318,7 +3318,10 @@ impl RuntimeState {
         dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
         observers: &mut LifecycleObserverBatch,
     ) -> usize {
-        self.drain_obligation_posts_before_completion_with_observers(dispatch_tasks, Some(observers))
+        self.drain_obligation_posts_before_completion_with_observers(
+            dispatch_tasks,
+            Some(observers),
+        )
     }
 
     fn drain_obligation_posts_before_completion_with_observers(
@@ -3911,7 +3914,10 @@ impl RuntimeState {
             (monitor.alert_count() != before).then(|| monitor.snapshot())
         };
         if let Some(snapshot) = alarm {
-            self.emit_lifecycle_observation(observers, LifecycleObserverEffect::LeakAlarm(snapshot));
+            self.emit_lifecycle_observation(
+                observers,
+                LifecycleObserverEffect::LeakAlarm(snapshot),
+            );
         }
     }
 
@@ -3972,7 +3978,7 @@ impl RuntimeState {
         }
     }
 
-/// Returns the number of task-completion observer dispatches whose direct
+    /// Returns the number of task-completion observer dispatches whose direct
     /// or lifecycle metrics callback, final provider destructor, or tracing
     /// subscriber panicked.
     ///
@@ -4169,14 +4175,18 @@ impl RuntimeState {
             )
         {
             observers.push(LifecycleObserverEffect::ProtocolViolation(
-                "external-shard synthesized cancellation request", result));
+                "external-shard synthesized cancellation request",
+                result,
+            ));
         }
         if matches!(
             completion_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
             observers.push(LifecycleObserverEffect::ProtocolViolation(
-                "external-shard task completion", completion_result));
+                "external-shard task completion",
+                completion_result,
+            ));
         }
     }
 
@@ -4326,11 +4336,25 @@ impl RuntimeState {
         &self,
         effects: CancellationEffects<Vec<(TaskId, u8)>>,
     ) -> TrackedCancellationEffects {
-        self.outstanding_cancel_dispatches
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .expect("cancellation dispatch count exhausted");
+        // Match fetch_update's CAS loop on stable and nightly. The pinned
+        // nightly deprecates that method; try_update is absent on stable.
+        // Keep Acquire loads and AcqRel updates, and refuse overflow without
+        // storing or wrapping the count of outstanding callback batches.
+        let mut outstanding = self.outstanding_cancel_dispatches.load(Ordering::Acquire);
+        loop {
+            let Some(next) = outstanding.checked_add(1) else {
+                panic!("cancellation dispatch count exhausted: {outstanding}");
+            };
+            match self.outstanding_cancel_dispatches.compare_exchange_weak(
+                outstanding,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => outstanding = observed,
+            }
+        }
         TrackedCancellationEffects {
             effects,
             outstanding: Arc::clone(&self.outstanding_cancel_dispatches),
@@ -4412,9 +4436,7 @@ impl RuntimeState {
     /// Takes callback-free cancellation batches for post-unlock publication
     /// and dispatch by the state-lock owner. Each batch retains its completion
     /// token until its post-lock callback dispatch finishes.
-    pub(crate) fn take_deferred_cancel_dispatches(
-        &mut self,
-    ) -> Vec<TrackedCancellationEffects> {
+    pub(crate) fn take_deferred_cancel_dispatches(&mut self) -> Vec<TrackedCancellationEffects> {
         let pending = std::mem::take(&mut self.pending_cancel_dispatches);
         self.pending_cancel_dispatch_ready
             .store(false, Ordering::Release);
@@ -4916,15 +4938,18 @@ impl RuntimeState {
             .get(id.arena_index())
             .expect("the branch region was minted above")
             .seal(spawn_fallback);
-        self.dispatch_region_lifecycle_effect(RegionLifecycleEffect::CreatedChild {
-            region_id: id,
-            parent,
-            now,
-            priority: RegionPriority::Normal,
-            budget: Budget::INFINITE,
-            capability_budget: CapabilityBudget::UNSPECIFIED,
-            register_envelope: false,
-        }, &mut None);
+        self.dispatch_region_lifecycle_effect(
+            RegionLifecycleEffect::CreatedChild {
+                region_id: id,
+                parent,
+                now,
+                priority: RegionPriority::Normal,
+                budget: Budget::INFINITE,
+                capability_budget: CapabilityBudget::UNSPECIFIED,
+                register_envelope: false,
+            },
+            &mut None,
+        );
         Ok(id)
     }
 
@@ -5235,9 +5260,7 @@ impl RuntimeState {
             regions
                 .resolve_ref(&self.regions)
                 .get(region.arena_index())
-                .map(|record| {
-                    record.obligation_admission_handle_for_task(task_id, cleanup_task)
-                }),
+                .map(|record| record.obligation_admission_handle_for_task(task_id, cleanup_task)),
         );
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
@@ -6467,12 +6490,8 @@ impl RuntimeState {
     /// Records a task's Complete event together with its terminal outcome,
     /// which a schedule capture keeps (br-asupersync-bi2462.8). The logical
     /// time is read from `self.tasks`, as the completion path always has.
-    fn record_task_completion_trace_event<F>(
-        &self,
-        task: &TaskRecord,
-        outcome: Severity,
-        build: F,
-    ) where
+    fn record_task_completion_trace_event<F>(&self, task: &TaskRecord, outcome: Severity, build: F)
+    where
         F: FnOnce(u64) -> TraceEvent,
     {
         let logical_time = self.logical_time_for_task(task.id);
@@ -6490,11 +6509,10 @@ impl RuntimeState {
         } else {
             None
         };
-        self.trace.record_completion_event_with_cancellation(
-            outcome,
-            cancellation,
-            move |seq| stamp_logical_time(build(seq), logical_time),
-        );
+        self.trace
+            .record_completion_event_with_cancellation(outcome, cancellation, move |seq| {
+                stamp_logical_time(build(seq), logical_time)
+            });
     }
 
     /// Records a task trace event with the task's logical time supplied by
@@ -6791,8 +6809,10 @@ impl RuntimeState {
 
         // PREVENT DOUBLE PANIC: If we are already panicking, we must not panic again.
         if matches!(response, ObligationLeakResponse::Panic) && std::thread::panicking() {
-            self.emit_walk_observation(effects,
-                LifecycleObserverEffect::LeakPanicDowngraded(error.task_id));
+            self.emit_walk_observation(
+                effects,
+                LifecycleObserverEffect::LeakPanicDowngraded(error.task_id),
+            );
             response = ObligationLeakResponse::Log;
         }
 
@@ -6858,7 +6878,9 @@ impl RuntimeState {
                     if monitored {
                         if aborted.is_ok() {
                             let mut observations = Vec::new();
-                            self.observe_obligation_leak_with_observers(&mut Some(&mut observations));
+                            self.observe_obligation_leak_with_observers(&mut Some(
+                                &mut observations,
+                            ));
                             for observation in observations {
                                 self.emit_walk_observation(effects, observation);
                             }
@@ -7379,8 +7401,10 @@ impl RuntimeState {
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            self.emit_lifecycle_observation(observers,
-                LifecycleObserverEffect::ProtocolViolation(op_label, validation_result));
+            self.emit_lifecycle_observation(
+                observers,
+                LifecycleObserverEffect::ProtocolViolation(op_label, validation_result),
+            );
             // Continue with the settle but log the violation
         }
     }
@@ -7424,7 +7448,9 @@ impl RuntimeState {
                 context,
                 op_label,
             } => {
-                self.dispatch_obligation_settle_validation(obligation, event, &context, op_label, observers);
+                self.dispatch_obligation_settle_validation(
+                    obligation, event, &context, op_label, observers,
+                );
             }
             ObligationLifecycleEffect::Commit {
                 info,
@@ -7485,8 +7511,12 @@ impl RuntimeState {
         };
         self.dispatch_obligation_settle_validation(
             obligation,
-            ObligationEvent::Reserve { token: obligation.as_u64().saturating_add(1) },
-            &context, "obligation creation", observers,
+            ObligationEvent::Reserve {
+                token: obligation.as_u64().saturating_add(1),
+            },
+            &context,
+            "obligation creation",
+            observers,
         );
         self.emit_lifecycle_observation(
             observers,
@@ -7519,7 +7549,9 @@ impl RuntimeState {
         effect: ObligationLifecycleEffect,
     ) {
         match sink {
-            LifecycleEffectsSink::Inline => self.dispatch_obligation_lifecycle_effect(effect, &mut None),
+            LifecycleEffectsSink::Inline => {
+                self.dispatch_obligation_lifecycle_effect(effect, &mut None)
+            }
             LifecycleEffectsSink::Buffered(buffer)
             | LifecycleEffectsSink::NativeBuffered { buffer, .. } => {
                 buffer.push(LifecycleEffect::Obligation(effect));
@@ -7581,7 +7613,9 @@ impl RuntimeState {
                 LifecycleEffect::Region(effect) => {
                     self.dispatch_region_lifecycle_effect(effect, &mut observers);
                 }
-                LifecycleEffect::Observer(effect) => self.emit_lifecycle_observation(&mut observers, effect),
+                LifecycleEffect::Observer(effect) => {
+                    self.emit_lifecycle_observation(&mut observers, effect)
+                }
                 LifecycleEffect::ValidatorRemoveObligation(obligation) => {
                     if self.cancel_protocol_tracking {
                         self.cancel_protocol_validator
@@ -8602,8 +8636,7 @@ impl RuntimeState {
                         && task_record
                             .cancel_reason()
                             .is_some_and(|effective| effective != reason);
-                    let captured_budget =
-                        capture_start.and_then(|_| task_record.cleanup_budget());
+                    let captured_budget = capture_start.and_then(|_| task_record.cleanup_budget());
                     (effects, captured_budget, unwitnessed_cx_cancel)
                 });
             let Some((effects, captured_budget, unwitnessed_cx_cancel)) = res else {
@@ -8989,10 +9022,12 @@ impl RuntimeState {
                             let inner = inner.read();
                             inner.is_cancel_requested() || inner.cancel_reason.is_some()
                         });
-                    let task_budget = shutdown_budgets.get(&rid).copied().map_or(
-                        cleanup_budget,
-                        |ceiling| cleanup_budget.combine_untraced(ceiling),
-                    );
+                    let task_budget = shutdown_budgets
+                        .get(&rid)
+                        .copied()
+                        .map_or(cleanup_budget, |ceiling| {
+                            cleanup_budget.combine_untraced(ceiling)
+                        });
                     let effects = task.request_cancel_with_budget_and_publication(
                         task_reason.clone(),
                         task_budget,
@@ -9051,9 +9086,7 @@ impl RuntimeState {
                     capture_start,
                     request_sequence,
                     captured_budget,
-                    unwitnessed_cx_cancel
-                        || (changed && !newly_cancelled)
-                        || finalizer_tightened,
+                    unwitnessed_cx_cancel || (changed && !newly_cancelled) || finalizer_tightened,
                 );
                 if (changed || finalizer_tightened) && publication.is_published() {
                     tasks_to_cancel.push((task_id, task_budget_res.priority));
@@ -9386,7 +9419,12 @@ impl RuntimeState {
         task: &mut TaskRecord,
         protocol_retired: &mut bool,
     ) -> TaskCompletionEffects {
-        self.task_completed_from_external_record_with_close_wakes(task, protocol_retired, None, None)
+        self.task_completed_from_external_record_with_close_wakes(
+            task,
+            protocol_retired,
+            None,
+            None,
+        )
     }
 
     /// Native detached-record completion retains functional close Wakers on
@@ -11210,8 +11248,13 @@ impl RuntimeState {
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            self.emit_lifecycle_observation(observers, LifecycleObserverEffect::ProtocolViolation(
-                "region finalize transition", validation_result));
+            self.emit_lifecycle_observation(
+                observers,
+                LifecycleObserverEffect::ProtocolViolation(
+                    "region finalize transition",
+                    validation_result,
+                ),
+            );
             // Protocol violation detected - invalidate region snapshot cache
             // to ensure consistency is re-established via authoritative scan
             self.read_biased_draining_region_snapshot.invalidate();
@@ -11257,8 +11300,13 @@ impl RuntimeState {
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            self.emit_lifecycle_observation(observers, LifecycleObserverEffect::ProtocolViolation(
-                "region close completion", validation_result));
+            self.emit_lifecycle_observation(
+                observers,
+                LifecycleObserverEffect::ProtocolViolation(
+                    "region close completion",
+                    validation_result,
+                ),
+            );
             self.read_biased_draining_region_snapshot.invalidate();
         }
     }
@@ -11306,7 +11354,10 @@ impl RuntimeState {
             .filter(|&stamp| stamp != u64::MAX)
         {
             let drain = Duration::from_nanos(now.as_nanos().saturating_sub(stamp));
-            self.emit_lifecycle_observation(observers, LifecycleObserverEffect::DrainCompleted(region_id, drain));
+            self.emit_lifecycle_observation(
+                observers,
+                LifecycleObserverEffect::DrainCompleted(region_id, drain),
+            );
         }
     }
 
@@ -11409,7 +11460,12 @@ impl RuntimeState {
                 finalization_event,
                 context,
             } => {
-                self.dispatch_region_finalize_validation(region_id, finalization_event, &context, observers);
+                self.dispatch_region_finalize_validation(
+                    region_id,
+                    finalization_event,
+                    &context,
+                    observers,
+                );
             }
             RegionLifecycleEffect::CloseValidation { region_id } => {
                 self.dispatch_region_close_validation(region_id, observers);
@@ -11464,7 +11520,9 @@ impl RuntimeState {
         effect: RegionLifecycleEffect,
     ) {
         match sink {
-            LifecycleEffectsSink::Inline => self.dispatch_region_lifecycle_effect(effect, &mut None),
+            LifecycleEffectsSink::Inline => {
+                self.dispatch_region_lifecycle_effect(effect, &mut None)
+            }
             LifecycleEffectsSink::Buffered(buffer)
             | LifecycleEffectsSink::NativeBuffered { buffer, .. } => {
                 buffer.push(LifecycleEffect::Region(effect));
@@ -13392,7 +13450,9 @@ fn captured_terminal_fast_cancellation_without_reason_is_refused() {
         assert!(guard.cancel_reason.is_none());
         assert!(guard.is_cancel_requested());
     }
-    recorder.record(Some(0), |seq| TraceEvent::poll(seq, Time::ZERO, task, region));
+    recorder.record(Some(0), |seq| {
+        TraceEvent::poll(seq, Time::ZERO, task, region)
+    });
     record.state = TaskState::Completed(Outcome::Ok(()));
     state.record_task_completion_trace_event(&record, Severity::Ok, |seq| {
         TraceEvent::complete(seq, Time::ZERO, task, region)
