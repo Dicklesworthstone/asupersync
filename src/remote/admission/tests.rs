@@ -118,6 +118,113 @@ fn admission_credit_waits_for_every_buffer_owner() {
 }
 
 #[test]
+fn attenuated_commit_refuses_before_native_registration_and_releases_credit() {
+    use crate::tls::{Certificate, CertificatePin, CertificatePinSet, TlsConnectorBuilder};
+
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap();
+    let handle = runtime.handle();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let certificate =
+            Certificate::from_pem(include_bytes!("../../../tests/fixtures/tls/server.crt"))
+                .unwrap()
+                .remove(0);
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificate(&certificate)
+            .with_certificate_pins(
+                CertificatePinSet::new()
+                    .with_pin(CertificatePin::compute_spki_sha256(&certificate).unwrap()),
+            )
+            .build()
+            .unwrap();
+        let client = RemoteComputationClient::new(
+            "127.0.0.1:1".parse().unwrap(),
+            "localhost",
+            connector,
+            RemoteComputationClientConfig::new()
+                .with_wire_limits(RemoteServiceWireLimits::new(4096)),
+        )
+        .unwrap();
+        let node = NodeId::new("peer");
+        let origin = NodeId::new("origin");
+        let hello = RemotePeerHello::new(
+            origin.clone(),
+            RemoteProtocolVersion::V3,
+            ComputationSchemaRegistry::new().fingerprint(),
+        );
+        let charge = 16 * (4096 + 4) + 256 * 1024;
+        let admitted = AdmittedNativeRemoteRuntime::new(
+            handle,
+            origin,
+            [(
+                NativeRemoteRoute::new(node.clone(), hello, client),
+                NativeRemotePeerAdmissionLimits {
+                    max_in_flight: 1,
+                    max_buffer_bytes: charge,
+                    max_input_bytes: 1,
+                },
+            )],
+            NativeRemoteAdmissionLimits {
+                max_routes: 1,
+                max_in_flight: 1,
+                max_buffer_bytes: charge,
+                max_waiters: 0,
+                max_waiters_per_peer: 0,
+            },
+            NativeRemoteRuntimeConfig::new().with_max_in_flight(1),
+        )
+        .unwrap();
+        let restricted = {
+            type LocalCaps = crate::cx::cap::CapSet<true, true, true, true, false>;
+            let _guard = cx.restrict::<LocalCaps>().set_current_restricted();
+            Cx::current().unwrap()
+        };
+        assert!(cx.capabilities().remote);
+        assert!(restricted.capabilities().io);
+        assert!(!restricted.capabilities().remote);
+        assert!(cx.remote().is_none(), "the domain supplies route authority");
+
+        let reservation = admitted
+            .reserve(&cx, &node, 1, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(admitted.usage().in_flight, 1);
+        assert_eq!(admitted.peer_usage(&node).unwrap().buffer_bytes, charge);
+        assert!(matches!(
+            reservation.commit(
+                &restricted,
+                &ComputationName::new("echo"),
+                &[7],
+                Duration::from_secs(1),
+            ),
+            Err(NativeRemoteAdmissionError::Remote(RemoteError::NoCapability))
+        ));
+        assert_eq!(admitted.usage(), NativeRemoteAdmissionUsage::default());
+        assert_eq!(
+            admitted.peer_usage(&node),
+            Some(NativeRemoteAdmissionUsage::default())
+        );
+        {
+            let state = admitted.domain.runtime.shared.state.lock();
+            assert!(
+                state.tasks.is_empty(),
+                "no native result channel was registered"
+            );
+            assert!(state.active.is_empty(), "no native driver was admitted");
+        }
+        let reused = admitted
+            .reserve(&cx, &node, 1, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(admitted.usage().buffer_bytes, charge);
+        drop(reused);
+        assert_eq!(admitted.usage(), NativeRemoteAdmissionUsage::default());
+    });
+}
+
+#[test]
 fn discarded_factory_and_unpolled_driver_retire_native_admission() {
     let runtime = crate::runtime::RuntimeBuilder::current_thread()
         .build()

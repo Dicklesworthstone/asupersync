@@ -522,6 +522,11 @@ impl NativeRemoteReservation {
     /// Commit exactly one local native publication. Input and name stay borrowed
     /// until their checked frame size is known, then are copied under the charge.
     /// This is not remote exactly-once execution; transport ambiguity is preserved.
+    ///
+    /// The reservation supplies route authority without a legacy `RemoteCap`,
+    /// but the committing context must still permit remote effects. An attenuated
+    /// context is refused before request materialization or native publication,
+    /// and the consumed reservation returns its credit.
     pub fn commit(
         self,
         cx: &Cx,
@@ -539,6 +544,9 @@ impl NativeRemoteReservation {
         }
         if cx.checkpoint().is_err() {
             return Err(NativeRemoteAdmissionError::Cancelled);
+        }
+        if !cx.capabilities().remote {
+            return Err(NativeRemoteAdmissionError::Remote(RemoteError::NoCapability));
         }
         let runtime = &self.domain.runtime;
         let route = runtime

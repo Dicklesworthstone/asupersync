@@ -266,6 +266,31 @@ fn exercise(workers: usize) {
             Err(NativeRemoteAdmissionError::RequestTooLarge)), "JSON expansion must refuse before native publication");
         assert_eq!(admitted.usage().buffer_bytes, 0);
 
+        // A reservation carries a route, not permission to restore an effect
+        // removed from the context that commits it. This caller has ordinary
+        // local I/O authority, so transport restrictions cannot mask the remote
+        // capability check. The following live calls also prove that refusal
+        // returns the single peer credit and leaves the domain usable.
+        let restricted = {
+            type LocalCaps = asupersync::cx::cap::CapSet<true, true, true, true, false>;
+            let _guard = cx.restrict::<LocalCaps>().set_current_restricted();
+            Cx::current().unwrap()
+        };
+        assert!(restricted.capabilities().io);
+        assert!(!restricted.capabilities().remote);
+        let denied = admitted.reserve(&cx, &node_a, 1, wait).await.unwrap();
+        assert_eq!(admitted.usage().buffer_bytes, charge);
+        assert!(matches!(
+            denied.commit(&restricted, &ComputationName::new("wait"), &[7], lease),
+            Err(NativeRemoteAdmissionError::Remote(
+                asupersync::remote::RemoteError::NoCapability
+            ))
+        ));
+        assert_eq!(admitted.usage().in_flight, 0);
+        assert_eq!(admitted.usage().buffer_bytes, 0);
+        assert_eq!(admitted.peer_usage(&node_a).unwrap().in_flight, 0);
+        assert!(!witness.parked.load(Ordering::Acquire));
+
         let mut parked = admitted.reserve(&cx, &node_a, 1, wait).await.unwrap()
             .commit(&cx, &ComputationName::new("wait"), &[7], lease).unwrap();
         eventually(&cx, || witness.parked.load(Ordering::Acquire) && parked.state() == RemoteTaskState::Running).await;
