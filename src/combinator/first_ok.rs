@@ -10,7 +10,7 @@
 //! - **race**: Run all concurrently, first to *complete* wins (regardless of outcome)
 //! - **first_ok**: Try sequentially, first *success* wins (errors cause fallback)
 //!
-//! Two executable forms share the aggregation types in this module:
+//! Executable forms offer different ownership boundaries:
 //!
 //! - the inline [`first_ok!`](crate::first_ok) macro awaits each operation in
 //!   place and yields a [`FirstOkResult`];
@@ -18,6 +18,13 @@
 //!   *factories* one at a time, runs each attempt as a region task, drains an
 //!   in-flight attempt when the caller is cancelled, and folds the terminal
 //!   outcomes through [`FirstOkResult`] / [`first_ok_to_result`].
+//! - [`Cx::first_ok_scoped`](crate::cx::Cx::first_ok_scoped) gives every lazy
+//!   attempt a private region. It cancels and drains the attempt's entire
+//!   subtree before starting the next fallback or returning a successful value.
+//!   Its report preserves the stop reason, typed task results, and actual
+//!   region-close receipts separately, including descendant and finalizer panics.
+//!   Returned values and errors must not retain obligations needed to close
+//!   their own attempt region.
 //!
 //! # Semantics
 //!

@@ -74,6 +74,7 @@ pub mod registry;
 pub mod resource_bracket;
 pub mod scope;
 pub mod scoped_cpu;
+pub mod scoped_first_ok;
 pub mod scoped_fs;
 pub mod scoped_race;
 pub mod scoped_timeout;
@@ -127,6 +128,10 @@ pub use registry::{
 };
 pub use scope::Scope;
 pub use scoped_cpu::{CpuCx, ScopedCpu, ScopedCpuError};
+pub use scoped_first_ok::{
+    ScopedFirstOkAttempt, ScopedFirstOkClose, ScopedFirstOkError, ScopedFirstOkReport,
+    ScopedFirstOkStop, ScopedFirstOkTask,
+};
 pub use scoped_fs::{ScopedFs, ScopedFsError};
 pub use scoped_race::{
     ScopedRaceBranch, ScopedRaceBranchReport, ScopedRaceClose, ScopedRaceError, ScopedRaceReport,

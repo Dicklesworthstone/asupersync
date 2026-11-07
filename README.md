@@ -1695,6 +1695,7 @@ Beyond `join`, `race`, and `timeout`, the combinator library includes patterns f
 | **quorum** | `Scope::quorum` (`src/cx/scope.rs`) + `src/combinator/quorum.rs` | M-of-N completion: spawns every branch, returns once M succeed or success is impossible, then cancels and drains every remaining branch |
 | **hedge** | `Scope::hedge` (`src/cx/scope.rs`); the `hedge()` future in `src/combinator/hedge.rs` | Start backup after delay, first response wins. `Scope::hedge` aborts and joins the loser; the standalone `hedge()` future drops it |
 | **first_ok** | `Scope::first_ok` (`src/cx/scope.rs`) + `src/combinator/first_ok.rs` | Try lazy operations sequentially until one succeeds; an in-flight attempt is drained on cancellation |
+| **scoped fallback** | `Cx::first_ok_scoped` (`src/cx/scoped_first_ok.rs`) | Try lazy operations sequentially, cancelling and draining each attempt's entire private subtree before advancing or returning; retain task and cleanup receipts |
 | **pipeline** | `Scope::pipeline` (`src/cx/scope.rs`) + `src/combinator/pipeline.rs` | Executes typed, channel-connected stages and an async sink as scoped tasks, with explicit edge capacities and an overall admitted-work limit |
 | **map_reduce** | `Scope::map_reduce` (`src/cx/scope.rs`) + `src/combinator/map_reduce.rs` | Spawns bounded scoped map tasks and reduces in input order, with separate limits for concurrency and retained work |
 | **circuit_breaker** | `src/combinator/circuit_breaker.rs` | Failure detection, open/half-open/closed states |
