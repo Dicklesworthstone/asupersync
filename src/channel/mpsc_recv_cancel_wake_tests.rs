@@ -43,6 +43,8 @@ fn idle_recv_cancellation_wakes_without_a_producer_event() {
         Poll::Ready(Err(RecvError::Cancelled))
     ));
     assert_eq!(sender.telemetry_snapshot(1).recv_waiter_count, 0);
+    assert_eq!(Arc::strong_count(&count), 3);
+    drop(recv);
     assert_eq!(Arc::strong_count(&count), 2);
 }
 
@@ -63,8 +65,9 @@ fn idle_recv_many_cancellation_wakes_and_preserves_existing_buffer() {
         Poll::Ready(Err(RecvError::Cancelled))
     ));
     assert_eq!(sender.telemetry_snapshot(1).recv_waiter_count, 0);
-    assert_eq!(Arc::strong_count(&count), 2);
+    assert_eq!(Arc::strong_count(&count), 3);
     drop(recv);
+    assert_eq!(Arc::strong_count(&count), 2);
     assert_eq!(buffer, [99]);
 }
 
@@ -83,6 +86,8 @@ fn unbounded_recv_also_wakes_on_cancellation_only() {
         recv.as_mut().poll(&mut task),
         Poll::Ready(Err(RecvError::Cancelled))
     ));
+    assert_eq!(Arc::strong_count(&count), 3);
+    drop(recv);
     assert_eq!(Arc::strong_count(&count), 2);
 }
 
@@ -178,11 +183,12 @@ fn successful_recv_clears_subscription_before_future_drop() {
     assert!(recv.as_mut().poll(&mut task).is_pending());
     sender.try_send(7).unwrap();
     assert!(matches!(recv.as_mut().poll(&mut task), Poll::Ready(Ok(7))));
-    assert_eq!(Arc::strong_count(&count), 2);
+    assert_eq!(Arc::strong_count(&count), 3);
     count.0.store(0, Ordering::SeqCst);
     cx.cancel_fast(CancelKind::User);
     assert_eq!(count.0.load(Ordering::SeqCst), 0);
     drop(recv);
+    assert_eq!(Arc::strong_count(&count), 2);
 }
 
 #[test]
@@ -198,11 +204,12 @@ fn successful_batch_clears_subscription_before_future_drop() {
     sender.try_send(2).unwrap();
     sender.try_send(3).unwrap();
     assert!(matches!(recv.as_mut().poll(&mut task), Poll::Ready(Ok(2))));
-    assert_eq!(Arc::strong_count(&count), 2);
+    assert_eq!(Arc::strong_count(&count), 3);
     count.0.store(0, Ordering::SeqCst);
     cx.cancel_fast(CancelKind::User);
     assert_eq!(count.0.load(Ordering::SeqCst), 0);
     drop(recv);
+    assert_eq!(Arc::strong_count(&count), 2);
     assert_eq!(buffer, [1, 2, 3]);
 }
 
@@ -220,10 +227,12 @@ fn disconnected_recv_unregisters_cancellation() {
         recv.as_mut().poll(&mut task),
         Poll::Ready(Err(RecvError::Disconnected))
     ));
-    assert_eq!(Arc::strong_count(&count), 2);
+    assert_eq!(Arc::strong_count(&count), 3);
     count.0.store(0, Ordering::SeqCst);
     cx.cancel_fast(CancelKind::User);
     assert_eq!(count.0.load(Ordering::SeqCst), 0);
+    drop(recv);
+    assert_eq!(Arc::strong_count(&count), 2);
 }
 
 #[test]
@@ -310,6 +319,8 @@ fn recv_cancellation_during_waker_retirement_finishes_in_same_poll() {
     ));
     assert!(cx.is_cancel_requested());
     assert_eq!(sender.telemetry_snapshot(1).recv_waiter_count, 0);
+    assert_eq!(Arc::strong_count(&count), 3);
+    drop(recv);
     assert_eq!(Arc::strong_count(&count), 2);
 }
 

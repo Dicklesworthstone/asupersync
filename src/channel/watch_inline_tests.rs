@@ -3168,13 +3168,14 @@
             Poll::Ready(Err(RecvError::Cancelled))
         );
         assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
-        assert_eq!(Arc::strong_count(&count), 2);
+        assert_eq!(Arc::strong_count(&count), 3);
         assert_eq!(
             changed.as_mut().poll(&mut task),
             Poll::Ready(Err(RecvError::PolledAfterCompletion))
         );
         tx.send(7).unwrap();
         drop(changed);
+        assert_eq!(Arc::strong_count(&count), 2);
         assert_eq!(rx.seen_version(), 0);
         assert!(rx.has_changed());
         let fresh = test_cx();
@@ -3202,11 +3203,12 @@
                 Ok(())
             };
             assert_eq!(changed.as_mut().poll(&mut task), Poll::Ready(expected));
-            assert_eq!(Arc::strong_count(&count), 2);
+            assert_eq!(Arc::strong_count(&count), 3);
             count.0.store(0, Ordering::SeqCst);
             cx.cancel_fast(crate::types::CancelKind::User);
             assert_eq!(count.0.load(Ordering::SeqCst), 0);
             drop(changed);
+            assert_eq!(Arc::strong_count(&count), 2);
         }
     }
 
@@ -3260,6 +3262,8 @@
             changed.as_mut().poll(&mut new_task),
             Poll::Ready(Err(RecvError::Cancelled))
         );
+        assert_eq!(Arc::strong_count(&new_count), 3);
+        drop(changed);
         assert_eq!(Arc::strong_count(&new_count), 2);
     }
 
@@ -3314,6 +3318,8 @@
                     Poll::Ready(Err(RecvError::Cancelled)),
                     "cancellation from the retired Waker must finish this poll"
                 );
+                assert_eq!(Arc::strong_count(&count), 3);
+                drop(changed);
                 assert_eq!(Arc::strong_count(&count), 2);
             }
             assert!(retired.load(Ordering::SeqCst));

@@ -615,32 +615,33 @@
             assert_eq!(second_calls.wake_count(), 1);
             assert_eq!(tx.channel.inner.lock().wakers.len(), 0);
             let mut first_context = Context::from_waker(Waker::noop());
-            // Pinned current behavior after 021dfdbfb: a waker whose Drop
-            // panics costs its own receiver the completed value; see bead
-            // asupersync-7l3xma. Completing `first` clears its cancellation
-            // registration, which drops the final owner inside this poll, so the
-            // planted Drop panic unwinds out of it and drops the Ready(Ok(83)).
-            // Fixing the bead flips this assertion back to `Ok(83)`.
-            let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                first_recv.as_mut().poll(&mut first_context)
-            }));
-            let Err(payload) = completion else {
-                panic!("first's completing poll must retire the final owner");
+            // Completion removes the cancellation slot but retains its final
+            // owner until future Drop (asupersync-7l3xma). A destructor panic
+            // must not consume the value before the caller receives it.
+            let Poll::Ready(Ok(value)) = first_recv.as_mut().poll(&mut first_context) else {
+                panic!("first's completing poll must deliver its value");
             };
+            assert_eq!(value.value, 83);
+            assert_eq!(drops.load(AtomicOrdering::SeqCst), 0);
+            assert_eq!(observer.strong_count(), 1);
+            assert!(matches!(
+                first_recv.as_mut().poll(&mut first_context),
+                Poll::Ready(Err(RecvError::PolledAfterCompletion))
+            ));
+            let retirement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(first_recv);
+            }));
+            let payload = retirement.expect_err("future Drop must retire the final owner");
             assert_eq!(
                 payload.downcast_ref::<&str>(),
                 Some(&"planted broadcast final-owner retirement panic")
             );
             assert_eq!(drops.load(AtomicOrdering::SeqCst), 1);
             assert_eq!(observer.strong_count(), 0);
-            assert!(matches!(
-                first_recv.as_mut().poll(&mut first_context),
-                Poll::Ready(Err(RecvError::PolledAfterCompletion))
-            ));
-            drop(first_recv);
+            assert_eq!(value.value, 83);
             assert!(
                 matches!(first.try_recv(), Err(TryRecvError::Empty)),
-                "the lost completion consumed first's 83"
+                "first's 83 was delivered exactly once"
             );
             assert!(
                 matches!(second_recv.as_mut().poll(&mut second_context), Poll::Ready(Ok(value)) if value.value == 83)
@@ -1421,6 +1422,8 @@
             Poll::Ready(Err(RecvError::Cancelled))
         ));
 
+        assert_eq!(drop_count.load(AtomicOrdering::Acquire), 0);
+        drop(fut);
         assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
         crate::test_complete!("recv_cancellation_retires_waker_outside_channel_lock");
     }
@@ -1479,6 +1482,8 @@
             Poll::Ready(Ok(17))
         ));
 
+        assert_eq!(drop_count.load(AtomicOrdering::Acquire), 0);
+        drop(fut);
         assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
         crate::test_complete!("recv_value_cleanup_retires_waker_outside_channel_lock");
     }
@@ -1513,6 +1518,8 @@
             Poll::Ready(Err(RecvError::Lagged(1)))
         ));
 
+        assert_eq!(drop_count.load(AtomicOrdering::Acquire), 0);
+        drop(fut);
         assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
         crate::test_complete!("recv_lag_cleanup_retires_waker_outside_channel_lock");
     }
@@ -1540,6 +1547,8 @@
         ));
         tx.channel.sender_count.store(1, Ordering::Release);
 
+        assert_eq!(drop_count.load(AtomicOrdering::Acquire), 0);
+        drop(fut);
         assert_waker_dropped_outside_lock(&drop_count, &lock_was_free);
         crate::test_complete!("recv_closed_cleanup_retires_waker_outside_channel_lock");
     }
@@ -3624,7 +3633,7 @@
             Poll::Ready(Err(RecvError::Cancelled))
         );
         assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
-        assert_eq!(Arc::strong_count(&count), 2);
+        assert_eq!(Arc::strong_count(&count), 3);
         assert_eq!(
             recv.as_mut().poll(&mut task),
             Poll::Ready(Err(RecvError::PolledAfterCompletion))
@@ -3632,6 +3641,7 @@
         let fresh = test_cx();
         assert_eq!(tx.send(&fresh, 7), Ok(1));
         drop(recv);
+        assert_eq!(Arc::strong_count(&count), 2);
         let mut retry = Box::pin(rx.recv(&fresh));
         assert_eq!(retry.as_mut().poll(&mut task), Poll::Ready(Ok(7)));
     }
@@ -3663,11 +3673,12 @@
                 }
             };
             assert_eq!(recv.as_mut().poll(&mut task), Poll::Ready(expected));
-            assert_eq!(Arc::strong_count(&count), 2);
+            assert_eq!(Arc::strong_count(&count), 3);
             count.wakes.store(0, AtomicOrdering::SeqCst);
             cx.cancel_fast(crate::types::CancelKind::User);
             assert_eq!(count.wake_count(), 0);
             drop(recv);
+            assert_eq!(Arc::strong_count(&count), 2);
         }
     }
 
@@ -3724,6 +3735,8 @@
             recv.as_mut().poll(&mut new_task),
             Poll::Ready(Err(RecvError::Cancelled))
         );
+        assert_eq!(Arc::strong_count(&new_count), 3);
+        drop(recv);
         assert_eq!(Arc::strong_count(&new_count), 2);
     }
 
@@ -3778,6 +3791,8 @@
                     Poll::Ready(Err(RecvError::Cancelled)),
                     "cancellation from the retired Waker must finish this poll"
                 );
+                assert_eq!(Arc::strong_count(&count), 3);
+                drop(recv);
                 assert_eq!(Arc::strong_count(&count), 2);
             }
             assert!(retired.load(AtomicOrdering::SeqCst));

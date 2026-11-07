@@ -52,6 +52,8 @@ fn reserve_cancellation_wakes_without_receiver_progress() {
     assert_no_send_waiters(&sender);
     // Neither cancellation nor cleanup consumed the already committed item.
     assert_eq!(receiver.try_recv(), Ok(1));
+    assert_eq!(Arc::strong_count(&count), 3);
+    drop(reserve);
     assert_eq!(Arc::strong_count(&count), 2);
 }
 
@@ -72,6 +74,8 @@ fn checked_reserve_cancellation_wakes_without_receiver_progress() {
         Poll::Ready(Err(CheckedSendError::Channel(SendError::Cancelled(()))))
     ));
     assert_no_send_waiters(&sender);
+    assert_eq!(Arc::strong_count(&count), 3);
+    drop(reserve);
     assert_eq!(Arc::strong_count(&count), 2);
 }
 
@@ -176,6 +180,8 @@ fn dropping_one_same_waker_reservation_does_not_unsubscribe_another() {
         Poll::Ready(Err(SendError::Cancelled(())))
     ));
     assert_no_send_waiters(&sender);
+    assert_eq!(Arc::strong_count(&count), 3);
+    drop(second);
     assert_eq!(Arc::strong_count(&count), 2);
 }
 
@@ -195,12 +201,13 @@ fn capacity_completion_unregisters_cancellation_before_future_drop() {
         other => panic!("expected a ready permit, got {other:?}"),
     };
     permit.try_send(2).unwrap();
-    assert_eq!(Arc::strong_count(&count), 2);
+    assert_eq!(Arc::strong_count(&count), 3);
     count.0.store(0, Ordering::SeqCst);
-    // Keep the completed future alive: cleanup cannot depend on its Drop.
+    // Keep the completed future alive: slot cleanup cannot depend on its Drop.
     cx.cancel_fast(CancelKind::User);
     assert_eq!(count.0.load(Ordering::SeqCst), 0);
     drop(reserve);
+    assert_eq!(Arc::strong_count(&count), 2);
     assert_eq!(receiver.try_recv(), Ok(2));
 }
 
@@ -219,10 +226,12 @@ fn disconnection_completion_unregisters_cancellation_before_future_drop() {
         reserve.as_mut().poll(&mut task),
         Poll::Ready(Err(SendError::Disconnected(())))
     ));
-    assert_eq!(Arc::strong_count(&count), 2);
+    assert_eq!(Arc::strong_count(&count), 3);
     count.0.store(0, Ordering::SeqCst);
     cx.cancel_fast(CancelKind::User);
     assert_eq!(count.0.load(Ordering::SeqCst), 0);
+    drop(reserve);
+    assert_eq!(Arc::strong_count(&count), 2);
 }
 
 #[test]
@@ -295,5 +304,7 @@ fn cancellation_during_waker_retirement_is_not_lost() {
     ));
     assert!(cx.is_cancel_requested());
     assert_no_send_waiters(&sender);
+    assert_eq!(Arc::strong_count(&count), 3);
+    drop(reserve);
     assert_eq!(Arc::strong_count(&count), 2);
 }

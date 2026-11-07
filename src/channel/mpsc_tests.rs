@@ -1366,7 +1366,9 @@ mod tests {
             other => panic!("head waiter must acquire freed capacity: {other:?}"),
         };
 
-        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "reserve acquire");
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(reserve);
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "completed reserve drop");
         permit.abort();
         crate::test_complete!("sender_waiter_acquire_retires_waker_after_unlock");
     }

@@ -381,10 +381,11 @@
         assert!(count.wake_count.load(Ordering::SeqCst) > 0);
         assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
         assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 0);
-        assert_eq!(Arc::strong_count(&count), 2);
+        assert_eq!(Arc::strong_count(&count), 3);
         tx.send(7).unwrap();
         assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
         let rx = stream.into_inner();
+        assert_eq!(Arc::strong_count(&count), 2);
         assert!(rx.has_changed());
         assert_eq!(*rx.borrow(), 7);
     }
@@ -400,7 +401,7 @@
         assert!(Pin::new(&mut stream).poll_next(&mut task).is_pending());
         tx.send(3).unwrap();
         assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(Some(3)));
-        assert_eq!(Arc::strong_count(&count), 2);
+        assert_eq!(Arc::strong_count(&count), 3);
         count.wake_count.store(0, Ordering::SeqCst);
         assert!(Pin::new(&mut stream).poll_next(&mut task).is_pending());
         cx.masked(|| {
@@ -410,6 +411,8 @@
             assert_eq!(tx.telemetry_snapshot(1).recv_waiter_count, 1);
         });
         assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+        assert_eq!(Arc::strong_count(&count), 3);
+        drop(stream);
         assert_eq!(Arc::strong_count(&count), 2);
     }
 
@@ -437,8 +440,9 @@
             cx.cancel_fast(crate::types::CancelKind::User);
             assert!(count.wake_count.load(Ordering::SeqCst) > 0);
             assert!(observer.as_mut().poll(&mut task).is_ready());
-            assert_eq!(Arc::strong_count(&count), 2);
+            assert_eq!(Arc::strong_count(&count), if action == 0 { 3 } else { 2 });
             drop(extracted);
             drop(stream);
+            assert_eq!(Arc::strong_count(&count), 2);
         }
     }

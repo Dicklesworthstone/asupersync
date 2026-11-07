@@ -1053,8 +1053,9 @@ impl<'a, T> Reserve<'a, T> {
     {
         match self.as_mut().poll_inner(ctx, register) {
             Poll::Ready(result) => {
-                // A completed future may stay allocated. Do not retain its
-                // executor through an obsolete auxiliary cancellation slot.
+                // Remove the obsolete cancellation slot now. Its final Waker
+                // owner stays until future Drop, so a destructor panic cannot
+                // unwind the completed permit or error out of this poll.
                 self.cancel.clear();
                 Poll::Ready(result)
             }
