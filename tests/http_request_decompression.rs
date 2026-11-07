@@ -560,16 +560,15 @@ fn encoded_streaming_requests_are_refused_without_polling_or_taking_the_body() {
     let runtime = asupersync::runtime::RuntimeBuilder::new().worker_threads(1).build().unwrap();
     let cx = runtime.request_cx_with_budget(asupersync::types::Budget::INFINITE);
     let (writer, body) = IncomingRequestBody::channel_with_limits(&cx, BodyKind::ContentLength(25), 1, 32);
-    let request = StreamingServerRequest {
-        head: RequestHead {
+    let request = StreamingServerRequest::new(
+        RequestHead {
             method: Method::Post,
             uri: "/upload".to_owned(),
             version: Version::Http11,
             headers: vec![("content-encoding".to_owned(), "gzip".to_owned()), ("content-length".to_owned(), "25".to_owned())],
         },
-        peer_addr: None,
         body,
-    };
+    );
     let (router, seen) = app(1024, 1024);
     let mut call = std::pin::pin!(router.handle_http1_streaming_request_with_cx(&cx, request));
     let Poll::Ready(response) = call.as_mut().poll(&mut Context::from_waker(Waker::noop())) else {
@@ -611,16 +610,15 @@ fn identity_streaming_tightens_both_bounds_without_eager_collection() {
         for length in [7, 8] {
             let cx = runtime.request_cx_with_budget(asupersync::types::Budget::INFINITE);
             let (mut writer, body) = IncomingRequestBody::channel_with_limits(&cx, BodyKind::Chunked, 2, 32);
-            let request = StreamingServerRequest {
-                head: RequestHead {
+            let request = StreamingServerRequest::new(
+                RequestHead {
                     method: Method::Post,
                     uri: "/upload".to_owned(),
                     version: Version::Http11,
                     headers: vec![("content-encoding".to_owned(), "identity".to_owned()), ("transfer-encoding".to_owned(), "chunked".to_owned())],
                 },
-                peer_addr: None,
                 body,
-            };
+            );
             let router = Router::new().without_default_trace()
                 .route("/upload", post(CollectStream))
                 .layer(RequestDecompressionLayer::new(encoded, decoded));

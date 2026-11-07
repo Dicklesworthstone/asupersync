@@ -384,11 +384,15 @@ fn native_session_abandoned_publication_keeps_writer_lease_until_worker_retireme
                 directory.sync_all()
             },
         ));
-        poll_fn(|task| {
-            assert!(applying.as_mut().poll(task).is_pending(), "publication remains gated");
-            if entered_rx.try_recv().is_ok() { Poll::Ready(()) }
-            else { task.waker().wake_by_ref(); Poll::Pending }
-        }).await;
+        {
+            // Own the Send receiver rather than borrowing it across await (it is not Sync).
+            let applying_ref = &mut applying;
+            poll_fn(move |task| {
+                assert!(applying_ref.as_mut().poll(task).is_pending(), "publication remains gated");
+                if entered_rx.try_recv().is_ok() { Poll::Ready(()) }
+                else { task.waker().wake_by_ref(); Poll::Pending }
+            }).await;
+        }
         drop(applying);
         assert!(session.is_fenced());
         assert_eq!(session.generation(), 0, "the awaiting caller did not observe durability");

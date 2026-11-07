@@ -11,6 +11,9 @@
 
 use std::path::PathBuf;
 
+// Included source modules use the same portable atomic path as the library.
+pub use asupersync::sync;
+
 /// Test utilities
 pub mod util {
     pub use asupersync::util::DetHasher;
