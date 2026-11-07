@@ -75,6 +75,7 @@ pub mod resource_bracket;
 pub mod scope;
 pub mod scoped_cpu;
 pub mod scoped_fs;
+pub mod scoped_race;
 pub mod scoped_timeout;
 pub mod supervisor_service;
 pub mod tracked_registry;
@@ -127,6 +128,10 @@ pub use registry::{
 pub use scope::Scope;
 pub use scoped_cpu::{CpuCx, ScopedCpu, ScopedCpuError};
 pub use scoped_fs::{ScopedFs, ScopedFsError};
+pub use scoped_race::{
+    ScopedRaceBranch, ScopedRaceBranchReport, ScopedRaceClose, ScopedRaceError, ScopedRaceReport,
+    ScopedRaceStop, ScopedRaceTask,
+};
 pub use scoped_timeout::{
     ScopedTimeoutClose, ScopedTimeoutError, ScopedTimeoutReport, ScopedTimeoutStop, ScopedTimeoutTask,
 };

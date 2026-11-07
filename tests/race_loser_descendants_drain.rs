@@ -18,10 +18,12 @@
 use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
-use asupersync::cx::RaceFactory;
+use asupersync::cx::{
+    RaceFactory, ScopedRaceBranch, ScopedRaceReport, ScopedRaceStop, ScopedRaceTask,
+};
 use asupersync::runtime::{JoinError, RuntimeBuilder};
 use asupersync::sync::Notify;
-use asupersync::types::{CancelKind, RegionId};
+use asupersync::types::{CancelKind, CancelReason, RegionId};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -532,4 +534,316 @@ fn a_timed_race_drains_a_branch_that_finished_at_its_deadline() {
             "seed {seed}: every lab oracle passes"
         );
     }
+}
+
+
+/// Scoped races own both subtrees. Exercise the real scheduler under every
+/// native state shape; a wall-clock watchdog only bounds a broken test and is
+/// never used to infer that a branch or its cleanup has actually parked.
+fn native_scoped<F, Fut>(scenario: F)
+where
+    F: Fn(Cx) -> Fut + Copy + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let (send, receive) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for workers in [1, 2] {
+                for sharded in [false, true] {
+                    let builder = if workers == 1 {
+                        RuntimeBuilder::current_thread()
+                    } else {
+                        RuntimeBuilder::new().worker_threads(workers)
+                    };
+                    let runtime = builder.with_sharded_state(sharded).build().unwrap();
+                    runtime.block_on(async {
+                        let root = Cx::current().expect("native root context");
+                        let mut owner = root.spawn(scenario).expect("real admitted owner");
+                        owner.join(&root).await.expect("scoped race scenario");
+                    });
+                    let drain = runtime.shutdown_drained(Duration::from_secs(5));
+                    assert_eq!(
+                        drain.outcome,
+                        asupersync::runtime::RootDrainOutcome::Quiescent,
+                        "workers={workers}, sharded={sharded}: {drain:?}"
+                    );
+                    assert_eq!(drain.live_tasks, 0);
+                    assert_eq!(drain.live_regions, 0);
+                    assert_eq!(drain.pending_spawns, 0);
+                    assert_eq!(drain.pending_obligations, 0);
+                    assert!(runtime.is_quiescent());
+                }
+            }
+        }));
+        let _ = send.send(result);
+    });
+    let result = receive
+        .recv_timeout(Duration::from_secs(45))
+        .expect("scoped race must drain every owned subtree");
+    worker.join().unwrap();
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+fn assert_scoped_closed<L, R>(report: &ScopedRaceReport<L, R>, parent: RegionId) {
+    let left = report.left.region_id.expect("left private region admitted");
+    let right = report
+        .right
+        .region_id
+        .expect("right private region admitted");
+    assert_ne!(left, parent);
+    assert_ne!(right, parent);
+    assert_ne!(left, right);
+    assert!(matches!(&report.left.close, Some(Ok(_))));
+    assert!(matches!(&report.right.close, Some(Ok(_))));
+    assert!(report.left.submission_error.is_none());
+    assert!(report.right.submission_error.is_none());
+}
+
+async fn scoped_loser_plain_child_join(owner: Cx) {
+    let grandchild = Arc::new(Witness::default());
+    let (_sender, receiver) = mpsc::channel::<()>(1);
+    let spawned = Arc::clone(&grandchild);
+    let awaited = Arc::clone(&grandchild);
+    let report = owner
+        .race_scoped(
+            move |branch| async move {
+                let mut child = branch
+                    .spawn(move |child| descendant(child, receiver, spawned))
+                    .expect("losing branch child");
+                // Intentionally use the ordinary, uninterruptible join. The
+                // race must cancel the subtree before joining this branch.
+                let result = child.join(&branch).await;
+                assert!(branch.checkpoint().is_err());
+                result.map(|()| 23_u32)
+            },
+            move |_| async move {
+                awaited
+                    .wait(|seen| seen.parked.load(Ordering::Acquire))
+                    .await;
+                "heterogeneous winner"
+            },
+        )
+        .await
+        .expect("scoped race admission");
+    assert!(matches!(
+        report.stop,
+        ScopedRaceStop::Winner(ScopedRaceBranch::Right)
+    ));
+    assert!(matches!(
+        report.left.task,
+        ScopedRaceTask::Joined(Ok(Ok(23)))
+    ));
+    assert!(matches!(
+        report.right.task,
+        ScopedRaceTask::Joined(Ok("heterogeneous winner"))
+    ));
+    assert_scoped_closed(&report, owner.region_id());
+    assert_drained(&grandchild, "the plain-joined scoped loser child");
+    assert!(report.owner_cancellation.is_none());
+    assert!(!owner.is_cancel_requested());
+}
+
+#[test]
+fn scoped_race_cancels_a_losing_subtree_before_its_plain_child_join_on_native_runtimes() {
+    native_scoped(scoped_loser_plain_child_join);
+}
+
+/// Cancellation is acknowledged, then cleanup reaches another Pending poll.
+/// Only the controller outside both branch regions can release that cleanup.
+async fn scoped_child_with_cleanup(
+    cx: Cx,
+    seen: Arc<Witness>,
+    mut cleanup: asupersync::channel::oneshot::Receiver<()>,
+) -> u32 {
+    let _retire = Retire(Arc::clone(&seen));
+    *seen.region.lock().unwrap() = Some(cx.region_id());
+    {
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+        poll_fn(|task| {
+            let progress = cancelled.as_mut().poll(task);
+            if progress.is_pending() && !seen.parked.load(Ordering::Acquire) {
+                seen.note(&seen.parked);
+            }
+            progress
+        })
+        .await;
+    }
+    assert!(cx.checkpoint().is_err());
+    *seen.kind.lock().unwrap() = cx.cancel_reason().map(|reason| reason.kind);
+    {
+        let mut receive = std::pin::pin!(cleanup.recv_uninterruptible());
+        poll_fn(|task| {
+            let progress = receive.as_mut().poll(task);
+            if progress.is_pending() && !seen.cancelled.load(Ordering::Acquire) {
+                seen.note(&seen.cancelled);
+            }
+            progress
+        })
+        .await
+        .expect("controller releases asynchronous cleanup");
+    }
+    seen.note(&seen.finished);
+    41
+}
+
+async fn scoped_race_waits_for_both_subtrees(owner: Cx) {
+    let left_seen = Arc::new(Witness::default());
+    let right_seen = Arc::new(Witness::default());
+    let (left_release, left_cleanup) = asupersync::channel::oneshot::channel();
+    let (right_release, right_cleanup) = asupersync::channel::oneshot::channel();
+    let left_spawned = Arc::clone(&left_seen);
+    let right_spawned = Arc::clone(&right_seen);
+    let left_ready = Arc::clone(&left_seen);
+    let right_ready = Arc::clone(&right_seen);
+    let mut race = std::pin::pin!(owner.race_scoped(
+        move |branch| async move {
+            let mut child = branch
+                .spawn(move |child| scoped_child_with_cleanup(child, left_spawned, left_cleanup))
+                .unwrap();
+            let result = child.join(&branch).await;
+            assert!(branch.checkpoint().is_err());
+            result
+        },
+        move |branch| async move {
+            branch
+                .spawn(move |child| scoped_child_with_cleanup(child, right_spawned, right_cleanup))
+                .unwrap();
+            left_ready
+                .wait(|seen| seen.parked.load(Ordering::Acquire))
+                .await;
+            right_ready
+                .wait(|seen| seen.parked.load(Ordering::Acquire))
+                .await;
+            Ok::<_, &'static str>(73_u64)
+        },
+    ));
+    let mut both_cleaning = std::pin::pin!(async {
+        left_seen
+            .wait(|seen| seen.cancelled.load(Ordering::Acquire))
+            .await;
+        right_seen
+            .wait(|seen| seen.cancelled.load(Ordering::Acquire))
+            .await;
+    });
+    poll_fn(|task| {
+        assert!(
+            race.as_mut().poll(task).is_pending(),
+            "cleanup gates are still closed"
+        );
+        both_cleaning.as_mut().poll(task)
+    })
+    .await;
+    assert!(!left_seen.retired.load(Ordering::Acquire));
+    assert!(!right_seen.retired.load(Ordering::Acquire));
+
+    // Finishing only one subtree cannot discharge the entire race.
+    right_release.send_blocking(()).unwrap();
+    let mut right_retired =
+        std::pin::pin!(right_seen.wait(|seen| seen.retired.load(Ordering::Acquire)));
+    poll_fn(|task| {
+        assert!(
+            race.as_mut().poll(task).is_pending(),
+            "loser cleanup is still held"
+        );
+        right_retired.as_mut().poll(task)
+    })
+    .await;
+    left_release.send_blocking(()).unwrap();
+    let report = race.await.expect("both subtrees drained");
+    assert!(matches!(
+        report.stop,
+        ScopedRaceStop::Winner(ScopedRaceBranch::Right)
+    ));
+    assert!(matches!(
+        report.left.task,
+        ScopedRaceTask::Joined(Ok(Ok(41)))
+    ));
+    assert!(matches!(
+        report.right.task,
+        ScopedRaceTask::Joined(Ok(Ok(73)))
+    ));
+    assert_scoped_closed(&report, owner.region_id());
+    assert!(left_seen.finished.load(Ordering::Acquire));
+    assert!(right_seen.finished.load(Ordering::Acquire));
+    assert!(left_seen.retired.load(Ordering::Acquire));
+    assert!(right_seen.retired.load(Ordering::Acquire));
+    assert!(!owner.is_cancel_requested());
+}
+
+#[test]
+fn scoped_race_waits_for_winner_and_loser_asynchronous_cleanup_on_native_runtimes() {
+    native_scoped(scoped_race_waits_for_both_subtrees);
+}
+
+async fn scoped_race_owner_cancel_during_drain(owner: Cx) {
+    let seen = Arc::new(Witness::default());
+    let spawned = Arc::clone(&seen);
+    let ready = Arc::clone(&seen);
+    let (release, cleanup) = asupersync::channel::oneshot::channel();
+    let mut racing = owner
+        .spawn(move |racer| async move {
+            let report = racer
+                .race_scoped(
+                    move |branch| async move {
+                        let mut child = branch
+                            .spawn(move |child| scoped_child_with_cleanup(child, spawned, cleanup))
+                            .unwrap();
+                        let result = child.join(&branch).await;
+                        assert!(branch.checkpoint().is_err());
+                        result
+                    },
+                    move |_| async move {
+                        ready
+                            .wait(|seen| seen.parked.load(Ordering::Acquire))
+                            .await;
+                        Err::<u8, _>("typed winner failure")
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(racer.checkpoint().is_err());
+            report
+        })
+        .unwrap();
+    // The child's cleanup is Pending, proving the race has already selected
+    // its winner and requested the loser's subtree cancellation.
+    seen.wait(|seen| seen.cancelled.load(Ordering::Acquire)).await;
+    racing.abort_with_reason(
+        CancelReason::shutdown().with_cause(CancelReason::user("owner stopped during race drain")),
+    );
+    release.send_blocking(()).unwrap();
+    let report = racing
+        .join(&owner)
+        .await
+        .expect("acknowledged owner result survives");
+    assert!(matches!(
+        report.stop,
+        ScopedRaceStop::Winner(ScopedRaceBranch::Right)
+    ));
+    assert!(matches!(
+        report.right.task,
+        ScopedRaceTask::Joined(Ok(Err("typed winner failure")))
+    ));
+    assert!(matches!(
+        report.left.task,
+        ScopedRaceTask::Joined(Ok(Ok(41)))
+    ));
+    assert_eq!(
+        report
+            .owner_cancellation
+            .as_ref()
+            .expect("owner cancellation recorded")
+            .kind,
+        CancelKind::Shutdown
+    );
+    assert_scoped_closed(&report, owner.region_id());
+    assert!(seen.retired.load(Ordering::Acquire));
+    assert!(!owner.is_cancel_requested());
+}
+
+#[test]
+fn scoped_race_preserves_selected_typed_result_when_owner_cancels_during_native_drain() {
+    native_scoped(scoped_race_owner_cancel_during_drain);
 }
