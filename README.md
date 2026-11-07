@@ -1693,6 +1693,7 @@ Beyond `join`, `race`, and `timeout`, the combinator library includes patterns f
 | Combinator | Location | Purpose |
 |------------|----------|---------|
 | **quorum** | `Scope::quorum` (`src/cx/scope.rs`) + `src/combinator/quorum.rs` | M-of-N completion: spawns every branch, returns once M succeed or success is impossible, then cancels and drains every remaining branch |
+| **scoped quorum** | `Cx::quorum_scoped` (`src/cx/scoped_quorum.rs`) | Select M successes from at most 64 private operation subtrees, then cancel and drain every subtree, including selected branches; retain task and cleanup receipts |
 | **hedge** | `Scope::hedge` (`src/cx/scope.rs`); the `hedge()` future in `src/combinator/hedge.rs` | Start backup after delay, first response wins. `Scope::hedge` aborts and joins the loser; the standalone `hedge()` future drops it |
 | **first_ok** | `Scope::first_ok` (`src/cx/scope.rs`) + `src/combinator/first_ok.rs` | Try lazy operations sequentially until one succeeds; an in-flight attempt is drained on cancellation |
 | **scoped fallback** | `Cx::first_ok_scoped` (`src/cx/scoped_first_ok.rs`) | Try lazy operations sequentially, cancelling and draining each attempt's entire private subtree before advancing or returning; retain task and cleanup receipts |
@@ -1703,6 +1704,14 @@ Beyond `join`, `race`, and `timeout`, the combinator library includes patterns f
 | **rate_limit** | `src/combinator/rate_limit.rs` | Token bucket throughput control |
 | **bracket** | `src/combinator/bracket.rs` | Acquire/use/release with guaranteed cleanup |
 | **retry** | `src/combinator/retry.rs` | Exponential backoff, budget-aware |
+
+`Cx::first_ok_scoped` and `Cx::quorum_scoped` preserve the caller's typed
+spawn capabilities without requiring a timer. Their reports separate selection
+from task and subtree-cleanup outcomes: a selected success does not certify
+successful descendant or finalizer cleanup. Dropping either operation requests
+subtree closure while the runtime retains asynchronous cleanup ownership.
+Returned values and errors must not hold obligations needed to close their own
+operation regions; cleanup is cooperative and has no forced deadline.
 
 Use `PipelineExecutionConfig` with `.pipeline(...).then(...).run(...).await`, or
 `MapReduceLimits` with `.map_reduce(...).await`. The existing outcome-fold APIs

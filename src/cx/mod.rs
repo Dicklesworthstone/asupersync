@@ -76,6 +76,7 @@ pub mod scope;
 pub mod scoped_cpu;
 pub mod scoped_first_ok;
 pub mod scoped_fs;
+pub mod scoped_quorum;
 pub mod scoped_race;
 pub mod scoped_timeout;
 pub mod supervisor_service;
@@ -133,6 +134,10 @@ pub use scoped_first_ok::{
     ScopedFirstOkStop, ScopedFirstOkTask,
 };
 pub use scoped_fs::{ScopedFs, ScopedFsError};
+pub use scoped_quorum::{
+    MAX_SCOPED_QUORUM_BRANCHES, ScopedQuorumAttempt, ScopedQuorumClose, ScopedQuorumError,
+    ScopedQuorumReport, ScopedQuorumStop, ScopedQuorumTask,
+};
 pub use scoped_race::{
     ScopedRaceBranch, ScopedRaceBranchReport, ScopedRaceClose, ScopedRaceError, ScopedRaceReport,
     ScopedRaceStop, ScopedRaceTask,

@@ -58,6 +58,15 @@
 //! executable entry rejects `needed == 0` (as well as `needed > N`) with
 //! [`QuorumError::InvalidQuorum`] before spawning anything, while the folder
 //! keeps `quorum(0, N)` as the algebraic additive identity.
+//!
+//! [`Cx::quorum_scoped`](crate::cx::Cx::quorum_scoped) offers whole-subtree
+//! ownership for between 1 and 64 branches. Every factory receives a private
+//! region, and every branch's entire subtree, including selected successes,
+//! is cancelled and drained before return. Its report retains the selected
+//! indices, typed task results, and actual region-close receipts separately.
+//! A satisfied quorum describes selection only: callers must also inspect
+//! cleanup failures and descendant panics. Values and errors must not retain
+//! obligations required to close their own branch region.
 
 use core::fmt;
 use std::marker::PhantomData;
