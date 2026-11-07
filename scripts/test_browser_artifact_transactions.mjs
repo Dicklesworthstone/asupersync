@@ -136,6 +136,7 @@ const logicalKey = (raw) => typeof raw === "string"
   ? Buffer.from(raw.split(":").at(-1), "base64url").toString("utf8") : null;
 async function environment(backend) {
   const values = new Map();
+  let failGet;
   let failDelete;
   let failSet;
   let mutationObserver;
@@ -143,7 +144,10 @@ async function environment(backend) {
   const localStorage = {
     get length() { return values.size; },
     key(index) { return [...values.keys()][index] ?? null; },
-    getItem(key) { return values.get(key) ?? null; },
+    getItem(key) {
+      if (failGet?.(logicalKey(key))) { failGet = undefined; throw new DOMException("injected read failure", "UnknownError"); }
+      return values.get(key) ?? null;
+    },
     setItem(key, value) {
       if (failSet?.(logicalKey(key))) { failSet = undefined; throw new DOMException("injected write failure", "QuotaExceededError"); }
       const projected = [...values].reduce((total, [raw, stored]) =>
@@ -163,6 +167,11 @@ async function environment(backend) {
     const idb = await independentIndexedDb();
     host.indexedDB = new idb.IDBFactory();
     host.IDBKeyRange = idb.IDBKeyRange;
+    const originalGet = idb.IDBObjectStore.prototype.get;
+    idb.IDBObjectStore.prototype.get = function (key) {
+      if (failGet?.(logicalKey(key))) { failGet = undefined; throw new DOMException("injected read failure", "UnknownError"); }
+      return originalGet.call(this, key);
+    };
     const originalDelete = idb.IDBObjectStore.prototype.delete;
     idb.IDBObjectStore.prototype.delete = function (key) {
       if (failDelete?.(logicalKey(key))) { failDelete = undefined; throw new DOMException("injected deletion failure", "UnknownError"); }
@@ -180,6 +189,7 @@ async function environment(backend) {
   });
   return {
     api, host, values, store,
+    failGet: (predicate) => { failGet = predicate; },
     failDelete: (predicate) => { failDelete = predicate; },
     failSet: (predicate) => { failSet = predicate; },
     observeMutations: (observer) => { mutationObserver = observer; },
@@ -205,6 +215,40 @@ async function consistent(store) {
     assert.equal((await store.exportArtifact(record.id)).bytes.byteLength, record.byteLength);
   }
   return records;
+}
+
+async function corruptStoredIndex(env, store) {
+  if (store.storage.backend === "localstorage") {
+    const rawKey = [...env.values.keys()].find((key) => logicalKey(key) === "__artifact_index__" &&
+      Buffer.from(key.split(":").at(-2), "base64url").toString("utf8") === store.namespace);
+    assert.ok(rawKey, "the index must already be persisted");
+    // Use the real host decoder: Buffer.from is deliberately more permissive
+    // than the browser atob boundary for invalid Base64.
+    env.host.atob = atob;
+    env.values.set(rawKey, "invalid base64 %");
+    return;
+  }
+  const database = await new Promise((resolve, reject) => {
+    const request = env.host.indexedDB.open(store.storage.dbName, store.storage.version);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(store.storage.storeName, "readwrite");
+      const objectStore = transaction.objectStore(store.storage.storeName);
+      transaction.oncomplete = resolve;
+      transaction.onabort = () => reject(transaction.error);
+      const request = objectStore.getAllKeys();
+      request.onsuccess = () => {
+        const rawKey = request.result.find((key) => logicalKey(key) === "__artifact_index__" &&
+          Buffer.from(key.split(":").at(-2), "base64url").toString("utf8") === store.namespace);
+        assert.ok(rawKey, "the index must already be persisted");
+        // A foreign client can store structured-cloneable non-byte values.
+        objectStore.put({ invalid: "not a BrowserStorage byte value" }, rawKey);
+      };
+    });
+  } finally { database.close(); }
 }
 
 for (const backend of ["localstorage", "indexeddb"]) {
@@ -365,6 +409,47 @@ for (const backend of ["localstorage", "indexeddb"]) {
     assert.equal(await store.clearArtifacts(), 1);
     assert.deepEqual(ids(await consistent(store)), []);
     assert.deepEqual(ids(await consistent(other)), ["untouched"]);
+  });
+
+  test(`${backend}: corrupt stored index bytes cannot wedge explicit recovery`, async () => {
+    const env = await environment(backend);
+    const store = env.store();
+    const other = env.store({}, "other");
+    await store.persistArtifact(custom("original"));
+    await other.persistArtifact(custom("untouched"));
+    await corruptStoredIndex(env, store);
+    assert.equal(await store.clearArtifacts(), 1);
+    assert.deepEqual(ids(await consistent(store)), []);
+    assert.deepEqual(ids(await consistent(other)), ["untouched"]);
+    await store.persistArtifact(custom("recovered"));
+    assert.equal(bytesText((await store.exportArtifact("recovered")).bytes), "recovered");
+  });
+
+  test(`${backend}: corrupt stored index bytes report recovery-capable diagnostics`, async () => {
+    const env = await environment(backend);
+    const store = env.store();
+    await store.persistArtifact(custom("original"));
+    await corruptStoredIndex(env, store);
+    for (const operation of [
+      () => store.listArtifacts(),
+      () => store.exportArchive(),
+      () => store.persistArtifact(custom("replacement")),
+      () => store.deleteArtifact("original"),
+    ]) {
+      await assert.rejects(operation(), (error) => artifactError(error, "corrupt_index"));
+    }
+    assert.equal((await store.storage.listKeys(store.namespace)).length, 2,
+      "observing corruption must not silently discard persisted artifacts");
+  });
+
+  test(`${backend}: failed index I/O cannot trigger destructive corruption recovery`, async () => {
+    const env = await environment(backend);
+    const store = env.store();
+    await store.persistArtifact(custom("original"));
+    env.failGet((key) => key === "__artifact_index__");
+    await assert.rejects(store.clearArtifacts(), (error) => artifactError(error, "storage_failed"));
+    assert.deepEqual(ids(await consistent(store)), ["original"]);
+    assert.equal(bytesText((await store.exportArtifact("original")).bytes), "original");
   });
 }
 

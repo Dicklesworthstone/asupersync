@@ -7015,12 +7015,42 @@ function browserUrlLike(
 
 /** Requests made by an artifact operation stay inside one host transaction. */
 interface BrowserArtifactTransaction {
-  get(key: string, consume: (bytes: Uint8Array | null) => void): void;
+  get(
+    key: string,
+    consume: (bytes: Uint8Array | null) => void,
+    invalidBytes?: (error: BrowserArtifactValueDecodeError) => void,
+  ): void;
   set(key: string, bytes: Uint8Array): void;
   delete(key: string): void;
   clear(consume: (count: number) => void): void;
   /** Publish retained entries before non-atomic localStorage reclamation. */
   reclaimIndex(bytes: Uint8Array | null): void;
+}
+
+class BrowserArtifactValueDecodeError extends Error {
+  constructor(readonly key: string, cause: unknown) {
+    super(errorMessage(cause));
+    this.name = "BrowserArtifactValueDecodeError";
+  }
+}
+
+function consumeBrowserArtifactValue(
+  key: string,
+  decode: () => Uint8Array | null,
+  consume: (bytes: Uint8Array | null) => void,
+  invalidBytes: ((error: BrowserArtifactValueDecodeError) => void) | undefined,
+): void {
+  let bytes: Uint8Array | null;
+  try { bytes = decode(); }
+  catch (cause) {
+    const error = new BrowserArtifactValueDecodeError(key, cause);
+    if (!invalidBytes) throw error;
+    invalidBytes(error);
+    return;
+  }
+  // Consumer callbacks can issue more host requests. Their failures are I/O
+  // failures, not evidence that the value successfully read was corrupt.
+  consume(bytes);
 }
 
 async function runBrowserArtifactTransaction<T>(
@@ -7060,13 +7090,15 @@ async function runBrowserArtifactTransaction<T>(
         const key = (value: string): string =>
           encodeIndexedDbStorageKey(namespace, value, storage.globalObject);
         const view: BrowserArtifactTransaction = {
-          get(value, consume) {
+          get(value, consume, invalidBytes) {
             const request = store.get(key(value));
-            request.onsuccess = () => guard(() => consume(
-              request.result === undefined || request.result === null
-                ? null
-                : compactIndexedDbBytes(normalizeBrowserStorageValue(request.result)),
-            ));
+            request.onsuccess = () => guard(() => {
+              const raw = request.result;
+              consumeBrowserArtifactValue(value, () =>
+                raw === undefined || raw === null
+                  ? null : compactIndexedDbBytes(normalizeBrowserStorageValue(raw)),
+              consume, invalidBytes);
+            });
           },
           set(value, bytes) { store.put(compactIndexedDbBytes(bytes), key(value)); },
           delete(value) { store.delete(key(value)); },
@@ -7101,12 +7133,15 @@ async function runBrowserArtifactTransaction<T>(
     let result: T;
     let hasResult = false;
     const view: BrowserArtifactTransaction = {
-      get(value, consume) {
+      get(value, consume, invalidBytes) {
         const encoded = key(value);
         const raw = pending.has(encoded) ? pending.get(encoded)! : local.getItem(encoded);
-        const bytes = raw === null ? null : decodeBrowserStorageBytes(raw, storage.globalObject);
-        if (raw !== null && bytes === null) throw new Error("invalid BrowserStorage value");
-        consume(bytes);
+        consumeBrowserArtifactValue(value, () => {
+          if (raw === null) return null;
+          const bytes = decodeBrowserStorageBytes(raw, storage.globalObject);
+          if (bytes === null) throw new Error("invalid BrowserStorage value");
+          return bytes;
+        }, consume, invalidBytes);
       },
       set(value, bytes) {
         ensureWritable();
@@ -7303,7 +7338,8 @@ export class BrowserArtifactStore {
           error.code === BROWSER_ARTIFACT_OPERATION_FAILED_CODE) throw error;
       throw this.operationError(
         operation,
-        browserArtifactFailureReasonFromError(error, "storage_failed"),
+        error instanceof BrowserArtifactValueDecodeError && error.key === BROWSER_ARTIFACT_INDEX_KEY
+          ? "corrupt_index" : browserArtifactFailureReasonFromError(error, "storage_failed"),
         errorMessage(error),
       );
     }
@@ -7712,6 +7748,11 @@ export class BrowserArtifactStore {
           return;
         }
         transaction.clear(() => finish(count));
+      }, () => {
+        // A present index can be corrupt before JSON parsing: invalid Base64
+        // in localStorage or a foreign non-byte IndexedDB value. Recover under
+        // the same transaction; host read failures never enter this callback.
+        transaction.clear((rawCount) => finish(rawCount - 1));
       });
     });
   }
