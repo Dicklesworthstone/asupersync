@@ -63,6 +63,9 @@ use std::time::Duration;
 
 const WINDOW: Duration = Duration::from_secs(10);
 
+#[path = "distributed_node_native/typed.rs"]
+mod typed;
+
 struct EchoRequest;
 struct EchoResponse;
 impl HasSchema for EchoRequest {
@@ -175,6 +178,7 @@ async fn fixture_protocol(cx: &Cx, protocol: RemoteProtocolVersion) -> Fixture {
             }
         }
     }).unwrap();
+    typed::register(&mut registry, Arc::clone(&parked));
     register_owned_membership_service(&mut registry, membership.clone()).unwrap();
     register_symbol_service(&mut registry, Arc::clone(&store)).unwrap();
 
@@ -195,7 +199,8 @@ async fn fixture_protocol(cx: &Cx, protocol: RemoteProtocolVersion) -> Fixture {
     );
     policy.grant_tls_peer(
         NodeId::new("authority"), pins,
-        ["echo", MEMBERSHIP_SERVICE_COMPUTATION, SYMBOL_SERVICE_COMPUTATION],
+        ["echo", MEMBERSHIP_SERVICE_COMPUTATION, SYMBOL_SERVICE_COMPUTATION]
+            .into_iter().chain(typed::NAMES),
     ).unwrap();
     let hello = policy.hello_for(NodeId::new("authority"));
     let service = RemoteComputationService::bind(

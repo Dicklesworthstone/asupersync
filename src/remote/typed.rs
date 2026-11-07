@@ -33,6 +33,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod owned;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub(crate) use owned::TypedRemoteReportDecoder;
 pub use owned::{
     TypedRemoteRunError, TypedRemoteRunHandle, TypedRemoteRunReply, TypedRemoteRunReport,
     spawn_remote_typed_owned,

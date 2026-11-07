@@ -76,7 +76,9 @@ pub use node::{
     NativeDistributedNodeStartError, NativeDistributedNodeStartFailure,
     NativeDistributedNodeStopCause, NativeDistributedOutboundConfig, NativeDistributedOutboundError,
     NativeDistributedOutboundReport, NativeDistributedRemoteError, NativeDistributedRemoteHandle,
-    NativeDistributedRemoteResult, NativeListenerResult, NativeMembershipResult,
+    NativeDistributedRemoteResult, NativeDistributedTypedRemoteError,
+    NativeDistributedTypedRemoteHandle, NativeDistributedTypedRemoteReport,
+    NativeDistributedTypedRemoteResult, NativeListenerResult, NativeMembershipResult,
 };
 pub use recovery::{
     CollectedSymbol, CollectionConsistency, CollectionMetrics, RecoveryCollector, RecoveryConfig,

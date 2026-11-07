@@ -36,7 +36,9 @@ mod outbound;
 pub use outbound::{
     NativeDistributedClient, NativeDistributedOutboundConfig, NativeDistributedOutboundError,
     NativeDistributedOutboundReport, NativeDistributedRemoteError, NativeDistributedRemoteHandle,
-    NativeDistributedRemoteResult,
+    NativeDistributedRemoteResult, NativeDistributedTypedRemoteError,
+    NativeDistributedTypedRemoteHandle, NativeDistributedTypedRemoteReport,
+    NativeDistributedTypedRemoteResult,
 };
 use outbound::Outbound;
 

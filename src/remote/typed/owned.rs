@@ -40,6 +40,22 @@ pub enum TypedRemoteRunError {
     NativeOwned(#[from] NativeRemoteOwnedError),
 }
 
+// Only the already-retired report crosses this adapter. It carries no remote
+// authority, task owner or encoded input, and never changes lifecycle receipts.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub(crate) struct TypedRemoteReportDecoder<C: TypedRemoteComputation> {
+    signature: Signature,
+    limits: TypedRemoteLimits,
+    marker: PhantomData<fn() -> C>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl<C: TypedRemoteComputation> TypedRemoteReportDecoder<C> {
+    pub(crate) fn decode(&self, report: RemoteRunReport) -> TypedRemoteRunReport<C::Output> {
+        decode_report::<C>(self.signature, self.limits, report)
+    }
+}
+
 /// Typed remote result with the original cancellation and checked-lease facts.
 ///
 /// The lease settlement describes protocol delivery and local ownership. It
@@ -225,6 +241,21 @@ impl<C: TypedRemoteComputation> TypedRemoteRunHandle<C> {
 }
 
 impl<C: TypedRemoteComputation> PreparedTypedRemoteCall<C> {
+    // Node admission checks the encoded length before taking these parts. Give
+    // its raw capacity check a compact allocation, not the codec's spare room.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub(crate) fn into_owned_parts(self) -> (crate::remote::RemoteInput, TypedRemoteReportDecoder<C>) {
+        let input = self.input.into_data().into_boxed_slice().into_vec();
+        (
+            crate::remote::RemoteInput::new(input),
+            TypedRemoteReportDecoder {
+                signature: self.signature,
+                limits: self.limits,
+                marker: PhantomData,
+            },
+        )
+    }
+
     /// Execute a prepared typed call through a reserved native domain and child region.
     ///
     /// Reserve exactly [`Self::encoded_len`] before calling. The reservation

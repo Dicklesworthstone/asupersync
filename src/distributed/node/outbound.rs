@@ -25,6 +25,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+mod typed;
+pub use typed::{
+    NativeDistributedTypedRemoteError, NativeDistributedTypedRemoteHandle,
+    NativeDistributedTypedRemoteReport, NativeDistributedTypedRemoteResult,
+};
+
 /// Explicit transport authority and finite catalog/operation bounds.
 ///
 /// Construction starts no task or connection. The supplied capability must be
@@ -399,6 +405,20 @@ impl NativeDistributedClient {
         Ok(generation)
     }
 
+    fn route_frame_limit(
+        &self, node: &NodeId, incarnation: u64,
+    ) -> Result<usize, NativeDistributedOutboundError> {
+        self.shared.check_open()?;
+        let peers = self.shared.peers.lock();
+        let Some((route, current)) = peers.get(node) else {
+            return Err(NativeDistributedOutboundError::Membership);
+        };
+        if *current != incarnation || !self.shared.membership.permits_native_route(node, incarnation) {
+            return Err(NativeDistributedOutboundError::Membership);
+        }
+        Ok(route.client().config().wire_limits().max_frame_bytes())
+    }
+
     /// Submit one membership-owned named computation in the node's child region.
     ///
     /// The owner runs independently of result polling. Its task Cx owns the
@@ -415,16 +435,7 @@ impl NativeDistributedClient {
         &self, node: NodeId, incarnation: u64, computation: ComputationName,
         input: RemoteInput, mut config: RemoteRunConfig,
     ) -> Result<NativeDistributedRemoteHandle, NativeDistributedOutboundError> {
-        self.shared.check_open()?;
-        let frame_limit = {
-            let peers = self.shared.peers.lock();
-            let Some((route, current)) = peers.get(&node) else {
-                return Err(NativeDistributedOutboundError::Membership);
-            };
-            if *current != incarnation || !self.shared.membership.permits_native_route(&node, incarnation)
-            { return Err(NativeDistributedOutboundError::Membership); }
-            route.client().config().wire_limits().max_frame_bytes()
-        };
+        let frame_limit = self.route_frame_limit(&node, incarnation)?;
         let input = input.into_data();
         if input.capacity() > frame_limit || computation.as_str().len() > frame_limit {
             return Err(NativeDistributedOutboundError::RequestTooLarge);
