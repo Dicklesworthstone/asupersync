@@ -13,6 +13,26 @@ use std::future::poll_fn;
 const MAX_UNRELATED_REPLIES: usize = 32;
 const MAX_DNS_PACKET: usize = u16::MAX as usize;
 
+/// A reactor lookup behind the resolver's public boundary: a boxed `Send` trait object, not a concrete `async` type.
+pub(super) type NativeLookup<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, DnsError>> + Send + 'a>>;
+
+/// Erases a reactor lookup's future type, so `Resolver::lookup_ip` and the record lookups do not embed it.
+///
+/// When a forbidden pool routes a public lookup to the reactor, that lookup's future would otherwise contain the whole
+/// `lookup_*_native` future. Every caller's `Send` proof (a task that awaits `lookup_ip` and is spawned) then descends
+/// through the socket, deadline and ambient-context futures, which for a large caller exceeds the default trait-solver
+/// recursion limit (`recursion_depth_exceeding_limit`, rust-lang #159228). Here the `Send` bound is proven once, under
+/// this crate's own limit, and callers see only the trait object.
+///
+/// Cost: one heap allocation of the lookup's state per routed call. Nothing else changes: the same future is polled, so
+/// the cache, special-use, cancellation, deadline and I/O and TIME gates are those of the `lookup_*_native` method.
+pub(super) fn erase_native<'a, T>(
+    lookup: impl Future<Output = Result<T, DnsError>> + Send + 'a,
+) -> NativeLookup<'a, T> {
+    Box::pin(lookup)
+}
+
 impl Resolver {
     /// Resolve A and AAAA records using runtime-owned UDP/TCP sockets.
     ///

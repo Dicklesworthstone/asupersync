@@ -236,10 +236,11 @@ impl Resolver {
 
         // The blocking pool is forbidden: resolve on the reactor instead of refusing. The fork sits before this
         // method's own cache probe because the native path validates, probes and fills the cache itself, so one
-        // lookup counts exactly one cache miss or hit.
+        // lookup counts exactly one cache miss or hit. The reactor future is boxed as a `Send` trait object so that it
+        // is not part of this future's type (see `native::erase_native`).
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(cx) = self.forbidden_native_owner() {
-            return self.lookup_ip_native(&cx, host).await;
+            return native::erase_native(self.lookup_ip_native(&cx, host)).await;
         }
 
         // Preserve absolute-name semantics in the cache: `example.com.` may be
@@ -511,7 +512,7 @@ impl Resolver {
         validate_dns_record_name(domain)?;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(cx) = self.forbidden_native_owner() {
-            return self.lookup_mx_native(&cx, domain).await;
+            return native::erase_native(self.lookup_mx_native(&cx, domain)).await;
         }
         self.refuse_system_config_read()?;
         let domain = domain.to_string();
@@ -561,7 +562,7 @@ impl Resolver {
         validate_dns_record_name(name)?;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(cx) = self.forbidden_native_owner() {
-            return self.lookup_srv_native(&cx, name).await;
+            return native::erase_native(self.lookup_srv_native(&cx, name)).await;
         }
         self.refuse_system_config_read()?;
         let name = name.to_string();
@@ -615,7 +616,7 @@ impl Resolver {
         validate_dns_record_name(name)?;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(cx) = self.forbidden_native_owner() {
-            return self.lookup_txt_native(&cx, name).await;
+            return native::erase_native(self.lookup_txt_native(&cx, name)).await;
         }
         self.refuse_system_config_read()?;
         let name = name.to_string();
