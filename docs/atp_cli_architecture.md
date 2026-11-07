@@ -11,6 +11,7 @@ asupersync atp <command> [args]
   send        Send files/directories with automatic chunking and repair
   get         Receive and restore files from ATP transfers  
   sync        Bidirectional sync with conflict resolution
+  local-sync  Preview/apply persistent sync between two local directories (Linux/glibc)
   mirror      One-way mirror with automatic cleanup
   share       Create shareable links with access control
   watch       Watch directories for changes and auto-sync
@@ -127,6 +128,72 @@ All ATP commands support JSON output for machine parsing. Output format is autom
    - NAT traversal and bandwidth tests
 
 ## Example Usage
+
+### Persistent local synchronization
+
+`asupersync atp local-sync` exposes the maintained native directory reconciliation
+engine through the `cli` feature. Both arguments are local filesystem directories;
+the existing peer-address `atp sync` and `atp mirror` execution paths still return
+their compatibility refusal. This command does not contact a daemon or remote peer.
+
+Use existing, absolute UTF-8 paths without symlink components. The private state
+directory must be empty for initialization, have mode `0700`, and belong to the
+effective user and group. State and staging must be outside both trees and each
+other. Staging must share the trees' filesystem, belong to the effective user,
+and not be writable by group or others. The caller must exclusively own both trees
+during a command. No directories are created implicitly for these arguments.
+
+```bash
+# Create history explicitly and inspect the initial three-way plan.
+# /work/left, /work/right, /work/sync-state and /work/sync-staging already exist.
+asupersync --format json atp local-sync /work/left /work/right \
+  --state-dir /work/sync-state --initialize
+
+# Reopen the saved history and preview the current changes without applying them.
+asupersync --format json atp local-sync /work/left /work/right \
+  --state-dir /work/sync-state
+
+# Apply non-destructive additions in both directions and persist convergence.
+asupersync --format json atp local-sync /work/left /work/right \
+  --state-dir /work/sync-state --apply --staging-dir /work/sync-staging
+
+# After reviewing the changes, explicitly authorize replacements and deletions.
+asupersync --format json atp local-sync /work/left /work/right \
+  --state-dir /work/sync-state --apply --staging-dir /work/sync-staging \
+  --allow-overwrite --allow-permission-change --allow-delete
+```
+
+Initialization records no prior common history. Different existing versions of
+the same file conflict; timestamps never pick a winner. Successful application
+verifies both resulting inventories and publishes the next durable baseline,
+which later invocations use to distinguish one-sided changes from concurrent
+edits. A conflict blocks the entire application. Failed reopen never falls back
+to initialization. Preview may confirm the durability of existing state files
+while holding their writer lease; it does not apply changes to the two trees.
+
+Each `--apply` prepares current inventories and revalidates them before effects.
+The `plan_id` identifies that invocation and its retained recovery job; it is not
+a reusable approval token from an earlier preview. Overwrite requires both
+`--allow-overwrite` and `--allow-permission-change`; deletion requires its separate
+`--allow-delete` grant. Originals are moved into quarantine, never unlinked by
+this command. There is no whole-tree transaction or automatic recovery cleanup.
+
+The content-only profile copies ordinary file contents and directory structure.
+It does not preserve source permissions, timestamps, symlinks, hard-link topology,
+sparse layout or platform metadata. Unsupported inputs are refused. New files
+use `0600` and new directories `0700`. Inventory bounds are configurable with
+`--max-entries`, `--max-depth`, `--max-file-bytes`, `--max-total-bytes` and
+`--max-state-bytes`.
+
+JSON output uses `schema_version: 1` and `command: "atp.local-sync"`. `decisions`
+contains each actual path/action and its baseline/local/remote observations.
+Application output preserves `result.actions`, including each action's last
+state, bytes written, durability, `staged_path` and `quarantine_path`.
+`result.complete` describes tree convergence; `result.publication` and
+`result.persistence_failure` separately describe durable history. Partial or
+non-durable application emits its receipt before a nonzero exit. An outer failure
+without an observed application receipt leaves `result` null and fills
+`application_error`; reopen history and inspect staging before another attempt.
 
 ### Basic Transfer Commands
 

@@ -105,6 +105,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+#[path = "asupersync/atp_local_sync.rs"]
+mod atp_local_sync;
+
 #[derive(Parser, Debug)]
 #[command(name = "asupersync", version, about = "Asupersync CLI tools")]
 struct Cli {
@@ -343,6 +346,8 @@ enum AtpCommand {
     Get(AtpGetArgs),
     /// Synchronize directories with ATP
     Sync(AtpSyncArgs),
+    /// Plan or apply persistent synchronization between two local directories
+    LocalSync(atp_local_sync::LocalSyncArgs),
     /// Mirror directories with ATP (including deletes)
     Mirror(AtpMirrorArgs),
     /// Generate share codes for ATP transfers
@@ -4657,6 +4662,7 @@ fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
         AtpCommand::Send(args) => atp_send(&args, output),
         AtpCommand::Get(args) => atp_get(&args, output),
         AtpCommand::Sync(args) => atp_sync(&args, output),
+        AtpCommand::LocalSync(args) => atp_local_sync::run(&args, output),
         AtpCommand::Mirror(args) => atp_mirror(&args, output),
         AtpCommand::Share(args) => atp_share(&args, output),
         AtpCommand::Pair(args) => atp_pair(&args, output),

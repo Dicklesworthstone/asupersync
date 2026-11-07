@@ -12,3 +12,8 @@ mod push_artifact_harness;
 #[cfg(unix)]
 #[path = "atp/cli_journey/serve_signal_shutdown.rs"]
 mod serve_signal_shutdown;
+
+// Persistent local directory reconciliation uses the native Linux/glibc profile.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "atp/cli_journey/local_sync.rs"]
+mod local_sync;
