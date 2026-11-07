@@ -360,6 +360,42 @@ enum AsyncAcquireStep<C> {
     Discard(C),
 }
 
+/// Notifications selected while the pool is locked and dispatched after unlock.
+/// The common single-waiter handoff needs only an Arc clone; closing detaches
+/// the existing queue without allocating another collection.
+enum AsyncPoolWakes {
+    None,
+    One(Arc<AsyncPoolWaiter>),
+    All(VecDeque<Arc<AsyncPoolWaiter>>),
+}
+
+impl AsyncPoolWakes {
+    fn dispatch(self) {
+        fn notify(waiter: Arc<AsyncPoolWaiter>) {
+            // A Waker is arbitrary user code. Its panic must not interrupt
+            // connection/quota cleanup or strand the rest of a close batch.
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    waiter.notify.notify_one();
+                }))
+            {
+                // A panic payload may itself panic when dropped.
+                std::mem::forget(payload);
+            }
+        }
+
+        match self {
+            Self::None => {}
+            Self::One(waiter) => notify(waiter),
+            Self::All(waiters) => {
+                for waiter in waiters {
+                    notify(waiter);
+                }
+            }
+        }
+    }
+}
+
 // ─── DbPool ─────────────────────────────────────────────────────────────────
 
 /// A generic database connection pool with health checks.
@@ -1981,12 +2017,13 @@ impl<M: AsyncConnectionManager> AsyncValidationGuard<'_, M> {
             AsyncDbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
             self.pool
                 .requeue_async_pool_waiter_at_front_locked(&mut inner, waiter_slot);
-            self.pool.wake_next_async_pool_waiter_locked(&mut inner);
+            let wakes = self.pool.prepare_next_async_pool_wake_locked(&mut inner);
             drop(inner);
             self.pool
                 .stats
                 .total_discards
                 .fetch_add(1, Ordering::Relaxed);
+            wakes.dispatch();
             self.pool.safe_disconnect(conn);
         }
     }
@@ -1998,12 +2035,13 @@ impl<M: AsyncConnectionManager> Drop for AsyncValidationGuard<'_, M> {
             let mut inner = self.pool.inner.lock();
             inner.total = inner.total.saturating_sub(1);
             AsyncDbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
-            self.pool.wake_next_async_pool_waiter_locked(&mut inner);
+            let wakes = self.pool.prepare_next_async_pool_wake_locked(&mut inner);
             drop(inner);
             self.pool
                 .stats
                 .total_discards
                 .fetch_add(1, Ordering::Relaxed);
+            wakes.dispatch();
             self.pool.safe_disconnect(conn);
         }
     }
@@ -2037,7 +2075,9 @@ impl<M: AsyncConnectionManager> Drop for AsyncCreationGuard<'_, M> {
             let mut inner = self.pool.inner.lock();
             inner.total = inner.total.saturating_sub(1);
             AsyncDbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
-            self.pool.wake_next_async_pool_waiter_locked(&mut inner);
+            let wakes = self.pool.prepare_next_async_pool_wake_locked(&mut inner);
+            drop(inner);
+            wakes.dispatch();
         }
     }
 }
@@ -2052,7 +2092,7 @@ impl<M: AsyncConnectionManager> Drop for AsyncCreationGuard<'_, M> {
 /// (wrapped in `time::timeout`, a losing `select!`/`race!` branch, or any
 /// caller that drops the future instead of polling it to a checkpoint). Without
 /// it the orphaned waiter stays in `inner.waiters` uncancelled,
-/// `wake_next_async_pool_waiter_locked` pins it `ready` at the FIFO front
+/// `prepare_next_async_pool_wake_locked` pins it `ready` at the FIFO front
 /// forever, and `prune_cancelled_async_pool_waiters_locked` never reaps it
 /// (`cancelled == false`) — wedging async acquisition pool-wide.
 struct AsyncWaiterGuard<'a, M: AsyncConnectionManager> {
@@ -2121,7 +2161,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         self.live_max_size.store(applied, Ordering::Relaxed);
         // A raised cap is capacity a parked waiter can use now.
         let mut inner = self.inner.lock();
-        self.wake_next_async_pool_waiter_locked(&mut inner);
+        let wakes = self.prepare_next_async_pool_wake_locked(&mut inner);
+        drop(inner);
+        wakes.dispatch();
         applied
     }
 
@@ -2250,11 +2292,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         &self,
         inner: &mut PoolInner<M::Connection>,
         waiter: Option<&Arc<AsyncPoolWaiter>>,
-    ) {
+    ) -> AsyncPoolWakes {
         if let Some(waiter) = waiter {
             self.remove_async_pool_waiter_locked(inner, waiter);
         }
-        self.wake_next_async_pool_waiter_locked(inner);
+        self.prepare_next_async_pool_wake_locked(inner)
     }
 
     /// The caller was granted an idle connection it could not use (expired,
@@ -2290,38 +2332,47 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         *waiter_slot = Some(waiter);
     }
 
-    fn wake_next_async_pool_waiter_locked(&self, inner: &mut PoolInner<M::Connection>) {
+    fn prepare_next_async_pool_wake_locked(
+        &self,
+        inner: &mut PoolInner<M::Connection>,
+    ) -> AsyncPoolWakes {
         self.prune_cancelled_async_pool_waiters_locked(inner);
 
         if inner.closed {
-            self.wake_all_async_pool_waiters_locked(inner);
-            return;
+            return self.prepare_all_async_pool_wakes_locked(inner);
         }
 
         if !self.async_pool_capacity_available_locked(inner) {
-            return;
+            return AsyncPoolWakes::None;
         }
 
         if let Some(waiter) = inner.waiters.front() {
             let already_ready = waiter.ready.swap(true, Ordering::AcqRel);
             if !already_ready {
-                waiter.notify.notify_one();
+                return AsyncPoolWakes::One(Arc::clone(waiter));
             }
         }
+        AsyncPoolWakes::None
     }
 
-    fn wake_all_async_pool_waiters_locked(&self, inner: &mut PoolInner<M::Connection>) {
-        for waiter in inner.waiters.drain(..) {
+    fn prepare_all_async_pool_wakes_locked(
+        &self,
+        inner: &mut PoolInner<M::Connection>,
+    ) -> AsyncPoolWakes {
+        let waiters = std::mem::take(&mut inner.waiters);
+        for waiter in &waiters {
             waiter.ready.store(true, Ordering::Release);
-            waiter.notify.notify_one();
         }
+        AsyncPoolWakes::All(waiters)
     }
 
     fn cancel_async_pool_waiter(&self, waiter: &Arc<AsyncPoolWaiter>) {
         waiter.cancelled.store(true, Ordering::Release);
         let mut inner = self.inner.lock();
         self.remove_async_pool_waiter_locked(&mut inner, waiter);
-        self.wake_next_async_pool_waiter_locked(&mut inner);
+        let wakes = self.prepare_next_async_pool_wake_locked(&mut inner);
+        drop(inner);
+        wakes.dispatch();
     }
 
     fn release_client_quota_locked(
@@ -2377,8 +2428,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 return Err(DbPoolError::Closed.into());
             }
             inner.waiters.push_back(Arc::clone(&waiter));
-            self.wake_next_async_pool_waiter_locked(&mut inner);
+            let wakes = self.prepare_next_async_pool_wake_locked(&mut inner);
             *waiter_slot = Some(Arc::clone(&waiter));
+            drop(inner);
+            wakes.dispatch();
             trace_async_pool_event(cx, "wait", "queued", client_scope);
             waiter
         };
@@ -2481,7 +2534,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 return Err(AsyncAcquireFailure::cancelled(cx));
             }
 
-            let step = {
+            let (step, wakes) = {
                 let mut inner = self.inner.lock();
                 if inner.closed {
                     trace_async_pool_event(cx, "acquire", "closed", "anonymous");
@@ -2489,21 +2542,24 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 }
 
                 if !self.async_pool_caller_has_turn_locked(&mut inner, waiter_guard.slot.as_ref()) {
-                    AsyncAcquireStep::Wait
+                    (AsyncAcquireStep::Wait, AsyncPoolWakes::None)
                 } else if let Some(idle) = inner.idle.pop_front() {
                     let granted_waiter = waiter_guard.slot.take();
-                    self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
-                    AsyncAcquireStep::Idle(idle)
+                    let wakes =
+                        self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                    (AsyncAcquireStep::Idle(idle), wakes)
                 } else if inner.total >= self.effective_max_size() {
                     Self::give_back_async_pool_turn(waiter_guard.slot.as_ref());
-                    AsyncAcquireStep::Wait
+                    (AsyncAcquireStep::Wait, AsyncPoolWakes::None)
                 } else {
                     inner.total += 1;
                     let granted_waiter = waiter_guard.slot.take();
-                    self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
-                    AsyncAcquireStep::Create
+                    let wakes =
+                        self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                    (AsyncAcquireStep::Create, wakes)
                 }
             };
+            wakes.dispatch();
 
             let idle = match step {
                 AsyncAcquireStep::Wait => {
@@ -2571,16 +2627,17 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 let is_stale = idle.is_idle_too_long(&self.config, now);
 
                 if is_expired || is_stale {
-                    {
+                    let wakes = {
                         let mut inner = self.inner.lock();
                         inner.total = inner.total.saturating_sub(1);
                         self.requeue_async_pool_waiter_at_front_locked(
                             &mut inner,
                             &mut waiter_guard.slot,
                         );
-                        self.wake_next_async_pool_waiter_locked(&mut inner);
-                    }
+                        self.prepare_next_async_pool_wake_locked(&mut inner)
+                    };
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    wakes.dispatch();
                     trace_async_pool_event(
                         cx,
                         "idle_discard",
@@ -2594,16 +2651,17 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 // br-asupersync-80525g: Validation bypass fix - check authentication state for async pool
                 // For async get() without client_id, only reuse clean connections
                 if self.config.validate_authentication_state && idle.authenticated_for.is_some() {
-                    {
+                    let wakes = {
                         let mut inner = self.inner.lock();
                         inner.total = inner.total.saturating_sub(1);
                         self.requeue_async_pool_waiter_at_front_locked(
                             &mut inner,
                             &mut waiter_guard.slot,
                         );
-                        self.wake_next_async_pool_waiter_locked(&mut inner);
-                    }
+                        self.prepare_next_async_pool_wake_locked(&mut inner)
+                    };
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    wakes.dispatch();
                     trace_async_pool_event(cx, "idle_discard", "authentication_state", "anonymous");
                     crate::tracing_compat::warn!(
                         event = "async_database_pool_authentication_state_discard",
@@ -2710,7 +2768,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 return Err(AsyncAcquireFailure::cancelled(cx));
             }
 
-            let step = {
+            let (step, wakes) = {
                 let mut inner = self.inner.lock();
                 if inner.closed {
                     trace_async_pool_event(cx, "acquire", "closed", "client");
@@ -2731,7 +2789,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 }
 
                 if !self.async_pool_caller_has_turn_locked(&mut inner, waiter_guard.slot.as_ref()) {
-                    AsyncAcquireStep::Wait
+                    (AsyncAcquireStep::Wait, AsyncPoolWakes::None)
                 } else {
                     // Try to get an idle connection with authentication state validation.
                     let mut discard = None;
@@ -2768,31 +2826,34 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             &mut inner,
                             &mut waiter_guard.slot,
                         );
-                        self.wake_next_async_pool_waiter_locked(&mut inner);
-                        AsyncAcquireStep::Discard(conn)
+                        let wakes = self.prepare_next_async_pool_wake_locked(&mut inner);
+                        (AsyncAcquireStep::Discard(conn), wakes)
                     } else if let Some(idle) = candidate {
                         let granted_waiter = waiter_guard.slot.take();
-                        self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                        let wakes =
+                            self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                         *inner
                             .client_connections
                             .entry(client_id_owned.clone())
                             .or_insert(0) += 1;
-                        AsyncAcquireStep::Idle(idle)
+                        (AsyncAcquireStep::Idle(idle), wakes)
                     } else if inner.total >= self.effective_max_size() {
                         Self::give_back_async_pool_turn(waiter_guard.slot.as_ref());
-                        AsyncAcquireStep::Wait
+                        (AsyncAcquireStep::Wait, AsyncPoolWakes::None)
                     } else {
                         inner.total += 1;
                         let granted_waiter = waiter_guard.slot.take();
-                        self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                        let wakes =
+                            self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                         *inner
                             .client_connections
                             .entry(client_id_owned.clone())
                             .or_insert(0) += 1;
-                        AsyncAcquireStep::Create
+                        (AsyncAcquireStep::Create, wakes)
                     }
                 }
             };
+            wakes.dispatch();
 
             let mut quota_guard = AsyncClientQuotaGuard {
                 pool: self,
@@ -2872,7 +2933,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 let is_stale = idle.is_idle_too_long(&self.config, now);
 
                 if is_expired || is_stale {
-                    {
+                    let wakes = {
                         let mut inner = self.inner.lock();
                         Self::release_client_quota_locked(
                             &mut inner,
@@ -2883,9 +2944,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             &mut inner,
                             &mut waiter_guard.slot,
                         );
-                        self.wake_next_async_pool_waiter_locked(&mut inner);
-                    }
+                        self.prepare_next_async_pool_wake_locked(&mut inner)
+                    };
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    wakes.dispatch();
                     trace_async_pool_event(
                         cx,
                         "idle_discard",
@@ -3138,11 +3200,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             client_id
         };
 
-        let conn_to_disconnect = {
+        let (conn_to_disconnect, wakes) = {
             let mut inner = self.inner.lock();
             if inner.closed {
                 inner.total = inner.total.saturating_sub(1);
-                Some(conn)
+                (Some(conn), AsyncPoolWakes::None)
             } else {
                 inner.idle.push_back(IdleConnection {
                     conn,
@@ -3154,10 +3216,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     // br-asupersync-80525g: Validation bypass fix - track authentication state
                     authenticated_for,
                 });
-                self.wake_next_async_pool_waiter_locked(&mut inner);
-                None
+                let wakes = self.prepare_next_async_pool_wake_locked(&mut inner);
+                (None, wakes)
             }
         };
+        wakes.dispatch();
 
         if let Some(conn) = conn_to_disconnect {
             self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
@@ -3167,10 +3230,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
     /// br-asupersync-80525g: Internal method to discard connection with client tracking.
     fn discard_connection_with_client(&self, conn: M::Connection, client_id: Option<String>) {
-        {
+        let wakes = {
             let mut inner = self.inner.lock();
             inner.total = inner.total.saturating_sub(1);
-            self.wake_next_async_pool_waiter_locked(&mut inner);
 
             // br-asupersync-80525g: Update client connection count on discard
             if let Some(ref client) = client_id {
@@ -3183,8 +3245,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     }
                 }
             }
-        }
+            self.prepare_next_async_pool_wake_locked(&mut inner)
+        };
         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+        wakes.dispatch();
         self.manager.disconnect(conn);
     }
 
@@ -3195,13 +3259,14 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         let idle: Vec<_> = inner.idle.drain(..).collect();
         let drained = idle.len();
         inner.total = inner.total.saturating_sub(drained);
-        self.wake_all_async_pool_waiters_locked(&mut inner);
+        let wakes = self.prepare_all_async_pool_wakes_locked(&mut inner);
         if drained > 0 {
             self.stats
                 .total_discards
                 .fetch_add(drained as u64, Ordering::Relaxed);
         }
         drop(inner);
+        wakes.dispatch();
         // br-asupersync-80525g: Use safe disconnect to prevent resource leaks during async pool close
         let mut failed_disconnects = 0;
         for entry in idle {
@@ -3423,7 +3488,7 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
                 } else {
                     let mut inner = self.pool.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
-                    self.pool.wake_next_async_pool_waiter_locked(&mut inner);
+                    let wakes = self.pool.prepare_next_async_pool_wake_locked(&mut inner);
                     drop(inner);
                     // Counted like every other discard, as the sync pool's
                     // safe_discard_connection does.
@@ -3431,6 +3496,7 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
                         .stats
                         .total_discards
                         .fetch_add(1, Ordering::Relaxed);
+                    wakes.dispatch();
                 }
             }
         }

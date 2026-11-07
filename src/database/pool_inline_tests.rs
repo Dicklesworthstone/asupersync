@@ -405,6 +405,70 @@
         }
     }
 
+    /// Records lock availability before re-entering public pool methods. The
+    /// old wake-under-lock implementation fails assertions instead of hanging.
+    struct PoolWakeProbe<M: AsyncConnectionManager> {
+        pool: std::sync::Weak<AsyncDbPool<M>>,
+        wakes: AtomicUsize,
+        saw_locked_pool: AtomicBool,
+        observations: Mutex<Vec<(DbPoolStats, usize, bool)>>,
+        panic_on_wake: bool,
+    }
+
+    impl<M: AsyncConnectionManager> PoolWakeProbe<M> {
+        fn new(pool: &Arc<AsyncDbPool<M>>, panic_on_wake: bool) -> Arc<Self> {
+            Arc::new(Self {
+                pool: Arc::downgrade(pool),
+                wakes: AtomicUsize::new(0),
+                saw_locked_pool: AtomicBool::new(false),
+                observations: Mutex::new(Vec::new()),
+                panic_on_wake,
+            })
+        }
+
+        fn assert_woken_unlocked(&self) {
+            assert_eq!(self.wakes.load(Ordering::SeqCst), 1);
+            assert!(
+                !self.saw_locked_pool.load(Ordering::SeqCst),
+                "pool notification ran while the pool mutex was held"
+            );
+            assert_eq!(self.observations.lock().len(), 1);
+        }
+    }
+
+    impl<M: AsyncConnectionManager> std::task::Wake for PoolWakeProbe<M> {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            if let Some(pool) = self.pool.upgrade() {
+                if let Some(inner) = pool.inner.try_lock() {
+                    let clients = inner.client_connections.values().sum();
+                    drop(inner);
+                    // These public methods acquire the same mutex again.
+                    let stats = pool.stats();
+                    let closed = pool.is_closed();
+                    self.observations.lock().push((stats, clients, closed));
+                } else {
+                    self.saw_locked_pool.store(true, Ordering::SeqCst);
+                }
+            }
+            assert!(!self.panic_on_wake, "pool notification panic sentinel");
+        }
+    }
+
+    /// Register directly so these boundary tests have no timer-driven wakes.
+    /// Public acquire/return operations still perform the actual handoff.
+    fn queued_pool_waiter<M: AsyncConnectionManager>(
+        pool: &AsyncDbPool<M>,
+    ) -> Arc<AsyncPoolWaiter> {
+        let waiter = Arc::new(AsyncPoolWaiter::new());
+        pool.inner.lock().waiters.push_back(Arc::clone(&waiter));
+        waiter
+    }
+
     fn has_pool_lifecycle_entry(
         entries: &[LogEntry],
         operation: &str,
@@ -2013,6 +2077,272 @@
             .expect("async acquisition must not be wedged by the dropped waiter");
         next.return_to_pool();
         crate::test_complete!("async_pool_dropped_parked_waiter_does_not_wedge_queue");
+    }
+
+    #[test]
+    fn async_pool_release_wakes_after_unlock_and_client_quota_release() {
+        use std::future::Future;
+
+        init_test("async_pool_release_wakes_after_unlock_and_client_quota_release");
+        for (keep_on_check, discard) in [(true, false), (true, true), (false, false)] {
+            let pool = Arc::new(AsyncDbPool::new(
+                ResettingAsyncManager::new(keep_on_check, true, false),
+                DbPoolConfig::with_max_size(1).max_connections_per_client(Some(1)),
+            ));
+            let cx = Cx::for_testing();
+            let holder = block_on(pool.get_for_client(&cx, "client")).expect("holder");
+            let waiter = queued_pool_waiter(&pool);
+            let probe = PoolWakeProbe::new(&pool, false);
+            let waker = std::task::Waker::from(Arc::clone(&probe));
+            let mut task_cx = std::task::Context::from_waker(&waker);
+            let mut notified = Box::pin(waiter.notify.notified());
+            assert!(notified.as_mut().poll(&mut task_cx).is_pending());
+
+            if discard {
+                holder.discard();
+            } else {
+                holder.return_to_pool();
+            }
+
+            probe.assert_woken_unlocked();
+            {
+                let observations = probe.observations.lock();
+                let (stats, clients, closed) = &observations[0];
+                let retained = usize::from(keep_on_check && !discard);
+                assert_eq!(stats.total, retained);
+                assert_eq!(stats.idle, retained);
+                assert_eq!(stats.pending_waiters, 1);
+                assert_eq!(*clients, 0, "the callback observes the released quota");
+                assert!(!*closed);
+            }
+            assert!(waiter.ready.load(Ordering::Acquire));
+            assert!(notified.as_mut().poll(&mut task_cx).is_ready());
+            pool.cancel_async_pool_waiter(&waiter);
+            block_on(pool.get_for_client(&cx, "client"))
+                .expect("released client quota is reusable")
+                .return_to_pool();
+        }
+        crate::test_complete!("async_pool_release_wakes_after_unlock_and_client_quota_release");
+    }
+
+    #[test]
+    fn async_pool_resize_and_cancel_handoff_wake_after_unlock() {
+        use std::future::Future;
+
+        init_test("async_pool_resize_and_cancel_handoff_wake_after_unlock");
+        let pool = Arc::new(AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(2).validate_on_checkout(false),
+        ));
+        assert_eq!(pool.set_max_size(1), 1);
+        let cx = Cx::for_testing();
+        let holder = block_on(pool.get(&cx)).expect("holder");
+        let first = queued_pool_waiter(&pool);
+        let second = queued_pool_waiter(&pool);
+        let first_probe = PoolWakeProbe::new(&pool, false);
+        let second_probe = PoolWakeProbe::new(&pool, false);
+        let first_waker = std::task::Waker::from(Arc::clone(&first_probe));
+        let second_waker = std::task::Waker::from(Arc::clone(&second_probe));
+        let mut first_cx = std::task::Context::from_waker(&first_waker);
+        let mut second_cx = std::task::Context::from_waker(&second_waker);
+        let mut first_notified = Box::pin(first.notify.notified());
+        let mut second_notified = Box::pin(second.notify.notified());
+        assert!(first_notified.as_mut().poll(&mut first_cx).is_pending());
+        assert!(second_notified.as_mut().poll(&mut second_cx).is_pending());
+
+        assert_eq!(pool.set_max_size(2), 2);
+        first_probe.assert_woken_unlocked();
+        assert_eq!(second_probe.wakes.load(Ordering::SeqCst), 0);
+        assert!(first.ready.load(Ordering::Acquire));
+        assert!(!second.ready.load(Ordering::Acquire));
+        assert!(first_notified.as_mut().poll(&mut first_cx).is_ready());
+
+        // The chosen caller disappears before taking its turn. Its guard must
+        // pass that turn to the next queued caller, outside the pool mutex.
+        drop(AsyncWaiterGuard {
+            pool: &pool,
+            slot: Some(Arc::clone(&first)),
+        });
+        second_probe.assert_woken_unlocked();
+        assert!(second.ready.load(Ordering::Acquire));
+        assert_eq!(second_probe.observations.lock()[0].0.pending_waiters, 1);
+        assert!(second_notified.as_mut().poll(&mut second_cx).is_ready());
+        pool.cancel_async_pool_waiter(&second);
+        holder.return_to_pool();
+        assert_eq!(pool.stats().pending_waiters, 0);
+        crate::test_complete!("async_pool_resize_and_cancel_handoff_wake_after_unlock");
+    }
+
+    #[test]
+    fn async_pool_checkout_handoff_wakes_after_unlock() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        init_test("async_pool_checkout_handoff_wakes_after_unlock");
+        for for_client in [false, true] {
+            let pool = Arc::new(AsyncDbPool::new(
+                AsyncTestManager::new(),
+                DbPoolConfig::with_max_size(2).validate_on_checkout(false),
+            ));
+            let cx = Cx::for_testing();
+            let first_holder = block_on(pool.get(&cx)).expect("first holder");
+            let second_holder = block_on(pool.get(&cx)).expect("second holder");
+            let mut first = Box::pin(async {
+                if for_client {
+                    pool.get_for_client(&cx, "client").await
+                } else {
+                    pool.get(&cx).await
+                }
+            });
+            let mut noop_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(first.as_mut().poll(&mut noop_cx).is_pending());
+
+            let second = queued_pool_waiter(&pool);
+            let probe = PoolWakeProbe::new(&pool, false);
+            let waker = std::task::Waker::from(Arc::clone(&probe));
+            let mut task_cx = std::task::Context::from_waker(&waker);
+            let mut notified = Box::pin(second.notify.notified());
+            assert!(notified.as_mut().poll(&mut task_cx).is_pending());
+            first_holder.return_to_pool();
+            second_holder.return_to_pool();
+            assert_eq!(probe.wakes.load(Ordering::SeqCst), 0);
+
+            let first_lease = match first.as_mut().poll(&mut noop_cx) {
+                Poll::Ready(Ok(lease)) => lease,
+                Poll::Ready(Err(err)) => panic!("first waiter failed: {err}"),
+                Poll::Pending => panic!("first waiter was not granted its turn"),
+            };
+            probe.assert_woken_unlocked();
+            {
+                let observations = probe.observations.lock();
+                let (stats, clients, _) = &observations[0];
+                assert_eq!(stats.total, 2);
+                assert_eq!(stats.idle, 1);
+                assert_eq!(stats.pending_waiters, 1);
+                assert_eq!(*clients, usize::from(for_client));
+            }
+            assert!(notified.as_mut().poll(&mut task_cx).is_ready());
+            pool.cancel_async_pool_waiter(&second);
+            let second_lease = block_on(pool.get(&cx)).expect("remaining idle connection");
+            assert_ne!(first_lease.id, second_lease.id);
+            first_lease.return_to_pool();
+            second_lease.return_to_pool();
+            assert_eq!(pool.stats().idle, 2);
+        }
+        crate::test_complete!("async_pool_checkout_handoff_wakes_after_unlock");
+    }
+
+    #[test]
+    fn async_pool_dropped_admission_wakes_after_capacity_and_quota_release() {
+        use std::future::Future;
+
+        init_test("async_pool_dropped_admission_wakes_after_capacity_and_quota_release");
+        for validating in [false, true] {
+            let manager = ControlledAsyncPoolManager::new(Outcome::Ok(()));
+            manager.pause_connect.store(!validating, Ordering::SeqCst);
+            manager.pause_validation.store(validating, Ordering::SeqCst);
+            let pool = Arc::new(AsyncDbPool::new(
+                manager,
+                DbPoolConfig::with_max_size(1).max_connections_per_client(Some(1)),
+            ));
+            let cx = Cx::for_testing();
+            if validating {
+                block_on(pool.get_for_client(&cx, "client"))
+                    .expect("seed idle connection")
+                    .return_to_pool();
+            }
+            let mut pending = Box::pin(pool.get_for_client(&cx, "client"));
+            let mut noop_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(pending.as_mut().poll(&mut noop_cx).is_pending());
+            assert_eq!(pool.stats().total, 1);
+
+            let waiter = queued_pool_waiter(&pool);
+            let probe = PoolWakeProbe::new(&pool, false);
+            let waker = std::task::Waker::from(Arc::clone(&probe));
+            let mut task_cx = std::task::Context::from_waker(&waker);
+            let mut notified = Box::pin(waiter.notify.notified());
+            assert!(notified.as_mut().poll(&mut task_cx).is_pending());
+            drop(pending);
+
+            probe.assert_woken_unlocked();
+            {
+                let observations = probe.observations.lock();
+                let (stats, clients, _) = &observations[0];
+                assert_eq!(stats.total, 0);
+                assert_eq!(stats.pending_waiters, 1);
+                assert_eq!(stats.total_discards, u64::from(validating));
+                assert_eq!(*clients, 0);
+            }
+            assert!(notified.as_mut().poll(&mut task_cx).is_ready());
+            pool.cancel_async_pool_waiter(&waiter);
+            pool.manager.pause_connect.store(false, Ordering::SeqCst);
+            pool.manager.pause_validation.store(false, Ordering::SeqCst);
+            block_on(pool.get_for_client(&cx, "client"))
+                .expect("abandoned admission released its slot and client quota")
+                .return_to_pool();
+        }
+        crate::test_complete!("async_pool_dropped_admission_wakes_after_capacity_and_quota_release");
+    }
+
+    #[test]
+    fn async_pool_close_wakes_every_waiter_after_unlock_despite_callback_panics() {
+        use std::future::Future;
+
+        init_test("async_pool_close_wakes_every_waiter_after_unlock_despite_callback_panics");
+        let pool = Arc::new(AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(2).validate_on_checkout(false),
+        ));
+        let cx = Cx::for_testing();
+        let holder = block_on(pool.get(&cx)).expect("checked-out connection");
+        block_on(pool.get(&cx))
+            .expect("idle connection")
+            .return_to_pool();
+
+        let waiters = [
+            queued_pool_waiter(&pool),
+            queued_pool_waiter(&pool),
+            queued_pool_waiter(&pool),
+        ];
+        let probes = [
+            PoolWakeProbe::new(&pool, true),
+            PoolWakeProbe::new(&pool, false),
+            PoolWakeProbe::new(&pool, true),
+        ];
+        let wakers: Vec<_> = probes
+            .iter()
+            .map(|probe| std::task::Waker::from(Arc::clone(probe)))
+            .collect();
+        let mut notifications: Vec<_> = waiters
+            .iter()
+            .map(|waiter| Box::pin(waiter.notify.notified()))
+            .collect();
+        for (notification, waker) in notifications.iter_mut().zip(&wakers) {
+            let mut task_cx = std::task::Context::from_waker(waker);
+            assert!(notification.as_mut().poll(&mut task_cx).is_pending());
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.close()));
+        assert!(result.is_ok(), "notification panics must not interrupt close");
+        for probe in &probes {
+            probe.assert_woken_unlocked();
+            let observations = probe.observations.lock();
+            let (stats, clients, closed) = &observations[0];
+            assert_eq!(stats.total, 1, "the checked-out connection still counts");
+            assert_eq!(stats.idle, 0);
+            assert_eq!(stats.pending_waiters, 0, "close detached the whole queue");
+            assert_eq!(*clients, 0);
+            assert!(*closed, "the callback can re-enter is_closed");
+        }
+        for (notification, waker) in notifications.iter_mut().zip(&wakers) {
+            let mut task_cx = std::task::Context::from_waker(waker);
+            assert!(notification.as_mut().poll(&mut task_cx).is_ready());
+        }
+        assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 1);
+        holder.return_to_pool();
+        assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 2);
+        crate::test_complete!("async_pool_close_wakes_every_waiter_after_unlock_despite_callback_panics");
     }
 
     #[test]
