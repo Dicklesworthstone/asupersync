@@ -3259,13 +3259,16 @@ impl MySqlConnection {
             cx: Some(cx.clone()),
             token: None,
         };
+        let mut owner_cancel_wake = CancelWakerGuard::new(Cx::current());
         std::future::poll_fn(|task_cx| {
             cancel_wake.refresh(task_cx.waker());
-            if cx.checkpoint().is_err() {
-                return Poll::Ready(Outcome::Cancelled(
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("cancelled")),
-                ));
+            owner_cancel_wake.refresh(task_cx.waker());
+            // Observe the driving task before installing the explicit caller.
+            // Otherwise every nested socket wait registers only the caller,
+            // and cancelling the owner leaves a silent handshake parked until
+            // the connection timeout even after its cancel-lane poll.
+            if let Some(reason) = io_cancel_reason(Some(cx)) {
+                return Poll::Ready(Outcome::Cancelled(reason));
             }
             // Scope ambient authority to this poll, never across an await.
             // TCP, TLS, and the existing packet helpers all see the caller's Cx.

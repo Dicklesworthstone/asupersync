@@ -7777,6 +7777,115 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mysql_native_connect_observes_both_owners_after_authentication_parks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+
+        // The runtime installs its own cancellation waker for the task. Count
+        // only the waker passed to the connection future, so a scheduler wake
+        // cannot stand in for the connection's owner registration.
+        struct ConnectionWake {
+            task: Waker,
+            count: Arc<AtomicUsize>,
+        }
+
+        impl Wake for ConnectionWake {
+            fn wake(self: Arc<Self>) {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                self.task.wake_by_ref();
+            }
+        }
+
+        for workers in [1, 2] {
+            for cancel_caller in [true, false] {
+                let authenticating = Arc::new(crate::sync::Notify::new());
+                let peer_authenticating = Arc::clone(&authenticating);
+                let peer = PoolResetPeer::start(move |peer| {
+                    let capabilities = capability::CLIENT_PROTOCOL_41
+                        | capability::CLIENT_SECURE_CONNECTION
+                        | capability::CLIENT_PLUGIN_AUTH
+                        | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+                        | capability::CLIENT_TRANSACTIONS;
+                    peer.write_all(&handshake_packet_bytes(capabilities)).unwrap();
+                    let (sequence, response) = read_native_kat_peer_packet(peer);
+                    assert_eq!(sequence, 1, "the client completed its handshake response");
+                    assert!(response.ends_with(b"caching_sha2_password\0"));
+                    // Withhold the authentication result. Neither an OK nor
+                    // EOF can wake or complete the client's next read.
+                    peer_authenticating.notify_one();
+                    pool_reset_peer_eof(peer);
+                });
+                let mut options = peer.options(None);
+                options.connect_timeout = Some(Duration::from_secs(30));
+                let runtime = pool_reset_runtime(workers);
+                let caller = runtime.request_cx_with_budget(crate::types::Budget::INFINITE);
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let owner = Cx::current().expect("native connection owner");
+                    crate::time::timeout(owner.now(), Duration::from_secs(5), async {
+                        let mut pending = Box::pin(MySqlConnection::connect_with_options(
+                            &caller, options,
+                        ));
+                        let mut observed = Box::pin(authenticating.notified());
+                        let wakes = Arc::new(AtomicUsize::new(0));
+                        let mut connection_waker = None;
+                        std::future::poll_fn(|task_cx| {
+                            let waker = connection_waker.get_or_insert_with(|| {
+                                Waker::from(Arc::new(ConnectionWake {
+                                    task: task_cx.waker().clone(),
+                                    count: Arc::clone(&wakes),
+                                }))
+                            });
+                            assert!(
+                                pending.as_mut().poll(&mut Context::from_waker(waker)).is_pending(),
+                                "the peer withholds authentication completion"
+                            );
+                            observed.as_mut().poll(task_cx)
+                        })
+                        .await;
+
+                        let connection_waker = connection_waker.expect("connection was polled");
+                        let reason = CancelReason::user("stop pending MySQL authentication")
+                            .with_cause(CancelReason::shutdown());
+                        {
+                            let mut io_cx = Context::from_waker(&connection_waker);
+                            assert!(pending.as_mut().poll(&mut io_cx).is_pending());
+                            let before_cancel = wakes.load(Ordering::SeqCst);
+                            let target = if cancel_caller { &caller } else { &owner };
+                            target.cancel_with_reason(reason.clone());
+                            assert!(
+                                wakes.load(Ordering::SeqCst) > before_cancel,
+                                "workers={workers} cancel_caller={cancel_caller}: \
+                                 cancellation must reach the connection's own waker"
+                            );
+                            assert!(
+                                target.masked(|| pending.as_mut().poll(&mut io_cx)).is_pending(),
+                                "the selected owner's cancellation mask remains effective"
+                            );
+                        }
+                        assert!(
+                            matches!(pending.await, Outcome::Cancelled(actual) if actual == reason),
+                            "workers={workers} cancel_caller={cancel_caller}: exact cancellation cause"
+                        );
+                        assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+                        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                        eprintln!(
+                            "event=mysql_connect_cancel workers={workers} \
+                             cancel_caller={cancel_caller} authentication_parked=true \
+                             auxiliary_wake=true mask_honored=true cause_preserved=true \
+                             registrations_retired=true"
+                        );
+                    })
+                    .await
+                    .expect("connection cancellation must precede its 30-second timeout");
+                }));
+                peer.finish();
+                assert_pool_reset_drained(&runtime);
+            }
+        }
+    }
+
     #[test]
     fn mysql_external_cancel_wakes_a_read_parked_on_a_silent_stream() {
         use std::time::Instant;
