@@ -138,17 +138,24 @@ async function environment(backend) {
   const values = new Map();
   let failDelete;
   let failSet;
+  let mutationObserver;
+  let storageQuota = Infinity;
   const localStorage = {
     get length() { return values.size; },
     key(index) { return [...values.keys()][index] ?? null; },
     getItem(key) { return values.get(key) ?? null; },
     setItem(key, value) {
       if (failSet?.(logicalKey(key))) { failSet = undefined; throw new DOMException("injected write failure", "QuotaExceededError"); }
+      const projected = [...values].reduce((total, [raw, stored]) =>
+        total + (raw === key ? 0 : raw.length + stored.length), key.length + value.length);
+      if (projected > storageQuota) throw new DOMException("storage quota exceeded", "QuotaExceededError");
       values.set(key, value);
+      mutationObserver?.({ operation: "set", key: logicalKey(key), values: new Map(values) });
     },
     removeItem(key) {
       if (failDelete?.(logicalKey(key))) { failDelete = undefined; throw new DOMException("injected deletion failure", "UnknownError"); }
       values.delete(key);
+      mutationObserver?.({ operation: "delete", key: logicalKey(key), values: new Map(values) });
     },
   };
   const host = { ...globals, localStorage };
@@ -175,6 +182,8 @@ async function environment(backend) {
     api, host, values, store,
     failDelete: (predicate) => { failDelete = predicate; },
     failSet: (predicate) => { failSet = predicate; },
+    observeMutations: (observer) => { mutationObserver = observer; },
+    setStorageQuota: (quota) => { storageQuota = quota; },
   };
 }
 
@@ -386,4 +395,216 @@ test("localstorage: independent SDK realms share the origin lock and snapshot re
   assert.deepEqual(ids(await consistent(first)), ["first", "second"]);
   assert.deepEqual(Array.from((await first.exportArtifact("first")).bytes), [1, 2]);
   assert.ok(requests.some((request) => request.mode === "shared"));
+});
+
+
+// A captured state models interruption immediately after one successful host
+// mutation: restart from it without executing the original operation's rollback.
+// This proves reference consistency, not multi-key atomicity or browser fsync.
+async function exportableAtEveryMutation(env, operation, retainedIds = []) {
+  const snapshots = [];
+  env.observeMutations(snapshot => {
+    if (snapshot.key === "__artifact_index__" || snapshot.key?.startsWith("artifact:")) snapshots.push(snapshot);
+  });
+  try { await operation(); }
+  finally { env.observeMutations(undefined); }
+  assert.ok(snapshots.length > 0, "the operation must reach a storage mutation");
+  for (const [offset, snapshot] of snapshots.entries()) {
+    const restarted = await environment("localstorage");
+    for (const [key, value] of snapshot.values) restarted.values.set(key, value);
+    let archive;
+    try { archive = await restarted.store().exportArchive(); }
+    catch (error) {
+      assert.fail(`interruption after mutation ${offset + 1} (${snapshot.operation} ${snapshot.key}) left unreadable artifacts: ${error.message}`);
+    }
+    const visible = ids(archive.archive.artifacts.map(entry => entry.artifact));
+    for (const id of retainedIds) {
+      assert.ok(visible.includes(id), `retained artifact ${id} vanished after mutation ${offset + 1}`);
+    }
+    for (const entry of archive.archive.artifacts) {
+      assert.equal(Buffer.from(entry.payloadBase64, "base64").byteLength, entry.artifact.byteLength,
+        "every published record must name its complete payload");
+    }
+  }
+  return snapshots;
+}
+
+test("localstorage: interrupted same-id replacement never publishes a missing payload", async () => {
+  const env = await environment("localstorage");
+  const store = env.store();
+  await store.persistArtifact(custom("anchor", "keep"));
+  await store.persistArtifact(custom("target", "before"));
+  const snapshots = await exportableAtEveryMutation(env,
+    () => store.persistArtifact(custom("target", "after")), ["anchor"]);
+  assert.equal(bytesText((await store.exportArtifact("target")).bytes), "after");
+  assert.deepEqual(ids(await consistent(store)), ["anchor", "target"]);
+  assert.ok(snapshots.some(snapshot => snapshot.operation === "delete" && snapshot.key.startsWith("artifact:")),
+    "the old payload must actually be reclaimed");
+});
+
+test("localstorage: interrupted multi-entry eviction preserves the retained artifacts", async () => {
+  const env = await environment("localstorage");
+  const store = env.store();
+  await store.persistArtifact(custom("old-a"));
+  await store.persistArtifact(custom("old-b"));
+  await store.persistArtifact(custom("anchor"));
+  const bounded = env.store({ maxArtifacts: 2 });
+  await exportableAtEveryMutation(env,
+    () => bounded.persistArtifact(custom("replacement")), ["anchor"]);
+  assert.deepEqual(ids(await consistent(bounded)), ["anchor", "replacement"]);
+});
+
+test("localstorage: an empty reclamation index remains readable and reserves the new sequence", async () => {
+  const env = await environment("localstorage");
+  const store = env.store({ maxArtifacts: 1 });
+  await store.persistArtifact(custom("original"));
+  const snapshots = await exportableAtEveryMutation(env,
+    () => store.persistArtifact(custom("replacement")));
+  const staged = snapshots.find(snapshot => {
+    const raw = [...snapshot.values].find(([key]) => logicalKey(key) === "__artifact_index__")?.[1];
+    return raw && JSON.parse(Buffer.from(raw, "base64").toString("utf8")).entries.length === 0;
+  });
+  assert.ok(staged, "replacement must publish an empty retained set before reclamation");
+  const restarted = await environment("localstorage");
+  for (const [key, value] of staged.values) restarted.values.set(key, value);
+  const recovered = await restarted.store().persistArtifact(custom("after-interruption"));
+  assert.equal(recovered.artifact.sequence, 3, "do not reuse the interrupted replacement's sequence");
+  assert.deepEqual(ids(await consistent(store)), ["replacement"]);
+});
+
+for (const last of [false, true]) {
+  test(`localstorage: interrupted deletion keeps every remaining payload readable (last=${last})`, async () => {
+    const env = await environment("localstorage");
+    const store = env.store();
+    if (!last) await store.persistArtifact(custom("anchor"));
+    await store.persistArtifact(custom("target"));
+    await exportableAtEveryMutation(env,
+      async () => assert.equal(await store.deleteArtifact("target"), true), last ? [] : ["anchor"]);
+    assert.deepEqual(ids(await consistent(store)), last ? [] : ["anchor"]);
+  });
+}
+
+test("localstorage: interrupted namespace clear unpublishes its index before payload removal", async () => {
+  const env = await environment("localstorage");
+  const store = env.store();
+  await store.persistArtifact(custom("first"));
+  await store.persistArtifact(custom("second"));
+  await env.store({}, "other").persistArtifact(custom("unrelated"));
+  const snapshots = await exportableAtEveryMutation(env,
+    async () => assert.equal(await store.clearArtifacts(), 2));
+  assert.deepEqual(ids(await consistent(store)), []);
+  for (const snapshot of snapshots) {
+    const restarted = await environment("localstorage");
+    for (const [key, value] of snapshot.values) restarted.values.set(key, value);
+    assert.deepEqual(ids(await consistent(restarted.store({}, "other"))), ["unrelated"]);
+  }
+});
+
+test("localstorage: replacement still succeeds without room for old plus new payloads", async () => {
+  const env = await environment("localstorage");
+  const store = env.store();
+  await store.persistArtifact(custom("anchor", "keep"));
+  await store.persistArtifact(custom("slot", "a".repeat(4096)));
+  const quota = [...env.values].reduce((total, [key, value]) => total + key.length + value.length, 0);
+  env.setStorageQuota(quota);
+  const snapshots = await exportableAtEveryMutation(env,
+    () => store.persistArtifact(custom("slot", "b".repeat(4096))), ["anchor"]);
+  for (const snapshot of snapshots) {
+    assert.ok([...snapshot.values].reduce((total, [key, value]) => total + key.length + value.length, 0) <= quota);
+  }
+  assert.equal(bytesText((await store.exportArtifact("slot")).bytes), "b".repeat(4096));
+  assert.deepEqual(ids(await consistent(store)), ["anchor", "slot"]);
+});
+
+test("localstorage: interrupted rollback of final-index failure preserves readable original artifacts", async () => {
+  const env = await environment("localstorage");
+  const store = env.store();
+  await store.persistArtifact(custom("anchor"));
+  await store.persistArtifact(custom("target", "original"));
+  let publications = 0;
+  env.failSet(key => key === "__artifact_index__" && ++publications === 2);
+  await exportableAtEveryMutation(env, () => assert.rejects(
+    store.persistArtifact(custom("target", "replacement")),
+    error => artifactError(error, "quota_exceeded")), ["anchor"]);
+  assert.equal(bytesText((await store.exportArtifact("target")).bytes), "original");
+  assert.deepEqual(ids(await consistent(store)), ["anchor", "target"]);
+});
+
+test("localstorage: interrupted rollback of payload-write failure preserves retained references", async () => {
+  const env = await environment("localstorage");
+  const store = env.store();
+  await store.persistArtifact(custom("anchor"));
+  await store.persistArtifact(custom("target", "original"));
+  env.failSet(key => key?.startsWith("artifact:"));
+  await exportableAtEveryMutation(env, () => assert.rejects(
+    store.persistArtifact(custom("target", "replacement")),
+    error => artifactError(error, "quota_exceeded")), ["anchor"]);
+  assert.equal(bytesText((await store.exportArtifact("target")).bytes), "original");
+  assert.deepEqual(ids(await consistent(store)), ["anchor", "target"]);
+});
+
+test("localstorage: failed rollback unpublication cannot remove any more payloads", async () => {
+  const env = await environment("localstorage");
+  const store = env.store();
+  await store.persistArtifact(custom("anchor"));
+  await store.persistArtifact(custom("target", "original"));
+  let replacementFailed = false;
+  env.failSet(key => {
+    if (!key?.startsWith("artifact:")) return false;
+    replacementFailed = true;
+    return true;
+  });
+  // Rollback must restore its retained-only publication before deleting any
+  // payload. Refuse that write after the first failure has been consumed.
+  const set = env.host.localStorage.setItem;
+  let blocked = false;
+  env.host.localStorage.setItem = function (key, value) {
+    if (replacementFailed && logicalKey(key) === "__artifact_index__" && !blocked) {
+      blocked = true;
+      throw new DOMException("rollback publication refused", "QuotaExceededError");
+    }
+    return set.call(this, key, value);
+  };
+  const snapshots = await exportableAtEveryMutation(env, () => assert.rejects(
+    store.persistArtifact(custom("target", "replacement")),
+    error => artifactError(error, "storage_failed")), ["anchor"]);
+  assert.equal(blocked, true);
+  assert.equal(snapshots.length, 2,
+    "only the staged index and original-payload removal may precede the refused rollback publication");
+  assert.equal(snapshots.at(-1).key.startsWith("artifact:"), true,
+    "no mutation may follow a refused rollback publication");
+  assert.deepEqual(ids(await store.listArtifacts()), ["anchor"]);
+});
+
+test("localstorage: failed original-payload restoration leaves only readable retained entries", async () => {
+  const env = await environment("localstorage");
+  const store = env.store();
+  await store.persistArtifact(custom("anchor"));
+  await store.persistArtifact(custom("target", "original"));
+  const index = JSON.parse(bytesText(await store.storage.get(store.namespace, "__artifact_index__")));
+  const originalPayloadKey = index.entries.find(entry => entry.id === "target").payloadKey;
+  let publications = 0;
+  let finalPublicationFailed = false;
+  env.failSet(key => {
+    if (key !== "__artifact_index__" || ++publications !== 2) return false;
+    finalPublicationFailed = true;
+    return true;
+  });
+  const set = env.host.localStorage.setItem;
+  let restorationRefused = false;
+  env.host.localStorage.setItem = function (key, value) {
+    if (finalPublicationFailed && logicalKey(key) === originalPayloadKey) {
+      restorationRefused = true;
+      throw new DOMException("original payload restoration refused", "QuotaExceededError");
+    }
+    return set.call(this, key, value);
+  };
+  const snapshots = await exportableAtEveryMutation(env, () => assert.rejects(
+    store.persistArtifact(custom("target", "replacement")),
+    error => artifactError(error, "storage_failed")), ["anchor"]);
+  assert.equal(finalPublicationFailed, true, "fail only after writing the replacement payload");
+  assert.equal(restorationRefused, true, "exercise failure while restoring the old payload");
+  assert.ok(snapshots.some(snapshot => snapshot.operation === "set" && snapshot.key.startsWith("artifact:")),
+    "the replacement payload must be written before publication fails");
+  assert.deepEqual(ids(await consistent(store)), ["anchor"]);
 });

@@ -7019,6 +7019,8 @@ interface BrowserArtifactTransaction {
   set(key: string, bytes: Uint8Array): void;
   delete(key: string): void;
   clear(consume: (count: number) => void): void;
+  /** Publish retained entries before non-atomic localStorage reclamation. */
+  reclaimIndex(bytes: Uint8Array | null): void;
 }
 
 async function runBrowserArtifactTransaction<T>(
@@ -7068,6 +7070,8 @@ async function runBrowserArtifactTransaction<T>(
           },
           set(value, bytes) { store.put(compactIndexedDbBytes(bytes), key(value)); },
           delete(value) { store.delete(key(value)); },
+          // IndexedDB already publishes all queued changes atomically.
+          reclaimIndex() {},
           clear(consume) {
             const range = indexedDbNamespaceRange(namespace, storage.globalObject);
             const request = store.count(range);
@@ -7088,6 +7092,7 @@ async function runBrowserArtifactTransaction<T>(
   const indexKey = encodeLocalStorageKey(namespace, BROWSER_ARTIFACT_INDEX_KEY, storage.globalObject);
   const run = (): T => {
     const pending = new Map<string, string | null>();
+    let reclamationIndex: string | null | undefined;
     const key = (value: string): string =>
       encodeLocalStorageKey(namespace, value, storage.globalObject);
     const ensureWritable = (): void => {
@@ -7108,6 +7113,11 @@ async function runBrowserArtifactTransaction<T>(
         pending.set(key(value), encodeBrowserStorageBytes(bytes, storage.globalObject));
       },
       delete(value) { ensureWritable(); pending.set(key(value), null); },
+      reclaimIndex(bytes) {
+        ensureWritable();
+        reclamationIndex = bytes === null
+          ? null : encodeBrowserStorageBytes(bytes, storage.globalObject);
+      },
       clear(consume) {
         ensureWritable();
         const keys = new Set<string>();
@@ -7126,30 +7136,59 @@ async function runBrowserArtifactTransaction<T>(
     // There is deliberately no await between the first read and publication.
     execute(view, (value) => { result = value; hasResult = true; });
     if (!hasResult) throw new Error("localStorage artifact transaction did not finish synchronously");
+    if (reclamationIndex !== undefined && !pending.has(indexKey)) {
+      throw new Error("artifact reclamation requires a final index update");
+    }
     const originals = new Map<string, string | null>();
     for (const raw of pending.keys()) originals.set(raw, local.getItem(raw));
+    const applyIndex = (value: string | null): void => {
+      if (value === null) local.removeItem(indexKey);
+      else local.setItem(indexKey, value);
+    };
+    const stagedIndex = reclamationIndex !== undefined ? reclamationIndex
+      : pending.has(indexKey) && pending.get(indexKey) === null ? null : undefined;
     try {
-      // Free evicted bytes before writing their replacements. Publish the index
-      // last, and restore the original namespace values if a host write fails.
-      for (const [raw, value] of pending) if (value === null) local.removeItem(raw);
+      // Unpublish superseded/evicted entries before reclaiming their bytes.
+      // Every completed host mutation then leaves an index whose payloads
+      // still exist, without needing old + replacement payload capacity.
+      if (stagedIndex !== undefined) applyIndex(stagedIndex);
+      for (const [raw, value] of pending) {
+        if (value === null && raw !== indexKey) local.removeItem(raw);
+      }
       for (const [raw, value] of pending) {
         if (value !== null && raw !== indexKey) local.setItem(raw, value);
       }
-      if (pending.has(indexKey) && pending.get(indexKey) !== null) {
-        local.setItem(indexKey, pending.get(indexKey)!);
+      if (pending.has(indexKey) && pending.get(indexKey) !== stagedIndex) {
+        applyIndex(pending.get(indexKey)!);
       }
     } catch (error) {
-      let rollbackFailure: unknown;
-      for (const raw of originals.keys()) {
-        try { local.removeItem(raw); } catch (failure) { rollbackFailure ??= failure; }
-      }
-      for (const [raw, value] of originals) {
-        if (value !== null) {
-          try { local.setItem(raw, value); } catch (failure) { rollbackFailure ??= failure; }
+      let rollbackFailure: { cause: unknown } | undefined;
+      // Retained entries never name the payloads being restored. Keep them
+      // readable during rollback; an append can retain its original raw index.
+      // If this publication fails, stop before removing any more payloads.
+      const rollbackIndex = stagedIndex !== undefined
+        ? stagedIndex : originals.get(indexKey) ?? null;
+      try { applyIndex(rollbackIndex); }
+      catch (cause) { rollbackFailure = { cause }; }
+      if (rollbackFailure === undefined) {
+        for (const raw of originals.keys()) {
+          if (raw === indexKey) continue;
+          try { local.removeItem(raw); } catch (cause) { rollbackFailure ??= { cause }; }
+        }
+        for (const [raw, value] of originals) {
+          if (value !== null && raw !== indexKey) {
+            try { local.setItem(raw, value); } catch (cause) { rollbackFailure ??= { cause }; }
+          }
+        }
+        // A failed payload restore must not publish dangling references.
+        const originalIndex = originals.get(indexKey);
+        if (rollbackFailure === undefined && originalIndex != null) {
+          try { local.setItem(indexKey, originalIndex); }
+          catch (cause) { rollbackFailure = { cause }; }
         }
       }
       if (rollbackFailure !== undefined) {
-        throw new Error(`localStorage artifact rollback failed: ${errorMessage(rollbackFailure)}; original failure: ${errorMessage(error)}`);
+        throw new Error(`localStorage artifact rollback failed: ${errorMessage(rollbackFailure.cause)}; original failure: ${errorMessage(error)}`);
       }
       throw error;
     }
@@ -7164,7 +7203,9 @@ async function runBrowserArtifactTransaction<T>(
     }, run);
   }
   // Older hosts without Web Locks retain same-realm serialization only.
-  // localStorage cannot provide crash-atomic or cross-tab multi-key writes.
+  // The staged index preserves readable references after each host mutation,
+  // not multi-key crash atomicity: interrupted replacement may lose evicted
+  // entries or leave unindexed payloads. Web Locks coordinate cooperating tabs.
   return run();
 }
 
@@ -7365,13 +7406,15 @@ export class BrowserArtifactStore {
   private writeIndex(
     transaction: BrowserArtifactTransaction,
     index: BrowserArtifactIndex,
+    beforeReclamation = false,
   ): void {
-    if (index.entries.length === 0) {
+    if (index.entries.length === 0 && !beforeReclamation) {
       transaction.delete(BROWSER_ARTIFACT_INDEX_KEY);
       return;
     }
     const payload = browserTextEncoder(this.storage.globalObject).encode(JSON.stringify(index));
-    transaction.set(BROWSER_ARTIFACT_INDEX_KEY, payload);
+    if (beforeReclamation) transaction.reclaimIndex(payload);
+    else transaction.set(BROWSER_ARTIFACT_INDEX_KEY, payload);
   }
 
   async listArtifacts(): Promise<BrowserArtifactRecord[]> {
@@ -7505,6 +7548,11 @@ export class BrowserArtifactStore {
     };
 
     const staleEntries = [...(existing ? [existing] : []), ...evictedEntries];
+    if (staleEntries.length > 0) {
+      // Reserve the new sequence even if interruption leaves only this index.
+      // It names retained payloads only, including an empty retained set.
+      this.writeIndex(transaction, { ...nextIndex, entries: retainedEntries }, true);
+    }
     for (const stale of staleEntries) {
       transaction.delete(stale.payloadKey);
     }
@@ -7642,6 +7690,8 @@ export class BrowserArtifactStore {
           retention: this.retention,
           entries: index.entries.filter((artifact) => artifact.id !== normalizedId),
         };
+        if (nextIndex.entries.length === 0) transaction.reclaimIndex(null);
+        else this.writeIndex(transaction, nextIndex, true);
         this.writeIndex(transaction, nextIndex);
         transaction.delete(entry.payloadKey);
         finish(true);
