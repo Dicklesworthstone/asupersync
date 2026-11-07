@@ -25,6 +25,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+mod discovery;
+pub use discovery::{
+    NativeDistributedDiscoveryHandle, NativeDistributedDiscoveryResult,
+    NativeDistributedDiscoveryStartError,
+};
 mod typed;
 pub use typed::{
     NativeDistributedTypedRemoteError, NativeDistributedTypedRemoteHandle,
@@ -89,6 +94,7 @@ impl NativeDistributedOutboundConfig {
             closed: AtomicBool::new(false),
             region_retired: AtomicBool::new(false),
             operations: Mutex::new(Vec::new()),
+            discoveries: Mutex::new(BTreeMap::new()),
             max_peers: self.max_peers,
             max_operations: self.max_operations,
         })
@@ -147,24 +153,36 @@ pub struct NativeDistributedOutboundReport {
     /// An uncollected region close also retains any submission interrupted by
     /// a panic before its task handle could be published to the caller.
     pub retained_operations: usize,
+    /// Discovery owners or unread discovery reports, bounded separately by the
+    /// configured peer capacity. Actual node region close drains their tasks.
+    pub retained_discoveries: usize,
 }
 
 pub(super) struct Outbound {
     remote: Arc<NativeRemoteRuntime>,
     capability: RemoteCap,
     membership: OwnedMembershipController,
-    peers: Mutex<BTreeMap<NodeId, (NativeRemoteRoute, u64)>>,
+    peers: Mutex<BTreeMap<NodeId, (NativeRemoteRoute, u64, Arc<()>)>>,
     closed: AtomicBool,
     region_retired: AtomicBool,
     operations: Mutex<Vec<Arc<Operation>>>,
+    discoveries: Mutex<BTreeMap<NodeId, Arc<Operation<discovery::DiscoveryOutcome>>>>,
     max_peers: usize,
     max_operations: usize,
 }
 
 impl Outbound {
     pub(super) fn begin_close(&self, panics: &mut StopPanics) {
-        self.closed.store(true, Ordering::Release);
+        self.seal();
         panics.run(|| { let _ = self.remote.begin_drain(); });
+    }
+
+    fn seal(&self) {
+        // Publication holds this same catalog lock. Finish its atomic update
+        // before sealing; release the lock before invoking any stop callbacks.
+        let peers = self.peers.lock();
+        self.closed.store(true, Ordering::Release);
+        drop(peers);
     }
 
     pub(super) async fn close(&self, cx: Option<&Cx>) -> bool {
@@ -184,6 +202,7 @@ impl Outbound {
             active_sessions: self.remote.active_operations(),
             route_generation: self.remote.route_generation(),
             retained_operations: self.retained_operations(),
+            retained_discoveries: self.retained_discoveries(),
         }
     }
 
@@ -234,15 +253,15 @@ impl Outbound {
 // future can drop before record retirement; only the handle's barrier may free
 // that slot. Reaping happens on the next admission/observation or node close and
 // requires no detached cleanup task. An unread public result retains the slot.
-struct Operation {
+struct Operation<R = Result<MembershipRemoteReport, NativeDistributedRemoteError>> {
     task: Mutex<Option<TaskHandle<()>>>,
-    outcome: Mutex<Option<Result<MembershipRemoteReport, NativeDistributedRemoteError>>>,
+    outcome: Mutex<Option<R>>,
     observed: AtomicBool,
     public: AtomicBool,
     stranded: AtomicBool,
 }
 
-impl Operation {
+impl<R> Operation<R> {
     fn reclaimable(&self, region_retired: bool) -> bool {
         if self.stranded.load(Ordering::Acquire) { return region_retired; }
         self.observed.load(Ordering::Acquire)
@@ -255,19 +274,19 @@ impl Operation {
 // visible to the runtime. Without its returned handle those cases cannot be
 // distinguished. Retain the reservation until the owning region has closed;
 // never manufacture a terminal observation or launch detached cleanup.
-struct SubmissionGuard<'a> {
+struct SubmissionGuard<'a, R = Result<MembershipRemoteReport, NativeDistributedRemoteError>> {
     client: &'a NativeDistributedClient,
-    operation: Arc<Operation>,
+    operation: Arc<Operation<R>>,
     armed: bool,
 }
 
-impl Drop for SubmissionGuard<'_> {
+impl<R> Drop for SubmissionGuard<'_, R> {
     fn drop(&mut self) {
         if !self.armed { return; }
         self.operation.stranded.store(true, Ordering::Release);
         // Another closer may have won Controls' cause CAS without reaching its
         // outbound callback yet. Seal admission here before any cleanup action.
-        self.client.shared.closed.store(true, Ordering::Release);
+        self.client.shared.seal();
         let mut panics = StopPanics::new();
         self.client.controls.stop(NativeDistributedNodeStopCause::OwnerDropped, &mut panics);
         panics.run(|| {
@@ -375,10 +394,12 @@ impl NativeDistributedClient {
             return Err(NativeDistributedOutboundError::PeerCapacity);
         }
         let mut candidate = peers.clone();
-        candidate.insert(destination.clone(), (route, incarnation));
+        // Explicit provisioning ends any discovery owner captured from the old
+        // route, even when a replacement keeps the same membership incarnation.
+        candidate.insert(destination.clone(), (route, incarnation, Arc::new(())));
         let publication = self.shared.membership.publish_native_route(&destination, incarnation, || {
             self.shared.check_open()?;
-            self.shared.remote.replace_routes(candidate.values().map(|(route, _)| route.clone()))
+            self.shared.remote.replace_routes(candidate.values().map(|(route, _, _)| route.clone()))
                 .map_err(NativeDistributedOutboundError::Routes)
         }).unwrap_or(Err(NativeDistributedOutboundError::Membership));
         let generation = match publication {
@@ -398,7 +419,7 @@ impl NativeDistributedClient {
         self.shared.check_open()?;
         let mut candidate = peers.clone();
         candidate.remove(node);
-        let generation = self.shared.remote.replace_routes(candidate.values().map(|(route, _)| route.clone()))?;
+        let generation = self.shared.remote.replace_routes(candidate.values().map(|(route, _, _)| route.clone()))?;
         let old = std::mem::replace(&mut *peers, candidate);
         drop(peers);
         drop(old);
@@ -410,7 +431,7 @@ impl NativeDistributedClient {
     ) -> Result<usize, NativeDistributedOutboundError> {
         self.shared.check_open()?;
         let peers = self.shared.peers.lock();
-        let Some((route, current)) = peers.get(node) else {
+        let Some((route, current, _)) = peers.get(node) else {
             return Err(NativeDistributedOutboundError::Membership);
         };
         if *current != incarnation || !self.shared.membership.permits_native_route(node, incarnation) {

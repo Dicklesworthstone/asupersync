@@ -71,6 +71,8 @@ pub use membership::{
 };
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use node::{
+    NativeDistributedDiscoveryHandle, NativeDistributedDiscoveryResult,
+    NativeDistributedDiscoveryStartError,
     NativeDistributedClient, NativeDistributedComponent, NativeDistributedComponentResult, NativeDistributedNode,
     NativeDistributedNodeReport,
     NativeDistributedNodeStartError, NativeDistributedNodeStartFailure,

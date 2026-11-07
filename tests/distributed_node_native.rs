@@ -66,6 +66,9 @@ const WINDOW: Duration = Duration::from_secs(10);
 #[path = "distributed_node_native/typed.rs"]
 mod typed;
 
+#[path = "distributed_node_native/discovery.rs"]
+mod discovery;
+
 struct EchoRequest;
 struct EchoResponse;
 impl HasSchema for EchoRequest {
@@ -109,6 +112,7 @@ struct Fixture {
     hello: RemotePeerHello,
     store: Arc<SymbolReplicaStore>,
     parked: Arc<ParkedInvocation>,
+    echo_calls: Arc<AtomicUsize>,
 }
 
 async fn fixture(cx: &Cx) -> Fixture {
@@ -132,12 +136,21 @@ impl Drop for ReleaseParked {
 }
 
 async fn fixture_protocol(cx: &Cx, protocol: RemoteProtocolVersion) -> Fixture {
+    fixture_protocol_members(cx, protocol,
+        vec![MembershipFloor { node: NodeId::new("worker"), incarnation: 0, sequence: 0 }],
+    ).await
+}
+
+async fn fixture_protocol_members(
+    cx: &Cx, protocol: RemoteProtocolVersion, floors: Vec<MembershipFloor>,
+) -> Fixture {
+    let max_members = floors.len();
     let membership = OwnedMembershipController::new(
         NodeId::new("authority"),
         7,
         AuthKey::from_seed(42),
-        vec![MembershipFloor { node: NodeId::new("worker"), incarnation: 0, sequence: 0 }],
-        MembershipControllerLimits { max_members: 1, max_lease_ids: 16 },
+        floors,
+        MembershipControllerLimits { max_members, max_lease_ids: 16 },
         cx.timer_driver().unwrap(),
     ).unwrap();
     let store = Arc::new(SymbolReplicaStore::new(
@@ -154,9 +167,13 @@ async fn fixture_protocol(cx: &Cx, protocol: RemoteProtocolVersion) -> Fixture {
     let mut registry = RemoteComputationRegistry::new();
     let parked = Arc::new(ParkedInvocation::default());
     let observed = Arc::clone(&parked);
+    let echo_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&echo_calls);
     registry.register::<EchoRequest, EchoResponse, _, _>("echo", move |body, invocation| {
         let observed = Arc::clone(&observed);
+        let calls = Arc::clone(&calls);
         async move {
+            calls.fetch_add(1, Ordering::AcqRel);
             if invocation.request().input.data() == b"park" {
                 let mut cancelled = std::pin::pin!(body.cancelled());
                 poll_fn(|task| {
@@ -215,7 +232,7 @@ async fn fixture_protocol(cx: &Cx, protocol: RemoteProtocolVersion) -> Fixture {
             .with_connect_timeout(Duration::from_secs(2))
             .with_attempt_timeout(Duration::from_secs(3)),
     ).unwrap();
-    Fixture { service, operator, membership, client, hello, store, parked }
+    Fixture { service, operator, membership, client, hello, store, parked, echo_calls }
 }
 
 fn singleton_swim(address: SocketAddr) -> UdpSwimDriver {

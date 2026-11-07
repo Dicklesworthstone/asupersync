@@ -6907,6 +6907,19 @@ impl NativeRemoteDiscoveryConfig {
     pub const fn max_consecutive_failures(self) -> usize {
         self.max_consecutive_failures
     }
+
+    pub(crate) fn validate(self) -> Result<(), NativeRemoteDiscoveryBuildError> {
+        if self.poll_interval.is_zero() {
+            return Err(NativeRemoteDiscoveryBuildError::ZeroPollInterval);
+        }
+        if self.retry_backoff.is_zero() {
+            return Err(NativeRemoteDiscoveryBuildError::ZeroRetryBackoff);
+        }
+        if self.max_consecutive_failures == 0 {
+            return Err(NativeRemoteDiscoveryBuildError::ZeroMaxConsecutiveFailures);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -7083,10 +7096,32 @@ impl std::error::Error for NativeRemoteDiscoveryError {}
 /// A context without blocking-pool authority is refused before the first poll.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub struct NativeRemoteDiscoveryDriver<D> {
-    runtime: Arc<NativeRemoteRuntime>,
+    runtime: Arc<dyn NativeRemoteDiscoveryRoutes>,
     destination: NodeId,
     discovery: Arc<D>,
     config: NativeRemoteDiscoveryConfig,
+}
+
+// A node must update its provisioning catalog and native routes together. This
+// private target seam keeps the public standalone driver's behavior unchanged.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub(crate) trait NativeRemoteDiscoveryRoutes: Send + Sync {
+    fn route_generation(&self) -> u64;
+
+    fn stop_reason(&self, _destination: &NodeId) -> Option<NativeRemoteDiscoveryStop> {
+        None
+    }
+
+    fn refresh_discovered_route(
+        &self, destination: &NodeId, endpoints: Vec<SocketAddr>,
+    ) -> Result<NativeRemoteRouteRefresh, NativeRemoteRouteRefreshError>;
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy)]
+pub(crate) enum NativeRemoteDiscoveryStop {
+    Cancelled,
+    DestinationRemoved,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -7111,15 +7146,16 @@ where
         discovery: Arc<D>,
         config: NativeRemoteDiscoveryConfig,
     ) -> Result<Self, NativeRemoteDiscoveryBuildError> {
-        if config.poll_interval.is_zero() {
-            return Err(NativeRemoteDiscoveryBuildError::ZeroPollInterval);
-        }
-        if config.retry_backoff.is_zero() {
-            return Err(NativeRemoteDiscoveryBuildError::ZeroRetryBackoff);
-        }
-        if config.max_consecutive_failures == 0 {
-            return Err(NativeRemoteDiscoveryBuildError::ZeroMaxConsecutiveFailures);
-        }
+        Self::with_routes(runtime, destination, discovery, config)
+    }
+
+    pub(crate) fn with_routes(
+        runtime: Arc<dyn NativeRemoteDiscoveryRoutes>,
+        destination: NodeId,
+        discovery: Arc<D>,
+        config: NativeRemoteDiscoveryConfig,
+    ) -> Result<Self, NativeRemoteDiscoveryBuildError> {
+        config.validate()?;
         Ok(Self {
             runtime,
             destination,
@@ -7132,6 +7168,20 @@ where
     #[must_use]
     pub const fn destination(&self) -> &NodeId {
         &self.destination
+    }
+
+    fn stopped(
+        &self, reason: NativeRemoteDiscoveryStop, mut report: NativeRemoteDiscoveryReport,
+    ) -> Result<NativeRemoteDiscoveryReport, NativeRemoteDiscoveryError> {
+        report.final_route_generation = self.runtime.route_generation();
+        match reason {
+            NativeRemoteDiscoveryStop::Cancelled => Ok(report),
+            NativeRemoteDiscoveryStop::DestinationRemoved => {
+                Err(NativeRemoteDiscoveryError::DestinationRemoved {
+                    destination: self.destination.clone(), report,
+                })
+            }
+        }
     }
 
     /// Runs immediate and periodic discovery until caller cancellation.
@@ -7169,6 +7219,10 @@ where
                 return Ok(report);
             }
 
+            if let Some(reason) = self.runtime.stop_reason(&self.destination) {
+                return self.stopped(reason, report);
+            }
+
             let discovery = Arc::clone(&self.discovery);
             let poll_result = crate::runtime::spawn_blocking::spawn_blocking_on_pool(
                 blocking_pool.clone(),
@@ -7179,6 +7233,13 @@ where
             )
             .await;
             report.polls = report.polls.saturating_add(1);
+
+            // A blocking source is always drained, but its late snapshot must
+            // not restore a node's withdrawn/replaced authority or closed owner.
+            // The standalone target has no additional stop policy.
+            if let Some(reason) = self.runtime.stop_reason(&self.destination) {
+                return self.stopped(reason, report);
+            }
 
             let failure = match poll_result {
                 Ok((_changes, endpoints)) => match self
@@ -7211,6 +7272,13 @@ where
                     Err(NativeRemoteRouteRefreshError::GenerationExhausted) => {
                         report.refused_snapshots = report.refused_snapshots.saturating_add(1);
                         Some("native remote route generation is exhausted".to_owned())
+                    }
+                    Err(NativeRemoteRouteRefreshError::Publication(error)) => {
+                        report.refused_snapshots = report.refused_snapshots.saturating_add(1);
+                        Some(error.to_string())
+                    }
+                    Err(NativeRemoteRouteRefreshError::Stopped) => {
+                        return self.stopped(NativeRemoteDiscoveryStop::Cancelled, report);
                     }
                 },
                 Err(error) => {
@@ -8169,16 +8237,29 @@ struct NativeRemoteRouteSnapshot {
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
-enum NativeRemoteRouteRefresh {
+pub(crate) enum NativeRemoteRouteRefresh {
     Published(u64),
     Unchanged(u64),
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
-enum NativeRemoteRouteRefreshError {
+pub(crate) enum NativeRemoteRouteRefreshError {
     DestinationRemoved,
     InvalidSnapshot(RemoteComputationClientError),
     GenerationExhausted,
+    Publication(NativeRemoteRuntimeBuildError),
+    Stopped,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteDiscoveryRoutes for NativeRemoteRuntime {
+    fn route_generation(&self) -> u64 { NativeRemoteRuntime::route_generation(self) }
+
+    fn refresh_discovered_route(
+        &self, destination: &NodeId, endpoints: Vec<SocketAddr>,
+    ) -> Result<NativeRemoteRouteRefresh, NativeRemoteRouteRefreshError> {
+        NativeRemoteRuntime::refresh_discovered_route(self, destination, endpoints)
+    }
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]

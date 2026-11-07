@@ -34,6 +34,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 mod outbound;
 pub use outbound::{
+    NativeDistributedDiscoveryHandle, NativeDistributedDiscoveryResult,
+    NativeDistributedDiscoveryStartError,
     NativeDistributedClient, NativeDistributedOutboundConfig, NativeDistributedOutboundError,
     NativeDistributedOutboundReport, NativeDistributedRemoteError, NativeDistributedRemoteHandle,
     NativeDistributedRemoteResult, NativeDistributedTypedRemoteError,
