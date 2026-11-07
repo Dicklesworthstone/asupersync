@@ -77,6 +77,360 @@
         }
     }
 
+    // asupersync-vftw38: merging equivalent routes must retain each method's
+    // body policy as well as its handler and parameter names.
+    mod merged_method_body_policies {
+        use super::*;
+
+        struct IdentityLayer;
+
+        impl<H: Handler> Layer<H> for IdentityLayer {
+            type Service = H;
+
+            fn layer(&self, inner: H) -> Self::Service {
+                inner
+            }
+        }
+
+        fn router(strict_first: bool) -> Router {
+            let permissive = get(FnHandler1::<_, Extension<RequestBodyPolicy>>::new(
+                body_policy_summary,
+            ))
+            .with_body_policy(RequestBodyPolicy::new().max_total_body_size(64));
+            let strict = post(FnHandler1::<_, Extension<RequestBodyPolicy>>::new(
+                body_policy_summary,
+            ))
+            .with_body_policy(RequestBodyPolicy::new().max_total_body_size(4));
+            let router = Router::new().without_default_trace();
+            if strict_first {
+                router
+                    .route("/items/:item_id", strict)
+                    .route("/items/:id", permissive)
+            } else {
+                router
+                    .route("/items/:id", permissive)
+                    .route("/items/:item_id", strict)
+            }
+        }
+
+        fn assert_limit(router: &Router, method: &str, path: &str, limit: usize) {
+            assert_eq!(
+                router
+                    .handle(
+                        Request::new(method, path)
+                            .with_header("content-length", limit.to_string()),
+                    )
+                    .status,
+                StatusCode::OK,
+                "{method} must accept its own boundary",
+            );
+            assert_eq!(
+                router
+                    .handle(
+                        Request::new(method, path)
+                            .with_header("content-length", (limit + 1).to_string()),
+                    )
+                    .status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{method} must enforce its own boundary",
+            );
+        }
+
+        #[test]
+        fn dispatch_layering_and_metadata_keep_each_registration_policy() {
+            for strict_first in [false, true] {
+                let router = router(strict_first).layer(IdentityLayer);
+                for (method, limit) in [("GET", 64), ("get", 64), ("POST", 4), ("pOsT", 4)] {
+                    assert_limit(&router, method, "/items/42", limit);
+                }
+                let body = Bytes::from_static(b"12345");
+                assert_eq!(
+                    router
+                        .handle(Request::new("GET", "/items/42").with_body(body.clone()))
+                        .status,
+                    StatusCode::OK,
+                );
+                assert_eq!(
+                    router
+                        .handle(Request::new("POST", "/items/42").with_body(body))
+                        .status,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                );
+                let policies = router.route_body_policies();
+                assert_eq!(policies.len(), 2);
+                for (entry, method, pattern, limit) in [
+                    (&policies[0], "GET", "/items/:id", 64),
+                    (&policies[1], "POST", "/items/:item_id", 4),
+                ] {
+                    let policy = RequestBodyPolicy::new().max_total_body_size(limit).resolved();
+                    assert_eq!(entry.method, method);
+                    assert_eq!(entry.pattern, pattern);
+                    assert_eq!(entry.route_policy, Some(policy));
+                    assert_eq!(entry.effective_policy, Some(policy));
+                    let response = router.handle(Request::new(method, "/items/42"));
+                    assert!(
+                        std::str::from_utf8(response.body.as_ref())
+                            .unwrap()
+                            .starts_with(&format!("total={limit};")),
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn unconfigured_method_stays_unconfigured_and_405_keeps_shared_policy() {
+            for strict_first in [false, true] {
+                let configured = get(FnHandler::new(ok_handler))
+                    .with_body_policy(RequestBodyPolicy::new().max_total_body_size(4));
+                let unconfigured = post(FnHandler::new(ok_handler));
+                let router = if strict_first {
+                    Router::new()
+                        .route("/items", configured)
+                        .route("/items", unconfigured)
+                } else {
+                    Router::new()
+                        .route("/items", unconfigured)
+                        .route("/items", configured)
+                };
+                assert_limit(&router, "GET", "/items", 4);
+                assert_eq!(
+                    router
+                        .handle(Request::new("POST", "/items").with_header("content-length", "5"))
+                        .status,
+                    StatusCode::OK,
+                );
+                let policies = router.route_body_policies();
+                assert_eq!(policies[1].method, "POST");
+                assert_eq!(policies[1].route_policy, None);
+                assert_eq!(policies[1].effective_policy, None);
+                assert_eq!(
+                    router
+                        .handle(Request::new("PUT", "/items").with_header("content-length", "4"))
+                        .status,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                );
+                assert_eq!(
+                    router
+                        .handle(Request::new("PUT", "/items").with_header("content-length", "5"))
+                        .status,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                );
+            }
+        }
+
+        #[test]
+        fn head_inherits_selected_get_policy_and_duplicate_methods_keep_first_policy() {
+            let router = Router::new()
+                .route(
+                    "/items/:post_id",
+                    post(FnHandler::new(ok_handler))
+                        .with_body_policy(RequestBodyPolicy::new().max_total_body_size(1)),
+                )
+                .route(
+                    "/items/:get_id",
+                    get(FnHandler::new(|| "first GET"))
+                        .with_body_policy(RequestBodyPolicy::new().max_total_body_size(6)),
+                )
+                .route(
+                    "/items/:duplicate_id",
+                    get(FnHandler::new(|| "duplicate GET"))
+                        .with_body_policy(RequestBodyPolicy::new().max_total_body_size(2)),
+                );
+            for method in ["GET", "HEAD", "hEaD"] {
+                assert_limit(&router, method, "/items/42", 6);
+                let response = router.handle(Request::new(method, "/items/42"));
+                assert_eq!(response.body.as_ref(), b"first GET");
+            }
+            let router = router.route(
+                "/items/:head_id",
+                MethodRouter::new()
+                    .head(FnHandler::new(|| "explicit HEAD"))
+                    .with_body_policy(RequestBodyPolicy::new().max_total_body_size(3)),
+            );
+            assert_limit(&router, "GET", "/items/42", 6);
+            for method in ["HEAD", "head"] {
+                assert_limit(&router, method, "/items/42", 3);
+                let response = router.handle(Request::new(method, "/items/42"));
+                assert_eq!(response.body.as_ref(), b"explicit HEAD");
+            }
+        }
+
+        #[test]
+        fn builder_policy_applies_to_existing_and_later_methods_even_after_merge() {
+            let policy = RequestBodyPolicy::new().max_total_body_size(4);
+            for policy_first in [false, true] {
+                let methods = if policy_first {
+                    MethodRouter::new()
+                        .with_body_policy(policy)
+                        .get(FnHandler::new(ok_handler))
+                        .post(FnHandler::new(ok_handler))
+                } else {
+                    get(FnHandler::new(ok_handler))
+                        .post(FnHandler::new(ok_handler))
+                        .with_body_policy(policy)
+                };
+                assert_eq!(methods.body_policy(), Some(policy.resolved()));
+                let router = Router::new().route("/items", methods);
+                for method in ["GET", "POST"] {
+                    assert_limit(&router, method, "/items", 4);
+                }
+            }
+            let mut methods = get(FnHandler::new(ok_handler))
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(64));
+            methods.merge(
+                post(FnHandler::new(ok_handler))
+                    .with_body_policy(RequestBodyPolicy::new().max_total_body_size(4)),
+            );
+            let policy = RequestBodyPolicy::new().max_total_body_size(2);
+            let router = Router::new().route(
+                "/items",
+                methods
+                    .with_body_policy(policy)
+                    .put(FnHandler::new(ok_handler)),
+            );
+            for method in ["GET", "POST", "PUT"] {
+                assert_limit(&router, method, "/items", 2);
+            }
+            assert!(
+                router
+                    .route_body_policies()
+                    .iter()
+                    .all(|entry| entry.route_policy == Some(policy.resolved())),
+            );
+        }
+
+        #[test]
+        fn repeated_nested_merge_keeps_strict_method_and_outer_ceiling() {
+            for strict_first in [false, true] {
+                let router = Router::new()
+                    .with_server_body_policy(RequestBodyPolicy::new().max_total_body_size(32))
+                    .nest(
+                        "/api",
+                        Router::new().route(
+                            "/items/:put_id",
+                            put(FnHandler::new(ok_handler)).with_body_policy(
+                                RequestBodyPolicy::new().max_total_body_size(24),
+                            ),
+                        ),
+                    )
+                    .nest("/api", router(strict_first))
+                    .nest(
+                        "/api",
+                        Router::new().route(
+                            "/items/:later_id",
+                            post(FnHandler::new(ok_handler)).with_body_policy(
+                                RequestBodyPolicy::new().max_total_body_size(128),
+                            ),
+                        ),
+                    )
+                    .layer(IdentityLayer);
+                for (method, limit) in [("GET", 32), ("POST", 4), ("PUT", 24)] {
+                    assert_limit(&router, method, "/api/items/42", limit);
+                }
+                let policies = router.route_body_policies();
+                assert_eq!(policies.len(), 3);
+                for (entry, method, local, effective) in [
+                    (&policies[0], "GET", 64, 32),
+                    (&policies[1], "POST", 4, 4),
+                    (&policies[2], "PUT", 24, 24),
+                ] {
+                    assert_eq!(entry.method, method);
+                    assert_eq!(entry.mount_prefix.as_deref(), Some("/api"));
+                    assert_eq!(entry.route_policy.unwrap().max_total_body_size, local);
+                    assert_eq!(
+                        entry.effective_policy.unwrap().max_total_body_size,
+                        effective,
+                    );
+                }
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn streaming_admission_selects_method_policy_and_preserves_405_fallback() {
+            use crate::http::h1::types::{Method, Version};
+
+            for strict_first in [false, true] {
+                let router = router(strict_first);
+                for (method, expected) in [
+                    (Method::Get, 64),
+                    (Method::Head, 64),
+                    (Method::Post, 4),
+                    (Method::Delete, if strict_first { 4 } else { 64 }),
+                ] {
+                    let head = RequestHead {
+                        method,
+                        uri: "/items/42?version=2".to_string(),
+                        version: Version::Http11,
+                        headers: Vec::new(),
+                    };
+                    assert_eq!(
+                        router.http1_streaming_body_policy(&head).unwrap(),
+                        Some(expected),
+                    );
+                    #[cfg(feature = "http2-streaming")]
+                    {
+                        let h2_head = RequestHead {
+                            method: head.method.clone(),
+                            uri: head.uri.clone(),
+                            version: Version::Http2,
+                            headers: Vec::new(),
+                        };
+                        assert_eq!(
+                            router.http2_streaming_body_policy(&h2_head).unwrap(),
+                            Some(expected),
+                        );
+                    }
+                    #[cfg(all(feature = "http3", feature = "tls"))]
+                    assert_eq!(
+                        router.h3_streaming_body_policy_limit(&Request::new(
+                            head.method.as_str(),
+                            "/items/42",
+                        )),
+                        Ok(Some(expected as usize)),
+                    );
+                }
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn streaming_dispatch_tightens_live_writer_with_selected_method_policy() {
+            use crate::http::h1::types::{Method, Version};
+            use crate::http::h1::{RequestHead, StreamingServerRequest};
+
+            for strict_first in [false, true] {
+                let cx = crate::Cx::for_testing();
+                let head = RequestHead {
+                    method: Method::Post,
+                    uri: "/streamed".to_string(),
+                    version: Version::Http11,
+                    headers: vec![("transfer-encoding".to_string(), "chunked".to_string())],
+                };
+                let (writer, request) = StreamingServerRequest::channel(head, &cx, 8);
+                let strict = post(BodyPolicyWriterProbe {
+                    writer: parking_lot::Mutex::new(Some(writer)),
+                })
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(6));
+                let permissive = get(FnHandler::new(ok_handler))
+                    .with_body_policy(RequestBodyPolicy::new().max_total_body_size(64));
+                let router = if strict_first {
+                    Router::new()
+                        .route("/streamed", strict)
+                        .route("/streamed", permissive)
+                } else {
+                    Router::new()
+                        .route("/streamed", permissive)
+                        .route("/streamed", strict)
+                };
+                let response = futures_lite::future::block_on(
+                    router.handle_http1_streaming_request_with_cx(&cx, request),
+                );
+                assert_eq!(response.status, 413);
+            }
+        }
+    }
+
     #[test]
     fn body_policy_server_router_and_route_merge_monotonically() {
         let server = RequestBodyPolicy::new()

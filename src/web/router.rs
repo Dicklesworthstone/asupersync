@@ -141,7 +141,7 @@ pub struct RouteBodyPolicyInfo {
     pub handler_name: &'static str,
     /// Full mount prefix when the route came from a nested router.
     pub mount_prefix: Option<String>,
-    /// Route-local policy, when one was configured on the [`MethodRouter`].
+    /// Route-local policy from this method's original [`MethodRouter`] registration.
     pub route_policy: Option<RequestBodyPolicy>,
     /// Monotonic merge of server, router, nested-router, and route policies.
     /// `None` means no first-class policy was configured and legacy extractor
@@ -164,6 +164,9 @@ struct MethodRoute {
     // An override when merged registrations use different patterns. None uses
     // the shared route pattern and parameters already extracted by Router.
     pattern: Option<RoutePattern>,
+    // Keep each registration's policy, including an unconfigured None, when
+    // another method with a different policy is merged into the same route.
+    body_policy: Option<RequestBodyPolicy>,
 }
 
 impl Default for MethodRouter {
@@ -192,6 +195,7 @@ impl MethodRouter {
             MethodRoute {
                 handler: Box::new(handler),
                 pattern: None,
+                body_policy: self.body_policy,
             },
         );
         if let Ok(mut guard) = self.allow_state.write() {
@@ -251,10 +255,11 @@ impl MethodRouter {
     }
 
     /// Add `other`'s methods to this route. For a method both register, this
-    /// route's handler and parameter pattern are kept: the first registration
-    /// of a pattern and method answers, as it did when each was a separate route
-    /// matched in order. A body policy is kept from this router, or taken
-    /// from `other` if this one has none.
+    /// route's handler, parameter pattern, and body policy are kept: the first
+    /// registration of a pattern and method answers, as it did when each was a
+    /// separate route matched in order. Each added method retains its own body policy. The
+    /// policy for a method-not-allowed response is kept from this router, or
+    /// taken from `other` if this one has none.
     ///
     /// Preserves existing middleware wrapping on `method_not_allowed`
     /// (br-asupersync-vftw38 item 8).
@@ -277,10 +282,17 @@ impl MethodRouter {
     #[must_use]
     pub fn with_body_policy(mut self, policy: RequestBodyPolicy) -> Self {
         self.body_policy = Some(policy.resolved());
+        for route in self.handlers.values_mut() {
+            route.body_policy = self.body_policy;
+        }
         self
     }
 
-    /// Return the route-local request-body policy, when configured.
+    /// Return the shared route-local request-body policy, when configured.
+    ///
+    /// After route merging, each method retains its registration's policy;
+    /// this shared policy continues to govern method-not-allowed responses.
+    /// Use [`Router::route_body_policies`] for the policy of each merged method.
     #[must_use]
     pub const fn body_policy(&self) -> Option<RequestBodyPolicy> {
         self.body_policy
@@ -300,6 +312,7 @@ impl MethodRouter {
                     MethodRoute {
                         handler: wrap(route.handler),
                         pattern: route.pattern,
+                        body_policy: route.body_policy,
                     },
                 )
             })
@@ -344,26 +357,37 @@ impl MethodRouter {
         entries
     }
 
-    /// Dispatch a request to the appropriate method handler.
-    async fn dispatch(&self, cx: &Cx, mut req: Request) -> Response {
-        if let Err(response) = apply_request_body_policy(
-            &mut req,
-            None,
-            self.body_policy.map(RequestBodyPolicyState::from_policy),
-        ) {
-            return response;
-        }
+    fn select(&self, method: &str) -> Option<&MethodRoute> {
         // Fast path: method is already uppercase (true for virtually all HTTP traffic).
-        let mut route = self.handlers.get(&req.method);
+        let mut route = self.handlers.get(method);
         if route.is_none() {
             // Slow path: case-insensitive fallback (allocates only if needed).
-            let upper = req.method.to_uppercase();
+            let upper = method.to_uppercase();
             route = self.handlers.get(&upper);
             // A server answers HEAD as it would GET (RFC 9110 §9.1, §9.3.2); the
             // HTTP transports send the response without its content.
             if route.is_none() && upper == METHOD_HEAD {
                 route = self.handlers.get(METHOD_GET);
             }
+        }
+        route
+    }
+
+    fn body_policy_for_method(&self, method: &str) -> Option<RequestBodyPolicy> {
+        self.select(method)
+            .map_or(self.body_policy, |route| route.body_policy)
+    }
+
+    /// Dispatch a request to the appropriate method handler.
+    async fn dispatch(&self, cx: &Cx, mut req: Request) -> Response {
+        let route = self.select(&req.method);
+        let policy = route.map_or(self.body_policy, |route| route.body_policy);
+        if let Err(response) = apply_request_body_policy(
+            &mut req,
+            None,
+            policy.map(RequestBodyPolicyState::from_policy),
+        ) {
+            return response;
         }
         if let Some(route) = route {
             // Match the selected method's original pattern, not the first
@@ -4217,14 +4241,14 @@ impl Router {
             // Admission selects exactly what dispatch will (`Self::select`).
             match router.select(&probe.path) {
                 Some(RouteSelection::Route(method_router, _)) => {
-                    // MethodRouter applies this before method lookup, including a
-                    // 405 response. Admission must select the same policy.
+                    // Select the same method (including HEAD-to-GET fallback)
+                    // and its original policy as dispatch. Missing methods
+                    // retain the shared method-not-allowed response policy.
+                    let policy = method_router.body_policy_for_method(&probe.method);
                     apply_probe_policy(
                         &mut probe,
                         None,
-                        method_router
-                            .body_policy
-                            .map(RequestBodyPolicyState::from_policy),
+                        policy.map(RequestBodyPolicyState::from_policy),
                     )?;
                     break;
                 }
@@ -4482,21 +4506,20 @@ impl Router {
             .map(|policy| legacy_policy.map_or(policy, |legacy| policy.tightened_with(legacy)));
 
         for (pattern, method_router) in &self.routes {
-            let effective_policy = meet_optional_policy_state(
-                router_policy,
-                method_router
-                    .body_policy
-                    .map(RequestBodyPolicyState::from_policy),
-            )
-            .map(|policy| legacy_policy.map_or(policy, |legacy| policy.tightened_with(legacy)))
-            .map(RequestBodyPolicyState::resolved);
             for route in method_router.route_entries(pattern, prefix, mount_prefix) {
+                let route_policy = method_router.body_policy_for_method(&route.method);
+                let effective_policy = meet_optional_policy_state(
+                    router_policy,
+                    route_policy.map(RequestBodyPolicyState::from_policy),
+                )
+                .map(|policy| legacy_policy.map_or(policy, |legacy| policy.tightened_with(legacy)))
+                .map(RequestBodyPolicyState::resolved);
                 entries.push(RouteBodyPolicyInfo {
                     method: route.method,
                     pattern: route.pattern,
                     handler_name: route.handler_name,
                     mount_prefix: route.mount_prefix,
-                    route_policy: method_router.body_policy,
+                    route_policy,
                     effective_policy,
                 });
             }

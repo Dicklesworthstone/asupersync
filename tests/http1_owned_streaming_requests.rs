@@ -584,6 +584,157 @@ fn owned_streaming_malformed_limit_and_unread_drain_refusals_keep_exact_wire_pol
     native(streaming_body_refusals);
 }
 
+// asupersync-vftw38: independently configured method policies must survive
+// equivalent route and nested-router merges at real HTTP/1 admission.
+async fn streaming_merged_method_body_policies(cx: Cx) {
+    use asupersync::bytes::Buf;
+    use asupersync::web::{
+        AsyncCxFnHandler1, FnHandler, RequestBodyPolicy, Response as WebResponse, Router,
+        StatusCode, StreamingRawBody, get, post, put,
+    };
+
+    for strict_first in [false, true] {
+        for nested in [false, true] {
+            for (method, framing, payload, status, handler_count, body_size, body_error) in [
+                ("GET", "Content-Length: 8\r\n", "12345678", 200, 1, 8, false),
+                (
+                    "POST",
+                    "Content-Length: 8\r\nExpect: 100-continue\r\n",
+                    "12345678",
+                    413,
+                    0,
+                    0,
+                    false,
+                ),
+                (
+                    "POST",
+                    "Transfer-Encoding: chunked\r\n",
+                    "8\r\n12345678\r\n0\r\n\r\n",
+                    413,
+                    1,
+                    0,
+                    true,
+                ),
+                ("POST", "Content-Length: 4\r\n", "1234", 200, 1, 4, false),
+            ] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let consumed = Arc::new(AtomicUsize::new(0));
+                let terminal = Arc::new(Mutex::new(None));
+                let handler = || {
+                    let calls = Arc::clone(&calls);
+                    let consumed = Arc::clone(&consumed);
+                    let terminal = Arc::clone(&terminal);
+                    AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                        move |_request_cx: Cx, mut body: StreamingRawBody| {
+                            let calls = Arc::clone(&calls);
+                            let consumed = Arc::clone(&consumed);
+                            let terminal = Arc::clone(&terminal);
+                            async move {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                while let Some(frame) =
+                                    poll_fn(|task| Pin::new(&mut body).poll_frame(task)).await
+                                {
+                                    match frame {
+                                        Ok(Frame::Data(bytes)) => {
+                                            consumed.fetch_add(bytes.remaining(), Ordering::SeqCst);
+                                        }
+                                        Ok(Frame::Trailers(_)) => {}
+                                        Err(error) => {
+                                            *terminal.lock().unwrap() = Some(error);
+                                            break;
+                                        }
+                                    }
+                                }
+                                // A caught transport error must still override this response.
+                                WebResponse::new(StatusCode::OK, "accepted")
+                            }
+                        },
+                    )
+                };
+                let permissive = get(handler())
+                    .with_body_policy(RequestBodyPolicy::new().max_total_body_size(64));
+                let strict = post(handler())
+                    .with_body_policy(RequestBodyPolicy::new().max_total_body_size(4));
+                let router = if nested {
+                    let permissive = Router::new().route("/items", permissive);
+                    let strict = Router::new().route("/items", strict);
+                    let outer = Router::new()
+                        .with_server_body_policy(RequestBodyPolicy::new().max_total_body_size(32));
+                    let outer = if strict_first {
+                        outer.nest("/api", strict).nest("/api", permissive)
+                    } else {
+                        outer.nest("/api", permissive).nest("/api", strict)
+                    };
+                    outer.nest(
+                        "/api",
+                        Router::new().route(
+                            "/items",
+                            put(FnHandler::new(|| "unused"))
+                                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(128)),
+                        ),
+                    )
+                } else if strict_first {
+                    Router::new()
+                        .route("/items", strict)
+                        .route("/items", permissive)
+                } else {
+                    Router::new()
+                        .route("/items", permissive)
+                        .route("/items", strict)
+                };
+                let path = if nested { "/api/items" } else { "/items" };
+                let request = format!(
+                    "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{framing}Connection: close\r\n\r\n{payload}"
+                );
+                let (socket, mut peer, witness) = pair(request.as_bytes());
+                let in_flight = Arc::new(AtomicUsize::new(0));
+                let (handler, settings) = router
+                    .without_default_trace()
+                    .into_http1_streaming_parts(config());
+                let server = Http1StreamingServer::with_config(handler, settings)
+                    .with_in_flight_requests(Arc::clone(&in_flight));
+                let mut serving = cx
+                    .spawn(move |connection_cx| async move {
+                        server.serve_owned(&connection_cx, socket).await
+                    })
+                    .unwrap();
+                let received = response(&mut peer).await;
+                serving.join(&cx).await.unwrap().unwrap();
+                assert!(
+                    received.starts_with(&format!("HTTP/1.1 {status} ")),
+                    "strict_first={strict_first}, nested={nested}, method={method}: {received}",
+                );
+                assert!(!received.contains("100 Continue"), "{received}");
+                assert_eq!(calls.load(Ordering::SeqCst), handler_count);
+                assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+                assert_eq!(witness.dropped.load(Ordering::SeqCst), 1);
+                if body_error {
+                    assert!(matches!(
+                        terminal.lock().unwrap().as_ref(),
+                        Some(IncomingBodyError::BodyTooLarge {
+                            actual: Some(8),
+                            limit: 4,
+                        }),
+                    ));
+                } else {
+                    assert!(terminal.lock().unwrap().is_none());
+                    assert_eq!(consumed.load(Ordering::SeqCst), body_size);
+                }
+                if status == 200 {
+                    assert!(received.ends_with("accepted"), "{received}");
+                } else {
+                    assert!(!received.contains("accepted"), "{received}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn owned_streaming_merged_method_policies_enforce_static_and_chunked_limits() {
+    native(streaming_merged_method_body_policies);
+}
+
 async fn streaming_panics_return_transport(cx: Cx) {
     for factory_panic in [false, true] {
         let (socket, mut peer, witness) = pair(
