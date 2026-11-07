@@ -208,6 +208,9 @@ struct CxHandles {
     /// Pending-spawn counter for THIS Cx's region (cloned under the state
     /// lock at Cx build time; credits gate region close per A1.2).
     pending_spawns: Option<Arc<crate::record::region::PendingSpawnCounter>>,
+    /// Region-specific placement policy, installed by authoritative admission.
+    /// This does not change the sealed region's authorization ancestor.
+    spawn_fallback_permitted: bool,
     /// Obligation mailbox gateway (br-asupersync-bi2462.13).
     ///
     /// Lets `Cx::try_register_obligation` mint a runtime-tracked obligation
@@ -1236,6 +1239,7 @@ impl<Caps> Cx<Caps> {
                 macaroon: None,
                 spawn_gateway: None,
                 pending_spawns: None,
+                spawn_fallback_permitted: true,
                 obligation_gateway: None,
                 obligation_admission: None,
                 runtime_obligation_context: false,
@@ -1374,6 +1378,7 @@ impl<Caps> Cx<Caps> {
                 macaroon: None,
                 spawn_gateway: None,
                 pending_spawns: None,
+                spawn_fallback_permitted: true,
                 obligation_gateway: None,
                 obligation_admission: None,
                 runtime_obligation_context: false,
@@ -4721,7 +4726,7 @@ impl<Caps> Cx<Caps> {
             principal_task_id,
             opener_task_id: self.task_id(),
             slot: std::sync::Arc::clone(&slot),
-            parent_fallback: self.inner.read().spawn_fallback_region,
+            parent_fallback: self.spawn_fallback_for(self.region_id()),
         };
         if gateway
             .enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Create(
@@ -6234,6 +6239,38 @@ where
         Ok((handle, branch))
     }
 
+    /// Owns one admitted sealed subtree without changing ordinary race
+    /// fallback policy. The supplied slot exists before enqueue so a drop
+    /// racing admission can hand its close request to late publication.
+    pub(crate) fn spawn_owned_branch<F, Fut>(
+        &self,
+        branch: Arc<crate::runtime::spawn_mailbox::BranchRegionSlot>,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        debug_assert!(branch.owns_subtree());
+        let gateway = self
+            .spawn_gateway_handle()
+            .ok_or(crate::runtime::state::SpawnError::RuntimeUnavailable)?;
+        let pending = self
+            .pending_spawn_counter_handle()
+            .ok_or(crate::runtime::state::SpawnError::RuntimeUnavailable)?;
+        self.spawn_via_gateway_in_branch(
+            self.region_id(),
+            self.budget(),
+            self.capability_budget(),
+            &gateway,
+            &pending,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            Some(branch),
+            f,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn_via_gateway_in_branch<F, Fut>(
         &self,
@@ -6469,6 +6506,16 @@ impl<Caps> Cx<Caps> {
     /// `None` for a spawn that names any other region: a closed scope or
     /// child region still denies it.
     pub(crate) fn spawn_fallback_for(&self, region: RegionId) -> Option<RegionId> {
+        if self.handles.spawn_fallback_permitted {
+            self.spawn_authorization_region_for(region)
+        } else {
+            None
+        }
+    }
+
+    /// Private sealed ownership preserves its original checked authority
+    /// target even when an owned subtree forbids ancestor placement.
+    pub(crate) fn spawn_authorization_region_for(&self, region: RegionId) -> Option<RegionId> {
         let inner = self.inner.read();
         if inner.region == region {
             inner.spawn_fallback_region
@@ -6487,6 +6534,10 @@ where
     /// sets it when it admits a task into a sealed region.
     pub(crate) fn set_spawn_fallback_region(&self, region: Option<RegionId>) {
         self.inner.write().spawn_fallback_region = region;
+    }
+
+    pub(crate) fn set_spawn_fallback_permitted(&mut self, permitted: bool) {
+        Arc::make_mut(&mut self.handles).spawn_fallback_permitted = permitted;
     }
 
     /// Snapshots the handles a task spawned from this context inherits:

@@ -358,3 +358,201 @@ fn fallible_sleep_stops_at_scope_timeout_before_running_subsequent_effects() {
         }
     }
 }
+
+
+/// A production-runtime proof that the deadline drains a real operation
+/// subtree, even after the direct task's retirement barrier has opened.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn scoped_timeout_native_waits_for_grandchild_after_direct_body_has_finished() {
+    use asupersync::cx::{ChildRegionSpec, ScopedTimeoutStop, ScopedTimeoutTask};
+    use asupersync::observability::TaskInspectorConfig;
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+    use asupersync::types::Time;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Mutex, mpsc};
+    use std::task::{Context, Wake, Waker};
+
+    #[derive(Default)]
+    struct Gate {
+        released: AtomicBool,
+        parked: AtomicBool,
+        waker: Mutex<Option<Waker>>,
+    }
+
+    impl Gate {
+        fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+            let waker = self.waker.lock().unwrap().take();
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+
+    struct WaitGate(Arc<Gate>);
+
+    impl Future for WaitGate {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<()> {
+            if self.0.released.load(Ordering::SeqCst) {
+                return Poll::Ready(());
+            }
+            *self.0.waker.lock().unwrap() = Some(task.waker().clone());
+            if self.0.released.load(Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                self.0.parked.store(true, Ordering::SeqCst);
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Installed only after timeout entered its unconditional task join.
+    /// The expired timer and owner-cancel registration are already gone.
+    struct JoinWake {
+        count: AtomicUsize,
+        parent: Waker,
+    }
+
+    impl Wake for JoinWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            self.parent.wake_by_ref();
+        }
+    }
+
+    for (current_thread, sharded) in [(true, false), (true, true), (false, false), (false, true)] {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let clock = Arc::new(VirtualClock::new());
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let builder = if current_thread {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::multi_thread().worker_threads(2)
+            };
+            let runtime = builder
+                .with_sharded_state(sharded)
+                .with_timer_driver(timer.clone())
+                .build()
+                .unwrap();
+            let inspector = runtime.task_inspector(TaskInspectorConfig::default());
+            runtime.block_on(async move {
+                let root = Cx::current().expect("native root context");
+                let cancellation_parked = Arc::new(AtomicBool::new(false));
+                let body_cancellation_parked = Arc::clone(&cancellation_parked);
+                let body_id = Arc::new(Mutex::new(None));
+                let published_body = Arc::clone(&body_id);
+                let cleanup_gate = Arc::new(Gate::default());
+                let body_gate = Arc::new(Gate::default());
+                let descendant_cleanup = Arc::clone(&cleanup_gate);
+                let body_return = Arc::clone(&body_gate);
+                let mut timeout = Box::pin(root.timeout_scoped(
+                    Duration::from_millis(50),
+                    move |body| async move {
+                        *published_body.lock().unwrap() = Some(body.task_id());
+                        let body_region = body.region_id();
+                        let _child = body.spawn(move |child| async move {
+                            let region = child
+                                .open_child_region(ChildRegionSpec::inherit())
+                                .await
+                                .unwrap();
+                            assert_ne!(region.region_id(), body_region);
+                            let mut grandchild = region.cx().spawn(move |grandchild| async move {
+                                let mut cancelled = std::pin::pin!(grandchild.cancelled());
+                                std::future::poll_fn(|task| {
+                                    let poll = cancelled.as_mut().poll(task);
+                                    if poll.is_pending() {
+                                        body_cancellation_parked.store(true, Ordering::SeqCst);
+                                    }
+                                    poll
+                                }).await;
+                                assert!(grandchild.checkpoint().is_err());
+                                WaitGate(descendant_cleanup).await;
+                            }).unwrap();
+                            let _ = grandchild.join(&child).await;
+                            region.close().await.unwrap();
+                        }).unwrap();
+                        body.cancelled().await;
+                        assert!(body.checkpoint().is_err());
+                        WaitGate(body_return).await;
+                        "late acknowledged value"
+                    },
+                ));
+                std::future::poll_fn(|task| {
+                    assert!(timeout.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                }).await;
+
+                // Observe an actual Pending cancellation registration before
+                // advancing the clock; admission speed cannot consume the bound.
+                while !cancellation_parked.load(Ordering::SeqCst) {
+                    yield_now().await;
+                }
+                let actual_body = body_id.lock().unwrap().expect("actual body identity");
+                clock.advance_to(Time::from_millis(50));
+                timer.process_timers();
+                std::future::poll_fn(|task| {
+                    assert!(timeout.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                }).await;
+                while !cleanup_gate.parked.load(Ordering::SeqCst)
+                    || !body_gate.parked.load(Ordering::SeqCst)
+                {
+                    yield_now().await;
+                }
+
+                // The body cannot retire before this poll because its return
+                // gate is closed. This fresh waker can only be woken by the
+                // direct join's terminal publication/retirement, not the timer.
+                let joined = std::future::poll_fn(|task| {
+                    let joined = Arc::new(JoinWake {
+                        count: AtomicUsize::new(0),
+                        parent: task.waker().clone(),
+                    });
+                    let waker = Waker::from(Arc::clone(&joined));
+                    assert!(timeout.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+                    Poll::Ready(joined)
+                }).await;
+                body_gate.release();
+                while joined.count.load(Ordering::SeqCst) == 0 {
+                    yield_now().await;
+                }
+                assert!(inspector.inspect_task(actual_body).is_none_or(|task| task.is_terminal()));
+
+                // The direct join is now ready. A task-only timeout would be
+                // Ready here; the owned timeout must still await the grandchild.
+                std::future::poll_fn(|task| {
+                    assert!(timeout.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                }).await;
+                assert!(!cleanup_gate.released.load(Ordering::SeqCst));
+                cleanup_gate.release();
+                let report = timeout.await.unwrap();
+                assert!(matches!(report.stop, ScopedTimeoutStop::TimedOut));
+                assert!(matches!(
+                    report.task,
+                    ScopedTimeoutTask::Joined(Ok("late acknowledged value"))
+                ));
+                assert!(report.region_id.is_some());
+                assert!(report.close.unwrap().is_ok());
+                assert!(!root.is_cancel_requested());
+                assert!(timer.is_empty());
+            });
+            assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+            done_tx.send(()).unwrap();
+        });
+        done_rx.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|error| {
+            panic!("scoped timeout did not drain: current_thread={current_thread}, sharded={sharded}: {error}");
+        });
+        runner.join().expect("native scoped-timeout runner");
+    }
+}

@@ -960,6 +960,10 @@ pub struct RegionRecord {
     /// admitted there, the region a race branch's context belonged to before
     /// branches had regions of their own (br-asupersync-k27oxe).
     spawn_fallback: std::sync::OnceLock<RegionId>,
+    /// Private owned subtrees retain the sealed authorization target without
+    /// permitting later placement in that ancestor. Nested sealed branches
+    /// inherit the refusal before any task context is published.
+    spawn_fallback_permitted: AtomicBool,
     /// When this region's first cancellation report was dispatched, in
     /// nanoseconds (`u64::MAX` until then). Region close reports the drain
     /// time from it. The first cancel creates it, so a region that is never
@@ -1075,6 +1079,7 @@ impl RegionRecord {
             pending_obligation_posts: Arc::new(PendingSpawnCounter::new()),
             sealed: AtomicBool::new(false),
             spawn_fallback: std::sync::OnceLock::new(),
+            spawn_fallback_permitted: AtomicBool::new(true),
             cancel_reported_at: None,
             span,
         }
@@ -1094,6 +1099,16 @@ impl RegionRecord {
     #[must_use]
     pub(crate) fn spawn_fallback(&self) -> Option<RegionId> {
         self.spawn_fallback.get().copied()
+    }
+
+    /// Keeps the sealed authorization target while forbidding placement
+    /// outside this owned subtree. Installed only during private admission.
+    pub(crate) fn forbid_spawn_fallback(&self) {
+        self.spawn_fallback_permitted.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn permits_spawn_fallback(&self) -> bool {
+        self.spawn_fallback_permitted.load(Ordering::Acquire)
     }
 
     /// The stamp this region's cancellation report writes when it is

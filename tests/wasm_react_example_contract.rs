@@ -106,7 +106,6 @@ fn react_adapter_threads_runtime_options_global_object_into_support_diagnostics(
         "globalObject: Record<string, unknown> | undefined = undefined,",
         "const browserDiagnostics = detectBrowserRuntimeSupport(globalObject);",
         "const globalObject = runtimeOptions?.globalObject;",
-        "() => detectReactRuntimeSupport(globalObject),",
         "const diagnosticsSnapshot = detectReactRuntimeSupport(globalObject);",
         "const consumerVersionMajor = runtimeOptions?.consumerVersion?.major ?? null;",
         "const consumerVersionMinor = runtimeOptions?.consumerVersion?.minor ?? null;",
@@ -118,6 +117,13 @@ fn react_adapter_threads_runtime_options_global_object_into_support_diagnostics(
             "React adapter source must preserve runtimeOptions/globalObject diagnostics alignment marker: {marker}"
         );
     }
+
+    assert!(
+        content.split_whitespace().collect::<String>().contains(
+            "useState<ReactRuntimeSupportDiagnostics>(()=>detectReactRuntimeSupport(globalObject),)"
+        ),
+        "initial diagnostics must use the supplied globalObject regardless of source formatting"
+    );
 
     assert!(
         !content.contains("}, [reloadNonce, runtimeOptions]);"),

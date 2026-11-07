@@ -1736,6 +1736,7 @@ pub struct AdmittedRegion {
 pub(crate) struct MintedBranchRegion {
     pub(crate) region_id: RegionId,
     close_notify: Arc<Mutex<crate::record::region::RegionCloseState>>,
+    close_receipt: Arc<Mutex<Option<crate::record::region::RegionCloseOutcome>>>,
 }
 
 impl MintedBranchRegion {
@@ -1746,6 +1747,10 @@ impl MintedBranchRegion {
 
     pub(crate) fn close_notify(&self) -> &Arc<Mutex<crate::record::region::RegionCloseState>> {
         &self.close_notify
+    }
+
+    pub(crate) fn close_outcome(&self) -> Option<crate::record::region::RegionCloseOutcome> {
+        self.close_receipt.lock().clone()
     }
 }
 
@@ -1764,6 +1769,16 @@ impl fmt::Debug for MintedBranchRegion {
 #[derive(Debug, Default)]
 pub(crate) struct BranchRegionSlot {
     minted: OnceLock<MintedBranchRegion>,
+    owner: Option<OwnedBranchClose>,
+}
+
+/// The mutex orders abandonment against publication. Neither path can miss
+/// the other: the owner queues close if publication won, and publication
+/// queues it if abandonment won. No caller Waker is stored here.
+#[derive(Debug)]
+struct OwnedBranchClose {
+    gateway: Weak<SpawnGateway>,
+    requested: Mutex<Option<CancelReason>>,
 }
 
 impl BranchRegionSlot {
@@ -1771,21 +1786,85 @@ impl BranchRegionSlot {
         Self::default()
     }
 
+    pub(crate) fn owned(gateway: &Arc<SpawnGateway>) -> Self {
+        Self {
+            minted: OnceLock::new(),
+            owner: Some(OwnedBranchClose {
+                gateway: Arc::downgrade(gateway),
+                requested: Mutex::new(None),
+            }),
+        }
+    }
+
+    pub(crate) fn owns_subtree(&self) -> bool {
+        self.owner.is_some()
+    }
+
     pub(crate) fn get(&self) -> Option<&MintedBranchRegion> {
         self.minted.get()
     }
 
+    pub(crate) fn close_requested(&self) -> bool {
+        self.owner
+            .as_ref()
+            .is_some_and(|owner| owner.requested.lock().is_some())
+    }
+
+    /// Requests the whole owned region's close, including when admission has
+    /// passed its abort check but has not yet published the region.
+    /// Called only outside runtime locks.
+    pub(crate) fn request_close(&self, reason: CancelReason) -> Result<(), SpawnError> {
+        let owner = self.owner.as_ref().expect("only owned branches request close");
+        let published = {
+            let mut requested = owner.requested.lock();
+            if let Some(previous) = requested.as_mut() {
+                previous.strengthen(&reason);
+            } else {
+                *requested = Some(reason);
+            }
+            self.minted.get().map(|region| {
+                (
+                    region.region_id,
+                    requested.as_ref().expect("close reason installed").clone(),
+                )
+            })
+        };
+        let gateway = owner.gateway.upgrade().ok_or(SpawnError::RuntimeUnavailable)?;
+        if let Some((region_id, reason)) = published {
+            gateway.enqueue_region_command(RegionCommand::Cancel { region_id, reason })?;
+        } else if !gateway.is_runtime_available() {
+            return Err(SpawnError::RuntimeUnavailable);
+        }
+        Ok(())
+    }
+
     /// Publishes the minted region. Called once, by admission, under the
-    /// runtime state lock; it wakes nobody.
+    /// runtime state lock; it wakes nobody. A prior owner close is inserted
+    /// into the mailbox without calling its notifier. This admission still
+    /// publishes a task lane (or its managed abort command), so the active
+    /// scheduler will process that close on its next progress turn.
     pub(crate) fn publish(
         &self,
         region_id: RegionId,
         close_notify: Arc<Mutex<crate::record::region::RegionCloseState>>,
+        close_receipt: Arc<Mutex<Option<crate::record::region::RegionCloseOutcome>>>,
     ) {
-        let _ = self.minted.set(MintedBranchRegion {
+        let requested = self.owner.as_ref().map(|owner| owner.requested.lock());
+        let first = self.minted.set(MintedBranchRegion {
             region_id,
             close_notify,
-        });
+            close_receipt,
+        }).is_ok();
+        let close = requested.as_ref().and_then(|reason| reason.as_ref().cloned());
+        drop(requested);
+        if first
+            && let Some(reason) = close
+            && let Some(gateway) = self.owner.as_ref().and_then(|owner| owner.gateway.upgrade())
+        {
+            // Callback-free handoff: do not use enqueue_region_command on the
+            // gateway here, since its notifier is arbitrary external code.
+            gateway.mailbox().enqueue_region_command(RegionCommand::Cancel { region_id, reason });
+        }
     }
 }
 
@@ -2303,7 +2382,7 @@ impl SpawnGateway {
         // Sealed race regions are private ownership machinery. They retain
         // their nearest unsealed authority target, never widening an ordinary
         // user-created child region. Admission re-derives this from its table.
-        let authority_region = cx.spawn_fallback_for(region).unwrap_or(region);
+        let authority_region = cx.spawn_authorization_region_for(region).unwrap_or(region);
         self.verify_spawn_authority(authority.as_ref(), authority_region, budget)
     }
 

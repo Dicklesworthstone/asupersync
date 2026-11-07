@@ -222,7 +222,9 @@ fn react_adapter_source_exposes_provider_and_hooks() {
         "export function useReactRuntime",
         "export function useReactRuntimeDiagnostics",
         "export function useReactScope",
-        "StrictMode-safe init: stale bootstrap completions are ignored/closed.",
+        "export function useReactRuntimeLifecycle",
+        "export function useReactScopeLifecycle",
+        "const retired = await closeReactOwners(previous);",
     ] {
         assert!(
             content.contains(marker),

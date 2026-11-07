@@ -5531,12 +5531,15 @@ impl RuntimeState {
             Err(error) => return SpawnAdmission::Denied { parts, error },
         };
         if let Some((child, slot)) = branch {
-            let close_notify = regions
+            let record = regions
                 .resolve_ref(&self.regions)
                 .get(child.arena_index())
-                .map(|record| Arc::clone(&record.close_notify))
                 .expect("the branch region holds the task just admitted");
-            slot.publish(child, close_notify);
+            slot.publish(
+                child,
+                Arc::clone(&record.close_notify),
+                record.close_receipt_handle(),
+            );
         }
         self.finish_send_spawn_admission_in(parts, task_id, &cx, now, tasks)
     }
@@ -5559,9 +5562,15 @@ impl RuntimeState {
         else {
             return requested;
         };
-        let closed = regions
+        let record = regions
             .resolve_ref(&self.regions)
-            .get(requested.arena_index())
+            .get(requested.arena_index());
+        // Placement is checked again at admission. A request queued while an
+        // owned subtree was open must never escape after that subtree closes.
+        if record.is_some_and(|record| !record.permits_spawn_fallback()) {
+            return requested;
+        }
+        let closed = record
             .is_none_or(|record| record.state() == crate::record::region::RegionState::Closed);
         if closed { fallback } else { requested }
     }
@@ -5612,7 +5621,18 @@ impl RuntimeState {
         {
             return None;
         }
+        let forbid_fallback = slot.owns_subtree()
+            || self
+                .regions
+                .get(parts.region.arena_index())
+                .is_some_and(|record| !record.permits_spawn_fallback());
         let child = self.create_race_branch_region(parts.region).ok()?;
+        if forbid_fallback {
+            self.regions
+                .get(child.arena_index())
+                .expect("the branch region was minted above")
+                .forbid_spawn_fallback();
+        }
         Some((child, slot))
     }
 
@@ -5641,6 +5661,7 @@ impl RuntimeState {
             return Err(SpawnError::RegionClosed(region));
         }
         let spawn_fallback = region_record.spawn_fallback();
+        let spawn_fallback_permitted = region_record.permits_spawn_fallback();
 
         let now = self.current_runtime_time();
         let idx = tasks
@@ -5776,6 +5797,7 @@ impl RuntimeState {
         if spawn_fallback.is_some() {
             cx.set_spawn_fallback_region(spawn_fallback);
         }
+        cx.set_spawn_fallback_permitted(spawn_fallback_permitted);
         // The scheduler must install the inherited authority for the entire
         // task lifetime, including factory construction and panic cleanup.
         cx.runtime_mask = runtime_mask;
@@ -5828,7 +5850,8 @@ impl RuntimeState {
         let parent = match request.parent_fallback {
             Some(fallback)
                 if self.region(request.parent).is_none_or(|record| {
-                    record.state() == crate::record::region::RegionState::Closed
+                    record.permits_spawn_fallback()
+                        && record.state() == crate::record::region::RegionState::Closed
                 }) =>
             {
                 fallback
