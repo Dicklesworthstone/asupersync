@@ -171,7 +171,7 @@ pub use service::chunked::{
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 mod native;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
-pub use native::{RemoteSymbolError, RemoteSymbolTransport};
+pub use native::{RemoteSymbolError, RemoteSymbolTransport, SymbolUploadIdentity};
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use native::recovery;

@@ -866,4 +866,180 @@ mod attempt_restart {
     fn persisted_attempt_resumes_after_publisher_process_crash_and_reconciles_completed_upload() {
         for workers in [1, 2] { exercise(workers); }
     }
+
+    fn exercise_abort(workers: usize) {
+        let store = store();
+        let staged = staging(Arc::clone(&store));
+        let mut registry = RemoteComputationRegistry::new();
+        register_chunked_symbol_service(&mut registry, Arc::clone(&staged)).unwrap();
+        let (acceptor, connector, pins) = tls(true);
+        let mut policy = RemotePeerAdmissionPolicy::new(
+            RemoteProtocolVersion::V1, registry.schema_registry().clone(),
+        );
+        policy.grant_tls_peer(
+            NodeId::new("origin-a"), pins, [SYMBOL_CHUNKED_SERVICE_COMPUTATION],
+        ).unwrap();
+        let hello = policy.hello_for(NodeId::new("origin-a"));
+        let denied_hello = policy.hello_for(NodeId::new("ungranted-origin"));
+        let server = RuntimeBuilder::current_thread().build().unwrap();
+        let service = server.block_on(RemoteComputationService::bind(
+            "127.0.0.1:0", acceptor, policy, registry,
+            RemoteComputationServiceConfig::new()
+                .with_wire_limits(RemoteServiceWireLimits::new(CHUNKED_FRAME_BYTES))
+                .with_max_connections(Some(4)).with_drain_timeout(Duration::from_secs(3)),
+        )).unwrap();
+        let endpoint = service.local_addr().unwrap();
+        let operator = service.handle();
+        let client_operator = operator.clone();
+        let retained = Arc::clone(&store);
+        let partial = Arc::clone(&staged);
+        let mut client_thread = ClientJoin(Some(thread::spawn(move || {
+            let _drain = DrainOnDrop(client_operator);
+            let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
+                else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+            runtime.block_on(async {
+                let cx = Cx::current().expect("fresh cleanup owner");
+                asupersync::time::timeout(cx.now(), Duration::from_secs(75), async {
+                    let client = RemoteComputationClient::new(
+                        endpoint, "localhost", connector,
+                        RemoteComputationClientConfig::new()
+                            .with_wire_limits(RemoteServiceWireLimits::new(CHUNKED_FRAME_BYTES))
+                            .with_max_attempts(1).with_connect_timeout(Duration::from_secs(3))
+                            .with_attempt_timeout(Duration::from_secs(5)),
+                    ).unwrap();
+                    let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                    let original = RemoteSymbolTransport::new_chunked_bounded(
+                        region.cx().clone(), hello.clone(), [("replica-a".to_owned(), client.clone())],
+                        Arc::new(AuthKey::from_seed(42)), chunked_batch_limits(), 1, ATTEMPT_CHUNK_BYTES,
+                    ).unwrap();
+                    let signed = chunked_symbols(42);
+                    let encoded = encode_symbol_batch(&signed, chunked_batch_limits()).unwrap();
+                    let identity = original.chunked_upload_identity(
+                        "replica-a", &encoded, PERSISTED_ATTEMPT,
+                    ).unwrap();
+                    // Independent authenticated BEGIN/CHUNK acknowledgements
+                    // establish the retained prefix before owner cancellation.
+                    // No timer, sleep or deliberately dropped poll creates it.
+                    save_first_chunk(region.cx(), &client, &hello, &signed, identity.attempt()).await;
+                    let before = partial.stats();
+                    assert_eq!(before.uploads, 1);
+                    assert_eq!(before.reserved_bytes, identity.encoded_bytes());
+                    assert_eq!(before.received_bytes, ATTEMPT_CHUNK_BYTES);
+                    assert!(before.received_bytes < before.reserved_bytes);
+                    assert_eq!(retained.stats().batches, 0);
+                    region.cx().set_cancel_requested(true);
+                    assert!(matches!(original.abort_symbol_upload(&identity).await,
+                        Err(RemoteSymbolError::Cancelled)));
+                    assert_eq!(original.in_flight(), 0);
+                    assert_eq!(partial.stats(), before, "cancelled owner performs no remote cleanup");
+                    drop(original);
+                    region.close().await.unwrap();
+
+                    let cleanup = RemoteSymbolTransport::new_chunked_bounded(
+                        cx.clone(), hello, [("replica-a".to_owned(), client.clone())],
+                        Arc::new(AuthKey::from_seed(42)), chunked_batch_limits(), 1, ATTEMPT_CHUNK_BYTES,
+                    ).unwrap();
+                    assert_eq!(cleanup.chunked_upload_identity(
+                        "replica-a", &encoded, identity.attempt(),
+                    ).unwrap(), identity, "fresh authority retains the exact upload correlation");
+                    let denied = RemoteSymbolTransport::new_chunked_bounded(
+                        cx.clone(), denied_hello, [("replica-a".to_owned(), client)],
+                        Arc::new(AuthKey::from_seed(42)), chunked_batch_limits(), 1, ATTEMPT_CHUNK_BYTES,
+                    ).unwrap();
+                    assert!(matches!(denied.abort_symbol_upload(&identity).await,
+                        Err(RemoteSymbolError::Configuration)));
+                    let denied_identity = denied.chunked_upload_identity(
+                        "replica-a", &encoded, identity.attempt(),
+                    ).unwrap();
+                    assert!(matches!(denied.abort_symbol_upload(&denied_identity).await,
+                        Err(RemoteSymbolError::Client(_) | RemoteSymbolError::Refused)),
+                        "metadata cannot grant an unadmitted origin the chunked capability");
+                    assert_eq!(denied.in_flight(), 0);
+                    assert_eq!(partial.stats(), before);
+
+                    let mut different = signed.clone();
+                    different[0] = SecurityContext::new(AuthKey::from_seed(42))
+                        .sign_symbol(&Symbol::new_for_test(71, 0, 0, &[255; 2048]));
+                    let wrong_batch = encode_symbol_batch(&different, chunked_batch_limits()).unwrap();
+                    let wrong_identity = cleanup.chunked_upload_identity(
+                        "replica-a", &wrong_batch, identity.attempt(),
+                    ).unwrap();
+                    assert!(matches!(cleanup.abort_symbol_upload(&wrong_identity).await,
+                        Err(RemoteSymbolError::Refused)));
+                    assert_eq!(partial.stats(), before, "wrong digest must preserve the live stage");
+
+                    let replacement_attempt = identity.attempt() + 1;
+                    let replacement = cleanup.chunked_upload_identity(
+                        "replica-a", &encoded, replacement_attempt,
+                    ).unwrap();
+                    cleanup.abort_symbol_upload(&replacement).await.unwrap();
+                    assert_eq!(partial.stats(), before, "absent attempt must not remove another attempt");
+                    assert!(matches!(cleanup.send_symbols_with_attempt(
+                        "replica-a", signed.clone(), replacement_attempt,
+                    ).await, Err(RemoteSymbolError::Refused)));
+                    assert_eq!(partial.stats(), before, "the original stage owns the only per-origin slot");
+                    assert_eq!(cleanup.in_flight(), 0);
+
+                    cleanup.abort_symbol_upload(&identity).await.unwrap();
+                    let cleared = partial.stats();
+                    assert_eq!(cleared.uploads, 0);
+                    assert_eq!(cleared.reserved_bytes, 0);
+                    assert_eq!(cleared.received_bytes, 0);
+                    cleanup.abort_symbol_upload(&identity).await.unwrap();
+                    assert_eq!(partial.stats(), cleared, "repeated exact abort is idempotent");
+                    assert_eq!(retained.stats().batches, 0);
+                    let ack = cleanup.send_symbols_with_attempt(
+                        "replica-a", signed.clone(), replacement_attempt,
+                    ).await.unwrap();
+                    assert_eq!(ack.replica_id, "replica-a");
+                    assert_eq!(ack.symbols_received, identity.symbol_count());
+                    assert_eq!(partial.stats(), cleared, "replacement reuses the slot without waiting for TTL");
+                    assert_eq!(retained.stats().batches, 1);
+                    assert_eq!(retained.stats().bytes, identity.encoded_bytes());
+
+                    cleanup.abort_symbol_upload(&replacement).await.unwrap();
+                    cleanup.abort_symbol_upload(&identity).await.unwrap();
+                    let fetched = cleanup.fetch_symbols("replica-a", identity.key()).await.unwrap();
+                    assert_eq!(fetched.len(), signed.len());
+                    for (actual, expected) in fetched.iter().zip(&signed) {
+                        assert!(actual.is_verified());
+                        assert_eq!(actual.symbol(), expected.symbol());
+                        assert_eq!(actual.tag(), expected.tag());
+                    }
+                    assert_eq!(retained.stats().batches, 1, "abort never revokes a committed batch");
+                    assert_eq!(retained.stats().bytes, identity.encoded_bytes());
+                    assert_eq!(partial.stats(), cleared);
+                    assert_eq!(cleanup.in_flight(), 0);
+                    eprintln!("symbol_upload_abort workers={workers} attempt={} before={before:?} after={cleared:?} committed={:?}",
+                        identity.attempt(), retained.stats());
+                }).await.expect("explicit upload abort workflow deadline");
+            });
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        })));
+        let report = server.block_on(async {
+            let cx = Cx::current().expect("abort receiver owner");
+            asupersync::time::timeout(cx.now(), Duration::from_secs(100), service.run(&cx)).await
+        });
+        let _ = operator.begin_drain();
+        let result = client_thread.0.take().unwrap().join();
+        let active = operator.active_connections();
+        let no_leaks = server.diagnostics().find_leaked_obligations().is_empty();
+        let shutdown = server.shutdown_timeout(Duration::from_secs(3));
+        result.expect("explicit upload abort client");
+        let report = report.expect("abort receiver workflow deadline").expect("abort receiver drain");
+        assert!(report.accepted_connections() > 8);
+        assert_eq!(report.panicked_connections(), 0);
+        assert_eq!(active, 0);
+        assert!(no_leaks && shutdown);
+        assert_eq!(store.stats().batches, 1);
+        assert_eq!(staged.stats().uploads, 0);
+        assert_eq!(staged.stats().reserved_bytes, 0);
+        assert_eq!(staged.stats().received_bytes, 0);
+    }
+
+    #[test]
+    fn fresh_owner_aborts_exact_chunked_upload_reclaims_quota_and_preserves_commit() {
+        for workers in [1, 2] { exercise_abort(workers); }
+    }
 }

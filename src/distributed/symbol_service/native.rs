@@ -20,6 +20,7 @@ use std::task::Poll;
 mod admission;
 use admission::Admission;
 mod chunked;
+pub use chunked::SymbolUploadIdentity;
 
 /// Transport refusal. Untrusted remote diagnostics/payloads are not echoed.
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +44,7 @@ pub enum RemoteSymbolError {
     /// The caller's context observed cancellation before dispatch.
     #[error("symbol transport context is cancelled")]
     Cancelled,
-    /// Clone-shared send/fetch capacity is exhausted; no request was dispatched.
+    /// Clone-shared operation capacity is exhausted; no request was dispatched.
     #[error("symbol transport admission limit reached")]
     Admission,
     /// The owning context's deadline elapsed during a multi-frame transfer.
@@ -132,7 +133,7 @@ impl RemoteSymbolTransport {
         Ok(transport)
     }
 
-    /// Admitted send and fetch operations across this transport and its clones.
+    /// Admitted send, fetch and explicit abort operations across this transport and its clones.
     #[must_use]
     pub fn in_flight(&self) -> usize { self.admission.active() }
 

@@ -4,13 +4,13 @@ use super::{RemoteSymbolError, RemoteSymbolTransport};
 use crate::cx::Cx;
 use crate::distributed::distribution::ReplicaAck;
 use crate::distributed::symbol_service::service::chunked::{
-    BEGIN, CHUNK, COMMIT, SYMBOL_CHUNKED_SERVICE_COMPUTATION, Upload,
+    ABORT, BEGIN, CHUNK, COMMIT, SYMBOL_CHUNKED_SERVICE_COMPUTATION, Upload,
     range_request, read_progress, read_range, request, upload_body,
 };
 use crate::distributed::symbol_service::service::validate_receipt;
-use crate::distributed::symbol_service::{SymbolBatchKey, SymbolBatchLimits, SymbolStoreError, decode_symbol_batch, encode_symbol_batch};
+use crate::distributed::symbol_service::{EncodedSymbolBatch, SymbolBatchKey, SymbolBatchLimits, SymbolStoreError, decode_symbol_batch, encode_symbol_batch};
 use crate::remote::{
-    ComputationName, IdempotencyKey, RemoteComputationClient, RemoteInput, RemotePeerHello,
+    ComputationName, IdempotencyKey, NodeId, RemoteComputationClient, RemoteInput, RemotePeerHello,
     RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId,
     SpawnRequest,
 };
@@ -19,6 +19,61 @@ use std::future::{Future, poll_fn};
 use std::io::{self, Write};
 use std::sync::Arc;
 use zeroize::Zeroizing;
+
+/// Exact identity of one caller-managed chunked upload, without its payload.
+///
+/// Obtain this from [`RemoteSymbolTransport::chunked_upload_identity`] before
+/// sending with [`RemoteSymbolTransport::send_symbols_with_attempt`]. Retain it
+/// if a later authorized owner may need to release an incomplete remote stage.
+/// It binds the origin, replica, attempt, canonical batch digest, byte length
+/// and symbol count; no public field can substitute another upload's metadata.
+///
+/// This is correlation metadata, not a capability or proof of delivery. The
+/// cleanup transport must independently authenticate the same origin and hold
+/// the replica's chunked-service grant. Callers sharing that origin must still
+/// reserve distinct attempt IDs and never reuse one for unrelated work.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SymbolUploadIdentity {
+    origin: NodeId,
+    replica: String,
+    upload: Upload,
+}
+
+impl std::fmt::Debug for SymbolUploadIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SymbolUploadIdentity")
+            .field("attempt", &self.upload.attempt)
+            .field("symbols", &self.upload.count)
+            .field("encoded_bytes", &self.upload.total)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SymbolUploadIdentity {
+    /// Authenticated origin whose staging namespace contains the attempt.
+    #[must_use]
+    pub fn origin(&self) -> &NodeId { &self.origin }
+
+    /// Configured replica route associated with this attempt.
+    #[must_use]
+    pub fn replica(&self) -> &str { &self.replica }
+
+    /// Exact canonical batch identity; its digest grants no authority.
+    #[must_use]
+    pub const fn key(&self) -> SymbolBatchKey { self.upload.key }
+
+    /// Caller-reserved attempt ID in the authenticated origin's namespace.
+    #[must_use]
+    pub const fn attempt(&self) -> u64 { self.upload.attempt }
+
+    /// Complete canonical encoded length, excluding service envelopes.
+    #[must_use]
+    pub const fn encoded_bytes(&self) -> usize { self.upload.total }
+
+    /// Number of symbols bound to this exact upload.
+    #[must_use]
+    pub const fn symbol_count(&self) -> u32 { self.upload.count }
+}
 
 impl RemoteSymbolTransport {
     /// Use a separately granted chunked symbol capability with finite shared admission.
@@ -38,6 +93,8 @@ impl RemoteSymbolTransport {
     /// Dropping/cancelling closes local work but incomplete remote staging remains
     /// charged until the receiver's fixed expiry/reap. A lost commit receipt can
     /// follow successful publication; a subsequent identical send is idempotent.
+    /// Caller-managed attempts can instead request explicit staging cleanup with
+    /// [`Self::abort_symbol_upload`] from a live, independently authorized owner.
     #[allow(clippy::too_many_arguments)]
     pub fn new_chunked_bounded(
         cx: Cx, hello: RemotePeerHello,
@@ -87,6 +144,77 @@ impl RemoteSymbolTransport {
         self.admission.run(|| {
             self.with_owner_deadline(self.send_chunked_attempt(replica, symbols, maximum, Some(attempt)))
         }).await
+    }
+
+    /// Describe an exact caller-managed upload for later explicit cleanup.
+    ///
+    /// No I/O, admission credit, payload copy or authority grant occurs here.
+    /// This can describe an upload even after this transport's owner is cancelled;
+    /// aborting it requires a live transport with the same authenticated origin.
+    /// Persist the attempt and source intent before dispatch, as required by
+    /// [`Self::send_symbols_with_attempt`]. After a restart, the same canonical
+    /// batch and attempt reconstruct the same identity; no checkpoint storage is
+    /// provided by this method.
+    ///
+    /// Whole-batch transports, unconfigured routes and metadata beyond this
+    /// transport's batch byte/symbol limits are refused before allocation.
+    pub fn chunked_upload_identity(
+        &self, replica: &str, batch: &EncodedSymbolBatch, attempt: u64,
+    ) -> Result<SymbolUploadIdentity, RemoteSymbolError> {
+        if self.chunk_bytes.is_none() { return Err(RemoteSymbolError::Configuration); }
+        if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }
+        let upload = Upload { key: batch.key(), attempt,
+            total: batch.as_ref().len(), count: batch.symbol_count() };
+        self.check_upload_bounds(upload)?;
+        Ok(SymbolUploadIdentity {
+            origin: self.hello.peer_node().clone(), replica: replica.to_owned(), upload,
+        })
+    }
+
+    /// Release only an exact upload's incomplete receiver staging reservation.
+    ///
+    /// This explicit authenticated ABORT uses the existing chunked capability,
+    /// clone-shared admission, owner cancellation/deadline and bounded RPC path.
+    /// A different origin, unconfigured replica, whole-batch transport or upload
+    /// beyond the cleanup transport's byte/symbol limits is refused locally.
+    /// The receiver also matches the digest, attempt, encoded length and count;
+    /// a conflicting live stage is left intact. Success requires its exact
+    /// correlated zero-progress acknowledgement. No batch payload is resent.
+    ///
+    /// Repeating an abort when the stage is absent is idempotent. An in-progress
+    /// COMMIT finishes before the receiver processes ABORT, and an already
+    /// committed batch is never removed. Thus success means staging was absent
+    /// at that receiver operation, not that publication was rolled back. Stop
+    /// dispatching this attempt first: ABORT is not a fence against a later BEGIN.
+    /// A lost, cancelled or timed-out reply does not prove whether cleanup ran;
+    /// retry explicitly with the same identity or let the receiver's TTL expire.
+    ///
+    /// After the original owner is cancelled, construct a new chunked transport
+    /// from a live authorized Cx, the same origin and authenticated replica route,
+    /// then pass the retained identity here. Cloning a cancelled transport does
+    /// not revive it. Dropping a send or this future never starts background I/O.
+    pub async fn abort_symbol_upload(
+        &self, identity: &SymbolUploadIdentity,
+    ) -> Result<(), RemoteSymbolError> {
+        if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
+        if self.chunk_bytes.is_none() || identity.origin != *self.hello.peer_node() {
+            return Err(RemoteSymbolError::Configuration);
+        }
+        if !self.routes.contains_key(&identity.replica) { return Err(RemoteSymbolError::UnknownReplica); }
+        self.check_upload_bounds(identity.upload)?;
+        self.admission.run(|| self.with_owner_deadline(async {
+            let response = self.call_named(&identity.replica, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
+                request(ABORT, &identity.replica, &upload_body(identity.upload))?).await?;
+            validate_abort_progress(&response, identity.upload)?;
+            Ok(())
+        })).await
+    }
+
+    fn check_upload_bounds(&self, upload: Upload) -> Result<(), RemoteSymbolError> {
+        if upload.total > self.limits.max_encoded_bytes || upload.count as usize > self.limits.max_symbols {
+            return Err(SymbolStoreError::Limit("batch bytes or symbols").into());
+        }
+        Ok(())
     }
 
     fn check_chunk_frame_budget(
@@ -226,6 +354,12 @@ impl RemoteSymbolTransport {
         self.check_chunk_context()?;
         Ok(symbols)
     }
+}
+
+fn validate_abort_progress(bytes: &[u8], upload: Upload) -> Result<(), SymbolStoreError> {
+    let (received, _) = read_progress(bytes, upload)?;
+    if received != 0 { return Err(SymbolStoreError::Identity); }
+    Ok(())
 }
 
 struct CountWriter(usize);
