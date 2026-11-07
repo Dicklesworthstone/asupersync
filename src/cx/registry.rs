@@ -525,6 +525,103 @@ impl fmt::Display for NameLeaseError {
 
 impl std::error::Error for NameLeaseError {}
 
+/// Waiter limits for one [`NameRegistry::register_with_policy_bounded`] call.
+///
+/// These bound queued waiters, including those admitted through the legacy
+/// unbounded API. Active leases, pending permits, and already granted leases
+/// are not waiters. A zero limit refuses queueing but still allows immediate
+/// registration when the name is available.
+///
+/// Limits are explicit per admission, not a persistent registry policy. To
+/// enforce a common bound, every caller must use the bounded API with the same
+/// limits. Legacy calls remain unrestricted and can exceed these limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NameWaitLimits {
+    max_per_name: usize,
+    max_total: usize,
+}
+
+impl NameWaitLimits {
+    /// Creates limits for queued waiters per name and across the registry.
+    #[must_use]
+    pub const fn new(max_per_name: usize, max_total: usize) -> Self {
+        Self {
+            max_per_name,
+            max_total,
+        }
+    }
+
+    /// Maximum queued waiters for the requested name.
+    #[must_use]
+    pub const fn max_per_name(self) -> usize {
+        self.max_per_name
+    }
+
+    /// Maximum queued waiters across all names.
+    #[must_use]
+    pub const fn max_total(self) -> usize {
+        self.max_total
+    }
+}
+
+/// Failure of [`NameRegistry::register_with_policy_bounded`].
+///
+/// Capacity failures do not acquire an obligation, displace a holder, or
+/// enqueue a waiter. Expired queued waiters may have been removed before
+/// checking capacity; already granted leases remain available for retrieval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BoundedNameRegistrationError {
+    /// Registration failed under the existing name-lease rules.
+    Lease(NameLeaseError),
+    /// The requested name already has the maximum number of queued waiters.
+    PerNameLimit {
+        /// The requested name.
+        name: String,
+        /// The per-name limit supplied for this admission.
+        limit: usize,
+    },
+    /// The registry already has the maximum number of queued waiters.
+    TotalLimit {
+        /// The requested name.
+        name: String,
+        /// The total limit supplied for this admission.
+        limit: usize,
+    },
+}
+
+impl From<NameLeaseError> for BoundedNameRegistrationError {
+    fn from(error: NameLeaseError) -> Self {
+        Self::Lease(error)
+    }
+}
+
+impl fmt::Display for BoundedNameRegistrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lease(error) => fmt::Display::fmt(error, f),
+            Self::PerNameLimit { name, limit } => {
+                write!(f, "waiter limit {limit} reached for name '{name}'")
+            }
+            Self::TotalLimit { name, limit } => {
+                write!(
+                    f,
+                    "registry waiter limit {limit} reached while waiting for name '{name}'"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BoundedNameRegistrationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Lease(error) => Some(error),
+            Self::PerNameLimit { .. } | Self::TotalLimit { .. } => None,
+        }
+    }
+}
+
 // ============================================================================
 // NameRegistry
 // ============================================================================
@@ -1185,6 +1282,88 @@ impl NameRegistry {
                 }
             }
         }
+    }
+
+    /// Register with an explicit bound on waiting admissions.
+    ///
+    /// The collision behavior is the same as [`Self::register_with_policy`].
+    /// Limits apply only when a valid [`NameCollisionPolicy::Wait`] request
+    /// collides with an active lease or a pending permit. Immediate registration,
+    /// replacement, and fail-on-collision keep their established behavior and
+    /// do not sweep unrelated waiters.
+    ///
+    /// Queued waiters from every entry point count toward both limits. When
+    /// either limit is reached, expired queued waiters across the registry
+    /// (`deadline < now`) are removed before capacity is checked again. This
+    /// preserves FIFO order among eligible waiters and keeps a waiter whose
+    /// deadline equals `now`. If both limits still prevent admission, the
+    /// per-name failure takes precedence. A refusal neither adds a waiter nor
+    /// allocates a lease obligation, and never changes ownership or uncollected
+    /// grants. Expiry cleanup may still have removed expired queued entries.
+    ///
+    /// These are per-call limits, not a persistent registry policy. Legacy
+    /// registrations remain unrestricted; use this method consistently with
+    /// the same limits to bound all waiting admissions. Grants, pending permits,
+    /// active leases, and the size of name strings are outside these bounds.
+    ///
+    /// Admission counts queue lengths in O(number of queued names), without
+    /// keeping a second counter that legacy mutation paths could invalidate.
+    /// The O(total queued waiters) expiry sweep runs only under capacity
+    /// pressure. Explicit [`Self::drain_expired_waiters`] remains available
+    /// for callers that need eager expiry cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BoundedNameRegistrationError::PerNameLimit`] or
+    /// [`BoundedNameRegistrationError::TotalLimit`] when a waiting request
+    /// cannot be admitted. Existing lease errors are preserved in
+    /// [`BoundedNameRegistrationError::Lease`].
+    pub fn register_with_policy_bounded(
+        &mut self,
+        name: impl Into<String>,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+        policy: NameCollisionPolicy,
+        limits: NameWaitLimits,
+    ) -> Result<NameCollisionOutcome, BoundedNameRegistrationError> {
+        let name = name.into();
+        if let NameCollisionPolicy::Wait { deadline } = policy
+            && (self.leases.contains_key(&name) || self.pending.contains_key(&name))
+        {
+            if deadline < now {
+                return Err(NameLeaseError::WaitBudgetExceeded { name }.into());
+            }
+
+            let mut per_name = self
+                .waiters
+                .get(&name)
+                .map_or(0, std::collections::VecDeque::len);
+            let mut total = self.waiter_count();
+            if per_name >= limits.max_per_name || total >= limits.max_total {
+                self.drain_expired_waiters(now);
+                per_name = self
+                    .waiters
+                    .get(&name)
+                    .map_or(0, std::collections::VecDeque::len);
+                total = self.waiter_count();
+            }
+            if per_name >= limits.max_per_name {
+                return Err(BoundedNameRegistrationError::PerNameLimit {
+                    name,
+                    limit: limits.max_per_name,
+                });
+            }
+            if total >= limits.max_total {
+                return Err(BoundedNameRegistrationError::TotalLimit {
+                    name,
+                    limit: limits.max_total,
+                });
+            }
+        }
+
+        self.register_with_policy(name, holder, region, now, policy)
+            .map_err(BoundedNameRegistrationError::from)
     }
 
     /// Unregister a name, removing it from the registry.
@@ -1864,3 +2043,408 @@ pub enum RegistryEvent {
 #[cfg(test)]
 #[path = "registry_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod bounded_registration_tests {
+    use super::*;
+    use crate::util::ArenaIndex;
+
+    fn tid(index: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(index, 0))
+    }
+
+    fn rid(index: u32) -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(index + 1, 0))
+    }
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    fn register_holder(registry: &mut NameRegistry, name: &str, holder: u32) {
+        let mut lease = registry
+            .register(name, tid(holder), rid(0), Time::ZERO)
+            .expect("register initial holder");
+        // Resolving the obligation does not unregister the name. Keep the
+        // entry for collision tests without leaving a drop bomb on assertion
+        // failure; grants below are checked while their leases are active.
+        lease.release().expect("resolve initial holder obligation");
+    }
+
+    fn wait(
+        registry: &mut NameRegistry,
+        name: &str,
+        holder: u32,
+        region: u32,
+        now: u64,
+        deadline: u64,
+        limits: NameWaitLimits,
+    ) -> Result<NameCollisionOutcome, BoundedNameRegistrationError> {
+        registry.register_with_policy_bounded(
+            name,
+            tid(holder),
+            rid(region),
+            Time::from_secs(now),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(deadline),
+            },
+            limits,
+        )
+    }
+
+    fn wait_legacy(
+        registry: &mut NameRegistry,
+        name: &str,
+        holder: u32,
+        region: u32,
+        deadline: u64,
+    ) {
+        assert!(matches!(
+            registry.register_with_policy(
+                name,
+                tid(holder),
+                rid(region),
+                Time::ZERO,
+                NameCollisionPolicy::Wait {
+                    deadline: Time::from_secs(deadline),
+                },
+            ),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+    }
+
+    fn assert_granted(registry: &mut NameRegistry, name: &str, holder: u32, region: u32) {
+        let mut grant = registry
+            .take_granted_for(name, tid(holder), rid(region))
+            .expect("expected named waiter grant");
+        let active = grant.lease.is_active();
+        let owned = registry.owns_lease(&grant.lease);
+        grant.lease.release().expect("resolve granted obligation");
+        assert_eq!(grant.name, name);
+        assert!(active, "the granted lease must be active on retrieval");
+        assert!(owned, "the retrieved lease must own the registration");
+    }
+
+    #[test]
+    fn bounded_wait_enforces_both_limits_and_preserves_fifo() {
+        init_test("bounded_wait_enforces_both_limits_and_preserves_fifo");
+        let mut registry = NameRegistry::new();
+        register_holder(&mut registry, "alpha", 1);
+        register_holder(&mut registry, "beta", 2);
+        register_holder(&mut registry, "gamma", 3);
+        registry
+            .watch_name("alpha", tid(90), rid(9))
+            .expect("watch ownership");
+        let limits = NameWaitLimits::new(2, 3);
+
+        for (name, holder) in [("alpha", 10), ("alpha", 11), ("beta", 12)] {
+            assert!(matches!(
+                wait(&mut registry, name, holder, 1, 1, 100, limits),
+                Ok(NameCollisionOutcome::Enqueued)
+            ));
+        }
+        assert_eq!(
+            wait(&mut registry, "alpha", 13, 1, 1, 100, limits)
+                .expect_err("per-name capacity must reject"),
+            BoundedNameRegistrationError::PerNameLimit {
+                name: "alpha".to_string(),
+                limit: 2,
+            }
+        );
+        assert_eq!(
+            wait(&mut registry, "gamma", 14, 1, 1, 100, limits)
+                .expect_err("total capacity must reject"),
+            BoundedNameRegistrationError::TotalLimit {
+                name: "gamma".to_string(),
+                limit: 3,
+            }
+        );
+        assert_eq!(registry.waiter_count(), 3);
+        assert_eq!(registry.whereis("alpha"), Some(tid(1)));
+        assert_eq!(registry.whereis("beta"), Some(tid(2)));
+        assert_eq!(registry.whereis("gamma"), Some(tid(3)));
+        assert!(registry.take_granted().is_empty());
+        assert!(registry.take_name_notifications().is_empty());
+
+        registry
+            .unregister_and_grant("alpha", tid(1), Time::from_secs(2))
+            .expect("grant first alpha waiter");
+        assert_granted(&mut registry, "alpha", 10, 1);
+        assert_eq!(registry.waiter_count(), 2);
+        registry
+            .unregister_and_grant("alpha", tid(10), Time::from_secs(3))
+            .expect("grant second alpha waiter");
+        assert_granted(&mut registry, "alpha", 11, 1);
+        registry
+            .unregister_and_grant("alpha", tid(11), Time::from_secs(4))
+            .expect("free alpha");
+        assert_eq!(registry.whereis("alpha"), None);
+        assert!(registry.take_granted().is_empty());
+
+        registry
+            .unregister_and_grant("beta", tid(2), Time::from_secs(4))
+            .expect("grant beta waiter");
+        assert_granted(&mut registry, "beta", 12, 1);
+        assert_eq!(registry.waiter_count(), 0);
+        assert_eq!(registry.whereis("gamma"), Some(tid(3)));
+        crate::test_complete!("bounded_wait_enforces_both_limits_and_preserves_fifo");
+    }
+
+    #[test]
+    fn bounded_wait_expires_under_pressure_without_touching_grants() {
+        init_test("bounded_wait_expires_under_pressure_without_touching_grants");
+        let mut registry = NameRegistry::new();
+        register_holder(&mut registry, "alpha", 1);
+        register_holder(&mut registry, "beta", 2);
+        register_holder(&mut registry, "gamma", 3);
+        let limits = NameWaitLimits::new(2, 3);
+
+        assert!(matches!(
+            wait(&mut registry, "gamma", 30, 3, 1, 2, limits),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+        registry
+            .unregister_and_grant("gamma", tid(3), Time::from_secs(2))
+            .expect("leave an uncollected grant");
+        assert_eq!(registry.waiter_count(), 0);
+        for (name, holder, deadline) in [("alpha", 10, 5), ("alpha", 11, 50), ("beta", 12, 4)] {
+            assert!(matches!(
+                wait(&mut registry, name, holder, 1, 2, deadline, limits),
+                Ok(NameCollisionOutcome::Enqueued)
+            ));
+        }
+
+        assert!(matches!(
+            wait(&mut registry, "beta", 13, 1, 5, 50, limits),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+        assert_eq!(
+            registry.waiter_count(),
+            3,
+            "deadline equality must retain alpha's first waiter"
+        );
+        assert!(matches!(
+            wait(&mut registry, "alpha", 14, 1, 6, 50, limits),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+        assert_eq!(registry.waiter_count(), 3);
+        assert_eq!(registry.whereis("gamma"), Some(tid(30)));
+        assert_granted(&mut registry, "gamma", 30, 3);
+
+        registry
+            .unregister_and_grant("alpha", tid(1), Time::from_secs(6))
+            .expect("skip expired alpha waiter");
+        assert_granted(&mut registry, "alpha", 11, 1);
+        registry
+            .unregister_and_grant("alpha", tid(11), Time::from_secs(6))
+            .expect("preserve retained alpha FIFO order");
+        assert_granted(&mut registry, "alpha", 14, 1);
+        registry
+            .unregister_and_grant("beta", tid(2), Time::from_secs(6))
+            .expect("skip expired beta waiter");
+        assert_granted(&mut registry, "beta", 13, 1);
+        assert_eq!(registry.waiter_count(), 0);
+        assert!(registry.take_granted().is_empty());
+        crate::test_complete!("bounded_wait_expires_under_pressure_without_touching_grants");
+    }
+
+    #[test]
+    fn bounded_zero_limits_preserve_nonwaiting_policy_behavior() {
+        init_test("bounded_zero_limits_preserve_nonwaiting_policy_behavior");
+        let mut registry = NameRegistry::new();
+        register_holder(&mut registry, "busy", 1);
+        wait_legacy(&mut registry, "busy", 10, 1, 1);
+        let limits = NameWaitLimits::new(0, 0);
+        let now = Time::from_secs(2);
+
+        let registered = registry
+            .register_with_policy_bounded(
+                "free",
+                tid(2),
+                rid(0),
+                now,
+                NameCollisionPolicy::Wait {
+                    deadline: Time::ZERO,
+                },
+                limits,
+            )
+            .expect("an available name does not queue or check wait limits");
+        let NameCollisionOutcome::Registered { mut lease } = registered else {
+            panic!("available name must register immediately");
+        };
+        lease.release().expect("resolve immediate registration");
+        assert_eq!(registry.whereis("free"), Some(tid(2)));
+        assert_eq!(registry.waiter_count(), 1);
+
+        let failure = registry
+            .register_with_policy_bounded(
+                "busy",
+                tid(2),
+                rid(0),
+                now,
+                NameCollisionPolicy::Fail,
+                limits,
+            )
+            .expect_err("Fail must preserve its existing collision error");
+        assert_eq!(
+            failure,
+            BoundedNameRegistrationError::Lease(NameLeaseError::NameTaken {
+                name: "busy".to_string(),
+                current_holder: tid(1),
+            })
+        );
+        assert!(std::error::Error::source(&failure).is_some());
+        assert_eq!(registry.waiter_count(), 1);
+        assert_eq!(
+            wait(&mut registry, "busy", 11, 1, 2, 1, limits)
+                .expect_err("already expired request must retain its error"),
+            BoundedNameRegistrationError::Lease(NameLeaseError::WaitBudgetExceeded {
+                name: "busy".to_string(),
+            })
+        );
+        assert_eq!(registry.waiter_count(), 1);
+
+        let replaced = registry
+            .register_with_policy_bounded(
+                "busy",
+                tid(3),
+                rid(0),
+                now,
+                NameCollisionPolicy::Replace,
+                limits,
+            )
+            .expect("replacement is not waiting admission");
+        let NameCollisionOutcome::Replaced {
+            mut lease,
+            displaced_holder,
+            ..
+        } = replaced
+        else {
+            panic!("Replace must displace the existing holder");
+        };
+        lease.release().expect("resolve replacement obligation");
+        assert_eq!(displaced_holder, tid(1));
+        assert_eq!(registry.waiter_count(), 1);
+
+        assert!(matches!(
+            wait(&mut registry, "busy", 12, 1, 2, 10, limits),
+            Err(BoundedNameRegistrationError::PerNameLimit { limit: 0, .. })
+        ));
+        assert_eq!(registry.waiter_count(), 0, "only Wait pressure sweeps expiry");
+        assert_eq!(registry.whereis("busy"), Some(tid(3)));
+        assert!(matches!(
+            wait(&mut registry, "busy", 12, 1, 2, 10, NameWaitLimits::new(1, 0)),
+            Err(BoundedNameRegistrationError::TotalLimit { limit: 0, .. })
+        ));
+        assert!(registry.take_granted().is_empty());
+        crate::test_complete!("bounded_zero_limits_preserve_nonwaiting_policy_behavior");
+    }
+
+    #[test]
+    fn bounded_wait_counts_legacy_admissions_and_cleanup_frees_capacity() {
+        init_test("bounded_wait_counts_legacy_admissions_and_cleanup_frees_capacity");
+        let mut registry = NameRegistry::new();
+        register_holder(&mut registry, "alpha", 1);
+        register_holder(&mut registry, "beta", 2);
+        register_holder(&mut registry, "gamma", 3);
+        wait_legacy(&mut registry, "alpha", 10, 1, 100);
+        wait_legacy(&mut registry, "alpha", 11, 2, 100);
+        wait_legacy(&mut registry, "beta", 10, 1, 100);
+        let limits = NameWaitLimits::new(2, 2);
+
+        assert!(matches!(
+            wait(&mut registry, "gamma", 12, 3, 1, 100, limits),
+            Err(BoundedNameRegistrationError::TotalLimit { limit: 2, .. })
+        ));
+        wait_legacy(&mut registry, "gamma", 13, 3, 100);
+        assert_eq!(registry.waiter_count(), 4, "legacy admission is unrestricted");
+        registry.cleanup_task_at(tid(10), Time::from_secs(2));
+        assert_eq!(registry.waiter_count(), 2);
+        assert!(matches!(
+            wait(&mut registry, "beta", 14, 4, 2, 100, limits),
+            Err(BoundedNameRegistrationError::TotalLimit { limit: 2, .. })
+        ));
+
+        registry.cleanup_region_at(rid(2), Time::from_secs(2));
+        assert_eq!(registry.waiter_count(), 1);
+        assert!(matches!(
+            wait(&mut registry, "beta", 14, 4, 2, 100, limits),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+        registry.cancel_wait_for("gamma", tid(13), rid(3), Time::from_secs(2));
+        assert_eq!(registry.waiter_count(), 1);
+        assert!(matches!(
+            wait(&mut registry, "alpha", 15, 4, 2, 100, limits),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+        assert_eq!(registry.drain_expired_waiters(Time::from_secs(101)), 2);
+        assert_eq!(registry.waiter_count(), 0);
+        assert!(matches!(
+            wait(&mut registry, "gamma", 16, 4, 101, 200, limits),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+        assert_eq!(registry.waiter_count(), 1);
+        assert_eq!(registry.whereis("alpha"), Some(tid(1)));
+        assert_eq!(registry.whereis("beta"), Some(tid(2)));
+        assert_eq!(registry.whereis("gamma"), Some(tid(3)));
+        crate::test_complete!(
+            "bounded_wait_counts_legacy_admissions_and_cleanup_frees_capacity"
+        );
+    }
+
+    #[test]
+    fn bounded_wait_handles_pending_permits_and_uncollected_grant_cancellation() {
+        init_test("bounded_wait_handles_pending_permits_and_uncollected_grant_cancellation");
+        let mut registry = NameRegistry::new();
+        let permit = registry
+            .reserve("pending", tid(1), rid(0), Time::ZERO)
+            .expect("reserve pending name");
+        let limits = NameWaitLimits::new(2, 2);
+        assert!(matches!(
+            wait(&mut registry, "pending", 10, 1, 1, 100, limits),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+        assert!(matches!(
+            wait(&mut registry, "pending", 11, 2, 1, 100, limits),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+        let refusal = wait(&mut registry, "pending", 12, 3, 1, 100, limits);
+        registry
+            .abort_permit(permit, Time::from_secs(2))
+            .expect("abort permit and grant first waiter");
+        assert!(matches!(
+            refusal,
+            Err(BoundedNameRegistrationError::PerNameLimit { limit: 2, .. })
+        ));
+        assert_eq!(registry.waiter_count(), 1);
+        assert_eq!(registry.whereis("pending"), Some(tid(10)));
+
+        registry.cancel_wait_for("pending", tid(10), rid(1), Time::from_secs(3));
+        assert_eq!(registry.waiter_count(), 0);
+        assert_eq!(registry.whereis("pending"), Some(tid(11)));
+        assert!(
+            registry
+                .take_granted_for("pending", tid(10), rid(1))
+                .is_none()
+        );
+        assert!(matches!(
+            wait(&mut registry, "pending", 12, 3, 3, 100, NameWaitLimits::new(1, 1)),
+            Ok(NameCollisionOutcome::Enqueued)
+        ));
+        assert_granted(&mut registry, "pending", 11, 2);
+        registry
+            .unregister_and_grant("pending", tid(11), Time::from_secs(3))
+            .expect("grant last waiter");
+        assert_granted(&mut registry, "pending", 12, 3);
+        registry
+            .unregister_and_grant("pending", tid(12), Time::from_secs(3))
+            .expect("free pending name");
+        assert_eq!(registry.waiter_count(), 0);
+        assert!(registry.take_granted().is_empty());
+        assert!(registry.is_empty());
+        crate::test_complete!(
+            "bounded_wait_handles_pending_permits_and_uncollected_grant_cancellation"
+        );
+    }
+}
