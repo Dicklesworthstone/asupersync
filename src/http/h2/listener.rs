@@ -3246,13 +3246,15 @@ async fn dispatch_owned_h2_response<F, Fut>(
         let guard = Arc::try_unwrap(guard)
             .unwrap_or_else(|_| unreachable!("closed request retained an unpublished guard"));
         match completion {
-            Ok(OwnedH2HopCompletion {
-                idle_expired: true, ..
-            })
-            | Ok(OwnedH2HopCompletion {
-                hop: ServerHopOutcome::Ok(OwnedH2Response::HandlerIdleTimeout),
-                ..
-            }) => FunnelItem::StreamIdleTimeout { stream_id, guard },
+            Ok(
+                OwnedH2HopCompletion {
+                    idle_expired: true, ..
+                }
+                | OwnedH2HopCompletion {
+                    hop: ServerHopOutcome::Ok(OwnedH2Response::HandlerIdleTimeout),
+                    ..
+                },
+            ) => FunnelItem::StreamIdleTimeout { stream_id, guard },
             completion => {
                 let response = match completion {
                     Ok(OwnedH2HopCompletion {

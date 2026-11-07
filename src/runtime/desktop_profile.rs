@@ -10,7 +10,7 @@ use crate::record::RegionLimits;
 use crate::runtime::reactor::{
     BrowserReactor, Events, Interest, IoReactorCapabilitySnapshot, Reactor, Source, Token,
 };
-use crate::runtime::{Runtime, RuntimeConfig, RuntimeHandle};
+use crate::runtime::{Runtime, RuntimeConfig, RuntimeHandle, SpawnError};
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -352,6 +352,7 @@ impl std::error::Error for DesktopRuntimeStartError {
 #[derive(Clone, Debug, Default)]
 pub struct ForeignCallCompletion {
     completed: Arc<AtomicBool>,
+    refused: Arc<AtomicBool>,
 }
 
 impl ForeignCallCompletion {
@@ -362,13 +363,29 @@ impl ForeignCallCompletion {
     }
 
     /// Return whether the foreign operation reached its terminal point.
+    ///
+    /// This stays `false` for an operation that [`try_run_foreign_call`] refused: it never started, so it never
+    /// reached a terminal point. Use [`was_refused`](Self::was_refused) to tell that apart from one still running.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.completed.load(Ordering::Acquire)
     }
 
+    /// Return whether [`try_run_foreign_call`] refused the operation before it started.
+    ///
+    /// A refused operation was dropped unrun, so its receipt is final: it will never complete, and an observer waiting
+    /// on [`is_complete`](Self::is_complete) should also stop on this.
+    #[must_use]
+    pub fn was_refused(&self) -> bool {
+        self.refused.load(Ordering::Acquire)
+    }
+
     fn mark_complete(&self) {
         self.completed.store(true, Ordering::Release);
+    }
+
+    fn mark_refused(&self) {
+        self.refused.store(true, Ordering::Release);
     }
 }
 
@@ -392,6 +409,49 @@ where
         }
     })
     .await
+}
+
+/// [`run_foreign_call`] that reports a refusal instead of panicking or running the operation inline.
+///
+/// The operation runs where the runtime admitted blocking work, exactly as for
+/// [`try_spawn_blocking`](crate::runtime::try_spawn_blocking): on the context's blocking pool, or on a dedicated
+/// thread outside any context. A pool that forbids blocking work, a closed pool, a context with no pool and a thread
+/// that cannot be started are the error [`SpawnError::RuntimeUnavailable`]. A refusal is terminal and the operation
+/// never started: it is dropped unrun, `completion` is marked [refused](ForeignCallCompletion::was_refused), and it
+/// is never marked complete. [`run_foreign_call`] runs the operation inline for a closed or absent pool and panics
+/// for a forbidden one; this function does neither.
+///
+/// # Errors
+///
+/// [`SpawnError::RuntimeUnavailable`] for each refusal above (the variant does not say which).
+///
+/// # Cancel Safety
+///
+/// As for [`run_foreign_call`]: dropping the returned future discards result delivery, and an already-running
+/// operation continues to its terminal point. A future dropped before the runtime answered leaves `completion`
+/// neither complete nor refused.
+pub async fn try_run_foreign_call<F, T>(
+    completion: ForeignCallCompletion,
+    operation: F,
+) -> Result<T, SpawnError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let receipt = completion.clone();
+    let placed = crate::runtime::spawn_blocking::try_spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+        completion.mark_complete();
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
+    .await;
+    if placed.is_err() {
+        receipt.mark_refused();
+    }
+    placed
 }
 
 #[cfg(test)]

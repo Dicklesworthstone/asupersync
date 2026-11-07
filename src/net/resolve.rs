@@ -4,8 +4,10 @@
 //! blocking the async runtime.
 
 use crate::cx::Cx;
-use crate::runtime::spawn_blocking;
-use crate::runtime::spawn_blocking::spawn_blocking_on_thread;
+use crate::runtime::SpawnError;
+use crate::runtime::spawn_blocking::{
+    refused_io_error, try_spawn_blocking, try_spawn_blocking_on_thread,
+};
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -100,17 +102,30 @@ where
     if crate::runtime::spawn_blocking::current_pool_forbids_blocking() {
         return Err(crate::runtime::spawn_blocking::forbidden_io_error());
     }
+    // Placement is strict: a closed pool or a thread that cannot be started is an error, never a lookup run inline
+    // on the polling thread (the lookup can block for as long as the resolver takes).
     if let Some(cx) = Cx::current() {
-        if cx.blocking_pool_handle().is_some() {
-            return unless_cancelled(&cx, spawn_blocking(f)).await;
+        // The stored handle decides, as in `try_spawn_blocking`. The public getter is `None` under a spawn-restricted
+        // mask even when the context inherited a pool, which would send a restricted context's lookup to a dedicated
+        // thread past its open pool, or past the refusal of its closed one.
+        if cx.blocking_pool_handle_for_inheritance().is_some() {
+            return unless_cancelled(&cx, async { admitted(try_spawn_blocking(f).await) }).await;
         }
-        return unless_cancelled(&cx, spawn_blocking_on_thread(f)).await;
+        return unless_cancelled(&cx, async {
+            admitted(try_spawn_blocking_on_thread(f).await)
+        })
+        .await;
     }
 
     // No pool available? Force a background thread to avoid blocking the reactor.
     // This maintains the original behavior (dedicated thread per lookup) but
     // uses the optimized Waker-based notification mechanism.
-    spawn_blocking_on_thread(f).await
+    admitted(try_spawn_blocking_on_thread(f).await)
+}
+
+/// The lookup's own result, or the refusal worded as an I/O error (the forbidden-policy error under a forbidden pool).
+fn admitted<T>(placed: Result<io::Result<T>, SpawnError>) -> io::Result<T> {
+    placed.unwrap_or_else(|_refused| Err(refused_io_error()))
 }
 
 /// Waits for a blocking lookup unless the calling task is cancelled first

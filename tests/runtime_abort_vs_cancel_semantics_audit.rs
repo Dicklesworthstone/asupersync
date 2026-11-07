@@ -155,6 +155,58 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+/// The two Release-ordered stores of the stable cancellation publication in `src/types/task_context.rs`, as the source
+/// writes them: `set_cancel_requested` stores to `fast_cancel`, `publish_cancel_requested` stores to `cancellation`. The
+/// source spells the ordering through the crate's atomic facade (`crate::sync::atomic`), not `std::sync::atomic`.
+const SET_CANCEL_REQUESTED_SIGNATURE: &str =
+    "pub(crate) fn set_cancel_requested(&mut self, value: bool) {";
+const SET_CANCEL_REQUESTED_STORE: &str =
+    "self.fast_cancel\n            .store(value, crate::sync::atomic::Ordering::Release);";
+const PUBLISH_CANCEL_REQUESTED_SIGNATURE: &str =
+    "pub(crate) fn publish_cancel_requested(&self, value: bool) {";
+const PUBLISH_CANCEL_REQUESTED_STORE: &str =
+    "self.cancellation\n            .store(value, crate::sync::atomic::Ordering::Release);";
+
+/// The body of the method with this signature, up to the first closing brace at method indentation (the same body cut the
+/// pins below use for `src/cx/cx.rs`).
+fn task_context_method_body<'a>(task_context: &'a str, signature: &str) -> Option<&'a str> {
+    let start = task_context.find(signature)?;
+    let end = task_context[start..].find("\n    }\n")?;
+    Some(&task_context[start..start + end])
+}
+
+/// The Release half: the one publisher is still called, and EACH of the two named stores is Release-ordered inside its own
+/// method. Naming the sites is the contract; a total count of matching text would accept a duplicated store in the wrong
+/// place, and a bare `contains` would accept one weakened site while the other stays Release. The tests below assert this
+/// predicate, and `stable_publication_pins_reject_relaxed_orderings` runs the same predicate over weakened source.
+fn task_context_publishes_with_release(task_context: &str) -> bool {
+    task_context.contains("self.publish_cancel_requested(value);")
+        && task_context_method_body(task_context, SET_CANCEL_REQUESTED_SIGNATURE)
+            .is_some_and(|body| body.contains(SET_CANCEL_REQUESTED_STORE))
+        && task_context_method_body(task_context, PUBLISH_CANCEL_REQUESTED_SIGNATURE)
+            .is_some_and(|body| body.contains(PUBLISH_CANCEL_REQUESTED_STORE))
+}
+
+/// The Acquire half: the single observation path reads the fast flag with Acquire, and the producer path is still the one
+/// publisher.
+fn task_context_observes_with_acquire(task_context: &str) -> bool {
+    task_context.contains(
+        "self.cancel_requested || self.fast_cancel.load(crate::sync::atomic::Ordering::Acquire)",
+    ) && task_context.contains("self.publish_cancel_requested(value);")
+}
+
+/// The ordering the pins name is core's, not a look-alike: the facade `src/sync/atomic.rs` re-exports `Ordering` from
+/// `core::sync::atomic`.
+fn crate_atomic_reexports_core_ordering(atomic: &str) -> bool {
+    let Some(start) = atomic.find("pub use core::sync::atomic::{") else {
+        return false;
+    };
+    let Some(end) = atomic[start..].find("};") else {
+        return false;
+    };
+    atomic[start..start + end].contains(" Ordering,")
+}
+
 fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read Rust source directory") {
         let path = entry.expect("read Rust source entry").path();
@@ -1791,8 +1843,7 @@ fn task_handle_abort_publishes_via_same_stable_envelope_as_cancel() {
             && source.contains(".filter(|task| task.is_published())")
             && source.contains("strengthen_cancel_reason_locked(&mut lock, &strongest_requested);")
             && source.contains("lock.set_cancel_requested(true);")
-            && task_context.contains("self.publish_cancel_requested(value);")
-            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
+            && task_context_publishes_with_release(&task_context),
         "REGRESSION: abort_with_reason no longer publishes \
          through the admission gate and cancel_requested + \
          fast_cancel.store(Release). \
@@ -1935,8 +1986,7 @@ fn cx_cancel_with_publishes_via_same_stable_envelope_as_abort() {
 
     assert!(
         body.contains("inner.set_cancel_requested(true);")
-            && task_context.contains("self.publish_cancel_requested(value);")
-            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
+            && task_context_publishes_with_release(&task_context),
         "REGRESSION: Cx::cancel_with no longer publishes via \
          cancel_requested + fast_cancel.store(Release). The \
          self-cancel API diverges from abort — observable \
@@ -2059,15 +2109,167 @@ fn cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path() {
     // checkpoint queries the same stable envelope that abort/cancel publish.
     assert!(
         body.contains("let cancelled = guard.is_cancel_requested();")
-            && task_context.contains(
-                "self.cancel_requested || self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)",
-            )
-            && task_context.contains("self.publish_cancel_requested(value);"),
+            && task_context_observes_with_acquire(&task_context),
         "REGRESSION: checkpoint no longer reads stable cancellation publication \
          with Acquire. The single-observation-path contract \
          is broken — abort and cancel may now route through \
          different observation mechanisms.",
     );
+}
+
+#[test]
+fn crate_atomic_ordering_is_the_core_ordering_the_publication_pins_name() {
+    // The stable-publication pins name `crate::sync::atomic::Ordering`; that must be core's `Ordering`, re-exported by
+    // the facade, not a type with the same variant names.
+    assert!(
+        crate_atomic_reexports_core_ordering(&read("src/sync/atomic.rs")),
+        "REGRESSION: crate::sync::atomic::Ordering is no longer re-exported from core::sync::atomic. The \
+         Release/Acquire spellings the cancellation pins name would no longer mean the hardware orderings.",
+    );
+}
+
+/// Negative control for the stable-publication pins above, run through the same predicates the pins assert. On the
+/// permitted original source every predicate holds. Each Release site is then weakened to `Relaxed` independently
+/// (`set_cancel_requested` alone, `publish_cancel_requested` alone, both): the Release predicate rejects each while the
+/// Acquire predicate stays true. `Acquire` weakened alone falsifies only the Acquire predicate. A Release store left
+/// intact but duplicated into the wrong method keeps the count of matching statements at two and is still rejected, so
+/// the named sites, not a count, are the contract. The earlier unnamed `contains` predicate accepted a single weakened
+/// site; the first-only and second-only cases are the controls that it failed. Facade binding: re-exporting `Ordering`
+/// from anywhere but core is rejected.
+#[test]
+fn stable_publication_pins_reject_relaxed_orderings() {
+    let task_context = read("src/types/task_context.rs");
+    let atomic = read("src/sync/atomic.rs");
+    let release_statement = ".store(value, crate::sync::atomic::Ordering::Release);";
+    let acquire_load = "self.fast_cancel.load(crate::sync::atomic::Ordering::Acquire)";
+
+    // Permitted original source.
+    assert!(
+        task_context_publishes_with_release(&task_context),
+        "the Release predicate must hold on the real source"
+    );
+    assert!(
+        task_context_observes_with_acquire(&task_context),
+        "the Acquire predicate must hold on the real source"
+    );
+    assert!(
+        crate_atomic_reexports_core_ordering(&atomic),
+        "the facade binding must hold on the real source"
+    );
+    assert_eq!(
+        task_context.matches(release_statement).count(),
+        2,
+        "exactly the two named Release stores exist"
+    );
+
+    // Weakens exactly one statement, which must exist exactly once.
+    let weaken = |text: &str, statement: &str| {
+        assert_eq!(
+            text.matches(statement).count(),
+            1,
+            "the mutation target must be unique"
+        );
+        text.replace(statement, &statement.replace("Release", "Relaxed"))
+    };
+
+    let first_only = weaken(&task_context, SET_CANCEL_REQUESTED_STORE);
+    assert!(
+        first_only.contains(PUBLISH_CANCEL_REQUESTED_STORE),
+        "the second site must be intact in the first-only mutation"
+    );
+    assert!(
+        !task_context_publishes_with_release(&first_only),
+        "Release -> Relaxed in set_cancel_requested alone must be rejected"
+    );
+    assert!(
+        task_context_observes_with_acquire(&first_only),
+        "the first-only mutation must not falsify the Acquire predicate"
+    );
+
+    let second_only = weaken(&task_context, PUBLISH_CANCEL_REQUESTED_STORE);
+    assert!(
+        second_only.contains(SET_CANCEL_REQUESTED_STORE),
+        "the first site must be intact in the second-only mutation"
+    );
+    assert!(
+        !task_context_publishes_with_release(&second_only),
+        "Release -> Relaxed in publish_cancel_requested alone must be rejected"
+    );
+    assert!(
+        task_context_observes_with_acquire(&second_only),
+        "the second-only mutation must not falsify the Acquire predicate"
+    );
+
+    let both = weaken(&first_only, PUBLISH_CANCEL_REQUESTED_STORE);
+    assert!(
+        !task_context_publishes_with_release(&both),
+        "Release -> Relaxed in both methods must be rejected"
+    );
+    assert!(
+        task_context_observes_with_acquire(&both),
+        "the both-sites mutation must not falsify the Acquire predicate"
+    );
+
+    let weakened_load =
+        task_context.replace(acquire_load, &acquire_load.replace("Acquire", "Relaxed"));
+    assert_ne!(
+        weakened_load, task_context,
+        "the Acquire mutation must change the source"
+    );
+    assert!(
+        !task_context_observes_with_acquire(&weakened_load),
+        "Acquire -> Relaxed on the observing load must be rejected"
+    );
+    assert!(
+        task_context_publishes_with_release(&weakened_load),
+        "the Acquire mutation must not falsify the Release predicate"
+    );
+
+    // A Release store duplicated into the wrong method keeps the statement count at two. The named sites reject it.
+    let stray = |statement: &str| {
+        format!(
+            "\n    pub(crate) fn stray_store(&self, value: bool) {{\n        {statement}\n    }}\n"
+        )
+    };
+    for (weakened, duplicated) in [
+        (&second_only, stray(SET_CANCEL_REQUESTED_STORE)),
+        (&first_only, stray(PUBLISH_CANCEL_REQUESTED_STORE)),
+    ] {
+        let misplaced = format!("{weakened}{duplicated}");
+        assert_eq!(
+            misplaced.matches(release_statement).count(),
+            2,
+            "a count of two still holds, which is why a count is not the contract"
+        );
+        assert!(
+            !task_context_publishes_with_release(&misplaced),
+            "a Release store in the wrong method must not stand in for the named site"
+        );
+    }
+
+    // Facade binding: the ordering must be re-exported from core.
+    for (mutated, why) in [
+        (
+            atomic.replace(" Ordering,", ""),
+            "Ordering dropped from the core re-export",
+        ),
+        (
+            atomic.replace(
+                "pub use core::sync::atomic::{",
+                "pub use portable_atomic::{",
+            ),
+            "re-export moved to another crate",
+        ),
+    ] {
+        assert_ne!(
+            mutated, atomic,
+            "{why}: the mutation must change the source"
+        );
+        assert!(
+            !crate_atomic_reexports_core_ordering(&mutated),
+            "{why}: must be rejected"
+        );
+    }
 }
 
 #[test]

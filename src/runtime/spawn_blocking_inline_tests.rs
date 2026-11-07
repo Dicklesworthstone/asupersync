@@ -1015,3 +1015,401 @@
             "spawn_blocking_io_off_worker_on_a_forbidden_pool_reports_unsupported_and_never_runs"
         );
     }
+
+    /// The fallible entry point is exactly `spawn_blocking` for a pool that admits work: the closure runs on a pool
+    /// thread, not the caller's, and its value comes back.
+    #[test]
+    fn try_spawn_blocking_on_a_bounded_pool_runs_on_a_pool_thread_and_returns_the_value() {
+        init_test("try_spawn_blocking_on_a_bounded_pool_runs_on_a_pool_thread_and_returns_the_value");
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let caller = std::thread::current().id();
+        let guard = Cx::set_current(Some(cx));
+        let (value, ran_on) = future::block_on(try_spawn_blocking(|| {
+            (6_u32 * 7, std::thread::current().id())
+        }))
+        .expect("a bounded pool admits the work");
+        assert_eq!(value, 42);
+        assert_ne!(
+            ran_on, caller,
+            "the closure must run on a pool thread, not inline"
+        );
+        assert_eq!(pool.active_threads(), 1);
+        drop(guard);
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        crate::test_complete!(
+            "try_spawn_blocking_on_a_bounded_pool_runs_on_a_pool_thread_and_returns_the_value"
+        );
+    }
+
+    /// A forbidden pool is a typed refusal with no side effect: the closure runs nowhere (not inline, not on a pool thread, not
+    /// on a fallback thread) and the pool starts nothing.
+    #[test]
+    fn try_spawn_blocking_on_a_forbidden_pool_refuses_and_runs_nothing_anywhere() {
+        init_test("try_spawn_blocking_on_a_forbidden_pool_refuses_and_runs_nothing_anywhere");
+        let pool = forbidden_pool();
+        let ran = Arc::new(AtomicU32::new(0));
+        let ran_on = Arc::new(StdMutex::new(None));
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(pool.handle())),
+        ));
+        let (ran_in_closure, ran_on_in_closure) = (Arc::clone(&ran), Arc::clone(&ran_on));
+        let result = future::block_on(try_spawn_blocking(move || {
+            ran_in_closure.fetch_add(1, Ordering::SeqCst);
+            *ran_on_in_closure.lock().unwrap() = Some(std::thread::current().id());
+            7_u32
+        }));
+        assert_eq!(result, Err(SpawnError::RuntimeUnavailable));
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "the closure must not run");
+        assert!(
+            ran_on.lock().unwrap().is_none(),
+            "the closure ran on some thread"
+        );
+        assert_eq!(
+            pool.active_threads(),
+            0,
+            "a forbidden pool starts no thread"
+        );
+        assert_eq!(pool.pending_count(), 0);
+        drop(guard);
+        pool.shutdown();
+
+        // Remove the plant: the same call over a pool that admits work succeeds.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(open.handle())),
+        ));
+        assert_eq!(future::block_on(try_spawn_blocking(|| 7_u32)), Ok(7));
+        drop(guard);
+        assert!(open.shutdown_and_wait(Duration::from_secs(5)));
+        crate::test_complete!(
+            "try_spawn_blocking_on_a_forbidden_pool_refuses_and_runs_nothing_anywhere"
+        );
+    }
+
+    /// Restricting a context hides the pool from the public getter but must not hide the decision: the pool the context
+    /// inherited still decides.
+    #[test]
+    fn try_spawn_blocking_refuses_through_a_spawn_restricted_context() {
+        init_test("try_spawn_blocking_refuses_through_a_spawn_restricted_context");
+        for (pool, forbidden) in [
+            (forbidden_pool(), true),
+            (crate::runtime::BlockingPool::new(1, 1), false),
+        ] {
+            let restricted = Cx::for_testing()
+                .with_blocking_pool_handle(Some(pool.handle()))
+                .restrict::<crate::cx::cap::None>();
+            let guard = restricted.set_current_restricted();
+            let ambient = Cx::current().expect("restricted ambient context");
+            assert!(
+                ambient.blocking_pool_handle().is_none(),
+                "the restriction hides the public handle, which is the case under test"
+            );
+            let result = future::block_on(try_spawn_blocking(|| 3_u8));
+            drop(guard);
+            if forbidden {
+                assert_eq!(result, Err(SpawnError::RuntimeUnavailable));
+                pool.shutdown();
+            } else {
+                assert_eq!(result, Ok(3));
+                assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+            }
+        }
+        crate::test_complete!("try_spawn_blocking_refuses_through_a_spawn_restricted_context");
+    }
+
+    /// The strict path has no inline fallback: a context with no pool is a refusal and the closure runs nowhere, while
+    /// `spawn_blocking` keeps running the same closure inline there.
+    #[test]
+    fn try_spawn_blocking_refuses_a_context_without_a_pool_and_never_runs_inline() {
+        init_test("try_spawn_blocking_refuses_a_context_without_a_pool_and_never_runs_inline");
+        let caller = std::thread::current().id();
+        let ran = Arc::new(AtomicU32::new(0));
+        let guard = Cx::set_current(Some(Cx::for_testing()));
+        let ran_in_closure = Arc::clone(&ran);
+        let refused = future::block_on(try_spawn_blocking(move || {
+            ran_in_closure.fetch_add(1, Ordering::SeqCst);
+            std::thread::current().id()
+        }));
+        assert_eq!(refused, Err(SpawnError::RuntimeUnavailable));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "no pool means refusal, not an inline run"
+        );
+
+        // Control: the compatibility entry point still runs inline in the same context.
+        let inline = future::block_on(spawn_blocking(|| std::thread::current().id()));
+        assert_eq!(inline, caller);
+        drop(guard);
+        crate::test_complete!(
+            "try_spawn_blocking_refuses_a_context_without_a_pool_and_never_runs_inline"
+        );
+    }
+
+    /// Code with no current context has no pool to be refused by: the strict path takes the dedicated, joined thread.
+    #[test]
+    fn try_spawn_blocking_without_a_context_runs_on_the_dedicated_thread() {
+        init_test("try_spawn_blocking_without_a_context_runs_on_the_dedicated_thread");
+        assert!(Cx::current().is_none());
+        let caller = std::thread::current().id();
+        let (value, ran_on, name) = future::block_on(try_spawn_blocking(|| {
+            (
+                9_u8,
+                std::thread::current().id(),
+                std::thread::current().name().map(str::to_owned),
+            )
+        }))
+        .expect("a dedicated thread can be started");
+        assert_eq!(value, 9);
+        assert_ne!(ran_on, caller);
+        assert_eq!(name.as_deref(), Some("asupersync-blocking"));
+        crate::test_complete!("try_spawn_blocking_without_a_context_runs_on_the_dedicated_thread");
+    }
+
+    /// A dedicated thread that cannot be started is a refusal: the closure was dropped unrun and is not run inline. The
+    /// real starter, in the same call, runs it on its own thread.
+    #[test]
+    fn a_strict_thread_that_cannot_be_started_is_refused_and_the_closure_never_runs_inline() {
+        init_test(
+            "a_strict_thread_that_cannot_be_started_is_refused_and_the_closure_never_runs_inline",
+        );
+        let ran = Arc::new(AtomicU32::new(0));
+        let ran_in_closure = Arc::clone(&ran);
+        let refused = future::block_on(try_spawn_blocking_on_thread_with(
+            move || {
+                ran_in_closure.fetch_add(1, Ordering::SeqCst);
+                17_u32
+            },
+            |work| {
+                drop(work);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "injected thread creation refusal",
+                ))
+            },
+        ));
+        assert_eq!(refused, Err(SpawnError::RuntimeUnavailable));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "a failed thread start must not run the closure inline"
+        );
+
+        // Remove the plant: the real starter runs the same kind of closure on its own thread.
+        let caller = std::thread::current().id();
+        let ran_in_closure = Arc::clone(&ran);
+        let ran_on = future::block_on(try_spawn_blocking_on_thread(move || {
+            ran_in_closure.fetch_add(1, Ordering::SeqCst);
+            std::thread::current().id()
+        }))
+        .expect("a dedicated thread can be started");
+        assert_ne!(ran_on, caller);
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        crate::test_complete!(
+            "a_strict_thread_that_cannot_be_started_is_refused_and_the_closure_never_runs_inline"
+        );
+    }
+
+    /// A pool that was shut down is a refusal on the strict path, for a bounded and for a forbidden pool alike, and the
+    /// closure is never run inline. The compatibility sink keeps its documented inline fallback for the bounded pool.
+    #[test]
+    fn a_closed_pool_is_refused_by_the_strict_sink_and_still_runs_inline_in_the_compat_sink() {
+        init_test(
+            "a_closed_pool_is_refused_by_the_strict_sink_and_still_runs_inline_in_the_compat_sink",
+        );
+        let caller = std::thread::current().id();
+        let closed = crate::runtime::BlockingPool::new(1, 1);
+        let strict_handle = closed.handle();
+        let compat_handle = closed.handle();
+        closed.shutdown();
+        let ran = Arc::new(AtomicU32::new(0));
+        let ran_in_closure = Arc::clone(&ran);
+        let refused = future::block_on(try_spawn_blocking_on_pool(strict_handle, move || {
+            ran_in_closure.fetch_add(1, Ordering::SeqCst);
+            7_u32
+        }));
+        assert_eq!(refused, Err(SpawnError::RuntimeUnavailable));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "a closed pool must not run inline on the strict path"
+        );
+        // Control: the compatibility sink runs the same work inline on the caller.
+        let inline = future::block_on(spawn_blocking_on_pool(compat_handle, || {
+            std::thread::current().id()
+        }));
+        assert_eq!(inline, caller);
+
+        let forbidden = forbidden_pool();
+        let forbidden_handle = forbidden.handle();
+        forbidden.shutdown();
+        let ran_in_closure = Arc::clone(&ran);
+        let refused = future::block_on(try_spawn_blocking_on_pool(forbidden_handle, move || {
+            ran_in_closure.fetch_add(1, Ordering::SeqCst);
+            7_u32
+        }));
+        assert_eq!(refused, Err(SpawnError::RuntimeUnavailable));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "a closed forbidden pool must not run inline"
+        );
+        crate::test_complete!(
+            "a_closed_pool_is_refused_by_the_strict_sink_and_still_runs_inline_in_the_compat_sink"
+        );
+    }
+
+    /// Reporting the refusal as a `Result` must not change how a panicking closure behaves: the panic is captured and
+    /// re-raised in the awaiter, on the pool path and on the dedicated-thread path.
+    #[test]
+    fn a_panicking_closure_on_the_strict_path_still_raises_its_panic_in_the_awaiter() {
+        init_test("a_panicking_closure_on_the_strict_path_still_raises_its_panic_in_the_awaiter");
+        fn message_of(payload: &(dyn std::any::Any + Send)) -> String {
+            payload
+                .downcast_ref::<&str>()
+                .map(ToString::to_string)
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_default()
+        }
+
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(pool.handle())),
+        ));
+        let pooled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future::block_on(try_spawn_blocking(|| -> u8 { panic!("strict pool boom") }))
+        }))
+        .expect_err("the pool closure's panic is re-raised");
+        assert_eq!(message_of(pooled.as_ref()), "strict pool boom");
+        drop(guard);
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+
+        assert!(Cx::current().is_none());
+        let threaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future::block_on(try_spawn_blocking(|| -> u8 {
+                panic!("strict thread boom")
+            }))
+        }))
+        .expect_err("the dedicated thread closure's panic is re-raised");
+        assert_eq!(message_of(threaded.as_ref()), "strict thread boom");
+        crate::test_complete!(
+            "a_panicking_closure_on_the_strict_path_still_raises_its_panic_in_the_awaiter"
+        );
+    }
+
+    /// The I/O error a refused strict call becomes names the policy that refused it: `Unsupported` under a forbidden pool,
+    /// a general not-admitted error otherwise.
+    #[test]
+    fn a_refused_strict_call_is_worded_by_the_policy_that_refused_it() {
+        init_test("a_refused_strict_call_is_worded_by_the_policy_that_refused_it");
+        let general = refused_io_error();
+        assert_eq!(general.kind(), std::io::ErrorKind::Other);
+        assert!(general.to_string().contains("not admitted"));
+
+        let pool = forbidden_pool();
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(pool.handle())),
+        ));
+        assert_eq!(
+            refused_io_error().kind(),
+            std::io::ErrorKind::Unsupported,
+            "a forbidden pool keeps the forbidden-policy error"
+        );
+        drop(guard);
+        pool.shutdown();
+
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(open.handle())),
+        ));
+        assert_eq!(refused_io_error().kind(), std::io::ErrorKind::Other);
+        drop(guard);
+        assert!(open.shutdown_and_wait(Duration::from_secs(5)));
+        crate::test_complete!("a_refused_strict_call_is_worded_by_the_policy_that_refused_it");
+    }
+
+    /// The three entry points agree on a forbidden context: the fallible one returns the error, the one that returns the
+    /// closure's value panics with the unchanged text, and the I/O one reports `Unsupported`.
+    #[test]
+    fn the_entry_points_agree_on_a_forbidden_pool_and_the_panic_text_is_unchanged() {
+        init_test("the_entry_points_agree_on_a_forbidden_pool_and_the_panic_text_is_unchanged");
+        let pool = forbidden_pool();
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(pool.handle())),
+        ));
+        assert_eq!(
+            future::block_on(try_spawn_blocking(|| 1_u8)),
+            Err(SpawnError::RuntimeUnavailable)
+        );
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future::block_on(spawn_blocking(|| 1_u8))
+        }))
+        .expect_err("the entry point that returns the closure's value cannot refuse any other way");
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        assert_eq!(
+            message,
+            "blocking work is forbidden by this runtime's blocking admission policy"
+        );
+        let error = future::block_on(spawn_blocking_io(|| Ok(1_u8)))
+            .expect_err("the I/O entry point reports the refusal as an error");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        drop(guard);
+        crate::test_complete!(
+            "the_entry_points_agree_on_a_forbidden_pool_and_the_panic_text_is_unchanged"
+        );
+    }
+
+    /// The same contract on real native runtimes rather than hand-built contexts: the runtime that chooses the policy refuses,
+    /// starts no blocking thread and runs nothing; one with a bounded pool runs the work on a pool thread.
+    #[test]
+    fn a_native_runtime_with_a_forbidden_pool_refuses_blocking_work_and_a_bounded_one_runs_it() {
+        init_test(
+            "a_native_runtime_with_a_forbidden_pool_refuses_blocking_work_and_a_bounded_one_runs_it",
+        );
+        let ran = Arc::new(AtomicU32::new(0));
+        let forbidding = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(0, 1)
+            .blocking_admission_policy(crate::runtime::BlockingAdmissionPolicy::Forbidden)
+            .build()
+            .expect("native runtime that forbids blocking work");
+        let ran_in_closure = Arc::clone(&ran);
+        let refused = forbidding.block_on(async move {
+            try_spawn_blocking(move || {
+                ran_in_closure.fetch_add(1, Ordering::SeqCst);
+                1_u8
+            })
+            .await
+        });
+        assert_eq!(refused, Err(SpawnError::RuntimeUnavailable));
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "the closure must not run");
+        assert_eq!(
+            forbidding
+                .blocking_handle()
+                .expect("a pool that refuses, not an absent one")
+                .active_threads(),
+            0
+        );
+
+        // Remove the plant: a bounded pool on the same kind of runtime runs the work off the runtime's own thread.
+        let bounded = crate::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("native runtime with a bounded pool");
+        let (caller, value, ran_on) = bounded.block_on(async {
+            let caller = std::thread::current().id();
+            let (value, ran_on) = try_spawn_blocking(|| (5_u8, std::thread::current().id()))
+                .await
+                .expect("a bounded pool admits the work");
+            (caller, value, ran_on)
+        });
+        assert_eq!(value, 5);
+        assert_ne!(ran_on, caller, "the closure must run on a pool thread");
+        crate::test_complete!(
+            "a_native_runtime_with_a_forbidden_pool_refuses_blocking_work_and_a_bounded_one_runs_it"
+        );
+    }

@@ -2456,6 +2456,308 @@
         );
     }
 
+    /// A blocking pool whose admission policy forbids blocking work.
+    fn forbidden_blocking_pool() -> crate::runtime::BlockingPool {
+        crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Forbidden,
+        )
+    }
+
+    /// One MX, one SRV and one TXT record, each at its own name.
+    fn record_zone() -> BTreeMap<(String, u16), Vec<TestDnsRecord>> {
+        let mut zone = BTreeMap::new();
+        zone.insert(
+            ("example.test".to_string(), 15),
+            vec![TestDnsRecord::Mx {
+                ttl: 60,
+                preference: 10,
+                exchange: "mx.example.test".to_string(),
+            }],
+        );
+        zone.insert(
+            ("_sip._tcp.example.test".to_string(), 33),
+            vec![TestDnsRecord::Srv {
+                ttl: 60,
+                priority: 5,
+                weight: 7,
+                port: 8443,
+                target: "svc.example.test".to_string(),
+            }],
+        );
+        zone.insert(
+            ("txt.example.test".to_string(), 16),
+            vec![TestDnsRecord::Txt {
+                ttl: 60,
+                text: "proof-token".to_string(),
+            }],
+        );
+        zone
+    }
+
+    /// The MX, SRV and TXT lookups against `record_zone`, successes erased.
+    async fn record_lookup_results(resolver: &Resolver) -> [Result<(), DnsError>; 3] {
+        [
+            resolver.lookup_mx("example.test").await.map(|_| ()),
+            resolver
+                .lookup_srv("_sip._tcp.example.test")
+                .await
+                .map(|_| ()),
+            resolver.lookup_txt("txt.example.test").await.map(|_| ()),
+        ]
+    }
+
+    /// Runs the three record lookups against `record_zone` and checks every answer.
+    async fn assert_records_resolve(resolver: &Resolver) {
+        let mx = resolver
+            .lookup_mx("example.test")
+            .await
+            .expect("MX should resolve");
+        assert_eq!(mx.records().count(), 1);
+        let srv = resolver
+            .lookup_srv("_sip._tcp.example.test")
+            .await
+            .expect("SRV should resolve");
+        assert_eq!(srv.records().count(), 1);
+        let txt = resolver
+            .lookup_txt("txt.example.test")
+            .await
+            .expect("TXT should resolve");
+        assert_eq!(txt.records().collect::<Vec<_>>(), vec!["proof-token"]);
+    }
+
+    #[test]
+    fn forbidden_pool_record_lookups_without_nameservers_never_read_system_config() {
+        // The reader is a plain `fn`, so the trap is a per-test counter and a per-test address cell.
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        static NAMESERVER: std::sync::OnceLock<SocketAddr> = std::sync::OnceLock::new();
+        fn trap_reader() -> Vec<SocketAddr> {
+            READS.fetch_add(1, Ordering::SeqCst);
+            NAMESERVER.get().copied().into_iter().collect()
+        }
+        init_test("forbidden_pool_record_lookups_without_nameservers_never_read_system_config");
+        let server = TestDnsServer::start(record_zone(), false);
+        NAMESERVER.set(server.addr).expect("the trap is armed once");
+        // No explicit nameservers: every record lookup takes them from the (trapped) system configuration.
+        let resolver = Resolver::with_config(ResolverConfig {
+            cache_enabled: false,
+            retries: 0,
+            timeout: Duration::from_secs(2),
+            ..ResolverConfig::default()
+        })
+        .with_system_config_reader(trap_reader);
+        let expected = crate::runtime::spawn_blocking::forbidden_io_error().to_string();
+
+        let forbidden = forbidden_blocking_pool();
+        {
+            let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+            let _guard = Cx::set_current(Some(cx));
+            future::block_on(async {
+                // The clone shares the reader, so it is held to the same rule.
+                let mut results = Vec::from(record_lookup_results(&resolver).await);
+                results.extend(record_lookup_results(&resolver.clone()).await);
+                for (which, result) in results.iter().enumerate() {
+                    crate::assert_with_log!(
+                        matches!(result, Err(DnsError::Io(message)) if *message == expected),
+                        "a record lookup without nameservers is refused with the shared message",
+                        which,
+                        format!("{result:?}")
+                    );
+                }
+            });
+        }
+        crate::assert_with_log!(
+            READS.load(Ordering::SeqCst) == 0,
+            "a forbidden pool must not read the system resolver configuration",
+            0,
+            READS.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            server.udp_queries() == 0,
+            "a forbidden pool must not send a single query",
+            0,
+            server.udp_queries()
+        );
+        forbidden.shutdown();
+
+        // Remove the plant: an open pool reads the configuration once per lookup, so the trap is live, and resolves.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        {
+            let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+            let _guard = Cx::set_current(Some(cx));
+            future::block_on(async {
+                assert_records_resolve(&resolver).await;
+                assert_records_resolve(&resolver.clone()).await;
+            });
+        }
+        crate::assert_with_log!(
+            READS.load(Ordering::SeqCst) == 6,
+            "an open pool still reads the system configuration once per lookup",
+            6,
+            READS.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            server.udp_queries() >= 6,
+            "the permitted path still queries the nameserver",
+            true,
+            server.udp_queries()
+        );
+        open.shutdown();
+
+        crate::test_complete!(
+            "forbidden_pool_record_lookups_without_nameservers_never_read_system_config"
+        );
+    }
+
+    #[test]
+    fn explicit_nameservers_never_read_system_config_on_a_forbidden_or_open_pool() {
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        fn trap_reader() -> Vec<SocketAddr> {
+            READS.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        }
+        init_test("explicit_nameservers_never_read_system_config_on_a_forbidden_or_open_pool");
+        let server = TestDnsServer::start(record_zone(), false);
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![server.addr],
+            cache_enabled: false,
+            retries: 0,
+            timeout: Duration::from_secs(2),
+            ..ResolverConfig::default()
+        })
+        .with_system_config_reader(trap_reader);
+        let expected = crate::runtime::spawn_blocking::forbidden_io_error().to_string();
+
+        // A context without a reactor on a forbidden pool keeps the legacy refusal, and reads nothing.
+        let forbidden = forbidden_blocking_pool();
+        {
+            let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+            let _guard = Cx::set_current(Some(cx));
+            future::block_on(async {
+                for (which, result) in record_lookup_results(&resolver).await.iter().enumerate() {
+                    crate::assert_with_log!(
+                        matches!(result, Err(DnsError::Io(message)) if *message == expected),
+                        "explicit nameservers without a reactor are refused with the shared message",
+                        which,
+                        format!("{result:?}")
+                    );
+                }
+            });
+        }
+        crate::assert_with_log!(
+            server.udp_queries() == 0,
+            "a forbidden pool must not send a single query",
+            0,
+            server.udp_queries()
+        );
+        forbidden.shutdown();
+
+        // An open pool resolves through the explicit nameservers and never consults the system configuration.
+        let open = crate::runtime::BlockingPool::new(1, 1);
+        {
+            let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(open.handle()));
+            let _guard = Cx::set_current(Some(cx));
+            future::block_on(assert_records_resolve(&resolver));
+        }
+        crate::assert_with_log!(
+            server.udp_queries() >= 3,
+            "the permitted path still queries the nameserver",
+            true,
+            server.udp_queries()
+        );
+        open.shutdown();
+        crate::assert_with_log!(
+            READS.load(Ordering::SeqCst) == 0,
+            "explicit nameservers never read the system resolver configuration",
+            0,
+            READS.load(Ordering::SeqCst)
+        );
+
+        crate::test_complete!(
+            "explicit_nameservers_never_read_system_config_on_a_forbidden_or_open_pool"
+        );
+    }
+
+    #[test]
+    fn forbidden_pool_cached_special_use_and_literal_ip_lookups_still_answer() {
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        fn trap_reader() -> Vec<SocketAddr> {
+            READS.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        }
+        init_test("forbidden_pool_cached_special_use_and_literal_ip_lookups_still_answer");
+        // No explicit nameservers. `lookup_ip` never consults the reader, so the zero count pins that these
+        // answers stay available on a forbidden pool without a thread and without any file read.
+        let resolver = Resolver::with_config(ResolverConfig {
+            retries: 0,
+            timeout: Duration::from_secs(2),
+            ..ResolverConfig::default()
+        })
+        .with_system_config_reader(trap_reader);
+        let cached_addr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 55));
+        resolver.cache.put_ip(
+            "cached.example.test",
+            &LookupIp::new(vec![cached_addr], Duration::from_mins(5)),
+        );
+        let expected = crate::runtime::spawn_blocking::forbidden_io_error().to_string();
+
+        let forbidden = forbidden_blocking_pool();
+        {
+            let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle()));
+            let _guard = Cx::set_current(Some(cx));
+            future::block_on(async {
+                let cached = resolver
+                    .lookup_ip("cached.example.test")
+                    .await
+                    .expect("a cached answer needs no thread");
+                assert_eq!(cached.addresses(), &[cached_addr]);
+                let literal = resolver
+                    .lookup_ip("192.0.2.1")
+                    .await
+                    .expect("a literal needs no lookup");
+                assert_eq!(
+                    literal.addresses(),
+                    &[IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))]
+                );
+                let bracketed = resolver
+                    .lookup_ip("[2001:db8::1]")
+                    .await
+                    .expect("a bracketed literal needs no lookup");
+                assert_eq!(
+                    bracketed.addresses(),
+                    &[IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))]
+                );
+                let special = resolver.lookup_ip("host.invalid").await;
+                crate::assert_with_log!(
+                    matches!(special, Err(DnsError::NoRecords(_))),
+                    "a special-use name is answered without a lookup",
+                    true,
+                    format!("{special:?}")
+                );
+                // Remove the plant: a name that needs the system resolver is still refused.
+                let uncached = resolver.lookup_ip("uncached.example.test").await;
+                crate::assert_with_log!(
+                    matches!(uncached, Err(DnsError::Io(ref message)) if *message == expected),
+                    "an uncached name still needs a thread, so it is refused",
+                    expected.clone(),
+                    format!("{uncached:?}")
+                );
+            });
+        }
+        crate::assert_with_log!(
+            READS.load(Ordering::SeqCst) == 0,
+            "no answer reads the system resolver configuration",
+            0,
+            READS.load(Ordering::SeqCst)
+        );
+        forbidden.shutdown();
+
+        crate::test_complete!("forbidden_pool_cached_special_use_and_literal_ip_lookups_still_answer");
+    }
+
     #[test]
     fn error_display_formats() {
         init_test("error_display_formats");
@@ -2916,4 +3218,28 @@
         }
 
         crate::test_complete!("conformance_ipv6_aaaa_preference");
+    }
+
+    /// A lookup thread that was not admitted is reported as an I/O error and the lookup is not run; what the lookup itself
+    /// returned, success or its own error, passes through untouched.
+    #[test]
+    fn resolver_blocking_dns_reports_a_refused_placement_and_passes_lookup_results_through() {
+        init_test(
+            "resolver_blocking_dns_reports_a_refused_placement_and_passes_lookup_results_through",
+        );
+        let refused = dns_admitted::<u8>(Err(SpawnError::RuntimeUnavailable));
+        crate::assert_with_log!(
+            matches!(&refused, Err(DnsError::Io(message)) if message.contains("not admitted")),
+            "a refused placement is a typed I/O error",
+            "Err(DnsError::Io(..not admitted..))",
+            format!("{refused:?}")
+        );
+        assert!(matches!(dns_admitted(Ok(Ok(5_u8))), Ok(5)));
+        assert!(matches!(
+            dns_admitted::<u8>(Ok(Err(DnsError::Cancelled))),
+            Err(DnsError::Cancelled)
+        ));
+        crate::test_complete!(
+            "resolver_blocking_dns_reports_a_refused_placement_and_passes_lookup_results_through"
+        );
     }

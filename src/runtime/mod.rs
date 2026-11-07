@@ -288,7 +288,7 @@ pub use slo_policy::{
     FourthWaveRuntimeBridgeDecision, SloRuntimePolicyBridge, SloRuntimePolicyBridgeDecision,
     SloRuntimePolicyBridgeRequest, SloRuntimeWorkKind,
 };
-pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
+pub use spawn_blocking::{spawn_blocking, spawn_blocking_io, try_spawn_blocking};
 pub use state::{
     ManualFinalizerReceipt, ManualFinalizerReceiptError, RuntimeSnapshot, RuntimeState, SpawnError,
 };

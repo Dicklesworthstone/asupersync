@@ -1,6 +1,13 @@
 //! Isolated, bounded stored-procedure results (asupersync-1dl7, asupersync-1dl7s).
 
-use super::*;
+use super::{
+    Arc, BTreeMap, CancelReason, Cx, MAX_COLUMN_COUNT, MySqlColumn, MySqlConnectOptions,
+    MySqlConnection, MySqlConnectionManager, MySqlError, MySqlExecResult, MySqlRow, MySqlStatement,
+    MySqlValue, Outcome, PacketBuffer, PacketReader, ToSql, capability, command, fmt, io,
+    outcome_from_error,
+};
+#[cfg(feature = "tls")]
+use super::{SslMode, TlsConnector};
 
 const MULTI_RESULT_CAPABILITIES: u32 =
     capability::CLIENT_MULTI_RESULTS | capability::CLIENT_PS_MULTI_RESULTS;
@@ -265,7 +272,11 @@ impl MySqlMultiResultStream<'_> {
     /// include that cleanup after `max_wait`. A well-formed terminal server ERR
     /// preserves framing but is returned as an error. An already terminated
     /// stream is a no-op; errors already reported by `next` are not repeated.
-    pub async fn finish(mut self, cx: &Cx, max_wait: Duration) -> Outcome<(), MySqlError> {
+    pub async fn finish(
+        mut self,
+        cx: &Cx,
+        max_wait: std::time::Duration,
+    ) -> Outcome<(), MySqlError> {
         if self.finished {
             return Outcome::Ok(());
         }

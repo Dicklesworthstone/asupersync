@@ -3,7 +3,7 @@
 mod body;
 pub use body::{ContentDecodeError, ContentDecodeLimits, ContentDecodedBody};
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use body::ContentDecodePlan;
+pub use body::ContentDecodePlan;
 
 use super::compress::{ContentEncoding, DecompressionLimit, Decompressor};
 use super::{Method, Response};
@@ -95,7 +95,7 @@ impl Response {
 
 /// A bounded ordered coding stack. Parsing does not allocate codecs or body
 /// output; adapters can reject unavailable body modes before consuming data.
-pub(crate) struct ContentDecoder {
+pub struct ContentDecoder {
     codings: Vec<Coding>,
 }
 
@@ -176,7 +176,7 @@ impl ContentDecoder {
 
 // Whether the message framing declared the body empty: at least one
 // Content-Length field, and every one of them 0.
-pub(crate) fn declared_empty(headers: &[(String, String)]) -> bool {
+pub fn declared_empty(headers: &[(String, String)]) -> bool {
     let mut lengths = headers
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
@@ -304,7 +304,7 @@ fn decoder_for(
     }
 }
 
-pub(crate) fn invalidated_field(name: &str) -> bool {
+pub fn invalidated_field(name: &str) -> bool {
     [
         "content-encoding",
         "content-length",
@@ -319,19 +319,23 @@ pub(crate) fn invalidated_field(name: &str) -> bool {
 
 /// Resource refusals remain distinguishable from corrupt compressed streams
 /// without treating a codec's human-readable error text as a protocol.
-pub(crate) fn is_limit_error(error: &io::Error) -> bool {
+pub fn is_limit_error(error: &io::Error) -> bool {
     let Some(source) = error.get_ref() else {
         return false;
     };
-    if source.is::<super::compress::DecompressionLimitExceeded>() {
-        return true;
+    #[cfg(not(feature = "zstd"))]
+    {
+        source.is::<super::compress::DecompressionLimitExceeded>()
     }
     #[cfg(feature = "zstd")]
-    if matches!(
-        source.downcast_ref::<asupersync_zstd::DecodeError>(),
-        Some(asupersync_zstd::DecodeError::OutputTooLarge | asupersync_zstd::DecodeError::WindowTooLarge)
-    ) {
-        return true;
+    {
+        source.is::<super::compress::DecompressionLimitExceeded>()
+            || matches!(
+                source.downcast_ref::<asupersync_zstd::DecodeError>(),
+                Some(
+                    asupersync_zstd::DecodeError::OutputTooLarge
+                        | asupersync_zstd::DecodeError::WindowTooLarge
+                )
+            )
     }
-    false
 }

@@ -68,7 +68,7 @@ fn collect<B: Body + Unpin>(body: &mut B) -> Result<(Vec<u8>, Option<HeaderMap>)
     let mut trailers = None;
     for _ in 0..100_000 {
         match poll(body) {
-            Poll::Pending => continue,
+            Poll::Pending => {}
             Poll::Ready(Some(Ok(Frame::Data(mut data)))) => {
                 assert!(trailers.is_none(), "DATA must precede terminal trailers");
                 let remaining = data.remaining();

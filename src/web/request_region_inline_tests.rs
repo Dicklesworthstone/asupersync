@@ -636,7 +636,10 @@
                 };
                 let mut request = GrpcRequest::new(Bytes::from_static(b"owned grpc reply"));
                 if peer_timeout {
-                    request.metadata_mut().insert("grpc-timeout", "300S");
+                    assert!(
+                        request.metadata_mut().insert("grpc-timeout", "300S"),
+                        "a valid grpc-timeout entry must be stored"
+                    );
                 }
                 let owner_task = owner.task_id();
                 let inherited = owner.budget();
@@ -1026,8 +1029,7 @@
                 assert!(wire.ends_with(b"/authority"));
                 assert!(!explicit.is_cancel_requested());
                 assert!(!owner.is_cancel_requested());
-                let request_cx = retained.lock().take().unwrap();
-                request_cx
+                retained.lock().take().unwrap()
             }).unwrap();
             let retired_request = task.join(&cx).await.unwrap();
             assert!(matches!(retired_request.try_register_obligation_checked(

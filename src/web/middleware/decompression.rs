@@ -13,7 +13,7 @@ use std::pin::Pin;
 /// middleware's replacement body cannot inherit stale wire codings, even if
 /// its allocation has the same size. Bytes are immutable and never copied.
 #[derive(Debug)]
-pub(crate) struct RequestContentCodings {
+pub struct RequestContentCodings {
     fields: Vec<String>,
     body: Bytes,
 }
@@ -32,7 +32,7 @@ impl RequestContentCodings {
 
 /// Resolve the public header projection and any still-authoritative repeated
 /// wire fields once, for buffered middleware and explicit streaming extraction.
-pub(crate) fn request_content_decoder(request: &Request) -> io::Result<ContentDecoder> {
+pub fn request_content_decoder(request: &Request) -> io::Result<ContentDecoder> {
     let mut fields = request.headers.iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
     let current = fields.next().map(|(_, value)| value.as_str());

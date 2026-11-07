@@ -26,6 +26,7 @@ use crate::cx::Cx;
 use crate::runtime::blocking_pool::{
     BlockingPoolHandle, BlockingSpawnErrorKind, BlockingTaskHandle,
 };
+use crate::runtime::state::SpawnError;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -675,10 +676,16 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
 /// A context without a pool runs the closure inline; without a current context,
 /// the closure runs on a dedicated thread. Pool workers do not inherit a `Cx`.
 ///
+/// Three more cases also run the closure inline on the calling thread, because this function has no error to
+/// return: a pool that has been shut down (earlier, or concurrently from another thread), a pool that drops the
+/// queued closure before a worker claims it, and a dedicated thread that cannot be started.
+/// [`try_spawn_blocking`] refuses all three.
+///
 /// A context whose pool is [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden)
 /// does neither: the closure is not run at all and the call panics, because this function returns
-/// the closure's own `T` and has no error to return. Use [`spawn_blocking_io`] or
-/// [`Cx::spawn_blocking`], which return an error instead.
+/// the closure's own `T` and has no error to return. Use [`try_spawn_blocking`], [`spawn_blocking_io`] or
+/// [`Cx::spawn_blocking`], which return an error instead. [`try_spawn_blocking`] is also the one that does not run
+/// the closure inline when the pool is closed or absent.
 ///
 /// # Type Bounds
 ///
@@ -733,6 +740,53 @@ where
     spawn_blocking(f).await
 }
 
+/// [`spawn_blocking`] for a caller that can report a refusal instead of running the closure inline.
+///
+/// It runs the closure where the runtime admitted blocking work, or says that it did not. It never runs the closure
+/// on the calling thread and never panics for a refusal.
+///
+/// - A context with a blocking pool (also one whose capabilities are restricted) runs the closure on that pool.
+/// - Outside any context the closure runs on a dedicated, bounded, joined thread.
+/// - Everything else is an error, [`SpawnError::RuntimeUnavailable`], and the closure is dropped unrun, with no
+///   thread started and nothing run inline: a pool that is
+///   [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden), a pool that is
+///   closed (or drops the queued closure before a worker claims it), a context that has no pool, and a dedicated
+///   thread that could not be started.
+///
+/// [`spawn_blocking`] keeps its compatibility fallbacks for the last three (it runs the closure inline); this
+/// function does not carry them over.
+///
+/// # Errors
+///
+/// [`SpawnError::RuntimeUnavailable`] for each refusal above. The variant is reused so the error type stays
+/// unchanged, which means it does not say which refusal happened. A caller that must tell a forbidden pool from an
+/// unavailable one reads the policy from the pool it configured.
+///
+/// # Cancel Safety
+///
+/// As for [`spawn_blocking`]: dropping the future after the closure was admitted discards its result, and a closure
+/// still queued is cancelled.
+///
+/// # Panics
+///
+/// If the blocking operation panics, the panic is captured and re-raised when the future is awaited, as for
+/// [`spawn_blocking`].
+pub async fn try_spawn_blocking<F, T>(f: F) -> Result<T, SpawnError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    if let Some(cx) = Cx::current() {
+        // The stored handle, as in `spawn_blocking`: a restricted public getter must not decide placement.
+        return match cx.blocking_pool_handle_for_inheritance() {
+            Some(pool) => try_spawn_blocking_on_pool(pool, f).await,
+            None => Err(SpawnError::RuntimeUnavailable),
+        };
+    }
+
+    try_spawn_blocking_on_thread(f).await
+}
+
 /// Whether the blocking pool the current context inherited forbids blocking work
 /// ([`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden)).
 ///
@@ -740,6 +794,12 @@ where
 /// dedicated-thread fallbacks, so nothing changes for a runtime that does not choose the policy. The stored
 /// handle is read, not the public accessor, so a context whose spawn authority was restricted cannot step
 /// around the decision.
+///
+/// This reads the immutable admission policy and nothing else. It says nothing about whether the pool is still
+/// open: a bounded pool that is shut down, earlier or on another thread at any moment, is not forbidden. A caller
+/// that checks this and then uses the compatibility sink ([`spawn_blocking`], [`spawn_blocking_on_pool`]) still runs
+/// its closure inline on the calling thread once the pool is closed. Only the strict `try_*` path refuses a closed
+/// pool.
 pub(crate) fn current_pool_forbids_blocking() -> bool {
     Cx::current()
         .and_then(|cx| cx.blocking_pool_handle_for_inheritance())
@@ -751,6 +811,19 @@ pub(crate) fn forbidden_io_error() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "blocking work is forbidden by this runtime's blocking admission policy",
+    )
+}
+
+/// What an I/O entry point returns when a strict `try_*` call ([`try_spawn_blocking`], `try_spawn_blocking_on_thread`)
+/// refused the work: the forbidden-policy error when the current context's pool forbids blocking work, otherwise a
+/// general error saying the work was not admitted. The strict path reports every refusal as the same
+/// [`SpawnError::RuntimeUnavailable`], so the caller reads the policy again to word the error truthfully.
+pub(crate) fn refused_io_error() -> std::io::Error {
+    if current_pool_forbids_blocking() {
+        return forbidden_io_error();
+    }
+    std::io::Error::other(
+        "blocking work was not admitted: the blocking pool is closed or absent, or a blocking thread could not be started",
     )
 }
 
@@ -820,7 +893,7 @@ where
     )
     .await;
 
-    start_blocking_io_thread_with(f, spawn, FallbackGuard)?.await
+    start_blocking_thread_with(f, spawn, FallbackGuard)?.await
 }
 
 /// Starts committed I/O before reporting acceptance to a write-behind caller.
@@ -854,17 +927,20 @@ where
             "the standard stream operation has no available blocking thread",
         ));
     }
-    start_blocking_io_thread_with(f, spawn, FallbackGuard)
+    start_blocking_thread_with(f, spawn, FallbackGuard)
 }
 
-fn start_blocking_io_thread_with<F, T, Spawn>(
+/// Starts `f` on a dedicated thread that owns `slot`, or reports that no thread could be started. When it reports
+/// failure `f` was dropped unrun. The I/O starters pass an `io::Result` closure; the strict `try_*` thread helper
+/// passes any value.
+fn start_blocking_thread_with<F, R, Spawn>(
     f: F,
     spawn: Spawn,
     slot: FallbackGuard,
-) -> std::io::Result<impl std::future::Future<Output = std::io::Result<T>> + Send>
+) -> std::io::Result<impl std::future::Future<Output = R> + Send>
 where
-    F: FnOnce() -> std::io::Result<T> + Send + 'static,
-    T: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
     Spawn: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<thread::JoinHandle<()>>,
 {
     // Transfer the reservation into the closure before attempting to spawn.
@@ -981,6 +1057,48 @@ where
                 "blocking work is forbidden by this runtime's blocking admission policy"
             );
             return rx.await;
+        }
+    };
+
+    let mut guard = CancelOnDrop::new(handle);
+    let result = rx.await;
+    guard.mark_done();
+    result
+}
+
+/// The strict pool sink: runs `f` on `pool`, or reports that the pool did not take it.
+///
+/// Unlike [`spawn_blocking_on_pool`] it has no inline fallback. A pool that forbids blocking work, a pool that is
+/// closed, and a queued task the pool drops before a worker claims it (its last worker failed to start) are all
+/// `Err(SpawnError::RuntimeUnavailable)`: `f` is dropped unrun, nothing runs on the caller and no thread is started.
+/// Saturation is not a refusal; admission stays parked, as for the compatibility sink.
+pub(crate) async fn try_spawn_blocking_on_pool<F, T>(
+    pool: BlockingPoolHandle,
+    f: F,
+) -> Result<T, SpawnError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = BlockingOneshot::new();
+    // The pool retires `tx` without a result whenever it drops the task unrun. That is a refusal here.
+    let rx = rx.with_closed_fallback(|| Err(SpawnError::RuntimeUnavailable));
+    let priority = Cx::current().map_or(128, |cx| cx.budget().priority);
+    let admission = pool.submit_with_priority(
+        move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                Ok::<T, SpawnError>(f())
+            }));
+            tx.send(result);
+        },
+        priority,
+    );
+    let handle = match admission.await {
+        Ok(handle) => handle,
+        Err(refused) => {
+            // A forbidden or closed pool hands the unstarted task back. Dropping it retires `tx` and `f` together.
+            drop(refused);
+            return Err(SpawnError::RuntimeUnavailable);
         }
     };
 
@@ -1142,6 +1260,42 @@ where
                 .expect("spawn_blocking_on_thread fn missing");
             f()
         }
+    }
+}
+
+/// [`spawn_blocking_on_thread`] for a caller that can report a refusal: the same bounded, joined dedicated thread,
+/// but a thread that cannot be started is `Err(SpawnError::RuntimeUnavailable)` and `f` is dropped unrun, never run
+/// inline on the caller. It consults no pool and no admission policy; a caller that must honour the policy checks it
+/// first, as the resolver and DNS entry points do.
+pub(crate) async fn try_spawn_blocking_on_thread<F, T>(f: F) -> Result<T, SpawnError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    try_spawn_blocking_on_thread_with(f, spawn_fallback_thread).await
+}
+
+/// [`try_spawn_blocking_on_thread`] with the thread creation injected, so a creation failure can be exercised.
+async fn try_spawn_blocking_on_thread_with<F, T, Spawn>(f: F, spawn: Spawn) -> Result<T, SpawnError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+    Spawn: FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<thread::JoinHandle<()>>,
+{
+    join_finished_fallback_threads();
+    // The admission owns its queue registration, as in `spawn_blocking_on_thread`.
+    FallbackAdmission::new(
+        &FALLBACK_THREAD_COUNT,
+        MAX_FALLBACK_THREADS,
+        &FALLBACK_WAITERS,
+    )
+    .await;
+
+    // The slot moves into the worker before the thread is requested, so a failed start and a finished worker both
+    // release it exactly once, and a failed start has already dropped `f`.
+    match start_blocking_thread_with(f, spawn, FallbackGuard) {
+        Ok(running) => Ok(running.await),
+        Err(_not_started) => Err(SpawnError::RuntimeUnavailable),
     }
 }
 

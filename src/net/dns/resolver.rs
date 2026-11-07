@@ -24,6 +24,25 @@
 //! "blocking work is forbidden" message, no thread is created and the lookup closure is dropped
 //! unrun. The refusal is not cached. A context with no pool, and code outside any context, keep
 //! the dedicated-thread path, and so does an open pool.
+//!
+//! A forbidden pool does not stop a resolver that has explicit nameservers: when the calling context
+//! also retains a native I/O driver and a timer driver and permits both I/O and time, `lookup_ip`,
+//! `lookup_mx`, `lookup_srv` and `lookup_txt` run the matching `lookup_*_native` method on the
+//! reactor, owned by that context. No thread is created and the blocking pool is not touched; the
+//! timeout, cancellation and cache rules are those of the `lookup_*_native` methods. The deadline is
+//! measured on the context's timer driver, not on an injected `time_getter`, and a shorter context
+//! `Budget` deadline wins over the resolver timeout. The refusal stays for the system-resolver path
+//! (no explicit nameservers, which needs `getaddrinfo` on a thread) and for a context that lacks a
+//! native I/O driver or a timer driver: without one, the native deadline would start a process-global
+//! timer thread. Only `Resolver` lookups are routed; `TcpStream::connect` by host name and
+//! `net::lookup_host` still refuse.
+//!
+//! Reading the system resolver configuration is blocking work too. A resolver with no explicit
+//! nameservers takes its nameservers from `/etc/resolv.conf`, and `lookup_mx`, `lookup_srv` and
+//! `lookup_txt` read that file before they schedule anything. On a forbidden pool they refuse first
+//! with the same error as `spawn_blocking_dns`: the file is never opened. A cached, special-use or
+//! literal `lookup_ip` answer never reaches the file, a resolver with explicit nameservers never
+//! reads it, and an open pool or no pool keeps reading it as before.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -44,8 +63,10 @@ use super::cache::{CacheConfig, CacheStats, DnsCache};
 use super::error::DnsError;
 use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
 use crate::net::TcpStream;
+use crate::runtime::SpawnError;
 use crate::runtime::spawn_blocking::{
-    current_pool_forbids_blocking, forbidden_io_error, spawn_blocking_on_thread,
+    current_pool_forbids_blocking, forbidden_io_error, refused_io_error,
+    try_spawn_blocking_on_thread,
 };
 use crate::time::{Elapsed, Sleep};
 use crate::types::Time;
@@ -139,6 +160,9 @@ pub struct Resolver {
     cache: Arc<DnsCache>,
     time_getter: fn() -> Time,
     entropy: Arc<dyn EntropySource>,
+    /// Reads the nameservers of the system resolver configuration (`/etc/resolv.conf`); only consulted
+    /// when `config.nameservers` is empty. A field so tests can count the reads, like `time_getter`.
+    system_config_reader: fn() -> Vec<SocketAddr>,
 }
 
 impl Resolver {
@@ -157,6 +181,7 @@ impl Resolver {
             cache,
             time_getter: crate::time::wall_now,
             entropy: Arc::new(OsEntropy),
+            system_config_reader: system_nameservers,
         }
     }
 
@@ -172,6 +197,7 @@ impl Resolver {
             cache,
             time_getter,
             entropy: Arc::new(OsEntropy),
+            system_config_reader: system_nameservers,
         }
     }
 
@@ -206,6 +232,14 @@ impl Resolver {
 
         if is_invalid_special_use_domain(host) {
             return Err(DnsError::NoRecords(host.to_string()));
+        }
+
+        // The blocking pool is forbidden: resolve on the reactor instead of refusing. The fork sits before this
+        // method's own cache probe because the native path validates, probes and fills the cache itself, so one
+        // lookup counts exactly one cache miss or hit.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(cx) = self.forbidden_native_owner() {
+            return self.lookup_ip_native(&cx, host).await;
         }
 
         // Preserve absolute-name semantics in the cache: `example.com.` may be
@@ -475,6 +509,11 @@ impl Resolver {
     /// Looks up MX records for a domain.
     pub async fn lookup_mx(&self, domain: &str) -> Result<LookupMx, DnsError> {
         validate_dns_record_name(domain)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(cx) = self.forbidden_native_owner() {
+            return self.lookup_mx_native(&cx, domain).await;
+        }
+        self.refuse_system_config_read()?;
         let domain = domain.to_string();
         let nameservers = self.effective_nameservers()?;
         let retries = self.config.retries;
@@ -520,6 +559,11 @@ impl Resolver {
     /// Looks up SRV records.
     pub async fn lookup_srv(&self, name: &str) -> Result<LookupSrv, DnsError> {
         validate_dns_record_name(name)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(cx) = self.forbidden_native_owner() {
+            return self.lookup_srv_native(&cx, name).await;
+        }
+        self.refuse_system_config_read()?;
         let name = name.to_string();
         let nameservers = self.effective_nameservers()?;
         let retries = self.config.retries;
@@ -569,6 +613,11 @@ impl Resolver {
     /// Looks up TXT records.
     pub async fn lookup_txt(&self, name: &str) -> Result<LookupTxt, DnsError> {
         validate_dns_record_name(name)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(cx) = self.forbidden_native_owner() {
+            return self.lookup_txt_native(&cx, name).await;
+        }
+        self.refuse_system_config_read()?;
         let name = name.to_string();
         let nameservers = self.effective_nameservers()?;
         let retries = self.config.retries;
@@ -624,7 +673,27 @@ impl Resolver {
         if !self.config.nameservers.is_empty() {
             return validate_configured_nameservers(&self.config.nameservers);
         }
-        Ok(system_nameservers())
+        Ok((self.system_config_reader)())
+    }
+
+    /// Refuses, before the system resolver configuration is read, on a forbidden blocking pool.
+    ///
+    /// Without explicit nameservers `effective_nameservers` opens `/etc/resolv.conf`, which is blocking
+    /// file I/O on the polling thread and runs before `spawn_blocking_dns` can refuse. A forbidden pool
+    /// gets the same error here, so the file is never touched; every other configuration returns `Ok` and
+    /// is unchanged.
+    fn refuse_system_config_read(&self) -> Result<(), DnsError> {
+        if self.config.nameservers.is_empty() && current_pool_forbids_blocking() {
+            return refuse_blocking_dns();
+        }
+        Ok(())
+    }
+
+    /// Replaces the system resolver configuration reader, so tests can count the reads.
+    #[cfg(test)]
+    fn with_system_config_reader(mut self, reader: fn() -> Vec<SocketAddr>) -> Self {
+        self.system_config_reader = reader;
+        self
     }
 }
 
@@ -642,6 +711,7 @@ impl Clone for Resolver {
             cache: Arc::clone(&self.cache),
             time_getter: self.time_getter,
             entropy: Arc::clone(&self.entropy),
+            system_config_reader: self.system_config_reader,
         }
     }
 }
@@ -756,14 +826,31 @@ where
     F: FnOnce() -> Result<T, DnsError> + Send + 'static,
     T: Send + 'static,
 {
-    // Gated like net::lookup_all; then a dedicated thread a cancelled caller stops waiting for.
+    // Gated like net::lookup_all, then refused on a forbidden pool: `f` is dropped unrun and no thread is
+    // created. Then a dedicated thread a cancelled caller stops waiting for.
+    refuse_blocking_dns()?;
+    // A thread that cannot be started is an error the caller sees, never a lookup run inline on the polling thread.
+    unless_cancelled(crate::cx::Cx::current(), async {
+        dns_admitted(try_spawn_blocking_on_thread(f).await)
+    })
+    .await
+}
+
+/// The admission check shared by every blocking resolver step.
+///
+/// The ambient context must permit I/O, and a runtime that forbids blocking work is refused with the same
+/// predicate and message as the pool-backed I/O entry points. Nothing is scheduled or read before it.
+fn refuse_blocking_dns() -> Result<(), DnsError> {
     crate::cx::io_gate::require_ambient_io("net::dns::Resolver")?;
-    // A runtime that forbids blocking work is refused here, before anything is scheduled: `f` is dropped
-    // unrun and no thread is created. The same predicate and message as the pool-backed I/O entry points.
     if current_pool_forbids_blocking() {
         return Err(DnsError::from(forbidden_io_error()));
     }
-    unless_cancelled(crate::cx::Cx::current(), spawn_blocking_on_thread(f)).await
+    Ok(())
+}
+
+/// The lookup's own result, or a refusal to place it worded as an I/O error (see `refused_io_error`).
+fn dns_admitted<T>(placed: Result<Result<T, DnsError>, SpawnError>) -> Result<T, DnsError> {
+    placed.unwrap_or_else(|_refused| Err(DnsError::from(refused_io_error())))
 }
 
 fn validate_lookup_hostname(host: &str) -> Result<(), DnsError> {

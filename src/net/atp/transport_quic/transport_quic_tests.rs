@@ -6725,7 +6725,9 @@ mod tests {
                 DeferredSymbolAcceptResult::Decode(job) => {
                     assert!(pending.replace(job).is_none());
                 }
-                other => panic!("unexpected poisoned-fixture admission: {other:?}"),
+                other @ DeferredSymbolAcceptResult::Immediate(_) => {
+                    panic!("unexpected poisoned-fixture admission: {other:?}")
+                }
             }
         }
         assert_eq!(pipeline.block_repair_failure(sbn), None);
@@ -6912,7 +6914,9 @@ mod tests {
                 DeferredSymbolAcceptResult::Decode(job) => {
                     assert!(pending.replace(job).is_none());
                 }
-                other => panic!("unexpected rank-retry admission: {other:?}"),
+                other @ DeferredSymbolAcceptResult::Immediate(_) => {
+                    panic!("unexpected rank-retry admission: {other:?}")
+                }
             }
         }
         let job = pending.expect("K repair rows must start an owned decode job");

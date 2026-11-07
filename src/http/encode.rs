@@ -203,7 +203,7 @@ impl<B: Body> ContentEncodedBody<B> {
 
 /// Shared by the encoder and the Body-to-produced transport bridge. Every
 /// owner retires only its own registration; no ambient context is minted.
-pub(crate) struct BodyCancellation {
+pub struct BodyCancellation {
     cx: Cx,
     token: Option<CancelWakerToken>,
 }
@@ -268,8 +268,7 @@ impl Encoder {
             #[cfg(feature = "zstd")]
             Self::Zstd(codec) => {
                 let mut output = vec![0; _quantum];
-                let step = codec.encode(input, &mut output)
-                    .map_err(|error| io::Error::other(error))?;
+                let step = codec.encode(input, &mut output).map_err(io::Error::other)?;
                 output.truncate(step.output_written);
                 Ok((step.input_read, output.into()))
             }
@@ -291,7 +290,7 @@ impl Encoder {
                 let step = if finish {
                     codec.finish(&mut output)
                 } else {
-                    codec.flush(&mut output).map_err(|error| io::Error::other(error))?
+                    codec.flush(&mut output).map_err(io::Error::other)?
                 };
                 output.truncate(step.output_written);
                 step.status != asupersync_zstd::StreamStatus::NeedOutput

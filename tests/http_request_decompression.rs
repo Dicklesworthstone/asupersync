@@ -96,7 +96,7 @@ mod progressive {
         let mut trailers = None;
         for _ in 0..100_000 {
             match poll(body) {
-                Poll::Pending => continue, // bounded cooperative codec work
+                Poll::Pending => {} // bounded cooperative codec work
                 Poll::Ready(Some(Ok(Frame::Data(mut data)))) => {
                     let remaining = data.remaining();
                     bytes.extend_from_slice(&data.copy_to_bytes(remaining));

@@ -267,7 +267,7 @@ impl Drop for DecodeCancellation {
 
 /// Prepared separately so web extraction can reject unsupported codecs
 /// before taking ownership of the single-consumer streaming request slot.
-pub(crate) struct ContentDecodePlan {
+pub struct ContentDecodePlan {
     limits: ContentDecodeLimits,
     stages: Vec<DecoderStage>,
     transformed: bool,

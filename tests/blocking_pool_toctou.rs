@@ -116,6 +116,53 @@ fn handle_spawn_shutdown_race_completes_or_cancels() -> Result<(), String> {
     run_spawn_shutdown_race(SpawnApi::Handle)
 }
 
+/// The blocking-helper name a source line declares, if any: a `pub` or `pub(crate)` function named `spawn_blocking*`
+/// or its fallible sibling `try_spawn_blocking*`. A helper that reports a refusal decides blocking placement exactly as
+/// the helper it mirrors does, so both families are classified.
+fn declared_blocking_helper(line: &str) -> Option<&str> {
+    let declaration = [
+        "pub async fn ",
+        "pub fn ",
+        "pub(crate) async fn ",
+        "pub(crate) fn ",
+    ]
+    .into_iter()
+    .find_map(|prefix| line.strip_prefix(prefix))?;
+    let name = declaration.split(['<', '(']).next()?;
+    (name.starts_with("spawn_blocking") || name.starts_with("try_spawn_blocking")).then_some(name)
+}
+
+/// Negative control for the widened census: the scan the census runs sees a new, unclassified `try_spawn_blocking*`
+/// helper, so adding one without a row in the expected table fails `blocking_helper_boundary_census_requires_classification`.
+#[test]
+fn blocking_helper_census_sees_an_unclassified_try_helper() {
+    let rogue = "pub(crate) async fn try_spawn_blocking_rogue<F, T>(f: F) -> Result<T, SpawnError>";
+    assert_eq!(
+        declared_blocking_helper(rogue),
+        Some("try_spawn_blocking_rogue")
+    );
+
+    // The same scan still finds the original family and ignores everything else.
+    assert_eq!(
+        declared_blocking_helper(
+            "pub async fn spawn_blocking_io<F, T>(f: F) -> std::io::Result<T>"
+        ),
+        Some("spawn_blocking_io")
+    );
+    assert_eq!(
+        declared_blocking_helper("fn try_spawn_blocking_private(f: F)"),
+        None
+    );
+    assert_eq!(
+        declared_blocking_helper("pub fn try_other_helper(f: F)"),
+        None
+    );
+    assert_eq!(
+        declared_blocking_helper("pub(crate) fn run_try_spawn_blocking(f: F)"),
+        None
+    );
+}
+
 #[test]
 fn blocking_helper_boundary_census_requires_classification() {
     use std::collections::BTreeMap;
@@ -130,19 +177,7 @@ fn blocking_helper_boundary_census_requires_classification() {
             } else if path.extension().is_some_and(|extension| extension == "rs") {
                 let source = std::fs::read_to_string(&path).expect("read Rust boundary source");
                 for line in source.lines().map(str::trim_start) {
-                    let declaration = [
-                        "pub async fn ",
-                        "pub fn ",
-                        "pub(crate) async fn ",
-                        "pub(crate) fn ",
-                    ]
-                    .into_iter()
-                    .find_map(|prefix| line.strip_prefix(prefix));
-                    let Some(declaration) = declaration else {
-                        continue;
-                    };
-                    let name = declaration.split(['<', '(']).next().unwrap();
-                    if name.starts_with("spawn_blocking") {
+                    if let Some(name) = declared_blocking_helper(line) {
                         let relative = path.strip_prefix(root).unwrap().to_path_buf();
                         *found.entry((relative, name.to_owned())).or_default() += 1;
                     }
@@ -171,6 +206,22 @@ fn blocking_helper_boundary_census_requires_classification() {
         ("runtime/spawn_blocking.rs", "spawn_blocking_on_pool", 1),
         ("runtime/spawn_blocking.rs", "spawn_blocking_on_thread", 1),
         ("runtime/spawn_blocking.rs", "spawn_blocking_io_off_worker", 1),
+        // The strict siblings (`try_*`): they report a refusal and have no inline fallback. `try_spawn_blocking` is the
+        // public dispatcher, `try_spawn_blocking_on_pool` and `try_spawn_blocking_on_thread` its two sinks, and
+        // `try_spawn_blocking_io_on_thread` the committed write-behind thread starter that already refused on a failed
+        // thread start or a full fallback cap.
+        ("runtime/spawn_blocking.rs", "try_spawn_blocking", 1),
+        (
+            "runtime/spawn_blocking.rs",
+            "try_spawn_blocking_io_on_thread",
+            1,
+        ),
+        ("runtime/spawn_blocking.rs", "try_spawn_blocking_on_pool", 1),
+        (
+            "runtime/spawn_blocking.rs",
+            "try_spawn_blocking_on_thread",
+            1,
+        ),
         ("cx/cx.rs", "spawn_blocking", 1),
         ("cx/cx.rs", "spawn_blocking_in", 1),
         ("cx/cx.rs", "spawn_blocking_drained", 1),

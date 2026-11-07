@@ -108,6 +108,27 @@ impl Resolver {
         Ok(LookupTxt::new(records))
     }
 
+    /// The calling context as the owner of a reactor lookup, when the blocking pool cannot be used for this resolver.
+    ///
+    /// That is the case only when the context's pool forbids blocking work, this resolver has explicit nameservers (the
+    /// reactor path never consults the system resolver) and the context retains a native I/O driver and permits I/O
+    /// AND retains a timer driver and permits TIME. The timer driver is required because the native deadline falls back
+    /// to the process-global fallback timer thread when its owner has none, which a context that forbids blocking work
+    /// must never reach. Anything else returns `None`, so the blocking-pool path, including its forbidden-policy
+    /// refusal, is unchanged.
+    ///
+    /// Time source: the reactor path measures its deadline on the owner context's timer driver, not on this resolver's
+    /// injected `time_getter`, and it also meets the context's `Budget` deadline, so a budget that ends before
+    /// `ResolverConfig::timeout` wins. The query id still comes from this resolver's entropy source, as on the
+    /// blocking path.
+    pub(super) fn forbidden_native_owner(&self) -> Option<Cx> {
+        if self.config.nameservers.is_empty() || !current_pool_forbids_blocking() {
+            return None;
+        }
+        Cx::current()
+            .filter(|cx| require_native_io(cx, true).is_ok() && cx.timer_driver().is_some())
+    }
+
     fn native_nameservers(&self) -> Result<Vec<SocketAddr>, DnsError> {
         if self.config.nameservers.is_empty() {
             return Err(DnsError::Io(
