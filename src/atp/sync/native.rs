@@ -41,6 +41,7 @@ pub use apply::{
 };
 pub use session::{
     NativeDirectorySessionReport, NativeDirectoryStatePublication, NativeDirectorySyncSession,
+    NativeDirectoryWatch, NativeDirectoryWatchConfig, NativeDirectoryWatchError,
     PreparedNativeDirectorySessionSync,
 };
 

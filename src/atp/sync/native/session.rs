@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod state;
+mod watch;
+pub use watch::{NativeDirectoryWatch, NativeDirectoryWatchConfig, NativeDirectoryWatchError};
 #[cfg(test)]
 mod tests;
 
@@ -203,6 +205,17 @@ impl NativeDirectorySyncSession {
         cx: &Cx,
     ) -> Result<PreparedNativeDirectorySessionSync<'_>, NativeDirectoryError> {
         self.require_ready()?;
+        let prepared = self.prepare_owned(cx).await?;
+        Ok(PreparedNativeDirectorySessionSync { session: self, prepared })
+    }
+
+    // Callers check require_ready before entering. The watch surface then
+    // fences its session while this read-only job is in flight, so abandoning
+    // a scan cannot start another worker before the retained lease retires.
+    async fn prepare_owned(
+        &self,
+        cx: &Cx,
+    ) -> Result<PreparedNativeDirectorySync, NativeDirectoryError> {
         checkpoint(cx)?;
         if !cx.capabilities().entropy {
             return Err(refused(self.state_directory(), "session preparation requires context entropy"));
@@ -234,7 +247,7 @@ impl NativeDirectorySyncSession {
                 Ok(prepared)
             })())
         }).await.map_err(NativeDirectoryError::Runtime)??;
-        Ok(PreparedNativeDirectorySessionSync { session: self, prepared })
+        Ok(prepared)
     }
 
     fn require_ready(&self) -> Result<(), NativeDirectoryError> {
