@@ -111,6 +111,8 @@ mod atp_local_sync;
 mod atp_local_mirror;
 #[path = "asupersync/atp_local_recover.rs"]
 mod atp_local_recover;
+#[path = "asupersync/atp_local_watch.rs"]
+mod atp_local_watch;
 
 #[derive(Parser, Debug)]
 #[command(name = "asupersync", version, about = "Asupersync CLI tools")]
@@ -356,6 +358,8 @@ enum AtpCommand {
     LocalMirror(atp_local_mirror::MirrorArgs),
     /// Review and restore originals retained by local synchronization or mirroring
     LocalRecover(atp_local_recover::RecoverArgs),
+    /// Observe local directory changes and optionally apply a bounded continuous policy
+    LocalWatch(atp_local_watch::LocalWatchArgs),
     /// Mirror directories with ATP (including deletes)
     Mirror(AtpMirrorArgs),
     /// Generate share codes for ATP transfers
@@ -4673,6 +4677,7 @@ fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
         AtpCommand::LocalSync(args) => atp_local_sync::run(&args, output),
         AtpCommand::LocalMirror(args) => atp_local_mirror::run_mirror(&args, output),
         AtpCommand::LocalRecover(args) => atp_local_recover::run(&args, output),
+        AtpCommand::LocalWatch(args) => atp_local_watch::run(&args, output),
         AtpCommand::Mirror(args) => atp_mirror(&args, output),
         AtpCommand::Share(args) => atp_share(&args, output),
         AtpCommand::Pair(args) => atp_pair(&args, output),

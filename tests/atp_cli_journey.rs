@@ -21,3 +21,7 @@ mod local_sync;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[path = "atp/cli_journey/local_mirror.rs"]
 mod local_mirror;
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "atp/cli_journey/local_watch.rs"]
+mod local_watch;
