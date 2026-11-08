@@ -352,3 +352,157 @@ fn reader_body_accepts_filled_bytes_in_a_shorter_original_prefix() {
     assert_eq!(data.chunk(), b"abc");
     assert!(matches!(Pin::new(&mut body).poll_frame(&mut cx), Poll::Ready(None)));
 }
+
+#[cfg(feature = "zstd")]
+mod zstd {
+    use super::{Reader, Status};
+    use crate::compression::zstd::{DecodeLimits, ZstdDecoder};
+    use crate::io::read_buf::copy_read_contract_tests::{
+        ReadStep, ScriptReader, Status as ReadStatus, finish,
+    };
+    use crate::io::{AsyncRead, AsyncReadExt, ReadBuf};
+    use std::future::Future;
+    use std::io;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    // Independent RFC 8878 raw-block fixtures, not output from our encoder.
+    const HI: &[u8] = &[0x28, 0xb5, 0x2f, 0xfd, 0x20, 2, 0x11, 0, 0, b'h', b'i'];
+    const EMPTY: &[u8] = &[0x28, 0xb5, 0x2f, 0xfd, 0x20, 0, 1, 0, 0];
+    const SKIPPABLE: &[u8] = &[0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0];
+
+    #[test]
+    fn pending_compressed_fills_survive_a_dropped_read_at_every_boundary() {
+        for split in 1..HI.len() {
+            let source = ScriptReader::new([
+                ReadStep::Data(HI[..split].to_vec(), ReadStatus::Pending),
+                ReadStep::Wait,
+                ReadStep::Data(HI[split..].to_vec(), ReadStatus::Ready),
+                ReadStep::Eof,
+            ]);
+            let polls = Rc::clone(&source.polls);
+            let mut decoder = ZstdDecoder::new(source, DecodeLimits::new(2));
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut storage = [0xa5; 8];
+            {
+                let mut read = decoder.read(&mut storage);
+                assert!(Pin::new(&mut read).poll(&mut cx).is_pending());
+            }
+            assert_eq!(polls.get(), 2, "the reported prefix must be retained");
+            assert_eq!(storage, [0xa5; 8]);
+            let mut output = Vec::new();
+            assert_eq!(finish(&mut decoder.read_to_end(&mut output)).unwrap(), 2);
+            assert_eq!(output, b"hi", "split {split}");
+            assert_eq!(polls.get(), 4);
+        }
+    }
+
+    #[test]
+    fn pending_compressed_fills_do_not_wait_for_another_source_wake() {
+        let source = ScriptReader::new([
+            ReadStep::Data(HI.to_vec(), ReadStatus::Pending),
+            ReadStep::Eof,
+        ]);
+        let polls = Rc::clone(&source.polls);
+        let mut decoder = ZstdDecoder::new(source, DecodeLimits::new(2));
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut storage = [0xa5; 8];
+        let mut buf = ReadBuf::new(&mut storage);
+        buf.put_slice(b"P");
+        assert!(matches!(
+            Pin::new(&mut decoder).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(buf.filled(), b"Phi");
+        assert_eq!(polls.get(), 1);
+    }
+
+    #[test]
+    fn compressed_fills_are_retained_when_the_original_source_error_is_returned() {
+        for split in 1..=HI.len() {
+            let source = ScriptReader::new([
+                ReadStep::Data(HI[..split].to_vec(), ReadStatus::Error),
+                ReadStep::Data(HI[split..].to_vec(), ReadStatus::Ready),
+                ReadStep::Eof,
+            ]);
+            let mut decoder = ZstdDecoder::new(source, DecodeLimits::new(2));
+            let mut storage = [0xa5; 8];
+            let error = finish(&mut decoder.read(&mut storage)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            assert_eq!(error.to_string(), "scripted read error");
+            assert_eq!(storage, [0xa5; 8]);
+            let mut output = Vec::new();
+            assert_eq!(finish(&mut decoder.read_to_end(&mut output)).unwrap(), 2);
+            assert_eq!(output, b"hi", "split {split}");
+        }
+    }
+
+    #[test]
+    fn substituted_compressed_input_is_terminal_for_every_source_status() {
+        for status in [Status::Ready, Status::Pending, Status::Error] {
+            let mut source = Reader::new(status);
+            source.bytes = HI;
+            source.shifted = true;
+            let polls = Arc::clone(&source.polls);
+            let mut decoder = ZstdDecoder::new(source, DecodeLimits::new(2));
+            let mut cx = Context::from_waker(Waker::noop());
+            for _ in 0..3 {
+                let mut storage = [0xa5; 8];
+                let mut buf = ReadBuf::new(&mut storage);
+                assert!(matches!(
+                    Pin::new(&mut decoder).poll_read(&mut cx, &mut buf),
+                    Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData
+                ));
+                assert!(buf.filled().is_empty());
+                assert_eq!(storage, [0xa5; 8]);
+            }
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[derive(Default)]
+    struct CountWake(AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn empty_and_skippable_frames_yield_then_resume_without_false_eof() {
+        for frame in [EMPTY, SKIPPABLE] {
+            let source = ScriptReader::new(
+                (0..256)
+                    .map(|_| ReadStep::Data(frame.to_vec(), ReadStatus::Ready))
+                    .chain([
+                        ReadStep::Data(HI.to_vec(), ReadStatus::Ready),
+                        ReadStep::Eof,
+                    ]),
+            );
+            let polls = Rc::clone(&source.polls);
+            let mut decoder = ZstdDecoder::new(source, DecodeLimits::new(2));
+            let wake = Arc::new(CountWake::default());
+            let waker = Waker::from(Arc::clone(&wake));
+            let mut cx = Context::from_waker(&waker);
+            let mut storage = [0xa5; 8];
+            let mut buf = ReadBuf::new(&mut storage);
+            buf.put_slice(b"P");
+            assert!(Pin::new(&mut decoder).poll_read(&mut cx, &mut buf).is_pending());
+            assert_eq!(buf.filled(), b"P");
+            assert!((1..=32).contains(&polls.get()), "one bounded read poll");
+            assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+            let mut output = Vec::new();
+            assert_eq!(finish(&mut decoder.read_to_end(&mut output)).unwrap(), 2);
+            assert_eq!(output, b"hi");
+            assert_eq!(polls.get(), 258);
+        }
+    }
+}

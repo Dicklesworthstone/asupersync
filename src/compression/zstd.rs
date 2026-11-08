@@ -25,7 +25,9 @@
 //! A stream that ends inside a frame, or contains no frame at all, fails
 //! with [`io::ErrorKind::UnexpectedEof`]. Any other decoding failure,
 //! including an exceeded limit, fails with [`io::ErrorKind::InvalidData`].
-//! The [`DecodeError`] is the error's source. The first error is final.
+//! The [`DecodeError`] is the error's source. The first codec error is final.
+//! Source I/O errors are returned unchanged. If the source permits a retry,
+//! the decoder retains any compressed bytes reported alongside that error.
 //!
 //! # Cancel safety
 //!
@@ -49,6 +51,9 @@
 //! The encoder compresses a frame when it fills, and on flush and shutdown.
 //! That work happens inside a single poll: about 10 ms for a 1 MiB frame at
 //! 100 MB/s. A smaller frame shortens each poll, at some cost in ratio.
+//! The decoder performs at most 32 codec steps per poll, each processing at
+//! most one bounded block, and then wakes itself before yielding. Empty and
+//! skippable frames therefore cannot keep a single read poll running forever.
 //!
 //! # Example
 //!
@@ -91,6 +96,7 @@ pub const MAX_FRAME_SIZE: usize = StreamEncoder::MAX_FRAME_SIZE;
 
 /// Bytes each adapter stages between the codec and the wrapped stream.
 const STAGING: usize = 32 * 1024;
+const POLL_STEPS: usize = 32;
 
 fn encode_error(error: StreamEncodeError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, error)
@@ -313,6 +319,8 @@ pub struct ZstdDecoder<R> {
     eof: bool,
     /// The stream ended cleanly; every later read returns end of file.
     done: bool,
+    /// A substituted input buffer makes the source's progress unknowable.
+    read_buffer_replaced: bool,
 }
 
 impl<R> ZstdDecoder<R> {
@@ -327,6 +335,7 @@ impl<R> ZstdDecoder<R> {
             filled: 0,
             eof: false,
             done: false,
+            read_buffer_replaced: false,
         }
     }
 
@@ -349,6 +358,44 @@ impl<R> ZstdDecoder<R> {
     }
 }
 
+impl<R: AsyncRead + Unpin> ZstdDecoder<R> {
+    fn check_read_buffer(&self) -> io::Result<()> {
+        if self.read_buffer_replaced {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "zstd source replaced the read buffer it was given; endpoint effects are unknown",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Preserve in-place input before interpreting the source's poll status.
+    fn poll_refill(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.consumed = 0;
+        self.filled = 0;
+        let start = self.input.as_ptr();
+        let offered = self.input.len();
+        let mut read = ReadBuf::new(&mut self.input);
+        let result = Pin::new(&mut self.inner).poll_read(cx, &mut read);
+        if !crate::io::transfer_session::filled_in_place(read.filled(), start, offered) {
+            self.read_buffer_replaced = true;
+            return Poll::Ready(self.check_read_buffer());
+        }
+        self.filled = read.filled().len();
+        match result {
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending if self.filled == 0 => Poll::Pending,
+            Poll::Pending | Poll::Ready(Ok(())) => {
+                // Only an empty successful read establishes EOF. A pending
+                // read with bytes has already made progress we can decode.
+                self.eof = self.filled == 0;
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+}
+
 impl<R: AsyncRead + Unpin> AsyncRead for ZstdDecoder<R> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -359,7 +406,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for ZstdDecoder<R> {
         if this.done || buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        loop {
+        this.check_read_buffer()?;
+        for _ in 0..POLL_STEPS {
             if this.eof {
                 let progress = this.decoder.finish(buf.unfilled()).map_err(decode_error)?;
                 buf.advance(progress.output_written);
@@ -383,7 +431,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for ZstdDecoder<R> {
             if progress.output_written > 0 {
                 return Poll::Ready(Ok(()));
             }
-            if progress.input_read > 0 {
+            if progress.input_read > 0 || progress.status == StreamStatus::FrameFinished {
                 continue;
             }
             if this.consumed < this.filled {
@@ -391,16 +439,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for ZstdDecoder<R> {
                     "zstd decoder made no progress with input pending",
                 )));
             }
-            let mut read = ReadBuf::new(&mut this.input);
-            match Pin::new(&mut this.inner).poll_read(cx, &mut read) {
+            match this.poll_refill(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(())) => {}
             }
-            this.consumed = 0;
-            this.filled = read.filled().len();
-            this.eof = this.filled == 0;
         }
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 }
 
@@ -413,6 +459,7 @@ impl<R: fmt::Debug> fmt::Debug for ZstdDecoder<R> {
             .field("buffered", &(self.filled - self.consumed))
             .field("eof", &self.eof)
             .field("done", &self.done)
+            .field("read_buffer_replaced", &self.read_buffer_replaced)
             .finish()
     }
 }

@@ -29,7 +29,7 @@ const REPLACED_BUFFER: &str =
 /// lifetime, so a reader can swap in a buffer over other memory; counting that
 /// fill would record bytes the destination never received. An empty fill moves
 /// nothing, wherever it points.
-pub(super) fn filled_in_place(filled: &[u8], start: *const u8, offered: usize) -> bool {
+pub(crate) fn filled_in_place(filled: &[u8], start: *const u8, offered: usize) -> bool {
     filled.is_empty() || (filled.len() <= offered && std::ptr::eq(filled.as_ptr(), start))
 }
 
