@@ -78,6 +78,7 @@ pub mod scoped_first_ok;
 pub mod scoped_fs;
 pub mod scoped_quorum;
 pub mod scoped_race;
+pub mod scoped_retry;
 pub mod scoped_timeout;
 pub mod supervisor_service;
 pub mod tracked_registry;
@@ -141,6 +142,10 @@ pub use scoped_quorum::{
 pub use scoped_race::{
     ScopedRaceBranch, ScopedRaceBranchReport, ScopedRaceClose, ScopedRaceError, ScopedRaceReport,
     ScopedRaceStop, ScopedRaceTask,
+};
+pub use scoped_retry::{
+    ScopedRetryAttempt, ScopedRetryClose, ScopedRetryError, ScopedRetryReport, ScopedRetryStop,
+    ScopedRetryTask,
 };
 pub use scoped_timeout::{
     ScopedTimeoutClose, ScopedTimeoutError, ScopedTimeoutReport, ScopedTimeoutStop, ScopedTimeoutTask,
