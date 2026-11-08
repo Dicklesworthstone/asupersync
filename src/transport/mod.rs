@@ -14,6 +14,8 @@ pub mod half_close_conformance_tests;
 pub mod router;
 pub mod sink;
 pub mod stream;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod udp;
 #[cfg(test)]
 mod tests;
 
@@ -40,6 +42,8 @@ pub use router::{
 };
 pub use sink::{MultipathPathStats, MultipathPendingSymbol, MultipathSink, SymbolSink, SymbolSinkExt};
 pub use stream::{SymbolStream, SymbolStreamExt};
+#[cfg(not(target_arch = "wasm32"))]
+pub use udp::{SymbolDatagramLimits, UdpSymbolSink, UdpSymbolStream, UdpSymbolStreamStats};
 
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::types::Symbol;

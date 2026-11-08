@@ -2561,7 +2561,7 @@ impl UdpSocket {
 
     /// Poll for send_to readiness.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    fn poll_send_to(
+    pub(crate) fn poll_send_to(
         &mut self,
         cx: &Context<'_>,
         buf: &[u8],

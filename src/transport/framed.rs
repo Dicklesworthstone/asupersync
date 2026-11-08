@@ -90,6 +90,10 @@ impl SymbolFrameLimits {
     #[must_use]
     pub const fn max_wire_bytes(self) -> usize { self.max_wire_bytes }
 
+    pub(super) const fn batch_limits(self) -> SymbolBatchLimits {
+        self.batch
+    }
+
     fn codec(self) -> LengthDelimitedCodec {
         LengthDelimitedCodec::builder()
             .max_frame_length(self.batch.max_encoded_bytes)
@@ -207,7 +211,7 @@ impl<W: AsyncWrite + Send + Unpin> SymbolSink for FramedSymbolSink<W> {
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
         }
-        let encoded = match encode_symbol_batch(std::slice::from_ref(&symbol), this.limits.batch) {
+        let encoded = match encode_symbol_batch(std::slice::from_ref(&symbol), this.limits.batch_limits()) {
             Ok(encoded) => encoded,
             Err(error) => return Poll::Ready(Err(SinkError::SendFailed { reason: error.to_string() })),
         };
@@ -354,7 +358,7 @@ impl<R: AsyncRead + Send + Unpin> SymbolStream for FramedSymbolStream<R> {
             }
             Poll::Ready(Some(Ok(bytes))) => bytes,
         };
-        match decode_symbol_batch(&bytes, &this.key, this.limits.batch) {
+        match decode_symbol_batch(&bytes, &this.key, this.limits.batch_limits()) {
             Ok(mut symbols) => {
                 let symbol = symbols.pop().expect("singleton batch admitted");
                 this.ended = false;
