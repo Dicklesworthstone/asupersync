@@ -6,7 +6,7 @@
 use crate::cx::Cx;
 use crate::runtime::SpawnError;
 use crate::runtime::spawn_blocking::{
-    refused_io_error, try_spawn_blocking, try_spawn_blocking_on_thread,
+    refused_io_error, refused_pool_io_error, try_spawn_blocking, try_spawn_blocking_on_thread,
 };
 use std::future::Future;
 use std::io;
@@ -109,7 +109,8 @@ where
         // mask even when the context inherited a pool, which would send a restricted context's lookup to a dedicated
         // thread past its open pool, or past the refusal of its closed one.
         if cx.blocking_pool_handle_for_inheritance().is_some() {
-            return unless_cancelled(&cx, async { admitted(try_spawn_blocking(f).await) }).await;
+            return unless_cancelled(&cx, async { admitted_on_pool(try_spawn_blocking(f).await) })
+                .await;
         }
         return unless_cancelled(&cx, async {
             admitted(try_spawn_blocking_on_thread(f).await)
@@ -126,6 +127,12 @@ where
 /// The lookup's own result, or the refusal worded as an I/O error (the forbidden-policy error under a forbidden pool).
 fn admitted<T>(placed: Result<io::Result<T>, SpawnError>) -> io::Result<T> {
     placed.unwrap_or_else(|_refused| Err(refused_io_error()))
+}
+
+/// [`admitted`] for a lookup placed on the context's blocking pool: a pool that bounds live job bytes is named as such
+/// instead of being reported as closed, absent, or unable to start a thread.
+fn admitted_on_pool<T>(placed: Result<io::Result<T>, SpawnError>) -> io::Result<T> {
+    placed.unwrap_or_else(|_refused| Err(refused_pool_io_error()))
 }
 
 /// Waits for a blocking lookup unless the calling task is cancelled first

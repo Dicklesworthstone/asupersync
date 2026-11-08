@@ -1413,3 +1413,225 @@
             "a_native_runtime_with_a_forbidden_pool_refuses_blocking_work_and_a_bounded_one_runs_it"
         );
     }
+
+    /// A pool that bounds live job bytes, open and idle. It is not shut down and not forbidden: it refuses a submission
+    /// that carries no byte charge, and takes one that does.
+    fn byte_bounded_pool(max_live_bytes: usize) -> crate::runtime::BlockingPool {
+        crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::BoundedBytes {
+                max_queued: std::num::NonZeroUsize::new(4).unwrap(),
+                max_live_bytes: std::num::NonZeroUsize::new(max_live_bytes).unwrap(),
+            },
+        )
+    }
+
+    /// A pool that bounds only the number of queued jobs, open and idle.
+    fn count_bounded_pool() -> crate::runtime::BlockingPool {
+        crate::runtime::BlockingPool::with_config_and_policies(
+            0,
+            1,
+            crate::runtime::blocking_pool::BlockingPoolOptions::default(),
+            crate::runtime::BlockingQueuePolicy::Fifo,
+            crate::runtime::BlockingAdmissionPolicy::Bounded {
+                max_queued: std::num::NonZeroUsize::new(4).unwrap(),
+            },
+        )
+    }
+
+    /// An I/O operation offered to a pool that bounds live job bytes is refused because it is submitted without a byte
+    /// charge, not because the pool stopped: the error says so (`InvalidInput`, as the standard streams report it), the
+    /// closure never runs, and the same pool, still open, takes a valid charged job. Permitted I/O on a count-bounded
+    /// pool (a real read-only file read) still runs on the pool's thread, and a pool that really was shut down still
+    /// reports that it stopped.
+    #[test]
+    fn off_worker_io_on_a_byte_bounded_pool_reports_the_uncharged_submission_not_a_stopped_pool() {
+        init_test(
+            "off_worker_io_on_a_byte_bounded_pool_reports_the_uncharged_submission_not_a_stopped_pool",
+        );
+        let pool = byte_bounded_pool(10_000);
+        let ran = Arc::new(AtomicU32::new(0));
+        let ran_in_closure = Arc::clone(&ran);
+        let result = future::block_on(spawn_blocking_io_off_worker(
+            Some(pool.handle()),
+            move || {
+                ran_in_closure.fetch_add(1, Ordering::SeqCst);
+                Ok(1_u32)
+            },
+        ));
+        let error = result.expect_err("a byte-bounded pool refuses an uncharged submission");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let message = error.to_string();
+        assert!(message.contains("uncharged"), "{message}");
+        assert!(!message.contains("stopped"), "{message}");
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "the closure must not run");
+        assert!(!pool.is_shutdown(), "the pool the error is about is open");
+        assert_eq!(pool.charged_bytes(), 0);
+
+        // The same still-live pool takes a valid charged job and runs it.
+        let ran_charged = Arc::clone(&ran);
+        let task = pool
+            .handle()
+            .try_spawn_charged(
+                move || {
+                    ran_charged.fetch_add(1, Ordering::SeqCst);
+                },
+                0,
+            )
+            .expect("an open byte-bounded pool admits a charged job");
+        assert!(task.wait_timeout(Duration::from_secs(5)));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.charged_bytes(), 0);
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+
+        // The same pool once it has really been shut down: an uncharged submission is refused either way, but a
+        // closed pool keeps the stopped-pool error it always had.
+        assert!(pool.is_shutdown());
+        let ran_closed = Arc::clone(&ran);
+        let closed = future::block_on(spawn_blocking_io_off_worker(
+            Some(pool.handle()),
+            move || {
+                ran_closed.fetch_add(1, Ordering::SeqCst);
+                Ok(1_u32)
+            },
+        ))
+        .expect_err("a closed byte-bounded pool refuses");
+        assert_eq!(closed.kind(), std::io::ErrorKind::Other);
+        assert!(closed.to_string().contains("stopped"), "{closed}");
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the closure must not run");
+
+        // Permitted I/O on a count-bounded pool: a real read-only file read (the first five bytes of this crate's
+        // Cargo.toml) runs on the pool's thread, not the caller's, and the call still returns 5. Once that pool is shut
+        // down it reports that it stopped.
+        let counted = count_bounded_pool();
+        let observed = Arc::new(StdMutex::new(None));
+        let observed_in_closure = Arc::clone(&observed);
+        let value = future::block_on(spawn_blocking_io_off_worker(
+            Some(counted.handle()),
+            move || {
+                use std::io::Read;
+                let mut head = [0_u8; 5];
+                std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))?
+                    .read_exact(&mut head)?;
+                *observed_in_closure.lock().unwrap() = Some((std::thread::current().id(), head));
+                Ok(5_u32)
+            },
+        ))
+        .expect("a count-bounded pool runs the I/O");
+        assert_eq!(value, 5);
+        let (read_on, head) = observed.lock().unwrap().expect("the read ran");
+        assert_eq!(
+            &head[..],
+            &include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))[..5],
+            "the pool's read returned the file's first bytes"
+        );
+        assert_ne!(
+            read_on,
+            std::thread::current().id(),
+            "the read must run on a pool thread, not the caller's"
+        );
+        counted.shutdown();
+        let stopped =
+            future::block_on(spawn_blocking_io_off_worker(Some(counted.handle()), || {
+                Ok(5_u32)
+            }))
+            .expect_err("a shut-down pool refuses");
+        assert_eq!(stopped.kind(), std::io::ErrorKind::Other);
+        assert!(stopped.to_string().contains("stopped"), "{stopped}");
+        crate::test_complete!(
+            "off_worker_io_on_a_byte_bounded_pool_reports_the_uncharged_submission_not_a_stopped_pool"
+        );
+    }
+
+    /// A strict pool placement refused by a pool that bounds live job bytes is worded as that pool's decision about an
+    /// uncharged submission, not as a closed pool or a thread that could not start. The public error is unchanged, the
+    /// closure never runs, a placement on a dedicated thread keeps the general wording, and the same open pool takes a
+    /// charged job.
+    #[test]
+    fn a_pool_placement_refused_by_a_byte_bounded_pool_is_worded_as_an_uncharged_submission() {
+        init_test(
+            "a_pool_placement_refused_by_a_byte_bounded_pool_is_worded_as_an_uncharged_submission",
+        );
+        let pool = byte_bounded_pool(10_000);
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(pool.handle())),
+        ));
+        let ran = Arc::new(AtomicU32::new(0));
+        let ran_in_closure = Arc::clone(&ran);
+        assert_eq!(
+            future::block_on(try_spawn_blocking(move || {
+                ran_in_closure.fetch_add(1, Ordering::SeqCst);
+                1_u8
+            })),
+            Err(SpawnError::RuntimeUnavailable),
+            "the public error type is unchanged"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "the closure must not run");
+        let pooled = refused_pool_io_error();
+        assert_eq!(pooled.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(pooled.to_string().contains("uncharged"), "{pooled}");
+        assert!(!pooled.to_string().contains("closed or absent"), "{pooled}");
+        let threaded = refused_io_error();
+        assert_eq!(threaded.kind(), std::io::ErrorKind::Other);
+        assert!(threaded.to_string().contains("not admitted"), "{threaded}");
+        drop(guard);
+
+        // The same open pool takes a valid charged job.
+        let ran_charged = Arc::clone(&ran);
+        let task = pool
+            .handle()
+            .try_spawn_charged(
+                move || {
+                    ran_charged.fetch_add(1, Ordering::SeqCst);
+                },
+                0,
+            )
+            .expect("an open byte-bounded pool admits a charged job");
+        assert!(task.wait_timeout(Duration::from_secs(5)));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+
+        // The same pool once closed refuses the same placement, but the coarse error cannot say why, and the pool is
+        // no longer open: it keeps the general closed-pool wording instead of the byte-policy one.
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(pool.handle())),
+        ));
+        assert_eq!(
+            future::block_on(try_spawn_blocking(|| 1_u8)),
+            Err(SpawnError::RuntimeUnavailable)
+        );
+        let closed = refused_pool_io_error();
+        assert_eq!(closed.kind(), std::io::ErrorKind::Other);
+        assert!(closed.to_string().contains("closed or absent"), "{closed}");
+        assert!(!closed.to_string().contains("uncharged"), "{closed}");
+        drop(guard);
+
+        // Other pools keep their wording on the pool path: a count-bounded pool is general, a forbidden one is
+        // `Unsupported`.
+        let counted = count_bounded_pool();
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(counted.handle())),
+        ));
+        let general = refused_pool_io_error();
+        assert_eq!(general.kind(), std::io::ErrorKind::Other);
+        assert!(general.to_string().contains("not admitted"), "{general}");
+        drop(guard);
+        assert!(counted.shutdown_and_wait(Duration::from_secs(5)));
+
+        let forbidden = forbidden_pool();
+        let guard = Cx::set_current(Some(
+            Cx::for_testing().with_blocking_pool_handle(Some(forbidden.handle())),
+        ));
+        assert_eq!(
+            refused_pool_io_error().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        drop(guard);
+        forbidden.shutdown();
+        crate::test_complete!(
+            "a_pool_placement_refused_by_a_byte_bounded_pool_is_worded_as_an_uncharged_submission"
+        );
+    }
