@@ -6663,24 +6663,27 @@ mod tests {
         );
     }
 
-    /// One in-memory connection on a one-thread pool, with a progress
-    /// handler that reports, every 1000 VM steps, that a statement is
-    /// executing (no statement timeout is armed, so the runner leaves the
-    /// handler alone).
-    fn connection_with_progress_witness(
+    /// One in-memory connection on a one-thread pool. Its independent update
+    /// hook reports the first actual insertion into t, proving the SQLite VM
+    /// is executing without replacing the operation's cancellation handler.
+    fn connection_with_update_witness(
         pool: &BlockingPool,
     ) -> (SqliteConnection, std::sync::mpsc::Receiver<()>) {
         let raw = rusqlite::Connection::open_in_memory().expect("open test connection");
         configure_connection_defaults(&raw, false).expect("configure test connection");
         let (started_tx, started_rx) = std::sync::mpsc::channel();
-        raw.progress_handler(
-            1000,
-            Some(move || {
-                let _ = started_tx.send(());
-                false
-            }),
-        )
-        .expect("install the progress witness");
+        let mut started_tx = Some(started_tx);
+        raw.update_hook(Some(
+            move |action: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+                if action == rusqlite::hooks::Action::SQLITE_INSERT
+                    && table == "t"
+                    && let Some(sender) = started_tx.take()
+                {
+                    let _ = sender.send(());
+                }
+            },
+        ))
+        .expect("install the one-shot update witness");
         let interrupt = Arc::new(raw.get_interrupt_handle());
         let conn = SqliteConnection {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
@@ -6704,13 +6707,19 @@ mod tests {
     fn a_running_statement_dropped_outside_a_transaction_is_interrupted() {
         let cx = create_test_cx();
         let pool = BlockingPool::new(1, 1);
-        let (conn, started) = connection_with_progress_witness(&pool);
+        let (conn, started) = connection_with_update_witness(&pool);
+        match block_on(conn.execute_batch(&cx, "CREATE TABLE t (v INTEGER)")) {
+            Outcome::Ok(()) => {}
+            other => panic!("CREATE TABLE failed: {other:?}"),
+        }
 
-        // Counts to 10^12 unless interrupted: hours of work.
+        // The single row insertion witnesses running work before RETURNING's
+        // long scalar subquery. Interruption must roll the statement back.
         let mut runaway = Box::pin(conn.query(
             &cx,
-            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
-             WHERE x < 1000000000000) SELECT count(*) AS n FROM c",
+            "INSERT INTO t(v) VALUES (1) RETURNING \
+             (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
+             WHERE x < 1000000000000) SELECT count(*) FROM c) AS n",
             &[],
         ));
         let waker = std::task::Waker::noop();
@@ -6751,6 +6760,15 @@ mod tests {
                 .is_autocommit(),
             "no transaction is left open"
         );
+        let rows = match block_on(conn.query(&cx, "SELECT COUNT(*) AS n FROM t", &[])) {
+            Outcome::Ok(rows) => rows,
+            other => panic!("post-interruption count failed: {other:?}"),
+        };
+        assert_eq!(
+            rows[0].get_i64("n").expect("count column"),
+            0,
+            "interrupting the autocommit statement must roll back its inserted rows"
+        );
     }
 
     /// The other half of M2's rule: inside a transaction a dropped statement
@@ -6761,7 +6779,7 @@ mod tests {
     fn a_running_statement_dropped_inside_a_transaction_is_left_to_finish() {
         let cx = create_test_cx();
         let pool = BlockingPool::new(1, 1);
-        let (conn, started) = connection_with_progress_witness(&pool);
+        let (conn, started) = connection_with_update_witness(&pool);
         match block_on(conn.execute_batch(&cx, "CREATE TABLE t (v INTEGER)")) {
             Outcome::Ok(()) => {}
             other => panic!("CREATE TABLE failed: {other:?}"),
