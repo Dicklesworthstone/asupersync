@@ -29,7 +29,7 @@ mod imp {
     use io_uring::{IoUring, Probe, cqueue, opcode, squeue, types};
     use parking_lot::Mutex;
     use smallvec::SmallVec;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::io::{self, Write};
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -1141,7 +1141,7 @@ mod imp {
 
     /// io_uring-based reactor.
     pub struct IoUringReactor {
-        ring: Mutex<IoUring>,
+        ring: Mutex<RingState>,
         state: Mutex<ReactorState>,
         wake_fd: OwnedFd,
         wake_pending: AtomicBool,
@@ -1207,7 +1207,7 @@ mod imp {
             ring.submit()?;
 
             Ok(Self {
-                ring: Mutex::new(ring),
+                ring: Mutex::new(RingState::new(ring)),
                 state: Mutex::new(ReactorState::new()),
                 wake_fd,
                 wake_pending: AtomicBool::new(false),
@@ -1353,18 +1353,37 @@ mod imp {
             raw_fd: RawFd,
             interest: Interest,
             user_data: u64,
+            expected_identity: FdIdentity,
         ) -> io::Result<()> {
             self.ensure_poll_mode_supported(interest)?;
             let mut ring = self.ring.lock();
-            if let Err(err) = submit_poll_entry(&mut ring, raw_fd, interest, user_data) {
+            ring.flush_pending_poll_removes()?;
+            ring.finish_staged_poll_submission()?;
+            let descriptor = duplicate_poll_fd(raw_fd, expected_identity)?;
+            if let Err(err) =
+                submit_poll_entry(&mut ring, descriptor.as_raw_fd(), interest, user_data)
+            {
                 if err.kind() != io::ErrorKind::WouldBlock {
                     return Err(err);
                 }
                 ring.submit()?;
-                submit_poll_entry(&mut ring, raw_fd, interest, user_data)?;
+                submit_poll_entry(&mut ring, descriptor.as_raw_fd(), interest, user_data)?;
             }
-            ring.submit()?;
-            Ok(())
+            // The SQ owns the entry from this point, even if io_uring_enter
+            // fails. Keep its descriptor alive until the kernel consumes it;
+            // the caller may close or reuse raw_fd as soon as we return Err.
+            ring.staged_poll_fd = Some(descriptor);
+            match ring.submit() {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    // register/modify/rearm will not map this failed poll.
+                    // Retain its cancellation even if the cleanup submission
+                    // also fails; poll retries anything not yet queued.
+                    ring.queue_poll_remove(user_data, is_multishot(interest));
+                    let _ = ring.flush_pending_poll_removes();
+                    Err(error)
+                }
+            }
         }
 
         /// Cancels a poll by user_data. A multishot poll is cancelled with AsyncCancel:
@@ -1372,15 +1391,8 @@ mod imp {
         /// armed, which only a single-shot poll, completing anyway, can afford.
         fn submit_poll_remove(&self, target_user_data: u64, multishot: bool) -> io::Result<()> {
             let mut ring = self.ring.lock();
-            if let Err(err) = push_poll_remove_entry(&mut ring, target_user_data, multishot) {
-                if err.kind() != io::ErrorKind::WouldBlock {
-                    return Err(err);
-                }
-                ring.submit()?;
-                push_poll_remove_entry(&mut ring, target_user_data, multishot)?;
-            }
-            ring.submit()?;
-            Ok(())
+            ring.queue_poll_remove(target_user_data, multishot);
+            ring.flush_pending_poll_removes()
         }
 
         fn drain_wake_fd(&self) {
@@ -1404,7 +1416,7 @@ mod imp {
 
         /// The caller keeps the ring locked from wake completion consumption
         /// through rearm, so another poll cannot wait with no wake poll armed.
-        fn rearm_wake_poll(&self, ring: &mut IoUring) -> io::Result<()> {
+        fn rearm_wake_poll(&self, ring: &mut RingState) -> io::Result<()> {
             #[cfg(test)]
             if self.fail_wake_rearm.load(Ordering::Acquire) {
                 return Err(io::Error::other("injected wake poll rearm failure"));
@@ -1426,7 +1438,11 @@ mod imp {
                     WAKE_USER_DATA,
                 )?;
             }
-            ring.submit()?;
+            // A queued wake poll already has an owner: wake_fd lives as long
+            // as the ring. A failed submit must not make the next cycle push
+            // a second poll with the same WAKE_USER_DATA. Every wait submits
+            // queued entries before blocking, so it can finish this one.
+            let _ = ring.submit();
             Ok(())
         }
 
@@ -1621,7 +1637,7 @@ mod imp {
             validate_safe_fd(raw_fd)?;
             let fd_identity = fd_identity(raw_fd)?;
             let poll_user_data = state.allocate_poll_user_data()?;
-            self.submit_poll_add(raw_fd, interest, poll_user_data)?;
+            self.submit_poll_add(raw_fd, interest, poll_user_data, fd_identity)?;
             state.poll_ops.insert(poll_user_data, token);
             state.fds.insert(raw_fd, token);
             state.registrations.insert(
@@ -1668,7 +1684,7 @@ mod imp {
             }
 
             let new_poll_user_data = state.allocate_poll_user_data()?;
-            self.submit_poll_add(info.raw_fd, interest, new_poll_user_data)?;
+            self.submit_poll_add(info.raw_fd, interest, new_poll_user_data, info.fd_identity)?;
             if let Some(old_poll_user_data) = info.active_poll_user_data {
                 let _ = self.submit_poll_remove(old_poll_user_data, is_multishot(info.interest));
             }
@@ -1698,6 +1714,10 @@ mod imp {
             events.clear();
 
             let mut ring = self.ring.lock();
+            // Removal failures cannot be forgotten after deregister drops
+            // the token, nor may a failed add become an untracked kernel poll.
+            // Queue retained cancellations before entering any wait.
+            ring.flush_pending_poll_removes()?;
             // A prior cycle may have deferred a failed wake-poll rearm so that
             // it could still deliver the completions it had already dequeued.
             // Retry under the same ring lock before entering any wait. A
@@ -1708,27 +1728,7 @@ mod imp {
                 self.wake_rearm_needed.store(false, Ordering::Release);
             }
 
-            match timeout {
-                None => {
-                    ring.submitter().submit_and_wait(1)?;
-                }
-                Some(t) if t == Duration::ZERO => {
-                    ring.submitter().submit()?;
-                }
-                Some(t) => {
-                    let ts = types::Timespec::new()
-                        .sec(t.as_secs())
-                        .nsec(t.subsec_nanos());
-                    let args = types::SubmitArgs::new().timespec(&ts);
-                    if let Err(err) = ring.submitter().submit_with_args(1, &args) {
-                        // io_uring reports timeout expiry as ETIME; that is not an
-                        // operational failure for reactor poll semantics.
-                        if err.raw_os_error() != Some(libc::ETIME) {
-                            return Err(err);
-                        }
-                    }
-                }
-            }
+            ring.wait(timeout)?;
 
             let mut completions = SmallVec::<[(u64, i32, u32); 64]>::new();
             for cqe in ring.completion() {
@@ -1892,10 +1892,11 @@ mod imp {
             .user_data(user_data);
 
         // SAFETY: PollAdd, single-shot or multishot, only uses the fd and interest
-        // mask; both remain valid for the life of the request (caller ensures fd
-        // lifetime). Descriptors arrive only through `register`, which runs the
-        // SQE-injection validator once, through `modify` or a multishot re-arm, which
-        // re-check the registered identity, or as the wake eventfd (asupersync-ttg5bg).
+        // mask. User polls name a private duplicate kept until SQ consumption,
+        // when the kernel owns the file reference; wake_fd lives with the ring.
+        // Descriptors arrive only through `register`, which runs the SQE-injection
+        // validator once, through `modify` or a multishot re-arm, which re-check
+        // the registered identity, or as the wake eventfd (asupersync-ttg5bg).
         unsafe {
             ring.submission().push(&entry).map_err(push_error_to_io)?;
         }
@@ -3025,7 +3026,12 @@ mod imp {
                 .expect("register live token should succeed");
 
             reactor
-                .submit_poll_add(reactor.wake_fd.as_raw_fd(), Interest::READABLE, 4242)
+                .submit_poll_add(
+                    reactor.wake_fd.as_raw_fd(),
+                    Interest::READABLE,
+                    4242,
+                    fd_identity(reactor.wake_fd.as_raw_fd()).expect("wake descriptor identity"),
+                )
                 .expect("unknown poll add should succeed");
             reactor.wake().expect("wake should succeed");
 
@@ -3545,7 +3551,12 @@ mod imp {
 
             let (left, mut right) = UnixStream::pair().expect("unix stream pair");
             reactor
-                .submit_poll_add(left.as_raw_fd(), Interest::READABLE, 77_777)
+                .submit_poll_add(
+                    left.as_raw_fd(),
+                    Interest::READABLE,
+                    77_777,
+                    fd_identity(left.as_raw_fd()).expect("poll descriptor identity"),
+                )
                 .expect("poll add should flush and retry when the SQ is full");
             std::io::Write::write_all(&mut right, b"x").expect("write should succeed");
 
@@ -4146,6 +4157,350 @@ mod imp {
             assert!(events.is_empty() && ended.is_empty());
         }
 
+        fn assert_peer_eof_after_cleanup(reactor: &IoUringReactor, peer: &mut UnixStream) {
+            peer.set_nonblocking(true).expect("nonblocking peer");
+            let deadline = std::time::Instant::now() + EDGE_WAIT;
+            let mut events = Events::with_capacity(16);
+            let mut byte = [0_u8; 1];
+            loop {
+                match std::io::Read::read(peer, &mut byte) {
+                    Ok(0) => return,
+                    Ok(_) => panic!("unexpected payload while waiting for EOF"),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "a forgotten poll still holds the closed peer's file reference"
+                        );
+                        reactor
+                            .poll(&mut events, Some(Duration::from_millis(20)))
+                            .expect("drive retained cancellation");
+                        assert!(
+                            events.is_empty(),
+                            "cleanup leaked user readiness: {events:?}"
+                        );
+                    }
+                    Err(error) => panic!("expected EOF after cancellation, got {error}"),
+                }
+            }
+        }
+
+        /// br-asupersync-46kfli: the fault happens after both PollAdd and its
+        /// cleanup are really in the SQ. Reuse the original descriptor before
+        /// submitting either; cleanup must end the old poll without observing
+        /// or closing the replacement socket.
+        #[test]
+        fn failed_poll_add_retains_ownership_across_fd_reuse() {
+            let Some(reactor) = edge_reactor_or_skip() else {
+                return;
+            };
+            let (local, mut old_peer) = nonblocking_pair();
+            let mut source = OwnedFd::from(local);
+            let original_fd = source.as_raw_fd();
+            let identity = fd_identity(original_fd).expect("original identity");
+            let token = Token::new(8_201);
+            reactor.ring.lock().fail_submissions = true;
+
+            let error = reactor
+                .register(&source, token, edge_interest())
+                .expect_err("inject failure after PollAdd enters the SQ");
+            assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
+            assert_eq!(reactor.registration_count(), 0);
+            assert_eq!(tracked_poll_op_count(&reactor), 0);
+            {
+                let mut ring = reactor.ring.lock();
+                assert_eq!(ring.submission().len(), 2, "queued add and cancellation");
+                let retained = ring.staged_poll_fd.as_ref().expect("SQ owns a duplicate");
+                assert_ne!(retained.as_raw_fd(), original_fd);
+                assert_eq!(fd_identity(retained.as_raw_fd()).unwrap(), identity);
+                assert!(
+                    ring.pending_poll_removes.is_empty(),
+                    "remove already entered SQ"
+                );
+            }
+            assert_eq!(fd_identity(original_fd).unwrap(), identity);
+            nix::unistd::write(&source, b"x").expect("failed register must not close original");
+            old_peer
+                .set_read_timeout(Some(EDGE_WAIT))
+                .expect("bounded read");
+            let mut byte = [0_u8; 1];
+            std::io::Read::read_exact(&mut old_peer, &mut byte).expect("original still works");
+            assert_eq!(byte, *b"x");
+
+            let (replacement, mut new_peer) = nonblocking_pair();
+            nix::unistd::dup2(&replacement, &mut source).expect("reuse the exact original fd");
+            drop(replacement);
+            assert_eq!(source.as_raw_fd(), original_fd);
+            assert_ne!(fd_identity(original_fd).unwrap(), identity);
+
+            reactor.ring.lock().fail_submissions = false;
+            reactor
+                .register(&source, token, edge_interest())
+                .expect("the failed registration did not reserve its token or fd");
+            std::io::Write::write_all(&mut new_peer, b"y").expect("replacement write");
+            let seen = readiness_for(&reactor, token, EDGE_WAIT, true);
+            assert_eq!(seen.len(), 1, "only the replacement reports: {seen:?}");
+            assert!(seen[0].is_readable() && !seen[0].is_error());
+            assert_eq!(nix::unistd::read(&source, &mut byte).unwrap(), 1);
+            assert_eq!(byte, *b"y");
+            assert_peer_eof_after_cleanup(&reactor, &mut old_peer);
+            assert!(reactor.ring.lock().staged_poll_fd.is_none());
+
+            reactor.deregister(token).expect("release replacement");
+            drop(source);
+            assert_peer_eof_after_cleanup(&reactor, &mut new_peer);
+            assert_eq!(reactor.registration_count(), 0);
+            assert_eq!(tracked_poll_op_count(&reactor), 0);
+        }
+
+        #[test]
+        fn failed_poll_add_after_kernel_submission_retries_queued_cancellation() {
+            let Some(reactor) = edge_reactor_or_skip() else {
+                return;
+            };
+            let (local, mut peer) = nonblocking_pair();
+            let token = Token::new(8_205);
+            reactor.ring.lock().fail_after_next_submit = true;
+
+            let error = reactor
+                .register(&local, token, edge_interest())
+                .expect_err("report failure after the kernel actually consumed PollAdd");
+            assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
+            assert_eq!(reactor.registration_count(), 0);
+            assert_eq!(tracked_poll_op_count(&reactor), 0);
+            {
+                let mut ring = reactor.ring.lock();
+                assert!(
+                    !ring.fail_after_next_submit,
+                    "the real submit reached the hook"
+                );
+                assert!(ring.fail_submissions, "cleanup submission is still blocked");
+                assert_eq!(
+                    ring.submission().len(),
+                    1,
+                    "only cancellation remains queued"
+                );
+                assert!(
+                    ring.staged_poll_fd.is_none(),
+                    "the kernel consumed the duplicate"
+                );
+                assert!(
+                    ring.pending_poll_removes.is_empty(),
+                    "cancellation owns an SQE"
+                );
+            }
+
+            drop(local);
+            peer.set_nonblocking(true).expect("nonblocking peer");
+            let mut byte = [0_u8; 1];
+            let pending = std::io::Read::read(&mut peer, &mut byte)
+                .expect_err("the live kernel poll still holds the closed socket");
+            assert_eq!(pending.kind(), io::ErrorKind::WouldBlock);
+
+            reactor.ring.lock().fail_submissions = false;
+            assert_peer_eof_after_cleanup(&reactor, &mut peer);
+            let mut ring = reactor.ring.lock();
+            assert!(ring.submission().is_empty());
+            assert!(ring.staged_poll_fd.is_none());
+            assert!(ring.pending_poll_removes.is_empty());
+        }
+
+        #[test]
+        fn failed_poll_replacement_preserves_original_readiness_and_cleans_new_poll() {
+            let Some(reactor) = edge_reactor_or_skip() else {
+                return;
+            };
+            let (local, mut peer) = nonblocking_pair();
+            let token = Token::new(8_202);
+            reactor
+                .register(&local, token, edge_interest())
+                .expect("register");
+            let original = active_poll_user_data_for_token(&reactor, token).unwrap();
+            reactor.ring.lock().fail_submissions = true;
+
+            let error = reactor
+                .modify(token, edge_interest())
+                .expect_err("replacement submission fails after its SQ push");
+            assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
+            assert_eq!(
+                active_poll_user_data_for_token(&reactor, token),
+                Some(original)
+            );
+            assert_eq!(tracked_poll_op_count(&reactor), 1);
+            {
+                let mut ring = reactor.ring.lock();
+                assert_eq!(
+                    ring.submission().len(),
+                    2,
+                    "failed replacement and cleanup queued"
+                );
+                assert!(ring.staged_poll_fd.is_some());
+            }
+
+            reactor.ring.lock().fail_submissions = false;
+            std::io::Write::write_all(&mut peer, b"x").expect("make original readable");
+            let seen = readiness_for(&reactor, token, EDGE_WAIT, true);
+            assert_eq!(
+                seen.len(),
+                1,
+                "failed replacement must not duplicate readiness"
+            );
+            assert!(seen[0].is_readable() && !seen[0].is_error());
+            assert_eq!(drain_readable(&local), 1);
+            assert_eq!(
+                active_poll_user_data_for_token(&reactor, token),
+                Some(original)
+            );
+            assert!(reactor.ring.lock().staged_poll_fd.is_none());
+
+            reactor.deregister(token).expect("release original poll");
+            drop(local);
+            assert_peer_eof_after_cleanup(&reactor, &mut peer);
+            assert_eq!(tracked_poll_op_count(&reactor), 0);
+        }
+
+        #[test]
+        fn failed_automatic_poll_rearm_cancels_the_unmapped_submission() {
+            let Some(reactor) = edge_reactor_or_skip() else {
+                return;
+            };
+            let (local, mut peer) = nonblocking_pair();
+            let token = Token::new(8_203);
+            reactor
+                .register(&local, token, edge_interest())
+                .expect("register");
+            let original = active_poll_user_data_for_token(&reactor, token).unwrap();
+            reactor
+                .submit_poll_remove(original, true)
+                .expect("end the original poll");
+            let (result, flags) = raw_cqe_for(&reactor, original, true).expect("terminal CQE");
+            assert_eq!(result, -libc::ECANCELED);
+
+            let mut emitted = SmallVec::new();
+            let mut removes = SmallVec::new();
+            let mut ended = SmallVec::new();
+            {
+                let mut state = reactor.state.lock();
+                process_completion_batch_locked(
+                    &mut state,
+                    [(original, result, flags)],
+                    &mut emitted,
+                    &mut removes,
+                    &mut ended,
+                );
+            }
+            assert_eq!(active_poll_user_data_for_token(&reactor, token), None);
+            assert_eq!(tracked_poll_op_count(&reactor), 0);
+            emitted.clear();
+            reactor.ring.lock().fail_submissions = true;
+            {
+                let mut state = reactor.state.lock();
+                reactor.rearm_multishot_locked(&mut state, token, &mut emitted, &mut removes);
+            }
+            assert_eq!(emitted.len(), 1);
+            assert_eq!(emitted[0].token, token);
+            assert!(emitted[0].is_error());
+            assert_eq!(active_poll_user_data_for_token(&reactor, token), None);
+            assert_eq!(tracked_poll_op_count(&reactor), 0);
+            {
+                let mut ring = reactor.ring.lock();
+                assert_eq!(
+                    ring.submission().len(),
+                    2,
+                    "rearm and cleanup queued after fault"
+                );
+                assert!(ring.staged_poll_fd.is_some());
+            }
+
+            reactor.ring.lock().fail_submissions = false;
+            reactor
+                .modify(token, edge_interest())
+                .expect("recover disarmed registration");
+            std::io::Write::write_all(&mut peer, b"x").expect("readiness after recovery");
+            let seen = readiness_for(&reactor, token, EDGE_WAIT, true);
+            assert_eq!(seen.len(), 1);
+            assert!(seen[0].is_readable() && !seen[0].is_error());
+            assert_eq!(drain_readable(&local), 1);
+            reactor.deregister(token).expect("release recovered poll");
+            drop(local);
+            assert_peer_eof_after_cleanup(&reactor, &mut peer);
+            assert!(reactor.ring.lock().staged_poll_fd.is_none());
+            assert_eq!(tracked_poll_op_count(&reactor), 0);
+        }
+
+        #[test]
+        fn failed_poll_removal_is_retried_before_and_after_its_sq_push() {
+            for full_queue in [false, true] {
+                let Some(reactor) = edge_reactor_or_skip() else {
+                    return;
+                };
+                let (local, mut peer) = nonblocking_pair();
+                let token = Token::new(8_204);
+                reactor
+                    .register(&local, token, edge_interest())
+                    .expect("register");
+                {
+                    let mut ring = reactor.ring.lock();
+                    if full_queue {
+                        fill_submission_queue(&mut ring);
+                    }
+                    ring.fail_submissions = true;
+                }
+
+                reactor
+                    .deregister(token)
+                    .expect("release token while retaining cleanup");
+                assert_eq!(reactor.registration_count(), 0);
+                assert_eq!(tracked_poll_op_count(&reactor), 0);
+                {
+                    let mut ring = reactor.ring.lock();
+                    if full_queue {
+                        assert!(ring.submission().is_full());
+                        assert_eq!(ring.pending_poll_removes.len(), 1, "remove not yet in SQ");
+                    } else {
+                        assert_eq!(ring.submission().len(), 1, "remove already owns an SQE");
+                        assert!(ring.pending_poll_removes.is_empty());
+                    }
+                    ring.fail_submissions = false;
+                }
+
+                drop(local);
+                assert_peer_eof_after_cleanup(&reactor, &mut peer);
+                let ring = reactor.ring.lock();
+                assert!(ring.pending_poll_removes.is_empty());
+                assert!(ring.staged_poll_fd.is_none());
+            }
+        }
+
+        #[test]
+        fn queued_wake_rearm_is_not_duplicated_after_submit_failure() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            reactor.wake().expect("complete the initial wake poll");
+            let (result, flags) = raw_cqe_for(&reactor, WAKE_USER_DATA, true).expect("wake CQE");
+            assert!(result >= 0 && !cqueue::more(flags));
+            reactor.wake_pending.store(false, Ordering::Release);
+            reactor.drain_wake_fd();
+            {
+                let mut ring = reactor.ring.lock();
+                ring.fail_submissions = true;
+                reactor
+                    .rearm_wake_poll(&mut ring)
+                    .expect("SQ owns the queued wake poll");
+                assert_eq!(ring.submission().len(), 1);
+                ring.fail_submissions = false;
+            }
+            reactor.wake().expect("wake after failed submission");
+            let mut events = Events::with_capacity(4);
+            reactor
+                .poll(&mut events, Some(EDGE_WAIT))
+                .expect("submit and consume wake");
+            assert!(events.is_empty());
+            assert!(!reactor.wake_rearm_needed.load(Ordering::Acquire));
+            assert!(!reactor.wake_pending.load(Ordering::Acquire));
+        }
+
         /// br-asupersync-n89rul H1: a kernel without IORING_FEAT_EXT_ARG
         /// (before 5.11) answers every timed wait with EINVAL, so the
         /// constructor refuses such a ring with `Unsupported`, which makes
@@ -4420,7 +4775,7 @@ mod imp {
                 return;
             }
             let armed = state.allocate_poll_user_data().and_then(|user_data| {
-                self.submit_poll_add(info.raw_fd, info.interest, user_data)
+                self.submit_poll_add(info.raw_fd, info.interest, user_data, info.fd_identity)
                     .map(|()| user_data)
             });
             match armed {
@@ -4433,6 +4788,173 @@ mod imp {
                 Err(_) => emitted_events.push(Event::errored(token)),
             }
         }
+    }
+
+    /// Owns work accepted by the SQ independently of registration bookkeeping
+    /// (br-asupersync-46kfli). An io_uring_enter error does not retract an SQE.
+    ///
+    /// The ring is declared first so teardown cancels queued and in-flight work
+    /// before the staged descriptor closes. This reactor never enables SQPOLL:
+    /// after a submit syscall returns and the SQ is empty, the kernel has taken
+    /// every file reference and the private duplicate can safely be released.
+    struct RingState {
+        ring: IoUring,
+        staged_poll_fd: Option<OwnedFd>,
+        pending_poll_removes: VecDeque<(u64, bool)>,
+        #[cfg(test)]
+        fail_submissions: bool,
+        #[cfg(test)]
+        fail_after_next_submit: bool,
+    }
+
+    impl RingState {
+        fn new(ring: IoUring) -> Self {
+            Self {
+                ring,
+                staged_poll_fd: None,
+                pending_poll_removes: VecDeque::new(),
+                #[cfg(test)]
+                fail_submissions: false,
+                #[cfg(test)]
+                fail_after_next_submit: false,
+            }
+        }
+
+        fn release_consumed_poll_fd(&mut self) {
+            if self.ring.submission().is_empty() {
+                self.staged_poll_fd = None;
+            }
+        }
+
+        fn submit(&mut self) -> io::Result<usize> {
+            #[cfg(test)]
+            if self.fail_submissions {
+                // Callers have already pushed their SQEs. Unlike a push fault,
+                // this leaves entries the next syscall can still consume.
+                return Err(io::Error::from_raw_os_error(libc::ENOMEM));
+            }
+            let result = self.ring.submit();
+            self.release_consumed_poll_fd();
+            #[cfg(test)]
+            if self.fail_after_next_submit && result.as_ref().is_ok_and(|&submitted| submitted > 0)
+            {
+                // Model an uncertain submit outcome after real kernel progress,
+                // then keep the subsequent cleanup SQE queued for a later poll.
+                self.fail_after_next_submit = false;
+                self.fail_submissions = true;
+                return Err(io::Error::from_raw_os_error(libc::ENOMEM));
+            }
+            result
+        }
+
+        fn wait(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+            #[cfg(test)]
+            if self.fail_submissions {
+                return Err(io::Error::from_raw_os_error(libc::ENOMEM));
+            }
+            let result = match timeout {
+                None => self.ring.submitter().submit_and_wait(1),
+                Some(Duration::ZERO) => self.ring.submitter().submit(),
+                Some(duration) => {
+                    let ts = types::Timespec::new()
+                        .sec(duration.as_secs())
+                        .nsec(duration.subsec_nanos());
+                    let args = types::SubmitArgs::new().timespec(&ts);
+                    match self.ring.submitter().submit_with_args(1, &args) {
+                        // An expired timed wait is not an operational error.
+                        Err(error) if error.raw_os_error() == Some(libc::ETIME) => Ok(0),
+                        result => result,
+                    }
+                }
+            };
+            self.release_consumed_poll_fd();
+            result.map(|_| ())
+        }
+
+        fn finish_staged_poll_submission(&mut self) -> io::Result<()> {
+            if self.staged_poll_fd.is_some() {
+                self.submit()?;
+                if self.staged_poll_fd.is_some() {
+                    // Keep descriptor retention bounded even if submit makes
+                    // only partial progress. A later poll retries this queue.
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "previous io_uring poll submission is still queued",
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        fn queue_poll_remove(&mut self, user_data: u64, multishot: bool) {
+            for pending in &mut self.pending_poll_removes {
+                if pending.0 == user_data {
+                    // A later best-effort one-shot remove cannot downgrade an
+                    // already retained multishot cancellation.
+                    pending.1 |= multishot;
+                    return;
+                }
+            }
+            self.pending_poll_removes.push_back((user_data, multishot));
+        }
+
+        fn flush_pending_poll_removes(&mut self) -> io::Result<()> {
+            if self.pending_poll_removes.is_empty() {
+                return Ok(());
+            }
+            while let Some(&(user_data, multishot)) = self.pending_poll_removes.front() {
+                if let Err(error) = push_poll_remove_entry(&mut self.ring, user_data, multishot) {
+                    if error.kind() != io::ErrorKind::WouldBlock {
+                        return Err(error);
+                    }
+                    self.submit()?;
+                    push_poll_remove_entry(&mut self.ring, user_data, multishot)?;
+                }
+                // Only an actual SQ push transfers ownership of this removal
+                // to the ring. A failed later submit leaves that SQE queued.
+                // Our PollAdds have no ASYNC/LINK/DRAIN flags: the kernel
+                // installs a live poll in its cancellation hash (or completes
+                // it) before issuing this later SQE, even in the same batch.
+                // AsyncCancel can therefore find every live multishot target;
+                // ENOENT means that target already ended, not a future add.
+                self.pending_poll_removes.pop_front();
+            }
+            self.submit().map(|_| ())
+        }
+    }
+
+    impl std::ops::Deref for RingState {
+        type Target = IoUring;
+
+        fn deref(&self) -> &Self::Target {
+            &self.ring
+        }
+    }
+
+    impl std::ops::DerefMut for RingState {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.ring
+        }
+    }
+
+    /// Retains the file named by an SQE even after its caller sees a submit
+    /// failure and closes or reuses the original descriptor number.
+    fn duplicate_poll_fd(raw_fd: RawFd, expected_identity: FdIdentity) -> io::Result<OwnedFd> {
+        // SAFETY: F_DUPFD_CLOEXEC accepts an arbitrary descriptor number and
+        // reports EBADF for an invalid one; it never closes the caller's fd.
+        // A nonnegative result is a new descriptor owned only by this helper,
+        // immediately wrapped for exactly one close on every subsequent path.
+        let descriptor = unsafe {
+            let duplicated = libc::fcntl(raw_fd, libc::F_DUPFD_CLOEXEC, 0);
+            if duplicated < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            OwnedFd::from_raw_fd(duplicated)
+        };
+        if fd_identity(descriptor.as_raw_fd())? != expected_identity {
+            return Err(io::Error::from_raw_os_error(libc::EBADF));
+        }
+        Ok(descriptor)
     }
 
     // br-asupersync-n89rul H1. Like the items above, this follows the test

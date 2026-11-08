@@ -363,10 +363,10 @@
   },
   "summary": {
     "boundary_rows": 103,
-    "operation_count": 909,
+    "operation_count": 910,
     "operation_kind_counts": {
       "allow_unsafe_code": 110,
-      "unsafe_block": 674,
+      "unsafe_block": 675,
       "unsafe_fn": 104,
       "unsafe_impl": 21,
       "unsafe_trait": 0
@@ -4087,12 +4087,13 @@
       "category": "reactor-ffi",
       "scope": "file-or-item-boundary",
       "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
-      "why_safe_rust_is_insufficient": "io_uring submission and buffer registration accept raw descriptors and pointers whose kernel-visible lifetimes cannot be expressed to Rust's borrow checker; the module also owns platform FFI for readiness, wakeup and descriptor validation.",
-      "safety_invariant": "Raw file descriptors, sockets, ring entries, and OS handles remain live for every FFI call; ownership transfers are one-way and close/dup paths avoid double-close and stale-handle reuse. The fixed-buffer, provided-group, mapped-buffer-ring and multishot-receive probes keep their backing allocations and nonblocking Unix stream pairs alive through terminal completions and cleanup attempts, and declare each temporary ring last so it drops before referenced backing on every path. The mapped buffer-ring probe owns its page-aligned shared mapping with RAII, publishes fully initialized entries with a release-ordered tail update, returns a selected lease, unregisters after terminal completion, and unmaps only after ring teardown on uncertain paths. The multishot-receive probe cancels and observes the terminal receive completion before returning selected buffers and removing the group. Every successful multishot-accept completion is immediately wrapped in exactly one OwnedFd, including unexpected positive completions; the listener outlives the temporary ring, and cancellation reaches the terminal accept completion before success. The requested-only SQPOLL probe references no external descriptor or buffer, completes its NOP before return, and drops its temporary ring and polling thread locally. Descriptor validation and fd-identity snapshots zero a plain-old-data libc::stat and pass it to fstat, which reports an invalid descriptor through its return value; the reused-fd test replaces its own duplicated descriptor with one atomic dup2 so no freed descriptor number is exposed to concurrent tests.",
-      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md. The reactor-ffi policy requires target-gated RCH compilation plus focused lifecycle tests; all six bounded advanced-capability source probes require an io-uring-feature compile receipt, while a test-target compilation timeout supplies no executable or live-host support claim.",
+      "why_safe_rust_is_insufficient": "io_uring submission and buffer registration accept raw descriptors and pointers whose kernel-visible lifetimes cannot be expressed to Rust's borrow checker; the module also owns platform FFI for readiness, wakeup and descriptor validation. The Source trait supplies only a raw descriptor, so duplicating it without assuming a borrowed descriptor lifetime requires the narrow F_DUPFD_CLOEXEC boundary.",
+      "safety_invariant": "Raw file descriptors, sockets, ring entries, and OS handles remain live for every FFI call; ownership transfers are one-way and close/dup paths avoid double-close and stale-handle reuse. The fixed-buffer, provided-group, mapped-buffer-ring and multishot-receive probes keep their backing allocations and nonblocking Unix stream pairs alive through terminal completions and cleanup attempts, and declare each temporary ring last so it drops before referenced backing on every path. The mapped buffer-ring probe owns its page-aligned shared mapping with RAII, publishes fully initialized entries with a release-ordered tail update, returns a selected lease, unregisters after terminal completion, and unmaps only after ring teardown on uncertain paths. The multishot-receive probe cancels and observes the terminal receive completion before returning selected buffers and removing the group. Every successful multishot-accept completion is immediately wrapped in exactly one OwnedFd, including unexpected positive completions; the listener outlives the temporary ring, and cancellation reaches the terminal accept completion before success. The requested-only SQPOLL probe references no external descriptor or buffer, completes its NOP before return, and drops its temporary ring and polling thread locally. Descriptor validation and fd-identity snapshots zero a plain-old-data libc::stat and pass it to fstat, which reports an invalid descriptor through its return value; the reused-fd test replaces its own duplicated descriptor with one atomic dup2 so no freed descriptor number is exposed to concurrent tests. Runtime PollAdd submission duplicates the source with F_DUPFD_CLOEXEC, immediately wraps the returned descriptor in exactly one OwnedFd, and checks its captured file identity. At most one unconsumed poll owns a staged duplicate; it remains live until a submit syscall returns with an empty SQ or the ring is torn down first. This relies on the runtime ring remaining non-SQPOLL and its PollAdds having no ASYNC, LINK or DRAIN flags: file assignment and live-poll cancellation-hash enrollment precede SQ-head publication and a following cancellation SQE. Failed adds and deregistrations retain cancellation intent until a successful SQ push transfers that intent to the ring; a syscall error never retracts queued ownership.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md. The reactor-ffi policy requires target-gated RCH compilation plus focused lifecycle tests; all six bounded advanced-capability source probes require an io-uring-feature compile receipt, while a test-target compilation timeout supplies no executable or live-host support claim. The submission-ownership changes require live Linux regressions for failed registration with exact descriptor reuse, failed replacement preserving original readiness, automatic rearm cleanup, cancellation failure before and after SQ push, and queued wake rearm; peer EOF must establish release of kernel-held file references.",
       "explicit_no_claims": [
         "This row is an inventory and schema baseline, not fresh execution proof for every platform path.",
         "Source and contract alignment do not prove fixed-buffer, provided-group, mapped-buffer-ring, multishot-accept, multishot-receive or SQPOLL completion, cancellation or cleanup on a live host.",
+        "Submission ownership does not establish completion-queue overflow recovery, behavior with ASYNC/LINK/DRAIN or SQPOLL runtime submission, or a performance improvement; duplication, identity checking and close add work on each poll arm.",
         "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
       ],
       "operation_locators": [
@@ -4173,12 +4174,12 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1391,
+          "line": 1403,
           "pattern": "unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1481,
+          "line": 1497,
           "pattern": "match unsafe { ring.submitter().register_buffers(&io_vecs) } {"
         },
         {
@@ -4193,53 +4194,58 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1899,
+          "line": 1900,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1959,
+          "line": 1960,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2024,
+          "line": 2025,
           "pattern": "let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2029,
+          "line": 2030,
           "pattern": "let owned = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2715,
+          "line": 2716,
           "pattern": "let pushed = unsafe { ring.submission().push(&entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2810,
+          "line": 2811,
           "pattern": "let stale_fd = unsafe { libc::dup(old_sock.as_raw_fd()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2823,
+          "line": 2824,
           "pattern": "unsafe { libc::dup2(new_sock.as_raw_fd(), stale_fd) },"
         },
         {
           "kind": "unsafe_block",
-          "line": 2844,
+          "line": 2845,
           "pattern": "let _ = unsafe { libc::close(stale_fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3465,
+          "line": 3471,
           "pattern": "let n = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3492,
+          "line": 3498,
           "pattern": "let n = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 4947,
+          "pattern": "let descriptor = unsafe {"
         }
       ]
     },

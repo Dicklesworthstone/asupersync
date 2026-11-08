@@ -177,6 +177,28 @@ and polling thread before returning. An io_uring-feature RCH compile checks this
 source boundary, but a nonterminal executable attempt proves neither live-host
 support nor cleanup behavior.
 
+The same row covers the runtime poll submission repair for
+`asupersync-46kfli`. Its narrow `F_DUPFD_CLOEXEC` helper receives a raw descriptor
+from `Source`, creates one owned duplicate without closing the original, and
+checks the duplicate against the registration's captured file identity. A queued
+poll keeps that duplicate even if submission fails. The runtime ring has no
+SQPOLL and uses plain PollAdd without ASYNC, LINK or DRAIN flags: after a submit
+syscall returns with an empty SQ, the kernel has resolved every submitted file
+reference, so the duplicate can close. At most one unconsumed poll retains a
+duplicate; later arms must first make progress on it. Ring teardown precedes
+dropping any retained duplicate.
+
+Cancellation intent stays in the retry queue until its SQE is actually pushed,
+then belongs to the SQ across syscall failures. Plain PollAdd installs a live
+poll in the kernel cancellation hash before a following cancellation is issued;
+future changes to submission flags must re-establish this ordering. Native
+regressions must show that failed registration tolerates exact descriptor reuse,
+failed replacement preserves the old registration, rearm and deregistration
+failures eventually release kernel-held socket references, and a queued wake
+poll is not duplicated. Source review and locator checks do not execute these
+proofs. This repair adds duplication, identity `fstat`, and close work per arm;
+it claims neither a performance gain nor completion-queue overflow recovery.
+
 ## Review Rules
 
 New unsafe code is acceptable only when all of these are true:
