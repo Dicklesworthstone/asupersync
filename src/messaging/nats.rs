@@ -63,10 +63,7 @@ fn nats_checkpoint(cx: &Cx) -> Result<(), NatsError> {
     // Cx's driverless checkpoint reads wall_now(), which consults the ambient
     // frame. Install the actual owner only for this check, restoring the
     // polling task before any transport I/O or its capability checks run.
-    let _owner = cx
-        .timer_driver()
-        .is_none()
-        .then(|| Cx::set_current(Some(cx.clone())));
+    let _owner = (!cx.has_timer()).then(|| Cx::set_current(Some(cx.clone())));
     cx.checkpoint().map_err(|_| NatsError::Cancelled)
 }
 
@@ -79,10 +76,7 @@ fn nats_poll_channel<F: Future + ?Sized>(
     future: Pin<&mut F>,
     task_cx: &mut std::task::Context<'_>,
 ) -> Poll<F::Output> {
-    let _owner = cx
-        .timer_driver()
-        .is_none()
-        .then(|| Cx::set_current(Some(cx.clone())));
+    let _owner = (!cx.has_timer()).then(|| Cx::set_current(Some(cx.clone())));
     future.poll(task_cx)
 }
 
@@ -1748,17 +1742,14 @@ where
 {
     let mut owner_cancel = NatsCancelWakerGuard::new(cx);
     let mut driver_cancel = Cx::current().as_ref().map(NatsCancelWakerGuard::new);
+    // Budget enforcement must keep the actual owning clock even when TIME
+    // is restricted. The private helper exposes no timer authority and does
+    // not change the clock policy of explicit request/connect timeouts.
     let mut deadline_timers = [
-        cx.budget().deadline.map(|at| nats_deadline_timer(cx, at)),
+        cx.budget_deadline_sleep(),
         driver_cancel
             .as_ref()
-            .and_then(|driver| {
-                driver
-                    .cx
-                    .budget()
-                    .deadline
-                    .map(|at| nats_deadline_timer(&driver.cx, at))
-            }),
+            .and_then(|driver| driver.cx.budget_deadline_sleep()),
     ];
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|task_cx| {

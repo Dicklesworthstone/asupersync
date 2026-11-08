@@ -25,6 +25,7 @@
         Owner,
         Driver,
         OwnerDeadline,
+        OwnerDeadlineWithoutTime,
     }
 
     fn native_parked_read_cancellation(worker_threads: usize, source: NativeNatsCancel) {
@@ -55,7 +56,10 @@
         let owner_start = crate::time::raw_wall_now() + Duration::from_secs(86_400);
         let owner_clock = Arc::new(VirtualClock::starting_at(owner_start));
         let owner_timer = TimerDriverHandle::with_virtual_clock(owner_clock.clone());
-        let owner: Cx = if matches!(source, NativeNatsCancel::OwnerDeadline) {
+        let owner: Cx = if matches!(
+            source,
+            NativeNatsCancel::OwnerDeadline | NativeNatsCancel::OwnerDeadlineWithoutTime
+        ) {
             Cx::new_with_drivers(
                 RegionId::new_for_test(0, 1),
                 TaskId::new_for_test(1, 0),
@@ -68,6 +72,16 @@
             )
         } else {
             Cx::for_testing()
+        };
+        let owner = if matches!(source, NativeNatsCancel::OwnerDeadlineWithoutTime) {
+            type IoOnly = crate::cx::cap::CapSet<false, false, false, true, false>;
+            let _restricted = owner.restrict::<IoOnly>().set_current_restricted();
+            let restricted = Cx::current().expect("TIME-restricted NATS request");
+            assert!(restricted.has_timer());
+            assert!(restricted.timer_driver().is_none());
+            restricted
+        } else {
+            owner
         };
         let operation_owner = owner.clone();
         let (parked_tx, parked_rx) = std_mpsc::channel();
@@ -134,7 +148,7 @@
                 NativeNatsCancel::Driver => {
                     driver.cancel_with(crate::types::CancelKind::Shutdown, Some("NATS driver stop"));
                 }
-                NativeNatsCancel::OwnerDeadline => {
+                NativeNatsCancel::OwnerDeadline | NativeNatsCancel::OwnerDeadlineWithoutTime => {
                     owner_clock.advance(100_000_000);
                     let _ = owner_timer.process_timers();
                 }
@@ -150,13 +164,19 @@
 
         assert!(parked.is_ok(), "native read never parked: {parked:?}");
         assert!(drained, "native cancellation runtime did not drain");
-        if matches!(source, NativeNatsCancel::OwnerDeadline) {
+        if matches!(
+            source,
+            NativeNatsCancel::OwnerDeadline | NativeNatsCancel::OwnerDeadlineWithoutTime
+        ) {
             assert!(deadline_armed, "the explicit owner's timer was never armed");
             assert_eq!(owner_timer.pending_count(), 0);
             assert_eq!(
                 owner.cancel_reason().unwrap().kind,
                 crate::types::CancelKind::Deadline,
             );
+        }
+        if matches!(source, NativeNatsCancel::OwnerDeadlineWithoutTime) {
+            assert!(owner.timer_driver().is_none(), "TIME must remain restricted");
         }
         match result {
             Ok((Err(NatsError::Cancelled), true, true)) => {}
@@ -186,6 +206,94 @@
         for workers in [1, 2] {
             native_parked_read_cancellation(workers, NativeNatsCancel::OwnerDeadline);
         }
+    }
+
+    #[test]
+    fn nats_native_parked_read_honors_budget_without_time_capability() {
+        for workers in [1, 2] {
+            native_parked_read_cancellation(workers, NativeNatsCancel::OwnerDeadlineWithoutTime);
+        }
+    }
+
+    #[test]
+    fn nats_io_keeps_restricted_budget_clocks_armed_through_masked_expiry() {
+        use crate::cx::cap::CapSet;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, RegionId, TaskId};
+
+        type IoOnly = CapSet<false, false, false, true, false>;
+        struct CountWakes(AtomicU64);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let owner_epoch = Time::from_secs(10_000);
+        let driver_epoch = Time::from_secs(100_000);
+        let owner_clock = Arc::new(VirtualClock::starting_at(owner_epoch));
+        let driver_clock = Arc::new(VirtualClock::starting_at(driver_epoch));
+        let owner_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&owner_clock));
+        let driver_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&driver_clock));
+        let restricted = |task, timer, deadline| {
+            let full = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(task, 0),
+                Budget::INFINITE.with_deadline(deadline),
+                None,
+                None,
+                None,
+                Some(timer),
+                None,
+            );
+            let _restriction = full.restrict::<IoOnly>().set_current_restricted();
+            Cx::current().expect("restricted context retains internal budget driver")
+        };
+        let owner = restricted(1, owner_timer.clone(), owner_epoch + Duration::from_millis(300));
+        let driver = restricted(2, driver_timer.clone(), driver_epoch + Duration::from_millis(100));
+        let _current = Cx::set_current(Some(driver.clone()));
+        let silent_transport = std::future::poll_fn(|_| {
+            assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+            assert!(Cx::current().unwrap().timer_driver().is_none());
+            Poll::<Result<(), NatsError>>::Pending
+        });
+        let mut call = Box::pin(crate::combinator::bracket::commit_section(
+            &driver,
+            u32::MAX,
+            nats_io(&owner, silent_transport),
+        ));
+        let wakes = Arc::new(CountWakes(AtomicU64::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        assert!(call.as_mut().poll(&mut task).is_pending());
+        assert_eq!(owner_timer.pending_count(), 1);
+        assert_eq!(driver_timer.pending_count(), 1);
+
+        driver_clock.advance(100_000_000);
+        assert_eq!(driver_timer.process_timers(), 1);
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        assert!(call.as_mut().poll(&mut task).is_pending());
+        assert!(driver_timer.is_empty());
+        assert_eq!(owner_timer.pending_count(), 1);
+        assert!(!owner.is_cancel_requested());
+
+        let before = wakes.0.load(Ordering::SeqCst);
+        owner_clock.advance(300_000_000);
+        assert_eq!(owner_timer.process_timers(), 1);
+        assert!(wakes.0.load(Ordering::SeqCst) > before);
+        assert!(matches!(
+            call.as_mut().poll(&mut task),
+            Poll::Ready(Err(NatsError::Cancelled))
+        ));
+        assert_eq!(owner.cancel_reason().unwrap().kind, CancelKind::Deadline);
+        assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+        assert!(owner.timer_driver().is_none());
+        assert!(driver.timer_driver().is_none());
+        drop(call);
+        assert!(owner_timer.is_empty());
+        assert!(driver_timer.is_empty());
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(driver.inner.read().cancel_waker_registrations.is_empty());
     }
 
     #[test]
