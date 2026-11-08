@@ -55,6 +55,69 @@
     }
 
     #[test]
+    fn stopped_runtime_finalizer_debt_preserves_manual_and_independent_work() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let manual_region = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("manual finalizer region");
+        let monitor = state.debt_monitor();
+        let independent = monitor.queue_work(
+            crate::observability::WorkType::RegionCleanup,
+            "independent-cleanup".to_owned(),
+            1,
+            1,
+            &CancelReason::shutdown(),
+            crate::types::CancelKind::Shutdown,
+            Vec::new(),
+        );
+        assert!(state.register_sync_finalizer(root, || {
+            panic!("stopped-runtime teardown must not execute queued cleanup");
+        }));
+        assert!(state.register_async_finalizer(root, std::future::pending::<()>()));
+        assert!(state.register_sync_finalizer(manual_region, || {}));
+        let record = state.region(manual_region).expect("manual region");
+        assert!(record.begin_close(None));
+        assert!(record.begin_finalize());
+        let (finalizer, mut receipt) = state
+            .pop_region_finalizer(manual_region)
+            .expect("manual receipt");
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 4);
+
+        let state = Arc::new(crate::sync::ContendedMutex::new("retained-state", state));
+        retire_stopped_tasks(&state, None, None);
+        assert_eq!(
+            monitor.get_debt_snapshot().total_pending,
+            2,
+            "only the external manual receipt and independent work remain"
+        );
+        assert!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finalizer_history()
+                .iter()
+                .all(|event| !matches!(
+                    event,
+                    crate::runtime::state::FinalizerHistoryEvent::Ran { .. }
+                )),
+            "teardown must not claim successful cleanup execution"
+        );
+
+        drop(finalizer);
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .abandon_manual_finalizer(&mut receipt)
+            .expect("manual finalizer abandonment");
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 1);
+        drop(state);
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 1);
+        assert!(monitor.complete_work(independent));
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 0);
+    }
+
+    #[test]
     fn worker_teardown_retains_job_when_first_reaper_spawn_is_refused() {
         let payload = Arc::new(());
         let weak_payload = Arc::downgrade(&payload);

@@ -247,12 +247,12 @@ struct ProcessingStats {
 }
 
 impl ProcessingStats {
-    fn new() -> Self {
+    fn new(now: SystemTime) -> Self {
         Self {
             items_processed: VecDeque::new(),
             total_processed: AtomicU64::new(0),
             last_rate: 0.0,
-            last_rate_time: super::replayable_system_time(),
+            last_rate_time: now,
         }
     }
 
@@ -485,6 +485,17 @@ impl CancellationDebtMonitor {
     /// Mark work as completed and remove from pending.
     pub fn complete_work(&self, work_id: u64) -> bool {
         let now = super::replayable_system_time();
+        let Some(work_type) = self.remove_pending_work(work_id) else {
+            return false;
+        };
+        self.record_completed_work_at(work_type, now);
+        true
+    }
+
+    /// Removes pending accounting without sampling a clock or dispatching
+    /// observations. Runtime retirement may call this while holding its locks;
+    /// the processing-rate sample is delivered separately after unlock.
+    pub(crate) fn remove_pending_work(&self, work_id: u64) -> Option<WorkType> {
         let mut found_work = None;
 
         // Find and remove the work
@@ -507,19 +518,25 @@ impl CancellationDebtMonitor {
             self.memory_usage_bytes
                 .fetch_sub(work_size, Ordering::Relaxed);
 
-            // Update processing statistics
-            {
-                let mut stats = self.processing_stats.lock();
-                stats
-                    .entry(work_type)
-                    .or_insert_with(ProcessingStats::new)
-                    .record_processing(1, now, self.config.rate_sampling_window);
-            }
-
-            true
+            Some(work_type)
         } else {
-            false
+            None
         }
+    }
+
+    /// Records the processing-rate observation for work already removed by
+    /// `remove_pending_work`. Clock providers can run user code, so the runtime
+    /// dispatches this only with its other deferred lifecycle observations.
+    pub(crate) fn record_completed_work(&self, work_type: WorkType) {
+        self.record_completed_work_at(work_type, super::replayable_system_time());
+    }
+
+    fn record_completed_work_at(&self, work_type: WorkType, now: SystemTime) {
+        let mut stats = self.processing_stats.lock();
+        stats
+            .entry(work_type)
+            .or_insert_with(|| ProcessingStats::new(now))
+            .record_processing(1, now, self.config.rate_sampling_window);
     }
 
     /// Complete multiple work items at once (batch completion).
@@ -556,7 +573,7 @@ impl CancellationDebtMonitor {
             for (work_type, count) in completed_by_type {
                 stats
                     .entry(work_type)
-                    .or_insert_with(ProcessingStats::new)
+                    .or_insert_with(|| ProcessingStats::new(now))
                     .record_processing(count, now, self.config.rate_sampling_window);
             }
         }

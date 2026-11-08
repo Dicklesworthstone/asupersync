@@ -49,6 +49,41 @@
     }
 
     #[test]
+    fn test_pending_retirement_precedes_processing_observation() {
+        let monitor = CancellationDebtMonitor::default();
+        let work_id = monitor.queue_work(
+            WorkType::RegionCleanup,
+            "finalizer".to_owned(),
+            1,
+            1,
+            &CancelReason::shutdown(),
+            CancelKind::Shutdown,
+            Vec::new(),
+        );
+        let work_type = monitor.remove_pending_work(work_id).expect("pending work");
+        assert_eq!(work_type, WorkType::RegionCleanup);
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 0);
+        assert_eq!(monitor.memory_usage_bytes.load(Ordering::Relaxed), 0);
+        assert!(monitor.processing_stats.lock().is_empty());
+        assert_eq!(monitor.remove_pending_work(work_id), None);
+
+        monitor.record_completed_work(work_type);
+        assert_eq!(
+            monitor.processing_stats.lock()[&work_type]
+                .total_processed
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert!(!monitor.complete_work(work_id));
+        assert_eq!(
+            monitor.processing_stats.lock()[&work_type]
+                .total_processed
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
     fn test_debt_calculation() {
         let mut config = CancellationDebtConfig::default();
         config.max_queue_depth = 100;

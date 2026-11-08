@@ -3751,6 +3751,251 @@ fn can_region_finalize_requires_child_regions_closed() {
 // =========================================================================
 
 #[test]
+fn finalizer_debt_tracks_sync_retirement_and_manual_barriers() {
+    init_test("finalizer_debt_tracks_sync_retirement_and_manual_barriers");
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    let monitor = state.debt_monitor();
+    assert!(state.register_sync_finalizer(region, || {}));
+    assert!(state.register_async_finalizer(region, async {}));
+    assert!(state.register_sync_finalizer(region, || panic!("cleanup failed")));
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 3);
+
+    let record = state.region(region).expect("region");
+    assert!(record.begin_close(None));
+    assert!(record.begin_finalize());
+    let (finalizer, mut receipt) = state
+        .run_sync_finalizers(region)
+        .expect("async finalizer should retain its manual barrier");
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 2);
+    let Finalizer::Async(future) = finalizer else {
+        panic!("expected async finalizer");
+    };
+    futures_lite::future::block_on(future);
+    assert_eq!(
+        monitor.get_debt_snapshot().total_pending,
+        2,
+        "callback completion alone must not settle a manual receipt"
+    );
+    assert!(state.run_sync_finalizers(region).is_none());
+
+    let mut other_state = RuntimeState::new();
+    assert_eq!(
+        other_state.complete_manual_finalizer(&mut receipt),
+        Err(ManualFinalizerReceiptError::WrongRuntime)
+    );
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 2);
+    state.complete_manual_finalizer(&mut receipt).unwrap();
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 1);
+    assert_eq!(
+        state.complete_manual_finalizer(&mut receipt),
+        Err(ManualFinalizerReceiptError::AlreadySettled)
+    );
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 1);
+    assert!(state.run_sync_finalizers(region).is_none());
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 0);
+    assert!(state.finalizer_debt.work_ids.is_empty());
+    crate::test_complete!("finalizer_debt_tracks_sync_retirement_and_manual_barriers");
+}
+
+#[test]
+fn finalizer_debt_retires_before_scheduled_completion_observers() {
+    init_test("finalizer_debt_retires_before_scheduled_completion_observers");
+    for outcome in [
+        Outcome::Ok(()),
+        Outcome::Cancelled(CancelReason::shutdown()),
+        Outcome::Panicked(crate::types::PanicPayload::new("cleanup panic")),
+    ] {
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let monitor = state.debt_monitor();
+        assert!(state.register_async_finalizer(region, async {}));
+        let record = state.region(region).expect("region");
+        assert!(record.begin_close(None));
+        state.advance_region_state(region);
+
+        let scheduled = state.drain_ready_async_finalizers();
+        assert_eq!(scheduled.len(), 1);
+        let task_id = scheduled[0].0;
+        assert_eq!(state.region_finalizer_count(region), 0);
+        assert_eq!(
+            monitor.get_debt_snapshot().total_pending,
+            1,
+            "scheduling the finalizer must not retire its debt"
+        );
+        state
+            .task_mut(task_id)
+            .expect("finalizer task")
+            .complete(outcome);
+        let completion = state.task_completed(task_id);
+        assert_eq!(
+            monitor.get_debt_snapshot().total_pending,
+            0,
+            "pending accounting must settle before advisory observer dispatch"
+        );
+        let (waiters, observer) = completion.into_parts();
+        assert!(waiters.is_empty());
+        assert!(observer.lifecycle.iter().any(|effect| matches!(
+            effect,
+            LifecycleObserverEffect::FinalizerDebtCompleted { .. }
+        )));
+        // A discarded advisory observation cannot resurrect completed work.
+        drop(observer);
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 0);
+        assert!(state.finalizer_debt.work_ids.is_empty());
+    }
+    crate::test_complete!("finalizer_debt_retires_before_scheduled_completion_observers");
+}
+
+#[test]
+fn finalizer_debt_retires_failed_start_cleanup() {
+    init_test("finalizer_debt_retires_failed_start_cleanup");
+    for case in 0..3 {
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let monitor = state.debt_monitor();
+        assert!(state.register_async_finalizer(region, async move {
+            match case {
+                0 => {}
+                1 => std::future::pending::<()>().await,
+                _ => panic!("failed-start cleanup panic"),
+            }
+        }));
+        let record = state.region(region).expect("region");
+        assert!(record.begin_close(None));
+        assert!(record.begin_finalize());
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 1);
+        assert!(state.drive_failed_start_async_finalizer_inline(region));
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 0, "case={case}");
+        assert!(state.finalizer_debt.work_ids.is_empty());
+    }
+    crate::test_complete!("finalizer_debt_retires_failed_start_cleanup");
+}
+
+#[test]
+fn finalizer_debt_panic_flush_skips_clock_observation() {
+    use crate::time::{TimeSource, TimerDriver};
+
+    #[derive(Debug, Default)]
+    struct CountingClock(AtomicUsize);
+
+    impl TimeSource for CountingClock {
+        fn now(&self) -> Time {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Time::from_secs(10)
+        }
+    }
+
+    init_test("finalizer_debt_panic_flush_skips_clock_observation");
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    let task = insert_task(&mut state, region);
+    let monitor = state.debt_monitor();
+    let clock = Arc::new(CountingClock::default());
+    let driver = TimerDriverHandle::new(Arc::new(TimerDriver::with_clock(Arc::clone(&clock))));
+    let cx = crate::cx::Cx::new_with_drivers(
+        region,
+        task,
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(driver),
+        None,
+    );
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    clock.0.store(0, Ordering::Relaxed);
+
+    for native in [false, true] {
+        let mut observations = vec![LifecycleObserverEffect::FinalizerDebtCompleted {
+            monitor: Arc::clone(&monitor),
+            work_type: crate::observability::WorkType::RegionCleanup,
+        }];
+        let mut close_wakes = Vec::new();
+        {
+            let mut sink = if native {
+                LifecycleEffectsSink::NativeCompletion {
+                    observers: &mut observations,
+                    close_wakes: &mut close_wakes,
+                }
+            } else {
+                LifecycleEffectsSink::Completion(&mut observations)
+            };
+            state.flush_completion_observations_inline(&mut sink);
+        }
+        assert!(observations.is_empty());
+        assert_eq!(clock.0.load(Ordering::Relaxed), 0, "native={native}");
+    }
+
+    // Prove the scoped clock observes normal rate dispatch without mutating
+    // the process-global observability clock used by concurrent tests.
+    LifecycleObserverEffect::FinalizerDebtCompleted {
+        monitor,
+        work_type: crate::observability::WorkType::RegionCleanup,
+    }
+    .dispatch(&*state.metrics);
+    assert!(clock.0.load(Ordering::Relaxed) > 0);
+    crate::test_complete!("finalizer_debt_panic_flush_skips_clock_observation");
+}
+
+#[test]
+fn finalizer_debt_drop_preserves_independent_monitor_work() {
+    init_test("finalizer_debt_drop_preserves_independent_monitor_work");
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    let monitor = state.debt_monitor();
+    let independent = monitor.queue_work(
+        crate::observability::WorkType::RegionCleanup,
+        "independent-cleanup".to_owned(),
+        1,
+        1,
+        &CancelReason::shutdown(),
+        CancelKind::Shutdown,
+        Vec::new(),
+    );
+    assert!(state.register_sync_finalizer(region, || {}));
+    assert!(state.register_async_finalizer(region, std::future::pending::<()>()));
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 3);
+    drop(state);
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 1);
+    assert!(monitor.complete_work(independent));
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 0);
+    crate::test_complete!("finalizer_debt_drop_preserves_independent_monitor_work");
+}
+
+#[test]
+fn settled_obligation_aborts_do_not_create_cancellation_debt() {
+    init_test("settled_obligation_aborts_do_not_create_cancellation_debt");
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    let task = insert_task(&mut state, region);
+    let monitor = state.debt_monitor();
+    for reason in [ObligationAbortReason::Explicit, ObligationAbortReason::Cancel] {
+        let obligation = state
+            .create_obligation(ObligationKind::SendPermit, task, region, None)
+            .expect("reserve obligation");
+        state
+            .abort_obligation(obligation, reason)
+            .expect("abort obligation");
+        assert_eq!(state.pending_obligation_count(), 0);
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 0);
+    }
+    let _orphan = state
+        .create_obligation(ObligationKind::Ack, task, region, None)
+        .expect("reserve orphaned obligation");
+    state
+        .task_mut(task)
+        .expect("holder")
+        .complete(Outcome::Cancelled(CancelReason::shutdown()));
+    let (waiters, observer) = state.task_completed(task).into_parts();
+    assert!(waiters.is_empty());
+    observer.dispatch();
+    assert_eq!(state.pending_obligation_count(), 0);
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 0);
+    crate::test_complete!("settled_obligation_aborts_do_not_create_cancellation_debt");
+}
+
+#[test]
 fn register_sync_finalizer() {
     init_test("register_sync_finalizer");
     let mut state = RuntimeState::new();
@@ -4021,6 +4266,7 @@ fn manual_finalizer_receipt_drop_fails_closed() {
     let mut state = RuntimeState::new();
     let region = state.create_root_region(Budget::INFINITE);
     state.register_sync_finalizer(region, || {});
+    let monitor = state.debt_monitor();
     {
         let region_record = state.regions.get(region.arena_index()).expect("region");
         region_record.begin_close(None);
@@ -4052,6 +4298,7 @@ fn manual_finalizer_receipt_drop_fails_closed() {
             .all(|event| !matches!(event, FinalizerHistoryEvent::Ran { .. })),
         "an unsettled receipt must not forge completion history"
     );
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 1);
     crate::test_complete!("manual_finalizer_receipt_drop_fails_closed");
 }
 
@@ -4061,6 +4308,7 @@ fn manual_finalizer_receipt_abandonment_releases_barrier_as_cancelled() {
     let mut state = RuntimeState::new();
     let region = state.create_root_region(Budget::INFINITE);
     state.register_sync_finalizer(region, || {});
+    let monitor = state.debt_monitor();
     {
         let region_record = state.regions.get(region.arena_index()).expect("region");
         region_record.begin_close(None);
@@ -4073,6 +4321,7 @@ fn manual_finalizer_receipt_abandonment_releases_barrier_as_cancelled() {
     state
         .abandon_manual_finalizer(&mut receipt)
         .expect("explicit abandonment should settle the receipt");
+    assert_eq!(monitor.get_debt_snapshot().total_pending, 0);
 
     assert!(receipt.is_settled());
     assert!(state.can_region_complete_close(region));

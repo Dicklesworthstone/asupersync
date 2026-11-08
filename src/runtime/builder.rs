@@ -7182,6 +7182,13 @@ fn retire_stopped_tasks(
             std::mem::forget(payload);
         }
     }
+    // Diagnostics may retain RuntimeState after teardown. No queued or
+    // scheduled finalizer remains owned by the stopped runtime; reflect that
+    // retirement without claiming that abandoned cleanup ran successfully.
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retire_stopped_finalizer_debt();
 }
 
 struct JoinState<T> {

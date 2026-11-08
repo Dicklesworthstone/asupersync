@@ -1596,10 +1596,9 @@ pub(crate) enum LifecycleObserverEffect {
         response: ObligationLeakResponse,
     },
     LeakPanicDowngraded(Option<TaskId>),
-    ObligationDebt {
+    FinalizerDebtCompleted {
         monitor: Arc<crate::observability::CancellationDebtMonitor>,
-        obligation: ObligationId,
-        holder: TaskId,
+        work_type: crate::observability::WorkType,
     },
 }
 
@@ -1939,20 +1938,8 @@ impl LifecycleObserverEffect {
                 );
                 let _ = task_id;
             }
-            Self::ObligationDebt {
-                monitor,
-                obligation,
-                holder,
-            } => {
-                monitor.queue_work(
-                    crate::observability::WorkType::ObligationSettlement,
-                    format!("obligation_{obligation}_{holder}"),
-                    1,
-                    1,
-                    &CancelReason::new(CancelKind::User),
-                    CancelKind::Shutdown,
-                    Vec::new(),
-                );
+            Self::FinalizerDebtCompleted { monitor, work_type } => {
+                monitor.record_completed_work(work_type);
             }
         }
     }
@@ -2531,6 +2518,22 @@ impl RuntimeObservability {
     }
 }
 
+/// Debt entries owned by this runtime's registered finalizers. Retiring a
+/// finalizer removes only its own work, leaving independently queued monitor
+/// entries intact. The drop path performs no clock or observer callbacks.
+struct FinalizerDebt {
+    monitor: Arc<crate::observability::CancellationDebtMonitor>,
+    work_ids: HashMap<u64, u64>,
+}
+
+impl Drop for FinalizerDebt {
+    fn drop(&mut self) {
+        for work_id in self.work_ids.values() {
+            let _ = self.monitor.remove_pending_work(*work_id);
+        }
+    }
+}
+
 /// The global runtime state.
 ///
 /// This is the "Σ" from the formal semantics:
@@ -2694,6 +2697,9 @@ pub struct RuntimeState {
     recently_closed_region_order: VecDeque<RegionId>,
     /// Finalizer ids pending per region, mirroring the runtime's LIFO stack.
     pending_finalizer_ids: HashMap<RegionId, Vec<u64>>,
+    /// Debt monitor receipts retained through queueing, execution, and manual
+    /// handoff until the logical finalizer retires.
+    finalizer_debt: FinalizerDebt,
     /// Async finalizer tasks mapped back to the logical finalizer they are running.
     async_finalizer_tasks: HashMap<TaskId, u64>,
     /// Logical cleanup results retained until the actual task completes. The
@@ -2884,6 +2890,7 @@ impl RuntimeState {
     ) -> Self {
         // Create shared instances for pressure monitoring
         let resource_monitor = Arc::new(ResourceMonitor::new(MonitorConfig::default()));
+        let debt_monitor = Arc::new(crate::observability::CancellationDebtMonitor::default());
 
         // RuntimeState owns the resource monitor and exposes the swarm-level
         // governor. The runtime-level PressureGovernor is attached by the
@@ -2942,6 +2949,10 @@ impl RuntimeState {
             recently_closed_region_outcomes: HashMap::new(),
             recently_closed_region_order: VecDeque::new(),
             pending_finalizer_ids: HashMap::new(),
+            finalizer_debt: FinalizerDebt {
+                monitor: Arc::clone(&debt_monitor),
+                work_ids: HashMap::new(),
+            },
             async_finalizer_tasks: HashMap::new(),
             async_finalizer_outcomes: HashMap::new(),
             active_async_finalizers: HashMap::new(),
@@ -2972,7 +2983,7 @@ impl RuntimeState {
                 },
             )),
             cancel_protocol_tracking: cfg!(any(test, debug_assertions)),
-            debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
+            debt_monitor,
             resource_monitor,
             swarm_pressure_governor,
             task_pressure: None,
@@ -4007,6 +4018,12 @@ impl RuntimeState {
     }
 
     /// Returns the cancellation debt monitor for this runtime.
+    ///
+    /// Registered finalizers remain pending until they retire; completed
+    /// obligation aborts do not create pending work. Scheduled finalizers also
+    /// contribute processing-rate samples after their lifecycle observations
+    /// are dispatched. Manual and bootstrap cleanup settle pending counts
+    /// without sampling a clock under the caller's runtime lock.
     #[inline]
     #[must_use]
     pub fn debt_monitor(&self) -> Arc<crate::observability::CancellationDebtMonitor> {
@@ -7671,6 +7688,13 @@ impl RuntimeState {
         } = sink
         {
             for effect in buffer.drain(..) {
+                // Finalizer pending debt is already retired. Its optional
+                // processing-rate observation can sample a user clock, so
+                // abandon that sample when leak recovery flushes under the
+                // runtime lock instead of the usual post-unlock boundary.
+                if matches!(effect, LifecycleObserverEffect::FinalizerDebtCompleted { .. }) {
+                    continue;
+                }
                 contain_metrics_hook(|| effect.dispatch(&*self.metrics));
             }
         }
@@ -7879,8 +7903,8 @@ impl RuntimeState {
     }
 
     /// Deferred instrumentation effects for an aborted obligation: span/log,
-    /// trace event (with the pre-captured holder logical time), metrics, the
-    /// debt-monitor settlement entry, and the obligation-table epoch advance.
+    /// trace event (with the pre-captured holder logical time), metrics, and
+    /// the obligation-table epoch advance.
     /// Dispatched outside any shard guard (br-asupersync-m9wsza / E2 S3a).
     fn dispatch_obligation_abort_effects(
         &mut self,
@@ -7910,17 +7934,6 @@ impl RuntimeState {
         if !self.leak_recovered_obligations.remove(&info.id) {
             self.observe_obligation_age_with_observers(info.duration, observers);
         }
-
-        // Debt monitoring may emit threshold/eviction subscriber callbacks.
-        // Completion therefore delivers this advisory work after unlock too.
-        self.emit_lifecycle_observation(
-            observers,
-            LifecycleObserverEffect::ObligationDebt {
-                monitor: Arc::clone(&self.debt_monitor),
-                obligation: info.id,
-                holder: info.holder,
-            },
-        );
 
         // Notify epoch tracker of obligation abort
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
@@ -9642,7 +9655,12 @@ impl RuntimeState {
                         }
                         None => resolved_watch_effects,
                     };
-                    self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
+                    self.retire_completed_finalizer_barrier(
+                        task_id,
+                        owner,
+                        close_outcome.as_ref(),
+                        &mut effects,
+                    );
                     self.abort_orphaned_obligations_for_holder(
                         &mut regions,
                         &tasks,
@@ -9694,7 +9712,12 @@ impl RuntimeState {
                     }
                     None => resolved_watch_effects,
                 };
-                self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
+                self.retire_completed_finalizer_barrier(
+                    task_id,
+                    owner,
+                    close_outcome.as_ref(),
+                    &mut effects,
+                );
                 self.abort_orphaned_obligations_for_holder(
                     &mut regions,
                     &tasks,
@@ -9795,6 +9818,7 @@ impl RuntimeState {
         task_id: TaskId,
         owner: RegionId,
         outcome: Option<&Outcome<(), Error>>,
+        effects: &mut LifecycleEffectsSink<'_>,
     ) {
         if let Some(finalizer_id) = self.async_finalizer_tasks.remove(&task_id) {
             let logical = self
@@ -9857,7 +9881,12 @@ impl RuntimeState {
 
             // E2 S4c-2c-i (br-asupersync-m9wsza): Embedded until the
             // guard-held completion sibling threads this phase's targets.
-            self.record_finalizer_run(&AdmissionRegionTarget::Embedded, owner, finalizer_id);
+            self.record_finalizer_run_in(
+                &AdmissionRegionTarget::Embedded,
+                owner,
+                finalizer_id,
+                effects,
+            );
         }
     }
 
@@ -10514,7 +10543,7 @@ impl RuntimeState {
 
         // Track finalizer work in debt monitor
         let cancel_reason = CancelReason::user("sync_finalizer_registration");
-        self.debt_monitor.queue_work(
+        let work_id = self.debt_monitor.queue_work(
             crate::observability::WorkType::RegionCleanup,
             format!("sync_finalizer_{finalizer_id}_{region_id}"),
             5, // Medium priority for cleanup
@@ -10523,6 +10552,7 @@ impl RuntimeState {
             CancelKind::Shutdown,
             Vec::new(),
         );
+        self.finalizer_debt.work_ids.insert(finalizer_id, work_id);
 
         true
     }
@@ -10567,7 +10597,7 @@ impl RuntimeState {
 
         // Track async finalizer work in debt monitor
         let cancel_reason = CancelReason::user("async_finalizer_registration");
-        self.debt_monitor.queue_work(
+        let work_id = self.debt_monitor.queue_work(
             crate::observability::WorkType::RegionCleanup,
             format!("async_finalizer_{finalizer_id}_{region_id}"),
             6, // Medium-high priority for async cleanup
@@ -10576,6 +10606,7 @@ impl RuntimeState {
             CancelKind::Shutdown,
             Vec::new(),
         );
+        self.finalizer_debt.work_ids.insert(finalizer_id, work_id);
 
         true
     }
@@ -10621,6 +10652,36 @@ impl RuntimeState {
         region: RegionId,
         id: u64,
     ) {
+        self.record_finalizer_run_in(regions, region, id, &mut LifecycleEffectsSink::Inline);
+    }
+
+    fn record_finalizer_run_in(
+        &mut self,
+        regions: &AdmissionRegionTarget<'_>,
+        region: RegionId,
+        id: u64,
+        effects: &mut LifecycleEffectsSink<'_>,
+    ) {
+        // Queue pop, async admission, and manual handoff are not completion:
+        // the same receipt survives all of them until this terminal hook.
+        // Remove pending accounting before any observation can unwind. A
+        // scheduled finalizer's clock-dependent processing-rate sample follows
+        // its deferred sink. The legacy sync/manual/bootstrap surfaces expose
+        // no post-unlock observer boundary: they retire pending debt without
+        // sampling a processing rate, rather than invoke a clock callback
+        // while the caller may still own the runtime lock.
+        if let Some(work_id) = self.finalizer_debt.work_ids.remove(&id)
+            && let Some(work_type) = self.debt_monitor.remove_pending_work(work_id)
+            && !matches!(effects, LifecycleEffectsSink::Inline)
+        {
+            self.emit_walk_observation(
+                effects,
+                LifecycleObserverEffect::FinalizerDebtCompleted {
+                    monitor: Arc::clone(&self.debt_monitor),
+                    work_type,
+                },
+            );
+        }
         self.validate_live_region_protocol_transition_in(
             regions,
             region,
@@ -10630,6 +10691,23 @@ impl RuntimeState {
         let now = self.current_runtime_time();
         self.finalizer_history
             .push(FinalizerHistoryEvent::Ran { id, time: now });
+    }
+
+    /// Clears debt for finalizers destroyed after all runtime workers stop.
+    /// External manual receipts still own their work until explicitly settled.
+    /// Teardown is retirement, not successful execution, so it produces no
+    /// finalizer-run history or processing-rate observation.
+    pub(crate) fn retire_stopped_finalizer_debt(&mut self) {
+        let manual = &self.active_manual_finalizers;
+        let monitor = &self.debt_monitor;
+        self.finalizer_debt.work_ids.retain(|id, work_id| {
+            if manual.values().any(|active_id| active_id == id) {
+                true
+            } else {
+                let _ = monitor.remove_pending_work(*work_id);
+                false
+            }
+        });
     }
 
     fn record_finalizer_close(&mut self, region: RegionId) {
