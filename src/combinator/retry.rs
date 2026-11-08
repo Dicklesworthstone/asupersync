@@ -575,6 +575,10 @@ impl Default for RateLimitedRetryPolicy {
 /// A token is spent when the retry it was taken for starts. A loop cancelled
 /// or dropped before then (during the backoff sleep, or while yielding after a
 /// batch of ready attempts) returns the token.
+///
+/// [`Cx::retry_scoped_with_budget`] shares this accounting with region-owned
+/// retries. It uses the explicit owner's timer clock and keeps a reservation
+/// refundable until strict admission actually invokes the next factory.
 #[derive(Debug, Clone)]
 pub struct RetryBudget {
     bucket: Arc<Mutex<RetryTokenBucket>>,
@@ -600,6 +604,13 @@ impl RetryBudget {
         self.bucket.lock().available_tokens()
     }
 
+    /// Reserves a token until an admitted retry invokes its factory.
+    /// Dropping the reservation before invocation returns the token.
+    pub(crate) fn reserve(&self, now: Time) -> Option<AdmittedRetryToken> {
+        self.try_acquire(now)
+            .then(|| AdmittedRetryToken(Some(self.clone())))
+    }
+
     fn refund(&self) {
         self.bucket.lock().refund_one();
     }
@@ -608,10 +619,10 @@ impl RetryBudget {
 /// A budget token taken for a retry that has not started. Dropping it unspent
 /// returns the token, so cancellation or a dropped loop does not shrink the
 /// budget other callers share.
-struct AdmittedRetryToken(Option<RetryBudget>);
+pub(crate) struct AdmittedRetryToken(Option<RetryBudget>);
 
 impl AdmittedRetryToken {
-    fn spend(mut self) {
+    pub(crate) fn spend(mut self) {
         self.0 = None;
     }
 }

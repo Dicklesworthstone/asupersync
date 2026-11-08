@@ -8,7 +8,9 @@ use super::scoped_first_ok::{
     ScopedFirstOkTask,
 };
 use super::{ChildRegionError, Cx, cap};
-use crate::combinator::retry::{RetryPolicy, RetryPredicate, calculate_delay};
+use crate::combinator::retry::{
+    AdmittedRetryToken, RetryBudget, RetryPolicy, RetryPredicate, calculate_delay,
+};
 use crate::runtime::state::SpawnError;
 use crate::time::Sleep;
 use crate::types::{CancelReason, RegionId};
@@ -35,6 +37,12 @@ pub enum ScopedRetryStop {
     /// The predicate declined to retry a typed error after its subtree closed.
     PredicateRejected {
         /// One-based attempt number whose error the predicate examined.
+        attempt: u32,
+    },
+    /// The shared retry budget could not reserve another attempt after a clean
+    /// typed failure and predicate acceptance. That failure remains in the report.
+    BudgetExhausted {
+        /// One-based number of the completed attempt that could not be retried.
         attempt: u32,
     },
     /// The explicit owner requested cancellation before a success was selected.
@@ -104,7 +112,8 @@ pub struct ScopedRetryReport<T, E> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ScopedRetryError {
-    /// The policy can delay a retry but the owner has no authorized timer.
+    /// Backoff or shared-budget accounting requires an authorized timer that
+    /// the explicit owner does not provide.
     TimerUnavailable,
     /// Jitter can affect a delayed retry but the owner's entropy is restricted.
     EntropyUnavailable,
@@ -116,7 +125,7 @@ impl std::fmt::Display for ScopedRetryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TimerUnavailable => {
-                f.write_str("scoped retry backoff requires an authorized timer driver")
+                f.write_str("scoped retry backoff or budget requires an authorized timer driver")
             }
             Self::EntropyUnavailable => {
                 f.write_str("scoped retry jitter requires entropy authority")
@@ -234,8 +243,8 @@ where
     /// entropy permission. A policy that can delay retries requires an authorized
     /// timer before its first attempt; jitter additionally requires runtime entropy
     /// permission. A zero initial delay or delay cap keeps every backoff immediate.
-    /// Shared [`crate::combinator::retry::RetryBudget`] token accounting is not part
-    /// of this API; the policy's attempt count bounds submissions.
+    /// The policy's attempt count bounds submissions. Use
+    /// [`Cx::retry_scoped_with_budget`] to also share retry admission across calls.
     ///
     /// Cancellation observation is mask-agnostic and does not acknowledge the
     /// owner's request. No predicate or new attempt starts after cancellation is
@@ -289,7 +298,71 @@ where
     /// ```
     pub async fn retry_scoped<T, E, Pred, F, Fut>(
         &self,
+        policy: RetryPolicy,
+        predicate: Pred,
+        factory: F,
+    ) -> Result<ScopedRetryReport<T, E>, ScopedRetryError>
+    where
+        Pred: RetryPredicate<E> + Send,
+        F: FnMut(Cx<Caps>, u32) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        self.retry_scoped_inner(policy, None, predicate, factory)
+            .await
+    }
+
+    /// Retries owned attempts while sharing admission tokens with other callers.
+    ///
+    /// This has the same per-attempt ownership, predicate, jitter, cancellation,
+    /// and receipt semantics as [`Cx::retry_scoped`]. The initial attempt is free.
+    /// After a typed failure closes cleanly and the predicate accepts another
+    /// attempt, one shared token is reserved before any backoff or fairness yield.
+    /// If none is available, [`ScopedRetryStop::BudgetExhausted`] preserves the
+    /// completed attempt's typed error without starting or scheduling another.
+    ///
+    /// A reservation is spent only when strict admission invokes the next user
+    /// factory. Cancellation, drop, or admission refusal before that invocation
+    /// returns it, including a request that publishes its region after the outer
+    /// future was dropped. A pending runtime-owned request may return the token
+    /// only when the runtime retires that request; dropping does not force cleanup.
+    /// An invoked factory consumes its token even if it subsequently fails or panics.
+    ///
+    /// The budget requires an authorized explicit timer even with an immediate
+    /// policy, so refill accounting never consults ambient time or a wall-clock
+    /// fallback. Construct the bucket with a `now` from the same clock domain,
+    /// then pass clones of one [`RetryBudget`] to every caller sharing the limit.
+    /// The policy's attempt count still applies, and no token is reserved after
+    /// its final permitted attempt or a declined predicate.
+    ///
+    /// # Errors
+    ///
+    /// Missing timer, required entropy, or spawn authority refuses before user
+    /// work. An already-cancelled owner starts no work and needs no authority.
+    /// Later failures remain in the report, exactly as with [`Cx::retry_scoped`].
+    pub async fn retry_scoped_with_budget<T, E, Pred, F, Fut>(
+        &self,
+        policy: RetryPolicy,
+        budget: RetryBudget,
+        predicate: Pred,
+        factory: F,
+    ) -> Result<ScopedRetryReport<T, E>, ScopedRetryError>
+    where
+        Pred: RetryPredicate<E> + Send,
+        F: FnMut(Cx<Caps>, u32) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        self.retry_scoped_inner(policy, Some(budget), predicate, factory)
+            .await
+    }
+
+    async fn retry_scoped_inner<T, E, Pred, F, Fut>(
+        &self,
         mut policy: RetryPolicy,
+        budget: Option<RetryBudget>,
         predicate: Pred,
         factory: F,
     ) -> Result<ScopedRetryReport<T, E>, ScopedRetryError>
@@ -314,7 +387,7 @@ where
         let can_delay = policy.max_attempts > 1
             && !policy.initial_delay.is_zero()
             && !policy.max_delay.is_zero();
-        let timer = if can_delay {
+        let timer = if can_delay || budget.is_some() {
             Some(
                 self.timer_driver()
                     .ok_or(ScopedRetryError::TimerUnavailable)?,
@@ -331,6 +404,7 @@ where
         }
 
         let mut factory = Some(factory);
+        let mut reservation: Option<AdmittedRetryToken> = None;
         let mut attempt = 1_u32;
         loop {
             if self.is_cancel_requested() {
@@ -342,8 +416,12 @@ where
                 ));
             }
             let mut attempt_factory = factory.take().expect("factory recovered after typed error");
+            let token = reservation.take();
             let receipt = self
                 .first_ok_scoped([move |body| async move {
+                    if let Some(token) = token {
+                        token.spend();
+                    }
                     match attempt_factory(body, attempt).await {
                         Ok(value) => Ok((value, attempt_factory)),
                         Err(error) => Err((error, attempt_factory)),
@@ -427,6 +505,21 @@ where
                     total_delay,
                 ));
             }
+            if let Some(budget) = &budget {
+                let now = timer
+                    .as_ref()
+                    .expect("shared budget passed timer preflight")
+                    .now();
+                let Some(token) = budget.reserve(now) else {
+                    return Ok(finished(
+                        self,
+                        ScopedRetryStop::BudgetExhausted { attempt },
+                        attempts,
+                        total_delay,
+                    ));
+                };
+                reservation = Some(token);
+            }
             if attempt.is_multiple_of(64) {
                 crate::runtime::yield_now().await;
                 if self.is_cancel_requested() {
@@ -496,3 +589,7 @@ mod tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "scoped_retry_native_tests.rs"]
 mod native_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "scoped_retry_budget_tests.rs"]
+mod budget_tests;

@@ -287,7 +287,7 @@ fn backoff_schedule(jitter: f64, ambient_draws: u32) -> (Vec<Time>, Duration) {
         let _ = ambient.random_u64();
     }
     ambient.set_cancel_reason(CancelReason::shutdown());
-    let _foreign_context = ambient.set_current();
+    let _foreign_context = Cx::set_current(Some(ambient.clone()));
     let starts = Arc::new(Mutex::new(Vec::new()));
     let called = Arc::clone(&starts);
     let policy = RetryPolicy::new()

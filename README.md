@@ -1704,6 +1704,7 @@ Beyond `join`, `race`, and `timeout`, the combinator library includes patterns f
 | **rate_limit** | `src/combinator/rate_limit.rs` | Token bucket throughput control |
 | **bracket** | `src/combinator/bracket.rs` | Acquire/use/release with guaranteed cleanup |
 | **retry** | `src/combinator/retry.rs` | Exponential backoff, budget-aware |
+| **scoped retry** | `Cx::retry_scoped` / `Cx::retry_scoped_with_budget` (`src/cx/scoped_retry.rs`) | Drain each attempt's entire private subtree before retrying; optionally share a retry budget across operations |
 
 `Cx::first_ok_scoped` and `Cx::quorum_scoped` preserve the caller's typed
 spawn capabilities without requiring a timer. Their reports separate selection
@@ -1712,6 +1713,15 @@ successful descendant or finalizer cleanup. Dropping either operation requests
 subtree closure while the runtime retains asynchronous cleanup ownership.
 Returned values and errors must not hold obligations needed to close their own
 operation regions; cleanup is cooperative and has no forced deadline.
+
+`Cx::retry_scoped` applies that ownership boundary to repeated attempts, using
+`RetryPolicy`, the explicit owner's timer and entropy, and independent task and
+cleanup receipts. `Cx::retry_scoped_with_budget` also accepts a shared
+`RetryBudget`: the initial attempt is free, and each retry reserves a token
+before backoff but spends it only when its admitted factory runs. Cancellation,
+drop, or admission refusal before invocation returns the reservation. Budgeted
+retries require the owner's timer even for an immediate policy so token refill
+uses the same explicit clock domain.
 
 Use `PipelineExecutionConfig` with `.pipeline(...).then(...).run(...).await`, or
 `MapReduceLimits` with `.map_reduce(...).await`. The existing outcome-fold APIs
