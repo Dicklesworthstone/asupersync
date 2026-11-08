@@ -69,6 +69,13 @@ fn pop_next_queued_waiter(wakers: &mut SmallVec<[ChannelWaiter; 2]>) -> Option<C
 /// A sink for outgoing symbols.
 pub trait SymbolSink: Send + Unpin {
     /// Send a symbol.
+    ///
+    /// `Pending` means this argument was not accepted; callers may retry the
+    /// same symbol. Previously accepted buffered symbols may still progress.
+    /// Once the new symbol is accepted, return `Ready(Ok(()))` even if its
+    /// transport bytes need a later flush. Readiness must be polled before
+    /// sending, and implementations must preserve this ownership boundary if
+    /// readiness changes between those calls.
     fn poll_send(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

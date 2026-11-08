@@ -8,6 +8,7 @@ pub mod aggregator;
 #[path = "mo\u{63}k.rs"]
 pub mod deterministic;
 pub mod error;
+pub mod framed;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod half_close_conformance_tests;
 pub mod router;
@@ -30,6 +31,7 @@ pub use deterministic::{
     SimTransportConfig, sim_channel,
 };
 pub use error::{SinkError, StreamError};
+pub use framed::{FramedSymbolSink, FramedSymbolStream, SymbolFrameLimits};
 pub use router::{
     BoundedLoadConfig, BoundedLoadDecision, BoundedLoadEndpointTelemetry,
     BoundedLoadRebalanceReason, DispatchConfig, DispatchError, DispatchResult, DispatchStrategy,
