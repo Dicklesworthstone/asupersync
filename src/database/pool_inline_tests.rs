@@ -3786,3 +3786,556 @@
             crate::test_complete!("native_async_disconnect_panic_recovers_a_parked_acquisition");
         }
     }
+
+/// dj4uhx M4 follow-through: all manager callbacks retain a physical-slot
+/// owner, not only disconnect. Each injected panic is observed through a
+/// public checkout/return path and followed by real acquisition recovery.
+mod callback_ownership_regressions {
+    use super::*;
+    use std::future::{Future, poll_fn};
+    use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(usize)]
+    enum Hook {
+        Connect = 1,
+        Validate,
+        Release,
+        Authentication,
+        ClearAuthentication,
+        Disconnect,
+    }
+
+    #[derive(Debug)]
+    struct CallbackConnection {
+        id: usize,
+        authenticated_for: Option<String>,
+        live: Arc<AtomicUsize>,
+    }
+
+    impl Drop for CallbackConnection {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct CallbackManager {
+        panic_next: AtomicUsize,
+        next_id: AtomicUsize,
+        live: Arc<AtomicUsize>,
+        disconnects: AtomicUsize,
+        unexpected_authentication: AtomicBool,
+        panic_disconnect: AtomicBool,
+    }
+
+    impl CallbackManager {
+        fn new() -> Self {
+            Self {
+                panic_next: AtomicUsize::new(0),
+                next_id: AtomicUsize::new(1),
+                live: Arc::new(AtomicUsize::new(0)),
+                disconnects: AtomicUsize::new(0),
+                unexpected_authentication: AtomicBool::new(false),
+                panic_disconnect: AtomicBool::new(false),
+            }
+        }
+
+        fn arm(&self, hook: Hook) {
+            assert_eq!(self.panic_next.swap(hook as usize, Ordering::SeqCst), 0);
+        }
+
+        fn call(&self, hook: Hook) {
+            if self
+                .panic_next
+                .compare_exchange(hook as usize, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                panic_any(hook);
+            }
+        }
+
+        fn open(&self) -> CallbackConnection {
+            self.call(Hook::Connect);
+            self.live.fetch_add(1, Ordering::SeqCst);
+            CallbackConnection {
+                id: self.next_id.fetch_add(1, Ordering::SeqCst),
+                authenticated_for: None,
+                live: Arc::clone(&self.live),
+            }
+        }
+
+        fn authentication(&self, conn: &CallbackConnection) -> Option<String> {
+            self.call(Hook::Authentication);
+            if self.unexpected_authentication.load(Ordering::SeqCst) {
+                Some("unexpected-client".to_owned())
+            } else {
+                conn.authenticated_for.clone()
+            }
+        }
+
+        fn clear_authentication(&self, conn: &mut CallbackConnection) -> bool {
+            self.call(Hook::ClearAuthentication);
+            conn.authenticated_for = None;
+            true
+        }
+
+        fn disconnect_owned(&self, conn: CallbackConnection) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+            drop(conn);
+            self.call(Hook::Disconnect);
+            if self.panic_disconnect.swap(false, Ordering::SeqCst) {
+                panic_any(Hook::Disconnect);
+            }
+        }
+    }
+
+    impl ConnectionManager for CallbackManager {
+        type Connection = CallbackConnection;
+        type Error = TestError;
+
+        fn connect(&self) -> Result<Self::Connection, Self::Error> {
+            Ok(self.open())
+        }
+
+        fn is_valid(&self, _conn: &Self::Connection) -> bool {
+            self.call(Hook::Validate);
+            true
+        }
+
+        fn release_check(&self, _conn: &mut Self::Connection) -> bool {
+            self.call(Hook::Release);
+            true
+        }
+
+        fn authentication_state(&self, conn: &Self::Connection) -> Option<String> {
+            self.authentication(conn)
+        }
+
+        fn clear_authentication_state(&self, conn: &mut Self::Connection) -> bool {
+            self.clear_authentication(conn)
+        }
+
+        fn disconnect(&self, conn: Self::Connection) {
+            self.disconnect_owned(conn);
+        }
+    }
+
+    impl AsyncConnectionManager for CallbackManager {
+        type Connection = CallbackConnection;
+        type Error = TestError;
+
+        async fn connect(&self, _cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+            Outcome::Ok(self.open())
+        }
+
+        async fn is_valid(&self, _cx: &Cx, _conn: &mut Self::Connection) -> bool {
+            self.call(Hook::Validate);
+            true
+        }
+
+        fn release_check(&self, _conn: &mut Self::Connection) -> bool {
+            self.call(Hook::Release);
+            true
+        }
+
+        fn authentication_state(&self, conn: &Self::Connection) -> Option<String> {
+            self.authentication(conn)
+        }
+
+        fn clear_authentication_state(&self, conn: &mut Self::Connection) -> bool {
+            self.clear_authentication(conn)
+        }
+
+        fn disconnect(&self, conn: Self::Connection) {
+            self.disconnect_owned(conn);
+        }
+    }
+
+    fn config(capacity: usize) -> DbPoolConfig {
+        DbPoolConfig::with_max_size(capacity)
+            .max_connections_per_client(Some(capacity))
+            .connection_timeout(Duration::from_secs(30))
+    }
+
+    fn assert_hook_panic<T>(result: std::thread::Result<T>, expected: Hook) {
+        let Err(payload) = result else {
+            panic!("{expected:?} callback must retain its outward panic");
+        };
+        assert_eq!(payload.downcast_ref::<Hook>(), Some(&expected));
+    }
+
+    #[test]
+    fn sync_checkout_callback_panics_release_capacity_and_client_quota() {
+        init_test("sync_checkout_callback_panics_release_capacity_and_client_quota");
+        for hook in [
+            Hook::Connect,
+            Hook::Validate,
+            Hook::Authentication,
+            Hook::ClearAuthentication,
+        ] {
+            let pool = DbPool::new(CallbackManager::new(), config(1));
+            if hook != Hook::Connect {
+                pool.get_for_client("client").unwrap().return_to_pool();
+            }
+            pool.manager
+                .unexpected_authentication
+                .store(hook == Hook::ClearAuthentication, Ordering::SeqCst);
+            pool.manager.arm(hook);
+            assert_hook_panic(
+                catch_unwind(AssertUnwindSafe(|| pool.get_for_client("client"))),
+                hook,
+            );
+            assert_eq!(pool.stats().total, 0, "{hook:?}");
+            assert!(pool.inner.lock().client_connections.is_empty(), "{hook:?}");
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0, "{hook:?}");
+            pool.manager
+                .unexpected_authentication
+                .store(false, Ordering::SeqCst);
+
+            let recovered = pool.get_for_client("client").expect("same client recovers");
+            assert_eq!(recovered.id, if hook == Hook::Connect { 1 } else { 2 });
+            assert!(matches!(
+                pool.get_for_client("client"),
+                Err(DbPoolError::ClientQuotaExceeded(_))
+            ));
+            recovered.return_to_pool();
+            pool.close();
+            assert_eq!(pool.stats().total, 0);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+        }
+        crate::test_complete!("sync_checkout_callback_panics_release_capacity_and_client_quota");
+    }
+
+    #[test]
+    fn sync_return_callback_panics_retire_only_the_returned_client_slot() {
+        init_test("sync_return_callback_panics_retire_only_the_returned_client_slot");
+        for hook in [Hook::Release, Hook::Authentication] {
+            let pool = DbPool::new(CallbackManager::new(), config(2));
+            let first = pool.get_for_client("client").unwrap();
+            let second = pool.get_for_client("client").unwrap();
+            pool.manager.arm(hook);
+            assert_hook_panic(
+                catch_unwind(AssertUnwindSafe(|| first.return_to_pool())),
+                hook,
+            );
+            assert_eq!(pool.stats().total, 1);
+            assert_eq!(pool.stats().total_discards, 1);
+            assert_eq!(pool.inner.lock().client_connections.get("client"), Some(&1));
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 1);
+
+            let replacement = pool
+                .get_for_client("client")
+                .expect("one refunded client slot");
+            assert_eq!(replacement.id, 3);
+            assert!(matches!(
+                pool.get_for_client("client"),
+                Err(DbPoolError::ClientQuotaExceeded(_))
+            ));
+            drop(second);
+            drop(replacement);
+            pool.close();
+            assert_eq!(pool.stats().total, 0);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+        }
+        crate::test_complete!("sync_return_callback_panics_retire_only_the_returned_client_slot");
+    }
+
+    #[test]
+    fn return_hook_unwind_preserves_primary_panic_when_disconnect_also_panics() {
+        init_test("return_hook_unwind_preserves_primary_panic_when_disconnect_also_panics");
+        for hook in [Hook::Release, Hook::Authentication] {
+            let pool = DbPool::new(CallbackManager::new(), config(1));
+            let holder = pool.get_for_client("client").unwrap();
+            pool.manager.arm(hook);
+            pool.manager.panic_disconnect.store(true, Ordering::SeqCst);
+            assert_hook_panic(catch_unwind(AssertUnwindSafe(|| drop(holder))), hook);
+            assert_eq!(pool.stats().total_disconnect_failures, 1);
+            pool.get_for_client("client")
+                .expect("sync replacement")
+                .return_to_pool();
+            pool.close();
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+
+            let cx = Cx::for_testing();
+            let pool = AsyncDbPool::new(CallbackManager::new(), config(1));
+            let holder = block_on(pool.get_for_client(&cx, "client")).unwrap();
+            pool.manager.arm(hook);
+            pool.manager.panic_disconnect.store(true, Ordering::SeqCst);
+            assert_hook_panic(catch_unwind(AssertUnwindSafe(|| drop(holder))), hook);
+            assert_eq!(pool.stats().total_disconnect_failures, 1);
+            block_on(pool.get_for_client(&cx, "client"))
+                .expect("async replacement")
+                .return_to_pool();
+            pool.close();
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+        }
+        crate::test_complete!(
+            "return_hook_unwind_preserves_primary_panic_when_disconnect_also_panics"
+        );
+    }
+
+    #[test]
+    fn sync_authentication_refusal_preserves_disconnect_panic_after_retirement() {
+        init_test("sync_authentication_refusal_preserves_disconnect_panic_after_retirement");
+        let pool = DbPool::new(CallbackManager::new(), config(1));
+        let mut holder = pool.get_for_client("client").unwrap();
+        holder.authenticated_for = Some("client".to_owned());
+        holder.return_to_pool();
+        pool.manager
+            .unexpected_authentication
+            .store(true, Ordering::SeqCst);
+        pool.manager.arm(Hook::Disconnect);
+        assert_hook_panic(
+            catch_unwind(AssertUnwindSafe(|| pool.get_for_client("client"))),
+            Hook::Disconnect,
+        );
+        assert_eq!(pool.stats().total, 0);
+        assert!(pool.inner.lock().client_connections.is_empty());
+        pool.manager
+            .unexpected_authentication
+            .store(false, Ordering::SeqCst);
+        pool.get_for_client("client")
+            .expect("replacement after refusal")
+            .return_to_pool();
+        pool.close();
+        assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+        crate::test_complete!(
+            "sync_authentication_refusal_preserves_disconnect_panic_after_retirement"
+        );
+    }
+
+    #[test]
+    fn async_checkout_callback_panics_release_capacity_and_client_quota() {
+        init_test("async_checkout_callback_panics_release_capacity_and_client_quota");
+        for hook in [
+            Hook::Connect,
+            Hook::Validate,
+            Hook::Authentication,
+            Hook::ClearAuthentication,
+        ] {
+            let cx = Cx::for_testing();
+            let pool = AsyncDbPool::new(CallbackManager::new(), config(1));
+            if hook != Hook::Connect {
+                block_on(pool.get_for_client(&cx, "client"))
+                    .unwrap()
+                    .return_to_pool();
+            }
+            pool.manager
+                .unexpected_authentication
+                .store(hook == Hook::ClearAuthentication, Ordering::SeqCst);
+            pool.manager.arm(hook);
+            assert_hook_panic(
+                catch_unwind(AssertUnwindSafe(|| {
+                    block_on(pool.get_for_client(&cx, "client"))
+                })),
+                hook,
+            );
+            assert_eq!(pool.stats().total, 0, "{hook:?}");
+            assert!(pool.inner.lock().client_connections.is_empty(), "{hook:?}");
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0, "{hook:?}");
+            pool.manager
+                .unexpected_authentication
+                .store(false, Ordering::SeqCst);
+            let recovered =
+                block_on(pool.get_for_client(&cx, "client")).expect("same client recovers");
+            assert_eq!(recovered.id, if hook == Hook::Connect { 1 } else { 2 });
+            recovered.return_to_pool();
+            pool.close();
+            assert_eq!(pool.stats().total, 0);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+        }
+        crate::test_complete!("async_checkout_callback_panics_release_capacity_and_client_quota");
+    }
+
+    #[derive(Default)]
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn async_return_hook_panics_wake_the_fifo_successor_without_overtaking() {
+        init_test("async_return_hook_panics_wake_the_fifo_successor_without_overtaking");
+        for hook in [Hook::Release, Hook::Authentication] {
+            let cx = Cx::for_testing();
+            let pool = AsyncDbPool::new(CallbackManager::new(), config(1));
+            let holder = block_on(pool.get_for_client(&cx, "holder")).unwrap();
+            let first_wakes = Arc::new(WakeCounter::default());
+            let second_wakes = Arc::new(WakeCounter::default());
+            let first_waker = Waker::from(Arc::clone(&first_wakes));
+            let second_waker = Waker::from(second_wakes);
+            let mut first_context = Context::from_waker(&first_waker);
+            let mut second_context = Context::from_waker(&second_waker);
+            let mut first = std::pin::pin!(pool.get_for_client(&cx, "first"));
+            let mut second = std::pin::pin!(pool.get_for_client(&cx, "second"));
+            assert!(first.as_mut().poll(&mut first_context).is_pending());
+            assert!(second.as_mut().poll(&mut second_context).is_pending());
+            assert_eq!(pool.stats().pending_waiters, 2);
+            let before = first_wakes.0.load(Ordering::SeqCst);
+            pool.manager.arm(hook);
+            assert_hook_panic(
+                catch_unwind(AssertUnwindSafe(|| holder.return_to_pool())),
+                hook,
+            );
+            assert_eq!(pool.stats().total, 0);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert!(first_wakes.0.load(Ordering::SeqCst) > before);
+            assert!(
+                second.as_mut().poll(&mut second_context).is_pending(),
+                "FIFO order"
+            );
+            let Poll::Ready(Ok(first_connection)) = first.as_mut().poll(&mut first_context) else {
+                panic!("{hook:?}: first queued borrower must acquire after retirement");
+            };
+            assert_eq!(first_connection.id, 2);
+            assert_eq!(pool.stats().pending_waiters, 1);
+            first_connection.return_to_pool();
+            let Poll::Ready(Ok(second_connection)) = second.as_mut().poll(&mut second_context)
+            else {
+                panic!("{hook:?}: second queued borrower must follow the first");
+            };
+            assert_eq!(second_connection.id, 2);
+            second_connection.return_to_pool();
+            pool.close();
+            assert_eq!(pool.stats().pending_waiters, 0);
+            assert_eq!(pool.stats().total_creates, 2);
+            assert_eq!(pool.stats().total_timeouts, 0);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+        }
+        crate::test_complete!(
+            "async_return_hook_panics_wake_the_fifo_successor_without_overtaking"
+        );
+    }
+
+    #[test]
+    fn async_reset_and_return_callback_panics_release_the_entire_lease() {
+        init_test("async_reset_and_return_callback_panics_release_the_entire_lease");
+        for hook in [Hook::Release, Hook::Authentication] {
+            let cx = Cx::for_testing();
+            let pool = AsyncDbPool::new(CallbackManager::new(), config(1));
+            let holder = block_on(pool.get_for_client(&cx, "client")).unwrap();
+            pool.manager.arm(hook);
+            assert_hook_panic(
+                catch_unwind(AssertUnwindSafe(|| block_on(holder.reset_and_return(&cx)))),
+                hook,
+            );
+            assert_eq!(pool.stats().total, 0);
+            assert_eq!(pool.stats().total_discards, 1);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            let replacement = block_on(pool.get_for_client(&cx, "client")).expect("reset recovery");
+            assert_eq!(replacement.id, 2);
+            replacement.return_to_pool();
+            pool.close();
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+        }
+        crate::test_complete!("async_reset_and_return_callback_panics_release_the_entire_lease");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_async_return_callback_panics_recover_a_parked_client() {
+        init_test("native_async_return_callback_panics_recover_a_parked_client");
+        for workers in [0, 2] {
+            for hook in [Hook::Release, Hook::Authentication] {
+                let builder = if workers == 0 {
+                    crate::runtime::RuntimeBuilder::current_thread()
+                } else {
+                    crate::runtime::RuntimeBuilder::new().worker_threads(workers)
+                };
+                let runtime = builder.build().expect("native pool callback runtime");
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx: Cx = Cx::current().expect("native task context");
+                    let pool = Arc::new(AsyncDbPool::new(CallbackManager::new(), config(1)));
+                    let holder = pool.get_for_client(&cx, "holder").await.unwrap();
+                    let parked = Arc::new(AtomicBool::new(false));
+                    let child_parked = Arc::clone(&parked);
+                    let child_pool = Arc::clone(&pool);
+                    let mut waiter = cx
+                        .spawn(move |waiter_cx| async move {
+                            let mut acquisition = std::pin::pin!(
+                                child_pool.get_for_client_outcome(&waiter_cx, "next")
+                            );
+                            poll_fn(|task_cx| {
+                                let result = acquisition.as_mut().poll(task_cx);
+                                if result.is_pending() {
+                                    child_parked.store(true, Ordering::Release);
+                                }
+                                result
+                            })
+                            .await
+                            .map(|connection| {
+                                let id = connection.id;
+                                connection.return_to_pool();
+                                id
+                            })
+                        })
+                        .expect("spawn queued borrower");
+                    for _ in 0..512 {
+                        if parked.load(Ordering::Acquire) && pool.stats().pending_waiters == 1 {
+                            break;
+                        }
+                        yield_now().await;
+                    }
+                    let reached_pending =
+                        parked.load(Ordering::Acquire) && pool.stats().pending_waiters == 1;
+                    pool.manager.arm(hook);
+                    let panic = catch_unwind(AssertUnwindSafe(|| holder.return_to_pool()));
+                    let joined =
+                        crate::time::timeout(cx.now(), Duration::from_secs(2), waiter.join(&cx))
+                            .await;
+                    if joined.is_err() {
+                        // Bound the old-code failure and retire the parked
+                        // child before asserting, rather than leaking it.
+                        pool.close();
+                        waiter.abort();
+                        let _ = waiter.join(&cx).await;
+                    }
+                    let terminal = pool.stats();
+                    pool.close();
+                    assert_hook_panic(panic, hook);
+                    assert!(
+                        reached_pending,
+                        "workers={workers}, hook={hook:?}: real Pending witness"
+                    );
+                    assert!(
+                        matches!(&joined, Ok(Ok(Outcome::Ok(2)))),
+                        "workers={workers}, hook={hook:?}: {joined:?}"
+                    );
+                    assert_eq!(terminal.total_creates, 2);
+                    assert_eq!(terminal.total_discards, 1);
+                    assert_eq!(terminal.total_timeouts, 0);
+                    assert_eq!(terminal.pending_waiters, 0);
+                    assert!(pool.inner.lock().client_connections.is_empty());
+                    assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+                }));
+                let drain = runtime.shutdown_drained(Duration::from_secs(5));
+                assert_eq!(
+                    drain.outcome,
+                    crate::runtime::RootDrainOutcome::Quiescent,
+                    "workers={workers}, hook={hook:?}: {drain:?}"
+                );
+                assert_eq!(drain.live_tasks, 0);
+                assert_eq!(drain.live_regions, 0);
+                assert_eq!(drain.pending_spawns, 0);
+                assert_eq!(drain.pending_obligations, 0);
+                assert_eq!(drain.queued_finalizers, 0);
+                assert!(!drain.has_pending_obligation_posts);
+                assert!(runtime.is_quiescent());
+            }
+        }
+        crate::test_complete!("native_async_return_callback_panics_recover_a_parked_client");
+    }
+}

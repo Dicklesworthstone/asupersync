@@ -598,9 +598,31 @@ impl<E: std::error::Error + 'static> std::error::Error for DbPoolError<E> {
     }
 }
 
+/// Owns a physical connection and its checkout quota until ownership is
+/// transferred to a borrower or the idle queue. Keep it armed across every
+/// manager callback, including release and authentication checks.
 struct ValidationGuard<'a, M: ConnectionManager> {
     pool: &'a DbPool<M>,
     conn: Option<M::Connection>,
+    client_id: Option<String>,
+}
+
+impl<M: ConnectionManager> ValidationGuard<'_, M> {
+    /// Explicit authentication refusal historically propagates a disconnect
+    /// panic. Retire ownership first, while preserving that callback policy.
+    fn disconnect(mut self) {
+        if let Some(conn) = self.conn.take() {
+            let mut inner = self.pool.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+            DbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
+            drop(inner);
+            self.pool
+                .stats
+                .total_discards
+                .fetch_add(1, Ordering::Relaxed);
+            self.pool.manager.disconnect(conn);
+        }
+    }
 }
 
 impl<M: ConnectionManager> Drop for ValidationGuard<'_, M> {
@@ -611,6 +633,7 @@ impl<M: ConnectionManager> Drop for ValidationGuard<'_, M> {
             // pool, so it must not retain a capacity slot (dj4uhx M4).
             let mut inner = self.pool.inner.lock();
             inner.total = inner.total.saturating_sub(1);
+            DbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
             drop(inner);
             self.pool
                 .stats
@@ -631,6 +654,7 @@ impl<M: ConnectionManager> Drop for ValidationGuard<'_, M> {
 struct CreationGuard<'a, M: ConnectionManager> {
     pool: &'a DbPool<M>,
     disarmed: bool,
+    client_id: Option<String>,
 }
 
 impl<M: ConnectionManager> Drop for CreationGuard<'_, M> {
@@ -638,6 +662,7 @@ impl<M: ConnectionManager> Drop for CreationGuard<'_, M> {
         if !self.disarmed {
             let mut inner = self.pool.inner.lock();
             inner.total = inner.total.saturating_sub(1);
+            DbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
         }
     }
 }
@@ -847,6 +872,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     let mut guard = ValidationGuard {
                         pool: self,
                         conn: Some(conn),
+                        client_id: None,
                     };
 
                     let valid = self.manager.is_valid(guard.conn.as_ref().unwrap());
@@ -885,6 +911,7 @@ impl<M: ConnectionManager> DbPool<M> {
             let mut creation_guard = CreationGuard {
                 pool: self,
                 disarmed: false,
+                client_id: None,
             };
 
             match self.manager.connect() {
@@ -1052,61 +1079,33 @@ impl<M: ConnectionManager> DbPool<M> {
                     let mut guard = ValidationGuard {
                         pool: self,
                         conn: Some(conn),
+                        client_id: Some(client_id_owned.clone()),
                     };
 
                     let valid = self.manager.is_valid(guard.conn.as_ref().unwrap());
 
                     if !valid {
-                        // Decrement client count since validation failed
-                        let mut inner = self.inner.lock();
-                        if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
-                            *count = count.saturating_sub(1);
-                            if *count == 0 {
-                                inner.client_connections.remove(&client_id_owned);
-                            }
-                        }
-                        drop(inner);
-
                         self.stats
                             .total_validation_failures
                             .fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
 
-                    let mut valid_conn = guard.conn.take().unwrap();
-
                     // br-asupersync-gb3rck: Additional authentication state validation after basic validation
                     if self.config.validate_authentication_state {
-                        let current_auth_state = self.manager.authentication_state(&valid_conn);
+                        // Authentication hooks are user code too. Retain the
+                        // guard until every hook has returned, so an unwind
+                        // retires both capacity and this client's quota.
+                        let current_auth_state =
+                            self.manager.authentication_state(guard.conn.as_ref().unwrap());
                         match (&current_auth_state, &authenticated_for) {
                             (Some(current_client), Some(expected_client))
                                 if current_client != expected_client =>
                             {
-                                // Authentication state mismatch - connection shows different auth than expected
-                                // Decrement client count and return error
-                                let mut inner = self.inner.lock();
-                                if let Some(count) =
-                                    inner.client_connections.get_mut(&client_id_owned)
-                                {
-                                    *count = count.saturating_sub(1);
-                                    if *count == 0 {
-                                        inner.client_connections.remove(&client_id_owned);
-                                    }
-                                }
-                                // br-asupersync-c5d0q: this connection was popped via the
-                                // needs_validation=true path (total NOT decremented at pop) and
-                                // taken out of the ValidationGuard above, so the guard's Drop
-                                // rollback no longer applies. Disconnecting it without
-                                // decrementing `total` permanently leaks a capacity slot
-                                // (eventually -> DbPoolError::Full forever). The async twin
-                                // decrements here; mirror it for the sync path.
-                                inner.total = inner.total.saturating_sub(1);
-                                drop(inner);
-
                                 self.stats
                                     .total_validation_failures
                                     .fetch_add(1, Ordering::Relaxed);
-                                self.manager.disconnect(valid_conn);
+                                guard.disconnect();
                                 return Err(DbPoolError::AuthenticationMismatch {
                                     expected: expected_client.clone(),
                                     found: current_client.clone(),
@@ -1119,28 +1118,14 @@ impl<M: ConnectionManager> DbPool<M> {
                             #[allow(clippy::collapsible_match)]
                             (Some(current_client), None) if current_client != &client_id_owned => {
                                 // Connection has unexpected authentication state - try to clear it
-                                if !self.manager.clear_authentication_state(&mut valid_conn) {
-                                    // Failed to clear auth state - discard connection
-                                    let mut inner = self.inner.lock();
-                                    if let Some(count) =
-                                        inner.client_connections.get_mut(&client_id_owned)
-                                    {
-                                        *count = count.saturating_sub(1);
-                                        if *count == 0 {
-                                            inner.client_connections.remove(&client_id_owned);
-                                        }
-                                    }
-                                    // br-asupersync-c5d0q: same leak as the mismatch arm above
-                                    // -- the connection was taken out of the ValidationGuard, so
-                                    // disconnecting it here without decrementing `total` leaks a
-                                    // capacity slot. Mirror the async twin's decrement.
-                                    inner.total = inner.total.saturating_sub(1);
-                                    drop(inner);
-
+                                if !self
+                                    .manager
+                                    .clear_authentication_state(guard.conn.as_mut().unwrap())
+                                {
                                     self.stats
                                         .total_validation_failures
                                         .fetch_add(1, Ordering::Relaxed);
-                                    self.manager.disconnect(valid_conn);
+                                    guard.disconnect();
                                     continue;
                                 }
                             }
@@ -1154,10 +1139,10 @@ impl<M: ConnectionManager> DbPool<M> {
                         .total_acquisitions
                         .fetch_add(1, Ordering::Relaxed);
                     return Ok(PooledConnection {
-                        conn: Some(valid_conn),
+                        conn: guard.conn.take(),
                         pool: self,
                         created_at,
-                        client_id: Some(client_id_owned),
+                        client_id: guard.client_id.take(),
                     });
                 }
 
@@ -1176,6 +1161,7 @@ impl<M: ConnectionManager> DbPool<M> {
             let mut creation_guard = CreationGuard {
                 pool: self,
                 disarmed: false,
+                client_id: Some(client_id_owned.clone()),
             };
 
             match self.manager.connect() {
@@ -1189,20 +1175,12 @@ impl<M: ConnectionManager> DbPool<M> {
                         conn: Some(conn),
                         pool: self,
                         created_at: crate::time::wall_now(),
-                        client_id: Some(client_id_owned),
+                        client_id: creation_guard.client_id.take(),
                     });
                 }
                 Err(e) => {
-                    // Decrement client count since creation failed
-                    let mut inner = self.inner.lock();
-                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
-                        *count = count.saturating_sub(1);
-                        if *count == 0 {
-                            inner.client_connections.remove(&client_id_owned);
-                        }
-                    }
-                    drop(inner);
-
+                    // The guard retires capacity and client quota on either
+                    // an error return or a panic in the connect callback.
                     return Err(DbPoolError::Connect(e));
                 }
             }
@@ -1439,17 +1417,25 @@ impl<M: ConnectionManager> DbPool<M> {
 
     /// Return a connection to the pool, preserving its original creation time.
     fn return_connection(&self, conn: M::Connection, created_at: Time, client_id: Option<String>) {
+        let mut guard = ValidationGuard {
+            pool: self,
+            conn: Some(conn),
+            client_id,
+        };
         // br-asupersync-gb3rck: Determine authentication state for this connection
         let authenticated_for = if self.config.validate_authentication_state {
             // If authentication validation is enabled, check current auth state
-            self.manager.authentication_state(&conn)
+            self.manager
+                .authentication_state(guard.conn.as_ref().unwrap())
         } else {
             // If validation disabled, preserve the client_id that was using this connection
-            client_id
+            guard.client_id.clone()
         };
 
         let conn_to_disconnect = {
             let mut inner = self.inner.lock();
+            Self::release_client_quota_locked(&mut inner, guard.client_id.as_deref());
+            let conn = guard.conn.take().unwrap();
             if inner.closed {
                 inner.total = inner.total.saturating_sub(1);
                 Some(conn)
@@ -1478,6 +1464,17 @@ impl<M: ConnectionManager> DbPool<M> {
                     action = "retire_pool_slot",
                     "disconnect failed while returning connection"
                 );
+            }
+        }
+    }
+
+    fn release_client_quota_locked(inner: &mut PoolInner<M::Connection>, client_id: Option<&str>) {
+        if let Some(client_id) = client_id
+            && let Some(count) = inner.client_connections.get_mut(client_id)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                inner.client_connections.remove(client_id);
             }
         }
     }
@@ -1777,46 +1774,34 @@ impl<M: ConnectionManager> std::ops::DerefMut for PooledConnection<'_, M> {
 
 impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
     fn drop(&mut self) {
-        if let Some(mut conn) = self.conn.take() {
+        if let Some(conn) = self.conn.take() {
+            let mut guard = ValidationGuard {
+                pool: self.pool,
+                conn: Some(conn),
+                client_id: self.client_id.take(),
+            };
             // br-asupersync-5bv5sr: gate the return-to-pool path on the
             // manager's release-time health check. Backends that detect a
             // poisoned protocol state, an open transaction, or any other
             // condition that would corrupt the next caller's view should
             // override `release_check` to return `false`; we then route
-            // the connection through `safe_discard_connection` so it's closed
+            // the connection through the guard's discard path so it's closed
             // rather than handed back to a fresh caller.
             //
-            // br-asupersync-db-pool-drop-unhealthy-double-decrement-b18gr5: the
-            // per-client quota is decremented by EXACTLY ONE owner per branch.
-            // `return_connection` does NOT touch `client_connections`, so the
-            // healthy path decrements inline here; `safe_discard_connection`
-            // decrements internally before consuming the connection, including
-            // when disconnect panics, so the unhealthy path must NOT decrement
-            // inline. The previous code decremented inline UNCONDITIONALLY and let
-            // `safe_discard_connection` decrement again, double-counting the
-            // release whenever a client held >1 connection and the unhealthy
-            // disconnect succeeded; the failure path then needed a +1 restore.
-            if self.pool.manager.release_check(&mut conn) {
-                // br-asupersync-qydi3j: healthy return decrements the client quota.
-                if let Some(client_id) = &self.client_id {
-                    if self.pool.config.enforce_client_quotas {
-                        let mut inner = self.pool.inner.lock();
-                        if let Some(count) = inner.client_connections.get_mut(client_id) {
-                            *count = count.saturating_sub(1);
-                            if *count == 0 {
-                                inner.client_connections.remove(client_id);
-                            }
-                        }
-                        drop(inner);
-                    }
-                }
-                self.pool
-                    .return_connection(conn, self.created_at, self.client_id.clone());
-            } else {
-                // br-asupersync-sxhome: safe discard owns the per-client quota for
-                // this path, so there is no inline decrement or compensation.
-                self.pool
-                    .safe_discard_connection(conn, self.client_id.clone());
+            // dj4uhx M4: a release hook can panic before disconnect is ever
+            // reached. The guard retains both physical and client ownership
+            // through that hook; successful return transfers the same guard
+            // responsibility to return_connection's authentication check.
+            if self
+                .pool
+                .manager
+                .release_check(guard.conn.as_mut().unwrap())
+            {
+                self.pool.return_connection(
+                    guard.conn.take().unwrap(),
+                    self.created_at,
+                    guard.client_id.take(),
+                );
             }
         }
     }
@@ -1991,6 +1976,8 @@ pub struct AsyncDbPool<M: AsyncConnectionManager> {
     live_max_size: AtomicUsize,
 }
 
+/// Async pool ownership counterpart of `ValidationGuard`. Its retirement
+/// wakes the next FIFO borrower after unlocking, including callback unwinds.
 struct AsyncValidationGuard<'a, M: AsyncConnectionManager> {
     pool: &'a AsyncDbPool<M>,
     conn: Option<M::Connection>,
@@ -3182,17 +3169,25 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
     /// Return a connection to the pool.
     fn return_connection(&self, conn: M::Connection, created_at: Time, client_id: Option<String>) {
+        let mut guard = AsyncValidationGuard {
+            pool: self,
+            conn: Some(conn),
+            client_id,
+        };
         // br-asupersync-80525g: Validation bypass fix - determine authentication state for async pool
         let authenticated_for = if self.config.validate_authentication_state {
             // If authentication validation is enabled, check current auth state
-            self.manager.authentication_state(&conn)
+            self.manager
+                .authentication_state(guard.conn.as_ref().unwrap())
         } else {
             // If validation disabled, preserve the client_id that was using this connection
-            client_id
+            guard.client_id.clone()
         };
 
         let (conn_to_disconnect, wakes) = {
             let mut inner = self.inner.lock();
+            Self::release_client_quota_locked(&mut inner, guard.client_id.as_deref());
+            let conn = guard.conn.take().unwrap();
             if inner.closed {
                 inner.total = inner.total.saturating_sub(1);
                 (Some(conn), AsyncPoolWakes::None)
@@ -3427,21 +3422,12 @@ impl<M: AsyncConnectionManager> std::ops::DerefMut for AsyncPooledConnection<'_,
 
 impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
     fn drop(&mut self) {
-        if let Some(mut conn) = self.conn.take() {
-            // br-asupersync-80525g: Decrement client connection count when dropping
-            if let Some(client_id) = &self.client_id {
-                if self.pool.config.enforce_client_quotas {
-                    let mut inner = self.pool.inner.lock();
-                    if let Some(count) = inner.client_connections.get_mut(client_id) {
-                        *count = count.saturating_sub(1);
-                        if *count == 0 {
-                            inner.client_connections.remove(client_id);
-                        }
-                    }
-                    drop(inner);
-                }
-            }
-
+        if let Some(conn) = self.conn.take() {
+            let mut guard = AsyncValidationGuard {
+                pool: self.pool,
+                conn: Some(conn),
+                client_id: self.client_id.take(),
+            };
             // br-asupersync-5bv5sr: gate on the manager's release-time
             // health check; discard rather than return-to-pool when the
             // backend reports the connection is in a state that would
@@ -3449,35 +3435,21 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
             // result set, protocol desync). reset_and_return already ran it.
             let keep = match self.release_verdict {
                 Some(keep) => keep,
-                None => self.pool.manager.release_check(&mut conn),
+                None => self
+                    .pool
+                    .manager
+                    .release_check(guard.conn.as_mut().unwrap()),
             };
             if keep {
-                self.pool
-                    .return_connection(conn, self.created_at, self.client_id.clone());
-            } else {
-                // The quota was retired above. Release capacity and wake the
-                // next FIFO waiter before consuming the connection in manager
-                // code; a caught disconnect panic must not strand that waiter.
-                let wakes = {
-                    let mut inner = self.pool.inner.lock();
-                    inner.total = inner.total.saturating_sub(1);
-                    self.pool.prepare_next_async_pool_wake_locked(&mut inner)
-                };
-                self.pool
-                    .stats
-                    .total_discards
-                    .fetch_add(1, Ordering::Relaxed);
-                wakes.dispatch();
-                if !self.pool.safe_disconnect(conn) {
-                    crate::tracing_compat::warn!(
-                        event = "async_database_pool_disconnect_failure",
-                        operation = "async_pooled_connection_drop",
-                        client_id = self.client_id.as_deref().unwrap_or("unknown"),
-                        action = "retire_pool_slot",
-                        "disconnect failed while dropping async pooled connection"
-                    );
-                }
+                self.pool.return_connection(
+                    guard.conn.take().unwrap(),
+                    self.created_at,
+                    guard.client_id.take(),
+                );
             }
+            // An unhealthy result or an unwinding hook leaves ownership with
+            // the guard. Retirement precedes disconnect and wakes a parked
+            // FIFO successor; callback panic payloads still unwind unchanged.
         }
     }
 }
