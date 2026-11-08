@@ -104,6 +104,10 @@ mod cancel_wake_tests;
 #[path = "mpsc_recv_cancel_wake_tests.rs"]
 mod recv_cancel_wake_tests;
 
+#[cfg(test)]
+#[path = "mpsc_graceful_close_tests.rs"]
+mod graceful_close_tests;
+
 /// Error returned when sending fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError<T> {
@@ -277,6 +281,9 @@ struct ChannelInner<T> {
     message_causality: Option<VecDeque<Option<MessageCausality>>>,
     /// Number of reserved slots (permits outstanding).
     reserved: usize,
+    /// Admission is sealed, but permits issued before the seal may still commit.
+    /// Legacy close and actual receiver drop revoke this permission.
+    graceful_close: bool,
     /// Arc-owned wakers for senders waiting for capacity (O(1) access by token).
     send_wakers: TokenSlab<Arc<RegisteredWaker>>,
     /// FIFO queue of waiter tokens to maintain fair ordering.
@@ -301,8 +308,10 @@ struct ChannelShared<T> {
     /// Number of active senders. Atomic so `Sender::clone` avoids the mutex
     /// and `Receiver::is_closed` can read without locking.
     sender_count: AtomicUsize,
-    /// Whether the receiver has been dropped. Atomic so `Sender::is_closed`
-    /// can read without locking. Monotone: transitions `false → true` once.
+    /// Whether receiver admission is closed, including explicit close or drop.
+    /// Atomic so `Sender::is_closed` can read without locking. Monotone:
+    /// transitions `false → true` once; `inner.graceful_close` separately keeps
+    /// preissued permit rights while a gracefully closed receiver is alive.
     receiver_dropped: AtomicBool,
     /// Allocated only when a producer first waits for receiver closure.
     closed: closed::ClosedSignal,
@@ -340,6 +349,7 @@ impl<T> ChannelInner<T> {
             queue,
             message_causality: None,
             reserved: 0,
+            graceful_close: false,
             send_wakers: TokenSlab::with_capacity(4),
             waiter_queue: VecDeque::with_capacity(4),
             recv_waker: None,
@@ -545,6 +555,15 @@ impl MpscWaiterCancelFixture {
 }
 
 impl<T> ChannelShared<T> {
+    /// Whether an empty receiver can finish. Call while holding `inner` so a
+    /// final permit cannot retire between the check and waker registration.
+    #[inline]
+    fn recv_is_disconnected(&self, inner: &ChannelInner<T>) -> bool {
+        self.sender_count.load(Ordering::Acquire) == 0
+            || (self.receiver_dropped.load(Ordering::Relaxed)
+                && (!inner.graceful_close || inner.reserved == 0))
+    }
+
     /// Builds an opt-in redacted telemetry snapshot.
     #[inline]
     fn telemetry_snapshot(&self, channel_id: u64) -> MpscTelemetrySnapshot {
@@ -559,7 +578,9 @@ impl<T> ChannelShared<T> {
         };
         let closed = receiver_dropped || sender_count == 0;
 
-        let receiver_health = if receiver_dropped {
+        let receiver_health = if inner.graceful_close {
+            "gracefully_closed"
+        } else if receiver_dropped {
             "receiver_dropped"
         } else if queued_messages > 0 {
             "value_ready"
@@ -826,7 +847,8 @@ impl<T> Sender<T> {
         Ok(())
     }
 
-    /// Returns true if the receiver has been dropped.
+    /// Returns true if receiver admission has closed or the receiver was dropped.
+    /// Preissued permits can still commit after [`Receiver::close_gracefully`].
     #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -854,10 +876,11 @@ impl<T> Sender<T> {
     pub(crate) fn close_receiver(&self) {
         let (send_wakers, recv_waker) = {
             let mut inner = self.shared.inner.lock();
-            if self.shared.receiver_dropped.load(Ordering::Relaxed) {
+            if self.shared.receiver_dropped.load(Ordering::Relaxed) && !inner.graceful_close {
                 return;
             }
             let send_wakers = inner.drain_sender_wakers();
+            inner.graceful_close = false;
             self.shared.receiver_dropped.store(true, Ordering::Release);
             let recv_waker = inner.recv_waker.take();
             drop(inner);
@@ -1641,7 +1664,7 @@ impl<T> SendPermit<'_, T> {
             inner.reserved -= 1;
         }
 
-        if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
+        if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) && !inner.graceful_close {
             // Receiver is gone; drop the value and release capacity.
             // Note: Receiver::drop already drained and woke any pending send_wakers.
             drop(inner);
@@ -1689,7 +1712,13 @@ impl<T> SendPermit<'_, T> {
                 inner.reserved -= 1;
             }
             inner.record_cancellation();
-            inner.take_next_sender_waker()
+            if inner.graceful_close && inner.reserved == 0 {
+                // No new sender can be admitted after the seal. Returning the
+                // last unused reservation can make a parked receiver reach EOF.
+                inner.recv_waker.take()
+            } else {
+                inner.take_next_sender_waker()
+            }
         };
         ReleasedCapacityWake(next_waker)
     }
@@ -1737,19 +1766,78 @@ impl<T> Receiver<T> {
     ///
     /// Existing messages in the queue remain available for receiving.
     /// Any pending senders will be woken and receive a `Disconnected` error.
+    /// Outstanding permits are revoked, including permits retained by an
+    /// earlier [`close_gracefully`](Self::close_gracefully) call.
     pub fn close(&mut self) {
-        let wakers = {
+        let (wakers, recv_waker) = {
+            let mut inner = self.shared.inner.lock();
+            if self.shared.receiver_dropped.load(Ordering::Relaxed) && !inner.graceful_close {
+                return;
+            }
+            let wakers = inner.drain_sender_wakers();
+            let recv_waker = if inner.graceful_close {
+                inner.recv_waker.take()
+            } else {
+                None
+            };
+            inner.graceful_close = false;
+            self.shared.receiver_dropped.store(true, Ordering::Release);
+            drop(inner);
+            (wakers, recv_waker)
+        };
+        let _closed = closed::WakeClosed(&self.shared);
+        wake_detached(wakers.into_iter().chain(recv_waker));
+    }
+
+    /// Stops new sends while preserving permits already issued to producers.
+    ///
+    /// New reservations and direct sends fail with `Disconnected`; pending
+    /// reservers and [`Sender::closed`] observers are notified immediately.
+    /// A slot reserved before the seal may still publish its value, even
+    /// though [`Sender::is_closed`] is now true (br-asupersync-9ngu0p). This
+    /// includes a reservation still completing its runtime obligation admission
+    /// when the seal occurs; a future merely waiting for capacity has no slot.
+    ///
+    /// Keep receiving to drain both queued values and those later committed
+    /// by preissued permits. An empty receive remains pending until every such
+    /// permit has committed, aborted, or been dropped. Then [`recv`](Self::recv)
+    /// returns `Disconnected` and [`recv_many`](Self::recv_many) returns zero.
+    /// [`try_recv`](Self::try_recv) returns `Empty` while a permit can still send.
+    /// A forgotten permit can therefore prevent drain indefinitely.
+    ///
+    /// This operation is idempotent and cannot reopen a channel closed by
+    /// [`close`](Self::close). A later `close` or dropping the receiver revokes
+    /// remaining permits; unsuccessful commits return their original values.
+    /// [`Self::is_closed`] keeps its sender-liveness meaning; receive completion
+    /// is the signal that a graceful drain has finished.
+    ///
+    /// ```
+    /// use asupersync::channel::mpsc::{self, RecvError, SendError};
+    /// let (sender, mut receiver) = mpsc::channel(1);
+    /// let accepted = sender.try_reserve().unwrap();
+    /// receiver.close_gracefully();
+    /// assert!(matches!(sender.try_send(2), Err(SendError::Disconnected(2))));
+    /// assert_eq!(receiver.try_recv(), Err(RecvError::Empty));
+    /// accepted.try_send(1).unwrap();
+    /// assert_eq!(receiver.try_recv(), Ok(1));
+    /// assert_eq!(receiver.try_recv(), Err(RecvError::Disconnected));
+    /// ```
+    pub fn close_gracefully(&mut self) {
+        let (send_wakers, recv_waker) = {
             let mut inner = self.shared.inner.lock();
             if self.shared.receiver_dropped.load(Ordering::Relaxed) {
                 return;
             }
-            let wakers = inner.drain_sender_wakers();
+            // Reserve detached fanout storage before publishing the seal.
+            let send_wakers = inner.drain_sender_wakers();
+            inner.graceful_close = true;
             self.shared.receiver_dropped.store(true, Ordering::Release);
+            let recv_waker = inner.recv_waker.take();
             drop(inner);
-            wakers
+            (send_wakers, recv_waker)
         };
         let _closed = closed::WakeClosed(&self.shared);
-        wake_detached(wakers);
+        wake_detached(send_wakers.into_iter().chain(recv_waker));
     }
 
     /// Creates a receive future for the next value.
@@ -1855,9 +1943,7 @@ impl<T> Receiver<T> {
                 return Poll::Ready(Ok(value));
             }
 
-            if self.shared.sender_count.load(Ordering::Acquire) == 0
-                || self.shared.receiver_dropped.load(Ordering::Relaxed)
-            {
+            if self.shared.recv_is_disconnected(&inner) {
                 let retired_waker = inner.recv_waker.take();
                 drop(inner);
                 drop(retired_waker);
@@ -1962,9 +2048,7 @@ impl<T> Receiver<T> {
                 return Poll::Ready(Ok(target));
             }
 
-            if self.shared.sender_count.load(Ordering::Acquire) == 0
-                || self.shared.receiver_dropped.load(Ordering::Relaxed)
-            {
+            if self.shared.recv_is_disconnected(&inner) {
                 let retired_waker = inner.recv_waker.take();
                 drop(inner);
                 drop(retired_waker);
@@ -2024,8 +2108,7 @@ impl<T> Receiver<T> {
             }
             Ok(value)
         } else {
-            let disconnected = self.shared.sender_count.load(Ordering::Acquire) == 0
-                || self.shared.receiver_dropped.load(Ordering::Relaxed);
+            let disconnected = self.shared.recv_is_disconnected(&inner);
             let retired_waker = if disconnected {
                 inner.recv_waker.take()
             } else {
@@ -2186,6 +2269,7 @@ impl<T> Drop for Receiver<T> {
             // helper reserves first, so an allocation panic cannot retire any
             // executor Waker under `inner`.
             let wakers = inner.drain_sender_wakers();
+            inner.graceful_close = false;
             self.shared.receiver_dropped.store(true, Ordering::Release);
             // Clear any pending recv waker so a dropped receiver does not
             // retain executor task state indefinitely.
@@ -2239,6 +2323,13 @@ impl<T> UnboundedReceiver<T> {
     #[inline]
     pub fn close(&mut self) {
         self.inner.close();
+    }
+
+    /// Stops admission and drains accepted messages. See
+    /// [`Receiver::close_gracefully`] for preissued-permit and EOF semantics.
+    #[inline]
+    pub fn close_gracefully(&mut self) {
+        self.inner.close_gracefully();
     }
 
     /// Creates a receive future for the next value.

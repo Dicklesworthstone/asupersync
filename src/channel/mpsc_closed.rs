@@ -18,7 +18,8 @@ impl<T> Sender<T> {
     /// not reserve capacity, publish a value, consume queued messages, or wait
     /// for the queue to drain. It can interrupt an upstream producer even when
     /// that producer has no message ready to send. Existing permits can still
-    /// be outstanding when this resolves; their sends will be refused.
+    /// be outstanding when this resolves. [`super::Receiver::close_gracefully`] keeps
+    /// their commit rights; ordinary close or receiver drop revokes them.
     ///
     /// Each pending call owns its notification registration. Dropping the
     /// future removes that registration without changing the channel or other
