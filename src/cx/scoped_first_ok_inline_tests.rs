@@ -155,7 +155,7 @@ fn scoped_first_ok_preserves_ordered_errors_and_short_circuits_after_success() {
             assert_ne!(attempt.region_id, Some(root));
             assert!(lab.state.region(attempt.region_id.unwrap()).is_none());
             let close = attempt.close.as_ref().unwrap().as_ref().unwrap();
-            assert!(!cleanup_failed(&attempt.close));
+            assert!(!cleanup_failed(attempt.close.as_ref()));
             assert!(close.descendant_panic.is_none());
             if selected == Some(index as u64) {
                 assert!(
@@ -388,7 +388,7 @@ fn scoped_first_ok_owner_cancel_during_cleanup_preserves_selection_and_blocks_fa
                 ScopedFirstOkTask::Joined(Ok(Err("failed before owner cancellation")))
             ));
         }
-        assert!(!cleanup_failed(&report.attempts[0].close));
+        assert!(!cleanup_failed(report.attempts[0].close.as_ref()));
         assert!(!owner.inner.read().cancel_acknowledged);
         drop(chain);
         finish_fixture(&mut lab, root, &owner_gate);
@@ -425,7 +425,7 @@ fn scoped_first_ok_masked_owner_cancellation_preserves_acknowledged_late_result(
             report.attempts[0].task,
             ScopedFirstOkTask::Joined(Ok(Ok(73)))
         ));
-        assert!(!cleanup_failed(&report.attempts[0].close));
+        assert!(!cleanup_failed(report.attempts[0].close.as_ref()));
         assert_eq!(owner.inner.read().mask_depth, 1);
         assert!(!owner.inner.read().cancel_acknowledged);
     });
@@ -492,7 +492,7 @@ fn scoped_first_ok_drops_unused_factory_resources_before_joining_or_closing_sele
             report.attempts[0].task,
             ScopedFirstOkTask::Joined(Ok(Ok(73)))
         ));
-        assert!(!cleanup_failed(&report.attempts[0].close));
+        assert!(!cleanup_failed(report.attempts[0].close.as_ref()));
         assert!(cleaned.load(Ordering::SeqCst));
         drop(chain);
         finish_fixture(&mut lab, root, &owner_gate);
@@ -581,7 +581,7 @@ fn scoped_first_ok_later_submission_failure_keeps_previous_typed_error() {
         report.attempts[0].task,
         ScopedFirstOkTask::Joined(Ok(Err("preserve this error")))
     ));
-    assert!(!cleanup_failed(&report.attempts[0].close));
+    assert!(!cleanup_failed(report.attempts[0].close.as_ref()));
     assert!(matches!(
         report.attempts[1].task,
         ScopedFirstOkTask::SubmissionFailed(SpawnError::RuntimeUnavailable)
@@ -969,7 +969,7 @@ mod native {
                 report
                     .attempts
                     .iter()
-                    .all(|attempt| !cleanup_failed(&attempt.close))
+                    .all(|attempt| !cleanup_failed(attempt.close.as_ref()))
             );
             assert!(called.load(Ordering::SeqCst));
         });
@@ -1038,7 +1038,7 @@ mod native {
                 report.attempts[0].task,
                 ScopedFirstOkTask::Joined(Ok(Ok(73)))
             ));
-            assert!(!cleanup_failed(&report.attempts[0].close));
+            assert!(!cleanup_failed(report.attempts[0].close.as_ref()));
             assert!(cleaned.load(Ordering::SeqCst));
             assert!(!cx.inner.read().cancel_acknowledged);
             // Acknowledgement belongs to the caller, after examining receipts.

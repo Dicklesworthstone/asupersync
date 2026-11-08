@@ -145,7 +145,7 @@ fn scoped_quorum_validates_bounds_before_invoking_or_submitting_factories() {
 #[test]
 fn scoped_quorum_keeps_input_order_ties_errors_and_unselected_successes() {
     let (mut lab, owner, root, gate) = fixture(0x5C_5200);
-    let factories: Vec<RaceFactory<Result<usize, &'static str>>> = (0..4)
+    let factories: Vec<RaceFactory<Result<usize, &'static str>>> = (0_usize..4)
         .map(|index| {
             Box::new(move |_| {
                 Box::pin(async move {
@@ -250,7 +250,7 @@ fn scoped_quorum_masked_precancel_keeps_exact_reason_without_starting_work() {
 fn scoped_quorum_partial_admission_refusal_retains_the_successful_prefix() {
     let (mut lab, owner, root, gate) = fixture(0x5C_5500);
     let calls = Arc::new(AtomicUsize::new(0));
-    let factories: Vec<RaceFactory<Result<u8, ()>>> = (0..2)
+    let factories: Vec<RaceFactory<Result<u8, ()>>> = (0_u8..2)
         .map(|index| {
             let called = Arc::clone(&calls);
             Box::new(move |_| {
@@ -339,7 +339,7 @@ fn scoped_quorum_drop_before_late_publication_closes_every_owned_slot() {
                 Box::pin(async {
                     panic!("a dropped quorum cannot run late-admitted user work");
                     #[allow(unreachable_code)]
-                    Ok(7)
+                    Ok::<u8, ()>(7)
                 }) as Pin<Box<dyn Future<Output = Result<u8, ()>> + Send>>
             }) as RaceFactory<Result<u8, ()>>
         })

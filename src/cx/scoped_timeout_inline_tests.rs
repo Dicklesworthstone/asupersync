@@ -195,7 +195,7 @@ fn scoped_timeout_cancels_whole_region_before_join_and_waits_for_grandchild_clea
         assert_eq!(lab.state.region(descendant_region).unwrap().parent, Some(body_region));
 
         lab.advance_time_to(start + Duration::from_millis(50));
-        owner.timer_driver().unwrap().process_timers();
+        let _ = owner.timer_driver().unwrap().process_timers();
         assert!(poll_once(timeout.as_mut()).is_pending());
         lab.run_until_idle();
         assert!(cleanup_started.load(Ordering::SeqCst));
@@ -306,7 +306,7 @@ fn scoped_timeout_never_uses_foreign_ambient_time_and_disarms_after_drain() {
         }
         let before = wakes.0.load(Ordering::SeqCst);
         lab.advance_time_to(start + Duration::from_millis(50));
-        timer.process_timers();
+        let _ = timer.process_timers();
         assert!(wakes.0.load(Ordering::SeqCst) > before, "owner timer wakes an external poller");
         {
             let _ambient = foreign.then(|| Cx::set_current(Some(ambient.clone())));
@@ -330,7 +330,9 @@ fn scoped_timeout_never_uses_foreign_ambient_time_and_disarms_after_drain() {
 #[test]
 fn scoped_timeout_refuses_missing_or_denied_time_before_any_admission() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let no_timer = Cx::detached_cancel_context();
+    // Full type-level authority (`HasSpawn` + `HasTime`) and an open runtime mask, but no timer driver: the timer is
+    // missing, not denied. `detached_cancel_context()` is `Cx<cap::None>`, which `timeout_scoped` cannot be called on.
+    let no_timer = Cx::for_testing();
     let called = Arc::clone(&calls);
     let mut missing = Box::pin(no_timer.timeout_scoped(Duration::ZERO, move |_| {
         called.fetch_add(1, Ordering::SeqCst);
@@ -387,7 +389,7 @@ fn scoped_timeout_zero_and_saturated_duration_use_exact_owner_deadlines() {
     lab.run_until_idle();
     assert_eq!(owner.timer_driver().unwrap().next_deadline(), Some(Time::MAX));
     lab.advance_time_to(Time::MAX);
-    owner.timer_driver().unwrap().process_timers();
+    let _ = owner.timer_driver().unwrap().process_timers();
     assert!(poll_once(timeout.as_mut()).is_pending());
     lab.run_until_idle();
     let report = ready_report(timeout.as_mut());
@@ -718,7 +720,7 @@ fn scoped_timeout_preserves_real_descendant_finalizer_failure_separately() {
             lab.run_until_idle();
             ready_report(timeout.as_mut())
         }
-        other => panic!("unexpected timeout refusal: {other:?}"),
+        other @ Poll::Ready(Err(_)) => panic!("unexpected timeout refusal: {other:?}"),
     };
     assert!(matches!(report.task, ScopedTimeoutTask::Joined(Ok("body succeeded"))));
     let close = report.close.unwrap().unwrap();
@@ -789,7 +791,59 @@ fn scoped_timeout_strict_authority_uses_checked_parent_target_without_placement_
             assert!(matches!(report.task, ScopedTimeoutTask::Joined(Ok(42))));
             assert!(report.close.unwrap().is_ok());
         });
-        assert!(runtime.is_quiescent());
+        // `block_on` drains a current-thread runtime for a bounded number of turns, and tasks of the other flavors may
+        // outlive the call. The scoped timeout certifies its private subtree; `is_quiescent` covers the whole runtime
+        // and can settle later. So retirement is observed, by yielding only: nothing is cancelled, closed or advanced.
+        let started = std::time::Instant::now();
+        let initial_quiescent = runtime.is_quiescent();
+        if !initial_quiescent {
+            eprintln!(
+                "SCOPED_TIMEOUT_STRICT_AUTHORITY_NOT_QUIESCENT_ON_RETURN current_thread={current_thread} sharded={sharded}"
+            );
+        }
+        while !runtime.is_quiescent() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "runtime stayed non-quiescent after block_on (current_thread={current_thread}, sharded={sharded}, \
+                 initial_quiescent={initial_quiescent}): quiescent_now={}; active tasks {:?}; leaked obligations {:?}; \
+                 confirmed leaks {:?}; draining regions {}",
+                runtime.is_quiescent(),
+                runtime
+                    .task_inspector(Default::default())
+                    .list_active_tasks(),
+                runtime.diagnostics().find_leaked_obligations(),
+                runtime.diagnostics().find_confirmed_obligation_leaks(),
+                runtime.draining_region_count(),
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            runtime.is_quiescent(),
+            "current_thread={current_thread}, sharded={sharded}, initial_quiescent={initial_quiescent}"
+        );
+        assert!(
+            runtime
+                .task_inspector(Default::default())
+                .list_active_tasks()
+                .is_empty(),
+            "active tasks remain (current_thread={current_thread}, sharded={sharded}, initial_quiescent={initial_quiescent})"
+        );
+        assert!(
+            runtime.diagnostics().find_leaked_obligations().is_empty(),
+            "leaked obligations (current_thread={current_thread}, sharded={sharded}, initial_quiescent={initial_quiescent})"
+        );
+        assert!(
+            runtime
+                .diagnostics()
+                .find_confirmed_obligation_leaks()
+                .is_empty(),
+            "confirmed obligation leaks (current_thread={current_thread}, sharded={sharded}, initial_quiescent={initial_quiescent})"
+        );
+        assert_eq!(
+            runtime.draining_region_count(),
+            0,
+            "draining regions remain (current_thread={current_thread}, sharded={sharded}, initial_quiescent={initial_quiescent})"
+        );
     }
 }
 
@@ -863,7 +917,7 @@ fn scoped_timeout_post_publication_notifier_panics_preserve_normal_drain_and_unw
         assert_eq!(lab.state.live_task_count(), 3);
         hostile.store(true, Ordering::SeqCst);
         lab.advance_time_to(Time::from_secs(60));
-        owner.timer_driver().unwrap().process_timers();
+        let _ = owner.timer_driver().unwrap().process_timers();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert!(poll_once(timeout.as_mut()).is_pending());
         })).is_ok(), "region/handle notifiers contain their own panics");

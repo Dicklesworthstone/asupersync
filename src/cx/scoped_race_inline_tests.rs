@@ -515,7 +515,7 @@ fn scoped_race_retains_task_and_descendant_finalizer_panics_as_separate_receipts
                 lab.run_until_idle();
                 ready_report(race.as_mut())
             }
-            other => panic!("unexpected scoped race refusal: {other:?}"),
+            other @ Poll::Ready(Err(_)) => panic!("unexpected scoped race refusal: {other:?}"),
         };
         assert_closed(&report.left);
         assert_closed(&report.right);

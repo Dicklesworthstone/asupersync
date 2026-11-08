@@ -499,7 +499,7 @@ fn scoped_timeout_native_waits_for_grandchild_after_direct_body_has_finished() {
                 }
                 let actual_body = body_id.lock().unwrap().expect("actual body identity");
                 clock.advance_to(Time::from_millis(50));
-                timer.process_timers();
+                let _ = timer.process_timers();
                 std::future::poll_fn(|task| {
                     assert!(timeout.as_mut().poll(task).is_pending());
                     Poll::Ready(())

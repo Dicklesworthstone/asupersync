@@ -194,7 +194,7 @@ fn owner_cancel_reason<Caps>(owner: &Cx<Caps>) -> CancelReason {
         .unwrap_or_else(|| CancelReason::user("scoped first_ok owner cancelled"))
 }
 
-fn cleanup_failed(close: &Option<Result<ScopedFirstOkClose, ChildRegionError>>) -> bool {
+fn cleanup_failed(close: Option<&Result<ScopedFirstOkClose, ChildRegionError>>) -> bool {
     match close {
         Some(Ok(receipt)) => {
             receipt.descendant_panic.is_some()
@@ -433,7 +433,7 @@ where
                 drop(factories.take());
             }
             let (region_id, close) = owned.quiesce(&gateway).await;
-            let failed_cleanup = cleanup_failed(&close);
+            let failed_cleanup = cleanup_failed(close.as_ref());
             attempts.push(ScopedFirstOkAttempt {
                 index,
                 task,
