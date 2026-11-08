@@ -131,7 +131,7 @@ enum BodyResult<T> {
     NotStarted,
 }
 
-struct OwnedBranch<T> {
+pub(super) struct OwnedBranch<T> {
     region: Arc<BranchRegionSlot>,
     started: Arc<AtomicBool>,
     handle: Option<TaskHandle<BodyResult<T>>>,
@@ -140,7 +140,7 @@ struct OwnedBranch<T> {
 }
 
 impl<T> OwnedBranch<T> {
-    fn new(gateway: &Arc<SpawnGateway>) -> Self {
+    pub(super) fn new(gateway: &Arc<SpawnGateway>) -> Self {
         Self {
             region: Arc::new(BranchRegionSlot::owned(gateway)),
             started: Arc::new(AtomicBool::new(false)),
@@ -150,7 +150,7 @@ impl<T> OwnedBranch<T> {
         }
     }
 
-    fn submit<Caps, F, Fut>(&mut self, owner: &Cx<Caps>, operation: F) -> bool
+    pub(super) fn submit<Caps, F, Fut>(&mut self, owner: &Cx<Caps>, operation: F) -> bool
     where
         Caps: cap::HasSpawn + Send + Sync + 'static,
         F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
@@ -162,7 +162,7 @@ impl<T> OwnedBranch<T> {
         let started = Arc::clone(&self.started);
         match owner.spawn_owned_branch(Arc::clone(&self.region), move |body_cx| async move {
             // Ordinary races can fall back to the parent on a refused region
-            // mint. This API promises two private subtrees, so such a fallback
+            // mint. Scoped races promise private subtrees, so such a fallback
             // must never invoke user work.
             if factory_region.get().is_none()
                 || factory_region.close_requested()
@@ -187,7 +187,15 @@ impl<T> OwnedBranch<T> {
         }
     }
 
-    fn abort_if_running(&self, reason: CancelReason) {
+    pub(super) fn region(&self) -> &Arc<BranchRegionSlot> {
+        &self.region
+    }
+
+    pub(super) fn started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    pub(super) fn abort_if_running(&self, reason: CancelReason) {
         if let Some(handle) = &self.handle
             && !handle.terminal_published()
         {
@@ -195,7 +203,7 @@ impl<T> OwnedBranch<T> {
         }
     }
 
-    fn poll_result(&mut self, task: &mut Context<'_>) -> bool {
+    pub(super) fn poll_result(&mut self, task: &mut Context<'_>) -> bool {
         if self.result.is_some() {
             return true;
         }
@@ -219,7 +227,7 @@ impl<T> OwnedBranch<T> {
         }
     }
 
-    fn report(
+    pub(super) fn report(
         &mut self,
         region_id: Option<RegionId>,
         close: Option<Result<ScopedRaceClose, ChildRegionError>>,
@@ -268,7 +276,7 @@ impl<L, R> Drop for OwnedRace<L, R> {
     }
 }
 
-fn owner_cancel_reason<Caps>(owner: &Cx<Caps>) -> CancelReason {
+pub(super) fn owner_cancel_reason<Caps>(owner: &Cx<Caps>) -> CancelReason {
     owner
         .cancel_reason()
         .unwrap_or_else(|| CancelReason::user("scoped race owner cancelled"))
@@ -276,7 +284,7 @@ fn owner_cancel_reason<Caps>(owner: &Cx<Caps>) -> CancelReason {
 
 /// Records a newly observed or stronger reason without acknowledging the
 /// owner's cancellation or charging its checkpoint budget.
-fn observe_owner_cancellation<Caps>(
+pub(super) fn observe_owner_cancellation<Caps>(
     owner: &Cx<Caps>,
     observed: &mut Option<CancelReason>,
 ) -> bool {
@@ -301,7 +309,7 @@ fn unstarted_branch<T>() -> ScopedRaceBranchReport<T> {
     }
 }
 
-async fn close_receipt(
+pub(super) async fn close_receipt(
     region: &Arc<BranchRegionSlot>,
     gateway: &Arc<SpawnGateway>,
 ) -> (

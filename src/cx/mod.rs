@@ -80,6 +80,7 @@ pub mod scoped_hedge;
 pub mod scoped_join;
 pub mod scoped_quorum;
 pub mod scoped_race;
+pub mod scoped_race_all;
 pub mod scoped_retry;
 pub mod scoped_timeout;
 pub mod supervisor_service;
@@ -152,6 +153,9 @@ pub use scoped_quorum::{
 pub use scoped_race::{
     ScopedRaceBranch, ScopedRaceBranchReport, ScopedRaceClose, ScopedRaceError, ScopedRaceReport,
     ScopedRaceStop, ScopedRaceTask,
+};
+pub use scoped_race_all::{
+    MAX_SCOPED_RACE_BRANCHES, ScopedRaceAllError, ScopedRaceAllReport, ScopedRaceAllStop,
 };
 pub use scoped_retry::{
     ScopedRetryAttempt, ScopedRetryClose, ScopedRetryError, ScopedRetryReport, ScopedRetryStop,
