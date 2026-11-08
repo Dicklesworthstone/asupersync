@@ -101,7 +101,10 @@ impl<T> DrainedBlockingHandle<T> {
     /// execution returns `JoinError::Cancelled`; a panic remains `Panicked`.
     pub async fn join(&mut self) -> Result<T, crate::runtime::JoinError> {
         let terminal = std::future::poll_fn(|cx| self.task.poll_join(cx)).await;
-        if matches!(terminal, Err(crate::runtime::JoinError::PolledAfterCompletion)) {
+        if matches!(
+            terminal,
+            Err(crate::runtime::JoinError::PolledAfterCompletion)
+        ) {
             return Err(crate::runtime::JoinError::PolledAfterCompletion);
         }
         if let Some(result) = self.state.inner.lock().result.take() {
@@ -184,7 +187,8 @@ impl<T> DrainedBlockingState<T> {
             drop(state);
             // T may own a native resource with a blocking or panicking Drop.
             // The admitted task stays alive across this entire destructor.
-            let retirement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(result)));
+            let retirement =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(result)));
             let panic = retirement.err().map(drained_panic).or(panic);
             let wake = {
                 let mut state = self.inner.lock();
@@ -192,14 +196,18 @@ impl<T> DrainedBlockingState<T> {
                 state.finished = true;
                 state.waiter.take()
             };
-            if let Some(wake) = wake { wake.wake(); }
+            if let Some(wake) = wake {
+                wake.wake();
+            }
         } else {
             state.panic = panic;
             state.result = Some(result);
             state.finished = true;
             let wake = state.waiter.take();
             drop(state);
-            if let Some(wake) = wake { wake.wake(); }
+            if let Some(wake) = wake {
+                wake.wake();
+            }
         }
     }
 
@@ -239,13 +247,13 @@ struct DrainedPoolWork<F, T> {
 impl<F: FnOnce() -> T, T> DrainedPoolWork<F, T> {
     fn run(mut self) {
         if self.cx.checkpoint().is_err() {
-            self.state.cancel(self.cx.cancel_reason().unwrap_or_else(
-                crate::types::CancelReason::shutdown,
-            ));
+            self.state.cancel(
+                self.cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::shutdown),
+            );
         }
-        let claimed = {
-            self.state.inner.lock().cancel.is_none()
-        };
+        let claimed = { self.state.inner.lock().cancel.is_none() };
         if claimed {
             let work = self.work.take().expect("one claimed blocking closure");
             self.result = Some(
@@ -300,9 +308,11 @@ impl<T> Drop for DrainedBlockingWait<T> {
         let waiter = self.state.inner.lock().waiter.take();
         drop(waiter);
         if !self.done {
-            self.state.cancel(self.cx.cancel_reason().unwrap_or_else(
-                crate::types::CancelReason::shutdown,
-            ));
+            self.state.cancel(
+                self.cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::shutdown),
+            );
             if let Some(task) = self.task.as_ref() {
                 task.cancel();
             }
@@ -332,7 +342,11 @@ pub(crate) async fn drive_drained_blocking<Caps, F, T>(
         // captures may block when destroyed, and this is an executor thread.
         // A worker skips or declines the closure and destroys them, and the
         // wait below then reports any capture panic (br-asupersync-q1pr9n).
-        state.cancel(control.cancel_reason().unwrap_or_else(crate::types::CancelReason::shutdown));
+        state.cancel(
+            control
+                .cancel_reason()
+                .unwrap_or_else(crate::types::CancelReason::shutdown),
+        );
     }
     let priority = control.budget().priority;
     let mut admission = pool.submit_with_priority(move || envelope.run(), priority);
@@ -347,12 +361,17 @@ pub(crate) async fn drive_drained_blocking<Caps, F, T>(
     };
     std::future::poll_fn(|poll_cx| {
         if !wait.cancellation_observed {
-            wait.cancel_waker = Some(wait.cx.refresh_cancel_waker(wait.cancel_waker, poll_cx.waker()));
+            wait.cancel_waker = Some(
+                wait.cx
+                    .refresh_cancel_waker(wait.cancel_waker, poll_cx.waker()),
+            );
             if wait.cx.checkpoint().is_err() {
                 wait.cancellation_observed = true;
-                wait.state.cancel(wait.cx.cancel_reason().unwrap_or_else(
-                    crate::types::CancelReason::shutdown,
-                ));
+                wait.state.cancel(
+                    wait.cx
+                        .cancel_reason()
+                        .unwrap_or_else(crate::types::CancelReason::shutdown),
+                );
                 if let Some(task) = wait.task.as_ref() {
                     task.cancel();
                 }
@@ -375,16 +394,20 @@ pub(crate) async fn drive_drained_blocking<Caps, F, T>(
                     wait.task = Some(task);
                 }
                 Poll::Ready(Err(refused)) => {
-                    // Only shutdown ends asynchronous admission without a
-                    // worker. Preserve the existing closed-pool retirement
-                    // path; capacity pressure never reaches this branch.
+                    // Capacity pressure never reaches this branch: it stays
+                    // parked in admission. A final refusal does: the pool shut
+                    // down, forbids blocking, or bounds live job bytes and was
+                    // offered this uncharged submission. None of them admitted
+                    // a worker, so all of them keep the existing retirement
+                    // path: the refused envelope is dropped here.
                     drop(refused);
                 }
             }
             admission_done = true;
         }
         wait.state.poll_finished(poll_cx)
-    }).await;
+    })
+    .await;
     wait.done = true;
     let panic = wait.state.inner.lock().panic.clone();
     if let Some(panic) = panic {
@@ -750,8 +773,9 @@ where
 /// - Everything else is an error, [`SpawnError::RuntimeUnavailable`], and the closure is dropped unrun, with no
 ///   thread started and nothing run inline: a pool that is
 ///   [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden), a pool that is
-///   closed (or drops the queued closure before a worker claims it), a context that has no pool, and a dedicated
-///   thread that could not be started.
+///   closed (or drops the queued closure before a worker claims it), a pool that bounds live job bytes (this
+///   function uses an uncharged submission API, which that pool refuses whether or not it is open), a context that
+///   has no pool, and a dedicated thread that could not be started.
 ///
 /// [`spawn_blocking`] keeps its compatibility fallbacks for the last three (it runs the closure inline); this
 /// function does not carry them over.
@@ -814,10 +838,45 @@ pub(crate) fn forbidden_io_error() -> std::io::Error {
     )
 }
 
+/// Whether the blocking pool the current context inherited bounds live job bytes
+/// ([`BlockingAdmissionPolicy::BoundedBytes`](crate::runtime::BlockingAdmissionPolicy::BoundedBytes)) and is still open.
+///
+/// Both halves matter. Such a pool refuses an uncharged submission as `ChargeRequired` BEFORE it looks at shutdown, so
+/// the refusal alone does not say the pool is open: a pool that has closed refuses the same way. Only an open pool
+/// makes the byte policy the whole story; a closed one keeps the closed-pool wording. The pool can close between the
+/// refusal and this read, and then either wording is true, because the pool is closed and was also offered work it
+/// refuses regardless.
+fn current_open_pool_bounds_live_bytes() -> bool {
+    Cx::current()
+        .and_then(|cx| cx.blocking_pool_handle_for_inheritance())
+        .is_some_and(|pool| {
+            matches!(
+                pool.admission_policy(),
+                crate::runtime::BlockingAdmissionPolicy::BoundedBytes { .. }
+            ) && !pool.is_shutdown()
+        })
+}
+
+/// What an I/O entry point returns when a pool that bounds live job bytes, still open, refused work that was
+/// submitted without a byte charge. The refusal is about this operation: it uses an uncharged submission API, which
+/// such a pool refuses for good (`InvalidInput`, as the standard-stream writers report the same refusal). A pool that
+/// has closed keeps the closed-pool wording instead.
+pub(crate) fn uncharged_io_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "this runtime's blocking pool bounds live job bytes and refused this I/O operation: it uses an uncharged \
+         submission API (it provides no explicit byte charge)",
+    )
+}
+
 /// What an I/O entry point returns when a strict `try_*` call ([`try_spawn_blocking`], `try_spawn_blocking_on_thread`)
 /// refused the work: the forbidden-policy error when the current context's pool forbids blocking work, otherwise a
 /// general error saying the work was not admitted. The strict path reports every refusal as the same
 /// [`SpawnError::RuntimeUnavailable`], so the caller reads the policy again to word the error truthfully.
+///
+/// It does not know which placement refused. A caller that placed the work on the context's pool should use
+/// [`refused_pool_io_error`], which also names a pool that bounds live job bytes; this one is for a placement on a
+/// dedicated thread, where that pool's byte policy played no part.
 pub(crate) fn refused_io_error() -> std::io::Error {
     if current_pool_forbids_blocking() {
         return forbidden_io_error();
@@ -827,12 +886,28 @@ pub(crate) fn refused_io_error() -> std::io::Error {
     )
 }
 
+/// [`refused_io_error`] for a strict placement made on the current context's pool ([`try_spawn_blocking`] with an
+/// inherited pool): additionally, an open pool that bounds live job bytes is named, because it refuses this uncharged
+/// submission and a refusal by an open pool says nothing about a closed or absent one. The coarse
+/// [`SpawnError::RuntimeUnavailable`] does not carry the pool's reason, so this reads the pool again; a pool that has
+/// closed keeps the general wording.
+pub(crate) fn refused_pool_io_error() -> std::io::Error {
+    if current_open_pool_bounds_live_bytes() {
+        return uncharged_io_error();
+    }
+    refused_io_error()
+}
+
 /// Runs I/O without ever moving the syscall onto the polling thread.
 ///
 /// Standard streams can block indefinitely, so the compatibility bridge's
 /// inline fallback is not suitable for them. A closed or failed pool reports
 /// an I/O error; a missing pool uses the same bounded, joined thread path as
-/// other blocking work, but thread-creation failure is an error too.
+/// other blocking work, but thread-creation failure is an error too. While a
+/// pool that bounds live job bytes is open it refuses this operation, which is
+/// submitted without a byte charge, with `InvalidInput`, and that error does
+/// not say the pool stopped; once the pool has closed, the stopped-pool error
+/// is reported, as before.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) async fn spawn_blocking_io_off_worker<F, T>(
     pool: Option<BlockingPoolHandle>,
@@ -860,14 +935,24 @@ where
         let handle = match admission.await {
             Ok(handle) => handle,
             Err(refused) => {
-                let forbidden = refused.kind() == BlockingSpawnErrorKind::Forbidden;
+                let kind = refused.kind();
                 // Returning the unstarted work retires its result sender.
                 // The receiver then reports refusal, never executing f.
                 drop(refused);
-                if forbidden {
-                    return Err(forbidden_io_error());
-                }
-                return rx.await;
+                // A forbidden pool decides about this submission; it has not stopped.
+                // So does a pool that bounds live job bytes, but it refuses an
+                // uncharged submission as `ChargeRequired` before it looks at
+                // shutdown, so that kind alone does not say the pool is open:
+                // report the byte policy only while the pool is open, and let
+                // a pool that has closed keep the stopped-pool wording below.
+                // If it closes after the refusal, that wording is true too.
+                return match kind {
+                    BlockingSpawnErrorKind::Forbidden => Err(forbidden_io_error()),
+                    BlockingSpawnErrorKind::ChargeRequired if !pool.is_shutdown() => {
+                        Err(uncharged_io_error())
+                    }
+                    _ => rx.await,
+                };
             }
         };
         let mut guard = CancelOnDrop::new(handle);
@@ -1050,11 +1135,24 @@ where
             // callers that can return an error (the file system, DNS, STUN,
             // Kafka transactions, remote discovery) check `forbids_blocking`
             // before they get here and return their own typed error.
-            let forbidden = refused.kind() == BlockingSpawnErrorKind::Forbidden;
+            //
+            // The same holds for a pool that bounds live job bytes
+            // (`BlockingAdmissionPolicy::BoundedBytes`): this function uses an
+            // uncharged submission API (it provides no explicit byte charge),
+            // so the pool refuses it as `ChargeRequired`, which is a decision
+            // about the submission and not a shutdown. Running the closure
+            // inline would be exactly the unaccounted capture the policy
+            // exists to refuse. (A charge of zero bytes is a charge; this
+            // function simply does not offer one.)
+            let kind = refused.kind();
             drop(refused);
             assert!(
-                !forbidden,
+                kind != BlockingSpawnErrorKind::Forbidden,
                 "blocking work is forbidden by this runtime's blocking admission policy"
+            );
+            assert!(
+                kind != BlockingSpawnErrorKind::ChargeRequired,
+                "this runtime's blocking pool bounds live job bytes and this operation uses an uncharged submission API"
             );
             return rx.await;
         }
@@ -1069,8 +1167,10 @@ where
 /// The strict pool sink: runs `f` on `pool`, or reports that the pool did not take it.
 ///
 /// Unlike [`spawn_blocking_on_pool`] it has no inline fallback. A pool that forbids blocking work, a pool that is
-/// closed, and a queued task the pool drops before a worker claims it (its last worker failed to start) are all
-/// `Err(SpawnError::RuntimeUnavailable)`: `f` is dropped unrun, nothing runs on the caller and no thread is started.
+/// closed, a pool that bounds live job bytes (this sink uses an uncharged submission API, which that pool refuses
+/// whether or not it is open), and a queued task the pool drops before a worker claims it (its last worker failed to
+/// start) are all `Err(SpawnError::RuntimeUnavailable)`: `f` is dropped unrun, nothing runs on the caller and no
+/// thread is started.
 /// Saturation is not a refusal; admission stays parked, as for the compatibility sink.
 pub(crate) async fn try_spawn_blocking_on_pool<F, T>(
     pool: BlockingPoolHandle,

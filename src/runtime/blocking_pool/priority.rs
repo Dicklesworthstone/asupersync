@@ -148,6 +148,7 @@ mod tests {
             preferred_cohort: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             completion: Arc::new(BlockingTaskCompletion::new(wall_clock_now)),
+            charge: None,
         }
     }
 

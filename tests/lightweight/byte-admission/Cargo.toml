@@ -1,0 +1,32 @@
+[package]
+name = "asupersync-byte-admission-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "deny"
+
+# Exercise the exact existing canary against the normal library dependency.
+# The root's SQLx/benchmark/conformance dev dependencies are not needed here.
+# Keep the root integration target too; this is not a replacement for its gates.
+[dependencies]
+asupersync = { path = "../../.." }
+
+[[test]]
+name = "blocking_byte_reservation_allocator"
+path = "../../blocking_byte_reservation_allocator.rs"
+
+# The real stderr writer on a byte-bounded pool, through the public runtime and context API only (no `test-internals`).
+# Also kept as a root integration target.
+[[test]]
+name = "blocking_stdio_byte_completion"
+path = "../../blocking_stdio_byte_completion.rs"
+
+# Observe real worker-side retirement through public APIs without compiling the
+# root's entire unit-test harness. The root integration target remains too.
+[[test]]
+name = "scoped_timeout_quiescence"
+path = "../../scoped_timeout_quiescence.rs"

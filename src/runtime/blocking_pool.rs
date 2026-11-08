@@ -56,17 +56,19 @@ use crate::runtime::pool_sizing::{
     PoolSizingAction, PoolSizingBounds, PoolSizingControllerState, PoolSizingDecision,
     PoolSizingPolicy, PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing,
 };
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use parking_lot::{Condvar, Mutex};
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
 use std::time::{Duration, Instant};
 
 #[path = "blocking_admission.rs"]
 mod admission;
 pub use admission::{
-    BlockingAdmissionPolicy, BlockingSpawnError, BlockingSpawnErrorKind, BlockingSubmission,
+    BlockingAdmissionPolicy, BlockingFactoryError, BlockingSpawnError, BlockingSpawnErrorKind,
+    BlockingSubmission,
 };
 
 #[path = "blocking_pool/priority.rs"]
@@ -126,6 +128,40 @@ fn drain_finished_thread_handles(
 fn join_thread_handles(handles: Vec<ThreadJoinHandle<()>>) {
     for handle in handles {
         let _ = handle.join();
+    }
+}
+
+/// Frees a panic payload that `catch_unwind` returned, without letting its destructor take the caller down. `true`
+/// when the payload was destroyed normally.
+///
+/// A payload is arbitrary user code: a job can `panic_any` a value whose `Drop` panics, and dropping the caught `Err`
+/// as an ordinary local would then unwind through the worker loop or the stranded drain, leaving the jobs behind it
+/// unreported. An ordinary payload is freed here, so nothing leaks. If its destructor panics, the secondary payload is
+/// opaque too and may panic again when destroyed, so it is forgotten rather than disposed of (as in
+/// `panic_isolation`'s `discard_panic_payload`) and the result is `false`: what it still owns is unknown and not
+/// bounded by anything, so a caller that holds a byte reservation for it must not return the reservation
+/// ([`retire_charge`]).
+fn discard_panic_payload(payload: Box<dyn std::any::Any + Send>) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(payload))) {
+        Ok(()) => true,
+        Err(secondary) => {
+            std::mem::forget(secondary);
+            false
+        }
+    }
+}
+
+/// Returns a task's byte reservation, unless it has to be pinned.
+///
+/// `resolved` is `false` when destroying a panic payload at a job site itself panicked. The opaque secondary payload
+/// may own anything the job captured (its declared heap, or inline storage moved into a new allocation), so the whole
+/// reservation stays counted for the life of the pool instead of coming back; see
+/// [`BlockingAdmissionPolicy::BoundedBytes`]. In every other case the reservation returns now, after the closure,
+/// its allocation and any payload are gone.
+fn retire_charge(charge: Option<admission::ByteCharge>, resolved: bool) {
+    match charge {
+        Some(charge) if !resolved => charge.quarantine(),
+        charge => drop(charge),
     }
 }
 
@@ -392,6 +428,12 @@ enum BlockingTaskDequeueKind {
 }
 
 /// A task submitted to the blocking pool.
+///
+/// `charge` is the byte reservation of a [`BlockingAdmissionPolicy::BoundedBytes`] pool. It is owned here, outside
+/// the allocation `work` lives in, and it is declared AFTER `work`: dropping the task drops `work` (the closure, its
+/// captures, then the box allocation itself) before `charge` returns its bytes. The worker and the stranded drain,
+/// which take `work` out of the task to call or drop it, release `charge` explicitly after that call or drop has
+/// returned and before they report the task done.
 struct BlockingTask {
     /// The work to execute.
     work: Box<dyn FnOnce() + Send + 'static>,
@@ -403,6 +445,8 @@ struct BlockingTask {
     cancelled: Arc<AtomicBool>,
     /// Completion signal.
     completion: Arc<BlockingTaskCompletion>,
+    /// Bytes reserved for `work`'s storage and declared captures; returned only after `work` and its box are gone.
+    charge: Option<admission::ByteCharge>,
 }
 
 /// Completion tracking for a blocking task.
@@ -411,8 +455,9 @@ struct BlockingTaskCompletion {
     done: AtomicBool,
     /// Condition variable for waiting.
     condvar: Condvar,
-    /// Mutex for condition variable.
-    mutex: Mutex<()>,
+    /// Mutex for condition variable. It also holds the waker of an asynchronous waiter ([`Self::poll_done`]): one slot,
+    /// so waiters never accumulate.
+    mutex: Mutex<Option<Waker>>,
     /// Time source for timeout accounting.
     time_getter: TimeGetter,
 }
@@ -422,15 +467,56 @@ impl BlockingTaskCompletion {
         Self {
             done: AtomicBool::new(false),
             condvar: Condvar::new(),
-            mutex: Mutex::new(()),
+            mutex: Mutex::new(None),
             time_getter,
         }
     }
 
     fn signal_done(&self) {
         self.done.store(true, Ordering::Release);
-        let _guard = self.mutex.lock();
-        self.condvar.notify_all();
+        let waker = {
+            let mut guard = self.mutex.lock();
+            self.condvar.notify_all();
+            guard.take()
+        };
+        // Outside the lock, and shielded like the admission wakeups: a waker may re-enter the pool, and a bad one must not
+        // kill the worker that is reporting this task done. The reservation went back before this wake and a waker
+        // belongs to its waiter, not to a reservation, so its payload is outside the byte accounting.
+        if let Some(waker) = waker
+            && let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || waker.wake()))
+        {
+            discard_panic_payload(payload);
+        }
+    }
+
+    /// `Ready` once the task is done, which for a task the worker has run, skipped or detached is after its closure,
+    /// its captures, the allocation holding them and any byte reservation are gone. Otherwise registers `cx`'s waker
+    /// (one slot, replacing a previous one) to be woken by [`Self::signal_done`].
+    fn poll_done(&self, cx: &Context<'_>) -> Poll<()> {
+        if self.done.load(Ordering::Acquire) {
+            return Poll::Ready(());
+        }
+        // Prepare the waker before taking the lock: cloning it runs arbitrary code. `signal_done` stores `done` before
+        // it takes the lock, so checking again under the lock cannot miss the wakeup.
+        let incoming = cx.waker().clone();
+        let mut guard = self.mutex.lock();
+        if self.done.load(Ordering::Acquire) {
+            drop(guard);
+            drop(incoming);
+            return Poll::Ready(());
+        }
+        let retired = guard.replace(incoming);
+        drop(guard);
+        // Outside the lock: dropping a waker runs arbitrary code too.
+        drop(retired);
+        Poll::Pending
+    }
+
+    /// Drops the waker registered by [`Self::poll_done`], if any, so an abandoned waiter is not kept alive by the task.
+    fn clear_waker(&self) {
+        let retired = self.mutex.lock().take();
+        drop(retired);
     }
 
     fn wait(&self) {
@@ -517,6 +603,19 @@ impl BlockingTaskHandle {
     #[must_use]
     pub fn wait_timeout(&self, timeout: Duration) -> bool {
         self.completion.wait_timeout(timeout)
+    }
+
+    /// Polls for completion without blocking: `Ready` once the task is done, which is after its closure, its captures,
+    /// the allocation holding them and any byte reservation are gone; otherwise registers `cx`'s waker, replacing a
+    /// previously registered one, to be woken at that moment. Crate-private: the pool's own consumers use it where
+    /// "the job reported its result" is not yet "the job's bytes are back".
+    pub(crate) fn poll_done(&self, cx: &Context<'_>) -> Poll<()> {
+        self.completion.poll_done(cx)
+    }
+
+    /// Drops the waker registered by [`Self::poll_done`], if any.
+    pub(crate) fn clear_done_waiter(&self) {
+        self.completion.clear_waker();
     }
 }
 
@@ -790,6 +889,7 @@ impl BlockingPool {
             preferred_cohort,
             cancelled: Arc::clone(&cancelled),
             completion: Arc::clone(&completion),
+            charge: None,
         };
 
         if !try_enqueue_task(&self.inner, task) {
@@ -1065,6 +1165,7 @@ impl BlockingPoolHandle {
             preferred_cohort,
             cancelled: Arc::clone(&cancelled),
             completion: Arc::clone(&completion),
+            charge: None,
         };
 
         if !try_enqueue_task(&self.inner, task) {
@@ -1179,7 +1280,9 @@ impl BlockingPoolHandle {
 
 fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool {
     let _guard = inner.mutex.lock();
-    if inner.admission.refusal(inner).is_some() {
+    // The infallible `spawn*` entry points state no charge, so a byte-bounded pool refuses them (the task, and
+    // with it the closure, is dropped here unrun and the caller gets a completed, cancelled handle).
+    if inner.admission.refusal(inner, None).is_some() {
         return false;
     }
     enqueue_task_locked(inner, task);
@@ -1427,10 +1530,29 @@ impl StrandedBlockingTasks {
         let drained_tasks = tasks.len();
 
         // Keep user-owned closure destruction outside the pool mutex: captured
-        // values may re-enter the pool from Drop.
+        // values may re-enter the pool from Drop. As for a task a worker skips,
+        // retire the closure, its captures and its allocation, then return the
+        // byte reservation, and only then report the task done: a handle that
+        // sees `done` (or is woken by it) can rely on all of that being over.
         for task in tasks {
-            task.cancelled.store(true, Ordering::Release);
-            task.completion.signal_done();
+            let BlockingTask {
+                work,
+                cancelled,
+                completion,
+                charge,
+                ..
+            } = task;
+            cancelled.store(true, Ordering::Release);
+            // A capture whose destructor panics must not leave the task unreported, and neither may its payload:
+            // that is freed (or, if its own destructor panics, contained and the reservation pinned) before the
+            // bytes would go back.
+            let resolved =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(work))) {
+                    Ok(()) => true,
+                    Err(payload) => discard_panic_payload(payload),
+                };
+            retire_charge(charge, resolved);
+            completion.signal_done();
         }
 
         debug_assert_eq!(
@@ -1762,11 +1884,24 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
             // worker and spawns none for new work (br-asupersync-q1pr9n).
             if task.cancelled.load(Ordering::Acquire) {
                 let BlockingTask {
-                    work, completion, ..
+                    work,
+                    completion,
+                    charge,
+                    ..
                 } = task;
-                let _dropped =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(work)));
+                // A payload from a capture's destructor is freed here too, while this worker counts as busy and
+                // before the bytes go back; one whose own destructor panics is contained, not unwound through the
+                // worker, and pins the reservation.
+                let resolved = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    move || drop(work),
+                )) {
+                    Ok(()) => true,
+                    Err(payload) => discard_panic_payload(payload),
+                };
                 inner.busy_threads.fetch_sub(1, Ordering::Relaxed);
+                // The closure, its captures, its box allocation and any payload are gone: only now do their bytes
+                // go back.
+                retire_charge(charge, resolved);
                 completion.signal_done();
                 continue;
             }
@@ -1776,12 +1911,29 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
             // which would cause waiters to hang indefinitely and the
             // worker thread to die (losing on_thread_stop + active_threads
             // decrement).
-            let _result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task.work));
+            let BlockingTask {
+                work,
+                completion,
+                charge,
+                ..
+            } = task;
+            // The job's panic payload is freed while this worker counts as busy and before the bytes go back,
+            // since a payload can own what the job captured. One whose own destructor panics is contained here
+            // instead of unwinding the worker and the jobs queued behind it, and pins the reservation.
+            let resolved = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+                Ok(()) => true,
+                Err(payload) => discard_panic_payload(payload),
+            };
             inner.busy_threads.fetch_sub(1, Ordering::Relaxed);
+
+            // The call consumed the box: when it returned or unwound, the closure, its captures and the box
+            // allocation were all dropped, and any payload with them. Only now do the bytes reserved for them go
+            // back.
+            retire_charge(charge, resolved);
 
             // Always signal completion so waiters are unblocked, even
             // if the task panicked.
-            task.completion.signal_done();
+            completion.signal_done();
             // Loop immediately to drain the queue before checking shutdown
             // or park/retire conditions. Without this, the worker falls through
             // to the shutdown check and may exit with queued work remaining.

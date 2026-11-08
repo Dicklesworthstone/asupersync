@@ -54,6 +54,7 @@
             preferred_cohort,
             cancelled: Arc::new(AtomicBool::new(false)),
             completion: Arc::new(BlockingTaskCompletion::new(wall_clock_now)),
+            charge: None,
         }
     }
 
@@ -71,6 +72,7 @@
             preferred_cohort,
             cancelled: Arc::clone(&cancelled),
             completion: Arc::clone(&completion),
+            charge: None,
         };
         (task, cancelled, completion)
     }
@@ -513,6 +515,7 @@
             preferred_cohort: Some(cohort),
             cancelled: Arc::new(AtomicBool::new(false)),
             completion: Arc::new(BlockingTaskCompletion::new(wall_clock_now)),
+            charge: None,
         }
     }
 
@@ -1668,6 +1671,7 @@
             preferred_cohort: None,
             cancelled: Arc::clone(&cancelled),
             completion: Arc::clone(&completion),
+            charge: None,
         };
 
         pool.inner.queue.push(task);

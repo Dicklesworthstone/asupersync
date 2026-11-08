@@ -22,6 +22,25 @@
 //!   meaningful when blocking is allowed.
 //! * `global_queue_limit`: the scheduler's global ready queue. 0 means unbounded and is refused.
 //!
+//! # An optional byte budget for the blocking pool
+//!
+//! [`LegacyCaps`] has public fields and so cannot grow one without breaking every literal. The byte budget is
+//! therefore stated on the profile instead: [`LegacyProfile::with_blocking_live_bytes`]. A profile that does not
+//! state one builds exactly the pool it always did ([`BlockingAdmissionPolicy::Bounded`]) and audits as it always
+//! did. A profile that states one builds a [`BlockingAdmissionPolicy::BoundedBytes`] pool with the same
+//! `blocking_max_queued`, and [`LegacyProfile::audit`] requires the runtime's pool to carry exactly that policy,
+//! not merely the same queue count. Two consequences of that policy are the caller's to know:
+//!
+//! * the pool refuses every submission that provides no explicit byte charge (`ChargeRequired`), so the entry points
+//!   that submit without a charge are refused on such a runtime; the charged ones (`try_spawn_charged`,
+//!   `try_spawn_charged_with`, the standard-stream writers) are the ones that work;
+//! * the budget bounds what the pool ADMITS. A closure the caller still holds, such as the one owned by a waiting
+//!   `submit_charged` future, is outside it, and so is the rest of the process heap.
+//!
+//! With `blocking_max_threads == 0` the pool is [`BlockingAdmissionPolicy::Forbidden`], admits nothing, and no byte
+//! can be live. A byte budget stated for such a profile is accepted and has no effect, as `blocking_max_queued`
+//! has none there; the profile still builds, and audit still requires, a pool that forbids blocking.
+//!
 //! # The blocking-thread stack
 //!
 //! `thread_stack_bytes` applies to the scheduler workers only. The blocking pool starts its threads with
@@ -74,7 +93,9 @@
 //! * Other threads are not counted: the deadline monitor (off by default, one thread when enabled), the
 //!   resource sampler (off by default), the short-lived shutdown and teardown helpers, and any thread the
 //!   application starts.
-//! * Queue bounds count jobs, not bytes. What a queued closure holds is the caller's.
+//! * Queue bounds count jobs, not bytes, unless the profile states a byte budget (above). That budget then bounds
+//!   the closure storage and declared heap of what the pool admits. What a closure holds before the pool admits it
+//!   is the caller's.
 //! * The budget is a parameter. This module states no figure for any board; measuring one is not done here.
 
 use crate::error::{Error, ErrorKind};
@@ -215,7 +236,10 @@ impl LegacyCaps {
     #[must_use]
     pub fn of_config(config: &RuntimeConfig, pool: Option<&BlockingPoolHandle>) -> Self {
         let blocking_max_queued = match pool.map(BlockingPoolHandle::admission_policy) {
-            Some(BlockingAdmissionPolicy::Bounded { max_queued }) => max_queued.get(),
+            Some(
+                BlockingAdmissionPolicy::Bounded { max_queued }
+                | BlockingAdmissionPolicy::BoundedBytes { max_queued, .. },
+            ) => max_queued.get(),
             Some(BlockingAdmissionPolicy::Unbounded | BlockingAdmissionPolicy::Forbidden)
             | None => 0,
         };
@@ -289,17 +313,46 @@ fn describe(violations: &[CapViolation]) -> String {
 pub struct LegacyProfile {
     caps: LegacyCaps,
     stack_budget_bytes: u64,
+    /// The blocking pool's live-byte budget, if one was stated. `None` is the profile as it always was.
+    blocking_live_bytes: Option<NonZeroUsize>,
 }
 
 impl LegacyProfile {
     /// `stack_budget_bytes` is the ceiling on [`LegacyCaps::worst_case_stack_bytes`]. It is the caller's number;
-    /// nothing here supplies one.
+    /// nothing here supplies one. The profile states no byte budget for the blocking pool: see
+    /// [`Self::with_blocking_live_bytes`].
     #[must_use]
     pub const fn new(caps: LegacyCaps, stack_budget_bytes: u64) -> Self {
         Self {
             caps,
             stack_budget_bytes,
+            blocking_live_bytes: None,
         }
+    }
+
+    /// This profile with its blocking pool also bounded in bytes: [`Self::builder`] selects
+    /// [`BlockingAdmissionPolicy::BoundedBytes`] with the stated `blocking_max_queued` and `max_live_bytes`, and
+    /// [`Self::audit`] requires a runtime's pool to carry exactly that policy.
+    ///
+    /// The budget bounds what the pool admits: the closure storage and declared heap of queued, running and pinned
+    /// jobs (see [`BlockingAdmissionPolicy::BoundedBytes`]). It does not bound a closure the caller still holds, and
+    /// it is not a limit on the process heap. A byte-bounded pool refuses every submission that uses an uncharged
+    /// submission API.
+    ///
+    /// With `blocking_max_threads == 0` it has no effect: the pool forbids blocking and admits nothing.
+    #[must_use]
+    pub const fn with_blocking_live_bytes(self, max_live_bytes: NonZeroUsize) -> Self {
+        Self {
+            caps: self.caps,
+            stack_budget_bytes: self.stack_budget_bytes,
+            blocking_live_bytes: Some(max_live_bytes),
+        }
+    }
+
+    /// The stated live-byte budget of the blocking pool, if any.
+    #[must_use]
+    pub const fn blocking_live_bytes(&self) -> Option<NonZeroUsize> {
+        self.blocking_live_bytes
     }
 
     /// The stated caps.
@@ -342,7 +395,13 @@ impl LegacyProfile {
                 Error::new(ErrorKind::ConfigError)
                     .with_message(CapViolation::BlockingQueueUnbounded.to_string())
             })?;
-            BlockingAdmissionPolicy::Bounded { max_queued }
+            match self.blocking_live_bytes {
+                Some(max_live_bytes) => BlockingAdmissionPolicy::BoundedBytes {
+                    max_queued,
+                    max_live_bytes,
+                },
+                None => BlockingAdmissionPolicy::Bounded { max_queued },
+            }
         };
         let builder = RuntimeBuilder::new()
             .worker_threads(self.caps.worker_threads)
@@ -362,6 +421,12 @@ impl LegacyProfile {
     /// `Ok` if `runtime` carries exactly the stated caps, otherwise a `ConfigError` naming the fields that
     /// differ. A runtime whose blocking pool was not given the stated stack size differs in
     /// `blocking_thread_stack_bytes`, and so does one whose pool was left to the platform default.
+    ///
+    /// A profile that states a live-byte budget ([`Self::with_blocking_live_bytes`]) also requires the pool's
+    /// policy to be exactly [`BlockingAdmissionPolicy::BoundedBytes`] with the stated queue bound and budget: a
+    /// count-only pool, or a byte-bounded pool with another budget, is refused with an error naming the budget. A
+    /// profile that states none does not constrain the byte policy, as before. A profile that forbids blocking is
+    /// met only by a pool that forbids it, whatever budget it states.
     ///
     /// The stated caps must themselves be acceptable ([`Self::validate`]): a runtime that matches caps which are
     /// unbounded or over budget is not a bounded runtime, and this method is public for callers who build the
@@ -383,11 +448,42 @@ impl LegacyProfile {
         let stated = self.caps.observable();
         let carried = LegacyCaps::of_runtime(runtime);
         if carried == stated {
-            return Ok(());
+            return self.audit_live_bytes(runtime);
         }
         let fields = stated.differing_fields(&carried).join(", ");
         Err(Error::new(ErrorKind::ConfigError).with_message(format!(
             "the runtime does not carry the stated caps ({fields} differ): stated {stated:?}, carried {carried:?}"
+        )))
+    }
+
+    /// The byte half of [`Self::audit`]: when a live-byte budget is stated and blocking is allowed, the pool's policy
+    /// must be exactly the one [`Self::builder`] selects. The queue bound was already compared with the other caps,
+    /// but a count-only pool shows the same queue bound, so it is the policy itself that is compared here.
+    fn audit_live_bytes(&self, runtime: &Runtime) -> Result<(), Error> {
+        let Some(max_live_bytes) = self.blocking_live_bytes else {
+            return Ok(());
+        };
+        // Forbidding blocking leaves no byte to bound; the forbidding pool itself was checked by the caller.
+        if self.caps.blocking_max_threads == 0 {
+            return Ok(());
+        }
+        let max_queued = NonZeroUsize::new(self.caps.blocking_max_queued).ok_or_else(|| {
+            Error::new(ErrorKind::ConfigError)
+                .with_message(CapViolation::BlockingQueueUnbounded.to_string())
+        })?;
+        let stated = BlockingAdmissionPolicy::BoundedBytes {
+            max_queued,
+            max_live_bytes,
+        };
+        let carried = runtime
+            .blocking_handle()
+            .map(|pool| pool.admission_policy());
+        if carried == Some(stated) {
+            return Ok(());
+        }
+        Err(Error::new(ErrorKind::ConfigError).with_message(format!(
+            "the profile states a live-byte budget of {max_live_bytes} bytes for the blocking pool but the runtime's \
+             pool carries {carried:?}, not {stated:?}"
         )))
     }
 
@@ -404,7 +500,7 @@ impl LegacyProfile {
 #[allow(clippy::pedantic, clippy::nursery)]
 mod tests {
     use super::*;
-    use crate::runtime::BlockingSpawnErrorKind;
+    use crate::runtime::{BlockingFactoryError, BlockingSpawnErrorKind};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
@@ -452,6 +548,19 @@ mod tests {
 
     fn bytes(threads: usize, stack: usize) -> u64 {
         u64::try_from(threads * stack).unwrap()
+    }
+
+    /// `green` with its blocking pool also bounded to `limit` live bytes: 8 queued jobs, 2 threads.
+    fn budgeted(limit: usize) -> LegacyProfile {
+        green().with_blocking_live_bytes(NonZeroUsize::new(limit).unwrap())
+    }
+
+    /// The refusal kind of an uncharged submission, `None` if it was admitted. The handle of an admitted job is
+    /// dropped: these jobs do nothing.
+    fn uncharged_refusal(
+        pool: &crate::runtime::BlockingPoolHandle,
+    ) -> Option<BlockingSpawnErrorKind> {
+        pool.try_spawn(|| {}).err().map(|refused| refused.kind())
     }
 
     /// Every cap at `usize::MAX`: the worker term and the blocking term each fit in 64 bits on a 32-bit host
@@ -1179,5 +1288,329 @@ mod tests {
         assert_eq!(looser.peak, 3);
         assert_ne!(looser.peak, 2);
         assert_eq!(looser.clamped_to, 3);
+    }
+
+    // ---- an optional byte budget for the blocking pool
+
+    #[test]
+    fn a_stated_byte_budget_selects_bounded_bytes_and_a_profile_without_one_still_builds_bounded() {
+        let stated = budgeted(4096);
+        assert_eq!(stated.blocking_live_bytes(), NonZeroUsize::new(4096));
+        let runtime = stated.build().unwrap();
+        let pool = runtime.blocking_handle().unwrap();
+        assert_eq!(
+            pool.admission_policy(),
+            BlockingAdmissionPolicy::BoundedBytes {
+                max_queued: NonZeroUsize::new(8).unwrap(),
+                max_live_bytes: NonZeroUsize::new(4096).unwrap(),
+            }
+        );
+        assert!(stated.audit(&runtime).is_ok());
+
+        // Remove the plant: the same caps without a budget are the profile as it always was.
+        let plain = green();
+        assert_eq!(plain.blocking_live_bytes(), None);
+        let runtime = plain.build().unwrap();
+        assert_eq!(
+            runtime.blocking_handle().unwrap().admission_policy(),
+            BlockingAdmissionPolicy::Bounded {
+                max_queued: NonZeroUsize::new(8).unwrap(),
+            }
+        );
+        assert!(plain.audit(&runtime).is_ok());
+    }
+
+    #[test]
+    fn a_byte_budget_changes_no_cap_and_no_verdict_about_the_caps() {
+        let (plain, stated) = (green(), budgeted(4096));
+        assert_eq!(stated.caps(), plain.caps());
+        assert_eq!(stated.stack_budget_bytes(), plain.stack_budget_bytes());
+        assert_eq!(stated.violations(), plain.violations());
+        assert!(stated.validate().is_ok());
+        // The budget is part of what a profile is: equal budgets are equal profiles, unequal ones are not.
+        assert_eq!(stated, budgeted(4096));
+        assert_ne!(stated, budgeted(8192));
+        assert_ne!(stated, plain);
+
+        // A budget does not excuse a defective cap: the profile is refused by the cap's own name, to build or to audit.
+        let unbounded = LegacyCaps {
+            blocking_max_queued: 0,
+            ..caps(2 * MIB)
+        };
+        let defective = LegacyProfile::new(unbounded, 6 * 1024 * 1024)
+            .with_blocking_live_bytes(NonZeroUsize::new(4096).unwrap());
+        assert!(defective.build().is_err());
+        let message = defective
+            .validate()
+            .unwrap_err()
+            .message()
+            .unwrap()
+            .to_string();
+        assert!(message.contains("BlockingQueueUnbounded"), "{message}");
+        let runtime = budgeted(4096).build().unwrap();
+        assert!(defective.audit(&runtime).is_err());
+        // Remove the plant: the same budget on sound caps is accepted.
+        assert!(budgeted(4096).audit(&runtime).is_ok());
+    }
+
+    #[test]
+    fn the_audit_requires_the_exact_byte_policy_not_just_the_queue_count() {
+        let stated = budgeted(4096);
+
+        // A count-only pool shows the same queue bound, so the caps alone cannot tell it from the stated one.
+        let count_only = green().build().unwrap();
+        assert_eq!(
+            LegacyCaps::of_runtime(&count_only),
+            stated.caps(),
+            "the caps cannot tell the two pools apart"
+        );
+        let error = stated
+            .audit(&count_only)
+            .expect_err("a count-only pool is not the stated byte-bounded one");
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        let message = error.message().unwrap();
+        assert!(message.contains("live-byte budget of 4096"), "{message}");
+        assert!(message.contains("Bounded {"), "{message}");
+
+        // A byte-bounded pool with another budget is refused too, naming both.
+        let other_budget = budgeted(8192).build().unwrap();
+        let error = stated
+            .audit(&other_budget)
+            .expect_err("another budget is not the stated one");
+        let message = error.message().unwrap();
+        assert!(
+            message.contains("4096") && message.contains("8192"),
+            "{message}"
+        );
+
+        // Another queue bound is still refused by the caps, by name.
+        let other_queue = stated
+            .builder()
+            .unwrap()
+            .blocking_admission_policy(BlockingAdmissionPolicy::BoundedBytes {
+                max_queued: NonZeroUsize::new(4).unwrap(),
+                max_live_bytes: NonZeroUsize::new(4096).unwrap(),
+            })
+            .build()
+            .unwrap();
+        let error = stated.audit(&other_queue).expect_err("another queue bound");
+        assert!(
+            error.message().unwrap().contains("blocking_max_queued"),
+            "{:?}",
+            error.message()
+        );
+
+        // Remove the plant: the runtime the profile builds is accepted, and so is one built by hand to the same policy.
+        assert!(stated.audit(&stated.build().unwrap()).is_ok());
+        let by_hand = green()
+            .builder()
+            .unwrap()
+            .blocking_admission_policy(BlockingAdmissionPolicy::BoundedBytes {
+                max_queued: NonZeroUsize::new(8).unwrap(),
+                max_live_bytes: NonZeroUsize::new(4096).unwrap(),
+            })
+            .build()
+            .unwrap();
+        assert!(stated.audit(&by_hand).is_ok());
+    }
+
+    #[test]
+    fn a_profile_that_states_no_budget_still_accepts_every_pool_it_always_accepted() {
+        // The helper the integration targets use: a budget-less profile whose builder is overridden to BoundedBytes.
+        let plain = green();
+        let overridden = plain
+            .builder()
+            .unwrap()
+            .blocking_admission_policy(BlockingAdmissionPolicy::BoundedBytes {
+                max_queued: NonZeroUsize::new(8).unwrap(),
+                max_live_bytes: NonZeroUsize::new(512).unwrap(),
+            })
+            .build()
+            .unwrap();
+        assert!(plain.audit(&overridden).is_ok());
+        assert!(plain.audit(&budgeted(4096).build().unwrap()).is_ok());
+        assert!(plain.audit(&plain.build().unwrap()).is_ok());
+        // The plant it is paired with: caps that do differ are still refused, budget or no budget.
+        let wider = LegacyProfile::new(
+            LegacyCaps {
+                blocking_max_queued: 9,
+                ..caps(2 * MIB)
+            },
+            6 * 1024 * 1024,
+        );
+        assert!(wider.audit(&plain.build().unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_profile_that_forbids_blocking_ignores_a_stated_byte_budget_and_still_forbids() {
+        let plain = no_blocking_for_this_process();
+        let stated = plain.with_blocking_live_bytes(NonZeroUsize::new(4096).unwrap());
+        let runtime = stated.build().unwrap();
+        let pool = runtime.blocking_handle().expect("a forbidding pool");
+        assert_eq!(pool.admission_policy(), BlockingAdmissionPolicy::Forbidden);
+        assert_eq!(
+            pool.admission_policy(),
+            plain
+                .build()
+                .unwrap()
+                .blocking_handle()
+                .unwrap()
+                .admission_policy()
+        );
+        assert!(stated.audit(&runtime).is_ok());
+        assert_eq!(
+            uncharged_refusal(&pool),
+            Some(BlockingSpawnErrorKind::Forbidden)
+        );
+        let charged = pool.try_spawn_charged(|| {}, 8).err().map(|r| r.kind());
+        assert_eq!(charged, Some(BlockingSpawnErrorKind::Forbidden));
+        assert_eq!(pool.charged_bytes(), 0);
+
+        // Paired refusal: the byte-bounded pool of a profile that allows blocking is not a pool that forbids it.
+        let allowing = budgeted(4096).build().unwrap();
+        let error = stated
+            .audit(&allowing)
+            .expect_err("a pool that admits work does not meet a profile that forbids it");
+        assert!(
+            error.message().unwrap().contains("absent or admits work"),
+            "{:?}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn a_pool_built_from_a_budgeted_profile_admits_copies_and_retires_charged_work_and_refuses_the_rest()
+     {
+        let runtime = budgeted(4096).build().unwrap();
+        let pool = runtime.blocking_handle().unwrap();
+        assert_eq!(pool.charged_bytes(), 0);
+
+        // Admit, copy, run, retire: the pool reserves the declared bytes before the factory copies into them and
+        // returns every byte once the job is done.
+        let source = vec![7_u8; 300];
+        let sink = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let (into, probe) = (Arc::clone(&sink), pool.clone());
+        let reserved_during_build = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&reserved_during_build);
+        let job = pool
+            .try_spawn_charged_with(source.len(), || {
+                seen.store(probe.charged_bytes(), Ordering::SeqCst);
+                let copy = source.clone();
+                move || *into.lock().unwrap() = copy
+            })
+            .expect("a budgeted pool admits a charged factory");
+        assert!(job.wait_timeout(WAIT));
+        assert_eq!(*sink.lock().unwrap(), source);
+        assert!(reserved_during_build.load(Ordering::SeqCst) >= source.len());
+        assert_eq!(pool.charged_bytes(), 0, "everything admitted was retired");
+
+        // An uncharged submission is refused for good, and nothing of it runs or stays reserved.
+        let ran = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&ran);
+        let refused = pool.try_spawn(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(
+            refused.err().map(|r| r.kind()),
+            Some(BlockingSpawnErrorKind::ChargeRequired)
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.charged_bytes(), 0);
+        // Remove the plant: declaring a charge, even of 0 bytes, is admitted.
+        let counted = Arc::clone(&ran);
+        let admitted = pool
+            .try_spawn_charged(
+                move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                },
+                0,
+            )
+            .expect("a declared charge of 0 is a charge");
+        assert!(admitted.wait_timeout(WAIT));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+        // A job larger than the whole budget can never be admitted. (One of exactly the budget is not tested here: the
+        // closure's own storage is part of the charge and its size is not this test's to assume.)
+        let too_large = pool.try_spawn_charged(|| {}, 5000);
+        assert_eq!(
+            too_large.err().map(|r| r.kind()),
+            Some(BlockingSpawnErrorKind::ChargeTooLarge)
+        );
+    }
+
+    #[test]
+    fn the_byte_budget_saturates_before_the_queue_does_and_frees_when_the_holder_retires() {
+        let runtime = budgeted(4096).build().unwrap();
+        let pool = runtime.blocking_handle().unwrap();
+        let gate = Gate::closed();
+
+        // One job holds 3_000 declared bytes, and the queue (8 slots) is nearly empty.
+        let held_by = Arc::clone(&gate);
+        let holder = pool
+            .try_spawn_charged(move || held_by.wait_open(), 3000)
+            .expect("the first job fits an empty pool");
+        let refused = pool.try_spawn_charged(|| {}, 2000);
+        assert_eq!(
+            refused.err().map(|r| r.kind()),
+            Some(BlockingSpawnErrorKind::ByteBudgetSaturated),
+            "bytes, not the queue, are what is full"
+        );
+        assert!(pool.charged_bytes() >= 3000);
+
+        // A small job still fits beside it: the budget refuses what does not fit, not everything.
+        let small = pool
+            .try_spawn_charged(|| {}, 100)
+            .expect("100 bytes fit beside 3_000");
+        assert!(small.wait_timeout(WAIT));
+
+        // Remove the plant: once the holder has retired, the very request that was refused is admitted.
+        gate.release();
+        assert!(holder.wait_timeout(WAIT));
+        assert_eq!(pool.charged_bytes(), 0);
+        let again = pool
+            .try_spawn_charged(|| {}, 2000)
+            .expect("the room came back");
+        assert!(again.wait_timeout(WAIT));
+        assert_eq!(pool.charged_bytes(), 0);
+    }
+
+    #[test]
+    fn a_factory_is_refused_unrun_by_a_budgeted_profiles_pool_when_the_bytes_are_taken() {
+        let runtime = budgeted(4096).build().unwrap();
+        let pool = runtime.blocking_handle().unwrap();
+        let gate = Gate::closed();
+        let held_by = Arc::clone(&gate);
+        let holder = pool
+            .try_spawn_charged(move || held_by.wait_open(), 3500)
+            .expect("the first job fits an empty pool");
+
+        let built = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&built);
+        let factory = move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            || {}
+        };
+        let factory = match pool.try_spawn_charged_with(1000, factory) {
+            Err(BlockingFactoryError::Refused(refused)) => {
+                assert_eq!(refused.kind(), BlockingSpawnErrorKind::ByteBudgetSaturated);
+                refused.into_inner()
+            }
+            _ => panic!("expected a refusal before the factory ran"),
+        };
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            0,
+            "no payload was built for a full pool"
+        );
+
+        // Remove the plant: the same factory, handed back by the refusal, runs once when the room is back.
+        gate.release();
+        assert!(holder.wait_timeout(WAIT));
+        let job = pool
+            .try_spawn_charged_with(1000, factory)
+            .expect("room for the same factory");
+        assert!(job.wait_timeout(WAIT));
+        assert_eq!(built.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.charged_bytes(), 0);
     }
 }
