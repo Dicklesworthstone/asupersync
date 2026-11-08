@@ -4117,11 +4117,18 @@ impl ThreeLaneScheduler {
         self.shutdown.load(Ordering::Acquire)
     }
 
+    /// Shared stop signal for native infrastructure that must not retain the
+    /// runtime itself, including the optional background I/O driver.
+    #[cfg(any(not(target_arch = "wasm32"), test))]
+    pub(crate) fn shutdown_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
+
     /// Shared shutdown flag, so a test task can hold a worker until the
     /// runtime begins stopping without retaining the runtime itself.
     #[cfg(test)]
     pub(crate) fn shutdown_signal_for_test(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.shutdown)
+        self.shutdown_signal()
     }
 }
 

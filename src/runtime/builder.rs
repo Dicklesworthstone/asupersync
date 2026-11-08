@@ -208,6 +208,10 @@ use crate::types::{
     WasmDispatcherDiagnostics, WasmExportDispatcher, WasmHandleRef, WasmScopeEnterBuilder,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "builder/background_io.rs"]
+mod background_io;
+
 // ---------------------------------------------------------------------------
 // Thread-local RuntimeHandle (issue #21)
 // ---------------------------------------------------------------------------
@@ -2655,6 +2659,7 @@ pub struct RuntimeBuilder {
     scoped_cpu_worker_limit: Option<usize>,
     reactor: Option<Arc<dyn Reactor>>,
     io_driver: Option<IoDriverHandle>,
+    background_io_driver: bool,
     io_uring_capability_policy: IoUringCapabilityPolicy,
     /// Construct the platform reactor at build time by default
     /// (br-asupersync-1ajbtl).
@@ -2704,6 +2709,7 @@ impl RuntimeBuilder {
             scoped_cpu_worker_limit: None,
             reactor: None,
             io_driver: None,
+            background_io_driver: false,
             io_uring_capability_policy: IoUringCapabilityPolicy::default(),
             platform_reactor: true,
             timer_driver: None,
@@ -3522,6 +3528,7 @@ impl RuntimeBuilder {
             scoped_cpu_worker_limit,
             reactor,
             io_driver,
+            background_io_driver,
             io_uring_capability_policy,
             platform_reactor,
             timer_driver,
@@ -3540,6 +3547,13 @@ impl RuntimeBuilder {
         let _ = (platform_reactor, io_uring_capability_policy);
         #[cfg(target_arch = "wasm32")]
         let _ = resource_sampling;
+        if background_io_driver
+            && (cfg!(target_arch = "wasm32")
+                || host_services.kind() != RuntimeHostServicesKind::NativeStdThread)
+        {
+            return Err(Error::new(crate::error::ErrorKind::ConfigError)
+                .with_message("background_io_driver requires native thread host services"));
+        }
         // br-asupersync-1ajbtl: default builds construct the platform reactor
         // so socket I/O uses readiness wakeups instead of the 1ms timer-paced
         // fallback re-poll path. Explicit with_reactor / with_io_driver
@@ -3575,6 +3589,10 @@ impl RuntimeBuilder {
         let reactor = reactor;
         #[cfg(target_arch = "wasm32")]
         let terminal_io_reactor_snapshot = None;
+        if background_io_driver && reactor.is_none() && io_driver.is_none() {
+            return Err(Error::new(crate::error::ErrorKind::ConfigError)
+                .with_message("background_io_driver requires an available I/O reactor or driver"));
+        }
         // br-asupersync-8fuxnt / br-asupersync-sched-hot-path-perf-bt4y5f.2.2:
         // the Sharded shape is publicly constructible. The former build-time
         // ConfigError gate flipped once its stated preconditions landed:
@@ -3600,6 +3618,12 @@ impl RuntimeBuilder {
             blocking_admission_policy,
             blocking_thread_stack_size,
         )?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let runtime = if background_io_driver {
+            runtime.with_background_io_driver_start(RuntimeInner::start_background_io_driver)?
+        } else {
+            runtime
+        };
         if capture_schedules {
             let trace = runtime
                 .inner
@@ -3751,6 +3775,30 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn with_io_driver(mut self, driver: IoDriverHandle) -> Self {
         self.io_driver = Some(driver);
+        self
+    }
+
+    /// Drives I/O readiness and shared timers on an additional native thread.
+    ///
+    /// Disabled by default. Enabling this keeps registered I/O and timer
+    /// Wakers progressing when every async worker is inside a long task poll,
+    /// including a runtime configured with one worker. The thread shares the
+    /// runtime's existing I/O dispatcher and poll election; it does not create
+    /// a second reactor or change the configured async worker count.
+    ///
+    /// This does not preempt a task or execute its future. A task woken while
+    /// the sole worker is blocked still waits for that worker to return. The
+    /// readiness thread participates in ordinary runtime shutdown and is
+    /// joined before teardown completes.
+    ///
+    /// Requires native thread host services and an available reactor, supplied
+    /// explicitly or constructed by the default platform-reactor path. Build
+    /// returns an error for a threadless host, missing reactor, or thread spawn
+    /// failure. Contended polls and failing callbacks use bounded retry waits;
+    /// this option does not promise a real-time wake latency.
+    #[must_use]
+    pub fn background_io_driver(mut self, enable: bool) -> Self {
+        self.background_io_driver = enable;
         self
     }
 
@@ -4341,6 +4389,23 @@ impl Runtime {
             *lock_state(&inner.worker_threads) = worker_threads;
             Ok(Self { inner })
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::result_large_err)]
+    fn with_background_io_driver_start(
+        self,
+        start: impl FnOnce(&Arc<RuntimeInner>) -> Result<(), Error>,
+    ) -> Result<Self, Error> {
+        if let Err(error) = start(&self.inner) {
+            // A worker's start hook can already have retained a strong handle
+            // or spawned a task holding one. Dropping this Runtime alone need
+            // not stop those workers. Use the explicit shutdown/reaper path
+            // even when the helper's thread could not be created.
+            self.shutdown_background();
+            return Err(error);
+        }
+        Ok(self)
     }
 
     /// Returns a handle that can spawn tasks from outside the runtime.
@@ -6174,6 +6239,45 @@ impl Drop for CallerTaskRegistration {
 }
 
 impl RuntimeInner {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::result_large_err)]
+    fn start_background_io_driver(self: &Arc<Self>) -> Result<(), Error> {
+        let (io, timers) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (state.io_driver_handle(), state.timer_driver_handle())
+        };
+        let io = io.ok_or_else(|| {
+            Error::new(crate::error::ErrorKind::ConfigError)
+                .with_message("background_io_driver requires an attached I/O driver")
+        })?;
+        let shutdown = self.scheduler.shutdown_signal();
+        let runtime_handle = RuntimeHandle::weak(self);
+        let mut builder = std::thread::Builder::new()
+            .name(format!("{}-io", self.config.thread_name_prefix));
+        if self.config.thread_stack_size > 0 {
+            builder = builder.stack_size(self.config.thread_stack_size);
+        }
+        let thread = builder
+            .spawn(move || {
+                // The thread holds only a weak runtime handle. The independent
+                // driver and shutdown token cannot keep RuntimeInner alive.
+                let _runtime = ScopedRuntimeHandle::new(runtime_handle);
+                background_io::run(io, timers, shutdown);
+            })
+            .map_err(|error| {
+                Error::new(crate::error::ErrorKind::Internal)
+                    .with_message(format!("failed to spawn background I/O driver: {error}"))
+            })?;
+        // A readiness/timer Waker may drop the last Runtime on this thread.
+        // The shared join list makes existing teardown detect that thread ID
+        // and transfer all joins to its off-thread reaper instead of self-join.
+        self.worker_threads.lock().push(thread);
+        Ok(())
+    }
+
     /// Must run before creating any RuntimeHandle or starting host workers:
     /// on_thread_start callbacks receive an ambient handle immediately.
     fn install_required_spawn_authorization(&self, key: Option<crate::security::key::AuthKey>) {
@@ -7763,6 +7867,10 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
 #[allow(unsafe_code)]
 #[path = "builder_inline_tests.rs"]
 mod tests;
+
+#[cfg(all(test, any(unix, windows), not(target_arch = "wasm32")))]
+#[path = "builder/background_io_tests.rs"]
+mod background_io_tests;
 
 // Opt-in obligation leak monitoring (br-asupersync-bi2462.150.2). This block
 // follows the test module so that the unsafe-boundary ledger's line locators
