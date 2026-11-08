@@ -1342,6 +1342,12 @@ interface BrowserWebTransportState {
     closed: boolean;
   };
   settled: boolean;
+  termination: {
+    outcome: BrowserOutcome<WasmValue>;
+    receipt: BrowserOutcome<WasmValue> | null;
+    busy: boolean;
+    closeHost: (() => void) | null;
+  } | null;
   scopeKey: string;
   writer: Promise<BrowserWebTransportWriterLike>;
 }
@@ -5418,6 +5424,84 @@ function collapseTaskOutcome(outcome: BrowserOutcome<WasmValue>): BrowserOutcome
   return outcome as BrowserOutcome<void>;
 }
 
+function webTransportOperationTerminal(outcome: BrowserOutcome<WasmValue>): BrowserOutcome<never> {
+  return outcome.outcome === "ok"
+    ? webTransportCancellationOutcome("webtransport_close", "WebTransport session completed.")
+    : outcome as BrowserOutcome<never>;
+}
+
+function currentWebTransportTerminal(state: BrowserWebTransportState): BrowserOutcome<never> | null {
+  const outcome = state.termination?.receipt ?? state.datagramTerminal;
+  return outcome === null ? null : webTransportOperationTerminal(outcome);
+}
+
+function sameWebTransportValue(expected: WasmValue, actual: WasmValue): boolean {
+  if (expected === actual) return true;
+  if ((typeof expected === "bigint" || typeof expected === "number" && Number.isSafeInteger(expected))
+    && (typeof actual === "bigint" || typeof actual === "number" && Number.isSafeInteger(actual))) {
+    return BigInt(expected) === BigInt(actual);
+  }
+  if (expected instanceof Uint8Array && actual instanceof Uint8Array) {
+    if (expected.byteLength !== actual.byteLength) return false;
+    for (let index = 0; index < expected.byteLength; index += 1) if (expected[index] !== actual[index]) return false;
+    return true;
+  }
+  // The request owns a copied record; the receipt preserves core handle wrappers.
+  if (expected && actual && typeof expected === "object" && typeof actual === "object"
+    && !(expected instanceof Uint8Array) && !(actual instanceof Uint8Array)) {
+    const left = expected instanceof BaseHandle ? expected.toJSON() : expected as HandleRef;
+    const right = actual instanceof BaseHandle ? actual.toJSON() : actual as HandleRef;
+    return left.kind === right.kind && left.slot === right.slot && left.generation === right.generation
+      && (left.owner_token == null || right.owner_token == null
+        ? left.owner_token === right.owner_token
+        : BigInt(left.owner_token) === BigInt(right.owner_token));
+  }
+  return false;
+}
+
+function sameWebTransportTerminal(
+  proposed: BrowserOutcome<WasmValue>, receipt: BrowserOutcome<WasmValue>,
+): boolean {
+  // Successful explicit TaskHandle.join values are revived by the core (bytes,
+  // handles and safe bigint values need not retain JS identity or representation).
+  if (proposed.outcome === "ok") return receipt.outcome === "ok" && sameWebTransportValue(proposed.value, receipt.value);
+  if (proposed.outcome === "err") return receipt.outcome === "err"
+    && proposed.failure.code === receipt.failure.code
+    && proposed.failure.recoverability === receipt.failure.recoverability
+    && proposed.failure.message === receipt.failure.message;
+  if (proposed.outcome === "panicked") return receipt.outcome === "panicked" && proposed.message === receipt.message;
+  if (receipt.outcome !== "cancelled") return false;
+  const expected = proposed.cancellation, actual = receipt.cancellation;
+  return expected.kind === actual.kind && expected.phase === actual.phase
+    && expected.origin_region === actual.origin_region && expected.origin_task === actual.origin_task
+    && BigInt(expected.timestamp_nanos) === BigInt(actual.timestamp_nanos)
+    && expected.message === actual.message && expected.truncated === actual.truncated;
+}
+
+function snapshotWebTransportTerminal(
+  outcome: BrowserOutcome<WasmValue>,
+  preserveCoreHandle = false,
+): BrowserOutcome<WasmValue> {
+  switch (outcome.outcome) {
+    case "ok": {
+      let value = outcome.value;
+      if (ArrayBuffer.isView(value)) {
+        const { buffer, byteOffset, byteLength } = browserStorageViewParts(value);
+        value = new Uint8Array(new Uint8Array(buffer, byteOffset, byteLength));
+      }
+      else if (value && typeof value === "object" && !(preserveCoreHandle && value instanceof BaseHandle)) {
+        const raw = value instanceof BaseHandle ? value.toJSON() : value;
+        value = Object.freeze({ kind: raw.kind, slot: raw.slot, generation: raw.generation,
+          owner_token: raw.owner_token }) as HandleRef;
+      }
+      return Object.freeze({ outcome: "ok", value });
+    }
+    case "err": return Object.freeze({ outcome: "err", failure: Object.freeze({ ...outcome.failure }) });
+    case "cancelled": return Object.freeze({ outcome: "cancelled", cancellation: Object.freeze({ ...outcome.cancellation }) });
+    case "panicked": return Object.freeze({ outcome: "panicked", message: outcome.message });
+  }
+}
+
 function waitForWebTransportDatagramHost<T>(
   state: BrowserWebTransportState,
   operation: Promise<T>,
@@ -5457,20 +5541,21 @@ async function sendAdmittedWebTransportDatagram(
   byteLength: number,
 ): Promise<BrowserOutcome<void>> {
   try {
-    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    const terminal = currentWebTransportTerminal(state);
+    if (terminal) return terminal;
     const ready = await waitForWebTransportDatagramHost(state, state.writer);
-    if ("terminal" in ready) return ready.terminal;
+    if ("terminal" in ready) return currentWebTransportTerminal(state) ?? ready.terminal;
     const writer = ready.value;
     const write = writer.write;
     // Host method lookup can reenter owner close before invocation.
-    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    if (state.datagramTerminal !== null) return currentWebTransportTerminal(state)!;
     const writing = write.call(writer, payload!);
     payload = null;
     const sent = await waitForWebTransportDatagramHost(state, writing);
-    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    if (state.datagramTerminal !== null) return currentWebTransportTerminal(state)!;
     return "terminal" in sent ? sent.terminal : OutcomeFactory.ok(undefined);
   } catch (error) {
-    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    if (state.datagramTerminal !== null) return currentWebTransportTerminal(state)!;
     takeTerminalWebTransportOutcome(handle);
     return webTransportFailureOutcome(
       `browser WebTransport datagram send failed: ${errorMessage(error)}`,
@@ -5485,24 +5570,68 @@ function settleWebTransportTask(
   handle: CoreTaskHandle,
   outcome: BrowserOutcome<WasmValue>,
   consumerVersion: AbiVersion | null,
+  closeHost: (() => void) | null = null,
 ): BrowserOutcome<WasmValue> {
   const key = browserWebTransportStateKey(handle);
   const state = lookupWebTransportState(handle);
-  if (state) {
-    stopWebTransportStreams(state, outcome);
-    state.settled = true;
-    TERMINAL_WEBTRANSPORTS.set(key, {
-      outcome,
-      scopeKey: state.scopeKey,
-    });
-    INFLIGHT_WEBTRANSPORTS.delete(key);
-  } else {
+  if (!state) {
     const terminal = TERMINAL_WEBTRANSPORTS.get(key);
     if (terminal) {
       return terminal.outcome;
     }
+    return taskJoin(handle, outcome, consumerVersion);
   }
-  return taskJoin(handle, outcome, consumerVersion);
+  if (state.termination?.busy) {
+    return OutcomeFactory.err("compatibility_rejected", "transient", "WebTransport terminal publication is already in progress");
+  }
+  const first = state.termination === null;
+  if (first) {
+    // Generic task completion accepts caller-owned values/getters. Guard before
+    // snapshotting them so a reentrant close cannot publish a second terminal.
+    state.termination = { outcome: OutcomeFactory.ok(undefined), receipt: null, busy: true, closeHost };
+    try {
+      state.termination.outcome = snapshotWebTransportTerminal(outcome);
+      if (INFLIGHT_WEBTRANSPORTS.get(key) !== state) {
+        state.termination = null;
+        return invalidHandleOutcome("WebTransport owner closed during terminal preparation");
+      }
+    } catch (error) {
+      state.termination = null;
+      return ownerCloseFailure("webtransport_terminal", error);
+    }
+    state.settled = true;
+  }
+  const termination = state.termination!;
+  termination.busy = true;
+  try {
+    if (first) cleanupWebTransportState(state,
+      termination.outcome.outcome === "cancelled" ? termination.outcome.cancellation.message ?? undefined : undefined,
+      termination.outcome);
+    if (termination.closeHost) {
+      termination.closeHost();
+      termination.closeHost = null;
+    }
+    // Owner close is an independent ledger barrier and may reenter host close.
+    // Never publish a stale task or recreate ownership after that barrier.
+    if (INFLIGHT_WEBTRANSPORTS.get(key) !== state) {
+      return invalidHandleOutcome("WebTransport owner closed during terminal publication");
+    }
+    const receipt = snapshotWebTransportTerminal(taskJoin(handle, termination.outcome, consumerVersion), true);
+    const accepted = sameWebTransportTerminal(termination.outcome, receipt);
+    termination.receipt = !accepted && receipt.outcome === "ok"
+      ? webTransportFailureOutcome("WebTransport terminal publication returned an inconsistent success")
+      : receipt;
+    if (accepted && INFLIGHT_WEBTRANSPORTS.get(key) === state) {
+      TERMINAL_WEBTRANSPORTS.set(key, { outcome: receipt, scopeKey: state.scopeKey });
+      INFLIGHT_WEBTRANSPORTS.delete(key);
+    }
+    return termination.receipt;
+  } catch (error) {
+    termination.receipt = webTransportFailureOutcome(`browser WebTransport terminal publication failed: ${errorMessage(error)}`);
+    return termination.receipt;
+  } finally {
+    termination.busy = false;
+  }
 }
 
 function cleanupWebTransportState(
@@ -5565,24 +5694,24 @@ function cancelBrowserTask(
   consumerVersion: AbiVersion | null,
 ): BrowserOutcome<void> {
   let ownedTask: CoreTaskHandle;
-  try { ownedTask = snapshotTaskHandle(task); }
+  let version: AbiVersion | null;
+  try { ownedTask = snapshotTaskHandle(task); version = snapshotOwnerCloseVersion(consumerVersion); }
   catch (error) { return ownerCloseFailure("task_cancel", error); }
-  const requested = taskCancel({ task: ownedTask, kind, message }, consumerVersion);
+  const state = lookupWebTransportState(ownedTask);
+  if (state?.termination) {
+    const receipt = settleWebTransportTask(ownedTask, state.termination.outcome, version);
+    return sameWebTransportTerminal(state.termination.outcome, receipt) ? OutcomeFactory.ok(undefined) : collapseTaskOutcome(receipt);
+  }
+  const requested = taskCancel({ task: ownedTask, kind, message }, version);
   if (requested.outcome !== "ok") {
     return requested;
   }
   SDK_FETCHES.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
-  const state = lookupWebTransportState(ownedTask);
   if (state && !state.settled) {
     const terminal = webTransportCancellationOutcome(kind, message, "cancelling");
-    cleanupWebTransportState(state, message, terminal);
-    try {
-      state.session.close(message === undefined ? undefined : { reason: message });
-    } catch {
-      // The admitted task cancellation still owns and initiates all stream
-      // cleanup, even when the host session's best-effort close throws.
-    }
-    settleWebTransportTask(ownedTask, terminal, consumerVersion);
+    const receipt = settleWebTransportTask(ownedTask, terminal, version,
+      () => state.session.close(message === undefined ? undefined : { reason: message }));
+    if (!sameWebTransportTerminal(terminal, receipt)) return collapseTaskOutcome(receipt);
   }
   return requested;
 }
@@ -5696,6 +5825,7 @@ function createBrowserWebTransportState(
       closed: false,
     },
     settled: false,
+    termination: null,
     scopeKey,
     writer,
   };
@@ -5707,11 +5837,11 @@ function createBrowserWebTransportState(
     const failure = webTransportFailureOutcome(
       `browser WebTransport failed during ready(): ${errorMessage(error)}`,
     );
-    cleanupWebTransportState(state, errorMessage(error), failure);
     settleWebTransportTask(
       handle,
       failure,
       consumerVersion,
+      () => state.session.close({ reason: "WebTransport readiness failed." }),
     );
   });
 
@@ -5720,7 +5850,6 @@ function createBrowserWebTransportState(
       if (state.settled) {
         return;
       }
-      cleanupWebTransportState(state, "webtransport closed");
       settleWebTransportTask(
         handle,
         webTransportCancellationOutcome("webtransport_close", "WebTransport session closed."),
@@ -5734,7 +5863,6 @@ function createBrowserWebTransportState(
       const failure = webTransportFailureOutcome(
         `browser WebTransport closed with error: ${errorMessage(error)}`,
       );
-      cleanupWebTransportState(state, errorMessage(error), failure);
       settleWebTransportTask(
         handle,
         failure,
@@ -6115,8 +6243,7 @@ export class RegionHandle {
         `failed to construct browser WebTransport: ${errorMessage(error)}`,
         "permanent",
       );
-      settleWebTransportTask(spawned.value, failure, consumerVersion);
-      return failure;
+      return settleWebTransportTask(spawned.value, failure, consumerVersion) as BrowserOutcome<WebTransportHandle>;
     }
 
     return OutcomeFactory.ok(new WebTransportHandle(spawned.value, consumerVersion));
@@ -6137,7 +6264,14 @@ export class TaskHandle {
     outcome: BrowserOutcome<WasmValue>,
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<WasmValue> {
-    return taskJoin(this.core, outcome, consumerVersion);
+    let core: CoreTaskHandle;
+    let version: AbiVersion | null;
+    try { core = snapshotTaskHandle(this.core); version = snapshotOwnerCloseVersion(consumerVersion); }
+    catch (error) { return ownerCloseFailure("task_join", error); }
+    const state = lookupWebTransportState(core);
+    if (!state) return taskJoin(core, outcome, version);
+    return settleWebTransportTask(core, outcome, version,
+      () => state.session.close({ reason: "WebTransport task completed." }));
   }
 
   cancel(
@@ -6204,20 +6338,25 @@ export class WebTransportHandle {
   async ready(
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): Promise<BrowserOutcome<void>> {
-    const state = lookupWebTransportState(this.core);
+    let core: CoreTaskHandle;
+    try { core = snapshotTaskHandle(this.core); }
+    catch (error) { return ownerCloseFailure("webtransport_ready", error); }
+    const state = lookupWebTransportState(core);
     if (!state) {
-      const terminal = takeTerminalWebTransportOutcome(this.core);
+      const terminal = takeTerminalWebTransportOutcome(core);
       if (terminal) {
-        return collapseTaskOutcome(terminal);
+        return webTransportOperationTerminal(terminal);
       }
       return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
 
     try {
-      await state.ready;
-      return OutcomeFactory.ok(undefined);
+      const ready = await waitForWebTransportDatagramHost(state, state.ready);
+      return currentWebTransportTerminal(state) ?? ("terminal" in ready ? ready.terminal : OutcomeFactory.ok(undefined));
     } catch (error) {
-      takeTerminalWebTransportOutcome(this.core);
+      const terminal = currentWebTransportTerminal(state);
+      if (terminal) return terminal;
+      takeTerminalWebTransportOutcome(core);
       return webTransportFailureOutcome(
         `browser WebTransport readiness failed: ${errorMessage(error)}`,
       );
@@ -6240,7 +6379,7 @@ export class WebTransportHandle {
     if (!state) {
       const terminal = takeTerminalWebTransportOutcome(this.core);
       if (terminal) {
-        return collapseTaskOutcome(terminal);
+        return webTransportOperationTerminal(terminal);
       }
       return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
@@ -6254,7 +6393,7 @@ export class WebTransportHandle {
         `browser WebTransport datagram send rejected: ${errorMessage(error)}`,
       );
     }
-    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    if (state.datagramTerminal !== null) return currentWebTransportTerminal(state)!;
     if (state.pendingDatagramCount >= WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedDatagrams
       || input.byteLength > WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedBytes - state.pendingDatagramBytes) {
       return OutcomeFactory.err(
@@ -6271,7 +6410,7 @@ export class WebTransportHandle {
     } catch (error) {
       state.pendingDatagramCount -= 1;
       state.pendingDatagramBytes -= input.byteLength;
-      if (state.datagramTerminal !== null) return state.datagramTerminal;
+      if (state.datagramTerminal !== null) return currentWebTransportTerminal(state)!;
       return OutcomeFactory.err(
         "compatibility_rejected", "permanent",
         `browser WebTransport datagram send rejected: ${errorMessage(error)}`,
@@ -6282,31 +6421,49 @@ export class WebTransportHandle {
   async recvDatagram(
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): Promise<BrowserOutcome<Uint8Array>> {
-    const state = lookupWebTransportState(this.core);
+    let core: CoreTaskHandle;
+    let version: AbiVersion | null;
+    try { core = snapshotTaskHandle(this.core); version = snapshotOwnerCloseVersion(consumerVersion); }
+    catch (error) { return ownerCloseFailure("webtransport_recv", error); }
+    const state = lookupWebTransportState(core);
     if (!state) {
-      const terminal = takeTerminalWebTransportOutcome(this.core);
+      const terminal = takeTerminalWebTransportOutcome(core);
       if (terminal) {
-        return terminal as BrowserOutcome<Uint8Array>;
+        return webTransportOperationTerminal(terminal);
       }
       return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
 
     try {
-      const reader = await state.reader;
-      const result = await reader.read();
-      if (result.done || result.value === undefined) {
+      const ready = await waitForWebTransportDatagramHost(state, state.reader);
+      if ("terminal" in ready) return currentWebTransportTerminal(state) ?? webTransportOperationTerminal(ready.terminal);
+      let terminal = currentWebTransportTerminal(state);
+      if (terminal) return terminal;
+      const reader = ready.value;
+      const read = reader.read;
+      terminal = currentWebTransportTerminal(state);
+      if (terminal) return terminal;
+      const readResult = await waitForWebTransportDatagramHost(state, read.call(reader));
+      terminal = currentWebTransportTerminal(state);
+      if (terminal) return terminal;
+      if ("terminal" in readResult) return webTransportOperationTerminal(readResult.terminal);
+      const done = readResult.value.done, value = readResult.value.value;
+      terminal = currentWebTransportTerminal(state);
+      if (terminal) return terminal;
+      if (done || value === undefined) {
         const cancelled = webTransportCancellationOutcome(
           "webtransport_close",
           "WebTransport datagram reader reached end-of-stream.",
         );
-        settleWebTransportTask(this.core, cancelled, consumerVersion);
-        return cancelled as BrowserOutcome<Uint8Array>;
+        return webTransportOperationTerminal(settleWebTransportTask(core, cancelled, version,
+          () => state.session.close({ reason: "WebTransport datagram reader reached end-of-stream." })));
       }
-      return OutcomeFactory.ok(
-        result.value instanceof Uint8Array ? result.value : new Uint8Array(result.value),
-      );
+      const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+      return currentWebTransportTerminal(state) ?? OutcomeFactory.ok(bytes);
     } catch (error) {
-      takeTerminalWebTransportOutcome(this.core);
+      const terminal = currentWebTransportTerminal(state);
+      if (terminal) return terminal;
+      takeTerminalWebTransportOutcome(core);
       return webTransportFailureOutcome(
         `browser WebTransport datagram receive failed: ${errorMessage(error)}`,
       );
@@ -6317,9 +6474,13 @@ export class WebTransportHandle {
     options: BrowserWebTransportCloseOptions = {},
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<void> {
-    const state = lookupWebTransportState(this.core);
+    let core: CoreTaskHandle;
+    let version: AbiVersion | null;
+    try { core = snapshotTaskHandle(this.core); version = snapshotOwnerCloseVersion(consumerVersion); }
+    catch (error) { return ownerCloseFailure("webtransport_close", error); }
+    const state = lookupWebTransportState(core);
     if (!state) {
-      const terminal = takeTerminalWebTransportOutcome(this.core);
+      const terminal = takeTerminalWebTransportOutcome(core);
       if (terminal) {
         return collapseTaskOutcome(terminal);
       }
@@ -6327,18 +6488,20 @@ export class WebTransportHandle {
     }
 
     try {
+      if (state.termination) return collapseTaskOutcome(settleWebTransportTask(core, state.termination.outcome, version));
       const reason = options.reason;
+      const closeOptions = Object.freeze({ reason, closeCode: options.closeCode });
+      if (lookupWebTransportState(core) !== state) return invalidHandleOutcome("WebTransport owner closed while reading close options");
       const terminal = webTransportCancellationOutcome(
         "webtransport_close",
         reason ?? "WebTransport session closed by caller.",
       );
-      cleanupWebTransportState(state, reason, terminal);
-      state.session.close(options);
       return collapseTaskOutcome(
         settleWebTransportTask(
-          this.core,
+          core,
           terminal,
-          consumerVersion,
+          version,
+          () => state.session.close(closeOptions),
         ),
       );
     } catch (error) {
@@ -6353,46 +6516,46 @@ export class WebTransportHandle {
     message?: string,
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<void> {
+    let core: CoreTaskHandle;
+    let version: AbiVersion | null;
+    try { core = snapshotTaskHandle(this.core); version = snapshotOwnerCloseVersion(consumerVersion); }
+    catch (error) { return ownerCloseFailure("webtransport_cancel", error); }
     const token =
       tokenOrKind instanceof CancellationToken
         ? tokenOrKind
         : new CancellationToken(tokenOrKind, message, consumerVersion);
-    const state = lookupWebTransportState(this.core);
+    const state = lookupWebTransportState(core);
     if (!state) {
-      const terminal = takeTerminalWebTransportOutcome(this.core);
+      const terminal = takeTerminalWebTransportOutcome(core);
       if (terminal) {
         return collapseTaskOutcome(terminal);
       }
       return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
 
+    if (state.termination) return collapseTaskOutcome(settleWebTransportTask(core, state.termination.outcome, version));
+    const kind = token.kind, cancellationMessage = token.message;
+    if (lookupWebTransportState(core) !== state) return invalidHandleOutcome("WebTransport owner closed while reading cancellation options");
+    if (state.termination) return collapseTaskOutcome(settleWebTransportTask(core, state.termination.outcome, version));
     const cancelOutcome = taskCancel(
       {
-        task: this.core,
-        kind: token.kind,
-        message: token.message,
+        task: core,
+        kind,
+        message: cancellationMessage,
       },
-      consumerVersion,
+      version,
     );
     if (cancelOutcome.outcome !== "ok") {
       return cancelOutcome;
     }
 
-    const terminal = webTransportCancellationOutcome(token.kind, token.message, "cancelling");
-    try {
-      cleanupWebTransportState(state, token.message, terminal);
-      state.session.close(token.message === undefined ? undefined : { reason: token.message });
-    } catch (error) {
-      return webTransportFailureOutcome(
-        `browser WebTransport cancel failed: ${errorMessage(error)}`,
-      );
-    }
-
+    const terminal = webTransportCancellationOutcome(kind, cancellationMessage, "cancelling");
     return collapseTaskOutcome(
       settleWebTransportTask(
-        this.core,
+        core,
         terminal,
-        consumerVersion,
+        version,
+        () => state.session.close(cancellationMessage === undefined ? undefined : { reason: cancellationMessage }),
       ),
     );
   }

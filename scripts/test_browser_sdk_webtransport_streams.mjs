@@ -16,7 +16,7 @@ import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
+import { createContext, runInNewContext, SourceTextModule, SyntheticModule } from "node:vm";
 
 const sdkPath = process.env.ASUPERSYNC_BROWSER_SDK_SOURCE
   ?? fileURLToPath(new URL("../packages/browser/src/index.ts", import.meta.url));
@@ -52,6 +52,15 @@ function deferred() {
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 const clone = (value) => structuredClone(value);
 const unitJson = '{"outcome":"ok","value":{"kind":"unit"}}';
+
+async function promptly(promise) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("owned WebTransport work did not settle")), 750);
+    })]);
+  } finally { clearTimeout(timer); }
+}
 
 function assertSameHandle(recorded, actual) {
   const normalized = clone(actual.toJSON());
@@ -96,12 +105,14 @@ function byteStream(options = {}) {
 async function fixture(t, options = {}) {
   const hosts = [];
   const calls = { init: 0, runtimeCreate: [], scopeEnter: [], spawn: [], join: [], cancel: [], scopeClose: [], runtimeClose: [] };
+  const controls = { joinResponse: options.joinResponse ?? null };
   let nextRuntime = 1;
   let nextRegion = 100;
   let nextTask = 1;
 
   class ControlledTransport {
     constructor(url, configuration) {
+      options.onConstruct?.();
       this.url = url;
       this.configuration = configuration;
       this.events = [];
@@ -152,6 +163,7 @@ async function fixture(t, options = {}) {
 
     close(info = {}) {
       this.events.push(["close", info]);
+      options.onHostClose?.(this, info);
       this.completion.resolve(info);
     }
   }
@@ -187,8 +199,10 @@ async function fixture(t, options = {}) {
       return handle("task", nextTask++);
     },
     task_join: (task, outcome, version) => {
-      calls.join.push({ task: JSON.parse(task), outcome: JSON.parse(outcome), version });
-      return outcome;
+      const call = { task: JSON.parse(task), outcome: JSON.parse(outcome), version };
+      calls.join.push(call);
+      options.onJoin?.(call);
+      return controls.joinResponse ?? outcome;
     },
     task_cancel: (request) => { calls.cancel.push(JSON.parse(request)); return options.cancelResponse ?? unitJson; },
     scope_close: (region) => { calls.scopeClose.push(JSON.parse(region)); return unitJson; },
@@ -229,7 +243,7 @@ async function fixture(t, options = {}) {
     const session = unwrap(owner.openWebTransport("https://transport.example.test/session"));
     return { session, host: hosts.at(-1), state: [...sdk.sdkHostSessions.values()].at(-1) };
   }
-  return { sdk, runtime, scope, open, hosts, calls };
+  return { sdk, runtime, scope, open, hosts, calls, controls };
 }
 
 function assertUnlocked(host) {
@@ -240,6 +254,266 @@ function assertUnlocked(host) {
 function closeCount(host) {
   return host.events.filter(([event]) => event === "close").length;
 }
+
+const publicationRefusal = {
+  outcome: "err",
+  failure: { code: "compatibility_rejected", recoverability: "transient", message: "terminal publication refused" },
+};
+
+for (const action of ["close", "cancel", "generic-cancel"]) {
+  test(`SDK-WT-TERMINAL-RETRY-${action}: publication refusal retains ownership and exact evidence`, { timeout: 5000 }, async (t) => {
+    const { sdk, open, calls, controls } = await fixture(t, { joinResponse: JSON.stringify(publicationRefusal) });
+    const { session, host } = open();
+    unwrap(await session.ready());
+    const requested = action === "close" ? session.close({ reason: "original stop" })
+      : action === "cancel" ? session.cancel("navigation", "original stop")
+        : new sdk.TaskHandle(session.core).cancel("navigation", "original stop");
+    assert.deepEqual(clone(requested), publicationRefusal);
+    await turn();
+    assert.equal(sdk.sdkHostSessions.size, 1, "refused task publication still owns the session");
+    assert.equal(calls.join.length, 1, "host close observers cannot automatically republish");
+    for (const outcome of await Promise.all([
+      session.ready(), session.recvDatagram(), session.sendDatagram(Uint8Array.of(1)),
+    ])) assert.deepEqual(clone(outcome), publicationRefusal);
+    assert.equal(calls.join.length, 1, "observing a refusal is not a publication retry");
+    controls.joinResponse = null;
+    const retried = action === "cancel" ? session.cancel("different", "must not overwrite")
+      : session.close({ reason: "must not overwrite" });
+    assert.equal(cancelled(retried).message, "original stop");
+    assert.equal(calls.join.length, 2);
+    assert.deepEqual(calls.join[1].outcome, calls.join[0].outcome);
+    assert.equal(calls.cancel.length, action === "close" ? 0 : 1, "a cancelling task is not cancelled again");
+    assert.equal(closeCount(host), 1, "retry publishes without repeating host teardown");
+    assert.equal(sdk.sdkHostSessions.size, 0);
+    cancelled(session.close()); // Existing terminal delivery remains one-shot.
+    assert.equal(session.close().failure.code, "invalid_handle");
+  });
+}
+
+test("SDK-WT-TERMINAL-EOF: EOF returns actual refused publication and allows explicit retirement retry", async (t) => {
+  const { sdk, open, calls, controls } = await fixture(t, { joinResponse: JSON.stringify(publicationRefusal) });
+  const { session, host } = open();
+  unwrap(await session.ready());
+  const reading = session.recvDatagram();
+  host.datagramInput.close();
+  assert.deepEqual(clone(await reading), publicationRefusal);
+  assert.equal(sdk.sdkHostSessions.size, 1);
+  assert.deepEqual(clone(await session.ready()), publicationRefusal);
+  controls.joinResponse = null;
+  cancelled(session.close());
+  assert.equal(calls.join.length, 2);
+  assert.equal(sdk.sdkHostSessions.size, 0);
+});
+
+test("SDK-WT-TERMINAL-PEER: peer closure cannot conceal or repeatedly republish an ABI refusal", async (t) => {
+  const { sdk, open, calls, controls } = await fixture(t, { joinResponse: JSON.stringify(publicationRefusal) });
+  const { session, host } = open();
+  unwrap(await session.ready());
+  const reading = session.recvDatagram();
+  host.completion.resolve();
+  assert.deepEqual(clone(await reading), publicationRefusal);
+  assert.deepEqual(clone(await session.ready()), publicationRefusal);
+  assert.equal(sdk.sdkHostSessions.size, 1);
+  assert.equal(calls.join.length, 1);
+  controls.joinResponse = null;
+  cancelled(session.close());
+  assert.equal(calls.join.length, 2);
+});
+
+test("SDK-WT-TERMINAL-MISMATCH: unrelated ABI success is not successful cancellation publication", async (t) => {
+  const { sdk, open, controls } = await fixture(t, { joinResponse: unitJson });
+  const { session } = open();
+  const outcome = session.close();
+  assert.equal(outcome.outcome, "err");
+  assert.equal(outcome.failure.code, "internal_failure");
+  assert.match(outcome.failure.message, /publication/);
+  assert.equal(sdk.sdkHostSessions.size, 1);
+  controls.joinResponse = null;
+  cancelled(session.close());
+});
+
+test("SDK-WT-TERMINAL-PREREADY: cancellation settles parked ready and receive without host handshake progress", async (t) => {
+  const { open, calls } = await fixture(t, { pendingHandshake: true });
+  const { session, host } = open();
+  const completions = [];
+  const waiting = Promise.all([session.ready(), session.recvDatagram()].map((promise) => promise.then((outcome) => {
+    completions.push(outcome);
+    return outcome;
+  })));
+  try {
+    const expected = clone(session.cancel("navigation", "left before ready"));
+    await turn();
+    assert.equal(completions.length, 2, "SDK terminal state must interrupt host readiness waits");
+    for (const outcome of await waiting) assert.deepEqual(clone(outcome), expected);
+    assert.equal(calls.join.length, 1);
+  } finally { host.handshake.resolve(); }
+});
+
+test("SDK-WT-TERMINAL-RECEIVE: pending native reads retain exact owner cancellation", async (t) => {
+  const { open } = await fixture(t);
+  const { session } = open();
+  unwrap(await session.ready());
+  const pending = session.recvDatagram();
+  await turn();
+  const expected = clone(session.cancel("navigation", "left while reading"));
+  assert.deepEqual(clone(await pending), expected);
+});
+
+test("SDK-WT-TERMINAL-LATE-CHUNK: close wins bytes already resolved but not delivered to a receiver", async (t) => {
+  const { open } = await fixture(t);
+  const { session, host } = open();
+  unwrap(await session.ready());
+  const pending = session.recvDatagram();
+  await turn();
+  host.datagramInput.enqueue(Uint8Array.of(99));
+  const expected = clone(session.close({ reason: "do not deliver stale data" }));
+  assert.deepEqual(clone(await pending), expected);
+});
+
+test("SDK-WT-TERMINAL-READ-GETTER: reader method lookup cannot start I/O after reentrant close", async (t) => {
+  const { open } = await fixture(t);
+  const { session, state } = open();
+  unwrap(await session.ready());
+  const reader = await state.reader;
+  const read = reader.read;
+  let reads = 0;
+  let expected;
+  Object.defineProperty(reader, "read", { get() {
+    expected = clone(session.close({ reason: "closed during method lookup" }));
+    return function () { reads += 1; return Reflect.apply(read, this, []); };
+  } });
+  const outcome = await session.recvDatagram();
+  assert.deepEqual(clone(outcome), expected);
+  assert.equal(reads, 0);
+});
+
+test("SDK-WT-TERMINAL-AUTHORITY: close option mutation cannot retarget the terminal join", async (t) => {
+  const { open, calls } = await fixture(t);
+  const first = open();
+  const second = open();
+  const original = first.session.core;
+  const version = { major: 1, minor: 0 };
+  const result = first.session.close({ get reason() {
+    first.session.core = second.session.core;
+    version.minor = 9;
+    return "first session only";
+  } }, version);
+  cancelled(result);
+  assertSameHandle(calls.join[0].task, { toJSON: () => original.toJSON() });
+  assert.deepEqual(JSON.parse(calls.join[0].version), { major: 1, minor: 0 });
+  assert.equal(closeCount(first.host), 1);
+  assert.equal(closeCount(second.host), 0);
+  unwrap(await second.session.ready());
+});
+
+test("SDK-WT-TERMINAL-REENTRANT: host close and ABI callbacks cannot publish twice", async (t) => {
+  let session;
+  const nested = [];
+  let hostReentered = false;
+  let joinReentered = false;
+  const options = {
+    onHostClose() {
+      if (!hostReentered) { hostReentered = true; nested.push(session.close()); }
+    },
+    onJoin() {
+      if (!joinReentered) { joinReentered = true; nested.push(session.close()); }
+    },
+  };
+  const f = await fixture(t, options);
+  ({ session } = f.open());
+  cancelled(session.close({ reason: "outer close" }));
+  assert.equal(f.calls.join.length, 1);
+  assert.equal(closeCount(f.hosts[0]), 1);
+  for (const outcome of nested) {
+    assert.equal(outcome.outcome, "err");
+    assert.equal(outcome.failure.recoverability, "transient");
+  }
+});
+
+test("SDK-WT-TERMINAL-CANCEL-GETTER: reentrant token lookup does not cancel an already-cancelling task again", async (t) => {
+  const { sdk, open, calls, controls } = await fixture(t, { joinResponse: JSON.stringify(publicationRefusal) });
+  const { session, host } = open();
+  const token = new sdk.CancellationToken("outer", "outer cancellation");
+  Object.defineProperty(token, "kind", { get() {
+    assert.deepEqual(clone(session.cancel("inner", "first cancellation")), publicationRefusal);
+    controls.joinResponse = null;
+    return "outer";
+  } });
+  const result = session.cancel(token);
+  assert.equal(cancelled(result).message, "first cancellation");
+  assert.equal(calls.cancel.length, 1);
+  assert.equal(calls.join.length, 2);
+  assert.deepEqual(calls.join[1].outcome, calls.join[0].outcome);
+  assert.equal(closeCount(host), 1);
+  assert.equal(sdk.sdkHostSessions.size, 0);
+});
+
+for (const value of [undefined, 7n, 18_446_744_073_709_551_615n, Uint8Array.of(1, 2, 3)]) {
+  test(`SDK-WT-TERMINAL-GENERIC-JOIN-${String(value)}: generic task completion also terminates its owned transport`, async (t) => {
+    const { sdk, open, calls } = await fixture(t);
+    const { session, host } = open();
+    const stream = unwrap(await session.openStream());
+    const reading = stream.read();
+    const datagram = session.recvDatagram();
+    await turn();
+    const result = new sdk.TaskHandle(session.core).join(sdk.Outcome.ok(value));
+    assert.equal(result.outcome, "ok");
+    if (typeof value === "bigint") assert.equal(BigInt(result.value), value);
+    else if (value instanceof Uint8Array) assert.deepEqual(Array.from(result.value), Array.from(value));
+    else assert.equal(result.value, value);
+    for (const terminal of await promptly(Promise.all([reading, datagram, stream.closed]))) cancelled(terminal);
+    assert.equal(calls.join.length, 1);
+    assert.equal(closeCount(host), 1);
+    assert.equal(sdk.sdkHostSessions.size, 0);
+    assertUnlocked(host.streams[0]);
+  });
+}
+
+test("SDK-WT-TERMINAL-GENERIC-HANDLE: canonical handle revival counts as the same terminal value", async (t) => {
+  const { sdk, scope, open } = await fixture(t);
+  const { session } = open();
+  const result = new sdk.TaskHandle(session.core).join(sdk.Outcome.ok(scope.core));
+  assert.equal(result.outcome, "ok");
+  assertSameHandle(result.value.toJSON(), scope);
+  assert.equal(sdk.sdkHostSessions.size, 0);
+  cancelled(await session.recvDatagram());
+});
+
+test("SDK-WT-TERMINAL-GENERIC-FOREIGN-BYTES: task completion preserves byte values from another realm", async (t) => {
+  const { sdk, open } = await fixture(t);
+  const { session, host } = open();
+  const value = runInNewContext("Uint8Array.of(3, 5, 8)");
+  assert.equal(value instanceof Uint8Array, false);
+  const result = new sdk.TaskHandle(session.core).join(sdk.Outcome.ok(value));
+  assert.equal(result.outcome, "ok");
+  assert.deepEqual(Array.from(result.value), [3, 5, 8]);
+  assert.equal(sdk.sdkHostSessions.size, 0);
+  assert.equal(closeCount(host), 1);
+});
+
+test("SDK-WT-TERMINAL-GENERIC-MISMATCH: changed success payload retains ownership and cannot replace the requested result", async (t) => {
+  const { sdk, open, controls } = await fixture(t, { joinResponse: unitJson });
+  const { session, host } = open();
+  const task = new sdk.TaskHandle(session.core);
+  const refused = task.join(sdk.Outcome.ok(Uint8Array.of(1, 2, 3)));
+  assert.equal(refused.outcome, "err");
+  assert.equal(sdk.sdkHostSessions.size, 1);
+  controls.joinResponse = null;
+  const receipt = task.join(sdk.Outcome.ok(99));
+  assert.equal(receipt.outcome, "ok");
+  assert.deepEqual(Array.from(receipt.value), [1, 2, 3]);
+  assert.equal(sdk.sdkHostSessions.size, 0);
+  assert.equal(closeCount(host), 1);
+});
+
+test("SDK-WT-TERMINAL-CONSTRUCT: failed construction exposes a refused task publication", async (t) => {
+  const { scope, calls } = await fixture(t, {
+    onConstruct() { throw new Error("controlled construction failure"); },
+    joinResponse: JSON.stringify(publicationRefusal),
+  });
+  assert.deepEqual(clone(scope.openWebTransport("https://transport.example.test/fail")), publicationRefusal);
+  assert.equal(calls.join.length, 1);
+});
 
 test("SDK-WT-MODES: one session and one task support all four reliable stream modes", { timeout: 5000 }, async (t) => {
   let writeGate = deferred();
