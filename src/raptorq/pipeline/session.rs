@@ -54,6 +54,10 @@ pub(super) trait SessionOperation {
 
     fn state(&mut self) -> &mut SessionState;
     fn poll_progress(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::Output, Error>>;
+
+    // Operations with admitted child work release their handle here even if
+    // the caller retains a terminal session. Region ownership outlives handles.
+    fn on_terminal(&mut self) {}
 }
 
 pub(super) struct SessionWait<'a, O: SessionOperation> {
@@ -86,6 +90,7 @@ impl<O: SessionOperation> Future for SessionWait<'_, O> {
         }
         if let Some(error) = this.operation.state().previous_error() {
             this.completed = true;
+            this.operation.on_terminal();
             this.cancellation.clear();
             this.deadline = None;
             return Poll::Ready(Err(error));
@@ -120,6 +125,7 @@ impl<O: SessionOperation> Future for SessionWait<'_, O> {
         }
         if result.is_ready() {
             this.completed = true;
+            this.operation.on_terminal();
             // This removes the registration but retains the last Waker owner
             // until the wait is dropped, after its Ready value is delivered.
             this.cancellation.clear();
