@@ -2,8 +2,9 @@
 //!
 //! [`ZstdEncoder`] wraps an [`AsyncWrite`] and compresses everything written
 //! through it. [`ZstdDecoder`] wraps an [`AsyncRead`] and decompresses what
-//! it reads. Each poll drives the codec one bounded step. Neither adapter
-//! does I/O other than on the stream it wraps, spawns tasks, or needs a `Cx`.
+//! it reads. Each poll performs a bounded number of codec and stream calls.
+//! Neither adapter does I/O other than on the stream it wraps, spawns tasks,
+//! or needs a `Cx`.
 //!
 //! # Wire format
 //!
@@ -48,9 +49,13 @@
 //!
 //! # Work per poll
 //!
-//! The encoder compresses a frame when it fills, and on flush and shutdown.
-//! That work happens inside a single poll: about 10 ms for a 1 MiB frame at
-//! 100 MB/s. A smaller frame shortens each poll, at some cost in ratio.
+//! The encoder makes at most 32 codec or wrapped-writer calls per poll. The
+//! allowance is shared by staging writes, encoding, flushing and shutdown;
+//! an always-ready writer cannot keep a single poll draining indefinitely.
+//! On exhaustion the encoder wakes itself before yielding. A codec call
+//! can still compress a whole frame, so this bounds the number of operations,
+//! not wall-clock time. Smaller frames reduce the maximum compression work
+//! in one call, at some cost in ratio.
 //! The decoder performs at most 32 codec steps per poll, each processing at
 //! most one bounded block, and then wakes itself before yielding. Empty and
 //! skippable frames therefore cannot keep a single read poll running forever.
@@ -79,7 +84,7 @@
 use std::fmt;
 use std::io;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use asupersync_zstd::{StreamDecoder, StreamEncodeError, StreamEncoder, StreamStatus};
 
@@ -181,8 +186,9 @@ impl<W> ZstdEncoder<W> {
 
 impl<W: AsyncWrite + Unpin> ZstdEncoder<W> {
     /// Writes the staged compressed bytes to `inner`.
-    fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_drain(&mut self, cx: &mut Context<'_>, remaining: &mut usize) -> Poll<io::Result<()>> {
         while self.written < self.filled {
+            ready!(Self::poll_step(cx, remaining));
             let pending = self.filled - self.written;
             match Pin::new(&mut self.inner).poll_write(cx, &self.staged[self.written..self.filled])
             {
@@ -205,6 +211,16 @@ impl<W: AsyncWrite + Unpin> ZstdEncoder<W> {
         Poll::Ready(Ok(()))
     }
 
+    /// Charges one codec or wrapped-writer call to the enclosing public poll.
+    fn poll_step(cx: &Context<'_>, remaining: &mut usize) -> Poll<()> {
+        if *remaining == 0 {
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        *remaining -= 1;
+        Poll::Ready(())
+    }
+
     /// Stages what one codec call produced.
     fn stage(&mut self, output_written: usize) {
         self.written = 0;
@@ -224,11 +240,13 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ZstdEncoder<W> {
         if this.finishing {
             return Poll::Ready(Err(encode_error(StreamEncodeError::Finished)));
         }
+        let mut remaining = POLL_STEPS;
         loop {
-            match this.poll_drain(cx) {
+            match this.poll_drain(cx, &mut remaining) {
                 Poll::Ready(Ok(())) => {}
                 other => return other.map_ok(|()| 0),
             }
+            ready!(Self::poll_step(cx, &mut remaining));
             let progress = this
                 .encoder
                 .encode(buf, &mut this.staged)
@@ -249,34 +267,39 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ZstdEncoder<W> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        let mut remaining = POLL_STEPS;
         loop {
-            match this.poll_drain(cx) {
+            match this.poll_drain(cx, &mut remaining) {
                 Poll::Ready(Ok(())) => {}
                 other => return other,
             }
             if this.finishing {
                 break;
             }
+            ready!(Self::poll_step(cx, &mut remaining));
             let progress = this.encoder.flush(&mut this.staged).map_err(encode_error)?;
             this.stage(progress.output_written);
             if progress.output_written == 0 {
                 break;
             }
         }
+        ready!(Self::poll_step(cx, &mut remaining));
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.finishing = true;
+        let mut remaining = POLL_STEPS;
         loop {
-            match this.poll_drain(cx) {
+            match this.poll_drain(cx, &mut remaining) {
                 Poll::Ready(Ok(())) => {}
                 other => return other,
             }
             if this.finished {
                 break;
             }
+            ready!(Self::poll_step(cx, &mut remaining));
             let progress = this.encoder.finish(&mut this.staged);
             this.stage(progress.output_written);
             if progress.status == StreamStatus::Finished {
@@ -287,6 +310,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ZstdEncoder<W> {
                 )));
             }
         }
+        ready!(Self::poll_step(cx, &mut remaining));
         Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }

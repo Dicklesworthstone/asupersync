@@ -14,13 +14,15 @@
 
 use std::future::{Future, poll_fn};
 use std::io;
-use std::pin::pin;
-use std::task::Poll;
+use std::pin::{Pin, pin};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use asupersync::compression::zstd::{
-    DecodeError, DecodeLimits, EncodeParams, Level, ZstdDecoder, ZstdEncoder,
+    DecodeError, DecodeLimits, EncodeParams, Level, MAX_FRAME_SIZE, ZstdDecoder, ZstdEncoder,
 };
-use asupersync::io::{AsyncReadExt, AsyncWriteExt, duplex};
+use asupersync::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, duplex};
 use asupersync::runtime::{RuntimeBuilder, yield_now};
 use futures_lite::future::zip;
 
@@ -82,6 +84,257 @@ fn decode_error(error: &io::Error) -> Option<DecodeError> {
         .get_ref()
         .and_then(|source| source.downcast_ref::<DecodeError>())
         .copied()
+}
+
+/// Never supplies backpressure or wakes the task itself. Any Pending from
+/// the encoder must therefore arrange its own wake and preserve progress.
+struct ReadyWriter {
+    bytes: Vec<u8>,
+    max_write: usize,
+    writes: usize,
+    flushes: usize,
+    shutdowns: usize,
+}
+
+impl ReadyWriter {
+    fn new(max_write: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_write,
+            writes: 0,
+            flushes: 0,
+            shutdowns: 0,
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.writes + self.flushes + self.shutdowns
+    }
+}
+
+impl AsyncWrite for ReadyWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let written = buf.len().min(this.max_write);
+        this.bytes.extend_from_slice(&buf[..written]);
+        this.writes += 1;
+        Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.get_mut().flushes += 1;
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.get_mut().shutdowns += 1;
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[derive(Default)]
+struct WakeCount(AtomicUsize);
+
+impl Wake for WakeCount {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn checked_encoder_poll<T>(
+    encoder: &mut ZstdEncoder<ReadyWriter>,
+    wakes: &WakeCount,
+    cx: &mut Context<'_>,
+    poll: impl FnOnce(Pin<&mut ZstdEncoder<ReadyWriter>>, &mut Context<'_>) -> Poll<io::Result<T>>,
+) -> Poll<io::Result<T>> {
+    let calls_before = encoder.get_ref().calls();
+    let wakes_before = wakes.0.load(Ordering::Relaxed);
+    let result = poll(Pin::new(&mut *encoder), cx);
+    let calls = encoder.get_ref().calls() - calls_before;
+    assert!(calls <= 32, "one encoder poll made {calls} writer calls");
+    if result.is_pending() {
+        assert!(
+            wakes.0.load(Ordering::Relaxed) > wakes_before,
+            "the always-ready writer cannot wake a yielded encoder"
+        );
+    }
+    result
+}
+
+fn finish_encoder_operation<T>(
+    encoder: &mut ZstdEncoder<ReadyWriter>,
+    wakes: &WakeCount,
+    cx: &mut Context<'_>,
+    mut poll: impl FnMut(Pin<&mut ZstdEncoder<ReadyWriter>>, &mut Context<'_>) -> Poll<io::Result<T>>,
+) -> (T, usize) {
+    for pending_polls in 0..10_000 {
+        if let Poll::Ready(result) = checked_encoder_poll(encoder, wakes, cx, &mut poll) {
+            return (result.expect("encoder operation"), pending_polls);
+        }
+    }
+    panic!("the encoder stopped making progress on an always-ready writer");
+}
+
+#[test]
+fn encoder_yields_with_one_byte_ready_writes_without_losing_progress() {
+    let wakes = Arc::new(WakeCount::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut cx = Context::from_waker(&waker);
+    let params = EncodeParams::new(Level::Store);
+    let mut encoder =
+        ZstdEncoder::with_params(ReadyWriter::new(1), params, 4113).expect("frame size");
+    let first = text(4113, 7);
+    let second = text(512, 8);
+    let third = text(777, 9);
+    let mut expected = asupersync_zstd::encode_all(&first, &params);
+    assert_eq!(
+        expected.len() % 32,
+        31,
+        "the next write accepts input with the last operation in its poll"
+    );
+
+    let (accepted, pending) = finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
+        enc.poll_write(cx, &first)
+    });
+    assert_eq!(accepted, first.len());
+    assert_eq!(pending, 0, "accepted input must be reported immediately");
+    assert_eq!(encoder.get_ref().writes, 0);
+
+    let (accepted, pending) = finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
+        enc.poll_write(cx, &second)
+    });
+    assert_eq!(accepted, second.len());
+    assert!(pending > 0, "draining the earlier frame must yield");
+
+    let ((), pending) = finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
+        enc.poll_flush(cx)
+    });
+    assert!(pending > 0, "flushing through partial writes must yield");
+    expected.extend_from_slice(&asupersync_zstd::encode_all(&second, &params));
+    assert_eq!(encoder.get_ref().bytes, expected, "flush preserves the wire");
+
+    let (accepted, pending) = finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
+        enc.poll_write(cx, &third)
+    });
+    assert_eq!(accepted, third.len());
+    assert_eq!(pending, 0);
+
+    let writes_before = encoder.get_ref().writes;
+    let shutdown = checked_encoder_poll(&mut encoder, &wakes, &mut cx, |enc, cx| {
+        enc.poll_shutdown(cx)
+    });
+    assert!(shutdown.is_pending());
+    assert_eq!(
+        encoder.get_ref().writes - writes_before,
+        31,
+        "the finish codec call and partial writes share the same budget"
+    );
+    let late = checked_encoder_poll(&mut encoder, &wakes, &mut cx, |enc, cx| {
+        enc.poll_write(cx, b"late")
+    });
+    match late {
+        Poll::Ready(Err(error)) => assert_eq!(error.kind(), io::ErrorKind::InvalidInput),
+        other => panic!("shutdown must refuse input even while yielding: {other:?}"),
+    }
+
+    // Retrying flush during a suspended shutdown drains staged bytes without
+    // invoking the codec's now-forbidden flush operation.
+    let ((), pending) = finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
+        enc.poll_flush(cx)
+    });
+    assert!(pending > 0);
+    finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
+        enc.poll_shutdown(cx)
+    });
+    assert_eq!(encoder.get_ref().flushes, 2);
+    assert_eq!(encoder.get_ref().shutdowns, 1);
+    expected.extend_from_slice(&asupersync_zstd::encode_all(&third, &params));
+    assert_eq!(
+        encoder.get_ref().bytes,
+        expected,
+        "retries preserve every byte"
+    );
+
+    let decoded = asupersync_zstd::decode_all(
+        &expected,
+        &DecodeLimits::new(first.len() + second.len() + third.len()),
+    )
+    .expect("standard frames");
+    assert_eq!(decoded, [first, second, third].concat());
+}
+
+#[test]
+fn encoder_yields_while_emitting_large_frames_to_a_ready_writer() {
+    let payload = text(MAX_FRAME_SIZE, 10);
+    let params = EncodeParams::new(Level::Store);
+    for operation in ["write", "flush", "shutdown"] {
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut cx = Context::from_waker(&waker);
+        let mut encoder =
+            ZstdEncoder::with_params(ReadyWriter::new(usize::MAX), params, MAX_FRAME_SIZE)
+                .expect("largest frame size");
+        // Write fills a complete frame; flush and shutdown must seal a
+        // partial frame themselves. Store prevents text from shrinking.
+        let input_len = payload.len() - usize::from(operation != "write");
+        let (accepted, pending) =
+            finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
+                enc.poll_write(cx, &payload[..input_len])
+            });
+        assert_eq!(accepted, input_len);
+        assert_eq!(pending, 0);
+        assert_eq!(encoder.get_ref().writes, 0);
+
+        let mut poll = |enc: Pin<&mut ZstdEncoder<ReadyWriter>>, cx: &mut Context<'_>| {
+            match operation {
+                "write" => enc.poll_write(cx, b"+"),
+                "flush" => enc.poll_flush(cx).map_ok(|()| 0),
+                "shutdown" => enc.poll_shutdown(cx).map_ok(|()| 0),
+                _ => unreachable!(),
+            }
+        };
+        let first = checked_encoder_poll(&mut encoder, &wakes, &mut cx, &mut poll);
+        assert!(
+            first.is_pending(),
+            "{operation} must yield before draining 8 MiB"
+        );
+        assert_eq!(
+            encoder.get_ref().writes,
+            16,
+            "{operation} shares 32 operations between codec calls and staging writes"
+        );
+        let (accepted, _) = finish_encoder_operation(&mut encoder, &wakes, &mut cx, poll);
+        assert_eq!(accepted, usize::from(operation == "write"));
+        finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
+            enc.poll_shutdown(cx)
+        });
+
+        let mut expected = asupersync_zstd::encode_all(&payload[..input_len], &params);
+        if operation == "write" {
+            expected.extend_from_slice(&asupersync_zstd::encode_all(b"+", &params));
+        }
+        assert_eq!(
+            encoder.get_ref().bytes,
+            expected,
+            "{operation} changed the wire"
+        );
+        let decoded = asupersync_zstd::decode_all(
+            &expected,
+            &DecodeLimits::new(input_len + usize::from(operation == "write")),
+        )
+        .expect("standard frames after resuming");
+        assert_eq!(&decoded[..input_len], &payload[..input_len]);
+        let suffix: &[u8] = if operation == "write" { b"+" } else { b"" };
+        assert_eq!(&decoded[input_len..], suffix);
+    }
 }
 
 #[test]
