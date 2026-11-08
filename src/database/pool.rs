@@ -606,21 +606,21 @@ struct ValidationGuard<'a, M: ConnectionManager> {
 impl<M: ConnectionManager> Drop for ValidationGuard<'_, M> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks
-            if self.pool.safe_disconnect(conn) {
-                // Only update counts if disconnect succeeded
-                let mut inner = self.pool.inner.lock();
-                inner.total = inner.total.saturating_sub(1);
-                drop(inner);
-                self.pool
-                    .stats
-                    .total_discards
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
+            // The guard relinquishes its only connection before invoking the
+            // manager. A disconnect panic cannot put that value back in the
+            // pool, so it must not retain a capacity slot (dj4uhx M4).
+            let mut inner = self.pool.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+            drop(inner);
+            self.pool
+                .stats
+                .total_discards
+                .fetch_add(1, Ordering::Relaxed);
+            if !self.pool.safe_disconnect(conn) {
                 crate::tracing_compat::warn!(
                     event = "database_pool_disconnect_failure",
                     guard = "validation",
-                    action = "preserve_pool_state",
+                    action = "retire_pool_slot",
                     "validation guard disconnect failed"
                 );
             }
@@ -1468,20 +1468,16 @@ impl<M: ConnectionManager> DbPool<M> {
         };
 
         if let Some(c) = conn_to_disconnect {
-            // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks
+            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+            // The closed pool no longer owns this connection, even if its
+            // manager panics while consuming it. Never restore a phantom slot.
             if !self.safe_disconnect(c) {
-                // If disconnect failed, we still decremented total count above,
-                // so we need to increment it back to maintain consistency
-                let mut inner = self.inner.lock();
-                inner.total += 1;
                 crate::tracing_compat::warn!(
                     event = "database_pool_disconnect_failure",
                     operation = "return_connection",
-                    action = "restore_pool_count",
+                    action = "retire_pool_slot",
                     "disconnect failed while returning connection"
                 );
-            } else {
-                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -1554,25 +1550,24 @@ impl<M: ConnectionManager> DbPool<M> {
         inner.total = inner.total.saturating_sub(evicted);
         drop(inner);
 
-        // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks during eviction
+        // All evicted values have left the pool before user cleanup runs.
+        // Report failed disconnects separately without recreating live slots.
+        self.stats
+            .total_discards
+            .fetch_add(evicted as u64, Ordering::Relaxed);
         let mut failed_disconnects = 0;
         for conn in to_disconnect {
-            if self.safe_disconnect(conn) {
-                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-            } else {
+            if !self.safe_disconnect(conn) {
                 failed_disconnects += 1;
             }
         }
 
-        // If any disconnects failed, restore the pool total count to maintain consistency
         if failed_disconnects > 0 {
-            let mut inner = self.inner.lock();
-            inner.total += failed_disconnects;
             crate::tracing_compat::warn!(
                 event = "database_pool_disconnect_failure",
                 operation = "evict_idle",
                 failed_disconnects,
-                action = "adjust_pool_count",
+                action = "retire_pool_slots",
                 "disconnect failures during idle eviction"
             );
         }
@@ -1631,34 +1626,32 @@ impl<M: ConnectionManager> DbPool<M> {
     /// br-asupersync-sxhome: Enhanced version of discard_connection that handles
     /// disconnect failures gracefully and ensures pool state consistency.
     fn safe_discard_connection(&self, conn: M::Connection, client_id: Option<String>) -> bool {
-        let disconnect_succeeded = self.safe_disconnect(conn);
+        // Retire this ownership exactly once before invoking arbitrary manager
+        // code. `disconnect` consumes the connection; catching its panic never
+        // recovers a value that can still occupy this slot or client quota.
+        {
+            let mut inner = self.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
 
-        if disconnect_succeeded {
-            // Only update stats and counts if disconnect actually succeeded
-            {
-                let mut inner = self.inner.lock();
-                inner.total = inner.total.saturating_sub(1);
-
-                // br-asupersync-qydi3j: Update client connection count only on successful disconnect
-                if let Some(ref client) = client_id {
-                    if self.config.enforce_client_quotas {
-                        if let Some(count) = inner.client_connections.get_mut(client) {
-                            *count = count.saturating_sub(1);
-                            if *count == 0 {
-                                inner.client_connections.remove(client);
-                            }
+            if let Some(ref client) = client_id {
+                if self.config.enforce_client_quotas {
+                    if let Some(count) = inner.client_connections.get_mut(client) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            inner.client_connections.remove(client);
                         }
                     }
                 }
             }
-            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-        } else {
-            // Disconnect failed - log security event but don't update pool counts
-            // to prevent resource count inconsistencies
+        }
+        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+
+        let disconnect_succeeded = self.safe_disconnect(conn);
+        if !disconnect_succeeded {
             crate::tracing_compat::warn!(
                 event = "database_pool_disconnect_failure",
                 client_id = client_id.as_deref().unwrap_or("unknown"),
-                action = "preserve_pool_count",
+                action = "retire_pool_slot",
                 "failed to discard connection"
             );
         }
@@ -1797,10 +1790,9 @@ impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
             // per-client quota is decremented by EXACTLY ONE owner per branch.
             // `return_connection` does NOT touch `client_connections`, so the
             // healthy path decrements inline here; `safe_discard_connection`
-            // decrements internally on a successful disconnect (and preserves the
-            // count on failure, since the connection is still alive), so the
-            // unhealthy path must NOT decrement inline. The previous code
-            // decremented inline UNCONDITIONALLY and then let
+            // decrements internally before consuming the connection, including
+            // when disconnect panics, so the unhealthy path must NOT decrement
+            // inline. The previous code decremented inline UNCONDITIONALLY and let
             // `safe_discard_connection` decrement again, double-counting the
             // release whenever a client held >1 connection and the unhealthy
             // disconnect succeeded; the failure path then needed a +1 restore.
@@ -1822,8 +1814,7 @@ impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
                     .return_connection(conn, self.created_at, self.client_id.clone());
             } else {
                 // br-asupersync-sxhome: safe discard owns the per-client quota for
-                // this path (decrement-on-success / preserve-on-failure), so there
-                // is no inline decrement and no restore compensation to do.
+                // this path, so there is no inline decrement or compensation.
                 self.pool
                     .safe_discard_connection(conn, self.client_id.clone());
             }
@@ -3464,39 +3455,27 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
                 self.pool
                     .return_connection(conn, self.created_at, self.client_id.clone());
             } else {
-                // br-asupersync-80525g: Use safe disconnect for unhealthy connections
-                if !self.pool.safe_disconnect(conn) {
-                    // If disconnect fails, client count was already decremented above,
-                    // so we need to restore it
-                    if let Some(ref client_id) = self.client_id {
-                        if self.pool.config.enforce_client_quotas {
-                            let mut inner = self.pool.inner.lock();
-                            let count = inner
-                                .client_connections
-                                .entry(client_id.clone())
-                                .or_insert(0);
-                            *count += 1;
-                            crate::tracing_compat::warn!(
-                                event = "async_database_pool_disconnect_failure",
-                                operation = "async_pooled_connection_drop",
-                                client_id = %client_id,
-                                action = "restore_client_count",
-                                "disconnect failed while dropping async pooled connection"
-                            );
-                        }
-                    }
-                } else {
+                // The quota was retired above. Release capacity and wake the
+                // next FIFO waiter before consuming the connection in manager
+                // code; a caught disconnect panic must not strand that waiter.
+                let wakes = {
                     let mut inner = self.pool.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
-                    let wakes = self.pool.prepare_next_async_pool_wake_locked(&mut inner);
-                    drop(inner);
-                    // Counted like every other discard, as the sync pool's
-                    // safe_discard_connection does.
-                    self.pool
-                        .stats
-                        .total_discards
-                        .fetch_add(1, Ordering::Relaxed);
-                    wakes.dispatch();
+                    self.pool.prepare_next_async_pool_wake_locked(&mut inner)
+                };
+                self.pool
+                    .stats
+                    .total_discards
+                    .fetch_add(1, Ordering::Relaxed);
+                wakes.dispatch();
+                if !self.pool.safe_disconnect(conn) {
+                    crate::tracing_compat::warn!(
+                        event = "async_database_pool_disconnect_failure",
+                        operation = "async_pooled_connection_drop",
+                        client_id = self.client_id.as_deref().unwrap_or("unknown"),
+                        action = "retire_pool_slot",
+                        "disconnect failed while dropping async pooled connection"
+                    );
                 }
             }
         }

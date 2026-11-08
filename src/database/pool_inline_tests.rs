@@ -3290,3 +3290,499 @@
         assert_eq!(pool.stats().total_timeouts, 1);
         second_holder.return_to_pool();
     }
+
+    /// br-asupersync-sqlite-pool-audit-r10-dj4uhx M4: a disconnect hook
+    /// consumes the connection even when it panics. Test both pool families
+    /// through public acquisition/return APIs, including a native parked task.
+    mod disconnect_panic_regressions {
+        use super::*;
+        use std::future::{Future, poll_fn};
+        use std::task::{Context, Poll, Waker};
+
+        #[derive(Debug)]
+        struct DisconnectConnection {
+            id: usize,
+            live: Arc<AtomicUsize>,
+        }
+
+        impl Drop for DisconnectConnection {
+            fn drop(&mut self) {
+                self.live.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        struct DisconnectManager {
+            next_id: AtomicUsize,
+            live: Arc<AtomicUsize>,
+            disconnects: AtomicUsize,
+            panic_next_disconnect: AtomicBool,
+            unhealthy: AtomicBool,
+            reject_validation: AtomicBool,
+            pause_validation: AtomicBool,
+            validations: AtomicUsize,
+            on_disconnect: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+        }
+
+        impl DisconnectManager {
+            fn new() -> Self {
+                Self {
+                    next_id: AtomicUsize::new(1),
+                    live: Arc::new(AtomicUsize::new(0)),
+                    disconnects: AtomicUsize::new(0),
+                    panic_next_disconnect: AtomicBool::new(true),
+                    unhealthy: AtomicBool::new(false),
+                    reject_validation: AtomicBool::new(false),
+                    pause_validation: AtomicBool::new(false),
+                    validations: AtomicUsize::new(0),
+                    on_disconnect: Mutex::new(None),
+                }
+            }
+
+            fn open(&self) -> DisconnectConnection {
+                self.live.fetch_add(1, Ordering::SeqCst);
+                DisconnectConnection {
+                    id: self.next_id.fetch_add(1, Ordering::SeqCst),
+                    live: Arc::clone(&self.live),
+                }
+            }
+
+            fn disconnect_owned(&self, conn: DisconnectConnection) {
+                self.disconnects.fetch_add(1, Ordering::SeqCst);
+                drop(conn);
+                let observer = self.on_disconnect.lock().clone();
+                if let Some(observer) = observer {
+                    observer();
+                }
+                assert!(
+                    !self.panic_next_disconnect.swap(false, Ordering::SeqCst),
+                    "injected disconnect panic after consuming the connection"
+                );
+            }
+        }
+
+        impl ConnectionManager for DisconnectManager {
+            type Connection = DisconnectConnection;
+            type Error = TestError;
+
+            fn connect(&self) -> Result<Self::Connection, Self::Error> {
+                Ok(self.open())
+            }
+
+            fn is_valid(&self, _conn: &Self::Connection) -> bool {
+                self.validations.fetch_add(1, Ordering::SeqCst);
+                !self.reject_validation.load(Ordering::SeqCst)
+            }
+
+            fn release_check(&self, _conn: &mut Self::Connection) -> bool {
+                !self.unhealthy.load(Ordering::SeqCst)
+            }
+
+            fn disconnect(&self, conn: Self::Connection) {
+                self.disconnect_owned(conn);
+            }
+        }
+
+        impl AsyncConnectionManager for DisconnectManager {
+            type Connection = DisconnectConnection;
+            type Error = TestError;
+
+            async fn connect(&self, _cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+                Outcome::Ok(self.open())
+            }
+
+            async fn is_valid(&self, _cx: &Cx, _conn: &mut Self::Connection) -> bool {
+                self.validations.fetch_add(1, Ordering::SeqCst);
+                poll_fn(|_| {
+                    if self.pause_validation.load(Ordering::SeqCst) {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(!self.reject_validation.load(Ordering::SeqCst))
+                    }
+                })
+                .await
+            }
+
+            fn release_check(&self, _conn: &mut Self::Connection) -> bool {
+                !self.unhealthy.load(Ordering::SeqCst)
+            }
+
+            fn disconnect(&self, conn: Self::Connection) {
+                self.disconnect_owned(conn);
+            }
+        }
+
+        #[test]
+        fn sync_discard_disconnect_panic_retires_capacity_before_callback() {
+            init_test("sync_discard_disconnect_panic_retires_capacity_before_callback");
+            let pool = Arc::new(DbPool::new(
+                DisconnectManager::new(),
+                DbPoolConfig::with_max_size(1).max_connections_per_client(Some(1)),
+            ));
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&observations);
+            let weak = Arc::downgrade(&pool);
+            *pool.manager.on_disconnect.lock() = Some(Arc::new(move || {
+                if let Some(pool) = weak.upgrade() {
+                    // Record instead of asserting inside the hook: its panic
+                    // is caught, so an assertion there would hide a failure.
+                    let state = pool.inner.try_lock().map(|inner| {
+                        (
+                            inner.total,
+                            inner.client_connections.values().sum::<usize>(),
+                        )
+                    });
+                    captured.lock().push(state);
+                }
+            }));
+
+            let first = pool.get_for_client("client").expect("first connection");
+            assert_eq!(first.id, 1);
+            first.discard();
+            assert_eq!(*observations.lock(), vec![Some((0, 0))]);
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.stats().total_disconnect_failures, 1);
+            assert_eq!(pool.stats().total_discards, 1);
+
+            let replacement = pool
+                .get_for_client("client")
+                .expect("a consumed connection must not reserve the only slot");
+            assert_eq!(replacement.id, 2);
+            assert!(matches!(
+                pool.get_for_client("client"),
+                Err(DbPoolError::ClientQuotaExceeded(client)) if client == "client"
+            ));
+            replacement.return_to_pool();
+            pool.close();
+            assert_eq!(pool.stats().total, 0);
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            crate::test_complete!("sync_discard_disconnect_panic_retires_capacity_before_callback");
+        }
+
+        #[test]
+        fn sync_unhealthy_disconnect_panic_releases_exactly_one_client_slot() {
+            init_test("sync_unhealthy_disconnect_panic_releases_exactly_one_client_slot");
+            let pool = DbPool::new(
+                DisconnectManager::new(),
+                DbPoolConfig::with_max_size(2).max_connections_per_client(Some(2)),
+            );
+            let survivor = pool.get_for_client("client").expect("surviving connection");
+            let discarded = pool.get_for_client("client").expect("discarded connection");
+            pool.manager.unhealthy.store(true, Ordering::SeqCst);
+            discarded.return_to_pool();
+            pool.manager.unhealthy.store(false, Ordering::SeqCst);
+
+            assert_eq!(pool.stats().total, 1);
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 1);
+            assert_eq!(pool.inner.lock().client_connections.get("client"), Some(&1));
+            let replacement = pool
+                .get_for_client("client")
+                .expect("one quota slot recovered");
+            assert_eq!(replacement.id, 3);
+            assert!(matches!(
+                pool.get_for_client("client"),
+                Err(DbPoolError::ClientQuotaExceeded(_))
+            ));
+            assert_eq!(pool.stats().total_disconnect_failures, 1);
+            assert_eq!(pool.stats().total_discards, 1);
+            survivor.return_to_pool();
+            replacement.return_to_pool();
+            pool.close();
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            crate::test_complete!(
+                "sync_unhealthy_disconnect_panic_releases_exactly_one_client_slot"
+            );
+        }
+
+        #[test]
+        fn sync_validation_disconnect_panic_allows_replacement() {
+            init_test("sync_validation_disconnect_panic_allows_replacement");
+            for client_scoped in [false, true] {
+                let pool = DbPool::new(
+                    DisconnectManager::new(),
+                    DbPoolConfig::with_max_size(1).max_connections_per_client(Some(1)),
+                );
+                let acquire = || {
+                    if client_scoped {
+                        pool.get_for_client("client")
+                    } else {
+                        pool.get()
+                    }
+                };
+                acquire().expect("seed idle connection").return_to_pool();
+                pool.manager.reject_validation.store(true, Ordering::SeqCst);
+                let replacement = acquire().expect("failed validation must release capacity");
+                assert_eq!(replacement.id, 2);
+                assert_eq!(pool.stats().total_validation_failures, 1);
+                assert_eq!(pool.stats().total_disconnect_failures, 1);
+                assert_eq!(pool.stats().total_discards, 1);
+                assert_eq!(pool.stats().total, 1);
+                assert_eq!(pool.manager.live.load(Ordering::SeqCst), 1);
+                pool.manager
+                    .reject_validation
+                    .store(false, Ordering::SeqCst);
+                replacement.return_to_pool();
+                assert!(pool.inner.lock().client_connections.is_empty());
+                pool.close();
+                assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            }
+            crate::test_complete!("sync_validation_disconnect_panic_allows_replacement");
+        }
+
+        #[test]
+        fn sync_eviction_disconnect_panic_does_not_restore_consumed_slots() {
+            init_test("sync_eviction_disconnect_panic_does_not_restore_consumed_slots");
+            let pool = DbPool::new(
+                DisconnectManager::new(),
+                DbPoolConfig::with_max_size(2).idle_timeout(Duration::ZERO),
+            );
+            let first = pool.get().expect("first connection");
+            let second = pool.get().expect("second connection");
+            first.return_to_pool();
+            second.return_to_pool();
+            // Seed the expiry boundary explicitly; no sleep determines which
+            // connection is evicted, and both disconnect callbacks must run.
+            for idle in &mut pool.inner.lock().idle {
+                idle.last_used = Time::ZERO;
+            }
+            assert!(crate::time::wall_now() > Time::ZERO);
+            assert_eq!(pool.evict_stale(), 2);
+            assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 2);
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.stats().total, 0);
+            assert_eq!(pool.stats().total_discards, 2);
+            assert_eq!(pool.stats().total_disconnect_failures, 1);
+
+            let first = pool.get().expect("first evicted slot recovered");
+            let second = pool.get().expect("second evicted slot recovered");
+            assert_eq!((first.id, second.id), (3, 4));
+            assert!(matches!(pool.get(), Err(DbPoolError::Full)));
+            first.return_to_pool();
+            second.return_to_pool();
+            pool.close();
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            crate::test_complete!("sync_eviction_disconnect_panic_does_not_restore_consumed_slots");
+        }
+
+        #[test]
+        fn sync_closed_return_disconnect_panic_keeps_pool_empty() {
+            init_test("sync_closed_return_disconnect_panic_keeps_pool_empty");
+            let pool = DbPool::new(
+                DisconnectManager::new(),
+                DbPoolConfig::with_max_size(1).max_connections_per_client(Some(1)),
+            );
+            let held = pool
+                .get_for_client("client")
+                .expect("checked-out connection");
+            pool.close();
+            assert_eq!(pool.stats().total, 1, "close retains a live checkout");
+            held.return_to_pool();
+            assert_eq!(pool.stats().total, 0);
+            assert_eq!(pool.stats().total_discards, 1);
+            assert_eq!(pool.stats().total_disconnect_failures, 1);
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert!(matches!(pool.get(), Err(DbPoolError::Closed)));
+            pool.close();
+            assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 1);
+            crate::test_complete!("sync_closed_return_disconnect_panic_keeps_pool_empty");
+        }
+
+        #[test]
+        fn async_unhealthy_disconnect_panic_wakes_fifo_after_retirement() {
+            init_test("async_unhealthy_disconnect_panic_wakes_fifo_after_retirement");
+            let pool = Arc::new(AsyncDbPool::new(
+                DisconnectManager::new(),
+                DbPoolConfig::with_max_size(2).max_connections_per_client(Some(2)),
+            ));
+            let cx = Cx::for_testing();
+            let survivor = block_on(pool.get_for_client(&cx, "client")).expect("survivor");
+            let discarded = block_on(pool.get_for_client(&cx, "client")).expect("discarded");
+            let waiter = queued_pool_waiter(&pool);
+            let probe = PoolWakeProbe::new(&pool, false);
+            let waker = Waker::from(Arc::clone(&probe));
+            let mut task_cx = Context::from_waker(&waker);
+            let mut notified = Box::pin(waiter.notify.notified());
+            assert!(notified.as_mut().poll(&mut task_cx).is_pending());
+
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&observations);
+            let weak = Arc::downgrade(&pool);
+            let callback_probe = Arc::clone(&probe);
+            *pool.manager.on_disconnect.lock() = Some(Arc::new(move || {
+                if let Some(pool) = weak.upgrade() {
+                    let state = pool.inner.try_lock().map(|inner| {
+                        (
+                            inner.total,
+                            inner.client_connections.values().sum::<usize>(),
+                            callback_probe.wakes.load(Ordering::SeqCst),
+                        )
+                    });
+                    captured.lock().push(state);
+                }
+            }));
+            pool.manager.unhealthy.store(true, Ordering::SeqCst);
+            discarded.return_to_pool();
+            pool.manager.unhealthy.store(false, Ordering::SeqCst);
+
+            probe.assert_woken_unlocked();
+            assert_eq!(*observations.lock(), vec![Some((1, 1, 1))]);
+            assert!(waiter.ready.load(Ordering::Acquire));
+            assert!(notified.as_mut().poll(&mut task_cx).is_ready());
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 1);
+            assert_eq!(pool.stats().total_disconnect_failures, 1);
+            assert_eq!(pool.stats().total_discards, 1);
+            pool.cancel_async_pool_waiter(&waiter);
+            let replacement = block_on(pool.get_for_client(&cx, "client"))
+                .expect("the retired slot and its client quota are reusable");
+            assert_eq!(replacement.id, 3);
+            assert!(matches!(
+                block_on(pool.get_for_client(&cx, "client")),
+                Err(DbPoolError::ClientQuotaExceeded(_))
+            ));
+            survivor.return_to_pool();
+            replacement.return_to_pool();
+            pool.close();
+            assert_eq!(pool.stats().pending_waiters, 0);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            crate::test_complete!("async_unhealthy_disconnect_panic_wakes_fifo_after_retirement");
+        }
+
+        #[test]
+        fn async_dropped_validation_disconnect_panic_refunds_exactly_once() {
+            init_test("async_dropped_validation_disconnect_panic_refunds_exactly_once");
+            let pool = AsyncDbPool::new(
+                DisconnectManager::new(),
+                DbPoolConfig::with_max_size(2).max_connections_per_client(Some(2)),
+            );
+            let cx = Cx::for_testing();
+            let survivor = block_on(pool.get_for_client(&cx, "client")).expect("survivor");
+            block_on(pool.get_for_client(&cx, "client"))
+                .expect("seed idle connection")
+                .return_to_pool();
+            pool.manager.pause_validation.store(true, Ordering::SeqCst);
+            let mut validating = Box::pin(pool.get_for_client_outcome(&cx, "client"));
+            let mut task_cx = Context::from_waker(Waker::noop());
+            assert!(validating.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(pool.manager.validations.load(Ordering::SeqCst), 1);
+            assert_eq!(pool.inner.lock().client_connections.get("client"), Some(&2));
+            drop(validating);
+
+            assert_eq!(pool.stats().total, 1);
+            assert_eq!(pool.stats().total_discards, 1);
+            assert_eq!(pool.stats().total_disconnect_failures, 1);
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 1);
+            assert_eq!(pool.inner.lock().client_connections.get("client"), Some(&1));
+            pool.manager.pause_validation.store(false, Ordering::SeqCst);
+            let replacement = block_on(pool.get_for_client(&cx, "client"))
+                .expect("dropped validation released exactly its own slot");
+            assert_eq!(replacement.id, 3);
+            assert!(matches!(
+                block_on(pool.get_for_client(&cx, "client")),
+                Err(DbPoolError::ClientQuotaExceeded(_))
+            ));
+            survivor.return_to_pool();
+            replacement.return_to_pool();
+            pool.close();
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            crate::test_complete!("async_dropped_validation_disconnect_panic_refunds_exactly_once");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn native_async_disconnect_panic_recovers_a_parked_acquisition() {
+            init_test("native_async_disconnect_panic_recovers_a_parked_acquisition");
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .expect("native current-thread runtime");
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx: Cx = Cx::current().expect("native task context");
+                let pool = Arc::new(AsyncDbPool::new(
+                    DisconnectManager::new(),
+                    DbPoolConfig::with_max_size(1)
+                        .max_connections_per_client(Some(1))
+                        .connection_timeout(Duration::from_secs(30)),
+                ));
+                let holder = pool.get_for_client(&cx, "holder").await.expect("holder");
+                let parked = Arc::new(AtomicBool::new(false));
+                let child_parked = Arc::clone(&parked);
+                let child_pool = Arc::clone(&pool);
+                let mut waiter = cx
+                    .spawn(move |waiter_cx| async move {
+                        let mut acquire =
+                            std::pin::pin!(child_pool.get_for_client_outcome(&waiter_cx, "next"));
+                        poll_fn(|task_cx| {
+                            let result = acquire.as_mut().poll(task_cx);
+                            if result.is_pending() {
+                                child_parked.store(true, Ordering::Release);
+                            }
+                            result
+                        })
+                        .await
+                        .map(|connection| {
+                            let id = connection.id;
+                            connection.return_to_pool();
+                            id
+                        })
+                    })
+                    .expect("spawn pool waiter");
+                for _ in 0..512 {
+                    if parked.load(Ordering::Acquire) && pool.stats().pending_waiters == 1 {
+                        break;
+                    }
+                    yield_now().await;
+                }
+                let reached_pending =
+                    parked.load(Ordering::Acquire) && pool.stats().pending_waiters == 1;
+                pool.manager.unhealthy.store(true, Ordering::SeqCst);
+                holder.return_to_pool();
+                pool.manager.unhealthy.store(false, Ordering::SeqCst);
+                let after_discard = pool.stats();
+
+                let joined =
+                    crate::time::timeout(cx.now(), Duration::from_secs(2), waiter.join(&cx)).await;
+                if joined.is_err() {
+                    // Keep the old-code failure bounded without leaving the
+                    // parked child behind when the recovery assertion fails.
+                    pool.close();
+                    waiter.abort();
+                    let _ = waiter.join(&cx).await;
+                }
+                let before_close = pool.stats();
+                pool.close();
+                assert!(
+                    reached_pending,
+                    "the native acquire must park before disconnect"
+                );
+                assert!(
+                    matches!(&joined, Ok(Ok(Outcome::Ok(2)))),
+                    "the parked task must acquire a fresh connection: {joined:?}"
+                );
+                assert_eq!(after_discard.total, 0);
+                assert_eq!(after_discard.total_discards, 1);
+                assert_eq!(after_discard.total_disconnect_failures, 1);
+                assert_eq!(before_close.pending_waiters, 0);
+                assert_eq!(before_close.total_creates, 2);
+                assert_eq!(before_close.total_timeouts, 0);
+                assert_eq!(pool.stats().total, 0);
+                assert!(pool.inner.lock().client_connections.is_empty());
+                assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            }));
+            let drain = runtime.shutdown_drained(Duration::from_secs(5));
+            assert_eq!(
+                drain.outcome,
+                crate::runtime::RootDrainOutcome::Quiescent,
+                "database pool recovery must leave a drained runtime: {drain:?}"
+            );
+            assert_eq!(drain.live_tasks, 0);
+            assert_eq!(drain.live_regions, 0);
+            assert_eq!(drain.pending_spawns, 0);
+            assert_eq!(drain.pending_obligations, 0);
+            assert_eq!(drain.queued_finalizers, 0);
+            assert!(!drain.has_pending_obligation_posts);
+            assert!(runtime.is_quiescent());
+            crate::test_complete!("native_async_disconnect_panic_recovers_a_parked_acquisition");
+        }
+    }
