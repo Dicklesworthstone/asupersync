@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+#[path = "read_adapter_framing_tests.rs"]
+mod framing;
+
 #[derive(Clone, Copy)]
 enum Status {
     Ready,

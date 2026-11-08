@@ -37,7 +37,9 @@ const MAX_WRITE_PASSES_PER_POLL: usize = 32;
 ///
 /// # Cancel Safety
 ///
-/// - Reading (`poll_next`): cancel-safe. Partial data stays in the read buffer.
+/// - Reading (`poll_next`): cancel-safe. Partial data stays in the read buffer,
+///   including bytes filled with `Pending` or an error. Read errors and provider
+///   panics terminate the read half; [`Self::into_parts`] recovers retained bytes.
 /// - Writing (`start_send`): completes synchronously with success or an
 ///   encoder error.
 /// - Readiness/flushing (`poll_ready`, `poll_flush`): cancel-safe. Partial
@@ -309,50 +311,41 @@ where
                     .clamp(1, READ_BUF_SIZE)
             };
             let mut tmp = [0u8; READ_BUF_SIZE];
+            let start = tmp.as_ptr();
             let mut read_buf = ReadBuf::new(&mut tmp[..read_len]);
+            this.poisoned = true;
+            let status = Pin::new(&mut this.inner).poll_read(cx, &mut read_buf);
+            let (status, filled) = match super::framed_read::retain_read_progress(
+                &mut this.read_buf,
+                read_buf.filled(),
+                start,
+                read_len,
+                max_buffer_len,
+                status,
+                "Framed",
+            ) {
+                Ok(progress) => progress,
+                Err(error) => return Poll::Ready(Some(Err(error.into()))),
+            };
+            this.poisoned = false;
+            if filled > 0 {
+                this.read_state = ReadState::NeedsDecode;
+            }
 
-            match Pin::new(&mut this.inner).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
+            match status {
+                Poll::Pending if filled == 0 => return Poll::Pending,
                 Poll::Ready(Err(e)) => {
                     this.poisoned = true;
                     return Poll::Ready(Some(Err(e.into())));
                 }
-                Poll::Ready(Ok(())) => {
-                    let filled = read_buf.filled();
-                    if filled.is_empty() {
-                        this.eof = true;
-                        this.read_state = ReadState::NeedsDecode;
-                    } else {
-                        // br-asupersync-bj427s: bound the partial-frame buffer
-                        // BEFORE appending so a peer that never completes a
-                        // frame cannot drive unbounded per-connection memory
-                        // growth. PRE-append so the buffer never crosses the
-                        // cap; `0` disables enforcement.
-                        if max_buffer_len > 0 {
-                            let projected = this.read_buf.len().saturating_add(filled.len());
-                            if projected > max_buffer_len {
-                                let cap = max_buffer_len;
-                                let buffered = this.read_buf.len();
-                                let added = filled.len();
-                                let err = io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Framed buffer would exceed max_buffer_len: \
-                                         {buffered} + {added} = {projected} > {cap} bytes \
-                                         (slowloris-style partial-frame attack? \
-                                         see br-asupersync-bj427s)"
-                                    ),
-                                );
-                                this.poisoned = true;
-                                return Poll::Ready(Some(Err(err.into())));
-                            }
-                        }
-                        this.read_buf.put_slice(filled);
-                        this.read_state = ReadState::NeedsDecode;
-                        read_passes += 1;
-                        if read_passes >= MAX_READ_PASSES_PER_POLL {
-                            should_yield = true;
-                        }
+                Poll::Ready(Ok(())) if filled == 0 => {
+                    this.eof = true;
+                    this.read_state = ReadState::NeedsDecode;
+                }
+                Poll::Pending | Poll::Ready(Ok(())) => {
+                    read_passes += 1;
+                    if read_passes >= MAX_READ_PASSES_PER_POLL {
+                        should_yield = true;
                     }
                 }
             }

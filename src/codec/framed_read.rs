@@ -43,6 +43,45 @@ pub(super) enum ReadState {
 /// (br-asupersync-bj427s.)
 pub const DEFAULT_MAX_BUFFER_LEN: usize = 8 * 1024 * 1024 + 4;
 
+/// Retain bytes consumed by a reader even when it also parks or fails. Both
+/// framed adapters use this boundary so their buffering and error precedence
+/// agree. A replaced buffer is never accepted as progress into our storage.
+pub(super) fn retain_read_progress(
+    buffer: &mut BytesMut,
+    filled: &[u8],
+    start: *const u8,
+    offered: usize,
+    maximum: usize,
+    status: Poll<io::Result<()>>,
+    adapter: &str,
+) -> io::Result<(Poll<io::Result<()>>, usize)> {
+    if !crate::io::transfer_session::filled_in_place(filled, start, offered) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "framed reader replaced its offered read buffer; stream position is unknown",
+        ));
+    }
+    let projected = buffer.len().saturating_add(filled.len());
+    if maximum > 0 && projected > maximum {
+        // The exact-capacity probe must preserve a real I/O failure, while
+        // never appending bytes beyond the configured allocation bound.
+        if let Poll::Ready(Err(error)) = status {
+            return Err(error);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{adapter} buffer would exceed max_buffer_len: {} + {} = \
+                 {projected} > {maximum} bytes",
+                buffer.len(),
+                filled.len(),
+            ),
+        ));
+    }
+    buffer.put_slice(filled);
+    Ok((status, filled.len()))
+}
+
 /// Async framed reader that applies a `Decoder` to an `AsyncRead` source.
 ///
 /// Implements `Stream` where each item is a decoded frame. Data is read
@@ -53,6 +92,11 @@ pub const DEFAULT_MAX_BUFFER_LEN: usize = 8 * 1024 * 1024 + 4;
 ///
 /// `poll_next` is cancel-safe. Partial data remains in the internal buffer
 /// across cancellations. No decoded frame is lost unless it was already yielded.
+/// A reader's partial fill is retained even if it returns `Pending` or an
+/// error. Errors remain terminal; retained bytes can be recovered with
+/// [`Self::into_parts`] but are never decoded after that error. A provider
+/// panic propagates and leaves the stream terminal to prevent an uncertain
+/// read from being repeated.
 ///
 /// # Memory bound (security)
 ///
@@ -286,57 +330,45 @@ where
                     .clamp(1, READ_BUF_SIZE)
             };
             let mut tmp = [0u8; READ_BUF_SIZE];
+            let start = tmp.as_ptr();
             let mut read_buf = ReadBuf::new(&mut tmp[..read_len]);
+            // A panicking provider can have consumed input without reporting
+            // it. Leave the stream poisoned unless its return is validated.
+            this.poisoned = true;
+            let status = Pin::new(&mut this.inner).poll_read(cx, &mut read_buf);
+            let (status, filled) = match retain_read_progress(
+                &mut this.buffer,
+                read_buf.filled(),
+                start,
+                read_len,
+                max_buffer_len,
+                status,
+                "FramedRead",
+            ) {
+                Ok(progress) => progress,
+                Err(error) => return Poll::Ready(Some(Err(error.into()))),
+            };
+            this.poisoned = false;
+            if filled > 0 {
+                this.read_state = ReadState::NeedsDecode;
+            }
 
-            match Pin::new(&mut this.inner).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
+            match status {
+                Poll::Pending if filled == 0 => return Poll::Pending,
                 Poll::Ready(Err(e)) => {
                     this.poisoned = true;
                     return Poll::Ready(Some(Err(e.into())));
                 }
-                Poll::Ready(Ok(())) => {
-                    let filled = read_buf.filled();
-                    if filled.is_empty() {
-                        this.eof = true;
-                        this.read_state = ReadState::NeedsDecode;
-                        // Loop back to handle EOF decoding.
-                    } else {
-                        // br-asupersync-bj427s: bound the partial-frame
-                        // buffer BEFORE appending. Without this check,
-                        // a peer that streams bytes without ever
-                        // closing a frame causes unbounded per-
-                        // connection memory growth. The check is
-                        // intentionally PRE-append so the buffer
-                        // never crosses the cap; the caller observes
-                        // the error before any over-the-cap memory is
-                        // ever allocated. A max_buffer_len of 0
-                        // disables enforcement.
-                        if max_buffer_len > 0 {
-                            let projected = this.buffer.len().saturating_add(filled.len());
-                            if projected > max_buffer_len {
-                                let cap = max_buffer_len;
-                                let buffered = this.buffer.len();
-                                let added = filled.len();
-                                let err = io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "FramedRead buffer would exceed max_buffer_len: \
-                                         {buffered} + {added} = {projected} > {cap} bytes \
-                                         (slowloris-style partial-frame attack? \
-                                         see br-asupersync-bj427s)"
-                                    ),
-                                );
-                                this.poisoned = true;
-                                return Poll::Ready(Some(Err(err.into())));
-                            }
-                        }
-                        this.buffer.put_slice(filled);
-                        this.read_state = ReadState::NeedsDecode;
-                        read_passes += 1;
-                        if read_passes >= MAX_READ_PASSES_PER_POLL {
-                            should_yield = true;
-                        }
-                        // Loop back to try decoding.
+                Poll::Ready(Ok(())) if filled == 0 => {
+                    this.eof = true;
+                    this.read_state = ReadState::NeedsDecode;
+                }
+                Poll::Pending | Poll::Ready(Ok(())) => {
+                    // Positive progress is readable now, even if the provider
+                    // also returned Pending without arranging another wake.
+                    read_passes += 1;
+                    if read_passes >= MAX_READ_PASSES_PER_POLL {
+                        should_yield = true;
                     }
                 }
             }
