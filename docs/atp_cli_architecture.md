@@ -13,6 +13,7 @@ asupersync atp <command> [args]
   sync        Bidirectional sync with conflict resolution
   local-sync  Preview/apply persistent sync between two local directories (Linux/glibc)
   mirror      One-way mirror with automatic cleanup
+  local-mirror Preview/apply an authoritative local mirror with retained originals (Linux/glibc)
   share       Create shareable links with access control
   watch       Watch directories for changes and auto-sync
   serve       Start ATP daemon/server mode
@@ -194,6 +195,89 @@ state, bytes written, durability, `staged_path` and `quarantine_path`.
 non-durable application emits its receipt before a nonzero exit. An outer failure
 without an observed application receipt leaves `result` null and fills
 `application_error`; reopen history and inspect staging before another attempt.
+
+### Reviewed local mirroring
+
+`asupersync atp local-mirror SOURCE DESTINATION` exposes the native one-way
+directory mirror through the `cli` feature on Linux/glibc. The source is
+authoritative: additions and changed files are proposed for the destination,
+and destination-only entries are proposed for removal into quarantine. No
+destination-only content is copied back to the source. This command operates on
+two local directories and does not use persistent synchronization history or a
+daemon. The existing peer-address `atp mirror` execution path remains unavailable.
+
+The default invocation scans both actual trees and prints a plan without changing
+their contents. Inspect every `decisions` entry and the printed `review_id`.
+Applying requires that exact ID in `--apply REVIEW_ID`, plus an existing external
+`--staging-dir`. The command scans again and refuses a different content/root
+identity before application, returning the newly observed plan for review.
+Native object guards are revalidated again before filesystem effects.
+
+```bash
+# Both trees and /work/mirror-staging already exist.
+# Preview the complete plan and inspect its review_id and proposed actions.
+asupersync --format json atp local-mirror /work/source /work/destination
+
+# Replace REVIEW_ID with the exact 64-character lowercase hexadecimal review_id.
+# Include only the grants required by the changes you reviewed.
+# Keep the receipt outside both trees so saving it does not change the plan.
+asupersync --format json atp local-mirror /work/source /work/destination \
+  --apply REVIEW_ID --staging-dir /work/mirror-staging \
+  --allow-overwrite --allow-permission-change --allow-delete \
+  > /work/mirror-receipt.json
+```
+
+Authorization is checked for the entire plan before the first effect. New files
+and directories require no destructive grants. Existing regular-file replacement
+requires **both** `--allow-overwrite` and `--allow-permission-change`.
+Destination-only files and directories require `--allow-delete`. Supplying one
+grant never implies another, and these grants require `--apply`. Without all
+required grants, even unrelated additions in the same plan remain unstarted.
+
+Use existing absolute UTF-8 paths without symlink components, and exclusively own
+both trees during each command. The roots must not overlap. Staging must be outside
+both roots, on the same filesystem as both, owned by the effective user, and not
+writable by group or others. Staging must have no visible extended attributes.
+A private mode-`0700` staging directory is suitable; the command
+does not create this supplied directory automatically.
+
+The content profile copies ordinary file bytes and directory structure. New files
+use `0600`, and new directories use `0700`. Ordinary destination mode and ownership
+are preserved during supported overwrites; source permissions and timestamps are
+not copied. Replacements with special mode bits, different ownership, or visible
+extended attributes are refused; replacement targets must belong to the effective
+user and group. The permission-change grant acknowledges that
+hidden platform metadata cannot be guaranteed; it does not waive these refusals.
+Symlinks, multiply linked files, unsupported object kinds, and file/directory kind
+replacement are refused. Source hard-link topology, sparse layout, and platform
+metadata are not preserved. Inventory bounds use `--max-entries`, `--max-depth`,
+`--max-file-bytes`, and `--max-total-bytes`.
+
+`review_id` identifies the deterministic content/root plan. `plan_id` identifies
+this particular execution attempt and its retained staging job; different
+invocations receive different attempt IDs. An explicitly restored destination can
+therefore be mirrored again without reusing or removing an earlier recovery job.
+The mirror never unlinks originals or automatically cleans staging. Overwritten
+files and removed entries are retained at their reported `quarantine_path`;
+removed subtrees have separate retained entries for their directories and files.
+There is no whole-tree transaction or automatic rollback. A failed operation may
+have completed earlier actions, and those effects remain in its receipt.
+
+JSON output has `schema_version: 1` and `command: "atp.local-mirror"`. A preview
+has `result: null`. Application reports `result.complete`, `result.dry_run`,
+`result.failure`, `result.staging_directory`, and every action's state, byte count,
+durability, `staged_path`, and `quarantine_path`. `result.recovery_source` preserves
+the original action indices and canonical quarantine associations for fresh native
+recovery preparation; it is diagnostic input, not authenticated content or a grant
+of restoration authority. Retain the complete application receipt and staging data.
+
+A rejected review leaves `result` null and explains the mismatch in
+`application_error`. An application that returns partial or failed effects emits
+its receipt before a nonzero exit. `runtime_quiescent` and `runtime_stopped` report
+cleanup, and unconfirmed cleanup prevents success. If writing or flushing stdout
+fails after application, the structured stderr error retains the full observed
+report in `context.receipt`. That output error does not roll back filesystem
+effects; inspect the receipt and retained originals before another attempt.
 
 ### Basic Transfer Commands
 

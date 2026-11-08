@@ -107,6 +107,8 @@ use std::task::{Context, Poll, Waker};
 
 #[path = "asupersync/atp_local_sync.rs"]
 mod atp_local_sync;
+#[path = "asupersync/atp_local_mirror.rs"]
+mod atp_local_mirror;
 
 #[derive(Parser, Debug)]
 #[command(name = "asupersync", version, about = "Asupersync CLI tools")]
@@ -348,6 +350,8 @@ enum AtpCommand {
     Sync(AtpSyncArgs),
     /// Plan or apply persistent synchronization between two local directories
     LocalSync(atp_local_sync::LocalSyncArgs),
+    /// Review and apply an authoritative local directory mirror with retained originals
+    LocalMirror(atp_local_mirror::MirrorArgs),
     /// Mirror directories with ATP (including deletes)
     Mirror(AtpMirrorArgs),
     /// Generate share codes for ATP transfers
@@ -4663,6 +4667,7 @@ fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
         AtpCommand::Get(args) => atp_get(&args, output),
         AtpCommand::Sync(args) => atp_sync(&args, output),
         AtpCommand::LocalSync(args) => atp_local_sync::run(&args, output),
+        AtpCommand::LocalMirror(args) => atp_local_mirror::run_mirror(&args, output),
         AtpCommand::Mirror(args) => atp_mirror(&args, output),
         AtpCommand::Share(args) => atp_share(&args, output),
         AtpCommand::Pair(args) => atp_pair(&args, output),
