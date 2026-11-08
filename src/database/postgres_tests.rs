@@ -72,6 +72,495 @@ mod tests {
         );
     }
 
+    #[test]
+    fn postgres_io_deadline_keeps_its_clock_and_wakes_after_unmask() {
+        use crate::cx::cap::CapSet;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::Time;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Wake, Waker};
+
+        type IoOnly = CapSet<false, false, false, true, false>;
+        struct CountWakes(AtomicUsize);
+        impl Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for masked in [false, true] {
+            let epoch = Time::from_secs(10_000);
+            let deadline = epoch + std::time::Duration::from_millis(100);
+            let clock = Arc::new(VirtualClock::starting_at(epoch));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let full = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE.with_deadline(deadline),
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let caller = {
+                let _restriction = full.restrict::<IoOnly>().set_current_restricted();
+                Cx::current().expect("restricted request context")
+            };
+            assert!(caller.timer_driver().is_none());
+            assert!(caller.has_timer());
+            let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+                VirtualClock::starting_at(Time::from_secs(100_000)),
+            ));
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(2, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(foreign_timer.clone()),
+                None,
+            );
+            let _current = Cx::set_current(Some(owner.clone()));
+            let mut stream = NeverReadyStream;
+            let mut buf = [0_u8; 1];
+            let mut operation = Box::pin(read_exact_from(&caller, &mut stream, &mut buf));
+            let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(timer.next_deadline(), Some(deadline));
+            assert_eq!(timer.pending_count(), 1);
+            assert!(foreign_timer.is_empty());
+
+            if masked {
+                let before_unmask = caller.masked(|| {
+                    clock.advance_to(deadline);
+                    assert_eq!(timer.process_timers(), 1);
+                    assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+                    assert!(timer.is_empty(), "expiry consumes the masked timer");
+                    assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 1);
+                    let before = wakes.0.load(Ordering::SeqCst);
+                    assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+                    assert_eq!(wakes.0.load(Ordering::SeqCst), before);
+                    before
+                });
+                assert!(
+                    wakes.0.load(Ordering::SeqCst) > before_unmask,
+                    "unmask must wake the read after its timer was consumed"
+                );
+            } else {
+                clock.advance_to(deadline);
+                assert_eq!(timer.process_timers(), 1);
+                assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            }
+            assert!(matches!(
+                operation.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(PgError::Cancelled(reason))) if reason.kind == CancelKind::Deadline
+            ));
+            assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+            assert!(timer.is_empty());
+            assert!(foreign_timer.is_empty());
+            assert!(caller.timer_driver().is_none(), "TIME remains restricted");
+            assert_eq!(Cx::current().unwrap().task_id(), owner.task_id());
+        }
+    }
+
+    #[test]
+    fn postgres_io_driverless_deadline_does_not_use_the_transport_clock() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::Time;
+        use std::task::Waker;
+        use std::time::Duration;
+
+        struct ImmediateRead {
+            transport_owner: TaskId,
+            interrupted: bool,
+        }
+
+        impl AsyncRead for ImmediateRead {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _task_cx: &mut Context<'_>,
+                _buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                assert_eq!(Cx::current().unwrap().task_id(), self.transport_owner);
+                Poll::Ready(if self.interrupted {
+                    Err(io::Error::from(io::ErrorKind::Interrupted))
+                } else {
+                    Ok(())
+                })
+            }
+        }
+
+        for expired in [false, true] {
+            let now = crate::time::raw_wall_now();
+            let caller = Cx::new(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE.with_deadline(if expired {
+                    now
+                } else {
+                    now + Duration::from_secs(3_600)
+                }),
+            );
+            let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+                VirtualClock::starting_at(if expired {
+                    Time::ZERO
+                } else {
+                    now + Duration::from_secs(86_400)
+                }),
+            ));
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(2, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(foreign_timer.clone()),
+                None,
+            );
+            let _current = Cx::set_current(Some(owner.clone()));
+            let mut stream = NeverReadyStream;
+            let mut buf = [0_u8; 1];
+            let mut operation = Box::pin(read_exact_from(&caller, &mut stream, &mut buf));
+            let result = operation.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            if expired {
+                assert!(matches!(
+                    result,
+                    Poll::Ready(Err(PgError::Cancelled(reason)))
+                        if reason.kind == CancelKind::Deadline
+                ));
+            } else {
+                assert!(result.is_pending(), "the caller's deadline is still live");
+                assert!(!caller.is_cancel_requested());
+            }
+            assert!(foreign_timer.is_empty());
+            assert_eq!(Cx::current().unwrap().task_id(), owner.task_id());
+            drop(operation);
+            assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            if !expired {
+                for interrupted in [false, true] {
+                    let mut stream = ImmediateRead {
+                        transport_owner: owner.task_id(),
+                        interrupted,
+                    };
+                    let mut operation = Box::pin(read_exact_from(&caller, &mut stream, &mut buf));
+                    let result = operation.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+                    let expected = if interrupted {
+                        io::ErrorKind::Interrupted
+                    } else {
+                        io::ErrorKind::UnexpectedEof
+                    };
+                    assert!(matches!(
+                        result,
+                        Poll::Ready(Err(PgError::Io(error))) if error.kind() == expected
+                    ));
+                    assert!(!caller.is_cancel_requested());
+                    assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+                    assert!(foreign_timer.is_empty());
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn postgres_native_request_deadlines_wake_silent_protocol_waits() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::Time;
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Mutex, mpsc};
+        use std::time::{Duration, Instant};
+
+        // Keep the accepted socket and thread owned even when an assertion
+        // fails. The wakeup connection only releases this fixture's accept.
+        struct DeadlinePeer {
+            addr: std::net::SocketAddr,
+            stopped: Arc<AtomicBool>,
+            socket: Arc<Mutex<Option<std::net::TcpStream>>>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl DeadlinePeer {
+            fn start(
+                handler: impl FnOnce(&std::net::TcpListener, &mut std::net::TcpStream)
+                    + Send
+                    + 'static,
+            ) -> Self {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
+                let stopped = Arc::new(AtomicBool::new(false));
+                let socket = Arc::new(Mutex::new(None));
+                let peer_stopped = Arc::clone(&stopped);
+                let peer_socket = Arc::clone(&socket);
+                let thread = std::thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    *peer_socket.lock().unwrap() = Some(stream.try_clone().unwrap());
+                    if peer_stopped.load(Ordering::Acquire) {
+                        return;
+                    }
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    handler(&listener, &mut stream);
+                });
+                Self {
+                    addr,
+                    stopped,
+                    socket,
+                    thread: Some(thread),
+                }
+            }
+
+            fn finish(mut self) {
+                self.thread
+                    .take()
+                    .unwrap()
+                    .join()
+                    .expect("deadline peer assertions");
+            }
+        }
+
+        impl Drop for DeadlinePeer {
+            fn drop(&mut self) {
+                if let Some(thread) = self.thread.take() {
+                    self.stopped.store(true, Ordering::Release);
+                    if let Some(socket) = self.socket.lock().unwrap().as_ref() {
+                        let _ = socket.shutdown(std::net::Shutdown::Both);
+                    }
+                    let _ =
+                        std::net::TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
+                    let _ = thread.join();
+                }
+            }
+        }
+
+        for workers in [1, 2] {
+            for phase in ["startup", "query", "notifications"] {
+                let server_waiting = Arc::new(crate::sync::Notify::new());
+                let peer_waiting = Arc::clone(&server_waiting);
+                let (resume_tx, resume_rx) = mpsc::channel();
+                let peer = DeadlinePeer::start(move |listener, peer| {
+                    let startup = read_startup_packet(peer);
+                    assert_eq!(&startup[4..8], &POSTGRES_PROTOCOL_VERSION_3_0.to_be_bytes());
+                    if phase != "startup" {
+                        write_startup_ready_with_key(peer, 42, 1337);
+                    }
+                    if phase == "query" {
+                        let (kind, body) = read_frontend_frame(peer);
+                        assert_eq!(kind, b'Q');
+                        assert!(body.starts_with(b"SET statement_timeout = "));
+                        reply_complete(peer, "SET", b'I');
+                        let (kind, body) = read_frontend_frame(peer);
+                        assert_eq!(kind, b'Q');
+                        assert_eq!(body, b"SELECT pg_sleep(30)\0");
+                    }
+                    let frame = notification_response_message(42, "jobs", "deadline-resume");
+                    if phase == "notifications" {
+                        peer.write_all(&frame[..7]).unwrap();
+                    }
+                    // Withhold the complete response until the native future
+                    // has parked and only its request deadline can release it.
+                    peer_waiting.notify_one();
+                    listener.set_nonblocking(true).unwrap();
+                    if phase == "query" {
+                        let bound = Instant::now() + Duration::from_secs(4);
+                        let mut cancel = loop {
+                            match listener.accept() {
+                                Ok((stream, _)) => break stream,
+                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                    assert!(
+                                        Instant::now() < bound,
+                                        "deadline must send CancelRequest"
+                                    );
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                                Err(error) => panic!("cancel connection: {error}"),
+                            }
+                        };
+                        cancel
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut frame = [0_u8; 16];
+                        cancel.read_exact(&mut frame).expect("complete CancelRequest");
+                        assert_eq!(&frame[..4], &16_i32.to_be_bytes());
+                        assert_eq!(&frame[4..8], &80_877_102_i32.to_be_bytes());
+                        assert_eq!(&frame[8..12], &42_i32.to_be_bytes());
+                        assert_eq!(&frame[12..], &1337_i32.to_be_bytes());
+                    } else if phase == "notifications" {
+                        resume_rx.recv_timeout(Duration::from_secs(4)).unwrap();
+                        assert!(
+                            matches!(listener.accept(),
+                                Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+                            "idle notification expiry must not send CancelRequest"
+                        );
+                        peer.write_all(&frame[7..]).unwrap();
+                        let (kind, body) = read_frontend_frame(peer);
+                        assert_eq!((kind, body), (b'X', Vec::new()));
+                    }
+                    let mut tail = Vec::new();
+                    (&mut *peer)
+                        .take(6)
+                        .read_to_end(&mut tail)
+                        .expect("client socket closes");
+                    if phase == "startup" {
+                        assert!(tail.is_empty() || tail == [b'X', 0, 0, 0, 4]);
+                    } else {
+                        assert!(tail.is_empty(), "no command follows deadline cleanup");
+                    }
+                });
+                let mut options = deterministic_postgres_options(peer.addr.port());
+                options.connect_timeout = Some(Duration::from_secs(30));
+                let clock = Arc::new(VirtualClock::new());
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let builder = if workers == 1 {
+                    crate::runtime::RuntimeBuilder::current_thread()
+                } else {
+                    crate::runtime::RuntimeBuilder::new().worker_threads(workers)
+                };
+                let runtime = builder
+                    .with_reactor(
+                        crate::runtime::reactor::create_reactor().expect("native reactor"),
+                    )
+                    .with_timer_driver(timer.clone())
+                    .build()
+                    .expect("native PostgreSQL deadline runtime");
+                let deadline = Time::from_millis(100);
+                let caller =
+                    runtime.request_cx_with_budget(Budget::INFINITE.with_deadline(deadline));
+                let task_caller = caller.clone();
+                let progress = Arc::new(AtomicUsize::new(usize::MAX));
+                let (parked_tx, parked_rx) = mpsc::channel();
+                let (done_tx, done_rx) = mpsc::channel();
+                let controller_timer = timer.clone();
+                let controller = std::thread::spawn(move || {
+                    let parked = parked_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+                    let armed = controller_timer.next_deadline() == Some(deadline);
+                    clock.advance_to(deadline);
+                    let _ = controller_timer.process_timers();
+                    let completed = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+                    if !completed {
+                        // Failure-only bound: the old guard has no request
+                        // timer, so release it through the outer test timeout.
+                        clock.advance_to(Time::from_secs(10));
+                        let _ = controller_timer.process_timers();
+                    }
+                    (parked, armed, completed)
+                });
+                let (result, retired) = runtime.block_on(runtime.handle().spawn(async move {
+                    let owner = Cx::current().expect("native protocol owner");
+                    let result = crate::time::timeout(owner.now(), Duration::from_secs(5), async {
+                        let exchange = async {
+                            if phase == "startup" {
+                                return PgConnection::connect_with_options(&task_caller, options)
+                                    .await
+                                    .map(drop);
+                            }
+                            let mut connection =
+                                match PgConnection::connect_with_options(&owner, options).await {
+                                    Outcome::Ok(connection) => connection,
+                                    outcome => return outcome.map(drop),
+                                };
+                            connection.inner.backend_frame.pending_progress =
+                                Some(Arc::clone(&progress));
+                            if phase == "query" {
+                                let outcome = connection
+                                    .query_unchecked(&task_caller, "SELECT pg_sleep(30)")
+                                    .await;
+                                assert!(
+                                    connection.inner.closed,
+                                    "interrupted query is not reusable"
+                                );
+                                outcome.map(drop)
+                            } else {
+                                let outcome = connection.notifications().next(&task_caller).await;
+                                assert!(
+                                    !connection.inner.closed,
+                                    "idle notification connection remains open"
+                                );
+                                assert_eq!(connection.inner.backend_frame.header_read, 5);
+                                assert_eq!(connection.inner.backend_frame.body_read, 2);
+                                resume_tx.send(()).unwrap();
+                                assert_notification(
+                                    connection.notifications().next(&owner).await,
+                                    42,
+                                    "jobs",
+                                    "deadline-resume",
+                                );
+                                connection.close().await.unwrap();
+                                outcome
+                                    .map(drop)
+                                    .map_err(|error| PgError::Protocol(format!("{error:?}")))
+                            }
+                        };
+                        let mut exchange = std::pin::pin!(exchange);
+                        let mut waiting = std::pin::pin!(server_waiting.notified());
+                        let mut witness = Some(parked_tx);
+                        let parked_bytes = if phase == "query" { 0 } else { 7 };
+                        std::future::poll_fn(|task_cx| {
+                            let result = exchange.as_mut().poll(task_cx);
+                            if result.is_pending()
+                                && witness.is_some()
+                                && (phase == "startup"
+                                    || progress.load(Ordering::Acquire) == parked_bytes)
+                                && waiting.as_mut().poll(task_cx).is_ready()
+                            {
+                                witness.take().unwrap().send(()).unwrap();
+                            }
+                            result
+                        })
+                        .await
+                    })
+                    .await;
+                    let retired = task_caller
+                        .inner
+                        .read()
+                        .cancel_waker_registrations
+                        .is_empty()
+                        && owner.inner.read().cancel_waker_registrations.is_empty();
+                    let _ = done_tx.send(());
+                    (result, retired)
+                }));
+                let witness = controller.join().expect("deadline controller");
+                peer.finish();
+                assert_eq!(
+                    witness,
+                    (true, true, true),
+                    "workers={workers} phase={phase}: parked, armed, completed"
+                );
+                assert!(
+                    matches!(result, Ok(Outcome::Cancelled(ref reason))
+                        if reason.kind == CancelKind::Deadline
+                            && Some(reason.clone()) == caller.cancel_reason()),
+                    "workers={workers} phase={phase} result={result:?}"
+                );
+                assert!(retired, "all operation registrations must retire");
+                assert!(timer.is_empty(), "all operation deadline timers must retire");
+                let drain = runtime.shutdown_drained(Duration::from_secs(5));
+                assert_eq!(drain.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+                assert_eq!(
+                    (drain.live_tasks, drain.live_regions, drain.pending_obligations),
+                    (0, 0, 0)
+                );
+                assert_eq!((drain.pending_spawns, drain.queued_finalizers), (0, 0));
+                assert!(!drain.has_pending_obligation_posts);
+                eprintln!(
+                    "event=postgres_native_deadline workers={workers} phase={phase} \
+                     transport_parked=true deadline_armed=true outcome=CancelledDeadline \
+                     registrations_retired=true timers_retired=true runtime=Quiescent"
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "tls")]
     static POSTGRES_SSL_CERT_FILE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

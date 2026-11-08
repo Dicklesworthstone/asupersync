@@ -53,7 +53,7 @@ use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 #[path = "postgres_tls.rs"]
 mod tls_options;
@@ -4465,6 +4465,14 @@ fn cancelled_error(cx: &Cx) -> PgError {
     PgError::Cancelled(cancelled_reason(cx))
 }
 
+fn io_cancel_requested(cx: &Cx) -> bool {
+    // A driverless request uses the process clock, even if the polling task
+    // owns a virtual clock. Scope this override to the checkpoint so neither
+    // the transport nor error classification borrows the wrong authority.
+    let _caller = (!cx.has_timer()).then(|| Cx::set_current(Some(cx.clone())));
+    cx.checkpoint().is_err()
+}
+
 /// Classify a zero-byte read from the peer.
 ///
 /// `read_exact`'s in-poll cancel guard runs at the top of each poll, but the
@@ -4480,7 +4488,7 @@ fn cancelled_error(cx: &Cx) -> PgError {
 /// hung up early with no cancel outstanding still reports `UnexpectedEof`; this
 /// is not a license to suppress errors that happened before any cancel.
 fn eof_or_cancelled(cx: &Cx) -> PgError {
-    if cx.checkpoint().is_err() {
+    if io_cancel_requested(cx) {
         return cancelled_error(cx);
     }
     PgError::Io(io::Error::new(
@@ -4493,7 +4501,7 @@ fn io_or_cancelled(cx: &Cx, err: io::Error) -> PgError {
     // The ambient socket checkpoint can observe cancellation after our
     // explicit checkpoint passed. Preserve that signal as cancellation so
     // the connection still performs its server-side cancellation drain.
-    if err.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() {
+    if err.kind() == io::ErrorKind::Interrupted && io_cancel_requested(cx) {
         cancelled_error(cx)
     } else {
         PgError::Io(err)
@@ -4514,18 +4522,42 @@ fn io_or_cancelled(cx: &Cx, err: io::Error) -> PgError {
 /// I/O completion path sends `CancelRequest`. Same owned-token pattern as
 /// the oneshot `RecvFuture`; a stale token from an earlier poll is refreshed
 /// without allocation when the Waker is unchanged.
+///
+/// A separately supplied request context has not necessarily been admitted
+/// as a runtime task, so its budget deadline has no automatic timer. Keep an
+/// owned deadline wake on that context's actual clock, including when its
+/// public time capability is restricted. Checkpoints still decide whether
+/// cancellation is masked and when to acknowledge it.
 struct CancelWakerGuard<'a> {
     cx: &'a Cx,
     token: Option<CancelWakerToken>,
+    deadline: Option<crate::time::Sleep>,
 }
 
 impl<'a> CancelWakerGuard<'a> {
     fn new(cx: &'a Cx) -> Self {
-        Self { cx, token: None }
+        Self {
+            cx,
+            token: None,
+            deadline: cx.budget_deadline_sleep(),
+        }
     }
 
-    fn refresh(&mut self, waker: &Waker) {
-        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    fn refresh(&mut self, task_cx: &mut Context<'_>) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, task_cx.waker()));
+        if self
+            .deadline
+            .as_mut()
+            .is_some_and(|deadline| Pin::new(deadline).poll_deadline(task_cx).is_ready())
+        {
+            // An expired timer may be consumed under a mask. Retain the
+            // cancellation registration so unmasking can wake the operation.
+            self.deadline = None;
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        io_cancel_requested(self.cx)
     }
 }
 
@@ -4552,10 +4584,10 @@ where
     while pos < buf.len() {
         let mut read_buf = ReadBuf::new(&mut buf[pos..]);
         std::future::poll_fn(|task_cx| {
-            if cx.checkpoint().is_err() {
+            cancel_wake.refresh(task_cx);
+            if cancel_wake.is_cancelled() {
                 return Poll::Ready(Err(cancelled_error(cx)));
             }
-            cancel_wake.refresh(task_cx.waker());
             match Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf) {
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
                 Poll::Ready(Err(err)) => Poll::Ready(Err(io_or_cancelled(cx, err))),
@@ -5520,8 +5552,8 @@ impl PgConnection {
         ));
         let mut cancel_wake = CancelWakerGuard::new(cx);
         std::future::poll_fn(|task_cx| {
-            cancel_wake.refresh(task_cx.waker());
-            if cx.checkpoint().is_err() {
+            cancel_wake.refresh(task_cx);
+            if cancel_wake.is_cancelled() {
                 return Poll::Ready(Outcome::Cancelled(cancelled_reason(cx)));
             }
             if deadline.as_mut().poll_deadline(task_cx).is_ready() {
@@ -5531,7 +5563,7 @@ impl PgConnection {
                 ))));
             }
             let result = connect.as_mut().poll(task_cx);
-            if cx.checkpoint().is_err() {
+            if cancel_wake.is_cancelled() {
                 Poll::Ready(Outcome::Cancelled(cancelled_reason(cx)))
             } else {
                 result
@@ -5728,8 +5760,8 @@ impl PgConnection {
             std::pin::pin!(Self::negotiate_tls_exchange(cx, tcp, options, connector));
         let mut cancel_wake = CancelWakerGuard::new(cx);
         std::future::poll_fn(|task_cx| {
-            cancel_wake.refresh(task_cx.waker());
-            if cx.checkpoint().is_err() {
+            cancel_wake.refresh(task_cx);
+            if cancel_wake.is_cancelled() {
                 return Poll::Ready(Err(cancelled_error(cx)));
             }
             if deadline.as_mut().poll_deadline(task_cx).is_ready() {
@@ -5742,7 +5774,7 @@ impl PgConnection {
             // An ambient socket can observe cancellation inside this poll.
             // Keep owner cancellation attributed as Cancelled, including when
             // rustls wraps an Interrupted error in its TLS error type.
-            if cx.checkpoint().is_err() {
+            if cancel_wake.is_cancelled() {
                 Poll::Ready(Err(cancelled_error(cx)))
             } else {
                 result
@@ -5776,10 +5808,10 @@ impl PgConnection {
             let mut pos = 0;
             while pos < ssl_request.len() {
                 let written = std::future::poll_fn(|task_cx| {
-                    if cx.checkpoint().is_err() {
+                    cancel_wake.refresh(task_cx);
+                    if cancel_wake.is_cancelled() {
                         return Poll::Ready(Err(cancelled_error(cx)));
                     }
-                    cancel_wake.refresh(task_cx.waker());
                     match Pin::new(&mut tcp).poll_write(task_cx, &ssl_request[pos..]) {
                         Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
                         Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
@@ -5802,10 +5834,10 @@ impl PgConnection {
         {
             let mut read_buf = ReadBuf::new(&mut response);
             std::future::poll_fn(|task_cx| {
-                if cx.checkpoint().is_err() {
+                cancel_wake.refresh(task_cx);
+                if cancel_wake.is_cancelled() {
                     return Poll::Ready(Err(cancelled_error(cx)));
                 }
-                cancel_wake.refresh(task_cx.waker());
                 match Pin::new(&mut tcp).poll_read(task_cx, &mut read_buf) {
                     Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
                     Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
@@ -8795,10 +8827,10 @@ impl PgConnection {
         let mut cancel_wake = CancelWakerGuard::new(cx);
         while pos < data.len() {
             let written = std::future::poll_fn(|task_cx| {
-                if cx.checkpoint().is_err() {
+                cancel_wake.refresh(task_cx);
+                if cancel_wake.is_cancelled() {
                     return Poll::Ready(Err(cancelled_error(cx)));
                 }
-                cancel_wake.refresh(task_cx.waker());
                 match Pin::new(&mut self.inner.stream).poll_write(task_cx, &data[pos..]) {
                     Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
                     Poll::Ready(Err(err)) => Poll::Ready(Err(io_or_cancelled(cx, err))),
@@ -8816,10 +8848,10 @@ impl PgConnection {
             pos += written;
         }
         std::future::poll_fn(|task_cx| {
-            if cx.checkpoint().is_err() {
+            cancel_wake.refresh(task_cx);
+            if cancel_wake.is_cancelled() {
                 return Poll::Ready(Err(cancelled_error(cx)));
             }
-            cancel_wake.refresh(task_cx.waker());
             match Pin::new(&mut self.inner.stream).poll_flush(task_cx) {
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
                 Poll::Ready(Err(err)) => Poll::Ready(Err(io_or_cancelled(cx, err))),
@@ -8868,10 +8900,10 @@ impl PgConnection {
         std::future::poll_fn(|task_cx| {
             let inner = &mut self.inner;
             loop {
-                if cx.checkpoint().is_err() {
+                cancel_wake.refresh(task_cx);
+                if cancel_wake.is_cancelled() {
                     return Poll::Ready(Err(cancelled_error(cx)));
                 }
-                cancel_wake.refresh(task_cx.waker());
                 let frame = &mut inner.backend_frame;
                 let reading_header = frame.header_read < frame.header.len();
                 let target = if reading_header {

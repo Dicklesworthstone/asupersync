@@ -3971,7 +3971,7 @@ impl<Caps> Cx<Caps> {
     /// driver handle nor an arbitrary caller-selected deadline. Completion
     /// only wakes the operation; its checkpoint still controls cancellation
     /// acknowledgement and masking.
-    #[cfg(feature = "mysql")]
+    #[cfg(any(feature = "mysql", feature = "postgres"))]
     pub(crate) fn budget_deadline_sleep(&self) -> Option<crate::time::Sleep> {
         self.budget()
             .deadline
