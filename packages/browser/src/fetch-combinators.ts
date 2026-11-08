@@ -126,7 +126,9 @@ interface Member {
  * When a member supplies retire(), its independent cleanup receipt is joined
  * alongside native reader cancellation and closed. A failed retirement prevents
  * ownership transfer even when closed preserves an earlier cancellation. An ok
- * retirement never suppresses an operation failure. Older handles retain their
+ * retirement never suppresses an operation failure or native cancellation
+ * rejection. Expected operation cancellation during drain cannot replace the
+ * group's actual failure or caller cancellation. Older handles retain their
  * native-cancellation/closed boundary; no stronger task-ABI receipt is implied.
  *
  * An optional AbortSignal also cancels and drains every member, including a
@@ -289,14 +291,21 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean, opt
       try { terminal = await member.closed; }
       catch { terminal = internal("fetch group member cleanup rejected"); }
       member.terminal = terminal;
-      const outcome = rejected
-        ? terminal.outcome !== "ok" ? terminal : internal("fetch group cancellation or terminal publication refused")
-        : terminal.outcome === "err" || terminal.outcome === "panicked" ? terminal : ok(undefined);
-      if (outcome.outcome !== "ok") noteCleanup(index, outcome);
+      // With an independent retirement receipt, operation cancellation is the
+      // expected result of loser drain, even if native cancellation rejects.
+      // It must not become a new owner cancellation or replace the caller's
+      // own cancellation identity. Legacy handles retain their old boundary.
+      const terminalFailure = terminal.outcome === "err" || terminal.outcome === "panicked"
+        || terminal.outcome === "cancelled" && rejected && !member.retire ? terminal : undefined;
+      const refusal = rejected ? internal("fetch group cancellation or terminal publication refused") : undefined;
+      if (terminalFailure) noteCleanup(index, terminalFailure);
+      else if (refusal) stop(refusal);
       // Recorded after the terminal: an equally severe operation failure keeps
-      // its own, more specific cause.
+      // its own, more specific cause. Prefer an explicit retirement failure to
+      // the generic native-refusal diagnostic, without delaying the stop fence.
       const retired = await joinedRetirement;
       if (retired.outcome !== "ok") noteCleanup(index, retired);
+      if (refusal) noteCleanup(index, refusal);
       resolve(cleanupErrors.get(index) ?? ok(undefined));
     })();
     return member.draining;

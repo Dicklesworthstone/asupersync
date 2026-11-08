@@ -174,6 +174,43 @@ test("same-member terminal error cannot overwrite an earlier retirement panic", 
   const g = f.group([a.handle, b.handle]); await pending(g.result); native.resolve();
   const result = await g.result; assert.equal(result.outcome, "panicked"); assert.equal(result.message, "strongest");
 });
+for (const receipt of [ok(undefined), err("independent retirement refused")]) {
+  test(`native cancellation rejection keeps an expected terminal cancellation out of a race (${receipt.outcome} retirement)`, async t => {
+    const f = await fixture(t), native = f.gate(), retirement = f.gate(), a = provider(t);
+    const b = provider(t, { native: native.promise, nativeRefuses: true, retire: () => retirement.promise });
+    const g = f.group([a.handle, b.handle]); await pending(g.result);
+    assert.equal(b.counts.native, 1); assert.equal(b.counts.retire, 1);
+    native.resolve(); await pending(g.result);
+    assert.equal((await b.handle.closed).outcome, "cancelled", "operation cancellation is expected during loser drain");
+    assert.equal(a.counts.native, 1, "native refusal retires the proposed winner before the other receipt settles");
+    retirement.resolve(receipt);
+    const result = await g.result;
+    assert.equal(result.outcome, "err", "failed cleanup must not manufacture owner cancellation");
+    assert.equal(result.failure.message, receipt.outcome === "err"
+      ? receipt.failure.message : "fetch group cancellation or terminal publication refused");
+    assert.equal(a.stream.locked, false); assert.equal(b.stream.locked, false);
+    assert.equal(a.counts.native, 1); assert.equal(b.counts.native, 1);
+  });
+}
+test("join application failure is not replaced by expected cancellation after native cleanup refusal", async t => {
+  const f = await fixture(t), a = provider(t, { park: true, terminal: err("application failed") });
+  const b = provider(t, { park: true, nativeRefuses: true, retire: () => Promise.resolve(err("retirement refused")) });
+  const g = f.group([a.handle, b.handle], "join"); a.head.resolve(err("application failed"));
+  const result = await g.result;
+  assert.equal(result.outcome, "err"); assert.equal(result.failure.message, "application failed");
+  assert.equal((await b.handle.closed).outcome, "cancelled");
+  assert.equal(a.counts.native, 1); assert.equal(b.counts.native, 1);
+  assert.equal(a.stream.locked, false); assert.equal(b.stream.locked, false);
+});
+for (const mode of ["race", "join"]) test(`${mode} owner cancellation keeps its identity across native and retirement refusal`, async t => {
+  const f = await fixture(t), a = provider(t, { park: true });
+  const b = provider(t, { park: true, nativeRefuses: true, retire: () => Promise.resolve(err("retirement refused")) });
+  const g = f.group([a.handle, b.handle], mode), done = g.cancel("owner shutdown");
+  const result = await g.result;
+  assert.equal(result.outcome, "cancelled"); assert.equal(result.cancellation.kind, `fetch_${mode}_cancel`);
+  assert.equal(result.cancellation.message, "owner shutdown"); assert.equal((await done).cancellation.message, "owner shutdown");
+  assert.equal(a.counts.native, 1); assert.equal(b.counts.native, 1);
+});
 for (const value of [undefined, {}, { outcome: "ok", value: 7 }, { outcome: "panicked", message: 7 }]) {
   test(`malformed retirement receipt fails closed: ${JSON.stringify(value)}`, async t => {
     const f = await fixture(t), a = provider(t), b = provider(t, { retire: () => Promise.resolve(value) });
