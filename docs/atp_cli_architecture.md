@@ -14,6 +14,7 @@ asupersync atp <command> [args]
   local-sync  Preview/apply persistent sync between two local directories (Linux/glibc)
   mirror      One-way mirror with automatic cleanup
   local-mirror Preview/apply an authoritative local mirror with retained originals (Linux/glibc)
+  local-recover Review/restore retained originals from saved local application receipts (Linux/glibc)
   share       Create shareable links with access control
   watch       Watch directories for changes and auto-sync
   serve       Start ATP daemon/server mode
@@ -278,6 +279,94 @@ cleanup, and unconfirmed cleanup prevents success. If writing or flushing stdout
 fails after application, the structured stderr error retains the full observed
 report in `context.receipt`. That output error does not roll back filesystem
 effects; inspect the receipt and retained originals before another attempt.
+
+### Restoring retained originals
+
+`asupersync atp local-recover RECEIPT LOCAL REMOTE` previews or applies restoration
+from an earlier `local-sync` or `local-mirror` application on Linux/glibc. Supply
+the original roots explicitly and in their original order: for a mirror, `LOCAL`
+is its source and `REMOTE` is its destination. Keep the receipt, the retained
+staging job, and both roots available. No new staging directory is created.
+
+The default command reads the saved associations and scans the actual retained
+originals and current destinations without changing their contents. Inspect every
+`entries` item, including its `quarantined` and `current` content identities, and
+the new recovery `review_id`. A saved receipt supplies neither authenticated
+historical contents nor overwrite authority. Applying requires the recovery
+review ID, not the earlier mirror's review ID or the operation's `plan_id`.
+Fresh preparation binds the selected associations, root identities, retained
+contents, and current trees; changes require another review before application.
+The native engine revalidates its captured objects before filesystem effects.
+
+```bash
+# Review actual retained originals and current destinations.
+asupersync --format json atp local-recover \
+  /work/mirror-receipt.json /work/source /work/destination
+
+# Replace RECOVERY_REVIEW_ID with the exact review_id from that recovery preview.
+# Both grants below are needed if any existing regular file will be exchanged.
+asupersync --format json atp local-recover \
+  /work/mirror-receipt.json /work/source /work/destination \
+  --apply RECOVERY_REVIEW_ID --allow-overwrite --allow-permission-change \
+  > /work/recovery-receipt.json
+```
+
+Keep both receipts and any preview output outside both roots and the recovery job;
+writing output into a scanned tree changes the next review. The receipt must be a
+regular file; symlinks at its final path entry, FIFOs, devices, and directories are
+refused before reading. Its parent directories remain caller-trusted. Use absolute
+UTF-8 paths and exclusively own both roots and the recovery job throughout each command.
+The roots and job must be disjoint and on one filesystem. The recovery job must
+retain private `0700` permissions and effective-user/group ownership. Native
+path, object-kind, ownership, mode, and visible-metadata refusals still apply.
+Inventory bounds use the same `--max-entries`, `--max-depth`, `--max-file-bytes`,
+and `--max-total-bytes` flags as local mirroring.
+
+Accepted JSON inputs are:
+
+- A complete saved `local-sync` or `local-mirror` application report, with
+  `schema_version: 1`, its exact command name, `mode: "apply"`, and
+  `content_profile: "linux-gnu-content-only-v1"`. Partial application reports
+  are accepted; they need not claim successful completion or durable publication.
+- A standalone `NativeDirectoryRecoverySource` object, such as the entire
+  `result.recovery_source` extracted from a mirror report. Preserve every action
+  and its original index, including actions without a quarantine path.
+- A structured `output_error` whose `context.receipt` is one of those complete
+  local application reports, as emitted when the original stdout write fails.
+
+Preview reports, recovery-command reports, nested error envelopes, and isolated
+`result` objects are not recovery inputs. If a full application report contains
+`result.recovery_source`, it must agree exactly with the report's plan ID,
+dry-run status, staging directory, and actions. The reader bounds actual input
+bytes before decoding: `--max-receipt-bytes` defaults to 16 MiB and accepts
+1 through 64 MiB. Ambiguous or malformed associations are refused before effects.
+
+An absent destination is restored by renaming its retained original into place.
+An existing regular file requires **both** `--allow-overwrite` and
+`--allow-permission-change`; the engine atomically exchanges it with the retained
+original. The displaced current bytes remain at the action's `quarantine_path`.
+All required grants are checked before the first restoration, and grants require
+`--apply`. There is no delete grant for this command: recovery does not unlink
+files. Existing-directory and file/directory kind replacements are refused.
+Recovered directories precede their recovered descendants.
+
+Only retained originals are restored. Files newly added by the earlier operation
+remain in place, persistent local-sync history is not rewound, and staging is not
+automatically cleaned. Review a new synchronization plan before later syncing a
+restored tree. Recovery is not a whole-tree rollback or an unattended crash-replay
+operation; a later failure can leave earlier restorations completed.
+
+JSON output uses `command: "atp.local-recover"` and records `source_plan_id`,
+the fresh `review_id`, scanned `entries`, and the retained `recovery_directory`.
+Application reports every action as `not_started`, `restored`, or `exchanged`,
+with its destination, quarantine path, and durability. A stale review returns
+the newly observed preview with `result: null` and `application_error`, then
+exits nonzero. Partial application emits its observed receipt before a nonzero
+exit. Check `result.complete`, `result.failure`, `runtime_quiescent`, and
+`runtime_stopped`; unconfirmed cleanup prevents success. If writing or flushing
+stdout fails after effects, the structured stderr error preserves the full
+recovery report in `context.receipt`. Retain this report alongside the original
+application receipt and the remaining recovery data.
 
 ### Basic Transfer Commands
 

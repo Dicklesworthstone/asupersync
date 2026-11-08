@@ -53,6 +53,51 @@ where
         .await
     }
 
+    /// Read a complete Unix regular file of at most `max_bytes` under region ownership.
+    ///
+    /// The final path entry must be a regular file, not a symlink. A nonblocking,
+    /// no-follow open prevents waiting for a FIFO writer, and descriptor metadata
+    /// is checked before reading so directories, FIFOs and devices are refused.
+    /// Parent paths remain caller-trusted: this is not path confinement.
+    ///
+    /// Byte bounds, chunk checkpoints, allocation and retirement follow
+    /// [`Self::read_bounded`]. A running regular-file open/read is still not
+    /// preemptible, and concurrent changes do not produce a point-in-time snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Preserves the authority, admission, checkpoint, size and I/O errors of
+    /// [`Self::read_bounded`]. A successfully opened nonregular descriptor is
+    /// `Io(InvalidInput)`; a final symlink is refused by the operating system.
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    pub async fn read_regular_bounded(
+        &self,
+        path: impl Into<PathBuf>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ScopedFsError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = path.into();
+        self.run_io(move |child| {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)?;
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "bounded input must be a regular file",
+                ));
+            }
+            read_bounded_reader(&mut file, max_bytes, || {
+                child.checkpoint().map_err(|error| {
+                    io::Error::new(io::ErrorKind::Interrupted, error)
+                })
+            })
+        })
+        .await
+    }
+
     /// Read at most `max_bytes` as UTF-8 without decoding on the async worker.
     ///
     /// The limit counts encoded bytes, not Unicode characters. The same size,

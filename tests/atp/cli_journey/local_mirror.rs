@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_asupersync");
 
+#[path = "local_recover.rs"]
+mod recovery;
+
 struct Fixture {
     root: PathBuf,
     source: PathBuf,

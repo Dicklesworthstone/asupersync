@@ -216,6 +216,74 @@
             });
         }
 
+        #[cfg(unix)]
+        #[test]
+        fn regular_bounded_reads_refuse_special_files_without_blocking_and_drain() {
+            use std::os::unix::fs::symlink;
+
+            bounded(|| {
+                for workers in [1, 2] {
+                    // Keep every fixture, including the unopened FIFO, for diagnosis.
+                    let directory = tempfile::Builder::new()
+                        .prefix("asupersync-regular-bounded-")
+                        .tempdir().unwrap().keep();
+                    eprintln!("retained regular bounded-read fixture: {}", directory.display());
+                    let path = directory.join("receipt");
+                    let link = directory.join("receipt-link");
+                    let fifo = directory.join("receipt-fifo");
+                    symlink(&path, &link).unwrap();
+                    nix::unistd::mkfifo(
+                        fifo.as_path(),
+                        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+                    ).unwrap();
+                    let runtime = runtime(workers);
+                    runtime.block_on(async {
+                        let cx = Cx::current().unwrap();
+                        let fs = cx.scoped_fs();
+                        for length in [0, 1, READ_CHUNK_BYTES + 7] {
+                            let bytes = vec![b'r'; length];
+                            fs.write(path.clone(), bytes.clone()).await.unwrap();
+                            assert_eq!(
+                                fs.read_regular_bounded(path.clone(), length).await.unwrap(),
+                                bytes,
+                            );
+                            if length > 0 {
+                                assert!(matches!(
+                                    fs.read_regular_bounded(path.clone(), length - 1).await,
+                                    Err(ScopedFsError::Io(error))
+                                        if error.kind() == io::ErrorKind::FileTooLarge
+                                ));
+                            }
+                        }
+                        assert!(matches!(
+                            fs.read_regular_bounded(link.clone(), 1).await,
+                            Err(ScopedFsError::Io(error))
+                                if error.raw_os_error() == Some(libc::ELOOP)
+                        ));
+                        // There is deliberately no FIFO writer. A blocking open
+                        // would strand this operation and fail the bounded scenario.
+                        for special in [fifo.clone(), directory.clone(), PathBuf::from("/dev/null")] {
+                            assert!(matches!(
+                                fs.read_regular_bounded(special.clone(), 1).await,
+                                Err(ScopedFsError::Io(error))
+                                    if error.kind() == io::ErrorKind::InvalidInput
+                            ), "nonregular input was not refused: {}", special.display());
+                        }
+                        assert_eq!(
+                            fs.read_regular_bounded(path.clone(), READ_CHUNK_BYTES + 7)
+                                .await.unwrap(),
+                            vec![b'r'; READ_CHUNK_BYTES + 7],
+                        );
+                    });
+                    assert_drained(&runtime);
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+                    assert_eq!(std::fs::read(&path).unwrap(), vec![b'r'; READ_CHUNK_BYTES + 7]);
+                    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+                    assert!(std::fs::symlink_metadata(&fifo).is_ok());
+                }
+            });
+        }
+
         #[test]
         fn bounded_utf8_counts_bytes_and_preserves_invalid_data_errors() {
             bounded(|| {
