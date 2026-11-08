@@ -477,6 +477,7 @@ export type BrowserArtifactOperation =
   | "list"
   | "export"
   | "export_archive"
+  | "import_archive"
   | "delete"
   | "clear"
   | "download"
@@ -487,6 +488,8 @@ export type BrowserArtifactFailureReason =
   | "payload_too_large"
   | "quota_exceeded"
   | "artifact_not_found"
+  | "artifact_conflict"
+  | "invalid_archive"
   | "storage_failed"
   | "serialization_failed"
   | "corrupt_index"
@@ -560,6 +563,19 @@ export interface BrowserArtifactArchiveExport {
   blob: Blob | null;
   contentType: "application/json";
   filename: string;
+}
+
+export interface BrowserArtifactArchiveImportOptions {
+  /** Existing IDs are rejected unless replacement is explicitly selected. */
+  conflict?: "fail" | "replace";
+}
+
+export interface BrowserArtifactArchiveImportResult {
+  /** Imported records, newest first, with sequences allocated by this store. */
+  artifacts: BrowserArtifactRecord[];
+  evictedArtifactIds: string[];
+  totalArtifacts: number;
+  totalBytes: number;
 }
 
 export interface BrowserArtifactOperationDiagnostics {
@@ -6697,6 +6713,14 @@ function browserArtifactFailureGuidance(reason: BrowserArtifactFailureReason): s
       return [
         "Call listArtifacts() before export or download when artifact IDs may have been evicted by retention policy.",
       ];
+    case "artifact_conflict":
+      return [
+        "Import into a fresh artifact namespace or explicitly select conflict: 'replace' to replace matching IDs.",
+      ];
+    case "invalid_archive":
+      return [
+        "Import a complete, unmodified schema-version-1 archive returned by exportArchive().",
+      ];
     case "corrupt_index":
       return [
         "Call clearArtifacts() to reset the browser artifact store if the persisted index is no longer readable.",
@@ -6771,14 +6795,19 @@ function sumBrowserArtifactBytes(entries: BrowserArtifactIndexEntry[]): number {
 }
 
 function isBrowserBinaryValue(value: unknown): value is BrowserStorageValue {
-  return (
-    value instanceof Uint8Array ||
-    value instanceof ArrayBuffer ||
-    ArrayBuffer.isView(value) ||
-    (Array.isArray(value) &&
-      value.every(
-        (item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 255,
-      ))
+  if (value instanceof Uint8Array || value instanceof ArrayBuffer || ARRAY_BUFFER_IS_VIEW(value)) {
+    return true;
+  }
+  // An iframe's ArrayBuffer has a different constructor identity. Use the
+  // same intrinsic brand check as BrowserStorage's byte normalizer.
+  if (ARRAY_BUFFER_BYTE_LENGTH_GETTER) {
+    try {
+      Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GETTER, value, []);
+      return true;
+    } catch { /* Not an ArrayBuffer. */ }
+  }
+  return Array.isArray(value) && value.every(
+    (item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 255,
   );
 }
 
@@ -7721,6 +7750,169 @@ export class BrowserArtifactStore {
       contentType: "application/json",
       filename: `asupersync-browser-artifacts-${this.namespace}.json`,
     };
+  }
+
+  /**
+   * Restore an exported archive into this namespace using this store's policy.
+   * Validation and byte ownership precede storage admission. Imported artifacts
+   * are admitted together; retention can evict older destination records only.
+   */
+  async importArchive(
+    archive: BrowserArtifactArchive | string | Uint8Array | ArrayBuffer,
+    options: BrowserArtifactArchiveImportOptions = {},
+  ): Promise<BrowserArtifactArchiveImportResult> {
+    const conflict = options.conflict ?? "fail";
+    let prepared: { artifact: BrowserArtifactRecord; bytes: Uint8Array }[];
+    let importedBytes = 0;
+    try {
+      if (conflict !== "fail" && conflict !== "replace") {
+        throw new TypeError("archive conflict policy must be fail or replace");
+      }
+      let candidate: unknown = archive;
+      if (typeof archive === "string") {
+        candidate = JSON.parse(archive);
+      } else if (isBrowserBinaryValue(archive)) {
+        const ctor = browserStorageGlobals(this.storage.globalObject)?.TextDecoder ?? TextDecoder;
+        candidate = JSON.parse(new ctor("utf-8", { fatal: true }).decode(
+          normalizeBrowserStorageValue(archive),
+        ));
+      }
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+        throw new TypeError("browser artifact archive must be an object");
+      }
+      const source = candidate as Partial<BrowserArtifactArchive>;
+      if (source.schemaVersion !== 1 || typeof source.namespace !== "string" ||
+          normalizeBrowserStorageNamespace(source.namespace) !== source.namespace ||
+          !Array.isArray(source.artifacts)) {
+        throw new TypeError("browser artifact archive schema mismatch");
+      }
+      const retention = source.retention;
+      if (typeof retention !== "object" || retention === null ||
+          ![retention.maxArtifacts, retention.maxTotalBytes, retention.maxArtifactBytes]
+            .every((value) => Number.isSafeInteger(value) && value > 0) ||
+          (retention.quotaStrategy !== "fail" && retention.quotaStrategy !== "evict_oldest")) {
+        throw new TypeError("browser artifact archive retention metadata is invalid");
+      }
+      // Source retention is descriptive; it cannot enlarge destination quotas.
+      if (source.artifacts.length > this.retention.maxArtifacts) {
+        throw this.operationError("import_archive", "quota_exceeded",
+          "the complete archive exceeds the destination artifact count limit");
+      }
+      const ids = new Set<string>();
+      const sequences = new Set<number>();
+      prepared = Array.from(source.artifacts, (entry) => {
+        if (typeof entry !== "object" || entry === null ||
+            typeof entry.artifact !== "object" || entry.artifact === null ||
+            typeof entry.payloadBase64 !== "string") {
+          throw new TypeError("browser artifact archive entry is missing record or payload fields");
+        }
+        const record = entry.artifact;
+        if (typeof record.id !== "string" || normalizeBrowserArtifactId(record.id) !== record.id ||
+            ids.has(record.id) || !Number.isSafeInteger(record.sequence) || record.sequence < 0 ||
+            sequences.has(record.sequence) || !Number.isSafeInteger(record.byteLength) || record.byteLength < 0 ||
+            (record.kind !== "trace" && record.kind !== "crashpack" && record.kind !== "evidence" && record.kind !== "custom") ||
+            (record.format !== "binary" && record.format !== "json" && record.format !== "text") ||
+            typeof record.filename !== "string" || typeof record.contentType !== "string" ||
+            !Array.isArray(record.tags) || !Array.from(record.tags).every((tag) => typeof tag === "string")) {
+          throw new TypeError("browser artifact archive contains invalid or duplicate record metadata");
+        }
+        if (record.byteLength > this.retention.maxArtifactBytes || record.byteLength > this.retention.maxTotalBytes) {
+          throw this.operationError("import_archive", "payload_too_large",
+            "an archived payload exceeds the destination artifact byte limit", record.id);
+        }
+        if (record.byteLength > this.retention.maxTotalBytes - importedBytes) {
+          throw this.operationError("import_archive", "quota_exceeded",
+            "the complete archive exceeds the destination total byte limit");
+        }
+        importedBytes += record.byteLength;
+        const encoded = entry.payloadBase64;
+        // The archive format is canonical unpadded Base64url. Check encoded
+        // size before allocating decoded payloads, including with permissive hosts.
+        if (encoded.length !== Math.ceil(record.byteLength * 4 / 3) ||
+            !/^[A-Za-z0-9_-]*$/u.test(encoded)) {
+          throw new TypeError("browser artifact archive payload encoding or byte length is invalid");
+        }
+        const bytes = decodeBrowserStorageBytes(encoded, this.storage.globalObject);
+        if (bytes === null || bytes.byteLength !== record.byteLength ||
+            encodeBrowserStorageBytes(bytes, this.storage.globalObject) !== encoded) {
+          throw new TypeError("browser artifact archive payload is not canonical Base64url");
+        }
+        ids.add(record.id);
+        sequences.add(record.sequence);
+        return { artifact: {
+          id: record.id, kind: record.kind, format: record.format,
+          filename: normalizeBrowserArtifactFilename(record.kind, record.id, record.format, record.filename),
+          contentType: record.contentType, byteLength: bytes.byteLength,
+          sequence: record.sequence, tags: normalizeBrowserArtifactTags(record.tags),
+        }, bytes };
+      });
+      prepared.sort((left, right) => left.artifact.sequence - right.artifact.sequence);
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error &&
+          error.code === BROWSER_ARTIFACT_OPERATION_FAILED_CODE) throw error;
+      throw this.operationError("import_archive", "invalid_archive", errorMessage(error));
+    }
+
+    return this.transaction("import_archive", "readwrite", (transaction, finish) => {
+      transaction.get(BROWSER_ARTIFACT_INDEX_KEY, (raw) => {
+        const index = this.readIndex(raw, "import_archive");
+        const importedIds = new Set(prepared.map((entry) => entry.artifact.id));
+        const collision = index.entries.find((entry) => importedIds.has(entry.id));
+        if (collision && conflict === "fail") {
+          throw this.operationError("import_archive", "artifact_conflict",
+            `browser artifact ${collision.id} already exists in the destination`, collision.id);
+        }
+        if (prepared.length > Number.MAX_SAFE_INTEGER - index.nextSequence) {
+          throw this.operationError("import_archive", "corrupt_index", "browser artifact sequence space is exhausted");
+        }
+        const retained = index.entries.filter((entry) => !importedIds.has(entry.id))
+          .sort((left, right) => left.sequence - right.sequence);
+        const evicted: BrowserArtifactIndexEntry[] = [];
+        let retainedBytes = sumBrowserArtifactBytes(retained);
+        if (this.retention.quotaStrategy === "evict_oldest" && prepared.length > 0) {
+          while (retained.length + prepared.length > this.retention.maxArtifacts ||
+                 retainedBytes > this.retention.maxTotalBytes - importedBytes) {
+            const oldest = retained.shift();
+            if (!oldest) break;
+            evicted.push(oldest);
+            retainedBytes -= oldest.byteLength;
+          }
+        }
+        if (prepared.length > 0 && (retained.length + prepared.length > this.retention.maxArtifacts ||
+            retainedBytes > this.retention.maxTotalBytes - importedBytes)) {
+          throw this.operationError("import_archive", "quota_exceeded",
+            "importing this archive would exceed the destination retention policy");
+        }
+        const imported = prepared.map(({ artifact }, offset): BrowserArtifactIndexEntry => {
+          const sequence = index.nextSequence + offset + 1;
+          return { ...artifact, sequence,
+            payloadKey: `artifact:${sequence.toString().padStart(6, "0")}:${encodeBrowserStorageSegment(artifact.id, this.storage.globalObject)}`,
+          };
+        });
+        const nextIndex: BrowserArtifactIndex = {
+          schemaVersion: BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION,
+          nextSequence: index.nextSequence + imported.length,
+          retention: this.retention,
+          entries: [...retained, ...imported].sort((left, right) => right.sequence - left.sequence),
+        };
+        if (imported.length > 0) {
+          const retainedIds = new Set(retained.map((entry) => entry.id));
+          const stale = index.entries.filter((entry) => !retainedIds.has(entry.id));
+          if (stale.length > 0) {
+            this.writeIndex(transaction, { ...nextIndex, entries: retained }, true);
+          }
+          for (const entry of stale) transaction.delete(entry.payloadKey);
+          imported.forEach((entry, offset) => transaction.set(entry.payloadKey, prepared[offset]!.bytes));
+          this.writeIndex(transaction, nextIndex);
+        }
+        finish({
+          artifacts: imported.reverse().map(stripBrowserArtifactRecord),
+          evictedArtifactIds: evicted.map((entry) => entry.id),
+          totalArtifacts: nextIndex.entries.length,
+          totalBytes: retainedBytes + importedBytes,
+        });
+      });
+    });
   }
 
   async deleteArtifact(id: string): Promise<boolean> {

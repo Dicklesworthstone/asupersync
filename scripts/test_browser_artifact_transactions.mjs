@@ -17,7 +17,7 @@ import { createRequire, stripTypeScriptTypes } from "node:module";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
+import { createContext, runInNewContext, SourceTextModule, SyntheticModule } from "node:vm";
 
 const sdkPath = process.env.ASUPERSYNC_BROWSER_SDK_SOURCE
   ?? fileURLToPath(new URL("../packages/browser/src/index.ts", import.meta.url));
@@ -501,7 +501,215 @@ for (const backend of ["localstorage", "indexeddb"]) {
       assert.deepEqual(ids(await consistent(store)), ["original"]);
     }
   });
+
+  test(`${backend}: exported archives restore binary, JSON, and text into a fresh namespace`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "capture");
+    await source.persistArtifact({ kind: "custom", id: "binary", value: new Uint8Array([0, 255, 128]), filename: "frame.bin", tags: ["raw"] });
+    await source.persistTraceRecord({ seed: 37, events: ["cancel", "drained"] }, { id: "trace" });
+    await source.persistArtifact({ kind: "evidence", id: "text", value: "recovered \u{1f30d}", filename: "evidence.txt" });
+    const exported = await source.exportArchive();
+    const foreignBuffer = runInNewContext("new Uint8Array(bytes).buffer", { bytes: Array.from(exported.bytes) });
+    assert.equal(foreignBuffer instanceof ArrayBuffer, false, "exercise a separate realm's buffer brand");
+    for (const [name, value] of [["object", exported.archive], ["bytes", exported.bytes], ["text", bytesText(exported.bytes)], ["buffer", exported.bytes.buffer], ["foreign-buffer", foreignBuffer]]) {
+      const target = env.store({}, `restored-${name}`);
+      const result = await target.importArchive(value);
+      assert.deepEqual(ids(result.artifacts), ["binary", "text", "trace"]);
+      assert.deepEqual(Array.from(result.evictedArtifactIds), []);
+      assert.equal(result.totalArtifacts, 3);
+      assert.equal(result.totalBytes, exported.archive.artifacts.reduce((sum, entry) => sum + entry.artifact.byteLength, 0));
+      const restored = await target.exportArchive();
+      assert.deepEqual(JSON.parse(JSON.stringify(restored.archive.artifacts)), JSON.parse(JSON.stringify(exported.archive.artifacts)));
+      assert.equal(restored.archive.namespace, `restored-${name}`);
+      await consistent(target);
+    }
+    await consistent(source);
+  });
+
+  test(`${backend}: archive conflicts require an explicit replacement and rebase imported sequences`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "capture");
+    await source.persistArtifact(custom("older", "older imported bytes"));
+    await source.persistArtifact(custom("same", "replacement"));
+    const archive = (await source.exportArchive()).archive;
+    const target = env.store();
+    await target.persistArtifact(custom("same", "original"));
+    await target.persistArtifact(custom("untouched"));
+    await assert.rejects(target.importArchive(archive), (error) => artifactError(error, "artifact_conflict"));
+    assert.equal(bytesText((await target.exportArtifact("same")).bytes), "original");
+    const result = await target.importArchive(archive, { conflict: "replace" });
+    assert.deepEqual(Array.from(result.artifacts, (entry) => [entry.id, entry.sequence]), [["same", 4], ["older", 3]]);
+    assert.equal(bytesText((await target.exportArtifact("same")).bytes), "replacement");
+    assert.deepEqual(ids(await consistent(target)), ["older", "same", "untouched"]);
+  });
+
+  test(`${backend}: archive admission honors destination quotas without discarding imported entries`, async () => {
+    const env = await environment(backend);
+    const source = env.store({ maxArtifacts: 5 }, "capture");
+    await source.persistArtifact(custom("first"));
+    await source.persistArtifact(custom("second"));
+    const archive = (await source.exportArchive()).archive;
+    const target = env.store({ maxArtifacts: 2 });
+    await target.persistArtifact(custom("oldest"));
+    await target.persistArtifact(custom("latest"));
+    const result = await target.importArchive(archive);
+    assert.deepEqual(Array.from(result.evictedArtifactIds), ["oldest", "latest"]);
+    assert.deepEqual(ids(await consistent(target)), ["first", "second"]);
+    const tooSmall = env.store({ maxArtifacts: 1 }, "too-small");
+    await tooSmall.persistArtifact(custom("kept"));
+    await assert.rejects(tooSmall.importArchive(archive), (error) => artifactError(error, "quota_exceeded"));
+    assert.deepEqual(ids(await consistent(tooSmall)), ["kept"]);
+    const fail = env.store({ maxArtifacts: 2, quotaStrategy: "fail" }, "fail-quota");
+    await fail.persistArtifact(custom("kept"));
+    await assert.rejects(fail.importArchive(archive), (error) => artifactError(error, "quota_exceeded"));
+    assert.deepEqual(ids(await consistent(fail)), ["kept"]);
+  });
+
+  test(`${backend}: malformed archive entries fail before any storage mutation`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "capture");
+    await source.persistArtifact(custom("one"));
+    await source.persistArtifact(custom("two"));
+    const exported = (await source.exportArchive()).archive;
+    const target = env.store();
+    await target.persistArtifact(custom("kept"));
+    const cases = [
+      (archive) => { archive.schemaVersion = 2; },
+      (archive) => { archive.artifacts[1].payloadBase64 = "%"; },
+      (archive) => { archive.artifacts[1].payloadBase64 = "b25l="; },
+      (archive) => { archive.artifacts[1].artifact.byteLength += 1; },
+      (archive) => { archive.artifacts[1].artifact.id = archive.artifacts[0].artifact.id; },
+      (archive) => { archive.artifacts[1].artifact.sequence = archive.artifacts[0].artifact.sequence; },
+      (archive) => { archive.artifacts[1].artifact.tags = [null]; },
+      (archive) => { archive.artifacts[1].artifact.kind = "unknown"; },
+    ];
+    for (const mutate of cases) {
+      const archive = JSON.parse(JSON.stringify(exported));
+      mutate(archive);
+      await assert.rejects(target.importArchive(archive), (error) => artifactError(error, "invalid_archive"));
+      assert.deepEqual(ids(await consistent(target)), ["kept"]);
+    }
+    await assert.rejects(target.importArchive("{bad-json"), (error) => artifactError(error, "invalid_archive"));
+    assert.deepEqual(ids(await consistent(target)), ["kept"]);
+  });
+
+  test(`${backend}: archive payload limits are checked against the destination before decoding`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "capture");
+    await source.persistArtifact(custom("large", "x".repeat(300)));
+    const archive = (await source.exportArchive()).archive;
+    const target = env.store({ maxArtifactBytes: 256 });
+    await target.persistArtifact(custom("kept"));
+    await assert.rejects(target.importArchive(archive), (error) => artifactError(error, "payload_too_large"));
+    assert.deepEqual(ids(await consistent(target)), ["kept"]);
+  });
+
+  test(`${backend}: sparse object archives cannot publish missing records or tags`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "capture");
+    await source.persistArtifact(custom("new"));
+    const exported = (await source.exportArchive()).archive;
+    const target = env.store();
+    await target.persistArtifact(custom("kept"));
+    for (const mutate of [
+      (archive) => { archive.artifacts.length += 1; },
+      (archive) => { archive.artifacts[0].artifact.tags = new Array(1); },
+    ]) {
+      const archive = JSON.parse(JSON.stringify(exported));
+      mutate(archive);
+      await assert.rejects(target.importArchive(archive), (error) => artifactError(error, "invalid_archive"));
+      assert.deepEqual(ids(await consistent(target)), ["kept"]);
+    }
+  });
+
+  test(`${backend}: aggregate archive bytes cannot raise destination limits through source metadata`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "capture");
+    await source.persistArtifact(custom("first", "x".repeat(600)));
+    await source.persistArtifact(custom("second", "y".repeat(600)));
+    const archive = (await source.exportArchive()).archive;
+    const target = env.store({ maxArtifactBytes: 1024, maxTotalBytes: 1024 });
+    await target.persistArtifact(custom("kept"));
+    await assert.rejects(target.importArchive(archive), (error) => artifactError(error, "quota_exceeded"));
+    assert.deepEqual(ids(await consistent(target)), ["kept"]);
+    assert.equal(target.retentionPolicy().maxTotalBytes, 1024);
+  });
+
+  test(`${backend}: empty archives are a no-op and exhausted sequences reject complete imports`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "capture");
+    const empty = (await source.exportArchive()).archive;
+    const target = env.store();
+    await target.persistArtifact(custom("kept"));
+    const before = await target.storage.get(target.namespace, "__artifact_index__");
+    const result = await target.importArchive(empty);
+    assert.equal(result.artifacts.length, 0);
+    assert.equal(result.totalArtifacts, 1);
+    assert.deepEqual(await target.storage.get(target.namespace, "__artifact_index__"), before);
+    await source.persistArtifact(custom("new"));
+    const index = JSON.parse(bytesText(before));
+    index.nextSequence = Number.MAX_SAFE_INTEGER;
+    await target.storage.set(target.namespace, "__artifact_index__", new TextEncoder().encode(JSON.stringify(index)));
+    await assert.rejects(target.importArchive((await source.exportArchive()).archive), (error) => artifactError(error, "corrupt_index"));
+    assert.deepEqual(ids(await consistent(target)), ["kept"]);
+  });
+
+  test(`${backend}: a failed multi-artifact import rolls back replacement and eviction together`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "capture");
+    await source.persistArtifact(custom("same", "replacement"));
+    await source.persistArtifact(custom("new", "new payload"));
+    const archive = (await source.exportArchive()).archive;
+    const target = env.store({ maxArtifacts: 2 });
+    await target.persistArtifact(custom("old", "retained on failure"));
+    await target.persistArtifact(custom("same", "original"));
+    let payloadWrites = 0;
+    env.failSet((key) => key?.startsWith("artifact:") && ++payloadWrites === 2);
+    await assert.rejects(target.importArchive(archive, { conflict: "replace" }), (error) => artifactError(error, "quota_exceeded"));
+    assert.deepEqual(ids(await consistent(target)), ["old", "same"]);
+    assert.equal(bytesText((await target.exportArtifact("same")).bytes), "original");
+    const result = await target.importArchive(archive, { conflict: "replace" });
+    assert.deepEqual(ids(result.artifacts), ["new", "same"]);
+    assert.deepEqual(ids(await consistent(target)), ["new", "same"]);
+  });
+
+  test(`${backend}: concurrent archive and single-artifact admission share one sequence and quota frontier`, async () => {
+    const env = await environment(backend);
+    const source = env.store({}, "capture");
+    await source.persistArtifact(custom("one"));
+    await source.persistArtifact(custom("two"));
+    const archive = (await source.exportArchive()).archive;
+    const target = env.store({ maxArtifacts: 2, quotaStrategy: "fail" });
+    const results = await Promise.allSettled([target.importArchive(archive), env.store({ maxArtifacts: 2, quotaStrategy: "fail" }).persistArtifact(custom("other"))]);
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    artifactError(results.find((result) => result.status === "rejected").reason, "quota_exceeded");
+    const records = await consistent(target);
+    assert.ok(JSON.stringify(ids(records)) === '["one","two"]' || JSON.stringify(ids(records)) === '["other"]');
+    assert.equal(new Set(records.map((record) => record.sequence)).size, records.length);
+  });
 }
+
+test("localstorage: archive input is owned before waiting for the cross-tab lock", async () => {
+  const env = await environment("localstorage");
+  const source = env.store({}, "capture");
+  await source.persistArtifact({ ...custom("original", "accepted bytes"), tags: ["accepted"] });
+  const archive = (await source.exportArchive()).archive;
+  let release;
+  const lock = new Promise((resolve) => { release = resolve; });
+  env.host.navigator = { locks: { request: (_name, _options, callback) => lock.then(callback) } };
+  const target = env.store();
+  const pending = target.importArchive(archive);
+  archive.artifacts[0].artifact.id = "mutated";
+  archive.artifacts[0].artifact.tags.push("mutated");
+  archive.artifacts[0].payloadBase64 = "bXV0YXRlZA";
+  archive.artifacts.length = 0;
+  release();
+  const result = await pending;
+  assert.deepEqual(ids(result.artifacts), ["original"]);
+  assert.deepEqual(Array.from(result.artifacts[0].tags), ["accepted"]);
+  assert.equal(bytesText((await target.exportArtifact("original")).bytes), "accepted bytes");
+  await consistent(target);
+});
 
 test("localstorage: independent SDK realms share the origin lock and snapshot request bytes", async () => {
   const env = await environment("localstorage");

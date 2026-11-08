@@ -775,9 +775,37 @@ Operational rules:
 
 - `BrowserArtifactStore` is explicit. Nothing is persisted unless application
   or tooling code calls `persistTraceRecord()`, `persistCrashArtifact()`, or
-  `persistEvidenceArtifact()`.
+  `persistEvidenceArtifact()`, or restores an archive with `importArchive()`.
 - `exportArtifact()` and `exportArchive()` work in main-thread and
   dedicated-worker runtimes because they return bytes/Blob-oriented payloads.
+- `importArchive()` accepts the archive object, JSON text, `Uint8Array`, or
+  `ArrayBuffer` produced by `exportArchive()`. It restores into the destination
+  store's namespace and applies the destination retention policy; the source
+  namespace and policy are descriptive metadata. For example:
+
+  ```ts
+  const exported = await captureStore.exportArchive();
+  const recovered = new BrowserArtifactStore({ namespace: "incident-review" });
+  const result = await recovered.importArchive(exported.bytes);
+  // For an intentional same-ID replacement:
+  await recovered.importArchive(exported.archive, { conflict: "replace" });
+  ```
+
+  Existing IDs fail with `artifact_conflict` by default. Malformed archives,
+  duplicate IDs/sequences, noncanonical Base64url, and payload length mismatches
+  fail with `invalid_archive` before writes. Imports retain the complete input
+  set or fail admission: `evict_oldest` may evict destination records, while
+  `fail` leaves them intact. Payload limits apply before decoding; byte quotas
+  count payloads, as they do for ordinary persistence. The result reports
+  imported records, evicted IDs, and destination totals. Imported records receive
+  fresh destination sequences preserving their relative source order.
+
+  IndexedDB commits all imported payloads and the index in one transaction.
+  localStorage uses the existing staged-index and rollback protocol with Web
+  Locks where available. It does not provide multi-key crash atomicity: browser
+  termination during replacement may lose reclaimed destination artifacts or
+  leave unindexed new payloads, but never publishes references to missing bytes.
+  Restoring bytes does not itself execute or validate a runtime replay.
 - `downloadArtifact()` and `downloadArchive()` are intentionally limited to
   browser main-thread DOM runtimes with `document` and `URL.createObjectURL()`.
 
