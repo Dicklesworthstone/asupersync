@@ -8,7 +8,6 @@ use std::task::{Context, Poll};
 
 use crate::config::RaptorQConfig;
 use crate::cx::Cx;
-use crate::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
 use crate::encoding::{EncodingPipeline, max_object_size};
 use crate::error::{Error, ErrorKind};
 use crate::observability::Metrics;
@@ -19,6 +18,16 @@ use crate::transport::sink::SymbolSink;
 use crate::transport::stream::SymbolStream;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams};
+
+mod receive_session;
+mod receive_state;
+mod send_session;
+mod session;
+
+pub use receive_session::RaptorQReceiveSession;
+pub use send_session::{RaptorQSendSession, RaptorQSymbolSendSession};
+
+use receive_state::ReceiveState;
 
 /// Outcome of a send operation.
 #[derive(Debug, Clone)]
@@ -136,6 +145,10 @@ pub struct RaptorQSender<T> {
     transport: T,
     security: Option<SecurityContext>,
     metrics: Option<Metrics>,
+    // A borrowing session owns the iterator over this encoder. Keeping its
+    // backing storage here avoids a self-referential session or collecting all
+    // encoded symbols before the transport can apply backpressure.
+    async_encoder: Option<EncodingPipeline>,
 }
 
 impl<T: SymbolSink + Unpin> RaptorQSender<T> {
@@ -151,12 +164,16 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
             transport,
             security,
             metrics,
+            async_encoder: None,
         }
     }
 
     /// Encodes data and sends symbols through the transport.
     ///
     /// The capability context is checked for cancellation at each symbol boundary.
+    /// This compatibility API polls each transport step only once and returns an
+    /// error when a step is pending. Use [`Self::start_send_object`] for an
+    /// asynchronous transport with backpressure and resumable progress.
     #[allow(clippy::result_large_err)]
     pub fn send_object(
         &mut self,
@@ -164,42 +181,7 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
         object_id: ObjectId,
         data: &[u8],
     ) -> Result<SendOutcome, Error> {
-        // Keep sender-side validation aligned with the encoder/decoder byte contract:
-        // an object may span up to 256 source blocks because SBN is u8.
-        let max_size = max_object_size(self.config.encoding.max_block_size) as u64;
-        if data.len() as u64 > max_size {
-            return Err(Error::data_too_large(data.len() as u64, max_size));
-        }
-
-        // Encode.
-        let total_repair_symbols = compute_total_repair_count(
-            data.len(),
-            self.config.encoding.max_block_size,
-            self.config.encoding.symbol_size as usize,
-            self.config.encoding.repair_overhead,
-        );
-        // Pool max_size must accommodate all source + repair symbols for this
-        // object. The configured pool_size is a hint for pre-allocation, but
-        // the actual need depends on the data length.
-        let sym_size = self.config.encoding.symbol_size as usize;
-        let source_count = if sym_size == 0 {
-            0
-        } else {
-            data.len().div_ceil(sym_size)
-        };
-        let (pool_initial, pool_max) = sender_pool_bounds(
-            self.config.resources.symbol_pool_size,
-            source_count,
-            total_repair_symbols,
-        );
-        let pool = SymbolPool::new(PoolConfig {
-            symbol_size: self.config.encoding.symbol_size,
-            initial_size: pool_initial,
-            max_size: pool_max,
-            allow_growth: true,
-            growth_increment: 64,
-        });
-        let mut encoder = EncodingPipeline::new(self.config.encoding.clone(), pool);
+        let mut encoder = prepare_encoder(&self.config, data.len())?;
         let symbol_iter = encoder.encode(object_id, data);
 
         // Collect encoded symbols, sign them, and transmit.
@@ -238,6 +220,10 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
     }
 
     /// Sends pre-encoded authenticated symbols.
+    ///
+    /// This compatibility API requires each transport poll to complete
+    /// immediately. Use [`Self::start_send_symbols`] to await readiness and flush
+    /// while retaining iterator progress across dropped waits.
     #[allow(clippy::result_large_err)]
     pub fn send_symbols(
         &mut self,
@@ -311,149 +297,25 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
     ///
     /// Reads symbols from the source until enough are collected to
     /// decode, then returns the reconstructed data.
+    /// This compatibility API returns an error if a source poll is pending. Use
+    /// [`Self::start_receive_object`] to await an asynchronous source and retain
+    /// authenticated decode progress across dropped waits.
     #[allow(clippy::result_large_err)]
     pub fn receive_object(
         &mut self,
         cx: &Cx,
         params: &ObjectParams,
     ) -> Result<ReceiveOutcome, Error> {
-        let decoding_config = DecodingConfig {
-            symbol_size: self.config.encoding.symbol_size,
-            max_block_size: self.config.encoding.max_block_size,
-            repair_overhead: self.config.encoding.repair_overhead,
-            // Authenticate target-object symbols at the receiver boundary so
-            // strict mode fails closed before decode and ReceiveOutcome can
-            // report whether consumed symbols were actually verified.
-            verify_auth: false,
-            // Let `set_object_params` size the per-block accept cap to K (via
-            // `configure_auto_buffer_limit`). The fixed default (8192) does NOT
-            // scale with K, so for a valid large-K config (e.g. symbol_size 64,
-            // 1 MiB blocks -> K=16384) it would reject legitimately-received
-            // symbols past 8192 and starve the decoder. Mirrors what the live
-            // QUIC/RQ transports already pass.
-            max_buffered_symbols: 0,
-            ..Default::default()
-        };
-
-        let mut decoder = DecodingPipeline::new(decoding_config);
-
-        decoder.set_object_params(*params).map_err(Error::from)?;
-
-        // br-asupersync-x7ad3b: honor the parsed SecurityConfig on the live
-        // receive path. Resolve the effective authentication context: an
-        // explicit builder-supplied context wins; otherwise derive one from the
-        // configured `auth_key_seed` + `auth_mode` so those knobs actually
-        // authenticate symbols instead of being phantom controls. When
-        // `reject_unauthenticated` is set and a context IS active, every
-        // consumed symbol must verify or we fail CLOSED before it can poison the
-        // decode matrix. (When no auth material is available anywhere the
-        // erasure-only / integrity-vs-manifest behavior is preserved unchanged —
-        // hardening this no-key default is the larger e880xo transport change.)
-        // br-asupersync-x7ad3b: a config-derived context is owned for the whole
-        // call; the per-symbol verify below borrows `self.security` OR this
-        // local only within each iteration (never across the `&mut self.source`
-        // read) to keep the disjoint field borrows clean.
-        let config_security = self.config.security.build_context();
-        let has_auth_material = self.security.is_some() || config_security.is_some();
-        let reject_unauthenticated = self.config.security.reject_unauthenticated
-            && self
-                .security
-                .as_ref()
-                .or(config_security.as_ref())
-                .is_some_and(|ctx| ctx.mode() == AuthMode::Strict);
-
-        let mut symbols_received = 0usize;
-        let mut authenticated = has_auth_material;
-        let mut authentication = ReceiveAuthenticationSummary::default();
-
-        // Read symbols until decoding completes.
-        while !decoder.is_complete() {
+        let mut receive = ReceiveState::new(&self.config, self.security.as_ref(), params, false)?;
+        while !receive.is_complete() {
             cx.checkpoint()?;
-
-            if let Some(mut auth_symbol) = poll_next_blocking(&mut self.source)? {
-                // Skip symbols for other objects.
-                if auth_symbol.symbol().object_id() != params.object_id {
-                    // ubs:ignore - object_id is not a secret
-                    continue;
-                }
-
-                // Explicit builder-supplied context wins; otherwise fall back to
-                // the context derived from the configured `auth_key_seed` +
-                // `auth_mode` so those knobs actually authenticate symbols
-                // instead of being phantom controls.
-                let symbol_verified =
-                    if let Some(ctx) = self.security.as_ref().or(config_security.as_ref()) {
-                        if let Err(err) = ctx.verify_authenticated_symbol(&mut auth_symbol) {
-                            if let Some(ref mut m) = self.metrics {
-                                m.counter("raptorq.auth_rejected").increment();
-                            }
-                            return Err(Error::new(ErrorKind::CorruptedSymbol)
-                                .with_message(err.to_string()));
-                        }
-                        auth_symbol.is_verified()
-                    } else {
-                        false
-                    };
-                let symbol_authentication_state = auth_symbol.authentication_state();
-
-                // br-asupersync-x7ad3b: reject_unauthenticated enforcement. With
-                // auth material available (explicit or config-derived) the
-                // operator has the means to authenticate, so an unverified
-                // symbol is a hard failure rather than a silently-accepted one.
-                // We fail CLOSED before feeding it into the decode matrix.
-                if reject_unauthenticated && has_auth_material && !symbol_verified {
-                    if let Some(ref mut m) = self.metrics {
-                        m.counter("raptorq.auth_rejected").increment();
-                    }
-                    return Err(Error::new(ErrorKind::CorruptedSymbol).with_message(
-                        "symbol rejected: reject_unauthenticated=true and symbol \
-                         did not authenticate",
-                    ));
-                }
-
-                match decoder.feed(auth_symbol).map_err(Error::from)? {
-                    SymbolAcceptResult::Accepted { .. }
-                    | SymbolAcceptResult::DecodingStarted { .. }
-                    | SymbolAcceptResult::BlockComplete { .. } => {
-                        authenticated &= symbol_verified;
-                        authentication.record(symbol_authentication_state);
-                        symbols_received += 1;
-                        if let Some(ref mut m) = self.metrics {
-                            m.counter("raptorq.symbols_received").increment();
-                        }
-                    }
-                    SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed) => {
-                        if let Some(ref mut m) = self.metrics {
-                            m.counter("raptorq.auth_rejected").increment();
-                        }
-                        return Err(Error::new(ErrorKind::CorruptedSymbol)
-                            .with_message("symbol authentication failed during receive"));
-                    }
-                    SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_) => {
-                        // Not used for decoding; keep waiting for usable symbols.
-                    }
-                }
+            if let Some(auth_symbol) = poll_next_blocking(&mut self.source)? {
+                receive.accept(auth_symbol, &mut self.metrics)?;
             } else {
-                let progress = decoder.progress();
-                return Err(Error::insufficient_symbols(
-                    usize_to_u32_saturating(progress.symbols_received),
-                    usize_to_u32_saturating(progress.symbols_needed_estimate),
-                ));
+                return Err(receive.insufficient_symbols());
             }
         }
-
-        let data = decoder.into_data().map_err(Error::from)?;
-
-        if let Some(ref mut m) = self.metrics {
-            m.counter("raptorq.objects_received").increment();
-        }
-
-        Ok(ReceiveOutcome {
-            data,
-            symbols_received,
-            authenticated,
-            authentication,
-        })
+        receive.finish(&mut self.metrics)
     }
 
     /// Returns a reference to the config.
@@ -473,6 +335,53 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
 // =========================================================================
 // Helpers
 // =========================================================================
+
+#[allow(clippy::result_large_err)]
+fn prepare_encoder(config: &RaptorQConfig, data_len: usize) -> Result<EncodingPipeline, Error> {
+    // SBN is u8, so the encoder/decoder contract permits up to 256 blocks.
+    let max_size = max_object_size(config.encoding.max_block_size) as u64;
+    if data_len as u64 > max_size {
+        return Err(Error::data_too_large(data_len as u64, max_size));
+    }
+    let symbol_size = usize::from(config.encoding.symbol_size);
+    let source_count = if symbol_size == 0 {
+        0
+    } else {
+        data_len.div_ceil(symbol_size)
+    };
+    let repairs = compute_total_repair_count(
+        data_len,
+        config.encoding.max_block_size,
+        symbol_size,
+        config.encoding.repair_overhead,
+    );
+    let (initial_size, max_size) =
+        sender_pool_bounds(config.resources.symbol_pool_size, source_count, repairs);
+    let pool = SymbolPool::new(PoolConfig {
+        symbol_size: config.encoding.symbol_size,
+        initial_size,
+        max_size,
+        allow_growth: true,
+        growth_increment: 64,
+    });
+    Ok(EncodingPipeline::new(config.encoding.clone(), pool))
+}
+
+#[allow(clippy::result_large_err)]
+fn required_security(
+    config: &RaptorQConfig,
+    explicit: Option<&SecurityContext>,
+) -> Result<SecurityContext, Error> {
+    explicit
+        .cloned()
+        .or_else(|| config.security.build_context())
+        .map(|security| security.with_mode(AuthMode::Strict))
+        .ok_or_else(|| {
+            Error::new(ErrorKind::ConfigError).with_message(
+                "asynchronous RaptorQ sessions require an explicit SecurityContext or configured authentication key",
+            )
+        })
+}
 
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
@@ -652,7 +561,8 @@ fn poll_send_blocking<T: SymbolSink + Unpin>(
             Err(Error::new(ErrorKind::DispatchFailed).with_message(e.to_string()))
         }
         Poll::Pending => {
-            // Phase 0: sim transports are always ready; real async comes later.
+            // The synchronous compatibility helper intentionally cannot await
+            // readiness. Asynchronous callers use the retained send session.
             Err(Error::new(ErrorKind::SinkRejected)
                 .with_message("transport not ready (sync context)"))
         }
@@ -695,3 +605,6 @@ fn poll_next_blocking<S: SymbolStream + Unpin>(
 #[cfg(test)]
 #[path = "pipeline_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod session_tests;
