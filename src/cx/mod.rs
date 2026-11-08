@@ -77,6 +77,7 @@ pub mod scoped_cpu;
 pub mod scoped_first_ok;
 pub mod scoped_fs;
 pub mod scoped_hedge;
+pub mod scoped_join;
 pub mod scoped_quorum;
 pub mod scoped_race;
 pub mod scoped_retry;
@@ -139,6 +140,10 @@ pub use scoped_fs::{ScopedFs, ScopedFsError};
 pub use scoped_hedge::{
     ScopedHedgeBranch, ScopedHedgeBranchReport, ScopedHedgeClose, ScopedHedgeError, ScopedHedgeReport,
     ScopedHedgeStop, ScopedHedgeTask,
+};
+pub use scoped_join::{
+    MAX_SCOPED_JOIN_BRANCHES, ScopedJoinAttempt, ScopedJoinClose, ScopedJoinError,
+    ScopedJoinPairReport, ScopedJoinReport, ScopedJoinStop, ScopedJoinTask,
 };
 pub use scoped_quorum::{
     MAX_SCOPED_QUORUM_BRANCHES, ScopedQuorumAttempt, ScopedQuorumClose, ScopedQuorumError,
