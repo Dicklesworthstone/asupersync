@@ -7777,6 +7777,439 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mysql_io_budget_deadlines_keep_distinct_clocks_armed_after_masking() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountWakes(AtomicUsize);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for phase in [
+            ParkedIoPhase::Read,
+            ParkedIoPhase::Write,
+            ParkedIoPhase::Flush,
+        ] {
+            for (caller_epoch, owner_epoch) in [(100, 10_000), (10_000, 100)] {
+                let caller_clock =
+                    Arc::new(VirtualClock::starting_at(Time::from_secs(caller_epoch)));
+                let caller_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&caller_clock));
+                let owner_clock =
+                    Arc::new(VirtualClock::starting_at(Time::from_secs(owner_epoch)));
+                let owner_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&owner_clock));
+                let make_cx = |task, timer, deadline| {
+                    Cx::new_with_drivers(
+                        RegionId::new_for_test(0, 1),
+                        TaskId::new_for_test(task, 0),
+                        Budget::new().with_deadline(deadline),
+                        None,
+                        None,
+                        None,
+                        Some(timer),
+                        None,
+                    )
+                };
+                let caller = make_cx(
+                    1,
+                    caller_timer.clone(),
+                    Time::from_secs(caller_epoch) + Duration::from_millis(300),
+                );
+                let owner = make_cx(
+                    2,
+                    owner_timer.clone(),
+                    Time::from_secs(owner_epoch) + Duration::from_millis(100),
+                );
+                let _current = Cx::set_current(Some(owner.clone()));
+                let (parked_tx, parked_rx) = mpsc::channel();
+                let mut stream = SilentIo {
+                    phase,
+                    parked: Some(parked_tx),
+                };
+                let mut buf = [0_u8; 8];
+                let mut operation = Box::pin(async {
+                    match phase {
+                        ParkedIoPhase::Read => {
+                            read_exact_from(Some(&caller), &mut stream, &mut buf).await
+                        }
+                        ParkedIoPhase::Write | ParkedIoPhase::Flush => {
+                            write_all_to(Some(&caller), &mut stream, &buf).await
+                        }
+                    }
+                });
+                let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+                let waker = Waker::from(Arc::clone(&wakes));
+                let mut task_cx = Context::from_waker(&waker);
+                owner.masked(|| {
+                    assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+                    parked_rx.try_recv().expect("the transport returned Pending");
+                    assert_eq!(caller_timer.pending_count(), 1, "caller timer is armed");
+                    assert_eq!(owner_timer.pending_count(), 1, "owner timer is armed");
+
+                    owner_clock.advance(100_000_000);
+                    assert_eq!(owner_timer.process_timers(), 1);
+                    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+                    assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+                    assert!(owner_timer.is_empty(), "the masked timer is retired");
+                    assert_eq!(caller_timer.pending_count(), 1);
+                    assert!(!caller.is_cancel_requested());
+                    let before = wakes.0.load(Ordering::SeqCst);
+                    assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+                    assert_eq!(wakes.0.load(Ordering::SeqCst), before, "no expiry spin");
+
+                    caller_clock.advance(300_000_000);
+                    assert_eq!(caller_timer.process_timers(), 1);
+                    assert!(wakes.0.load(Ordering::SeqCst) > before);
+                    assert!(matches!(
+                        operation.as_mut().poll(&mut task_cx),
+                        Poll::Ready(Err(MySqlError::Cancelled(reason)))
+                            if reason.kind == CancelKind::Deadline
+                                && Some(reason.clone()) == caller.cancel_reason()
+                    ));
+                });
+                assert!(caller_timer.is_empty());
+                assert!(owner_timer.is_empty());
+                assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                eprintln!(
+                    "event=mysql_io_deadline phase={phase:?} caller_epoch={caller_epoch} \
+                     owner_epoch={owner_epoch} transport_parked=true \
+                     masked_owner_retired=true caller_woke=true registrations_retired=true"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_io_unmask_wakes_after_the_budget_timer_is_consumed() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountWakes(AtomicUsize);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let caller = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(1, 0),
+            Budget::INFINITE.with_deadline(Time::from_millis(100)),
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(Cx::for_testing()));
+        let mut stream = NeverReadyStream;
+        let mut buf = [0_u8; 8];
+        let mut operation = Box::pin(read_exact_from(Some(&caller), &mut stream, &mut buf));
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+        let before_unmask = caller.masked(|| {
+            assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+            clock.advance_to(Time::from_millis(100));
+            assert_eq!(timer.process_timers(), 1);
+            assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+            assert!(timer.is_empty(), "masked expiry consumes its timer");
+            assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 1);
+            let before = wakes.0.load(Ordering::SeqCst);
+            assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(wakes.0.load(Ordering::SeqCst), before);
+            before
+        });
+        assert!(
+            wakes.0.load(Ordering::SeqCst) > before_unmask,
+            "unmask must wake the parked read after its only timer was consumed"
+        );
+        assert!(matches!(
+            operation.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(MySqlError::Cancelled(reason))) if reason.kind == CancelKind::Deadline
+        ));
+        assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+        assert!(timer.is_empty());
+    }
+
+    #[test]
+    fn mysql_io_deadlines_preserve_the_clock_when_time_capability_is_restricted() {
+        use crate::cx::cap::CapSet;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        type IoOnly = CapSet<false, false, false, true, false>;
+        struct CountWakes(AtomicUsize);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for explicit_caller in [true, false] {
+            let epoch = Time::from_secs(10_000);
+            let deadline = epoch + Duration::from_millis(100);
+            let clock = Arc::new(VirtualClock::starting_at(epoch));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let full = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE.with_deadline(deadline),
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let restricted = {
+                let _restriction = full.restrict::<IoOnly>().set_current_restricted();
+                Cx::current().expect("capability-filtered context")
+            };
+            assert!(restricted.timer_driver().is_none());
+            assert!(restricted.has_timer());
+            let _current = Cx::set_current(Some(if explicit_caller {
+                Cx::for_testing()
+            } else {
+                restricted.clone()
+            }));
+            let caller = explicit_caller.then_some(&restricted);
+            let mut stream = NeverReadyStream;
+            let mut buf = [0_u8; 8];
+            let mut operation = Box::pin(read_exact_from(caller, &mut stream, &mut buf));
+            let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(timer.next_deadline(), Some(deadline));
+            assert_eq!(timer.pending_count(), 1, "the checkpoint clock owns the wake");
+            clock.advance_to(deadline);
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            assert!(matches!(
+                operation.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(MySqlError::Cancelled(reason)))
+                    if reason.kind == CancelKind::Deadline
+            ));
+            assert!(restricted.timer_driver().is_none(), "TIME remains restricted");
+            assert!(timer.is_empty());
+            assert!(restricted.inner.read().cancel_waker_registrations.is_empty());
+            eprintln!(
+                "event=mysql_restricted_deadline explicit_caller={explicit_caller} \
+                 checkpoint_clock_used=true time_capability_granted=false outcome=CancelledDeadline"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_io_driverless_deadline_uses_its_own_clock_without_replacing_transport_owner() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+
+        for expired in [false, true] {
+            let now = crate::time::raw_wall_now();
+            let caller = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(1, 0),
+                Budget::new().with_deadline(if expired {
+                    now
+                } else {
+                    now + Duration::from_secs(3_600)
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let foreign_clock = Arc::new(VirtualClock::starting_at(if expired {
+                Time::ZERO
+            } else {
+                now + Duration::from_secs(86_400)
+            }));
+            let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock);
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(2, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(foreign_timer.clone()),
+                None,
+            );
+            let _current = Cx::set_current(Some(owner.clone()));
+            let mut stream = NeverReadyStream;
+            let mut buf = [0_u8; 8];
+            let mut operation = Box::pin(read_exact_from(
+                Some(&caller),
+                &mut stream,
+                &mut buf,
+            ));
+            let result = operation.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            if expired {
+                assert!(matches!(
+                    result,
+                    Poll::Ready(Err(MySqlError::Cancelled(reason)))
+                        if reason.kind == CancelKind::Deadline
+                ));
+            } else {
+                assert!(
+                    result.is_pending(),
+                    "a foreign future epoch cannot expire the caller"
+                );
+                assert!(!caller.is_cancel_requested());
+            }
+            assert_eq!(Cx::current().unwrap().task_id(), owner.task_id());
+            assert!(
+                foreign_timer.is_empty(),
+                "no deadline may bind to the foreign timer"
+            );
+            drop(operation);
+            assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mysql_native_request_deadline_wakes_silent_authentication_and_ping() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, Time};
+
+        for workers in [1, 2] {
+            for authenticating in [true, false] {
+                let server_waiting = Arc::new(crate::sync::Notify::new());
+                let peer_waiting = Arc::clone(&server_waiting);
+                let peer = PoolResetPeer::start(move |peer| {
+                    if authenticating {
+                        let capabilities = capability::CLIENT_PROTOCOL_41
+                            | capability::CLIENT_SECURE_CONNECTION
+                            | capability::CLIENT_PLUGIN_AUTH
+                            | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+                            | capability::CLIENT_TRANSACTIONS;
+                        peer.write_all(&handshake_packet_bytes(capabilities))
+                            .unwrap();
+                        let (sequence, response) = read_native_kat_peer_packet(peer);
+                        assert_eq!(sequence, 1);
+                        assert!(response.ends_with(b"caching_sha2_password\0"));
+                    } else {
+                        pool_reset_peer_auth(peer, false);
+                        pool_reset_peer_command(peer, command::COM_PING, &[]);
+                    }
+                    // No response, EOF, or readiness signal can end the wait.
+                    peer_waiting.notify_one();
+                    pool_reset_peer_eof(peer);
+                });
+                let mut options = peer.options(None);
+                options.connect_timeout = Some(Duration::from_secs(30));
+                let clock = Arc::new(VirtualClock::new());
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let runtime = pool_reset_runtime_with_timer(workers, Some(timer.clone()));
+                let deadline = Time::from_millis(100);
+                let caller =
+                    runtime.request_cx_with_budget(Budget::INFINITE.with_deadline(deadline));
+                let task_caller = caller.clone();
+                let (parked_tx, parked_rx) = mpsc::channel();
+                let (done_tx, done_rx) = mpsc::channel();
+                let controller_timer = timer.clone();
+                let controller = std::thread::spawn(move || {
+                    let parked = parked_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+                    let armed = controller_timer.next_deadline() == Some(deadline);
+                    clock.advance_to(deadline);
+                    let _ = controller_timer.process_timers();
+                    let completed = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+                    if !completed {
+                        // Failure-only watchdog: release the old implementation
+                        // through the outer bound, without supplying socket data.
+                        clock.advance_to(Time::from_secs(10));
+                        let _ = controller_timer.process_timers();
+                    }
+                    (parked, armed, completed)
+                });
+                let (result, retired) = runtime.block_on(runtime.handle().spawn(async move {
+                    let owner = Cx::current().expect("native MySQL deadline owner");
+                    let result = crate::time::timeout(owner.now(), Duration::from_secs(5), async {
+                        let exchange = async {
+                            if authenticating {
+                                MySqlConnection::connect_with_options(&task_caller, options)
+                                    .await
+                                    .map(|_| ())
+                            } else {
+                                let mut connection = match MySqlConnection::connect_with_options(
+                                    &owner, options,
+                                )
+                                .await
+                                {
+                                    Outcome::Ok(connection) => connection,
+                                    outcome => return outcome.map(|_| ()),
+                                };
+                                connection.ping(&task_caller).await
+                            }
+                        };
+                        let mut exchange = std::pin::pin!(exchange);
+                        let mut waiting = std::pin::pin!(server_waiting.notified());
+                        let mut parked_tx = Some(parked_tx);
+                        std::future::poll_fn(|task_cx| {
+                            let result = exchange.as_mut().poll(task_cx);
+                            if result.is_pending()
+                                && parked_tx.is_some()
+                                && waiting.as_mut().poll(task_cx).is_ready()
+                            {
+                                // The native transport returned Pending after
+                                // its peer reached the exact withheld response.
+                                parked_tx.take().unwrap().send(()).unwrap();
+                            }
+                            result
+                        })
+                        .await
+                    })
+                    .await;
+                    let retired = task_caller
+                        .inner
+                        .read()
+                        .cancel_waker_registrations
+                        .is_empty()
+                        && owner.inner.read().cancel_waker_registrations.is_empty();
+                    let _ = done_tx.send(());
+                    (result, retired)
+                }));
+                let witness = controller.join().expect("deadline controller");
+                peer.finish();
+                assert_eq!(
+                    witness,
+                    (true, true, true),
+                    "workers={workers} authenticating={authenticating}: parked, armed, completed"
+                );
+                assert!(
+                    matches!(result, Ok(Outcome::Cancelled(ref reason))
+                        if reason.kind == CancelKind::Deadline
+                            && Some(reason.clone()) == caller.cancel_reason()),
+                    "workers={workers} authenticating={authenticating} result={result:?}"
+                );
+                assert!(retired, "both owners' wait registrations must be retired");
+                assert!(
+                    timer.is_empty(),
+                    "connection and owner deadline timers are retired"
+                );
+                assert_pool_reset_drained(&runtime);
+                eprintln!(
+                    "event=mysql_native_deadline workers={workers} authenticating={authenticating} \
+                     transport_parked=true deadline_armed=true outcome=CancelledDeadline \
+                     registrations_retired=true runtime=Quiescent"
+                );
+            }
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn mysql_native_connect_observes_both_owners_after_authentication_parks() {

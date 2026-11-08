@@ -43,7 +43,7 @@ use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll};
 
 // ============================================================================
 // Error Types
@@ -2889,13 +2889,17 @@ fn outcome_from_error<T>(err: MySqlError) -> Outcome<T, MySqlError> {
 /// cancellation takes precedence, but supplying it must not hide cancellation
 /// of the ambient task that owns the connection's work.
 fn io_cancel_reason(cx: Option<&Cx>) -> Option<CancelReason> {
-    if let Some(cx) = cx
-        && cx.checkpoint().is_err()
-    {
-        return Some(
-            cx.cancel_reason()
-                .unwrap_or_else(|| CancelReason::user("cancelled")),
-        );
+    if let Some(cx) = cx {
+        // A driverless caller's deadline belongs to the process clock, not
+        // a virtual clock supplied by the task polling this exchange. Scope
+        // this override to the checkpoint, preserving transport authority.
+        let _caller = (!cx.has_timer()).then(|| Cx::set_current(Some(cx.clone())));
+        if cx.checkpoint().is_err() {
+            return Some(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
     }
     Cx::with_current(|c| {
         if c.checkpoint().is_err() {
@@ -3025,19 +3029,40 @@ fn contains_sql_token(sql_lower: &str, pattern: &str) -> bool {
 /// owned `Cx` handle once so refresh and drop-time clear target the same
 /// context. Normal exchanges register both their explicit caller and ambient
 /// owner without replacing the ambient context or its capability restrictions.
+///
+/// A request context can carry a deadline without having been admitted as a
+/// runtime task, so no runtime deadline monitor necessarily wakes it. Each
+/// guard also arms that context's deadline in its own clock domain. Keeping
+/// separate timers preserves the other owner's wake if one deadline expires
+/// while its cancellation is masked.
 struct CancelWakerGuard {
     cx: Option<Cx>,
     token: Option<CancelWakerToken>,
+    deadline: Option<crate::time::Sleep>,
 }
 
 impl CancelWakerGuard {
     fn new(cx: Option<Cx>) -> Self {
-        Self { cx, token: None }
+        let deadline = cx.as_ref().and_then(Cx::budget_deadline_sleep);
+        Self {
+            cx,
+            token: None,
+            deadline,
+        }
     }
 
-    fn refresh(&mut self, waker: &Waker) {
+    fn refresh(&mut self, task_cx: &mut Context<'_>) {
         if let Some(cx) = &self.cx {
-            self.token = Some(cx.refresh_cancel_waker(self.token, waker));
+            self.token = Some(cx.refresh_cancel_waker(self.token, task_cx.waker()));
+        }
+        if self
+            .deadline
+            .as_mut()
+            .is_some_and(|deadline| Pin::new(deadline).poll_deadline(task_cx).is_ready())
+        {
+            // Checkpoints classify expiry as cancellation. A masked owner
+            // may keep waiting, without repeatedly polling an elapsed timer.
+            self.deadline = None;
         }
     }
 }
@@ -3070,8 +3095,8 @@ where
     while pos < buf.len() {
         let mut read_buf = ReadBuf::new(&mut buf[pos..]);
         std::future::poll_fn(|task_cx| {
-            caller_cancel_wake.refresh(task_cx.waker());
-            owner_cancel_wake.refresh(task_cx.waker());
+            caller_cancel_wake.refresh(task_cx);
+            owner_cancel_wake.refresh(task_cx);
             if let Some(reason) = io_cancel_reason(cx) {
                 return Poll::Ready(Err(MySqlError::Cancelled(reason)));
             }
@@ -3100,8 +3125,8 @@ where
     let mut owner_cancel_wake = CancelWakerGuard::new(Cx::current());
     while pos < data.len() {
         let written = std::future::poll_fn(|task_cx| {
-            caller_cancel_wake.refresh(task_cx.waker());
-            owner_cancel_wake.refresh(task_cx.waker());
+            caller_cancel_wake.refresh(task_cx);
+            owner_cancel_wake.refresh(task_cx);
             if let Some(reason) = io_cancel_reason(cx) {
                 return Poll::Ready(Err(MySqlError::Cancelled(reason)));
             }
@@ -3121,8 +3146,8 @@ where
     }
     // TLS can accept plaintext before its encrypted records reach the socket.
     std::future::poll_fn(|task_cx| {
-        caller_cancel_wake.refresh(task_cx.waker());
-        owner_cancel_wake.refresh(task_cx.waker());
+        caller_cancel_wake.refresh(task_cx);
+        owner_cancel_wake.refresh(task_cx);
         if let Some(reason) = io_cancel_reason(cx) {
             return Poll::Ready(Err(MySqlError::Cancelled(reason)));
         }
@@ -3255,14 +3280,11 @@ impl MySqlConnection {
             }
             Outcome::Ok(conn)
         });
-        let mut cancel_wake = CancelWakerGuard {
-            cx: Some(cx.clone()),
-            token: None,
-        };
+        let mut cancel_wake = CancelWakerGuard::new(Some(cx.clone()));
         let mut owner_cancel_wake = CancelWakerGuard::new(Cx::current());
         std::future::poll_fn(|task_cx| {
-            cancel_wake.refresh(task_cx.waker());
-            owner_cancel_wake.refresh(task_cx.waker());
+            cancel_wake.refresh(task_cx);
+            owner_cancel_wake.refresh(task_cx);
             // Observe the driving task before installing the explicit caller.
             // Otherwise every nested socket wait registers only the caller,
             // and cancelling the owner leaves a silent handshake parked until
@@ -3580,12 +3602,9 @@ impl MySqlConnection {
                 .await
         };
         let mut exchange = std::pin::pin!(crate::time::timeout(cx.now(), bound, exchange));
-        let mut cancel_wake = CancelWakerGuard {
-            cx: Some(cx.clone()),
-            token: None,
-        };
+        let mut cancel_wake = CancelWakerGuard::new(Some(cx.clone()));
         std::future::poll_fn(|task_cx| {
-            cancel_wake.refresh(task_cx.waker());
+            cancel_wake.refresh(task_cx);
             if cx.checkpoint().is_err() {
                 return Poll::Ready(Err(MySqlError::Cancelled(
                     cx.cancel_reason()

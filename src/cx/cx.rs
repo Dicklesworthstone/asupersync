@@ -3964,6 +3964,23 @@ impl<Caps> Cx<Caps> {
         self.recycle_cancel_waker(retired_waker);
     }
 
+    /// Creates an owned wake for this context's budget deadline.
+    ///
+    /// Internal enforcement uses the same clock as `checkpoint`, even when
+    /// the public time capability has been restricted. This exposes neither a
+    /// driver handle nor an arbitrary caller-selected deadline. Completion
+    /// only wakes the operation; its checkpoint still controls cancellation
+    /// acknowledgement and masking.
+    #[cfg(feature = "mysql")]
+    pub(crate) fn budget_deadline_sleep(&self) -> Option<crate::time::Sleep> {
+        self.budget()
+            .deadline
+            .map(|deadline| match self.handles.timer_driver.clone() {
+                Some(driver) => crate::time::Sleep::with_timer_driver(deadline, driver),
+                None => crate::time::Sleep::with_wall_clock(deadline),
+            })
+    }
+
     /// Arms a timer at this context's budget deadline that cancels it with
     /// [`CancelKind::Deadline`] and wakes its cancellation targets, so a task
     /// parked in a cancel-aware wait (channel receive, lock, semaphore) ends at
