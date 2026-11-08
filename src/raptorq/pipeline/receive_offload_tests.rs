@@ -56,7 +56,10 @@ fn config() -> RaptorQConfig {
 
 fn encoded(data: &[u8]) -> (ObjectParams, Vec<AuthenticatedSymbol>) {
     let object = ObjectId::new(71, 9);
-    let config = config();
+    let mut config = config();
+    // The emitted erasure margin must still reach the receiver's 1.5 admission
+    // threshold after intentional source loss, including the final K=1 block.
+    config.encoding.repair_overhead = 3.0;
     let mut encoder = super::super::prepare_encoder(&config, data.len()).unwrap();
     let security = SecurityContext::new(AuthKey::from_seed(42));
     let symbols = encoder

@@ -553,7 +553,7 @@ pub struct MultipathPathStats {
     pub sent_symbols: u64,
     /// Symbols covered by a successful local downstream flush.
     pub flushed_symbols: u64,
-    /// Never-attempted symbols moved from this failed path to another path.
+    /// Symbols known unaccepted moved from this failed path to another path.
     pub reassigned_symbols: u64,
     /// Whether the path has returned a terminal error.
     pub failed: bool,
@@ -566,10 +566,10 @@ pub struct MultipathPathStats {
 pub struct MultipathPendingSymbol {
     /// The original authenticated symbol.
     pub symbol: AuthenticatedSymbol,
-    /// Whether downstream `poll_send` was already invoked for this symbol.
+    /// Whether downstream `poll_send` may have accepted this symbol.
     ///
     /// When true, replay can duplicate an operation with an unknown outcome.
-    /// Only false entries are known never to have crossed that boundary.
+    /// False includes a normal `Pending`, which promises no acceptance.
     pub attempted: bool,
 }
 
@@ -584,6 +584,15 @@ struct MultipathOutput {
     error: Option<SinkError>,
     ready: bool,
     closed: bool,
+    polling: Option<MultipathPollPhase>,
+}
+
+#[derive(Clone, Copy)]
+enum MultipathPollPhase {
+    Ready,
+    Send,
+    Flush,
+    Close,
 }
 
 /// Bounded, opt-in source striping and repair routing over real symbol sinks.
@@ -607,10 +616,16 @@ struct MultipathOutput {
 /// flush or close polls continue driving it. Dropping the sink itself releases
 /// its retained work, just like [`BufferedSink`]; there are no hidden tasks.
 ///
-/// A path failure before any downstream send attempt permits reassignment of
-/// that queued symbol. An attempted send or an unflushed acceptance is never
-/// replayed automatically. Such a failure prevents new admission, while flush
-/// and close still drain healthy paths before reporting the failure. The exact
+/// A path failure before downstream acceptance permits reassignment of that
+/// queued symbol, including after a normal `Pending`. A send error, caught
+/// send panic, or unflushed acceptance is never replayed automatically. Such a
+/// failure prevents new admission, while flush and close still drain healthy
+/// paths before reporting the failure. Cancellation, including I/O
+/// `Interrupted`, instead stops all admission and data dispatch immediately;
+/// it never becomes path failover. Explicit close can still close remaining
+/// providers, which may flush bytes they already own, but does not dispatch
+/// retained symbols. A caught provider panic quarantines that provider from
+/// all further calls, including close. The exact
 /// path error remains available through [`Self::path_error`], and
 /// [`Self::into_paths`] preserves remaining symbols and their uncertainty.
 pub struct MultipathSink {
@@ -622,6 +637,7 @@ pub struct MultipathSink {
     closing: bool,
     closed: bool,
     close_failed: bool,
+    cancellation: Option<SinkError>,
 }
 
 impl std::fmt::Debug for MultipathSink {
@@ -666,6 +682,7 @@ impl MultipathSink {
             closing: false,
             closed: false,
             close_failed: false,
+            cancellation: None,
         })
     }
 
@@ -693,6 +710,7 @@ impl MultipathSink {
             error: None,
             ready: false,
             closed: false,
+            polling: None,
         });
         self.paths.sort_by_key(|path| path.id);
         self.reset_credits();
@@ -818,7 +836,9 @@ impl MultipathSink {
     }
 
     fn terminal_error(&self) -> Option<SinkError> {
-        if self.paths.iter().any(|path| path.stats.outcome_uncertain) {
+        if let Some(error) = self.cancellation.as_ref() {
+            Self::copy_cancellation(error)
+        } else if self.paths.iter().any(|path| path.stats.outcome_uncertain) {
             Some(Self::failure(
                 "multipath downstream outcome is uncertain; inspect path_error",
             ))
@@ -831,9 +851,35 @@ impl MultipathSink {
         }
     }
 
+    fn copy_cancellation(error: &SinkError) -> Option<SinkError> {
+        match error {
+            SinkError::Cancelled => Some(SinkError::Cancelled),
+            SinkError::Io { source } if source.kind() == std::io::ErrorKind::Interrupted => {
+                Some(SinkError::Io {
+                    source: std::io::Error::new(source.kind(), source.to_string()),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn quarantine_panics(&mut self) {
+        for path in &mut self.paths {
+            // A phase left behind means caller-controlled code unwound before
+            // reporting its outcome. Never call that provider again, even for
+            // close, or after a different path has cancelled the transfer.
+            if let Some(phase) = path.polling.take() {
+                path.closed = true;
+                self.close_failed |= matches!(phase, MultipathPollPhase::Close);
+                Self::mark_failed(path, Self::failure("multipath provider panicked"));
+            }
+        }
+    }
+
     /// Poll every usable path so one blocked path cannot hide another's wake.
     fn drive(&mut self, cx: &mut Context<'_>) {
-        if self.paths.is_empty() {
+        self.quarantine_panics();
+        if self.paths.is_empty() || self.cancellation.is_some() {
             return;
         }
         let mut yielded = false;
@@ -849,10 +895,18 @@ impl MultipathSink {
             path.ready = false;
             let mut sent_this_poll = 0;
             for _ in 0..16 {
-                match Pin::new(&mut *path.sink).poll_ready(cx) {
+                path.polling = Some(MultipathPollPhase::Ready);
+                let ready = Pin::new(&mut *path.sink).poll_ready(cx);
+                path.polling = None;
+                match ready {
                     Poll::Ready(Ok(())) => path.ready = true,
                     Poll::Ready(Err(error)) => {
+                        let cancellation = Self::copy_cancellation(&error);
                         Self::mark_failed(path, error);
+                        if let Some(error) = cancellation {
+                            self.cancellation = Some(error);
+                            return;
+                        }
                         break;
                     }
                     Poll::Pending => break,
@@ -869,7 +923,10 @@ impl MultipathSink {
                 // The original stays owned until the downstream result is
                 // known. A Pending send remains bound to this exact path.
                 front.attempted = true;
-                match Pin::new(&mut *path.sink).poll_send(cx, front.symbol.clone()) {
+                path.polling = Some(MultipathPollPhase::Send);
+                let result = Pin::new(&mut *path.sink).poll_send(cx, front.symbol.clone());
+                path.polling = None;
+                match result {
                     Poll::Ready(Ok(())) => {
                         path.queue.pop_front();
                         path.ready = false;
@@ -878,10 +935,20 @@ impl MultipathSink {
                         path.stats.unflushed_symbols += 1;
                     }
                     Poll::Ready(Err(error)) => {
+                        let cancellation = Self::copy_cancellation(&error);
                         Self::mark_failed(path, error);
+                        if let Some(error) = cancellation {
+                            self.cancellation = Some(error);
+                            return;
+                        }
                         break;
                     }
                     Poll::Pending => {
+                        // The sink contract promises that a normal Pending
+                        // did not accept this argument. A later path failure
+                        // may safely reroute it; errors and panics remain
+                        // uncertain and keep `attempted` set.
+                        front.attempted = false;
                         path.ready = false;
                         break;
                     }
@@ -891,7 +958,10 @@ impl MultipathSink {
                 continue;
             }
             if path.stats.unflushed_symbols != 0 {
-                match Pin::new(&mut *path.sink).poll_flush(cx) {
+                path.polling = Some(MultipathPollPhase::Flush);
+                let flushed = Pin::new(&mut *path.sink).poll_flush(cx);
+                path.polling = None;
+                match flushed {
                     Poll::Ready(Ok(())) => {
                         path.stats.flushed_symbols = path
                             .stats
@@ -902,14 +972,21 @@ impl MultipathSink {
                         // retained front whose send just returned Pending.
                         yielded |= !path.queue.is_empty();
                     }
-                    Poll::Ready(Err(error)) => Self::mark_failed(path, error),
+                    Poll::Ready(Err(error)) => {
+                        let cancellation = Self::copy_cancellation(&error);
+                        Self::mark_failed(path, error);
+                        if let Some(error) = cancellation {
+                            self.cancellation = Some(error);
+                            return;
+                        }
+                    }
                     Poll::Pending => {}
                 }
             }
             yielded |= sent_this_poll == 16 && !path.queue.is_empty();
         }
         self.next_start = (last_progress.unwrap_or(start) + 1) % self.paths.len();
-        // Only never-attempted symbols can cross paths after a failure. Take
+        // Only symbols known unaccepted can cross paths after a failure. Take
         // from the back: an uncertain front remains pinned and recoverable.
         let mut reassign_budget = 64;
         for offset in 0..self.paths.len() {
@@ -1014,6 +1091,11 @@ impl SymbolSink for MultipathSink {
         if !self.closed {
             self.drive(cx);
         }
+        if let Some(error) = self.cancellation.as_ref() {
+            // Healthy queued work must not hide an already observed owner
+            // cancellation behind Pending, or resume on a later flush.
+            return Poll::Ready(Err(Self::copy_cancellation(error).expect("stored cancellation")));
+        }
         if self.paths.iter().any(|path| {
             !path.stats.failed && (!path.queue.is_empty() || path.stats.unflushed_symbols != 0)
         }) {
@@ -1040,13 +1122,22 @@ impl SymbolSink for MultipathSink {
         }
         let mut pending = false;
         let mut failed = false;
-        for path in &mut self.paths {
+        let this = self.as_mut().get_mut();
+        for path in &mut this.paths {
             if path.closed {
                 continue;
             }
-            match Pin::new(&mut *path.sink).poll_close(cx) {
+            path.polling = Some(MultipathPollPhase::Close);
+            let closed = Pin::new(&mut *path.sink).poll_close(cx);
+            path.polling = None;
+            match closed {
                 Poll::Ready(Ok(())) => path.closed = true,
                 Poll::Ready(Err(error)) => {
+                    if this.cancellation.is_none() {
+                        // Record immediately: a later provider may panic
+                        // during cleanup, but cancellation remains sticky.
+                        this.cancellation = Self::copy_cancellation(&error);
+                    }
                     Self::mark_failed(path, error);
                     path.closed = true;
                     failed = true;
@@ -1054,11 +1145,11 @@ impl SymbolSink for MultipathSink {
                 Poll::Pending => pending = true,
             }
         }
-        self.close_failed |= failed;
+        this.close_failed |= failed;
         if pending {
             Poll::Pending
         } else {
-            self.closed = true;
+            this.closed = true;
             self.as_mut().poll_flush(cx)
         }
     }

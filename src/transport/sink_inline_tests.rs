@@ -256,6 +256,7 @@
         fail_flush: bool,
         close_ready: bool,
         fail_close: bool,
+        cancel_close: bool,
         sent: Vec<AuthenticatedSymbol>,
         sends: usize,
         closes: usize,
@@ -278,6 +279,7 @@
                 fail_flush: false,
                 close_ready: true,
                 fail_close: false,
+                cancel_close: false,
                 sent: Vec::new(),
                 sends: 0,
                 closes: 0,
@@ -336,6 +338,8 @@
                 Poll::Pending
             } else if state.fail_close {
                 Poll::Ready(Err(SinkError::Closed))
+            } else if state.cancel_close {
+                Poll::Ready(Err(SinkError::Cancelled))
             } else {
                 Poll::Ready(Ok(()))
             }
@@ -452,6 +456,302 @@
         assert_eq!(path.0.lock().sends, 3);
         assert_eq!(path.0.lock().sent.iter().map(|symbol| symbol.symbol().id().esi()).collect::<Vec<_>>(), vec![0, 1]);
         assert_eq!(sink.path_stats(PathId(1)).unwrap().flushed_symbols, 2);
+    }
+
+    struct PendingThenLost {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SymbolSink for PendingThenLost {
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            if self.attempts.load(Ordering::Acquire) == 0 { Poll::Ready(Ok(())) }
+            else { Poll::Ready(Err(SinkError::Closed)) }
+        }
+        fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>, _: AuthenticatedSymbol) -> Poll<Result<(), SinkError>> {
+            self.attempts.fetch_add(1, Ordering::AcqRel);
+            // The next readiness notification reports that this path was lost.
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn multipath_normal_pending_then_path_loss_reroutes_unaccepted_symbol_exactly_once() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let healthy = MultipathGate::new();
+        healthy.0.lock().ready = true;
+        let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(0), PendingThenLost { attempts: attempts.clone() }).unwrap();
+        sink.add_path(PathId(2), multipath_quality(500), healthy.clone()).unwrap();
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(8)), Poll::Ready(Ok(()))));
+        assert!(Pin::new(&mut sink).poll_flush(&mut cx).is_pending());
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert!(!sink.paths[0].queue[0].attempted, "normal Pending proves no acceptance");
+        let mut completed = false;
+        for _ in 0..4 {
+            if let Poll::Ready(result) = Pin::new(&mut sink).poll_flush(&mut cx) {
+                result.unwrap();
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "a surviving ready path must finish the retained symbol");
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        let failed = sink.path_stats(PathId(1)).unwrap();
+        assert!(failed.failed);
+        assert!(!failed.outcome_uncertain);
+        assert_eq!(failed.reassigned_symbols, 1);
+        assert_eq!(healthy.0.lock().sent.iter().map(|symbol| symbol.symbol().esi()).collect::<Vec<_>>(), [8]);
+        assert_eq!(sink.path_stats(PathId(2)).unwrap().flushed_symbols, 1);
+    }
+
+    struct PendingThenCancelled {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+        closes: Arc<std::sync::atomic::AtomicUsize>,
+        failure: Option<SinkError>,
+    }
+
+    impl SymbolSink for PendingThenCancelled {
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            let this = self.get_mut();
+            if this.attempts.load(Ordering::Acquire) == 0 {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Ready(Err(this.failure.take().expect("cancelled provider was polled again")))
+            }
+        }
+
+        fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>, _: AuthenticatedSymbol) -> Poll<Result<(), SinkError>> {
+            self.attempts.fetch_add(1, Ordering::AcqRel);
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            panic!("cancelled path has no accepted bytes to flush")
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            self.closes.fetch_add(1, Ordering::AcqRel);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn assert_multipath_cancellation(result: Poll<Result<(), SinkError>>, interrupted: bool) {
+        match result {
+            Poll::Ready(Err(SinkError::Cancelled)) if !interrupted => {}
+            Poll::Ready(Err(SinkError::Io { source })) if interrupted => {
+                assert_eq!(source.kind(), std::io::ErrorKind::Interrupted);
+                assert_eq!(source.to_string(), "owner cancelled");
+            }
+            other => panic!("expected terminal cancellation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multipath_pending_then_cancellation_preserves_every_queue_and_stops_failover() {
+        for interrupted in [false, true] {
+            let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let healthy = MultipathGate::new();
+            let requested = Arc::new(Mutex::new(None));
+            let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+            let failure = if interrupted {
+                SinkError::Io { source: std::io::Error::new(std::io::ErrorKind::Interrupted, "owner cancelled") }
+            } else { SinkError::Cancelled };
+            sink.add_path(PathId(1), multipath_quality(0), PendingThenCancelled {
+                attempts: attempts.clone(), closes: closes.clone(), failure: Some(failure),
+            }).unwrap();
+            sink.add_path(PathId(2), multipath_quality(500), PanickingPath {
+                inner: healthy.clone(), phase: requested.clone(),
+            }).unwrap();
+            let mut cx = Context::from_waker(Waker::noop());
+            for esi in [8, 9] {
+                assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(esi)), Poll::Ready(Ok(()))));
+            }
+            assert_eq!(attempts.load(Ordering::Acquire), 1);
+            assert_eq!(sink.path_stats(PathId(1)).unwrap().queued_symbols, 1);
+            assert_eq!(sink.path_stats(PathId(2)).unwrap().queued_symbols, 1);
+            // The healthy path is still blocked. Cancellation must be reported
+            // now, rather than hidden behind its retained queue's Pending.
+            assert_multipath_cancellation(Pin::new(&mut sink).poll_flush(&mut cx), interrupted);
+            match sink.path_error(PathId(1)).unwrap() {
+                SinkError::Cancelled => assert!(!interrupted),
+                SinkError::Io { source } => {
+                    assert!(interrupted);
+                    assert_eq!(source.kind(), std::io::ErrorKind::Interrupted);
+                    assert_eq!(source.to_string(), "owner cancelled");
+                }
+                other => panic!("original cancellation was replaced: {other:?}"),
+            }
+            healthy.0.lock().ready = true;
+            for _ in 0..2 {
+                assert_multipath_cancellation(Pin::new(&mut sink).poll_flush(&mut cx), interrupted);
+                assert_multipath_cancellation(Pin::new(&mut sink).poll_ready(&mut cx), interrupted);
+                assert_multipath_cancellation(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(10)), interrupted);
+            }
+            assert_eq!(attempts.load(Ordering::Acquire), 1);
+            assert_eq!(healthy.0.lock().sends, 0, "cancellation never resumes healthy queued data");
+            let failed = sink.path_stats(PathId(1)).unwrap();
+            assert!(failed.failed);
+            assert!(!failed.outcome_uncertain);
+            assert_eq!(failed.reassigned_symbols, 0);
+            // Explicit close may clean up owners, but even after cancellation
+            // a caught close panic must quarantine that provider permanently.
+            *requested.lock() = Some(MultipathPollPhase::Close);
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = Pin::new(&mut sink).poll_close(&mut cx);
+            })).is_err());
+            for _ in 0..2 {
+                assert_multipath_cancellation(Pin::new(&mut sink).poll_close(&mut cx), interrupted);
+            }
+            assert_eq!(closes.load(Ordering::Acquire), 1);
+            assert_eq!(healthy.0.lock().closes, 1);
+            assert_eq!(healthy.0.lock().sends, 0);
+            let parts = sink.into_paths().collect::<Vec<_>>();
+            for (part, esi) in parts.iter().zip([8, 9]) {
+                assert_eq!(part.2.len(), 1);
+                assert!(!part.2[0].attempted);
+                assert_eq!(part.2[0].symbol.symbol().esi(), esi);
+            }
+        }
+    }
+
+    struct PanickingPath {
+        inner: MultipathGate,
+        phase: Arc<Mutex<Option<MultipathPollPhase>>>,
+    }
+
+    impl PanickingPath {
+        fn after(&self, phase: MultipathPollPhase) {
+            let should_panic = {
+                let mut requested = self.phase.lock();
+                if requested.as_ref().is_some_and(|requested| std::mem::discriminant(requested) == std::mem::discriminant(&phase)) {
+                    *requested = None;
+                    true
+                } else { false }
+            };
+            assert!(!should_panic, "fixture provider panicked after its operation");
+        }
+    }
+
+    impl SymbolSink for PanickingPath {
+        fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            let result = Pin::new(&mut self.inner).poll_ready(cx);
+            self.after(MultipathPollPhase::Ready);
+            result
+        }
+        fn poll_send(mut self: Pin<&mut Self>, cx: &mut Context<'_>, symbol: AuthenticatedSymbol) -> Poll<Result<(), SinkError>> {
+            let result = Pin::new(&mut self.inner).poll_send(cx, symbol);
+            self.after(MultipathPollPhase::Send);
+            result
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            let result = Pin::new(&mut self.inner).poll_flush(cx);
+            self.after(MultipathPollPhase::Flush);
+            result
+        }
+        fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            let result = Pin::new(&mut self.inner).poll_close(cx);
+            self.after(MultipathPollPhase::Close);
+            result
+        }
+    }
+
+    #[test]
+    fn multipath_caught_provider_panics_quarantine_unknown_work_without_replay() {
+        for phase in [MultipathPollPhase::Ready, MultipathPollPhase::Send, MultipathPollPhase::Flush] {
+            let bad = MultipathGate::new();
+            let requested = Arc::new(Mutex::new(None));
+            let good = MultipathGate::new();
+            good.0.lock().ready = true;
+            let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+            sink.add_path(PathId(1), multipath_quality(0), PanickingPath { inner: bad.clone(), phase: requested.clone() }).unwrap();
+            sink.add_path(PathId(2), multipath_quality(500), good.clone()).unwrap();
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(4)), Poll::Ready(Ok(()))));
+            bad.0.lock().ready = true;
+            *requested.lock() = Some(phase);
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = Pin::new(&mut sink).poll_flush(&mut cx);
+            })).is_err());
+            let ready_panic = matches!(phase, MultipathPollPhase::Ready);
+            let mut outcome = None;
+            for _ in 0..4 {
+                if let Poll::Ready(result) = Pin::new(&mut sink).poll_flush(&mut cx) {
+                    outcome = Some(result);
+                    break;
+                }
+            }
+            assert_eq!(outcome.expect("quarantined path must terminate").is_ok(), ready_panic);
+            assert!(sink.path_stats(PathId(1)).unwrap().failed);
+            assert!(matches!(sink.path_error(PathId(1)), Some(SinkError::SendFailed { .. })));
+            assert_eq!(sink.path_stats(PathId(1)).unwrap().outcome_uncertain, !ready_panic);
+            assert_eq!(bad.0.lock().sends, if ready_panic { 0 } else { 1 });
+            assert_eq!(good.0.lock().sent.len(), if ready_panic { 1 } else { 0 });
+            let _ = Pin::new(&mut sink).poll_flush(&mut cx);
+            assert_eq!(bad.0.lock().sends, if ready_panic { 0 } else { 1 }, "unknown send/flush is never repeated");
+            assert!(Pin::new(&mut sink).poll_close(&mut cx).is_ready());
+            assert_eq!(bad.0.lock().closes, 0, "a panicked provider must not be called again for cleanup");
+            assert_eq!(good.0.lock().closes, 1);
+        }
+    }
+
+    #[test]
+    fn multipath_caught_close_panic_closes_healthy_paths_without_repeating_unknown_close() {
+        let bad = MultipathGate::new();
+        bad.0.lock().ready = true;
+        let good = MultipathGate::new();
+        good.0.lock().ready = true;
+        let requested = Arc::new(Mutex::new(Some(MultipathPollPhase::Close)));
+        let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(0), PanickingPath { inner: bad.clone(), phase: requested }).unwrap();
+        sink.add_path(PathId(2), multipath_quality(500), good.clone()).unwrap();
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut sink).poll_close(&mut cx);
+        })).is_err());
+        assert!(matches!(Pin::new(&mut sink).poll_close(&mut cx), Poll::Ready(Err(_))));
+        assert_eq!(bad.0.lock().closes, 1);
+        assert_eq!(good.0.lock().closes, 1);
+        assert!(matches!(Pin::new(&mut sink).poll_close(&mut cx), Poll::Ready(Err(_))));
+        assert_eq!(bad.0.lock().closes, 1);
+        assert_eq!(good.0.lock().closes, 1);
+    }
+
+    #[test]
+    fn multipath_close_cancellation_survives_a_later_provider_panic_and_prior_path_error() {
+        let bad = MultipathGate::new();
+        let good = MultipathGate::new();
+        good.0.lock().ready = true;
+        let mut sink = MultipathSink::new(2, 1, 1).unwrap();
+        sink.add_path(PathId(1), multipath_quality(0), bad.clone()).unwrap();
+        sink.add_path(PathId(2), multipath_quality(500), PanickingPath {
+            inner: good.clone(), phase: Arc::new(Mutex::new(Some(MultipathPollPhase::Close))),
+        }).unwrap();
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(Pin::new(&mut sink).poll_send(&mut cx, create_symbol(4)), Poll::Ready(Ok(()))));
+        { let mut state = bad.0.lock(); state.ready = true; state.fail_send = true; state.cancel_close = true; }
+        assert!(matches!(Pin::new(&mut sink).poll_flush(&mut cx), Poll::Ready(Err(_))));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut sink).poll_close(&mut cx);
+        })).is_err());
+        // The first provider's cancellation must survive unwinding through
+        // the next provider, even though its original send error is retained.
+        assert_multipath_cancellation(Pin::new(&mut sink).poll_flush(&mut cx), false);
+        assert_multipath_cancellation(Pin::new(&mut sink).poll_close(&mut cx), false);
+        assert!(matches!(sink.path_error(PathId(1)), Some(SinkError::SendFailed { .. })));
+        assert_eq!(bad.0.lock().sends, 1);
+        assert_eq!(bad.0.lock().closes, 1);
+        assert_eq!(good.0.lock().closes, 1);
+        assert_eq!(good.0.lock().sends, 0);
     }
 
     #[test]

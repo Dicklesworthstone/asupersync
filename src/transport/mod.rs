@@ -11,6 +11,7 @@ pub mod error;
 pub mod framed;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod half_close_conformance_tests;
+pub mod multipath_stream;
 pub mod router;
 pub mod sink;
 pub mod stream;
@@ -34,6 +35,9 @@ pub use deterministic::{
 };
 pub use error::{SinkError, StreamError};
 pub use framed::{FramedSymbolSink, FramedSymbolStream, SymbolFrameLimits};
+pub use multipath_stream::{
+    MultipathStreamLimits, MultipathStreamPathStats, MultipathSymbolStream,
+};
 pub use router::{
     BoundedLoadConfig, BoundedLoadDecision, BoundedLoadEndpointTelemetry,
     BoundedLoadRebalanceReason, DispatchConfig, DispatchError, DispatchResult, DispatchStrategy,
