@@ -5424,10 +5424,10 @@ function collapseTaskOutcome(outcome: BrowserOutcome<WasmValue>): BrowserOutcome
   return outcome as BrowserOutcome<void>;
 }
 
-function webTransportOperationTerminal(outcome: BrowserOutcome<WasmValue>): BrowserOutcome<never> {
+function webTransportOperationTerminal(outcome: BrowserOutcome<unknown>): BrowserOutcome<never> {
   return outcome.outcome === "ok"
     ? webTransportCancellationOutcome("webtransport_close", "WebTransport session completed.")
-    : outcome as BrowserOutcome<never>;
+    : outcome;
 }
 
 function currentWebTransportTerminal(state: BrowserWebTransportState): BrowserOutcome<never> | null {
@@ -5478,6 +5478,25 @@ function sameWebTransportTerminal(
     && expected.message === actual.message && expected.truncated === actual.truncated;
 }
 
+function snapshotWebTransportHandle(handle: HandleRef): WasmValue {
+  // Read caller-owned properties once before selecting a concrete ABI handle kind.
+  const { kind, slot, generation, owner_token } = handle;
+  switch (kind) {
+    case "runtime":
+      return Object.freeze({ kind, slot, generation, owner_token });
+    case "region":
+      return Object.freeze({ kind, slot, generation, owner_token });
+    case "task":
+      return Object.freeze({ kind, slot, generation, owner_token });
+    case "cancel_token":
+      return Object.freeze({ kind, slot, generation, owner_token });
+    case "fetch_request":
+      return Object.freeze({ kind, slot, generation, owner_token });
+    default:
+      throw new TypeError("unsupported WebTransport terminal handle kind");
+  }
+}
+
 function snapshotWebTransportTerminal(
   outcome: BrowserOutcome<WasmValue>,
   preserveCoreHandle = false,
@@ -5491,8 +5510,7 @@ function snapshotWebTransportTerminal(
       }
       else if (value && typeof value === "object" && !(preserveCoreHandle && value instanceof BaseHandle)) {
         const raw = value instanceof BaseHandle ? value.toJSON() : value;
-        value = Object.freeze({ kind: raw.kind, slot: raw.slot, generation: raw.generation,
-          owner_token: raw.owner_token }) as HandleRef;
+        value = snapshotWebTransportHandle(raw);
       }
       return Object.freeze({ outcome: "ok", value });
     }
@@ -6535,8 +6553,10 @@ export class WebTransportHandle {
 
     if (state.termination) return collapseTaskOutcome(settleWebTransportTask(core, state.termination.outcome, version));
     const kind = token.kind, cancellationMessage = token.message;
-    if (lookupWebTransportState(core) !== state) return invalidHandleOutcome("WebTransport owner closed while reading cancellation options");
-    if (state.termination) return collapseTaskOutcome(settleWebTransportTask(core, state.termination.outcome, version));
+    // Token getters may begin termination, so inspect a fresh state reference.
+    const currentState = lookupWebTransportState(core);
+    if (currentState !== state) return invalidHandleOutcome("WebTransport owner closed while reading cancellation options");
+    if (currentState.termination) return collapseTaskOutcome(settleWebTransportTask(core, currentState.termination.outcome, version));
     const cancelOutcome = taskCancel(
       {
         task: core,
