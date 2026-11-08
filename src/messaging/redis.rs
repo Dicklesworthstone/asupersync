@@ -18,7 +18,6 @@
 //! of polls, or from a task that is not cancelled.
 
 use crate::cx::{CancelWakerToken, Cx};
-use std::task::Waker;
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::sync::{GenericPool, Pool as _, PoolConfig, PoolError, PooledResource};
@@ -30,6 +29,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
 use std::time::Duration;
 
 /// Error type for Redis operations.
@@ -2642,6 +2642,13 @@ enum Resp3PushHandling {
     ReturnToPubSubCaller,
 }
 
+fn redis_checkpoint(cx: &Cx) -> Result<(), RedisError> {
+    // Driverless requests belong to the process clock. Only the checkpoint
+    // uses this override; socket polling retains the ambient task's authority.
+    let _caller = (!cx.has_timer()).then(|| Cx::set_current(Some(cx.clone())));
+    cx.checkpoint().map_err(|_| RedisError::Cancelled)
+}
+
 /// Registers exactly one cancellation-Waker on a `Cx` for the lifetime of a
 /// socket read loop (br-asupersync-r8n4qx).
 ///
@@ -2656,6 +2663,7 @@ enum Resp3PushHandling {
 struct CancelWakerGuard {
     cx: Cx,
     token: Option<CancelWakerToken>,
+    deadline: Option<crate::time::Sleep>,
 }
 
 impl CancelWakerGuard {
@@ -2663,11 +2671,25 @@ impl CancelWakerGuard {
         Self {
             cx: cx.clone(),
             token: None,
+            deadline: cx.budget_deadline_sleep(),
         }
     }
 
-    fn refresh(&mut self, waker: &Waker) {
-        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    fn refresh(&mut self, task_cx: &mut Context<'_>) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, task_cx.waker()));
+        if self
+            .deadline
+            .as_mut()
+            .is_some_and(|deadline| Pin::new(deadline).poll_deadline(task_cx).is_ready())
+        {
+            // A masked deadline still retains its cancellation registration
+            // for unmasking, without re-polling the completed timer.
+            self.deadline = None;
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        redis_checkpoint(&self.cx).is_err()
     }
 }
 
@@ -2682,14 +2704,15 @@ impl Drop for CancelWakerGuard {
 /// Keep both the explicit operation owner and the task driving its transport
 /// subscribed to cancellation. A caller context can differ from the ambient
 /// context during pooled connection creation, redirects, or Pub/Sub work.
-/// Neither context is installed here: ambient capability restrictions and
-/// cancellation masks continue to govern the underlying socket/TLS future.
+/// Ambient capability restrictions and cancellation masks continue to govern
+/// the underlying socket/TLS future; only checkpoint clock lookup is isolated.
 ///
 /// A budget deadline on either context is a cancellation source too, but
 /// `Cx::checkpoint` only notices an expired deadline when something polls.
-/// A timer armed for the earlier deadline re-polls a read or write parked on
-/// a silent server, so it fails with `Cancelled` at the deadline instead of
-/// waiting for the server or the OS TCP timeout (br-asupersync-798g1k).
+/// Each context owns a timer on its own clock. Absolute deadlines from
+/// different drivers cannot be sorted or interpreted on the ambient clock.
+/// Keeping both timers armed also lets the unmasked owner wake the call after
+/// the other owner's deadline expires under a mask (br-asupersync-798g1k).
 async fn redis_io<T, E>(
     cx: &Cx,
     future: impl Future<Output = Result<T, E>>,
@@ -2699,46 +2722,19 @@ where
 {
     let mut owner_cancel = CancelWakerGuard::new(cx);
     let mut driver_cancel = Cx::current().as_ref().map(CancelWakerGuard::new);
-    let mut deadlines: Vec<_> = [
-        cx.budget().deadline,
-        driver_cancel
-            .as_ref()
-            .and_then(|driver| driver.cx.budget().deadline),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    deadlines.sort_unstable();
-    // Latest first, so `pop` yields the next deadline to arm.
-    deadlines.reverse();
-    let mut deadline_timer = deadlines
-        .pop()
-        .map(|at| Box::pin(crate::time::sleep_until(at)));
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|task_cx| {
         // Register before checking. Cancellation may occur while a new Waker
         // is cloned, before its registration becomes visible to the publisher.
-        owner_cancel.refresh(task_cx.waker());
+        owner_cancel.refresh(task_cx);
         if let Some(driver) = driver_cancel.as_mut() {
-            driver.refresh(task_cx.waker());
-        }
-        // Arm (or re-arm) the deadline wakeup. A fired timer is replaced by
-        // the next deadline: the earlier one may not end the call (for
-        // example, the driving task is inside a masked section), and nothing
-        // else would wake a read parked on a silent server at the later one.
-        while deadline_timer
-            .as_mut()
-            .is_some_and(|timer| timer.as_mut().poll(task_cx).is_ready())
-        {
-            deadline_timer = deadlines
-                .pop()
-                .map(|at| Box::pin(crate::time::sleep_until(at)));
+            driver.refresh(task_cx);
         }
         let cancelled = || {
-            cx.checkpoint().is_err()
+            owner_cancel.is_cancelled()
                 || driver_cancel
                     .as_ref()
-                    .is_some_and(|driver| driver.cx.checkpoint().is_err())
+                    .is_some_and(CancelWakerGuard::is_cancelled)
         };
         if cancelled() {
             return std::task::Poll::Ready(Err(RedisError::Cancelled));
@@ -2913,7 +2909,7 @@ impl RedisConnection {
     }
 
     async fn write_command(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<(), RedisError> {
-        cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
+        redis_checkpoint(cx)?;
 
         let mut buf = Vec::new();
         encode_command_into(&mut buf, args);
@@ -2979,7 +2975,7 @@ impl RedisConnection {
         push_handling: Resp3PushHandling,
     ) -> Result<RespValue, RedisError> {
         loop {
-            cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
+            redis_checkpoint(cx)?;
 
             let protocol_limits = self.config.protocol_limits;
             let frame_limit = protocol_limits.max_frame_size;
@@ -3047,7 +3043,7 @@ impl RedisConnection {
             // reports it as `Cancelled` when either context is cancelled,
             // but a plain EINTR is not a cancellation (br-asupersync-798g1k).
             let read_result = std::future::poll_fn(|task_cx| {
-                if cx.checkpoint().is_err() {
+                if redis_checkpoint(cx).is_err() {
                     return std::task::Poll::Ready(Ok(None));
                 }
                 let mut read_buf = ReadBuf::new(&mut tmp);
@@ -3342,7 +3338,7 @@ impl RedisClient {
     /// Connect to Redis.
     #[allow(clippy::unused_async)]
     pub async fn connect(cx: &Cx, url: &str) -> Result<Self, RedisError> {
-        cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
+        redis_checkpoint(cx)?;
         Self::connect_with_config(cx, RedisConfig::from_url(url)?).await
     }
 
@@ -3375,7 +3371,7 @@ impl RedisClient {
         config: RedisConfig,
         pool_config: PoolConfig,
     ) -> Result<Self, RedisError> {
-        cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
+        redis_checkpoint(cx)?;
         let config_for_factory = config.clone();
         let resp3_push_backlog =
             Arc::new(parking_lot::Mutex::new(RedisResp3PushBacklog::default()));
@@ -3459,7 +3455,7 @@ impl RedisClient {
     }
 
     async fn acquire(&self, cx: &Cx) -> Result<PooledResource<RedisConnection>, RedisError> {
-        cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
+        redis_checkpoint(cx)?;
         // The pool's factory has no Cx parameter. Enclose acquisition so its
         // TCP/TLS setup and capacity wait are still owned by this caller.
         redis_io(cx, async {
@@ -4391,7 +4387,7 @@ impl Pipeline<'_> {
             combined.extend_from_slice(cmd);
         }
 
-        cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
+        redis_checkpoint(cx)?;
 
         conn.write_all(cx, &combined).await?;
 

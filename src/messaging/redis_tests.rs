@@ -7891,6 +7891,472 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn redis_io_deadlines_keep_distinct_clocks_armed_after_masking() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, RegionId, TaskId, Time};
+
+        struct WakeCount(AtomicU32);
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for caller_first in [false, true] {
+            for caller_epoch in [Time::ZERO, Time::from_secs(10_000)] {
+                let driver_epoch = if caller_epoch == Time::ZERO {
+                    Time::from_secs(10_000)
+                } else {
+                    Time::ZERO
+                };
+                let caller_clock = Arc::new(VirtualClock::starting_at(caller_epoch));
+                let driver_clock = Arc::new(VirtualClock::starting_at(driver_epoch));
+                let caller_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&caller_clock));
+                let driver_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&driver_clock));
+                let caller_deadline =
+                    caller_epoch + Duration::from_millis(if caller_first { 100 } else { 300 });
+                let driver_deadline =
+                    driver_epoch + Duration::from_millis(if caller_first { 300 } else { 100 });
+                let context = |task, deadline, timer| {
+                    Cx::new_with_drivers(
+                        RegionId::new_for_test(0, 1),
+                        TaskId::new_for_test(task, 0),
+                        Budget::INFINITE.with_deadline(deadline),
+                        None,
+                        None,
+                        None,
+                        Some(timer),
+                        None,
+                    )
+                };
+                let caller = context(1, caller_deadline, caller_timer.clone());
+                let driver = context(2, driver_deadline, driver_timer.clone());
+                let _current = Cx::set_current(Some(driver.clone()));
+                let wakes = Arc::new(WakeCount(AtomicU32::new(0)));
+                let waker = Waker::from(Arc::clone(&wakes));
+                let mut task_cx = Context::from_waker(&waker);
+                let mut call = Box::pin(redis_io(
+                    &caller,
+                    std::future::pending::<Result<(), RedisError>>(),
+                ));
+                assert!(call.as_mut().poll(&mut task_cx).is_pending());
+                assert_eq!(caller_timer.next_deadline(), Some(caller_deadline));
+                assert_eq!(driver_timer.next_deadline(), Some(driver_deadline));
+
+                let (first, second) = if caller_first {
+                    (
+                        (&caller, &caller_clock, &caller_timer, caller_deadline),
+                        (&driver, &driver_clock, &driver_timer, driver_deadline),
+                    )
+                } else {
+                    (
+                        (&driver, &driver_clock, &driver_timer, driver_deadline),
+                        (&caller, &caller_clock, &caller_timer, caller_deadline),
+                    )
+                };
+                let (first, first_clock, first_timer, first_deadline) = first;
+                let (second, second_clock, second_timer, second_deadline) = second;
+                first.masked(|| {
+                    first_clock.advance_to(first_deadline);
+                    assert_eq!(first_timer.process_timers(), 1);
+                    assert!(call.as_mut().poll(&mut task_cx).is_pending());
+                    assert!(first_timer.is_empty());
+                    assert_eq!(second_timer.next_deadline(), Some(second_deadline));
+                    let before = wakes.0.load(Ordering::SeqCst);
+                    second_clock.advance_to(second_deadline);
+                    assert_eq!(second_timer.process_timers(), 1);
+                    assert!(wakes.0.load(Ordering::SeqCst) > before);
+                    assert!(matches!(
+                        call.as_mut().poll(&mut task_cx),
+                        Poll::Ready(Err(RedisError::Cancelled))
+                    ));
+                    assert_eq!(second.cancel_reason().unwrap().kind, CancelKind::Deadline);
+                });
+                assert!(caller_timer.is_empty());
+                assert!(driver_timer.is_empty());
+                assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+                assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn redis_io_restricted_deadline_wakes_after_its_timer_is_consumed_under_mask() {
+        use crate::cx::cap::CapSet;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, RegionId, TaskId, Time};
+
+        type IoOnly = CapSet<false, false, false, true, false>;
+        struct WakeCount(AtomicU32);
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for restrict_caller in [false, true] {
+            let epoch = Time::from_secs(10_000);
+            let deadline = epoch + Duration::from_millis(100);
+            let clock = Arc::new(VirtualClock::starting_at(epoch));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let full = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE.with_deadline(deadline),
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let restricted = {
+                let _restriction = full.restrict::<IoOnly>().set_current_restricted();
+                Cx::current().expect("restricted Redis context")
+            };
+            let other_timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
+            let other = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(2, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(other_timer.clone()),
+                None,
+            );
+            let (caller, driver) = if restrict_caller {
+                (&restricted, &other)
+            } else {
+                (&other, &restricted)
+            };
+            let _current = Cx::set_current(Some(driver.clone()));
+            let wakes = Arc::new(WakeCount(AtomicU32::new(0)));
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = Context::from_waker(&waker);
+            let mut call = Box::pin(redis_io(
+                caller,
+                std::future::pending::<Result<(), RedisError>>(),
+            ));
+            let before_unmask = restricted.masked(|| {
+                assert!(call.as_mut().poll(&mut task_cx).is_pending());
+                assert_eq!(timer.next_deadline(), Some(deadline));
+                assert!(other_timer.is_empty());
+                clock.advance_to(deadline);
+                assert_eq!(timer.process_timers(), 1);
+                assert!(call.as_mut().poll(&mut task_cx).is_pending());
+                assert!(timer.is_empty());
+                let before = wakes.0.load(Ordering::SeqCst);
+                assert!(call.as_mut().poll(&mut task_cx).is_pending());
+                assert_eq!(wakes.0.load(Ordering::SeqCst), before);
+                before
+            });
+            assert!(wakes.0.load(Ordering::SeqCst) > before_unmask);
+            assert!(matches!(
+                call.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(RedisError::Cancelled))
+            ));
+            assert_eq!(restricted.cancel_reason().unwrap().kind, CancelKind::Deadline);
+            assert!(restricted.timer_driver().is_none());
+            assert!(!other.is_cancel_requested());
+            assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+            assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+            assert!(timer.is_empty());
+            assert!(other_timer.is_empty());
+        }
+    }
+
+    #[test]
+    fn redis_io_driverless_deadline_preserves_transport_clock_and_errors() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, RegionId, TaskId, Time};
+
+        for expired in [false, true] {
+            let now = crate::time::raw_wall_now();
+            let caller = Cx::new(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE.with_deadline(if expired {
+                    now
+                } else {
+                    now + Duration::from_secs(3_600)
+                }),
+            );
+            let driver_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+                VirtualClock::starting_at(if expired {
+                    Time::ZERO
+                } else {
+                    now + Duration::from_secs(86_400)
+                }),
+            ));
+            let driver = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(2, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(driver_timer.clone()),
+                None,
+            );
+            let _current = Cx::set_current(Some(driver.clone()));
+            for kind in [io::ErrorKind::Interrupted, io::ErrorKind::UnexpectedEof] {
+                let work = async {
+                    assert!(!expired, "an expired caller cannot start I/O");
+                    assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+                    Err::<(), _>(io::Error::from(kind))
+                };
+                let result = future::block_on(redis_io(&caller, work));
+                if expired {
+                    assert!(matches!(result, Err(RedisError::Cancelled)));
+                    assert_eq!(caller.cancel_reason().unwrap().kind, CancelKind::Deadline);
+                } else {
+                    assert!(matches!(result, Err(RedisError::Io(error)) if error.kind() == kind));
+                    assert!(!caller.is_cancel_requested());
+                }
+                assert_eq!(Cx::current().unwrap().task_id(), driver.task_id());
+                assert!(driver_timer.is_empty());
+                assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+                assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn redis_native_request_deadline_uses_its_runtime_clock_and_discards_transports() {
+        use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, Time};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Mutex;
+
+        struct DeadlinePeer {
+            addr: std::net::SocketAddr,
+            stopped: Arc<AtomicBool>,
+            socket: Arc<Mutex<Option<std::net::TcpStream>>>,
+            thread: Option<thread::JoinHandle<()>>,
+        }
+
+        impl DeadlinePeer {
+            fn start(
+                waiting: Arc<crate::sync::Notify>,
+                closed: Arc<crate::sync::Notify>,
+            ) -> Self {
+                let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
+                let stopped = Arc::new(AtomicBool::new(false));
+                let socket = Arc::new(Mutex::new(None));
+                let peer_stopped = Arc::clone(&stopped);
+                let peer_socket = Arc::clone(&socket);
+                let thread = thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    *peer_socket.lock().unwrap() = Some(stream.try_clone().unwrap());
+                    if peer_stopped.load(Ordering::Acquire) {
+                        return;
+                    }
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    write_hello3_ok(&mut stream);
+                    assert_resp_command(read_resp_frame(&mut stream), &[b"PING"]);
+                    // Never send PONG, data, or EOF while the operation waits.
+                    waiting.notify_one();
+                    match stream.read(&mut [0_u8; 1]) {
+                        Ok(0) => {}
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                            ) => {}
+                        result => {
+                            panic!("deadline must close the interrupted transport: {result:?}")
+                        }
+                    }
+                    closed.notify_one();
+                });
+                Self {
+                    addr,
+                    stopped,
+                    socket,
+                    thread: Some(thread),
+                }
+            }
+
+            fn finish(mut self) {
+                self.thread
+                    .take()
+                    .unwrap()
+                    .join()
+                    .expect("Redis deadline peer assertions");
+            }
+        }
+
+        impl Drop for DeadlinePeer {
+            fn drop(&mut self) {
+                if let Some(thread) = self.thread.take() {
+                    self.stopped.store(true, Ordering::Release);
+                    if let Some(socket) = self.socket.lock().unwrap().as_ref() {
+                        let _ = socket.shutdown(std::net::Shutdown::Both);
+                    }
+                    let _ =
+                        std::net::TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
+                    let _ = thread.join();
+                }
+            }
+        }
+
+        for workers in [0, 2] {
+            for pubsub_wait in [false, true] {
+                for caller_epoch in [Time::ZERO, Time::from_secs(10_000)] {
+                    let driver_epoch = if caller_epoch == Time::ZERO {
+                        Time::from_secs(10_000)
+                    } else {
+                        Time::ZERO
+                    };
+                    let caller_clock = Arc::new(VirtualClock::starting_at(caller_epoch));
+                    let caller_timer =
+                        TimerDriverHandle::with_virtual_clock(Arc::clone(&caller_clock));
+                    let caller_runtime = RuntimeBuilder::current_thread()
+                        .with_timer_driver(caller_timer.clone())
+                        .build()
+                        .unwrap();
+                    let deadline = caller_epoch + Duration::from_millis(100);
+                    let caller = caller_runtime
+                        .request_cx_with_budget(Budget::INFINITE.with_deadline(deadline));
+                    let task_caller = caller.clone();
+                    let driver_clock = Arc::new(VirtualClock::starting_at(driver_epoch));
+                    let driver_timer =
+                        TimerDriverHandle::with_virtual_clock(Arc::clone(&driver_clock));
+                    let builder = if workers == 0 {
+                        RuntimeBuilder::current_thread()
+                    } else {
+                        RuntimeBuilder::multi_thread().worker_threads(workers)
+                    };
+                    let runtime = builder
+                        .with_timer_driver(driver_timer.clone())
+                        .build()
+                        .unwrap();
+                    let waiting = Arc::new(crate::sync::Notify::new());
+                    let closed = Arc::new(crate::sync::Notify::new());
+                    let peer = DeadlinePeer::start(Arc::clone(&waiting), Arc::clone(&closed));
+                    let address = peer.addr;
+                    let (parked_tx, parked_rx) = mpsc::channel();
+                    let (done_tx, done_rx) = mpsc::channel();
+                    let controller_caller_timer = caller_timer.clone();
+                    let controller_driver_timer = driver_timer.clone();
+                    let controller = thread::spawn(move || {
+                        let parked = parked_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+                        let armed = controller_caller_timer.next_deadline() == Some(deadline);
+                        caller_clock.advance_to(deadline);
+                        let _ = controller_caller_timer.process_timers();
+                        let completed = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+                        if !completed {
+                            // Failure-only release of the old ambient-clock
+                            // implementation. No socket activity supplies the
+                            // success-path wake from the caller's timer.
+                            driver_clock.advance_to(driver_epoch + Duration::from_secs(10));
+                            let _ = controller_driver_timer.process_timers();
+                        }
+                        (parked, armed, completed)
+                    });
+                    let task = runtime.handle().spawn(async move {
+                        let driver = Cx::current().expect("native Redis driver");
+                        let exchange = async {
+                            let client =
+                                RedisClient::connect(&driver, &format!("redis://{address}"))
+                                    .await
+                                    .unwrap();
+                            let mut pubsub = if pubsub_wait {
+                                Some(client.pubsub(&driver).await.unwrap())
+                            } else {
+                                None
+                            };
+                            let outcome = {
+                                let work = async {
+                                    if let Some(pubsub) = pubsub.as_mut() {
+                                        pubsub.ping(&task_caller, None).await
+                                    } else {
+                                        client.ping(&task_caller).await
+                                    }
+                                };
+                                let mut work = std::pin::pin!(work);
+                                let mut peer_waiting = std::pin::pin!(waiting.notified());
+                                let mut witness = Some(parked_tx);
+                                std::future::poll_fn(|task_cx| {
+                                    let result = work.as_mut().poll(task_cx);
+                                    if result.is_pending()
+                                        && witness.is_some()
+                                        && peer_waiting.as_mut().poll(task_cx).is_ready()
+                                    {
+                                        witness.take().unwrap().send(()).unwrap();
+                                    }
+                                    result
+                                })
+                                .await
+                            };
+                            let stats = client.pool.stats();
+                            let poisoned = pubsub.as_ref().is_none_or(|pubsub| pubsub.poisoned);
+                            // Keep both public owners alive until the peer
+                            // observes shutdown; their eventual Drop cannot
+                            // satisfy this cancellation cleanup witness.
+                            closed.notified().await;
+                            (outcome, stats, poisoned, driver.checkpoint().is_ok())
+                        };
+                        let result =
+                            crate::time::timeout(driver.now(), Duration::from_secs(5), exchange)
+                                .await;
+                        let retired = task_caller
+                            .inner
+                            .read()
+                            .cancel_waker_registrations
+                            .is_empty()
+                            && driver.inner.read().cancel_waker_registrations.is_empty();
+                        let _ = done_tx.send(());
+                        (result, retired)
+                    });
+                    let (result, retired) = runtime.block_on(task);
+                    let witness = controller.join().expect("Redis deadline controller");
+                    peer.finish();
+                    assert_eq!(
+                        witness,
+                        (true, true, true),
+                        "workers={workers} pubsub={pubsub_wait} caller_epoch={caller_epoch:?}"
+                    );
+                    let (outcome, stats, poisoned, driver_live) = result
+                        .expect("the caller deadline must precede the driver's watchdog");
+                    assert!(matches!(outcome, Err(RedisError::Cancelled)));
+                    assert_eq!(caller.cancel_reason().unwrap().kind, CancelKind::Deadline);
+                    assert!(driver_live, "the unrelated driving context stays live");
+                    assert!(poisoned, "an interrupted Pub/Sub connection is poisoned");
+                    assert_eq!((stats.active, stats.total, stats.waiters), (0, 0, 0));
+                    assert!(retired, "both owners retire their wait registrations");
+                    assert!(caller_timer.is_empty());
+                    assert!(driver_timer.is_empty());
+                    for runtime in [&runtime, &caller_runtime] {
+                        let drain = runtime.shutdown_drained(Duration::from_secs(5));
+                        assert_eq!(drain.outcome, RootDrainOutcome::Quiescent);
+                        assert_eq!(
+                            (drain.live_tasks, drain.live_regions, drain.pending_spawns),
+                            (0, 0, 0)
+                        );
+                        assert_eq!((drain.pending_obligations, drain.queued_finalizers), (0, 0));
+                        assert!(!drain.has_pending_obligation_posts);
+                    }
+                    eprintln!(
+                        "event=redis_native_deadline workers={workers} pubsub={pubsub_wait} \
+                         caller_epoch={caller_epoch:?} driver_epoch={driver_epoch:?} \
+                         transport_parked=true caller_timer_woke=true outcome=CancelledDeadline \
+                         transport_closed_before_owner_drop=true registrations_retired=true \
+                         pool_active=0 pool_total=0 pool_waiters=0 both_runtimes=Quiescent"
+                    );
+                }
+            }
+        }
+    }
+
     /// A pipeline reads one reply per command. CLIENT REPLY OFF or SKIP hung
     /// exec, and a multi-channel SUBSCRIBE or MONITOR paired replies with the
     /// wrong commands. Such a pipeline is refused before a connection is taken
