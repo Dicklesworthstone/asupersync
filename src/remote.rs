@@ -100,6 +100,8 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(feature = "tls")]
+use crate::sync::atomic::AtomicUsize;
 use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -4611,6 +4613,77 @@ impl RemoteServiceExecutionMode {
     }
 }
 
+/// Fixed-cardinality accounting for authenticated listener exchanges.
+///
+/// Only configured policy identities have counters. Presented hello/origin
+/// strings never insert keys, and retired exchanges leave no per-request state.
+#[cfg(feature = "tls")]
+struct RemoteServicePeerAdmission {
+    max_exchanges: usize,
+    active: BTreeMap<NodeId, Arc<AtomicUsize>>,
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServicePeerAdmission {
+    fn new(policy: &RemotePeerAdmissionPolicy, max_exchanges: usize) -> Self {
+        Self {
+            max_exchanges,
+            active: policy
+                .grants
+                .keys()
+                .map(|peer| (peer.clone(), Arc::new(AtomicUsize::new(0))))
+                .collect(),
+        }
+    }
+
+    fn try_acquire(&self, peer: &NodeId) -> Option<Arc<RemoteServicePeerPermit>> {
+        let active = self.active.get(peer)?;
+        let mut observed = active.load(Ordering::Acquire);
+        loop {
+            if observed >= self.max_exchanges {
+                return None;
+            }
+            // observed < max_exchanges <= usize::MAX, so the increment cannot
+            // overflow, including the explicitly unbounded-sized limit.
+            match active.compare_exchange_weak(
+                observed,
+                observed + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(Arc::new(RemoteServicePeerPermit {
+                        active: Arc::clone(active),
+                    }));
+                }
+                Err(current) => observed = current,
+            }
+        }
+    }
+
+    fn active(&self, peer: &NodeId) -> Option<usize> {
+        self.active
+            .get(peer)
+            .map(|active| active.load(Ordering::Acquire))
+    }
+}
+
+/// One counted exchange, shared by transport ownership and region finalization.
+/// A disconnected/force-closed transport cannot return the slot while admitted
+/// descendants or finalizers still hold the region's copy.
+#[cfg(feature = "tls")]
+struct RemoteServicePeerPermit {
+    active: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "tls")]
+impl Drop for RemoteServicePeerPermit {
+    fn drop(&mut self) {
+        let previous = self.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "remote peer exchange credit underflow");
+    }
+}
+
 /// Executes one bounded authenticated named computation over established TLS.
 ///
 /// The caller owns the TLS handshake and the connection lifetime. This adapter
@@ -4643,6 +4716,7 @@ where
         None,
         RemoteServiceExecutionMode::Inline,
         None,
+        None,
     )
     .await
 }
@@ -4657,6 +4731,7 @@ async fn serve_tls_computation_once_with_idempotency<IO>(
     idempotency: Option<&RemoteServiceIdempotency>,
     execution_mode: RemoteServiceExecutionMode,
     initial_frame_timeout: Option<Duration>,
+    peer_admission: Option<&RemoteServicePeerAdmission>,
 ) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -4683,6 +4758,9 @@ where
     // server's execution mode.
     let uses_v3_session_envelope =
         wire_request.hello().protocol_version() == RemoteProtocolVersion::V3;
+    // Retain the transport's copy until the response is completely flushed.
+    // Lease-bound execution also gives its child region a copy before spawn.
+    let mut peer_permit = None;
     let (response, terminal_commit) = match policy
         .admit_tls_peer(wire_request.hello(), &**framed.get_ref())
     {
@@ -4702,42 +4780,59 @@ where
             }
             .with_no_commit()
         }
-        Ok(session) => match wire_request.into_spawn_request() {
-            Err(diagnostic) => RemoteServiceWireResponse::Rejected {
-                remote_task_id,
-                code: RemoteServiceRejectionCode::MalformedRequest,
-                diagnostic,
-            }
-            .with_no_commit(),
-            Ok(request) => {
-                if remote_service_protocol_kind(session.protocol_version())
-                    == RemoteServiceProtocolKind::V3Session
-                    && execution_mode == RemoteServiceExecutionMode::LeaseBound
-                {
-                    let state =
-                        idempotency.ok_or(RemoteComputationServiceError::IdempotencyStateLost)?;
-                    return serve_tls_computation_v3_session(
-                        cx,
-                        &mut framed,
-                        &session,
-                        computations,
-                        request,
-                        state,
-                        limits.max_frame_bytes(),
-                    )
-                    .await;
+        Ok(session) => {
+            let admitted = peer_admission.is_none_or(|admission| {
+                peer_permit = admission.try_acquire(session.peer_node());
+                peer_permit.is_some()
+            });
+            if !admitted {
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id,
+                    code: RemoteServiceRejectionCode::AdmissionDenied,
+                    diagnostic: "authenticated peer active-exchange limit reached".to_owned(),
                 }
-                remote_service_dispatch_with_idempotency(
-                    cx,
-                    &session,
-                    computations,
-                    request,
-                    idempotency,
-                    execution_mode,
-                )
-                .await
+                .with_no_commit()
+            } else {
+                match wire_request.into_spawn_request() {
+                    Err(diagnostic) => RemoteServiceWireResponse::Rejected {
+                        remote_task_id,
+                        code: RemoteServiceRejectionCode::MalformedRequest,
+                        diagnostic,
+                    }
+                    .with_no_commit(),
+                    Ok(request) => {
+                        if remote_service_protocol_kind(session.protocol_version())
+                            == RemoteServiceProtocolKind::V3Session
+                            && execution_mode == RemoteServiceExecutionMode::LeaseBound
+                        {
+                            let state = idempotency
+                                .ok_or(RemoteComputationServiceError::IdempotencyStateLost)?;
+                            return serve_tls_computation_v3_session(
+                                cx,
+                                &mut framed,
+                                &session,
+                                computations,
+                                request,
+                                state,
+                                limits.max_frame_bytes(),
+                                peer_permit.as_ref(),
+                            )
+                            .await;
+                        }
+                        remote_service_dispatch_with_idempotency(
+                            cx,
+                            &session,
+                            computations,
+                            request,
+                            idempotency,
+                            execution_mode,
+                            peer_permit.as_ref(),
+                        )
+                        .await
+                    }
+                }
             }
-        },
+        }
     };
     let (response, terminal_commit, encoded) = remote_service_prepare_terminal_encoding(
         response,
@@ -4766,6 +4861,7 @@ async fn remote_service_dispatch_with_idempotency(
     request: SpawnRequest,
     idempotency: Option<&RemoteServiceIdempotency>,
     execution_mode: RemoteServiceExecutionMode,
+    peer_permit: Option<&Arc<RemoteServicePeerPermit>>,
 ) -> (
     RemoteServiceWireResponse,
     Option<RemoteServiceTerminalCommit>,
@@ -4878,7 +4974,14 @@ async fn remote_service_dispatch_with_idempotency(
         }
         #[cfg(not(target_arch = "wasm32"))]
         RemoteServiceExecutionMode::LeaseBound => {
-            remote_service_dispatch_with_lease(cx, session, computations, request.clone()).await
+            remote_service_dispatch_with_lease(
+                cx,
+                session,
+                computations,
+                request.clone(),
+                peer_permit,
+            )
+            .await
         }
     };
     match terminal {
@@ -4955,6 +5058,7 @@ async fn serve_tls_computation_v3_session<IO>(
     request: SpawnRequest,
     idempotency: &RemoteServiceIdempotency,
     max_frame_bytes: usize,
+    peer_permit: Option<&Arc<RemoteServicePeerPermit>>,
 ) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -5084,7 +5188,7 @@ where
     let accepted_at = cx.now();
     let mut expires_at = accepted_at + remote_service_clamp_lease(request.lease);
     let child_spec = remote_service_child_spec(cx.budget(), request.budget);
-    let child = match cx.open_child_region(child_spec).await {
+    let child = match remote_service_open_child(cx, child_spec, peer_permit).await {
         Ok(child) => child,
         Err(error) => {
             let diagnostic =
@@ -5602,6 +5706,7 @@ async fn remote_service_dispatch_with_lease(
     session: &RemotePeerSession,
     computations: &RemoteComputationRegistry,
     request: SpawnRequest,
+    peer_permit: Option<&Arc<RemoteServicePeerPermit>>,
 ) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
     let accepted_at = cx.now();
     let expires_at = accepted_at + remote_service_clamp_lease(request.lease);
@@ -5610,8 +5715,7 @@ async fn remote_service_dispatch_with_lease(
     // deadline at the same instant let the runtime's proactive deadline
     // (br-asupersync-pev2xi) cancel the task first, so the computation's own
     // reaction to that cancellation was reported instead of the lease expiry.
-    let child = cx
-        .open_child_region(ChildRegionSpec::inherit())
+    let child = remote_service_open_child(cx, ChildRegionSpec::inherit(), peer_permit)
         .await
         .map_err(|error| remote_service_execution_lifecycle_error("create child region", error))?;
     let child_region_id = child.region_id();
@@ -5685,6 +5789,25 @@ async fn remote_service_dispatch_with_lease(
             }
         }
     }
+}
+
+/// Enroll retained admission before exposing the computation's child context.
+/// The transport and the last region finalizer jointly own the credit, so a
+/// dropped exchange cannot free capacity while owned cleanup still runs.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_service_open_child(
+    cx: &Cx,
+    spec: ChildRegionSpec,
+    peer_permit: Option<&Arc<RemoteServicePeerPermit>>,
+) -> Result<crate::cx::ChildRegion, ChildRegionError> {
+    let child = cx.open_child_region(spec).await?;
+    if let Some(permit) = peer_permit
+        && let Err(error) = child.retain_until_finalized(Arc::clone(permit)).await
+    {
+        child.close().await?;
+        return Err(error);
+    }
+    Ok(child)
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -8732,6 +8855,8 @@ struct RemoteComputationServiceFileConfig {
     max_connections: usize,
     #[serde(default)]
     max_connections_per_ip: Option<u32>,
+    #[serde(default)]
+    max_exchanges_per_peer: Option<usize>,
     tls_handshake_timeout_ms: u64,
     initial_frame_timeout_ms: u64,
     drain_timeout_ms: u64,
@@ -9161,6 +9286,9 @@ impl RemoteComputationServiceBootstrap {
         if let Some(per_ip) = config.max_connections_per_ip {
             service_config = service_config.with_max_connections_per_ip(Some(per_ip));
         }
+        if let Some(per_peer) = config.max_exchanges_per_peer {
+            service_config = service_config.with_max_exchanges_per_peer(Some(per_peer));
+        }
         let identity = RemoteComputationServiceIdentity {
             listen_scope: config.listen_scope,
             registry_fingerprint,
@@ -9454,6 +9582,7 @@ pub struct RemoteComputationServiceConfig {
     wire_limits: RemoteServiceWireLimits,
     max_connections: Option<usize>,
     max_connections_per_ip: Option<u32>,
+    max_exchanges_per_peer: Option<usize>,
     write_progress_timeout: Option<Duration>,
     initial_frame_timeout: Duration,
     drain_timeout: Duration,
@@ -9470,6 +9599,7 @@ impl RemoteComputationServiceConfig {
             wire_limits: RemoteServiceWireLimits::new(DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES),
             max_connections: Some(256),
             max_connections_per_ip: None,
+            max_exchanges_per_peer: None,
             write_progress_timeout: None,
             initial_frame_timeout: DEFAULT_REMOTE_SERVICE_INITIAL_FRAME_TIMEOUT,
             drain_timeout: Duration::from_secs(30),
@@ -9506,6 +9636,27 @@ impl RemoteComputationServiceConfig {
     #[must_use]
     pub const fn with_max_connections_per_ip(mut self, max_connections: Option<u32>) -> Self {
         self.max_connections_per_ip = max_connections;
+        self
+    }
+
+    /// Caps active exchanges for each certificate-authenticated logical peer.
+    ///
+    /// Admission happens after the bounded first frame and certificate grant
+    /// are verified, before any computation or child region is created. The
+    /// slot remains held through response flush and every admitted descendant
+    /// and finalizer, including cleanup after transport cancellation or loss.
+    /// V3 cancel and lease-renewal commands use their session's existing slot.
+    /// Cached replies count as exchanges while their response is being flushed.
+    ///
+    /// `None` (the default) preserves unbounded per-peer exchanges; `Some(0)`
+    /// refuses every authenticated exchange. Quotas use the granted hello
+    /// identity, never the request's asserted origin or source IP. Separately
+    /// granted aliases have separate quotas even if they share a certificate.
+    /// Pre-authentication connections and first-frame buffers remain governed
+    /// by the connection, IP, framing and timeout limits, not this cap.
+    #[must_use]
+    pub const fn with_max_exchanges_per_peer(mut self, max_exchanges: Option<usize>) -> Self {
+        self.max_exchanges_per_peer = max_exchanges;
         self
     }
 
@@ -9574,6 +9725,12 @@ impl RemoteComputationServiceConfig {
         self.max_connections_per_ip
     }
 
+    /// Active-exchange limit for each authenticated logical peer.
+    #[must_use]
+    pub const fn max_exchanges_per_peer(self) -> Option<usize> {
+        self.max_exchanges_per_peer
+    }
+
     /// Maximum continuous transport write stall, including encrypted TLS bytes.
     #[must_use]
     pub const fn write_progress_timeout(self) -> Option<Duration> {
@@ -9619,6 +9776,7 @@ pub struct RemoteComputationServiceHandle {
     shutdown_signal: ShutdownSignal,
     connections: ConnectionManager,
     drain_timeout: Duration,
+    peer_admission: Option<Arc<RemoteServicePeerAdmission>>,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -9655,6 +9813,19 @@ impl RemoteComputationServiceHandle {
     #[must_use]
     pub fn active_connections(&self) -> usize {
         self.connections.active_count()
+    }
+
+    /// Exchanges still retained by transport publication or owned cleanup.
+    ///
+    /// Returns `None` when per-peer exchange admission is disabled or the peer
+    /// is not in this listener's fixed grant set. `Some(0)` means that every
+    /// exchange charged to that configured identity has finished publication
+    /// and region finalization. This is an instantaneous observation.
+    #[must_use]
+    pub fn active_exchanges_for_peer(&self, peer: &NodeId) -> Option<usize> {
+        self.peer_admission
+            .as_ref()
+            .and_then(|admission| admission.active(peer))
     }
 }
 
@@ -9789,6 +9960,7 @@ pub struct RemoteComputationService {
     policy: Arc<RemotePeerAdmissionPolicy>,
     computations: Arc<RemoteComputationRegistry>,
     idempotency: Arc<RemoteServiceIdempotency>,
+    peer_admission: Option<Arc<RemoteServicePeerAdmission>>,
     config: RemoteComputationServiceConfig,
     shutdown_signal: ShutdownSignal,
     connections: ConnectionManager,
@@ -9863,12 +10035,16 @@ impl RemoteComputationService {
             config.idempotency_retention,
             config.max_idempotency_records_per_peer,
         ));
+        let peer_admission = config
+            .max_exchanges_per_peer
+            .map(|limit| Arc::new(RemoteServicePeerAdmission::new(&policy, limit)));
         Ok(Self {
             tcp_listener,
             tls_acceptor: Arc::new(tls_acceptor),
             policy: Arc::new(policy),
             computations: Arc::new(computations),
             idempotency,
+            peer_admission,
             config,
             shutdown_signal,
             connections,
@@ -9882,6 +10058,7 @@ impl RemoteComputationService {
             shutdown_signal: self.shutdown_signal.clone(),
             connections: self.connections.clone(),
             drain_timeout: self.config.drain_timeout,
+            peer_admission: self.peer_admission.clone(),
         }
     }
 
@@ -9981,6 +10158,7 @@ impl RemoteComputationService {
             let policy = Arc::clone(&self.policy);
             let computations = Arc::clone(&self.computations);
             let idempotency = Arc::clone(&self.idempotency);
+            let peer_admission = self.peer_admission.clone();
             let shutdown_signal = self.shutdown_signal.clone();
             let wire_limits = self.config.wire_limits;
             let initial_frame_timeout = self.config.initial_frame_timeout;
@@ -10025,6 +10203,7 @@ impl RemoteComputationService {
                             Some(&idempotency),
                             RemoteServiceExecutionMode::LeaseBound,
                             Some(initial_frame_timeout),
+                            peer_admission.as_deref(),
                         )
                         .await
                         .map_err(RemoteComputationConnectionError::Service)?;

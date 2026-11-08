@@ -1,5 +1,50 @@
 # Inbound remote execution admission
 
+The listener can cap all authenticated exchanges from each configured logical
+peer. Handlers can additionally share execution, input-byte, queue and priority
+limits through `distributed::remote_owned::RemoteServiceAdmission`.
+
+## Listener-wide authenticated-peer limits
+
+Set `RemoteComputationServiceConfig::with_max_exchanges_per_peer(Some(limit))`
+to bound the active exchanges charged to each certificate-authenticated logical
+peer. The default `None` preserves existing behavior. `Some(0)` refuses every
+authenticated exchange. Configured V3 servers accept the same optional top-level
+field in their existing schema-version-2 TOML file:
+
+```toml
+max_connections = 256
+max_connections_per_ip = 64
+max_exchanges_per_peer = 8
+```
+
+This gate covers every registered handler and protocol version, including V1
+requests and V2/V3 cached replies. It runs after the bounded initial frame and
+certificate-bound peer admission, before computation dispatch, child-region
+creation or idempotency admission. A saturated peer receives the existing typed
+`AdmissionDenied` response without invoking a handler or creating a retained
+request record. The quota is selected by the granted hello identity; a request's
+asserted origin or source IP cannot select a different account. Separately granted
+logical aliases have independent quotas even if they share a certificate. Counter
+storage is fixed by the configured peer grant set.
+
+An exchange keeps one slot until its response is flushed and all of its admitted
+descendants and finalizers have finished. Disconnecting or force-closing its
+transport cannot free that slot while child cleanup is still running. V3 renewal
+and cancellation commands use the session's existing slot, so they remain usable
+when its peer is at capacity. `handle.active_exchanges_for_peer(&peer)` reports
+the current charge; `None` means the gate is disabled or that peer is not granted.
+
+The listener limit and the handler limits below count different work. A cached
+reply uses a listener slot while being sent but does not start another handler.
+A handler waiting in the application admission queue still occupies its listener
+slot. Configure the listener cap high enough for the intended active and waiting
+requests. Keep the separate global/per-IP connection, handshake, initial-frame,
+frame-size and idempotency-retention limits: the peer gate begins after TLS and
+the first frame, and does not bound unauthenticated connections or total memory.
+
+## Handler execution limits
+
 `distributed::remote_owned::RemoteServiceAdmission` adds peer-specific execution
 limits to handlers in the existing `RemoteComputationRegistry`. It complements
 the outbound `RemoteExecutor`; its counters are independent of caller-side gates.
@@ -150,7 +195,8 @@ against all unauthenticated resource use. Keep the listener's connection, frame,
 handshake, first-frame and retained-record bounds. Charges exclude prior input
 copies, serialization expansion, outputs, TLS buffers, and application memory.
 There is no output-byte reservation or global cross-process fairness claim.
-Existing unwrapped registry handlers bypass this gate.
+Existing unwrapped registry handlers bypass the handler gate. The listener-wide
+peer limit, when enabled, still applies to them.
 
 The focused tests drive real local runtime tasks through public registry dispatch.
 The native tests use actual V3 mTLS sessions without the outbound executor. They
@@ -173,4 +219,5 @@ RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --lib distributed::rem
 RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features tls,test-internals --test remote_service_admission_native -- --nocapture
 RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features tls,test-internals --test remote_queue_native -- --nocapture
 RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features tls,test-internals --test remote_priority_native -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch-asupersync-peer-exchanges cargo test -p asupersync --features remote-service,test-internals --test remote_transport_lifecycle_contract configured_remote_service_ -- --nocapture
 ```

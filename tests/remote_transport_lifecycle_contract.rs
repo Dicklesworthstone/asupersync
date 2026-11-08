@@ -5101,6 +5101,133 @@ fn configured_remote_service_hosts_application_registry_over_mtls_and_drains() {
 
 #[cfg(all(feature = "remote-service", unix))]
 #[test]
+fn configured_remote_service_peer_exchange_limit_refuses_before_handler() {
+    const PEER_NODE: &str = "configured-quota-peer";
+    const COMPUTATION: &str = "app.quota_guarded";
+
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let spki_pin = CertificatePin::compute_spki_sha256(
+        certificates.first().expect("TLS fixture should contain a leaf"),
+    )
+    .expect("TLS fixture should produce an SPKI pin")
+    .to_base64();
+    let temp = tempfile::tempdir().expect("configured quota directory should exist");
+    let certificate_path = temp.path().join("service.crt");
+    let private_key_path = temp.path().join("service.key");
+    let ca_path = temp.path().join("client-ca.crt");
+    fs::write(&certificate_path, TEST_CERT_PEM).expect("service certificate should be written");
+    fs::write(&private_key_path, TEST_KEY_PEM).expect("service key should be written");
+    fs::write(&ca_path, TEST_CERT_PEM).expect("client CA should be written");
+    let config_path = temp.path().join("remote-service-quota.toml");
+    write_configured_remote_service_file(
+        &config_path,
+        "127.0.0.1:0".parse().expect("loopback address should parse"),
+        &certificate_path,
+        &private_key_path,
+        &ca_path,
+        PEER_NODE,
+        &spki_pin,
+        &[COMPUTATION],
+    );
+    let config = fs::read_to_string(&config_path).expect("quota config should be readable");
+    fs::write(&config_path, format!("max_exchanges_per_peer = 0\n{config}"))
+        .expect("quota should be configured through the public TOML field");
+
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&factory_calls);
+    let mut computations = RemoteComputationRegistry::new();
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>(COMPUTATION, move |_cx, invocation| {
+            handler_calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(RemoteOutcome::Success(
+                    invocation.into_request().input.into_data(),
+                ))
+            }
+        })
+        .expect("quota fixture handler should register");
+    let registry_fingerprint = computations.schema_registry().fingerprint();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let service_thread = thread::spawn(move || {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("configured quota runtime should build");
+        let bootstrap =
+            RemoteComputationServiceBootstrap::from_toml_file(config_path, computations)
+                .expect("optional quota field should validate in schema version 2");
+        let (service, _) = runtime
+            .block_on(bootstrap.bind())
+            .expect("configured quota service should bind");
+        let endpoint = service.local_addr().expect("bound address should be available");
+        ready_tx
+            .send((endpoint, service.handle()))
+            .expect("configured quota service should publish readiness");
+        let report = runtime
+            .block_on(async move {
+                let cx = Cx::current().expect("service runtime should install a root context");
+                service.run(&cx).await
+            })
+            .expect("configured quota service should drain cleanly");
+        assert!(runtime.shutdown_timeout(Duration::from_secs(2)));
+        report
+    });
+    let (endpoint, operator) = ready_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("configured quota service should become ready");
+    let peer = NodeId::new(PEER_NODE);
+    assert_eq!(operator.active_exchanges_for_peer(&peer), Some(0));
+
+    let (_, connector) = remote_client_test_mtls_pair();
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(3)),
+    )
+    .expect("configured quota client should validate");
+    let client_runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("configured quota client runtime should build");
+    let hello = RemotePeerHello::new(peer.clone(), RemoteProtocolVersion::V3, registry_fingerprint);
+    let response = run_remote_service_cli_session(
+        &client_runtime,
+        &client,
+        &remote_service_wire_request_with(hello, COMPUTATION, 8_904, 0x8_904, b"must-not-run"),
+    )
+    .expect("configured zero quota should return a typed refusal over mTLS");
+    assert!(matches!(
+        response,
+        RemoteServiceWireResponse::Rejected {
+            remote_task_id: 8_904,
+            code: RemoteServiceRejectionCode::AdmissionDenied,
+            ref diagnostic,
+        } if diagnostic.contains("active-exchange limit")
+    ));
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(operator.active_exchanges_for_peer(&peer), Some(0));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while operator.active_connections() != 0 {
+        assert!(std::time::Instant::now() < deadline, "refused connection should retire");
+        thread::yield_now();
+    }
+    assert!(operator.begin_drain());
+    let report = service_thread.join().expect("configured quota service should not panic");
+    assert_eq!(report.accepted_connections(), 1);
+    assert_eq!(report.completed_connections(), 1);
+    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(report.interrupted_connections(), 0);
+    assert_eq!(report.panicked_connections(), 0);
+    assert_eq!(report.shutdown().force_closed, 0);
+    assert_eq!(operator.shutdown_signal().phase(), ShutdownPhase::Stopped);
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+    assert!(client_runtime.shutdown_timeout(Duration::from_secs(2)));
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[test]
 fn configured_remote_service_config_fails_closed_before_bind() {
     const PEER_NODE: &str = "configured-validation-peer";
     const COMPUTATION: &str = "app.validation";

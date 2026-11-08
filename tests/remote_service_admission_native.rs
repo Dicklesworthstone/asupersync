@@ -251,6 +251,255 @@ fn v3_retained_terminal_replay_is_not_charged_as_a_new_execution() {
     for workers in [1, 2] { exercise(workers, Case::Cached); }
 }
 
+mod peer_exchange_limits {
+    use super::*;
+    use asupersync::remote::RemoteServiceRejectionCode;
+
+    #[derive(Clone, Copy)]
+    enum Finish { Complete, Cancel, Disconnect, ForceClose }
+
+    fn refused_exchange(response: RemoteServiceWireResponse) {
+        assert!(matches!(response, RemoteServiceWireResponse::Rejected {
+            code: RemoteServiceRejectionCode::AdmissionDenied, diagnostic, ..
+        } if diagnostic == "authenticated peer active-exchange limit reached"));
+    }
+
+    async fn usage(cx: &Cx, operator: &RemoteComputationServiceHandle, peer: &NodeId, expected: usize) {
+        asupersync::time::timeout(cx.now(), Duration::from_secs(3), async {
+            while operator.active_exchanges_for_peer(peer) != Some(expected) {
+                asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+            }
+        }).await.expect("peer exchange accounting reached the expected state");
+    }
+
+    async fn parked(cx: &Cx, witness: &Witness) {
+        asupersync::time::timeout(cx.now(), Duration::from_secs(3),
+            witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire)))
+            .await.expect("real descendant reached its parked cancellation boundary");
+    }
+
+    fn exercise_exchange_limit(workers: usize, version: RemoteProtocolVersion,
+        limit: Option<usize>, finish: Finish)
+    {
+        let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
+            else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+        let witness = Arc::new(Witness::default());
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let mut registry = RemoteComputationRegistry::new();
+            let seen = Arc::clone(&witness);
+            // Deliberately register without RemoteServiceAdmission. These tests
+            // exercise the listener gate, not the execution adapter's quotas.
+            registry.register::<Bytes, Bytes, _, _>("echo", move |_, invocation| {
+                seen.factories.fetch_add(1, Ordering::SeqCst);
+                async move { Ok(RemoteOutcome::Success(invocation.into_request().input.into_data())) }
+            }).unwrap();
+            let seen = Arc::clone(&witness);
+            registry.register::<Bytes, Bytes, _, _>("wait", move |body, _| {
+                let seen = Arc::clone(&seen);
+                seen.factories.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let descendant = Arc::clone(&seen);
+                    let _child = body.spawn(move |child| async move {
+                        let _retire = Retire(Arc::clone(&descendant));
+                        let mut cancelled = std::pin::pin!(child.cancelled());
+                        poll_fn(|task| {
+                            let state = cancelled.as_mut().poll(task);
+                            if state.is_pending() && !descendant.parked.swap(true, Ordering::AcqRel) {
+                                descendant.changed.notify_waiters();
+                            }
+                            state
+                        }).await;
+                        assert!(child.checkpoint().is_err());
+                        descendant.cancelled.store(true, Ordering::Release);
+                        descendant.changed.notify_waiters();
+                        // The handler body can already be gone. Only real
+                        // region ownership keeps this cleanup and its credit.
+                        descendant.changed.wait_until(|| descendant.release.load(Ordering::Acquire)).await;
+                    }).unwrap();
+                    let mut cancelled = std::pin::pin!(body.cancelled());
+                    let mut released = std::pin::pin!(seen.changed.wait_until(|| seen.release.load(Ordering::Acquire)));
+                    poll_fn(|task| {
+                        if cancelled.as_mut().poll(task).is_ready() {
+                            return std::task::Poll::Ready(());
+                        }
+                        released.as_mut().poll(task)
+                    }).await;
+                    let _ = body.checkpoint();
+                    Ok(RemoteOutcome::Success(b"wait completed".to_vec()))
+                }
+            }).unwrap();
+
+            let cert = Certificate::from_pem(include_bytes!("fixtures/tls/server.crt")).unwrap().remove(0);
+            let chain = CertificateChain::from_pem(include_bytes!("fixtures/tls/server.crt")).unwrap();
+            let key = PrivateKey::from_pem(include_bytes!("fixtures/tls/server.key")).unwrap();
+            let mut roots = RootCertStore::empty(); roots.add(&cert).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain.clone(), key.clone())
+                .client_auth(ClientAuth::Required(roots)).build().unwrap();
+            let mut pins = CertificatePinSet::new();
+            pins.add(CertificatePin::compute_spki_sha256(&cert).unwrap());
+            let connector = TlsConnectorBuilder::new().add_root_certificate(&cert).identity(chain, key)
+                .with_certificate_pins(pins.clone()).build().unwrap();
+            let mut policy = RemotePeerAdmissionPolicy::new(version, registry.schema_registry().clone());
+            // Explicitly granted logical aliases share a fixture certificate;
+            // they remain distinct quotas on the same source IP.
+            for peer in ["a", "b"] {
+                policy.grant_tls_peer(NodeId::new(peer), pins.clone(), NAMES).unwrap();
+            }
+            let a = policy.hello_for(NodeId::new("a"));
+            let b = policy.hello_for(NodeId::new("b"));
+            assert_eq!(RemoteComputationServiceConfig::new().max_exchanges_per_peer(), None);
+            let config = RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(8))
+                .with_max_exchanges_per_peer(limit)
+                .with_drain_timeout(Duration::from_secs(3));
+            assert_eq!(config.max_exchanges_per_peer(), limit);
+            let service = RemoteComputationService::bind("127.0.0.1:0", acceptor, policy, registry, config)
+                .await.unwrap();
+            let address = service.local_addr().unwrap();
+            let operator = service.handle();
+            assert_eq!(operator.active_exchanges_for_peer(a.peer_node()), limit.map(|_| 0));
+            assert_eq!(operator.active_exchanges_for_peer(&NodeId::new("not-granted")), None);
+            let _stop = Stop { service: operator.clone(), witness: Arc::clone(&witness) };
+            let mut serving = cx.spawn(move |server| async move { service.run(&server).await }).unwrap();
+            let client = RemoteComputationClient::new(address, "localhost", connector,
+                RemoteComputationClientConfig::new().with_max_attempts(1)
+                    .with_connect_timeout(Duration::from_secs(2)).with_attempt_timeout(Duration::from_secs(8)))
+                .unwrap();
+
+            if limit == Some(0) {
+                refused_exchange(call(&cx, &client, &a, b"denied", 101).await);
+                refused_exchange(call(&cx, &client, &b, b"also denied", 102).await);
+                assert_eq!(witness.factories.load(Ordering::SeqCst), 0);
+            } else if version == RemoteProtocolVersion::V3 {
+                let request = wire(&cx, &a, "wait", b"owned", 111);
+                let mut session = match client.start_session(&cx, &request).await.unwrap() {
+                    RemoteComputationSessionStart::Running(session) => session,
+                    RemoteComputationSessionStart::Terminal(response) => panic!("expected running V3 session: {response:?}"),
+                    _ => panic!("unexpected session start variant"),
+                };
+                parked(&cx, &witness).await;
+                assert_eq!(operator.active_exchanges_for_peer(a.peer_node()), limit.map(|_| 1));
+                assert!(matches!(session.renew_lease(&cx, Duration::from_secs(20)).await.unwrap(),
+                    RemoteServiceSessionEvent::LeaseRenewed { .. }), "controls reuse the admitted exchange");
+                let excess = call(&cx, &client, &a, b"same peer", 112).await;
+                if limit.is_some() { refused_exchange(excess); }
+                else { success(excess, b"same peer"); }
+                success(call(&cx, &client, &b, b"other peer", 113).await, b"other peer");
+                assert_eq!(witness.factories.load(Ordering::SeqCst), if limit.is_some() { 2 } else { 3 });
+
+                if matches!(finish, Finish::Cancel) {
+                    let mut cancelling = Box::pin(session.cancel(&cx, CancelReason::user("peer exchange test")));
+                    let mut observed = Box::pin(witness.changed.wait_until(|| witness.cancelled.load(Ordering::Acquire)));
+                    asupersync::time::timeout(cx.now(), Duration::from_secs(3), poll_fn(|task| {
+                        assert!(cancelling.as_mut().poll(task).is_pending(), "terminal waits for descendant cleanup");
+                        observed.as_mut().poll(task)
+                    })).await.expect("cancel reaches the parked descendant at capacity");
+                    drop(observed);
+                    assert_eq!(operator.active_exchanges_for_peer(a.peer_node()), limit.map(|_| 1));
+                    if limit.is_some() { refused_exchange(call(&cx, &client, &a, b"during cleanup", 114).await); }
+                    witness.release();
+                    assert!(matches!(cancelling.await.unwrap(), RemoteServiceWireResponse::Outcome {
+                        outcome: RemoteServiceWireOutcome::Cancelled(_), ..
+                    }));
+                } else {
+                    if matches!(finish, Finish::ForceClose) { operator.force_close(); }
+                    drop(session);
+                    asupersync::time::timeout(cx.now(), Duration::from_secs(3),
+                        witness.changed.wait_until(|| witness.cancelled.load(Ordering::Acquire)))
+                        .await.expect("transport shutdown reaches the parked descendant");
+                    assert_eq!(operator.active_exchanges_for_peer(a.peer_node()), Some(1));
+                    assert!(!witness.dropped.load(Ordering::Acquire));
+                    if matches!(finish, Finish::ForceClose) {
+                        asupersync::time::timeout(cx.now(), Duration::from_secs(3), async {
+                            while operator.active_connections() != 0 {
+                                asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                            }
+                        }).await.expect("force-close drops connection ownership");
+                        assert_eq!(operator.active_exchanges_for_peer(a.peer_node()), Some(1),
+                            "region finalization retains credit after the transport guard is gone");
+                    } else {
+                        refused_exchange(call(&cx, &client, &a, b"during cleanup", 114).await);
+                        success(call(&cx, &client, &b, b"still healthy", 115).await, b"still healthy");
+                    }
+                    witness.release();
+                }
+                if limit.is_some() { usage(&cx, &operator, a.peer_node(), 0).await; }
+                assert!(witness.dropped.load(Ordering::Acquire));
+                if !matches!(finish, Finish::ForceClose) {
+                    success(call(&cx, &client, &a, b"credit returned", 116).await, b"credit returned");
+                }
+            } else {
+                // V1/V2 have no Accepted event: drive the real request until
+                // the server's descendant proves the computation was admitted.
+                let request = wire(&cx, &a, "wait", b"owned", 121);
+                let mut running = Box::pin(client.call(&cx, &request));
+                let mut observed = Box::pin(parked(&cx, &witness));
+                poll_fn(|task| {
+                    assert!(running.as_mut().poll(task).is_pending());
+                    observed.as_mut().poll(task)
+                }).await;
+                drop(observed);
+                assert_eq!(operator.active_exchanges_for_peer(a.peer_node()), Some(1));
+                refused_exchange(call(&cx, &client, &a, b"same peer", 122).await);
+                success(call(&cx, &client, &b, b"other peer", 123).await, b"other peer");
+                assert_eq!(witness.factories.load(Ordering::SeqCst), 2);
+                witness.release();
+                success(running.await.unwrap(), b"wait completed");
+                usage(&cx, &operator, a.peer_node(), 0).await;
+                assert!(witness.dropped.load(Ordering::Acquire));
+                success(call(&cx, &client, &a, b"credit returned", 124).await, b"credit returned");
+            }
+
+            if limit.is_some() {
+                usage(&cx, &operator, a.peer_node(), 0).await;
+                usage(&cx, &operator, b.peer_node(), 0).await;
+            }
+            assert!(!cx.is_cancel_requested());
+            let _ = operator.begin_drain();
+            asupersync::time::timeout(cx.now(), Duration::from_secs(3), serving.join(&cx)).await
+                .expect("service drain deadline").expect("service task").expect("service result");
+            assert_eq!(operator.active_connections(), 0);
+        });
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn mtls_peer_exchange_limits_preserve_cancel_renew_and_peer_isolation() {
+        for workers in [1, 2] {
+            exercise_exchange_limit(workers, RemoteProtocolVersion::V3, Some(1), Finish::Cancel);
+        }
+    }
+
+    #[test]
+    fn mtls_peer_exchange_credit_survives_disconnect_and_force_close_until_descendants_finish() {
+        for workers in [1, 2] {
+            for finish in [Finish::Disconnect, Finish::ForceClose] {
+                exercise_exchange_limit(workers, RemoteProtocolVersion::V3, Some(1), finish);
+            }
+        }
+    }
+
+    #[test]
+    fn mtls_peer_exchange_limits_cover_v1_and_v2_without_handler_adapters() {
+        for workers in [1, 2] {
+            for version in [RemoteProtocolVersion::V1, RemoteProtocolVersion::V2] {
+                exercise_exchange_limit(workers, version, Some(1), Finish::Complete);
+            }
+        }
+    }
+
+    #[test]
+    fn mtls_peer_exchange_limits_preserve_disabled_default_and_refuse_zero() {
+        for workers in [1, 2] {
+            for limit in [None, Some(0)] {
+                exercise_exchange_limit(workers, RemoteProtocolVersion::V3, limit, Finish::Cancel);
+            }
+        }
+    }
+}
+
 // Linux routes the complete 127/8 range locally, so distinct source addresses
 // exercise the IP boundary without host network configuration or external peers.
 #[cfg(target_os = "linux")]

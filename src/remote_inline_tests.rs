@@ -27,6 +27,73 @@
         IdempotencyRequestFingerprint::new(ComputationName::new(name), RemoteInput::empty())
     }
 
+    #[cfg(feature = "tls")]
+    #[test]
+    fn peer_exchange_credits_bound_each_configured_identity_and_release_once() {
+        let mut policy = RemotePeerAdmissionPolicy::new(
+            RemoteProtocolVersion::V3,
+            ComputationSchemaRegistry::new(),
+        );
+        let a = NodeId::new("peer-a");
+        let b = NodeId::new("peer-b");
+        for peer in [&a, &b] {
+            policy.grant_peer(peer.clone(), std::iter::empty::<&str>()).unwrap();
+        }
+        for limit in [0, 1, 3] {
+            let admission = RemoteServicePeerAdmission::new(&policy, limit);
+            let mut held = Vec::new();
+            for expected in 1..=limit {
+                held.push(admission.try_acquire(&a).expect("capacity available"));
+                assert_eq!(admission.active(&a), Some(expected));
+            }
+            assert!(admission.try_acquire(&a).is_none(), "capacity is exact");
+            let other_peer = admission.try_acquire(&b);
+            assert_eq!(other_peer.is_some(), limit != 0);
+            assert_eq!(admission.active(&b), Some(usize::from(limit != 0)));
+            for index in 0..32 {
+                let unknown = NodeId::new(format!("not-granted-{index}"));
+                assert!(admission.try_acquire(&unknown).is_none());
+                assert_eq!(admission.active(&unknown), None);
+            }
+            assert_eq!(admission.active.len(), 2, "requests cannot grow the identity map");
+
+            let retained_cleanup = held.last().map(Arc::clone);
+            drop(held);
+            assert_eq!(admission.active(&a), Some(usize::from(limit != 0)));
+            drop(retained_cleanup);
+            drop(other_peer);
+            assert_eq!(admission.active(&a), Some(0));
+            assert_eq!(admission.active(&b), Some(0));
+            assert_eq!(admission.active.len(), 2);
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn peer_exchange_credit_unwind_releases_only_after_the_last_owner() {
+        let peer = NodeId::new("peer");
+        let mut policy = RemotePeerAdmissionPolicy::new(
+            RemoteProtocolVersion::V3,
+            ComputationSchemaRegistry::new(),
+        );
+        policy.grant_peer(peer.clone(), std::iter::empty::<&str>()).unwrap();
+        let admission = RemoteServicePeerAdmission::new(&policy, 1);
+        let transport = admission.try_acquire(&peer).unwrap();
+        let region = Arc::clone(&transport);
+        let unwound = std::panic::catch_unwind(move || {
+            let _transport = transport;
+            panic!("exchange interrupted during publication");
+        });
+        assert!(unwound.is_err());
+        assert_eq!(admission.active(&peer), Some(1));
+        assert!(admission.try_acquire(&peer).is_none());
+        drop(region);
+        assert_eq!(admission.active(&peer), Some(0));
+        let next = admission.try_acquire(&peer).expect("cleanup returned the credit");
+        drop(next);
+        assert_eq!(admission.active(&peer), Some(0));
+    }
+
     #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
     #[test]
     fn accept_resource_exhaustion_retries_out_of_memory() {
