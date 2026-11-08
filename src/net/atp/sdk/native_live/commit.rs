@@ -239,7 +239,8 @@ pub mod resume;
 /// Manifest-authorized publication through the canonical ATP sparse writer.
 pub use manifest_sink::{
     ManifestFileCancellation, ManifestFileCancellationError,
-    ManifestFileJournalConfig, ManifestFileJournalError, ManifestFileSink, ManifestFileSinkConfig,
+    ManifestFileJournalConfig, ManifestFileJournalError, ManifestFileRestoreConfig,
+    ManifestFileSink, ManifestFileSinkConfig,
 };
 
 // Keep the transport adapter beside its existing trait, not in a second writer,
@@ -250,9 +251,9 @@ mod manifest_sink {
     use crate::atp::journal::sparse_writer::{ScopedSparseWriter, ScopedWriterResult, SparseWriterError};
     use crate::atp::journal::{
         AppendJournal, FsyncPolicy, JournalCancelReport, JournalCancelRequest,
-        JournalCheckpoint, JournalCheckpointReport,
+        JournalCheckpoint, JournalCheckpointReport, JournalConfig,
         JournalCheckpointRequest, JournalCommitReport, JournalCommitRequest,
-        JournalPublication, JournalRestoreLimits, SparseWriterConfig, TransferResumeStatus,
+        JournalPublication, JournalRecord, JournalRestoreLimits, SparseWriterConfig, TransferResumeStatus,
         WriteOptions,
     };
     use crate::atp::manifest::{ChunkBoundary, Manifest};
@@ -264,7 +265,7 @@ mod manifest_sink {
     use sha2::{Digest, Sha256};
     use std::fmt;
     use std::future::Future;
-    use std::io;
+    use std::io::{self, Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
     use std::sync::Arc;
@@ -309,6 +310,28 @@ mod manifest_sink {
         pub transfer_id: String,
         /// Application timestamp for these records. Sequences establish order;
         /// this fixed timestamp is not an expiry or wall-clock freshness claim.
+        pub timestamp: u64,
+    }
+
+    /// Explicit local authority for reopening a checkpointed manifest sink.
+    ///
+    /// Keep exclusive ownership of the journal directory and retained payload.
+    /// The source path must come from the application's trusted recovery catalog,
+    /// not from a journal record or remote peer. This is payload recovery only;
+    /// it carries no live connection nonce, epoch chain, attempt or peer binding.
+    pub struct ManifestFileRestoreConfig {
+        /// Existing journal directory and its normal reopening policy.
+        /// An absent directory is refused, never initialized for recovery.
+        pub journal_config: JournalConfig,
+        /// Independently retained key authenticating the journal records.
+        pub auth_key: crate::security::AuthKey,
+        /// Existing receiving transfer whose checkpoint is being restored.
+        pub transfer_id: String,
+        /// Whole-object staging file selected by the application, opened read-only.
+        /// Only authenticated contiguous receipts are copied; other bytes are ignored.
+        pub source_path: PathBuf,
+        /// Timestamp for subsequent checkpoint and publication records.
+        /// It does not establish freshness or alter the recovered record order.
         pub timestamp: u64,
     }
 
@@ -375,6 +398,23 @@ mod manifest_sink {
         checkpoint: Option<JournalCheckpoint>,
         publication: Option<JournalPublication>,
         released: bool,
+    }
+
+    // Both passes own this one descriptor. The reconstructed stream hashes are
+    // accepted only after the canonical copy independently checks the same
+    // authenticated receipt hashes; a changed source cannot silently diverge.
+    struct RestoreState {
+        config: ManifestFileSinkConfig,
+        journal: AppendJournal,
+        transfer_id: String,
+        timestamp: u64,
+        source: std::fs::File,
+        expected_bytes: u64,
+        written: u64,
+        chunks: u32,
+        hash: Sha256,
+        checks: ChunkChecks,
+        limits: JournalRestoreLimits,
     }
 
     type Work = Pin<Box<dyn Future<Output = io::Result<Completion>> + Send>>;
@@ -651,6 +691,81 @@ mod manifest_sink {
             let report = sink.writer.checkpoint_to_journal(cx, request).await
                 .map_err(io::Error::other)?;
             sink.observe_checkpoint(0, report)?;
+            Ok(sink)
+        }
+
+        /// Reopen a receiving checkpoint and resume this same committing sink API.
+        ///
+        /// Validate the trusted manifest/pin and authenticated offered identity,
+        /// root, length, status and receipt bounds before opening payload or
+        /// creating staging. Only contiguous durable receipts from offset zero
+        /// are admitted; terminal, commit-intent, unknown and incomplete receipt
+        /// histories refuse. The declared byte and receipt limits include the
+        /// recovered prefix, rather than resetting at restart.
+        ///
+        /// Rehash the retained prefix to reconstruct the whole-stream SHA and any
+        /// partially received manifest chunk. The canonical sparse-writer restore
+        /// then checks those same authenticated receipt hashes while copying the
+        /// same opened descriptor into NEW staging. The original source is never
+        /// adopted, changed or removed. A final durable checkpoint describes the
+        /// new staging before this method returns; save its `journal_checkpoint`
+        /// path in the trusted recovery catalog before admitting more input.
+        ///
+        /// Journal opening, validation, bounded reads and copying use region-owned
+        /// filesystem jobs. The two read passes each use at most one 64 KiB buffer;
+        /// journal history and the caller-owned manifest are not memory-bounded
+        /// by these limits. Checkpointing also rehashes and synchronizes staging.
+        /// Ordinary host path semantics and exclusive directory ownership apply.
+        /// Cancellation or error may leave new staging, but preserves the old
+        /// source and journal evidence for explicit recovery. Restoration never
+        /// publishes a destination. A later `poll_commit` still requires fresh
+        /// canonical verification; its error can follow actual publication.
+        ///
+        /// `written_bytes` is the restored append offset, not proof of a peer ACK.
+        /// A suffix-only stream receipt cannot commit this whole object. Restore
+        /// any protected live receiver checkpoint through the existing resume API
+        /// separately, with its original nonce, chain, peer and attempt authority;
+        /// none of those are inferred from this payload journal.
+        pub async fn restore_journaled(
+            cx: &Cx,
+            config: ManifestFileSinkConfig,
+            restore: ManifestFileRestoreConfig,
+        ) -> io::Result<Self> {
+            let state = cx.scoped_fs().run_io(move |child| {
+                prepare_restore(config, restore, || child.checkpoint()
+                    .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error)))
+            }).await.map_err(io::Error::other)?;
+            Self::restore_prepared(cx, state).await
+        }
+
+        async fn restore_prepared(cx: &Cx, state: RestoreState) -> io::Result<Self> {
+            let RestoreState {
+                config, journal, transfer_id, timestamp, source, expected_bytes,
+                written, chunks, hash, checks, limits,
+            } = state;
+            let owner = Arc::new(journal);
+            let writer = domain(ScopedSparseWriter::restore_from_journal(
+                cx, Arc::clone(&owner), transfer_id.clone(), source,
+                config.destination, config.writer, limits,
+            ).await)?;
+            // The awaited scoped job has retired its capture before returning.
+            // Refuse rather than ever downgrade if exclusive ownership is lost.
+            let journal = Arc::try_unwrap(owner)
+                .map_err(|_| io::Error::other("restored journal owner is still shared"))?;
+            let mut sink = Self {
+                writer, object_id: config.object_id, manifest: config.manifest,
+                expected: config.expected_chunk_commitment, expected_bytes,
+                max_chunks: config.max_chunks, written, chunks, hash, checks,
+                flushed: None, pending: None, unreported: None, receipt: None,
+                published: None, journal: Some(JournalState {
+                    owner: Some(journal), transfer_id, timestamp, limits,
+                    checkpoint: None, publication: None, released: false,
+                }), cancellation: None, failure: None, shutdown: false, poisoned: false,
+            };
+            let request = sink.journal_request()?;
+            let report = sink.writer.checkpoint_to_journal(cx, request).await
+                .map_err(io::Error::other)?;
+            sink.observe_checkpoint(written, report)?;
             Ok(sink)
         }
 
@@ -1305,6 +1420,146 @@ mod manifest_sink {
         }
         Ok(length)
     }
+
+    fn journal_value<T>(
+        outcome: Outcome<T, crate::atp::journal::append_journal::JournalError>,
+    ) -> io::Result<T> {
+        match outcome {
+            Outcome::Ok(value) => Ok(value),
+            Outcome::Err(error) => Err(io::Error::other(error)),
+            Outcome::Cancelled(reason) => Err(io::Error::other(format!("journal restore cancelled: {reason:?}"))),
+            Outcome::Panicked(payload) => Err(io::Error::other(format!("journal restore panicked: {payload:?}"))),
+        }
+    }
+
+    fn prepare_restore(
+        config: ManifestFileSinkConfig,
+        restore: ManifestFileRestoreConfig,
+        mut checkpoint: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<RestoreState> {
+        checkpoint()?;
+        let expected_bytes = validate(&config)?;
+        if restore.transfer_id.is_empty() || restore.transfer_id.len() > 4096
+            || config.writer.fsync_policy == FsyncPolicy::Never
+            || config.destination.to_str().is_none()
+        {
+            return Err(invalid("journal restore requires a bounded ID, durable policy and UTF-8 destination"));
+        }
+        if !std::fs::metadata(&restore.journal_config.base_dir)?.is_dir() {
+            return Err(invalid("restore journal path is not an existing directory"));
+        }
+        checkpoint()?;
+        let journal = journal_value(AppendJournal::new(restore.journal_config, restore.auth_key))?;
+        let summary = journal_value(journal.get_resume_summary(&restore.transfer_id))?;
+        if !summary.is_resumable() || summary.total_size != Some(expected_bytes)
+            || summary.contiguous_prefix_bytes != summary.durable_bytes
+        {
+            return Err(invalid("manifest sink restore requires a receiving contiguous checkpoint"));
+        }
+        let chunks = u32::try_from(summary.durable_chunks.len())
+            .map_err(|_| invalid("restore receipt count exceeds the sink limit"))?;
+        let mut written = 0_u64;
+        let mut max_chunk = 0_usize;
+        for chunk in &summary.durable_chunks {
+            let end = written.checked_add(chunk.chunk_size)
+                .filter(|end| *end <= expected_bytes)
+                .ok_or_else(|| invalid("restore receipt exceeds the expected object"))?;
+            let size = usize::try_from(chunk.chunk_size)
+                .map_err(|_| invalid("restore receipt exceeds address space"))?;
+            if chunk.chunk_offset != written || size == 0 || size > MAX_LIVE_EPOCH_BYTES {
+                return Err(invalid("restore receipts must form a bounded contiguous prefix"));
+            }
+            written = end;
+            max_chunk = max_chunk.max(size);
+        }
+        if written != summary.durable_bytes || chunks > config.max_chunks
+            || (expected_bytes - written).div_ceil(MAX_LIVE_EPOCH_BYTES as u64)
+                > u64::from(config.max_chunks - chunks)
+        {
+            return Err(invalid("restored prefix leaves insufficient byte or receipt capacity"));
+        }
+        let entries = journal_value(journal.get_transfer_entries(&restore.transfer_id))?;
+        let mut offered = false;
+        for entry in &entries {
+            let (offset, size, hash) = match &entry.record {
+                JournalRecord::Offer { object_id, manifest_root, total_size, .. } => {
+                    if object_id != &config.object_id || manifest_root != &config.manifest.merkle_root
+                        || *total_size != expected_bytes
+                    {
+                        return Err(invalid("restore offer differs from the trusted manifest selection"));
+                    }
+                    offered = true;
+                    continue;
+                }
+                JournalRecord::ChunkReceived { chunk_offset, chunk_size, chunk_hash, .. } =>
+                    (*chunk_offset, *chunk_size, Some(chunk_hash)),
+                JournalRecord::ChunkVerified { chunk_offset, chunk_size, verified_hash, .. } =>
+                    (*chunk_offset, *chunk_size, Some(verified_hash)),
+                JournalRecord::ChunkWritten { chunk_offset, chunk_size, .. } =>
+                    (*chunk_offset, *chunk_size, None),
+                JournalRecord::Accept { .. } | JournalRecord::ProofDigest { .. } => continue,
+                _ => return Err(invalid("restore history contains a non-receiving transition")),
+            };
+            // A partial journal append must not import uncheckpointed ranges or
+            // silently discard the receipts that the next checkpoint must honor.
+            let found = summary.durable_chunks.binary_search_by_key(&offset, |chunk| chunk.chunk_offset)
+                .ok().and_then(|index| summary.durable_chunks.get(index));
+            if !offered || found.is_none_or(|chunk| chunk.chunk_size != size
+                || hash.is_some_and(|hash| *hash != chunk.chunk_hash))
+            {
+                return Err(invalid("restore history contains an incomplete or conflicting receipt"));
+            }
+        }
+        if !offered {
+            return Err(invalid("restore requires an authenticated matching offer"));
+        }
+        checkpoint()?;
+        let mut source = std::fs::File::open(&restore.source_path)?;
+        let metadata = source.metadata()?;
+        if !metadata.is_file() || metadata.len() < written || metadata.len() > expected_bytes {
+            return Err(invalid("restore source is not a compatible whole-object file"));
+        }
+        source.seek(SeekFrom::Start(0))?;
+        let mut buffer = Vec::new();
+        buffer.try_reserve_exact(max_chunk)
+            .map_err(|error| io::Error::other(format!("restore buffer allocation: {error}")))?;
+        let mut hash = Sha256::new();
+        let mut checks = ChunkChecks::default();
+        let boundaries = &config.manifest.objects.get(&config.object_id)
+            .expect("validated manifest retains its selected file").chunk_boundaries;
+        for chunk in &summary.durable_chunks {
+            buffer.resize(chunk.chunk_size as usize, 0);
+            let mut filled = 0;
+            while filled < buffer.len() {
+                checkpoint()?;
+                let end = filled + (buffer.len() - filled).min(8192);
+                match source.read(&mut buffer[filled..end]) {
+                    Ok(0) => return Err(invalid("restore source was truncated")),
+                    Ok(count) => filled += count,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let digest: [u8; 32] = Sha256::digest(&buffer).into();
+            if digest != chunk.chunk_hash {
+                return Err(integrity_error(format!("restore payload hash mismatch at offset {}", chunk.chunk_offset)));
+            }
+            checks.accept(boundaries, chunk.chunk_offset, &buffer, digest)?;
+            hash.update(&buffer);
+        }
+        checkpoint()?;
+        let limits = JournalRestoreLimits {
+            max_bytes: config.max_bytes, max_chunks: config.max_chunks,
+            max_chunk_bytes: MAX_LIVE_EPOCH_BYTES,
+        };
+        Ok(RestoreState {
+            config, journal, transfer_id: restore.transfer_id, timestamp: restore.timestamp,
+            source, expected_bytes, written, chunks, hash, checks, limits,
+        })
+    }
+
+    #[cfg(test)]
+    mod restore_tests;
 
     #[cfg(test)]
     mod tests {
