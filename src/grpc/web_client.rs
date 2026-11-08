@@ -3,7 +3,8 @@
 //! This client owns HTTP/1 connections through the native HTTP client's pool.
 //! Binary and independently padded text response streams are decoded as bytes
 //! arrive. No background reader or browser runtime is required. HTTPS uses the
-//! HTTP client's configured trust roots. HTTP content compression is not
+//! HTTP client's configured trust roots. HTTP, HTTPS and SOCKS5 proxies use
+//! the same bounded transport and call lifetime. HTTP content compression is not
 //! negotiated. Message-level gzip is opt-in through [`GrpcWebCompressionConfig`]
 //! and reuses the native gRPC codec's negotiated-encoding validation and
 //! decompression-bomb limits.
@@ -235,13 +236,22 @@ impl GrpcWebClient {
         )
     }
 
-    /// Configure native HTTP connectivity, TLS trust, DNS, pool admission and
-    /// message-level compression.
+    /// Configure native HTTP connectivity, proxies, TLS trust, DNS, pool
+    /// admission and message-level compression.
     ///
     /// Transport headers cannot be supplied through `default_headers`. Supply
-    /// application metadata there or on each Request. A proxy is rejected:
-    /// the owned pooled streaming HTTP transport currently uses direct
-    /// HTTP/HTTPS connections. Automatic redirects and retries are disabled.
+    /// application metadata there or on each Request. An HTTP proxy accepts
+    /// credentials in `proxy_url`, or a `Proxy-Authorization` default header
+    /// or per-request metadata override. That header authenticates only the
+    /// forward proxy or CONNECT hop; it is removed from tunneled origin and
+    /// SOCKS5 requests. SOCKS5 authentication uses the proxy URL credentials.
+    ///
+    /// Proxy negotiation and response streaming share the original call's
+    /// deadline, cancellation and pool admission. Proxied connections are
+    /// closed after each call, including success, so later calls cannot inherit
+    /// an earlier call's authenticated tunnel. HTTPS proxies and origins use
+    /// the configured TLS trust roots and hostname verification. Automatic
+    /// redirects and retries are disabled, including through a proxy.
     /// HTTP `Content-Encoding` remains identity even when gRPC message gzip is
     /// enabled; only message frames use `grpc-encoding`.
     pub fn with_http_config_and_compression(
@@ -258,11 +268,6 @@ impl GrpcWebClient {
             || config.timeout.is_zero()
         {
             return Err(Status::invalid_argument("invalid gRPC-Web limits"));
-        }
-        if http.proxy_url.is_some() {
-            return Err(Status::unimplemented(
-                "native gRPC-Web pooled streaming requires a direct connection",
-            ));
         }
         let mut default_header_bytes = 0;
         for (name, value) in &http.default_headers {

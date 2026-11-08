@@ -47,7 +47,7 @@ fn accept(listener: &TcpListener) -> TcpStream {
     }
 }
 
-fn request(socket: &mut TcpStream) -> (String, Vec<u8>) {
+fn request_head(socket: &mut impl Read) -> String {
     let mut bytes = Vec::new();
     while !bytes.ends_with(b"\r\n\r\n") {
         assert!(bytes.len() < 16 * 1024, "unbounded request head");
@@ -55,8 +55,12 @@ fn request(socket: &mut TcpStream) -> (String, Vec<u8>) {
         socket.read_exact(&mut byte).unwrap();
         bytes.push(byte[0]);
     }
-    let head = String::from_utf8(bytes).unwrap();
-    assert!(head.starts_with("POST /test.Service/Watch HTTP/1.1\r\n"));
+    String::from_utf8(bytes).unwrap()
+}
+
+fn request_to(socket: &mut impl Read, target: &str) -> (String, Vec<u8>) {
+    let head = request_head(socket);
+    assert!(head.starts_with(&format!("POST {target} HTTP/1.1\r\n")), "{head}");
     let length = head
         .split("\r\n")
         .filter_map(|line| line.split_once(':'))
@@ -70,6 +74,18 @@ fn request(socket: &mut TcpStream) -> (String, Vec<u8>) {
     let mut body = vec![0; length];
     socket.read_exact(&mut body).unwrap();
     (head, body)
+}
+
+fn request(socket: &mut impl Read) -> (String, Vec<u8>) {
+    request_to(socket, "/test.Service/Watch")
+}
+
+fn header_values<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
+    head.split("\r\n")
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.trim())
+        .collect()
 }
 
 fn envelope(flag: u8, payload: &[u8]) -> Vec<u8> {
@@ -93,14 +109,14 @@ fn success(payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn chunk(socket: &mut TcpStream, bytes: &[u8]) {
+fn chunk(socket: &mut impl Write, bytes: &[u8]) {
     write!(socket, "{:x}\r\n", bytes.len()).unwrap();
     socket.write_all(bytes).unwrap();
     socket.write_all(b"\r\n").unwrap();
     socket.flush().unwrap();
 }
 
-fn fixed(socket: &mut TcpStream, status: u16, content_type: &str, headers: &str, body: &[u8]) {
+fn fixed(socket: &mut impl Write, status: u16, content_type: &str, headers: &str, body: &[u8]) {
     write!(socket,
         "HTTP/1.1 {status} Response\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{headers}\r\n",
         body.len(),
@@ -109,7 +125,7 @@ fn fixed(socket: &mut TcpStream, status: u16, content_type: &str, headers: &str,
     socket.flush().unwrap();
 }
 
-fn expect_closed(socket: &mut TcpStream) {
+fn expect_closed(socket: &mut impl Read) {
     let mut byte = [0];
     match socket.read(&mut byte) {
         Ok(0) => {}
@@ -147,6 +163,359 @@ fn metadata_text(metadata: &Metadata, key: &str) -> Option<String> {
         Some(MetadataValue::Ascii(value)) => Some(value.clone()),
         _ => None,
     }
+}
+
+fn proxy_http_config(proxy: String) -> HttpClientConfig {
+    let mut http = HttpClientConfig::default();
+    http.proxy_url = Some(proxy);
+    http.pool_config.max_connections_per_host = 1;
+    http.pool_config.max_total_connections = 1;
+    http
+}
+
+fn proxy_request(proxy_authorization: Option<&str>) -> Request<Bytes> {
+    let mut request = Request::new(Bytes::from_static(b"request"));
+    assert!(request.metadata_mut().insert("authorization", "Bearer origin-only"));
+    assert!(request.metadata_mut().insert("x-call", "private-method-metadata"));
+    if let Some(value) = proxy_authorization {
+        assert!(request.metadata_mut().insert("proxy-authorization", value));
+    }
+    request
+}
+
+fn accept_socks5(socket: &mut TcpStream) {
+    let mut greeting = [0; 2];
+    socket.read_exact(&mut greeting).unwrap();
+    assert_eq!(greeting[0], 5);
+    let mut methods = vec![0; usize::from(greeting[1])];
+    socket.read_exact(&mut methods).unwrap();
+    assert!(methods.contains(&2));
+    socket.write_all(&[5, 2]).unwrap();
+    let mut auth = [0; 2];
+    socket.read_exact(&mut auth).unwrap();
+    assert_eq!(auth, [1, 5]);
+    let mut username = [0; 5];
+    socket.read_exact(&mut username).unwrap();
+    assert_eq!(&username, b"agent");
+    let mut length = [0];
+    socket.read_exact(&mut length).unwrap();
+    assert_eq!(length, [2]);
+    let mut password = [0; 2];
+    socket.read_exact(&mut password).unwrap();
+    assert_eq!(&password, b"pw");
+    socket.write_all(&[1, 0]).unwrap();
+    let mut connect = [0; 5];
+    socket.read_exact(&mut connect).unwrap();
+    assert_eq!(&connect[..4], &[5, 1, 0, 3]);
+    let mut target = vec![0; usize::from(connect[4])];
+    socket.read_exact(&mut target).unwrap();
+    assert_eq!(target, b"origin.invalid");
+    let mut port = [0; 2];
+    socket.read_exact(&mut port).unwrap();
+    assert_eq!(u16::from_be_bytes(port), 8080);
+    socket.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+}
+
+fn web_chunk(socket: &mut impl Write, content_type: ContentType, bytes: &[u8]) {
+    if content_type.is_text_mode() {
+        // Each independently padded part is legal even before the stream ends.
+        for part in bytes.chunks(7) {
+            chunk(socket, base64::engine::general_purpose::STANDARD.encode(part).as_bytes());
+        }
+    } else {
+        chunk(socket, bytes);
+    }
+}
+
+#[test]
+fn forward_and_socks_proxies_preserve_streams_authentication_and_call_ownership() {
+    for (socks, content_type) in [
+        (false, ContentType::GrpcWeb),
+        (true, ContentType::GrpcWebText),
+    ] {
+        let (listener, _) = listener();
+        let address = listener.local_addr().unwrap();
+        let url = "http://origin.invalid:8080/test.Service/Watch";
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            for (index, proxy_auth) in ["Bearer proxy-call", "Bearer proxy-default", "Bearer proxy-default"]
+                .into_iter().enumerate()
+            {
+                let mut socket = accept(&listener);
+                if socks {
+                    accept_socks5(&mut socket);
+                }
+                let target = if socks { "/test.Service/Watch" } else { url };
+                let (head, body) = request_to(&mut socket, target);
+                assert_eq!(header_values(&head, "host"), ["origin.invalid:8080"]);
+                assert_eq!(header_values(&head, "authorization"), ["Bearer origin-only"]);
+                assert_eq!(header_values(&head, "x-call"), ["private-method-metadata"]);
+                let proxy_headers = header_values(&head, "proxy-authorization");
+                if socks {
+                    assert!(proxy_headers.is_empty(), "SOCKS credentials must not become origin headers");
+                } else {
+                    assert_eq!(proxy_headers, [proxy_auth], "the per-call proxy credential wins");
+                }
+                let expected = message(b"request");
+                assert_eq!(body, if content_type.is_text_mode() {
+                    base64::engine::general_purpose::STANDARD.encode(expected).into_bytes()
+                } else {
+                    expected
+                });
+                if index == 1 {
+                    fixed(&mut socket, 200, "application/grpc-web", "", &success(b"unary"));
+                } else {
+                    write!(socket,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\nx-initial: proxy\r\n\r\n",
+                        content_type.as_header_value(),
+                    ).unwrap();
+                    web_chunk(&mut socket, content_type, &message(b"first"));
+                    if index == 0 {
+                        continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        web_chunk(&mut socket, content_type, &success(b"second"));
+                        socket.write_all(b"0\r\n\r\n").unwrap();
+                        socket.flush().unwrap();
+                    }
+                }
+                // Even successful proxy calls close their authenticated route.
+                // The third response deliberately remains parked until dropped
+                // or cancelled by the caller, with no terminal peer frame.
+                expect_closed(&mut socket);
+            }
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+        });
+        let scheme = if socks { "socks5" } else { "http" };
+        let mut http = proxy_http_config(format!("{scheme}://agent:pw@{address}"));
+        http.default_headers.push(("Proxy-Authorization".into(), "Bearer proxy-default".into()));
+        let client = GrpcWebClient::with_http_config(http, config(content_type)).unwrap();
+        let runtime = runtime(socks);
+        let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+        let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+        runtime.block_on_with_cx(driver.clone(), async {
+            let mut stream = client.server_streaming(
+                &driver, url, proxy_request(Some("Bearer proxy-call")), IdentityCodec,
+            ).await.unwrap();
+            assert_eq!(metadata_text(stream.initial_metadata(), "x-initial").as_deref(), Some("proxy"));
+            assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"first");
+            assert!(stream.trailing_metadata().is_none());
+            assert_eq!(client.http.pool_stats().total_connections, 1);
+            let error = client.unary(&driver, url, proxy_request(None), IdentityCodec).await.unwrap_err();
+            assert_eq!(error.code(), Code::ResourceExhausted, "the stream owns its pool slot");
+            continue_tx.send(()).unwrap();
+            assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"second");
+            assert!(stream.message().await.unwrap().is_none());
+            assert_eq!(metadata_text(stream.trailing_metadata().unwrap(), "x-final").as_deref(), Some("yes"));
+            assert_eq!(client.http.pool_stats().total_connections, 0);
+            assert_eq!(client.http.pool_stats().idle_connections, 0);
+
+            let unary = client.unary(&driver, url, proxy_request(None), IdentityCodec).await.unwrap();
+            assert_eq!(unary.get_ref().as_ref(), b"unary");
+            assert_eq!(metadata_text(unary.trailing_metadata(), "x-final").as_deref(), Some("yes"));
+            assert_eq!(client.http.pool_stats().total_connections, 0);
+
+            let mut parked = client.server_streaming(&owner, url, proxy_request(None), IdentityCodec).await.unwrap();
+            assert_eq!(parked.message().await.unwrap().unwrap().as_ref(), b"first");
+            let wakes = Arc::new(WakeCount::default());
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task = Context::from_waker(&waker);
+            assert!(parked.poll_message(&mut task).is_pending());
+            if socks {
+                let before = wakes.0.load(Ordering::SeqCst);
+                owner.cancel_with(CancelKind::User, Some("proxied call cancelled"));
+                assert!(wakes.0.load(Ordering::SeqCst) > before);
+                assert_eq!(parked.message().await.unwrap_err().code(), Code::Cancelled);
+            }
+            drop(parked);
+            assert_eq!(client.http.pool_stats().total_connections, 0);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(driver.checkpoint().is_ok());
+        });
+        peer.join().unwrap();
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[cfg(feature = "tls")]
+const PROXY_TLS_CERT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/server.crt"
+));
+
+#[cfg(feature = "tls")]
+fn proxy_tls_server(socket: TcpStream) -> rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    let key = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/server.key"));
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions().unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![CertificateDer::from_pem_slice(PROXY_TLS_CERT).unwrap()],
+        PrivateKeyDer::from_pem_slice(key).unwrap(),
+    ).unwrap();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+    rustls::StreamOwned::new(connection, socket)
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn connect_tunnels_and_https_proxies_preserve_verified_tls_and_auth_boundaries() {
+    for https_proxy in [false, true] {
+        let (listener, _) = listener();
+        let address = listener.local_addr().unwrap();
+        let url = if https_proxy {
+            "http://origin.invalid:8080/test.Service/Watch"
+        } else {
+            "https://localhost/test.Service/Watch"
+        };
+        let peer = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            if !https_proxy {
+                let connect = request_head(&mut socket);
+                assert!(connect.starts_with("CONNECT localhost:443 HTTP/1.1\r\n"));
+                assert_eq!(header_values(&connect, "proxy-authorization"), ["Basic YWdlbnQ6cHc="]);
+                assert!(header_values(&connect, "authorization").is_empty());
+                assert!(header_values(&connect, "x-call").is_empty());
+                socket.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").unwrap();
+            }
+            let mut tls = proxy_tls_server(socket);
+            let target = if https_proxy { url } else { "/test.Service/Watch" };
+            let (head, body) = request_to(&mut tls, target);
+            assert_eq!(body, message(b"request"));
+            assert_eq!(header_values(&head, "authorization"), ["Bearer origin-only"]);
+            assert_eq!(header_values(&head, "x-call"), ["private-method-metadata"]);
+            if https_proxy {
+                assert_eq!(header_values(&head, "proxy-authorization"), ["Basic YWdlbnQ6cHc="]);
+            } else {
+                assert!(header_values(&head, "proxy-authorization").is_empty(), "CONNECT credentials reached the origin");
+            }
+            fixed(&mut tls, 200, "application/grpc-web", "", &success(b"verified"));
+        });
+        let proxy = if https_proxy {
+            format!("https://agent:pw@localhost:{}", address.port())
+        } else {
+            format!("http://agent:pw@{address}")
+        };
+        let mut http = proxy_http_config(proxy);
+        http.tls_root_certificates = crate::tls::Certificate::from_pem(PROXY_TLS_CERT).unwrap();
+        let client = GrpcWebClient::with_http_config(http, config(ContentType::GrpcWeb)).unwrap();
+        let runtime = runtime(https_proxy);
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        runtime.block_on_with_cx(cx.clone(), async {
+            let response = client.unary(&cx, url, proxy_request(None), IdentityCodec).await.unwrap();
+            assert_eq!(response.get_ref().as_ref(), b"verified");
+            assert_eq!(metadata_text(response.trailing_metadata(), "x-final").as_deref(), Some("yes"));
+            assert_eq!(client.http.pool_stats().total_connections, 0);
+            assert_eq!(client.http.pool_stats().idle_connections, 0);
+        });
+        peer.join().unwrap();
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn proxy_connect_refusal_cancellation_and_deadline_release_the_call() {
+    for mode in ["refused", "cancelled", "deadline"] {
+        let (listener, _) = listener();
+        let address = listener.local_addr().unwrap();
+        let (entered, observed) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            let head = request_head(&mut socket);
+            assert!(head.starts_with("CONNECT origin.invalid:443 HTTP/1.1\r\n"));
+            assert_eq!(header_values(&head, "proxy-authorization"), ["Bearer tunnel-only"]);
+            assert!(header_values(&head, "authorization").is_empty());
+            assert!(header_values(&head, "x-call").is_empty());
+            if mode == "refused" {
+                socket.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n").unwrap();
+            } else {
+                entered.send(()).unwrap();
+            }
+            expect_closed(&mut socket);
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+        });
+        let runtime = runtime(false);
+        let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let budget = if mode == "deadline" {
+            Budget::INFINITE.with_deadline(Time::from_nanos(110))
+        } else {
+            Budget::INFINITE
+        };
+        let owner = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1), TaskId::new_for_test(4, 0), budget,
+            None, driver.io_driver_handle(), None, Some(timer.clone()), None,
+        );
+        let cancel_owner = owner.clone();
+        let interrupt = (mode != "refused").then(|| std::thread::spawn(move || {
+            // The proxy has received CONNECT and supplies no reply. The
+            // protocol itself cannot wake the parked setup operation.
+            observed.recv_timeout(Duration::from_secs(3)).unwrap();
+            if mode == "deadline" {
+                clock.advance(10);
+                assert!(timer.process_timers() > 0);
+            } else {
+                cancel_owner.cancel_with(CancelKind::User, Some("proxy negotiation parked"));
+            }
+        }));
+        let http = proxy_http_config(format!("http://{address}"));
+        let client = GrpcWebClient::with_http_config(http, config(ContentType::GrpcWeb)).unwrap();
+        runtime.block_on_with_cx(driver, async {
+            let error = client.server_streaming(
+                &owner, "https://origin.invalid/test.Service/Watch",
+                proxy_request(Some("Bearer tunnel-only")), IdentityCodec,
+            ).await.unwrap_err();
+            let expected = match mode {
+                "refused" => Code::Unavailable,
+                "cancelled" => Code::Cancelled,
+                "deadline" => Code::DeadlineExceeded,
+                _ => unreachable!(),
+            };
+            assert_eq!(error.code(), expected, "{mode}: {error}");
+            assert_eq!(client.http.pool_stats().total_connections, 0);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        });
+        if let Some(interrupt) = interrupt { interrupt.join().unwrap(); }
+        peer.join().unwrap();
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn proxy_redirects_do_not_replay_rpc_metadata_or_credentials() {
+    let (listener, _) = listener();
+    let address = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut socket = accept(&listener);
+        let (head, body) = request_to(&mut socket, "http://origin.invalid:8080/test.Service/Watch");
+        assert_eq!(body, message(b"request"));
+        assert_eq!(header_values(&head, "authorization"), ["Bearer origin-only"]);
+        assert_eq!(header_values(&head, "proxy-authorization"), ["Bearer proxy-only"]);
+        fixed(&mut socket, 307, "text/plain", "Location: http://different.invalid/steal\r\n", b"");
+        expect_closed(&mut socket);
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+    });
+    let mut http = proxy_http_config(format!("http://{address}"));
+    http.redirect_policy = RedirectPolicy::Limited(5);
+    http.retry_policy = RetryPolicy::IdempotentStatusCodes { max_retries: 3 };
+    let client = GrpcWebClient::with_http_config(http, config(ContentType::GrpcWeb)).unwrap();
+    let runtime = runtime(false);
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    runtime.block_on_with_cx(cx.clone(), async {
+        let error = client.unary(
+            &cx, "http://origin.invalid:8080/test.Service/Watch",
+            proxy_request(Some("Bearer proxy-only")), IdentityCodec,
+        ).await.unwrap_err();
+        assert_eq!(error.code(), Code::Unknown);
+        assert!(error.message().contains("HTTP 307"));
+        assert_eq!(client.http.pool_stats().total_connections, 0);
+    });
+    peer.join().unwrap();
+    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
 }
 
 #[test]
