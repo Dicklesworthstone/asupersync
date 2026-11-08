@@ -74,6 +74,7 @@ const ENTRY_POINTS: &[&str] = &[
     "fs::read_dir",
     "fs::rename",
     "fs::remove_file",
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
     "process::Command::spawn",
     #[cfg(unix)]
     "signal::signal",
@@ -245,12 +246,15 @@ async fn census(cx: Cx, fx: Fixtures) -> Vec<(&'static str, Verdict, String)> {
         verdict(asupersync::fs::remove_file(dir.join("to_remove")).await),
     );
 
-    let spawned = asupersync::process::Command::new("true").spawn();
-    let spawned = spawned.map(|mut child| {
-        // `true` exits at once; reap it.
-        let _ = child.wait();
-    });
-    record("process::Command::spawn", verdict(spawned));
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+    {
+        let spawned = asupersync::process::Command::new("true").spawn();
+        let spawned = spawned.map(|mut child| {
+            // `true` exits at once; reap it.
+            let _ = child.wait();
+        });
+        record("process::Command::spawn", verdict(spawned));
+    }
 
     #[cfg(unix)]
     record(
@@ -390,10 +394,13 @@ fn io_entry_points_proceed_with_io_multi_thread() {
 fn a_thread_outside_the_runtime_is_not_gated() {
     std::thread::spawn(|| {
         assert!(Cx::current().is_none(), "no ambient cx on a plain thread");
-        let mut child = asupersync::process::Command::new("true")
-            .spawn()
-            .expect("spawn outside the runtime");
-        let _ = child.wait();
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+        {
+            let mut child = asupersync::process::Command::new("true")
+                .spawn()
+                .expect("spawn outside the runtime");
+            let _ = child.wait();
+        }
         #[cfg(unix)]
         {
             let dir = tempfile::tempdir().expect("temp dir");

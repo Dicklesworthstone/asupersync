@@ -140,7 +140,7 @@ include = [
 ]
 
 [features]
-default = ["proc-macros", "nightly-outcome-try", "runtime-core", "native-runtime"]
+default = ["proc-macros", "nightly-outcome-try", "runtime-core", "native-runtime", "process"]
 # Opt-in live HTTP/2 request ingress with bounded body queues and
 # consumption-based stream receive credit. Native validation is a separate lane.
 http2-streaming = []
@@ -172,11 +172,30 @@ deterministic-mode = []
 # Make those edges optional only when the corresponding module gates exist.
 runtime-core = []
 native-runtime = []
+# The host child-process module (`asupersync::process`: `Command`, `Child`,
+# `Stdio`, ...). Together with the explicit slim profile this is a real module
+# gate. It is on by default, so default and
+# desktop builds keep every existing API. Existing bare no-default-features
+# consumers also retain the module for compatibility. A host that deliberately
+# selects `slim-runtime-profile` with defaults off may leave this feature out. The
+# module has no in-crate users, and the OS crates it uses (nix, libc, socket2,
+# windows-sys) are shared with other modules, so no dependency edge becomes
+# optional with it. It is also absent on wasm32, whatever this feature says.
+# tests/fixtures/process-gate-consumer is the compiler check that the API is
+# absent only in the explicit slim selection, and restored when requested.
+process = []
+# Explicit opt-in to the reduced native module surface. This currently omits
+# only child-process support when `process` is not also selected; it is not a
+# no-thread, no-allocation, minimal-dependency or whole-process memory guarantee.
+# Existing selections retain their surface unless another consumer in the same
+# Cargo graph opts into this profile. Build device and host leaves separately,
+# or enable `process` explicitly in the host consumer to restore its APIs.
+slim-runtime-profile = ["runtime-core", "native-runtime"]
 # Bounded runtime configuration for native desktop hosts. The profile's
 # runtime behavior is structured-concurrency-only; its compatibility feature
 # group is explicit so the selected graph is inspectable and can be reduced by
 # the next upstream factoring step without another API rename.
-desktop-runtime-profile = ["runtime-core", "native-runtime"]
+desktop-runtime-profile = ["runtime-core", "native-runtime", "process"]
 # Canonical wasm browser profiles (FP-BR-* in the wasm build plan).
 # runtime-core is part of every profile so a consumer can select only the
 # profile under default-features = false. native-runtime stays out: it is
@@ -337,6 +356,7 @@ ci-cross-platform = [
     "browser-trace",
     "deterministic-mode",
     "native-runtime",
+    "process",
     "wasm-browser-dev",
     "wasm-browser-prod",
     "wasm-browser-deterministic",

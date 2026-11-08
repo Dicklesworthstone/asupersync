@@ -1,3 +1,4 @@
+#![cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
 //! Deterministic Conformance and Fault-Injection Tests (Track 3.7)
 //!
 //! Validates conformance contracts and adversarial fault scenarios for

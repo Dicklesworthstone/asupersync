@@ -249,7 +249,7 @@ test_atp_caps() {
                 --package asupersync \
                 --lib \
                 --no-default-features \
-                --features "native-runtime"
+                --features "native-runtime,process"
             ;;
         windows)
             run_cargo_check \
@@ -257,7 +257,7 @@ test_atp_caps() {
                 --package asupersync \
                 --lib \
                 --no-default-features \
-                --features "native-runtime"
+                --features "native-runtime,process"
             ;;
     esac
 }
@@ -276,7 +276,7 @@ test_windows_cross_compile_surface() {
         --lib \
         --target "$windows_target" \
         --no-default-features \
-        --features "native-runtime,quic,http3,compression,tracing-integration"
+        --features "native-runtime,process,quic,http3,compression,tracing-integration"
 
     if tool_exists x86_64-w64-mingw32-gcc; then
         run_cargo_check \

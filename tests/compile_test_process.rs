@@ -1,3 +1,4 @@
+#![cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
 //! Integration smoke tests for the process command APIs.
 
 use asupersync::process::Command;

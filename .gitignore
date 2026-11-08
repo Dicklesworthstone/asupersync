@@ -6,6 +6,7 @@ target_*/
 Cargo.lock
 !fuzz/Cargo.lock
 !tests/fixtures/downstream-consumer-proof/Cargo.lock
+!tests/fixtures/process-gate-consumer/Cargo.lock
 
 # IDE
 .idea/

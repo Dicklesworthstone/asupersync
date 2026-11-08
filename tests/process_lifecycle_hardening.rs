@@ -1,3 +1,4 @@
+#![cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
 #![allow(warnings)]
 #![allow(clippy::all)]
 //! Process Lifecycle Parity Hardening Tests (Track 3.4)

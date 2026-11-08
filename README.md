@@ -1940,10 +1940,21 @@ async fn macro_example(cx: &Cx, state: &mut RuntimeState) {
 These macros are available in the default feature set. The default production
 feature set is intentionally limited to `proc-macros` plus
 `nightly-outcome-try` plus the empty compatibility markers `runtime-core` and
-`native-runtime`; test-only internals are opt-in. The markers gate nothing yet.
-They are on by default so that default builds keep those modules when the planned
-runtime split puts them behind the markers. If you opt out of default features
-for a minimal core-only build, re-enable `proc-macros` explicitly.
+`native-runtime`, plus `process`; test-only internals are opt-in. The two
+markers gate nothing yet. They are on by default so that default builds keep
+those modules when the planned runtime split puts them behind the markers.
+The host child-process module (`asupersync::process`) remains available in
+existing native feature selections, including bare `default-features = false`
+consumers. To deliberately omit it, select `slim-runtime-profile` with defaults
+off and leave `process` out. Selecting `process` restores the module in that
+profile. This first module reduction excludes no shared dependency and makes
+no no-thread, heap-size or minimal-runtime claim. If you opt out of default
+features and need the macros, re-enable `proc-macros` explicitly.
+
+Cargo unifies dependency features within a build. Select the reduced profile
+from a final device binary and build host tools separately; a host consumer in
+the same graph must enable `process` to retain those APIs. Enabling it restores
+the module for every consumer sharing that Asupersync instance.
 
 Current contract:
 
@@ -2246,6 +2257,8 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `nightly-outcome-try` | `Outcome` `Try`/residual impls that enable `?`; active only on a nightly compiler (on stable the crate builds without them) | Yes |
 | `runtime-core` | Compatibility marker for the planned runtime module split; gates nothing yet | Yes |
 | `native-runtime` | Compatibility marker for the planned runtime module split; a compile error on wasm32 browser builds, gates nothing else yet | Yes |
+| `process` | Retains host child-process APIs in the explicit slim profile; existing native feature selections retain them either way; always absent on wasm32 | Yes |
+| `slim-runtime-profile` | Explicit reduced native module surface; currently omits child-process support unless `process` is also enabled; no dependency or memory-size guarantee | No |
 | `tower` | Tower `Service` adapter support | No |
 | `trace-compression` | LZ4 compression for trace files | No |
 | `debug-server` | Debug HTTP server for runtime inspection | No |

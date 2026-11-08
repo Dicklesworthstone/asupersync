@@ -1,3 +1,4 @@
+#![cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
 #![allow(unsafe_code)]
 //! Contract tests for [T3.6] Cancellation-Safe Integration: FS, Process, Signal
 //!

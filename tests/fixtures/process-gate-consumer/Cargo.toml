@@ -1,0 +1,39 @@
+[package]
+name = "asupersync-process-gate-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A real downstream graph: it is its own workspace, so the root workspace's
+# dev-dependencies, default features and test-internals are not unified into it.
+# That is what lets each row below mean what it says.
+[workspace]
+
+[dependencies]
+asupersync = { path = "../../..", default-features = false, features = ["runtime-core"] }
+
+[features]
+default = []
+# Opt in to the reduced native module surface. The consumer sources never
+# mention this feature; it only changes the dependency graph.
+slim = ["asupersync/slim-runtime-profile"]
+# Restore the child-process module when `slim` omitted it.
+process = ["asupersync/process"]
+
+# Two targets, deliberately not gated by `required-features`:
+#   * the library (src/lib.rs) uses core API only and must compile in all three graphs;
+#   * the binary (src/bin/process_consumer.rs) imports asupersync::process
+#     unconditionally and, when it builds, spawns and reaps one bounded host child.
+#
+# The three graphs and what each must do with the binary:
+#   (none)          the legacy selection keeps the module: compile and run;
+#   slim            the module is omitted: fail to compile, specifically E0432
+#                   on the unresolved import of asupersync::process;
+#   slim + process  the module is restored: compile and run.
+#
+# Central verification runs `cargo check` on the library in every graph and
+# `cargo run` on the binary in the (none) and `slim + process` graphs, plus
+# `cargo check` on the binary in the `slim` graph, and reads the retained
+# compiler logs. Cargo.lock: not produced yet. It is generated once centrally,
+# reviewed and committed (see the .gitignore exception), and then used with
+# --locked.

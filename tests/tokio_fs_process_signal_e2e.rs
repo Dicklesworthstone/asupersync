@@ -1,3 +1,4 @@
+#![cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
 #![allow(unsafe_code)]
 //! End-to-end tests for [T3.10] FS/Process/Signal with forensic-grade logging.
 //!

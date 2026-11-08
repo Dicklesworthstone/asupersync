@@ -1044,11 +1044,11 @@
       "stability": "feature-gated"
     },
     {
-      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
-      "doc": "Native process lifecycle surfaces.",
-      "feature_flags": [],
+      "cfg": "#[cfg(all(not(target_arch = \"wasm32\"), any(not(feature = \"slim-runtime-profile\"), feature = \"process\")))]",
+      "doc": "Native process lifecycle surfaces; retained for existing feature selections, omitted only by the explicit slim profile without process.",
+      "feature_flags": ["slim-runtime-profile", "process"],
       "kind": "module",
-      "line": 275,
+      "line": 283,
       "name": "process",
       "signature": "pub mod process",
       "stability": "native-only"
@@ -2419,11 +2419,11 @@
       "stability": "feature-gated"
     },
     {
-      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
-      "doc": "Native process lifecycle surfaces.",
-      "feature_flags": [],
+      "cfg": "#[cfg(all(not(target_arch = \"wasm32\"), any(not(feature = \"slim-runtime-profile\"), feature = \"process\")))]",
+      "doc": "Native process lifecycle surfaces; retained for existing feature selections, omitted only by the explicit slim profile without process.",
+      "feature_flags": ["slim-runtime-profile", "process"],
       "kind": "module",
-      "line": 275,
+      "line": 283,
       "name": "process",
       "signature": "pub mod process",
       "stability": "native-only"

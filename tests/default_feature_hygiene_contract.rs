@@ -65,6 +65,9 @@ fn default_features_do_not_enable_test_internals_for_downstream_consumers() {
     // `runtime-core` and `native-runtime` are empty compatibility markers for the
     // planned runtime module split (0967799e0). They are default so that default
     // builds keep those modules once the split gates them (asupersync-bi2462.138).
+    // `process` preserves child-process support in the explicit slim profile.
+    // Existing bare no-default consumers retain it too; the downstream compiler
+    // cells in tests/fixtures/process-gate-consumer cover both selections.
     assert_eq!(
         default,
         &vec![
@@ -72,6 +75,7 @@ fn default_features_do_not_enable_test_internals_for_downstream_consumers() {
             "nightly-outcome-try".to_string(),
             "runtime-core".to_string(),
             "native-runtime".to_string(),
+            "process".to_string(),
         ],
         "default features must stay production-safe; test-internals is opt-in"
     );
@@ -113,7 +117,7 @@ fn docs_match_default_feature_policy() {
     );
     assert!(
         agents.contains(
-            "default = [\"proc-macros\", \"nightly-outcome-try\", \"runtime-core\", \"native-runtime\"]"
+            "default = [\"proc-macros\", \"nightly-outcome-try\", \"runtime-core\", \"native-runtime\", \"process\"]"
         ),
         "AGENTS feature summary must match the manifest default and not put test-internals in default"
     );

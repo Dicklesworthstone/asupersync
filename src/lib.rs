@@ -273,7 +273,13 @@ pub mod fs;
 pub mod grpc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod messaging;
-#[cfg(not(target_arch = "wasm32"))]
+// Retain the established API for existing native feature selections, including
+// bare no-default-features consumers. Only the explicit slim profile opts out;
+// selecting `process` restores the complete module in that profile too.
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(not(feature = "slim-runtime-profile"), feature = "process")
+))]
 pub mod process;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
