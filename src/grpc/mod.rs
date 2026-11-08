@@ -103,7 +103,7 @@ pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
 // Re-export commonly used types
 #[cfg(not(target_arch = "wasm32"))]
-pub use client::UnaryAdmissionLimits;
+pub use client::{HttpConnectProxy, UnaryAdmissionLimits};
 pub use client::{
     Channel, ChannelBuilder, ChannelConfig, ClientInterceptor, CompressionEncoding, ConnectPolicy,
     GrpcClient, MetadataInterceptor, ResponseStream,

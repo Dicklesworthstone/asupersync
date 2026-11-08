@@ -212,30 +212,21 @@ impl NativeStreamEndpoint {
         Ok(endpoint)
     }
 
-    async fn dial(&self, setup: &mut Setup) -> Result<DialedStream, Status> {
-        let remaining = setup.remaining();
-        setup
-            .run(async {
-                match &self.destination {
-                    Destination::Address(address) => {
-                        TcpStream::connect_timeout(*address, remaining)
-                            .await
-                            .map(DialedStream::Tcp)
-                    }
-                    Destination::Host(host, port) => {
-                        self.connect_policy
-                            .connect_host(host.clone(), *port, remaining)
-                            .await
-                            .map(DialedStream::Tcp)
-                    }
-                    #[cfg(unix)]
-                    Destination::Unix(path) => crate::net::unix::UnixStream::connect(path)
-                        .await
-                        .map(DialedStream::Unix),
-                }
-                .map_err(io_status)
-            })
-            .await
+    async fn dial(&self, remaining: Duration) -> Result<DialedStream, Status> {
+        match &self.destination {
+            Destination::Address(address) => TcpStream::connect_timeout(*address, remaining)
+                .await
+                .map(DialedStream::Tcp),
+            Destination::Host(host, port) => self.connect_policy
+                .connect_host(host.clone(), *port, remaining)
+                .await
+                .map(DialedStream::Tcp),
+            #[cfg(unix)]
+            Destination::Unix(path) => crate::net::unix::UnixStream::connect(path)
+                .await
+                .map(DialedStream::Unix),
+        }
+        .map_err(io_status)
     }
 
     /// Connect over plaintext TCP and send the request.
@@ -490,9 +481,41 @@ impl NativeStreamEndpoint {
         Upgrade: FnOnce(DialedStream) -> UpgradeFuture,
         UpgradeFuture: Future<Output = Result<IO, Status>>,
     {
+        self.connect_with_dial(
+            cx, path, request, codec, config, windows, started,
+            |remaining| self.dial(remaining), upgrade,
+        )
+        .await
+    }
+
+    // A channel may obtain a CONNECT tunnel instead of a raw TCP socket.
+    // Keep the endpoint's public dial/return types unchanged and admit both
+    // factories through the exact same staged owner/deadline machinery.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn connect_with_dial<C, D, IO, Dial, DialFuture, Upgrade, UpgradeFuture>(
+        &self,
+        cx: &Cx,
+        path: &str,
+        request: Request<C::Encode>,
+        codec: C,
+        config: NativeStreamConfig,
+        windows: NativeStreamWindows,
+        started: Option<CallDeadline>,
+        dial: Dial,
+        upgrade: Upgrade,
+    ) -> Result<NativeServerStream<IO, C>, Status>
+    where
+        C: Codec,
+        IO: AsyncRead + AsyncWrite + Unpin,
+        Dial: FnOnce(Duration) -> DialFuture,
+        DialFuture: Future<Output = Result<D, Status>>,
+        Upgrade: FnOnce(D) -> UpgradeFuture,
+        UpgradeFuture: Future<Output = Result<IO, Status>>,
+    {
         windows.validate()?;
         let (admitted, mut setup) = self.admit_started(cx, path, &request, &config, started)?;
-        let dialed = self.dial(&mut setup).await?;
+        let remaining = setup.remaining();
+        let dialed = setup.run(dial(remaining)).await?;
         let io = setup.run(async { upgrade(dialed).await }).await?;
         let mut stream = setup
             .run(async {
@@ -536,9 +559,38 @@ impl NativeStreamEndpoint {
         Upgrade: FnOnce(DialedStream) -> UpgradeFuture,
         UpgradeFuture: Future<Output = Result<IO, Status>>,
     {
+        self.connect_duplex_with_dial(
+            cx, path, request, codec, config, windows, started,
+            |remaining| self.dial(remaining), upgrade,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn connect_duplex_with_dial<C, D, IO, Dial, DialFuture, Upgrade, UpgradeFuture>(
+        &self,
+        cx: &Cx,
+        path: &str,
+        request: Request<()>,
+        codec: C,
+        config: NativeStreamConfig,
+        windows: NativeStreamWindows,
+        started: Option<CallDeadline>,
+        dial: Dial,
+        upgrade: Upgrade,
+    ) -> Result<NativeDuplexStream<IO, C>, Status>
+    where
+        C: Codec,
+        IO: AsyncRead + AsyncWrite + Unpin,
+        Dial: FnOnce(Duration) -> DialFuture,
+        DialFuture: Future<Output = Result<D, Status>>,
+        Upgrade: FnOnce(D) -> UpgradeFuture,
+        UpgradeFuture: Future<Output = Result<IO, Status>>,
+    {
         windows.validate()?;
         let (admitted, mut setup) = self.admit_started(cx, path, &request, &config, started)?;
-        let dialed = self.dial(&mut setup).await?;
+        let remaining = setup.remaining();
+        let dialed = setup.run(dial(remaining)).await?;
         let io = setup.run(async { upgrade(dialed).await }).await?;
         let mut stream = setup
             .run(async {

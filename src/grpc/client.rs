@@ -49,6 +49,10 @@ use super::streaming::{
 #[cfg(not(target_arch = "wasm32"))]
 mod legacy_native;
 #[cfg(not(target_arch = "wasm32"))]
+mod proxy;
+#[cfg(not(target_arch = "wasm32"))]
+pub use proxy::HttpConnectProxy;
+#[cfg(not(target_arch = "wasm32"))]
 mod unary_admission;
 #[cfg(not(target_arch = "wasm32"))]
 pub use unary_admission::UnaryAdmissionLimits;
@@ -343,6 +347,9 @@ pub struct ChannelBuilder {
     /// Whether native streaming probes recover already-readable acknowledgements.
     #[cfg(not(target_arch = "wasm32"))]
     progress_aware_keepalive: bool,
+    /// Explicit HTTP CONNECT route, independent of RPC metadata and origin TLS.
+    #[cfg(not(target_arch = "wasm32"))]
+    http_connect_proxy: Option<Arc<HttpConnectProxy>>,
 }
 
 impl ChannelBuilder {
@@ -372,6 +379,8 @@ impl ChannelBuilder {
             keepalive_backoff: false,
             #[cfg(not(target_arch = "wasm32"))]
             progress_aware_keepalive: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            http_connect_proxy: None,
         }
     }
 
@@ -618,6 +627,39 @@ impl ChannelBuilder {
         self
     }
 
+    /// Route every native connection through an explicit HTTP CONNECT proxy.
+    ///
+    /// Applies to unary and all native streaming calls, including fresh
+    /// connections used by the unary pool. Both plaintext HTTP/2 and HTTPS
+    /// origins use CONNECT; the origin's authority, TLS server name and `h2`
+    /// ALPN checks are unchanged. An explicit [`Self::dial_addr`] selects the
+    /// tunnel destination while retaining the logical origin identity.
+    ///
+    /// Proxy negotiation shares the existing setup and whole-call deadlines
+    /// and cancellation. No refusal or redirect is retried, and the route
+    /// never falls back to a direct connection. Configure proxy credentials
+    /// on [`HttpConnectProxy`]; `proxy-authorization` RPC metadata is refused
+    /// after interceptors and before network I/O. Loopback and Unix-domain
+    /// channels cannot use this option.
+    ///
+    /// ```no_run
+    /// use asupersync::grpc::{Channel, HttpConnectProxy, Status};
+    ///
+    /// async fn channel() -> Result<Channel, Status> {
+    ///     let proxy = HttpConnectProxy::new("http://proxy.example:3128")?
+    ///         .with_authorization("Bearer proxy-access-token")?;
+    ///     Channel::builder("http://service.internal:50051")
+    ///         .http_connect_proxy(proxy)
+    ///         .connect().await.map_err(|error| error.into_status())
+    /// }
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn http_connect_proxy(mut self, proxy: HttpConnectProxy) -> Self {
+        self.http_connect_proxy = Some(Arc::new(proxy));
+        self
+    }
+
     /// Build the channel.
     pub async fn connect(self) -> Result<Channel, GrpcError> {
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
@@ -632,6 +674,10 @@ impl ChannelBuilder {
         .await?;
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Some(proxy) = self.http_connect_proxy {
+                proxy.validate_channel(channel.uri())?;
+                channel.http_connect_proxy = Some(proxy);
+            }
             channel.connect_policy = self.connect_policy;
             channel.progress_aware_keepalive = self.progress_aware_keepalive;
             channel.unary_admission = self
@@ -691,6 +737,9 @@ pub struct Channel {
     /// Timeout policy copied into each subsequently created native stream owner.
     #[cfg(not(target_arch = "wasm32"))]
     progress_aware_keepalive: bool,
+    /// Fixed proxy route shared by clones and their unary connection pool.
+    #[cfg(not(target_arch = "wasm32"))]
+    http_connect_proxy: Option<Arc<HttpConnectProxy>>,
 }
 
 impl Channel {
@@ -778,6 +827,8 @@ impl Channel {
             keepalive_backoff: None,
             #[cfg(not(target_arch = "wasm32"))]
             progress_aware_keepalive: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            http_connect_proxy: None,
         })
     }
 
@@ -973,6 +1024,14 @@ impl<C: Codec> GrpcClient<C> {
         self.apply_client_interceptors(&mut metadata_request)?;
 
         let mut metadata = metadata_request.metadata().clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.channel.http_connect_proxy.is_some()
+            && metadata.iter().any(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"))
+        {
+            return Err(Status::invalid_argument(
+                "configure gRPC proxy authorization on HttpConnectProxy, not RPC metadata",
+            ));
+        }
         let _ = metadata.insert("x-asupersync-grpc-path", path);
         let transport = if channel_target_is_loopback(self.channel.uri()) {
             "loopback"
@@ -1146,7 +1205,7 @@ impl<C: Codec> GrpcClient<C> {
         let setup = self.prepare_native_stream(cx, path, &request)?;
         let connector = self.channel.tls_connector().cloned();
         let request = Request::with_metadata(request.into_inner(), setup.metadata);
-        let stream = setup.endpoint.connect_with_transport(
+        let stream = setup.endpoint.connect_with_dial(
             cx,
             path,
             request,
@@ -1154,6 +1213,7 @@ impl<C: Codec> GrpcClient<C> {
             setup.config,
             setup.windows,
             Some(setup.deadline),
+            |remaining| setup.target.connect(remaining),
             |dialed| native_h2_transport(dialed, &setup.target, connector),
         ).await?;
         match setup.keepalive {
@@ -1227,7 +1287,7 @@ impl<C: Codec> GrpcClient<C> {
         let setup = self.prepare_native_stream(cx, path, &request)?;
         let connector = self.channel.tls_connector().cloned();
         let request = Request::with_metadata((), setup.metadata);
-        let stream = setup.endpoint.connect_duplex_with_transport(
+        let stream = setup.endpoint.connect_duplex_with_dial(
             cx,
             path,
             request,
@@ -1235,6 +1295,7 @@ impl<C: Codec> GrpcClient<C> {
             setup.config,
             setup.windows,
             Some(setup.deadline),
+            |remaining| setup.target.connect(remaining),
             |dialed| native_h2_transport(dialed, &setup.target, connector),
         ).await?;
         match setup.keepalive {
@@ -1668,7 +1729,7 @@ impl<C: Codec> GrpcClient<C> {
         let request = Request::with_metadata(request.into_inner(), setup.metadata);
         let mut stream = setup
             .endpoint
-            .connect_with_transport(
+            .connect_with_dial(
                 &cx,
                 path,
                 request,
@@ -1676,6 +1737,7 @@ impl<C: Codec> GrpcClient<C> {
                 setup.config,
                 setup.windows,
                 Some(setup.deadline),
+                |remaining| setup.target.connect(remaining),
                 |dialed| native_h2_transport(dialed, &setup.target, connector),
             )
             .await?;
@@ -1702,7 +1764,7 @@ impl<C: Codec> GrpcClient<C> {
         let connector = self.channel.tls_connector().cloned();
         let mut stream = setup
             .endpoint
-            .connect_duplex_with_transport(
+            .connect_duplex_with_dial(
                 &cx,
                 path,
                 Request::with_metadata((), setup.metadata),
@@ -1710,6 +1772,7 @@ impl<C: Codec> GrpcClient<C> {
                 setup.config,
                 setup.windows,
                 Some(setup.deadline),
+                |remaining| setup.target.connect(remaining),
                 |dialed| native_h2_transport(dialed, &setup.target, connector),
             )
             .await?;
@@ -1743,6 +1806,7 @@ struct NativeH2Target {
     scheme: &'static str,
     use_tls: bool,
     connect_policy: ConnectPolicy,
+    http_connect_proxy: Option<Arc<HttpConnectProxy>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1775,6 +1839,7 @@ impl NativeH2Target {
             channel.dial_addr(),
         )?;
         target.connect_policy = channel.connect_policy();
+        target.http_connect_proxy = channel.http_connect_proxy.clone();
         Ok(target)
     }
 
@@ -1819,6 +1884,7 @@ impl NativeH2Target {
             scheme: if use_tls { "https" } else { "http" },
             use_tls,
             connect_policy: ConnectPolicy::default(),
+            http_connect_proxy: None,
         })
     }
 
@@ -1838,6 +1904,7 @@ impl NativeH2Target {
                 scheme: "http",
                 use_tls: false,
                 connect_policy: ConnectPolicy::default(),
+                http_connect_proxy: None,
             })
         }
         #[cfg(not(unix))]
@@ -1849,7 +1916,19 @@ impl NativeH2Target {
         }
     }
 
-    async fn connect(&self, timeout: Duration) -> Result<DialedStream, Status> {
+    async fn connect(&self, timeout: Duration) -> Result<NativeChannelDial, Status> {
+        if let Some(proxy) = &self.http_connect_proxy {
+            let authority = match &self.destination {
+                NativeH2Destination::Address(address) => address.to_string(),
+                NativeH2Destination::Host(host, port) => format!("{host}:{port}"),
+                #[cfg(unix)]
+                NativeH2Destination::Unix(_) => return Err(Status::invalid_argument(
+                    "HTTP CONNECT proxies cannot route Unix-domain channels",
+                )),
+            };
+            let cx = legacy_native_cx()?;
+            return proxy.connect(&cx, &authority).await.map(NativeChannelDial::Tunnel);
+        }
         // Share the same offloaded, cancellation-aware system resolver used by
         // NativeStreamEndpoint. The caller's outer setup timeout also covers
         // resolution and TLS, so neither can restart the connection budget.
@@ -1868,8 +1947,19 @@ impl NativeH2Target {
                 .await
                 .map(DialedStream::Unix),
         }
+        .map(NativeChannelDial::Direct)
         .map_err(|error| transport_status("connect", error))
     }
+}
+
+/// Channel-only dial result. The existing public endpoint dial enum remains
+/// unchanged, including the concrete TCP return types of its constructors.
+#[cfg(not(target_arch = "wasm32"))]
+enum NativeChannelDial {
+    Direct(DialedStream),
+    Tunnel(Box<crate::http::h1::http_client::HttpConnectTunnel<
+        crate::http::h1::http_client::ClientIo,
+    >>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1880,6 +1970,13 @@ enum NativeH2Io {
     Unix(crate::net::unix::UnixStream),
     #[cfg(feature = "tls")]
     Tls(TlsStream<TcpStream>),
+    Tunnel(Box<crate::http::h1::http_client::HttpConnectTunnel<
+        crate::http::h1::http_client::ClientIo,
+    >>),
+    #[cfg(feature = "tls")]
+    TlsTunnel(Box<TlsStream<crate::http::h1::http_client::HttpConnectTunnel<
+        crate::http::h1::http_client::ClientIo,
+    >>>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1895,6 +1992,9 @@ impl AsyncRead for NativeH2Io {
             Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Tunnel(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::TlsTunnel(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
         }
     }
 }
@@ -1912,6 +2012,9 @@ impl AsyncWrite for NativeH2Io {
             Self::Unix(stream) => Pin::new(stream).poll_write(cx, data),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_write(cx, data),
+            Self::Tunnel(stream) => Pin::new(stream.as_mut()).poll_write(cx, data),
+            #[cfg(feature = "tls")]
+            Self::TlsTunnel(stream) => Pin::new(stream.as_mut()).poll_write(cx, data),
         }
     }
 
@@ -1922,6 +2025,9 @@ impl AsyncWrite for NativeH2Io {
             Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Tunnel(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::TlsTunnel(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
         }
     }
 
@@ -1932,6 +2038,9 @@ impl AsyncWrite for NativeH2Io {
             Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(feature = "tls")]
             Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Tunnel(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::TlsTunnel(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
         }
     }
 }
@@ -2381,50 +2490,90 @@ fn pool_after_success(pool: &UnaryConnectionPool, conn: NativeH2Conn, stream_id:
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn native_h2_transport(
-    stream: DialedStream,
+    stream: NativeChannelDial,
     target: &NativeH2Target,
     tls_connector: Option<TlsConnector>,
 ) -> Result<NativeH2Io, Status> {
+    // Preserve the existing missing-policy status even in a build without
+    // TLS, before selecting either the direct or tunneled transport branch.
+    if target.use_tls && tls_connector.is_none() {
+        return Err(Status::failed_precondition(
+            "HTTPS gRPC transport requires an explicit caller-supplied TLS connector",
+        ));
+    }
     let stream = match stream {
-        DialedStream::Tcp(stream) => stream,
+        NativeChannelDial::Tunnel(tunnel) => {
+            if !target.use_tls {
+                return Ok(NativeH2Io::Tunnel(tunnel));
+            }
+            #[cfg(feature = "tls")]
+            {
+                return native_h2_tls(*tunnel, target, tls_connector)
+                    .await
+                    .map(|tls| NativeH2Io::TlsTunnel(Box::new(tls)));
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                let _ = (tunnel, tls_connector);
+                return Err(Status::unavailable(
+                    "gRPC TLS support is disabled; rebuild with --features tls",
+                ));
+            }
+        }
+        NativeChannelDial::Direct(DialedStream::Tcp(stream)) => stream,
         // `unix:` targets never use TLS (NativeH2Target::unix).
         #[cfg(unix)]
-        DialedStream::Unix(stream) => return Ok(NativeH2Io::Unix(stream)),
+        NativeChannelDial::Direct(DialedStream::Unix(stream)) => return Ok(NativeH2Io::Unix(stream)),
     };
     if !target.use_tls {
         return Ok(NativeH2Io::Plain(stream));
     }
+
+    #[cfg(feature = "tls")]
+    {
+        native_h2_tls(stream, target, tls_connector).await.map(NativeH2Io::Tls)
+    }
+
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = (stream, tls_connector, target.server_name.as_str());
+        Err(Status::unavailable(
+            "gRPC TLS support is disabled; rebuild with --features tls",
+        ))
+    }
+}
+
+/// The same origin trust, identity and ALPN policy applies to a direct socket
+/// and a CONNECT tunnel, including TLS nested inside an HTTPS proxy.
+#[cfg(all(not(target_arch = "wasm32"), feature = "tls"))]
+async fn native_h2_tls<T>(
+    stream: T,
+    target: &NativeH2Target,
+    tls_connector: Option<TlsConnector>,
+) -> Result<TlsStream<T>, Status>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
     let connector = tls_connector.ok_or_else(|| {
         Status::failed_precondition(
             "HTTPS gRPC transport requires an explicit caller-supplied TLS connector",
         )
     })?;
 
-    #[cfg(feature = "tls")]
-    {
-        let tls = connector
-            .connect(&target.server_name, stream)
-            .await
-            .map_err(|error| {
-                ambient_cancellation_status("gRPC TLS handshake").unwrap_or_else(|| {
-                    Status::unavailable(format!("gRPC TLS handshake failed: {error}"))
-                })
-            })?;
-        if tls.alpn_protocol() != Some(b"h2".as_slice()) {
-            return Err(Status::unavailable(
-                "gRPC TLS peer did not negotiate the required h2 ALPN protocol",
-            ));
-        }
-        Ok(NativeH2Io::Tls(tls))
+    let tls = connector
+        .connect(&target.server_name, stream)
+        .await
+        .map_err(|error| {
+            ambient_cancellation_status("gRPC TLS handshake").unwrap_or_else(|| {
+                Status::unavailable(format!("gRPC TLS handshake failed: {error}"))
+            })
+        })?;
+    if tls.alpn_protocol() != Some(b"h2".as_slice()) {
+        return Err(Status::unavailable(
+            "gRPC TLS peer did not negotiate the required h2 ALPN protocol",
+        ));
     }
-
-    #[cfg(not(feature = "tls"))]
-    {
-        let _ = (stream, connector, target.server_name.as_str());
-        Err(Status::unavailable(
-            "gRPC TLS support is disabled; rebuild with --features tls",
-        ))
-    }
+    Ok(tls)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
