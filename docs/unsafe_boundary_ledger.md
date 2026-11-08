@@ -105,6 +105,17 @@ now 100 rows and 897 operations. The same change re-locates four
 (`allow(unsafe_code)` and three test env-var mutations); their text and
 reasoning are unchanged.
 
+On November 7, 2026 one `test-or-lab-harness` row was added for
+`tests/blocking_byte_reservation_allocator.rs`, the allocator canary of the
+byte-bounded blocking pool: a counting `#[global_allocator]` that forwards to
+`System` and counts live allocations of one watched size. `GlobalAlloc` is an
+unsafe trait with unsafe methods, so safe Rust cannot express it. The
+`allow(unsafe_code)` is scoped to that one `unsafe impl`, not to the file, and
+the row lists it with the impl, its two methods and the two forwarding
+`unsafe` blocks. The row is an inventory entry: it claims nothing about
+`System`'s own correctness or about any production allocation path. The
+inventory JSON now records 103 rows and 909 operations.
+
 ## Row Schema
 
 Each `sites[]` row must include:
