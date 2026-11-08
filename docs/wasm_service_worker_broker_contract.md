@@ -83,6 +83,45 @@ The downgrade promise is non-negotiable: browser reclaim, missing storage,
 scope drift, or capability mismatch may change the selected lane, but must not
 quietly widen the support claim.
 
+### Registration and durable-write fences
+
+Broker writes validate the current registration and retained records in the
+same IndexedDB transaction that commits the update. Each list operation also
+reads one consistent transaction snapshot. The localStorage backend uses the
+same namespace Web Lock as artifact storage when Web Locks are available;
+without Web Locks it provides only synchronous serialization within one realm.
+This does not provide localStorage crash atomicity across multiple keys.
+
+The stored origin and registration scope must match the active service worker.
+A different app namespace, major version, broker protocol, run profile, or
+capability manifest may be registered only when no work or handoff records
+remain. Clearing the registration alone does not let a new registration adopt
+orphaned descriptors. Reconcile retained work or explicitly clear the broker
+state before replacing its contract.
+
+Work and handoff writes share a lease fence for each `brokerWorkId`:
+
+- `leaseEpoch` must be a nonnegative safe integer and cannot fall below either
+  retained record's epoch.
+- The capability manifest must match the registration. An existing work ID
+  remains bound to its idempotency key, artifact namespace, and source event
+  kind, including when a newer lease is published.
+- Repeating an identical record at the same epoch returns its original receipt
+  without rewriting its timestamp. Updating metadata at the current epoch
+  remains supported.
+- Nested metadata and identity fields are copied before waiting for storage or
+  a lock. Durable records with malformed identities fail closed rather than
+  being repaired by coercion during reads.
+
+Handoffs remain persisted metadata: they do not delete the corresponding work
+descriptor or execute it. Both records remain available for application-owned
+reconciliation, including an older handoff retained beside a newer descriptor.
+The SDK does not allocate leases or promise exactly-once delivery. Lifecycle
+states are recorded labels; the embedding application still owns admission and
+execution policy. `deleteBrokerWork()`, `clearRegistration()`, and
+`clearBrokerState()` remain explicit, unconditional cleanup operations rather
+than lease-fenced worker completion.
+
 ## Bounded Broker Law
 
 ### Allowed broker responsibilities

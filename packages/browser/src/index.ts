@@ -7225,13 +7225,14 @@ function browserUrlLike(
   return urlLike;
 }
 
-/** Requests made by an artifact operation stay inside one host transaction. */
-interface BrowserArtifactTransaction {
+/** Requests for one namespace stay inside one host transaction or Web Lock. */
+interface BrowserStorageTransaction {
   get(
     key: string,
     consume: (bytes: Uint8Array | null) => void,
-    invalidBytes?: (error: BrowserArtifactValueDecodeError) => void,
+    invalidBytes?: (error: BrowserStorageValueDecodeError) => void,
   ): void;
+  keys(consume: (keys: string[]) => void): void;
   set(key: string, bytes: Uint8Array): void;
   delete(key: string): void;
   clear(consume: (count: number) => void): void;
@@ -7239,23 +7240,23 @@ interface BrowserArtifactTransaction {
   reclaimIndex(bytes: Uint8Array | null): void;
 }
 
-class BrowserArtifactValueDecodeError extends Error {
+class BrowserStorageValueDecodeError extends Error {
   constructor(readonly key: string, cause: unknown) {
     super(errorMessage(cause));
-    this.name = "BrowserArtifactValueDecodeError";
+    this.name = "BrowserStorageValueDecodeError";
   }
 }
 
-function consumeBrowserArtifactValue(
+function consumeBrowserStorageValue(
   key: string,
   decode: () => Uint8Array | null,
   consume: (bytes: Uint8Array | null) => void,
-  invalidBytes: ((error: BrowserArtifactValueDecodeError) => void) | undefined,
+  invalidBytes: ((error: BrowserStorageValueDecodeError) => void) | undefined,
 ): void {
   let bytes: Uint8Array | null;
   try { bytes = decode(); }
   catch (cause) {
-    const error = new BrowserArtifactValueDecodeError(key, cause);
+    const error = new BrowserStorageValueDecodeError(key, cause);
     if (!invalidBytes) throw error;
     invalidBytes(error);
     return;
@@ -7265,13 +7266,14 @@ function consumeBrowserArtifactValue(
   consume(bytes);
 }
 
-async function runBrowserArtifactTransaction<T>(
-  storage: BrowserStorage,
+async function runBrowserStorageTransaction<T>(
+  storage: Pick<BrowserStorage, "backend" | "globalObject" | "dbName" | "storeName" | "version" | "onIndexedDbBlocked">,
   namespace: string,
   mode: "readonly" | "readwrite",
-  execute: (transaction: BrowserArtifactTransaction, finish: (value: T) => void) => void,
+  execute: (transaction: BrowserStorageTransaction, finish: (value: T) => void) => void,
 ): Promise<T> {
-  assertBrowserStorageSupport(storage.diagnostics());
+  // Callers validate their own host contract. In particular, a bounded broker
+  // may use durable storage without admitting a service-worker direct runtime.
   if (storage.backend === "indexeddb") {
     const database = await openIndexedDbDatabase(
       storage.globalObject, storage.dbName, storage.storeName, storage.version,
@@ -7293,24 +7295,31 @@ async function runBrowserArtifactTransaction<T>(
         };
         transaction.onerror = () => { failure ??= transaction.error; };
         transaction.onabort = () => reject(
-          failure ?? transaction.error ?? new Error("IndexedDB artifact transaction aborted"),
+          failure ?? transaction.error ?? new Error("IndexedDB storage transaction aborted"),
         );
         transaction.oncomplete = () => {
           if (hasResult) resolve(result);
-          else reject(new Error("IndexedDB artifact transaction completed without a result"));
+          else reject(new Error("IndexedDB storage transaction completed without a result"));
         };
         const key = (value: string): string =>
           encodeIndexedDbStorageKey(namespace, value, storage.globalObject);
-        const view: BrowserArtifactTransaction = {
+        const view: BrowserStorageTransaction = {
           get(value, consume, invalidBytes) {
             const request = store.get(key(value));
             request.onsuccess = () => guard(() => {
               const raw = request.result;
-              consumeBrowserArtifactValue(value, () =>
+              consumeBrowserStorageValue(value, () =>
                 raw === undefined || raw === null
                   ? null : compactIndexedDbBytes(normalizeBrowserStorageValue(raw)),
               consume, invalidBytes);
             });
+          },
+          keys(consume) {
+            const request = store.getAllKeys(indexedDbNamespaceRange(namespace, storage.globalObject));
+            request.onsuccess = () => guard(() => consume(request.result
+              .map((raw) => typeof raw === "string"
+                ? decodeIndexedDbStorageKey(raw, namespace, storage.globalObject) : null)
+              .filter((value): value is string => value !== null).sort()));
           },
           set(value, bytes) { store.put(compactIndexedDbBytes(bytes), key(value)); },
           delete(value) { store.delete(key(value)); },
@@ -7331,7 +7340,7 @@ async function runBrowserArtifactTransaction<T>(
   }
 
   const local = browserLocalStorage(storage.globalObject);
-  if (!local) throw createBrowserStorageUnsupportedError(storage.diagnostics());
+  if (!local) throw new Error("localStorage is unavailable in this browser/runtime");
   const prefix = localStorageNamespacePrefix(namespace, storage.globalObject);
   const indexKey = encodeLocalStorageKey(namespace, BROWSER_ARTIFACT_INDEX_KEY, storage.globalObject);
   const run = (): T => {
@@ -7340,20 +7349,33 @@ async function runBrowserArtifactTransaction<T>(
     const key = (value: string): string =>
       encodeLocalStorageKey(namespace, value, storage.globalObject);
     const ensureWritable = (): void => {
-      if (mode !== "readwrite") throw new Error("artifact transaction is readonly");
+      if (mode !== "readwrite") throw new Error("storage transaction is readonly");
     };
     let result: T;
     let hasResult = false;
-    const view: BrowserArtifactTransaction = {
+    const view: BrowserStorageTransaction = {
       get(value, consume, invalidBytes) {
         const encoded = key(value);
         const raw = pending.has(encoded) ? pending.get(encoded)! : local.getItem(encoded);
-        consumeBrowserArtifactValue(value, () => {
+        consumeBrowserStorageValue(value, () => {
           if (raw === null) return null;
           const bytes = decodeBrowserStorageBytes(raw, storage.globalObject);
           if (bytes === null) throw new Error("invalid BrowserStorage value");
           return bytes;
         }, consume, invalidBytes);
+      },
+      keys(consume) {
+        const rawKeys = new Set<string>();
+        for (let index = 0; index < local.length; index += 1) {
+          const raw = local.key(index);
+          if (raw?.startsWith(prefix)) rawKeys.add(raw);
+        }
+        for (const [raw, value] of pending) {
+          if (value === null) rawKeys.delete(raw);
+          else rawKeys.add(raw);
+        }
+        consume([...rawKeys].map((raw) => decodeLocalStorageKey(raw, namespace, storage.globalObject))
+          .filter((value): value is string => value !== null).sort());
       },
       set(value, bytes) {
         ensureWritable();
@@ -7382,7 +7404,7 @@ async function runBrowserArtifactTransaction<T>(
     };
     // There is deliberately no await between the first read and publication.
     execute(view, (value) => { result = value; hasResult = true; });
-    if (!hasResult) throw new Error("localStorage artifact transaction did not finish synchronously");
+    if (!hasResult) throw new Error("localStorage storage transaction did not finish synchronously");
     if (reclamationIndex !== undefined && !pending.has(indexKey)) {
       throw new Error("artifact reclamation requires a final index update");
     }
@@ -7415,7 +7437,7 @@ async function runBrowserArtifactTransaction<T>(
       // If this publication fails, stop before removing any more payloads.
       const rollbackIndex = stagedIndex !== undefined
         ? stagedIndex : originals.get(indexKey) ?? null;
-      try { applyIndex(rollbackIndex); }
+      try { if (pending.has(indexKey)) applyIndex(rollbackIndex); }
       catch (cause) { rollbackFailure = { cause }; }
       if (rollbackFailure === undefined) {
         for (const raw of originals.keys()) {
@@ -7435,7 +7457,7 @@ async function runBrowserArtifactTransaction<T>(
         }
       }
       if (rollbackFailure !== undefined) {
-        throw new Error(`localStorage artifact rollback failed: ${errorMessage(rollbackFailure.cause)}; original failure: ${errorMessage(error)}`);
+        throw new Error(`localStorage storage rollback failed: ${errorMessage(rollbackFailure.cause)}; original failure: ${errorMessage(error)}`);
       }
       throw error;
     }
@@ -7541,16 +7563,17 @@ export class BrowserArtifactStore {
   private async transaction<T>(
     operation: BrowserArtifactOperation,
     mode: "readonly" | "readwrite",
-    execute: (transaction: BrowserArtifactTransaction, finish: (value: T) => void) => void,
+    execute: (transaction: BrowserStorageTransaction, finish: (value: T) => void) => void,
   ): Promise<T> {
     try {
-      return await runBrowserArtifactTransaction(this.storage, this.namespace, mode, execute);
+      assertBrowserStorageSupport(this.storage.diagnostics());
+      return await runBrowserStorageTransaction(this.storage, this.namespace, mode, execute);
     } catch (error) {
       if (typeof error === "object" && error !== null && "code" in error &&
           error.code === BROWSER_ARTIFACT_OPERATION_FAILED_CODE) throw error;
       throw this.operationError(
         operation,
-        error instanceof BrowserArtifactValueDecodeError
+        error instanceof BrowserStorageValueDecodeError
           ? "corrupt_index" : browserArtifactFailureReasonFromError(error, "storage_failed"),
         errorMessage(error),
       );
@@ -7652,7 +7675,7 @@ export class BrowserArtifactStore {
   }
 
   private writeIndex(
-    transaction: BrowserArtifactTransaction,
+    transaction: BrowserStorageTransaction,
     index: BrowserArtifactIndex,
     beforeReclamation = false,
   ): void {
@@ -7720,7 +7743,7 @@ export class BrowserArtifactStore {
   }
 
   private persistInTransaction(
-    transaction: BrowserArtifactTransaction,
+    transaction: BrowserStorageTransaction,
     index: BrowserArtifactIndex,
     prepared: {
       requestedId: string | undefined;
@@ -8226,7 +8249,11 @@ function isBrowserServiceWorkerBrokerLifecycleState(
 function normalizeBrowserServiceWorkerBrokerLifecycleState(
   value: BrowserServiceWorkerBrokerLifecycleState | undefined,
 ): BrowserServiceWorkerBrokerLifecycleState {
-  return value ?? "cold_start";
+  const state = value ?? "cold_start";
+  if (!isBrowserServiceWorkerBrokerLifecycleState(state)) {
+    throw new TypeError("service-worker broker lifecycle_state is invalid");
+  }
+  return state;
 }
 
 function normalizeBrowserServiceWorkerBrokerFallbackTarget(
@@ -8247,22 +8274,38 @@ function normalizeBrowserServiceWorkerBrokerFallbackTarget(
 function normalizeBrowserServiceWorkerBrokerMetadata(
   value: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> | null {
-  if (!value) {
+  if (value === undefined || value === null) {
     return null;
   }
-  return { ...value };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("service-worker broker metadata must be a JSON object");
+  }
+  // Own nested values before waiting for a database or cross-host lock. An
+  // admitted descriptor must not change while another writer holds the store.
+  const snapshot: unknown = JSON.parse(JSON.stringify({ ...value }));
+  if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
+    throw new TypeError("service-worker broker metadata must serialize to a JSON object");
+  }
+  return snapshot as Record<string, unknown>;
 }
 
 function normalizeBrowserServiceWorkerBrokerLeaseEpoch(value: number): number {
-  if (!Number.isFinite(value)) {
-    throw new TypeError("service-worker broker lease_epoch must be a finite number");
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError("service-worker broker lease_epoch must be a nonnegative safe integer");
   }
-  return Math.max(0, Math.trunc(value));
+  return value;
 }
 
 function normalizeBrowserServiceWorkerBrokerAdmissionTuple(
   admission: BrowserServiceWorkerBrokerAdmissionTuple,
 ): BrowserServiceWorkerBrokerAdmissionTuple {
+  const appVersionMajor = Math.max(0, Math.trunc(
+    normalizeOptionalBrowserServiceWorkerBrokerVersion(admission.appVersionMajor) ?? 0));
+  const brokerProtocolVersion = Math.max(0, Math.trunc(
+    normalizeOptionalBrowserServiceWorkerBrokerVersion(admission.brokerProtocolVersion) ?? 0));
+  if (!Number.isSafeInteger(appVersionMajor) || !Number.isSafeInteger(brokerProtocolVersion)) {
+    throw new TypeError("service-worker broker admission versions must be safe integers");
+  }
   return {
     origin: normalizeBrowserServiceWorkerBrokerString(
       admission.origin,
@@ -8276,18 +8319,8 @@ function normalizeBrowserServiceWorkerBrokerAdmissionTuple(
       admission.appNamespace,
       "service-worker broker app_namespace",
     ),
-    appVersionMajor: Math.max(
-      0,
-      Math.trunc(
-        normalizeOptionalBrowserServiceWorkerBrokerVersion(admission.appVersionMajor) ?? 0,
-      ),
-    ),
-    brokerProtocolVersion: Math.max(
-      0,
-      Math.trunc(
-        normalizeOptionalBrowserServiceWorkerBrokerVersion(admission.brokerProtocolVersion) ?? 0,
-      ),
-    ),
+    appVersionMajor,
+    brokerProtocolVersion,
     runProfile: normalizeBrowserServiceWorkerBrokerString(
       admission.runProfile,
       "service-worker broker run_profile",
@@ -8307,7 +8340,9 @@ function parseBrowserServiceWorkerBrokerAdmissionTuple(
     typeof candidate.registrationScope !== "string" ||
     typeof candidate.appNamespace !== "string" ||
     typeof candidate.appVersionMajor !== "number" ||
+    !Number.isSafeInteger(candidate.appVersionMajor) || candidate.appVersionMajor < 0 ||
     typeof candidate.brokerProtocolVersion !== "number" ||
+    !Number.isSafeInteger(candidate.brokerProtocolVersion) || candidate.brokerProtocolVersion < 0 ||
     typeof candidate.runProfile !== "string"
   ) {
     throw new Error("service-worker broker admission tuple is missing required fields");
@@ -8327,13 +8362,15 @@ function parseBrowserServiceWorkerBrokerRegistration(
   if (
     candidate.contractId !== BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID ||
     candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE ||
-    typeof candidate.backend !== "string" ||
+    (candidate.backend !== "indexeddb" && candidate.backend !== "localstorage") ||
     !Array.isArray(candidate.downgradeOrder) ||
     typeof candidate.capabilityManifestVersion !== "string" ||
     typeof candidate.controllerPresent !== "boolean" ||
     typeof candidate.directExecutionReasonCode !== "string" ||
     typeof candidate.registeredAtMs !== "number" ||
-    typeof candidate.updatedAtMs !== "number"
+    !Number.isSafeInteger(candidate.registeredAtMs) || candidate.registeredAtMs < 0 ||
+    typeof candidate.updatedAtMs !== "number" ||
+    !Number.isSafeInteger(candidate.updatedAtMs) || candidate.updatedAtMs < 0
   ) {
     throw new Error("service-worker broker registration is missing required fields");
   }
@@ -8355,7 +8392,7 @@ function parseBrowserServiceWorkerBrokerRegistration(
         BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
       ),
     ),
-    backend: candidate.backend === "indexeddb" ? "indexeddb" : "localstorage",
+    backend: candidate.backend,
     admission: parseBrowserServiceWorkerBrokerAdmissionTuple(candidate.admission),
     capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
       candidate.capabilityManifestVersion,
@@ -8385,7 +8422,9 @@ function parseBrowserServiceWorkerBrokerDescriptor(
     typeof candidate.leaseEpoch !== "number" ||
     typeof candidate.sourceEventKind !== "string" ||
     typeof candidate.createdAtMs !== "number" ||
-    typeof candidate.updatedAtMs !== "number"
+    !Number.isSafeInteger(candidate.createdAtMs) || candidate.createdAtMs < 0 ||
+    typeof candidate.updatedAtMs !== "number" ||
+    !Number.isSafeInteger(candidate.updatedAtMs) || candidate.updatedAtMs < 0
   ) {
     throw new Error("service-worker broker descriptor is missing required fields");
   }
@@ -8442,7 +8481,8 @@ function parseBrowserServiceWorkerBrokerHandoffRecord(
     typeof candidate.leaseEpoch !== "number" ||
     typeof candidate.sourceEventKind !== "string" ||
     typeof candidate.reason !== "string" ||
-    typeof candidate.recordedAtMs !== "number"
+    typeof candidate.recordedAtMs !== "number" ||
+    !Number.isSafeInteger(candidate.recordedAtMs) || candidate.recordedAtMs < 0
   ) {
     throw new Error("service-worker broker handoff record is missing required fields");
   }
@@ -8586,234 +8626,225 @@ export class BrowserServiceWorkerBrokerStore {
     );
   }
 
-  private async getRaw(
+  private async transaction<T>(
+    operation: BrowserServiceWorkerBrokerOperation,
+    mode: "readonly" | "readwrite",
+    execute: (transaction: BrowserStorageTransaction, finish: (value: T) => void) => void,
+    brokerWorkId?: string,
+  ): Promise<T> {
+    this.assertSupported();
+    try {
+      return await runBrowserStorageTransaction(this, this.namespace, mode, execute);
+    } catch (error) {
+      if (this.isBrokerOperationError(error)) throw error;
+      throw this.operationError(operation,
+        error instanceof BrowserStorageValueDecodeError
+          ? "broker_restart_reconciliation_failed" : "storage_failed",
+        errorMessage(error), brokerWorkId);
+    }
+  }
+
+  private snapshotTimestamp(operation: BrowserServiceWorkerBrokerOperation): number {
+    try {
+      const now = this.now();
+      if (!Number.isFinite(now) || !Number.isSafeInteger(Math.trunc(now))) {
+        throw new TypeError("service-worker broker clock must return a finite safe timestamp");
+      }
+      return Math.max(0, Math.trunc(now));
+    } catch (error) {
+      throw this.operationError(operation, "serialization_failed", errorMessage(error));
+    }
+  }
+
+  private readRecord<T>(
+    transaction: BrowserStorageTransaction,
     key: string,
     operation: BrowserServiceWorkerBrokerOperation,
+    parser: (value: unknown) => T,
+    consume: (value: T | null) => void,
     brokerWorkId?: string,
-  ): Promise<Uint8Array | null> {
-    this.assertSupported();
+  ): void {
+    transaction.get(key, (raw) => consume(raw === null ? null
+      : this.decodeJsonRecord(raw, operation, parser, brokerWorkId)));
+  }
 
+  private writeRecord(
+    transaction: BrowserStorageTransaction,
+    key: string,
+    value: unknown,
+    operation: BrowserServiceWorkerBrokerOperation,
+    brokerWorkId?: string,
+  ): void {
+    let bytes: Uint8Array;
     try {
-      if (this.backend === "indexeddb") {
-        const database = await openIndexedDbDatabase(
-          this.globalObject,
-          this.dbName,
-          this.storeName,
-          this.version,
-          this.onIndexedDbBlocked,
-        );
-        try {
-          const { store } = openIndexedDbStore(database, this.storeName, "readonly");
-          const request = store.get(
-            encodeIndexedDbStorageKey(this.namespace, key, this.globalObject),
-          );
-          const result = await awaitIndexedDbRequest(request);
-          if (result === undefined || result === null) {
-            return null;
+      const serialized = JSON.stringify(value);
+      if (serialized === undefined) throw new TypeError("broker state must be JSON-serializable");
+      bytes = browserTextEncoder(this.globalObject).encode(serialized);
+    } catch (error) {
+      throw this.operationError(operation, "serialization_failed", errorMessage(error), brokerWorkId);
+    }
+    transaction.set(key, bytes);
+  }
+
+  private validateRegistrationHost(
+    registration: BrowserServiceWorkerBrokerRegistration,
+    operation: BrowserServiceWorkerBrokerOperation,
+  ): void {
+    const support = this.diagnostics();
+    if (registration.admission.origin !== support.origin ||
+        registration.admission.registrationScope !== support.registrationScope) {
+      throw this.operationError(operation, "service_worker_registration_scope_mismatch",
+        "durable broker origin and registration scope must match the active service worker");
+    }
+    if (registration.backend !== this.backend) {
+      throw this.operationError(operation, "broker_restart_reconciliation_failed",
+        "durable broker registration names a different storage backend");
+    }
+  }
+
+  private readRegistrationInTransaction(
+    transaction: BrowserStorageTransaction,
+    operation: BrowserServiceWorkerBrokerOperation,
+    consume: (registration: BrowserServiceWorkerBrokerRegistration | null) => void,
+  ): void {
+    this.readRecord(transaction, BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY, operation,
+      parseBrowserServiceWorkerBrokerRegistration, (registration) => {
+        if (registration) this.validateRegistrationHost(registration, operation);
+        consume(registration);
+      });
+  }
+
+  private registrationMismatch(
+    existing: BrowserServiceWorkerBrokerRegistration,
+    next: BrowserServiceWorkerBrokerRegistration,
+  ): BrowserServiceWorkerBrokerFailureReason | null {
+    if (existing.admission.origin !== next.admission.origin ||
+        existing.admission.registrationScope !== next.admission.registrationScope) {
+      return "service_worker_registration_scope_mismatch";
+    }
+    if (existing.admission.appNamespace !== next.admission.appNamespace) return "app_namespace_mismatch";
+    if (existing.admission.appVersionMajor !== next.admission.appVersionMajor) return "app_version_major_mismatch";
+    if (existing.admission.brokerProtocolVersion !== next.admission.brokerProtocolVersion) return "broker_protocol_version_mismatch";
+    if (existing.capabilityManifestVersion !== next.capabilityManifestVersion) return "capability_manifest_mismatch_on_restart";
+    if (existing.admission.runProfile !== next.admission.runProfile || existing.backend !== next.backend) {
+      return "broker_restart_reconciliation_failed";
+    }
+    return null;
+  }
+
+  private prepareWork(
+    request: BrowserServiceWorkerBrokerDescriptorRequest,
+    operation: "persist_work" | "persist_handoff",
+  ) {
+    try {
+      const fallbackTarget = request.fallbackTarget;
+      return {
+        artifactNamespace: normalizeBrowserServiceWorkerBrokerString(request.artifactNamespace,
+          "service-worker broker artifact_namespace"),
+        brokerWorkId: normalizeBrowserServiceWorkerBrokerString(request.brokerWorkId,
+          "service-worker broker broker_work_id"),
+        capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(request.capabilityManifestVersion,
+          "service-worker broker capability_manifest_version"),
+        idempotencyKey: normalizeBrowserServiceWorkerBrokerString(request.idempotencyKey,
+          "service-worker broker idempotency_key"),
+        leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(request.leaseEpoch),
+        metadata: normalizeBrowserServiceWorkerBrokerMetadata(request.metadata),
+        sourceEventKind: normalizeBrowserServiceWorkerBrokerString(request.sourceEventKind,
+          "service-worker broker source_event_kind"),
+        fallbackTarget: fallbackTarget == null ? null
+          : normalizeBrowserServiceWorkerBrokerFallbackTarget(fallbackTarget, BROWSER_BRIDGE_ONLY_FALLBACK_TARGET),
+      };
+    } catch (error) {
+      throw this.operationError(operation, "serialization_failed", errorMessage(error));
+    }
+  }
+
+  private readWorkFence(
+    transaction: BrowserStorageTransaction,
+    operation: BrowserServiceWorkerBrokerOperation,
+    brokerWorkId: string,
+    consume: (
+      work: BrowserServiceWorkerBrokerDescriptor | null,
+      handoff: BrowserServiceWorkerBrokerHandoffRecord | null,
+    ) => void,
+  ): void {
+    this.readRecord(transaction, `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${brokerWorkId}`,
+      operation, parseBrowserServiceWorkerBrokerDescriptor, (work) => {
+        this.readRecord(transaction, `${BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX}${brokerWorkId}`,
+          operation, parseBrowserServiceWorkerBrokerHandoffRecord, (handoff) => {
+            if ((work && work.brokerWorkId !== brokerWorkId) || (handoff && handoff.brokerWorkId !== brokerWorkId)) {
+              throw this.operationError(operation, "broker_restart_reconciliation_failed",
+                "durable broker record does not match its storage key", brokerWorkId);
+            }
+            consume(work, handoff);
+          }, brokerWorkId);
+      }, brokerWorkId);
+  }
+
+  private validateWorkFence(
+    registration: BrowserServiceWorkerBrokerRegistration,
+    request: ReturnType<BrowserServiceWorkerBrokerStore["prepareWork"]>,
+    work: BrowserServiceWorkerBrokerDescriptor | null,
+    handoff: BrowserServiceWorkerBrokerHandoffRecord | null,
+    operation: "persist_work" | "persist_handoff",
+  ): void {
+    if (request.capabilityManifestVersion !== registration.capabilityManifestVersion) {
+      throw this.operationError(operation, "capability_manifest_mismatch_on_restart",
+        "broker work must match the registered capability manifest", request.brokerWorkId);
+    }
+    for (const existing of [work, handoff]) {
+      if (!existing) continue;
+      if (existing.capabilityManifestVersion !== registration.capabilityManifestVersion) {
+        throw this.operationError(operation, "capability_manifest_mismatch_on_restart",
+          "retained broker work belongs to a different capability manifest", request.brokerWorkId);
+      }
+      if (existing.idempotencyKey !== request.idempotencyKey ||
+          existing.artifactNamespace !== request.artifactNamespace ||
+          existing.sourceEventKind !== request.sourceEventKind) {
+        throw this.operationError(operation, "broker_restart_reconciliation_failed",
+          "broker_work_id is already bound to a different event identity", request.brokerWorkId);
+      }
+      if (request.leaseEpoch < existing.leaseEpoch) {
+        throw this.operationError(operation, "broker_restart_reconciliation_failed",
+          `stale broker lease epoch ${request.leaseEpoch}; retained work or handoff is at epoch ${existing.leaseEpoch}`,
+          request.brokerWorkId);
+      }
+    }
+  }
+
+  private listRecords<T extends { brokerWorkId: string; capabilityManifestVersion: string }>(
+    operation: "list_work" | "list_handoffs",
+    prefix: string,
+    parser: (value: unknown) => T,
+  ): Promise<T[]> {
+    return this.transaction(operation, "readonly", (transaction, finish) => {
+      this.readRegistrationInTransaction(transaction, operation, (registration) => {
+        transaction.keys((keys) => {
+          const selected = keys.filter((key) => key.startsWith(prefix));
+          const records: T[] = [];
+          let remaining = selected.length;
+          if (remaining === 0) { finish(records); return; }
+          for (const key of selected) {
+            const brokerWorkId = key.slice(prefix.length);
+            this.readRecord(transaction, key, operation, parser, (record) => {
+              if (record) {
+                if (record.brokerWorkId !== brokerWorkId) {
+                  throw this.operationError(operation, "broker_restart_reconciliation_failed",
+                    "durable broker record does not match its storage key", brokerWorkId);
+                }
+                if (registration && record.capabilityManifestVersion !== registration.capabilityManifestVersion) {
+                  throw this.operationError(operation, "capability_manifest_mismatch_on_restart",
+                    "retained broker work belongs to a different capability manifest", brokerWorkId);
+                }
+                records.push(record);
+              }
+              remaining -= 1;
+              if (remaining === 0) finish(records);
+            }, brokerWorkId);
           }
-          const bytes = normalizeBrowserStorageValue(result as BrowserStorageValue);
-          return compactIndexedDbBytes(bytes);
-        } finally {
-          database.close();
-        }
-      }
-
-      const storage = browserLocalStorage(this.globalObject);
-      if (!storage) {
-        throw new Error("localStorage is unavailable in this browser/runtime");
-      }
-      const result = storage.getItem(encodeLocalStorageKey(this.namespace, key, this.globalObject));
-      if (result === null) {
-        return null;
-      }
-      const decoded = decodeBrowserStorageBytes(result, this.globalObject);
-      if (decoded === null) {
-        throw new Error("service-worker broker durable state could not be decoded from storage");
-      }
-      return decoded;
-    } catch (error) {
-      throw this.operationError(operation, "storage_failed", errorMessage(error), brokerWorkId);
-    }
-  }
-
-  private async setRaw(
-    key: string,
-    value: Uint8Array,
-    operation: BrowserServiceWorkerBrokerOperation,
-    brokerWorkId?: string,
-  ): Promise<void> {
-    this.assertSupported();
-
-    try {
-      if (this.backend === "indexeddb") {
-        const database = await openIndexedDbDatabase(
-          this.globalObject,
-          this.dbName,
-          this.storeName,
-          this.version,
-          this.onIndexedDbBlocked,
-        );
-        try {
-          const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
-          store.put(
-            compactIndexedDbBytes(value),
-            encodeIndexedDbStorageKey(this.namespace, key, this.globalObject),
-          );
-          await awaitIndexedDbTransaction(transaction);
-          return;
-        } finally {
-          database.close();
-        }
-      }
-
-      const storage = browserLocalStorage(this.globalObject);
-      if (!storage) {
-        throw new Error("localStorage is unavailable in this browser/runtime");
-      }
-      storage.setItem(
-        encodeLocalStorageKey(this.namespace, key, this.globalObject),
-        encodeBrowserStorageBytes(value, this.globalObject),
-      );
-    } catch (error) {
-      throw this.operationError(operation, "storage_failed", errorMessage(error), brokerWorkId);
-    }
-  }
-
-  private async deleteRaw(
-    key: string,
-    operation: BrowserServiceWorkerBrokerOperation,
-    brokerWorkId?: string,
-  ): Promise<boolean> {
-    this.assertSupported();
-
-    try {
-      if (this.backend === "indexeddb") {
-        const database = await openIndexedDbDatabase(
-          this.globalObject,
-          this.dbName,
-          this.storeName,
-          this.version,
-          this.onIndexedDbBlocked,
-        );
-        try {
-          const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
-          const storageKey = encodeIndexedDbStorageKey(this.namespace, key, this.globalObject);
-          const existing = await awaitIndexedDbRequest(store.getKey(storageKey));
-          store.delete(storageKey);
-          await awaitIndexedDbTransaction(transaction);
-          return existing !== undefined && existing !== null;
-        } finally {
-          database.close();
-        }
-      }
-
-      const storage = browserLocalStorage(this.globalObject);
-      if (!storage) {
-        throw new Error("localStorage is unavailable in this browser/runtime");
-      }
-      const storageKey = encodeLocalStorageKey(this.namespace, key, this.globalObject);
-      const existed = storage.getItem(storageKey) !== null;
-      storage.removeItem(storageKey);
-      return existed;
-    } catch (error) {
-      throw this.operationError(operation, "storage_failed", errorMessage(error), brokerWorkId);
-    }
-  }
-
-  private async listNamespaceKeys(
-    operation: BrowserServiceWorkerBrokerOperation,
-  ): Promise<string[]> {
-    this.assertSupported();
-
-    try {
-      if (this.backend === "indexeddb") {
-        const database = await openIndexedDbDatabase(
-          this.globalObject,
-          this.dbName,
-          this.storeName,
-          this.version,
-          this.onIndexedDbBlocked,
-        );
-        try {
-          const { store } = openIndexedDbStore(database, this.storeName, "readonly");
-          const namespaceRange = indexedDbNamespaceRange(this.namespace, this.globalObject);
-          const rawKeys = await awaitIndexedDbRequest(store.getAllKeys(namespaceRange));
-          const keys = Array.from(rawKeys as ArrayLike<unknown>)
-            .map((value) =>
-              typeof value === "string"
-                ? decodeIndexedDbStorageKey(value, this.namespace, this.globalObject)
-                : null,
-            )
-            .filter((value): value is string => value !== null);
-          keys.sort();
-          return Array.from(new Set(keys));
-        } finally {
-          database.close();
-        }
-      }
-
-      const storage = browserLocalStorage(this.globalObject);
-      if (!storage) {
-        throw new Error("localStorage is unavailable in this browser/runtime");
-      }
-      const prefix = localStorageNamespacePrefix(this.namespace, this.globalObject);
-      const keys: string[] = [];
-      for (let index = 0; index < storage.length; index += 1) {
-        const maybeKey = storage.key(index);
-        if (!maybeKey || !maybeKey.startsWith(prefix)) {
-          continue;
-        }
-        const decoded = decodeLocalStorageKey(maybeKey, this.namespace, this.globalObject);
-        if (decoded !== null) {
-          keys.push(decoded);
-        }
-      }
-      keys.sort();
-      return Array.from(new Set(keys));
-    } catch (error) {
-      throw this.operationError(operation, "storage_failed", errorMessage(error));
-    }
-  }
-
-  private async clearNamespace(operation: BrowserServiceWorkerBrokerOperation): Promise<number> {
-    if (this.backend === "indexeddb") {
-      try {
-        const database = await openIndexedDbDatabase(
-          this.globalObject,
-          this.dbName,
-          this.storeName,
-          this.version,
-          this.onIndexedDbBlocked,
-        );
-        try {
-          const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
-          const namespaceRange = indexedDbNamespaceRange(this.namespace, this.globalObject);
-          const transactionCompletion = awaitIndexedDbTransaction(transaction);
-          const countRequest = store.count(namespaceRange);
-          store.delete(namespaceRange);
-          const [rawCount] = await Promise.all([
-            awaitIndexedDbRequest(countRequest),
-            transactionCompletion,
-          ]);
-          return rawCount as number;
-        } finally {
-          database.close();
-        }
-      } catch (error) {
-        throw this.operationError(operation, "storage_failed", errorMessage(error));
-      }
-    }
-
-    try {
-      this.assertSupported();
-      const storage = browserLocalStorage(this.globalObject);
-      if (!storage) {
-        throw new Error("localStorage is unavailable in this browser/runtime");
-      }
-      return clearLocalStorageNamespace(storage, this.namespace, this.globalObject);
-    } catch (error) {
-      throw this.operationError(operation, "storage_failed", errorMessage(error));
-    }
+        });
+      });
+    });
   }
 
   private decodeJsonRecord<T>(
@@ -8835,71 +8866,30 @@ export class BrowserServiceWorkerBrokerStore {
     }
   }
 
-  private async readJsonRecord<T>(
-    key: string,
-    operation: BrowserServiceWorkerBrokerOperation,
-    parser: (value: unknown) => T,
-    brokerWorkId?: string,
-  ): Promise<T | null> {
-    const raw = await this.getRaw(key, operation, brokerWorkId);
-    if (raw === null) {
-      return null;
-    }
-    return this.decodeJsonRecord(raw, operation, parser, brokerWorkId);
-  }
-
-  private async writeJsonRecord(
-    key: string,
-    value: unknown,
-    operation: BrowserServiceWorkerBrokerOperation,
-    brokerWorkId?: string,
-  ): Promise<void> {
-    try {
-      const serialized = JSON.stringify(value);
-      if (serialized === undefined) {
-        throw new TypeError("service-worker broker durable state must be JSON-serializable");
-      }
-      await this.setRaw(
-        key,
-        browserTextEncoder(this.globalObject).encode(serialized),
-        operation,
-        brokerWorkId,
-      );
-    } catch (error) {
-      if (this.isBrokerOperationError(error)) {
-        throw error;
-      }
-      throw this.operationError(
-        operation,
-        "serialization_failed",
-        errorMessage(error),
-        brokerWorkId,
-      );
-    }
-  }
-
   async readRegistration(): Promise<BrowserServiceWorkerBrokerRegistration | null> {
-    return this.readJsonRecord(
-      BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
-      "read_registration",
-      parseBrowserServiceWorkerBrokerRegistration,
-    );
+    return this.transaction("read_registration", "readonly", (transaction, finish) => {
+      this.readRegistrationInTransaction(transaction, "read_registration", finish);
+    });
   }
 
   async registerBroker(
     request: BrowserServiceWorkerBrokerRegistrationRequest,
   ): Promise<BrowserServiceWorkerBrokerRegistration> {
     const admission = normalizeBrowserServiceWorkerBrokerAdmissionTuple(request.admission);
+    const controllerPresent = request.controllerPresent;
+    const capabilityManifestVersion = normalizeBrowserServiceWorkerBrokerString(
+      request.capabilityManifestVersion, "service-worker broker capability_manifest_version");
+    const lifecycleState = normalizeBrowserServiceWorkerBrokerLifecycleState(
+      request.lifecycleState ?? "validating_scope");
     const support = this.assertSupported({
       appNamespace: admission.appNamespace,
       appVersionMajor: admission.appVersionMajor,
       brokerProtocolVersion: admission.brokerProtocolVersion,
-      controllerPresent: request.controllerPresent,
+      controllerPresent,
       expectedRegistrationScope: admission.registrationScope,
       runProfile: admission.runProfile,
     });
-    const existing = await this.readRegistration();
-    const now = Math.max(0, Math.trunc(this.now()));
+    const now = this.snapshotTimestamp("write_registration");
     const fallbackTarget = support.fallbackTarget;
     const registration: BrowserServiceWorkerBrokerRegistration = {
       contractId: BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID,
@@ -8909,133 +8899,106 @@ export class BrowserServiceWorkerBrokerStore {
       downgradeOrder: [...support.downgradeOrder],
       backend: this.backend,
       admission,
-      capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
-        request.capabilityManifestVersion,
-        "service-worker broker capability_manifest_version",
-      ),
-      lifecycleState: normalizeBrowserServiceWorkerBrokerLifecycleState(
-        request.lifecycleState ?? "validating_scope",
-      ),
-      controllerPresent: request.controllerPresent ?? support.controllerPresent,
+      capabilityManifestVersion,
+      lifecycleState,
+      controllerPresent: controllerPresent ?? support.controllerPresent,
       directExecutionReasonCode: support.directExecutionReasonCode,
-      registeredAtMs: existing?.registeredAtMs ?? now,
+      registeredAtMs: now,
       updatedAtMs: now,
     };
-    await this.writeJsonRecord(
-      BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
-      registration,
-      "write_registration",
-    );
-    return registration;
+    this.validateRegistrationHost(registration, "write_registration");
+    return this.transaction("write_registration", "readwrite", (transaction, finish) => {
+      this.readRegistrationInTransaction(transaction, "write_registration", (existing) => {
+        const mismatch = existing ? this.registrationMismatch(existing, registration) : null;
+        const publish = (): void => {
+          if (existing && mismatch === null) registration.registeredAtMs = existing.registeredAtMs;
+          this.writeRecord(transaction, BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
+            registration, "write_registration");
+          finish(registration);
+        };
+        if (existing && mismatch === null) { publish(); return; }
+        transaction.keys((keys) => {
+          const retainedWork = keys.some((key) => key.startsWith(BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX)
+            || key.startsWith(BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX));
+          if (retainedWork) {
+            throw this.operationError("write_registration", mismatch ?? "broker_restart_reconciliation_failed",
+              "retained broker work cannot be adopted by a different registration; reconcile or explicitly clear the broker state first");
+          }
+          publish();
+        });
+      });
+    });
   }
 
   async setLifecycleState(
     lifecycleState: BrowserServiceWorkerBrokerLifecycleState,
   ): Promise<BrowserServiceWorkerBrokerRegistration | null> {
-    const registration = await this.readRegistration();
-    if (!registration) {
-      return null;
-    }
-    const updated: BrowserServiceWorkerBrokerRegistration = {
-      ...registration,
-      lifecycleState: normalizeBrowserServiceWorkerBrokerLifecycleState(lifecycleState),
-      updatedAtMs: Math.max(0, Math.trunc(this.now())),
-    };
-    await this.writeJsonRecord(
-      BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
-      updated,
-      "set_lifecycle",
-    );
-    return updated;
+    const state = normalizeBrowserServiceWorkerBrokerLifecycleState(lifecycleState);
+    const now = this.snapshotTimestamp("set_lifecycle");
+    return this.transaction("set_lifecycle", "readwrite", (transaction, finish) => {
+      this.readRegistrationInTransaction(transaction, "set_lifecycle", (registration) => {
+        if (!registration) { finish(null); return; }
+        const updated = { ...registration, lifecycleState: state, updatedAtMs: now };
+        this.writeRecord(transaction, BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
+          updated, "set_lifecycle");
+        finish(updated);
+      });
+    });
   }
 
   async clearRegistration(): Promise<boolean> {
-    return this.deleteRaw(BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY, "clear_registration");
+    return this.transaction("clear_registration", "readwrite", (transaction, finish) => {
+      transaction.get(BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY, (raw) => {
+        transaction.delete(BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY);
+        finish(raw !== null);
+      }, () => {
+        transaction.delete(BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY);
+        finish(true);
+      });
+    });
   }
 
   async listPendingWork(): Promise<BrowserServiceWorkerBrokerDescriptor[]> {
-    const keys = await this.listNamespaceKeys("list_work");
-    const workKeys = keys.filter((key) =>
-      key.startsWith(BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX),
-    );
-    const descriptors = await Promise.all(
-      workKeys.map(async (key) => {
-        const brokerWorkId = key.slice(BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX.length);
-        return this.readJsonRecord(
-          key,
-          "list_work",
-          parseBrowserServiceWorkerBrokerDescriptor,
-          brokerWorkId,
-        );
-      }),
-    );
-    return descriptors
-      .filter(
-        (descriptor): descriptor is BrowserServiceWorkerBrokerDescriptor => descriptor !== null,
-      )
-      .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+    const descriptors = await this.listRecords("list_work", BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX,
+      parseBrowserServiceWorkerBrokerDescriptor);
+    return descriptors.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
   }
 
   async persistBrokerWork(
     request: BrowserServiceWorkerBrokerDescriptorRequest,
   ): Promise<BrowserServiceWorkerBrokerDescriptor> {
-    const registration = await this.readRegistration();
-    if (!registration) {
-      throw this.operationError(
-        "persist_work",
-        "broker_bootstrap_failure",
-        "registerBroker() must succeed before persistBrokerWork() claims durable restartable work.",
-        request.brokerWorkId,
-      );
-    }
-    const brokerWorkId = normalizeBrowserServiceWorkerBrokerString(
-      request.brokerWorkId,
-      "service-worker broker broker_work_id",
-    );
-    const fallbackTarget = normalizeBrowserServiceWorkerBrokerFallbackTarget(
-      request.fallbackTarget,
-      registration.fallbackTarget,
-    );
-    const now = Math.max(0, Math.trunc(this.now()));
-    const existing = await this.readJsonRecord(
-      `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${brokerWorkId}`,
-      "persist_work",
-      parseBrowserServiceWorkerBrokerDescriptor,
-      brokerWorkId,
-    );
-    const descriptor: BrowserServiceWorkerBrokerDescriptor = {
-      artifactNamespace: normalizeBrowserServiceWorkerBrokerString(
-        request.artifactNamespace,
-        "service-worker broker artifact_namespace",
-      ),
-      brokerWorkId,
-      capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
-        request.capabilityManifestVersion,
-        "service-worker broker capability_manifest_version",
-      ),
-      createdAtMs: existing?.createdAtMs ?? now,
-      fallbackTarget,
-      fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
-      idempotencyKey: normalizeBrowserServiceWorkerBrokerString(
-        request.idempotencyKey,
-        "service-worker broker idempotency_key",
-      ),
-      leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(request.leaseEpoch),
-      metadata: normalizeBrowserServiceWorkerBrokerMetadata(request.metadata),
-      requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
-      sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
-        request.sourceEventKind,
-        "service-worker broker source_event_kind",
-      ),
-      updatedAtMs: now,
-    };
-    await this.writeJsonRecord(
-      `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${brokerWorkId}`,
-      descriptor,
-      "persist_work",
-      brokerWorkId,
-    );
-    return descriptor;
+    const prepared = this.prepareWork(request, "persist_work");
+    const { brokerWorkId } = prepared;
+    const now = this.snapshotTimestamp("persist_work");
+    return this.transaction("persist_work", "readwrite", (transaction, finish) => {
+      this.readRegistrationInTransaction(transaction, "persist_work", (registration) => {
+        if (!registration) {
+          throw this.operationError("persist_work", "broker_bootstrap_failure",
+            "registerBroker() must succeed before persistBrokerWork() claims durable restartable work.", brokerWorkId);
+        }
+        this.readWorkFence(transaction, "persist_work", brokerWorkId, (existing, handoff) => {
+          this.validateWorkFence(registration, prepared, existing, handoff, "persist_work");
+          const fallbackTarget = prepared.fallbackTarget ?? registration.fallbackTarget;
+          if (existing && existing.leaseEpoch === prepared.leaseEpoch &&
+              existing.fallbackTarget === fallbackTarget &&
+              JSON.stringify(existing.metadata) === JSON.stringify(prepared.metadata)) {
+            finish(existing);
+            return;
+          }
+          const descriptor: BrowserServiceWorkerBrokerDescriptor = {
+            ...prepared,
+            createdAtMs: existing?.createdAtMs ?? now,
+            fallbackTarget,
+            fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
+            requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+            updatedAtMs: now,
+          };
+          this.writeRecord(transaction, `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${brokerWorkId}`,
+            descriptor, "persist_work", brokerWorkId);
+          finish(descriptor);
+        });
+      });
+    }, brokerWorkId);
   }
 
   async deleteBrokerWork(brokerWorkId: string): Promise<boolean> {
@@ -9043,99 +9006,76 @@ export class BrowserServiceWorkerBrokerStore {
       brokerWorkId,
       "service-worker broker broker_work_id",
     );
-    return this.deleteRaw(
-      `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${normalized}`,
-      "delete_work",
-      normalized,
-    );
+    return this.transaction("delete_work", "readwrite", (transaction, finish) => {
+      transaction.get(`${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${normalized}`, (raw) => {
+        transaction.delete(`${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${normalized}`);
+        finish(raw !== null);
+      }, () => {
+        transaction.delete(`${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${normalized}`);
+        finish(true);
+      });
+    }, normalized);
   }
 
   async listDurableHandoffs(): Promise<BrowserServiceWorkerBrokerHandoffRecord[]> {
-    const keys = await this.listNamespaceKeys("list_handoffs");
-    const handoffKeys = keys.filter((key) =>
-      key.startsWith(BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX),
-    );
-    const records = await Promise.all(
-      handoffKeys.map(async (key) => {
-        const brokerWorkId = key.slice(BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX.length);
-        return this.readJsonRecord(
-          key,
-          "list_handoffs",
-          parseBrowserServiceWorkerBrokerHandoffRecord,
-          brokerWorkId,
-        );
-      }),
-    );
-    return records
-      .filter((record): record is BrowserServiceWorkerBrokerHandoffRecord => record !== null)
-      .sort((left, right) => right.recordedAtMs - left.recordedAtMs);
+    const records = await this.listRecords("list_handoffs", BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX,
+      parseBrowserServiceWorkerBrokerHandoffRecord);
+    return records.sort((left, right) => right.recordedAtMs - left.recordedAtMs);
   }
 
   async persistDurableHandoff(
     request: BrowserServiceWorkerBrokerHandoffRequest,
   ): Promise<BrowserServiceWorkerBrokerHandoffRecord> {
-    const registration = await this.readRegistration();
-    if (!registration) {
-      throw this.operationError(
-        "persist_handoff",
-        "broker_bootstrap_failure",
-        "registerBroker() must succeed before persistDurableHandoff() records fallback metadata.",
-        request.brokerWorkId,
-      );
-    }
-    const brokerWorkId = normalizeBrowserServiceWorkerBrokerString(
-      request.brokerWorkId,
-      "service-worker broker broker_work_id",
-    );
-    const fallbackTarget = normalizeBrowserServiceWorkerBrokerFallbackTarget(
-      request.fallbackTarget,
-      registration.fallbackTarget,
-    );
-    const targetLane = normalizeBrowserServiceWorkerBrokerFallbackTarget(
-      request.targetLane,
-      fallbackTarget,
-    );
-    const record: BrowserServiceWorkerBrokerHandoffRecord = {
-      artifactNamespace: normalizeBrowserServiceWorkerBrokerString(
-        request.artifactNamespace,
-        "service-worker broker artifact_namespace",
-      ),
-      brokerWorkId,
-      capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
-        request.capabilityManifestVersion,
-        "service-worker broker capability_manifest_version",
-      ),
-      fallbackTarget,
-      fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
-      idempotencyKey: normalizeBrowserServiceWorkerBrokerString(
-        request.idempotencyKey,
-        "service-worker broker idempotency_key",
-      ),
-      leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(request.leaseEpoch),
-      metadata: normalizeBrowserServiceWorkerBrokerMetadata(request.metadata),
-      reason: (request.reason ?? registration.directExecutionReasonCode) as
-        | BrowserServiceWorkerBrokerSupportReason
-        | BrowserExecutionReasonCode,
-      recordedAtMs: Math.max(0, Math.trunc(this.now())),
-      requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
-      sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
-        request.sourceEventKind,
-        "service-worker broker source_event_kind",
-      ),
-      targetLane,
-      targetLaneId: browserServiceWorkerBrokerFallbackLaneId(targetLane),
-    };
-    await this.writeJsonRecord(
-      `${BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX}${brokerWorkId}`,
-      record,
-      "persist_handoff",
-      brokerWorkId,
-    );
-    return record;
+    const prepared = this.prepareWork(request, "persist_handoff");
+    const { brokerWorkId } = prepared;
+    const requestedTarget = request.targetLane;
+    const target = requestedTarget == null ? null
+      : normalizeBrowserServiceWorkerBrokerFallbackTarget(requestedTarget, BROWSER_BRIDGE_ONLY_FALLBACK_TARGET);
+    const requestedReason = request.reason;
+    const reason = requestedReason === undefined ? null
+      : normalizeBrowserServiceWorkerBrokerString(requestedReason, "service-worker broker reason") as
+        BrowserServiceWorkerBrokerSupportReason | BrowserExecutionReasonCode;
+    const now = this.snapshotTimestamp("persist_handoff");
+    return this.transaction("persist_handoff", "readwrite", (transaction, finish) => {
+      this.readRegistrationInTransaction(transaction, "persist_handoff", (registration) => {
+        if (!registration) {
+          throw this.operationError("persist_handoff", "broker_bootstrap_failure",
+            "registerBroker() must succeed before persistDurableHandoff() records fallback metadata.", brokerWorkId);
+        }
+        this.readWorkFence(transaction, "persist_handoff", brokerWorkId, (work, existing) => {
+          this.validateWorkFence(registration, prepared, work, existing, "persist_handoff");
+          const fallbackTarget = prepared.fallbackTarget ?? registration.fallbackTarget;
+          const targetLane = target ?? fallbackTarget;
+          const handoffReason = reason ?? registration.directExecutionReasonCode;
+          if (existing && existing.leaseEpoch === prepared.leaseEpoch &&
+              existing.fallbackTarget === fallbackTarget && existing.targetLane === targetLane &&
+              existing.reason === handoffReason &&
+              JSON.stringify(existing.metadata) === JSON.stringify(prepared.metadata)) {
+            finish(existing);
+            return;
+          }
+          const record: BrowserServiceWorkerBrokerHandoffRecord = {
+            ...prepared,
+            fallbackTarget,
+            fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
+            reason: handoffReason,
+            recordedAtMs: now,
+            requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+            targetLane,
+            targetLaneId: browserServiceWorkerBrokerFallbackLaneId(targetLane),
+          };
+          this.writeRecord(transaction, `${BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX}${brokerWorkId}`,
+            record, "persist_handoff", brokerWorkId);
+          finish(record);
+        });
+      });
+    }, brokerWorkId);
   }
 
   async clearBrokerState(): Promise<number> {
-    return this.clearNamespace("clear_state");
+    return this.transaction("clear_state", "readwrite", (transaction, finish) => {
+      transaction.clear(finish);
+    });
   }
 }
 

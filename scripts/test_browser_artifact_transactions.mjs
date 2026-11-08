@@ -140,6 +140,8 @@ async function environment(backend) {
   let failDelete;
   let failSet;
   let mutationObserver;
+  let readObserver;
+  let abortPut;
   let storageQuota = Infinity;
   const localStorage = {
     get length() { return values.size; },
@@ -170,7 +172,9 @@ async function environment(backend) {
     const originalGet = idb.IDBObjectStore.prototype.get;
     idb.IDBObjectStore.prototype.get = function (key) {
       if (failGet?.(logicalKey(key))) { failGet = undefined; throw new DOMException("injected read failure", "UnknownError"); }
-      return originalGet.call(this, key);
+      const request = originalGet.call(this, key);
+      request.addEventListener("success", () => readObserver?.(logicalKey(key)));
+      return request;
     };
     const originalDelete = idb.IDBObjectStore.prototype.delete;
     idb.IDBObjectStore.prototype.delete = function (key) {
@@ -180,7 +184,12 @@ async function environment(backend) {
     const originalPut = idb.IDBObjectStore.prototype.put;
     idb.IDBObjectStore.prototype.put = function (value, key) {
       if (failSet?.(logicalKey(key))) { failSet = undefined; throw new DOMException("injected write failure", "QuotaExceededError"); }
-      return originalPut.call(this, value, key);
+      const request = originalPut.call(this, value, key);
+      if (abortPut?.(logicalKey(key))) {
+        abortPut = undefined;
+        request.addEventListener("success", () => this.transaction.abort());
+      }
+      return request;
     };
   }
   const api = await sdk(host);
@@ -193,6 +202,8 @@ async function environment(backend) {
     failDelete: (predicate) => { failDelete = predicate; },
     failSet: (predicate) => { failSet = predicate; },
     observeMutations: (observer) => { mutationObserver = observer; },
+    observeReads: (observer) => { readObserver = observer; },
+    abortAfterPut: (predicate) => { abortPut = predicate; },
     setStorageQuota: (quota) => { storageQuota = quota; },
   };
 }
@@ -950,4 +961,370 @@ test("localstorage: failed original-payload restoration leaves only readable ret
   assert.ok(snapshots.some(snapshot => snapshot.operation === "set" && snapshot.key.startsWith("artifact:")),
     "the replacement payload must be written before publication fails");
   assert.deepEqual(ids(await consistent(store)), ["anchor"]);
+});
+
+const brokerRegistration = (overrides = {}) => ({
+  admission: {
+    origin: "https://broker.example.test",
+    registrationScope: "https://broker.example.test/app/",
+    appNamespace: "broker-transactions",
+    appVersionMajor: 1,
+    brokerProtocolVersion: 1,
+    runProfile: "restartable",
+  },
+  capabilityManifestVersion: "caps-v1",
+  lifecycleState: "brokering",
+  ...overrides,
+});
+const brokerWork = (overrides = {}) => ({
+  artifactNamespace: "broker-evidence",
+  brokerWorkId: "work-1",
+  capabilityManifestVersion: "caps-v1",
+  idempotencyKey: "event-1",
+  leaseEpoch: 1,
+  metadata: { progress: "accepted" },
+  sourceEventKind: "fetch",
+  ...overrides,
+});
+const brokerRecord = value => JSON.parse(JSON.stringify(value));
+function brokerError(error, reason) {
+  assert.equal(error.code, "ASUPERSYNC_BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED");
+  assert.equal(error.diagnostics.reason, reason);
+  return true;
+}
+async function brokerEnvironment(backend) {
+  const env = await environment(backend);
+  const host = {
+    ...env.host,
+    window: undefined,
+    document: undefined,
+    clients: { claim: async () => undefined, matchAll: async () => [] },
+    location: { origin: "https://broker.example.test" },
+    registration: { scope: "https://broker.example.test/app/" },
+    skipWaiting: async () => undefined,
+  };
+  const broker = (options = {}) => new env.api.BrowserServiceWorkerBrokerStore({
+    backend, globalObject: host, namespace: "broker-transactions", now: () => 1_000,
+    ...options,
+  });
+  const first = broker();
+  await first.registerBroker(brokerRegistration());
+  return { ...env, brokerHost: host, broker, first };
+}
+
+for (const backend of ["indexeddb", "localstorage"]) {
+  test(`${backend}: broker rejects stale work without replacing newer durable progress`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    await first.persistBrokerWork(brokerWork({ leaseEpoch: 2, metadata: { progress: "new owner" } }));
+    await assert.rejects(broker().persistBrokerWork(brokerWork()),
+      error => brokerError(error, "broker_restart_reconciliation_failed"));
+    const pending = await broker().listPendingWork();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].leaseEpoch, 2);
+    assert.equal(pending[0].metadata.progress, "new owner");
+  });
+
+  test(`${backend}: broker work and handoff share one monotonic lease fence`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    await first.persistDurableHandoff(brokerWork({ leaseEpoch: 3 }));
+    await assert.rejects(broker().persistBrokerWork(brokerWork({ leaseEpoch: 2 })),
+      error => brokerError(error, "broker_restart_reconciliation_failed"));
+    await first.persistBrokerWork(brokerWork({ leaseEpoch: 4 }));
+    await assert.rejects(broker().persistDurableHandoff(brokerWork({ leaseEpoch: 3 })),
+      error => brokerError(error, "broker_restart_reconciliation_failed"));
+    assert.equal((await first.listPendingWork())[0].leaseEpoch, 4);
+    assert.equal((await first.listDurableHandoffs())[0].leaseEpoch, 3);
+  });
+
+  test(`${backend}: broker refuses work and handoff from a foreign capability manifest`, async () => {
+    const { first } = await brokerEnvironment(backend);
+    for (const operation of ["persistBrokerWork", "persistDurableHandoff"]) {
+      await assert.rejects(first[operation](brokerWork({ capabilityManifestVersion: "caps-other" })),
+        error => brokerError(error, "capability_manifest_mismatch_on_restart"));
+    }
+    assert.equal((await first.listPendingWork()).length, 0);
+    assert.equal((await first.listDurableHandoffs()).length, 0);
+  });
+
+  test(`${backend}: broker re-registration cannot adopt another app's retained work`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    await first.persistBrokerWork(brokerWork());
+    const registration = brokerRegistration();
+    registration.admission.appNamespace = "another-app";
+    await assert.rejects(broker().registerBroker(registration),
+      error => brokerError(error, "app_namespace_mismatch"));
+    assert.equal((await first.readRegistration()).admission.appNamespace, "broker-transactions");
+    assert.equal((await first.listPendingWork())[0].idempotencyKey, "event-1");
+  });
+
+  test(`${backend}: broker same-epoch replay preserves receipts and the retained handoff workflow`, async () => {
+    const env = await brokerEnvironment(backend);
+    let now = 2_000;
+    const store = env.broker({ now: () => ++now });
+    await store.setLifecycleState("reconciling_durable_state");
+    const descriptor = await store.persistBrokerWork(brokerWork());
+    env.failSet(key => key === "broker_work:work-1");
+    assert.deepEqual(brokerRecord(await store.persistBrokerWork(brokerWork())), brokerRecord(descriptor));
+    env.failSet(undefined);
+    await store.setLifecycleState("brokering");
+    const request = brokerWork({ metadata: { destination: "worker" } });
+    const handoff = await store.persistDurableHandoff(request);
+    env.failSet(key => key === "broker_handoff:work-1");
+    assert.deepEqual(brokerRecord(await store.persistDurableHandoff(request)), brokerRecord(handoff));
+    env.failSet(undefined);
+    await store.setLifecycleState("draining");
+    await store.setLifecycleState("quiescent");
+    const restarted = env.broker();
+    assert.equal((await restarted.readRegistration()).lifecycleState, "quiescent");
+    assert.deepEqual(brokerRecord((await restarted.listPendingWork())[0]), brokerRecord(descriptor));
+    assert.deepEqual(brokerRecord((await restarted.listDurableHandoffs())[0]), brokerRecord(handoff));
+    assert.equal(await restarted.clearBrokerState(), 3);
+    assert.equal(await restarted.readRegistration(), null);
+    assert.equal((await restarted.listPendingWork()).length, 0);
+    assert.equal((await restarted.listDurableHandoffs()).length, 0);
+  });
+
+  test(`${backend}: broker same-epoch conflicts cannot replace an admitted event identity`, async () => {
+    const { first } = await brokerEnvironment(backend);
+    const descriptor = await first.persistBrokerWork(brokerWork());
+    const handoff = await first.persistDurableHandoff(brokerWork());
+    for (const operation of ["persistBrokerWork", "persistDurableHandoff"]) {
+      for (const change of [
+        { idempotencyKey: "different-event" },
+        { artifactNamespace: "other-evidence" },
+        { sourceEventKind: "push" },
+      ]) {
+        await assert.rejects(first[operation](brokerWork(change)),
+          error => brokerError(error, "broker_restart_reconciliation_failed"));
+      }
+    }
+    assert.deepEqual(brokerRecord((await first.listPendingWork())[0]), brokerRecord(descriptor));
+    assert.deepEqual(brokerRecord((await first.listDurableHandoffs())[0]), brokerRecord(handoff));
+  });
+
+  test(`${backend}: broker concurrent writers compare against the committed lease in one transaction`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    await first.persistBrokerWork(brokerWork());
+    const results = await Promise.allSettled([
+      first.persistBrokerWork(brokerWork({ leaseEpoch: 3 })),
+      broker().persistBrokerWork(brokerWork({ leaseEpoch: 2 })),
+    ]);
+    assert.equal(results[0].status, "fulfilled");
+    assert.equal(results[1].status, "rejected");
+    brokerError(results[1].reason, "broker_restart_reconciliation_failed");
+    const crossRecord = await Promise.allSettled([
+      first.persistDurableHandoff(brokerWork({ leaseEpoch: 5 })),
+      broker().persistBrokerWork(brokerWork({ leaseEpoch: 4 })),
+    ]);
+    assert.equal(crossRecord[0].status, "fulfilled");
+    assert.equal(crossRecord[1].status, "rejected");
+    brokerError(crossRecord[1].reason, "broker_restart_reconciliation_failed");
+    assert.equal((await broker().listPendingWork())[0].leaseEpoch, 3);
+    assert.equal((await broker().listDurableHandoffs())[0].leaseEpoch, 5);
+  });
+
+  test(`${backend}: broker registration changes and work admission cannot cross capability versions`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    const results = await Promise.allSettled([
+      first.registerBroker(brokerRegistration({ capabilityManifestVersion: "caps-v2" })),
+      broker().persistBrokerWork(brokerWork()),
+    ]);
+    assert.equal(results[0].status, "fulfilled");
+    assert.equal(results[1].status, "rejected");
+    brokerError(results[1].reason, "capability_manifest_mismatch_on_restart");
+    assert.equal((await first.readRegistration()).capabilityManifestVersion, "caps-v2");
+    assert.equal((await first.listPendingWork()).length, 0);
+    await first.persistBrokerWork(brokerWork({ capabilityManifestVersion: "caps-v2" }));
+    await assert.rejects(broker().registerBroker(brokerRegistration()),
+      error => brokerError(error, "capability_manifest_mismatch_on_restart"));
+    assert.equal((await first.readRegistration()).capabilityManifestVersion, "caps-v2");
+  });
+
+  test(`${backend}: broker manifest removal cannot make retained work adoptable by another app`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    await first.persistBrokerWork(brokerWork());
+    assert.equal(await first.clearRegistration(), true);
+    const request = brokerRegistration();
+    request.admission.appNamespace = "another-app";
+    await assert.rejects(broker().registerBroker(request),
+      error => brokerError(error, "broker_restart_reconciliation_failed"));
+    assert.equal(await first.readRegistration(), null);
+    assert.equal((await first.listPendingWork())[0].idempotencyKey, "event-1");
+    assert.equal(await first.clearBrokerState(), 1);
+    assert.equal((await first.registerBroker(request)).admission.appNamespace, "another-app");
+  });
+
+  test(`${backend}: broker owns nested input before waiting for storage`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    const request = brokerWork({ metadata: { nested: { accepted: true } } });
+    const writing = first.persistBrokerWork(request);
+    request.brokerWorkId = "retargeted";
+    request.leaseEpoch = 99;
+    request.metadata.nested.accepted = false;
+    const descriptor = await writing;
+    assert.equal(descriptor.brokerWorkId, "work-1");
+    assert.equal(descriptor.leaseEpoch, 1);
+    assert.equal(descriptor.metadata.nested.accepted, true);
+    descriptor.metadata.nested.accepted = false;
+    assert.equal((await broker().listPendingWork())[0].metadata.nested.accepted, true);
+  });
+
+  test(`${backend}: broker rejects ambiguous lease epochs before mutating durable state`, async () => {
+    const { first } = await brokerEnvironment(backend);
+    await first.persistBrokerWork(brokerWork({ leaseEpoch: Number.MAX_SAFE_INTEGER }));
+    for (const leaseEpoch of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      for (const operation of ["persistBrokerWork", "persistDurableHandoff"]) {
+        await assert.rejects(first[operation](brokerWork({ leaseEpoch })),
+          error => brokerError(error, "serialization_failed"));
+      }
+    }
+    assert.equal((await first.listPendingWork())[0].leaseEpoch, Number.MAX_SAFE_INTEGER);
+    assert.equal((await first.listDurableHandoffs()).length, 0);
+  });
+
+  test(`${backend}: broker failed publication retains the old lease and unrelated namespace records`, async () => {
+    const env = await brokerEnvironment(backend);
+    const artifact = env.store({}, "broker-transactions");
+    await artifact.persistArtifact(custom("retained-evidence"));
+    await env.first.persistBrokerWork(brokerWork());
+    env.failSet(key => key === "broker_work:work-1");
+    await assert.rejects(env.first.persistBrokerWork(brokerWork({ leaseEpoch: 2 })),
+      error => brokerError(error, "storage_failed"));
+    assert.equal((await env.first.listPendingWork())[0].leaseEpoch, 1);
+    assert.equal(bytesText((await artifact.exportArtifact("retained-evidence")).bytes), "retained-evidence");
+    assert.equal((await env.first.persistBrokerWork(brokerWork({ leaseEpoch: 2 }))).leaseEpoch, 2);
+  });
+
+  test(`${backend}: broker rejects persisted identity drift and permits explicit corrupt-record cleanup`, async () => {
+    const env = await brokerEnvironment(backend);
+    const record = await env.first.persistBrokerWork(brokerWork());
+    const storage = new env.api.BrowserStorage({ backend, globalObject: env.host });
+    await storage.set("broker-transactions", "broker_work:work-1",
+      new TextEncoder().encode(JSON.stringify({ ...record, brokerWorkId: "another-work" })));
+    await assert.rejects(env.first.listPendingWork(),
+      error => brokerError(error, "broker_restart_reconciliation_failed"));
+    await assert.rejects(env.first.persistDurableHandoff(brokerWork()),
+      error => brokerError(error, "broker_restart_reconciliation_failed"));
+    assert.equal(await env.first.deleteBrokerWork("work-1"), true);
+    assert.equal((await env.first.listPendingWork()).length, 0);
+    assert.equal((await env.first.persistBrokerWork(brokerWork())).brokerWorkId, "work-1");
+  });
+
+  test(`${backend}: broker rejects durable registration from another service-worker origin`, async () => {
+    const { first, broker, brokerHost } = await brokerEnvironment(backend);
+    const foreign = broker({ globalObject: {
+      ...brokerHost, location: { origin: "https://other.example.test" },
+    } });
+    await assert.rejects(foreign.readRegistration(),
+      error => brokerError(error, "service_worker_registration_scope_mismatch"));
+    await assert.rejects(foreign.persistBrokerWork(brokerWork()),
+      error => brokerError(error, "service_worker_registration_scope_mismatch"));
+    assert.equal((await first.listPendingWork()).length, 0);
+  });
+
+  test(`${backend}: broker refuses malformed durable identity instead of normalizing it into authority`, async () => {
+    const env = await brokerEnvironment(backend);
+    const registration = brokerRecord(await env.first.readRegistration());
+    const storage = new env.api.BrowserStorage({ backend, globalObject: env.host });
+    for (const record of [
+      { ...registration, backend: "foreign-storage" },
+      { ...registration, admission: { ...registration.admission, appVersionMajor: -1 } },
+      { ...registration, admission: { ...registration.admission, appVersionMajor: 1.5 } },
+      { ...registration, admission: { ...registration.admission, brokerProtocolVersion: 1.5 } },
+      { ...registration, admission: { ...registration.admission, brokerProtocolVersion: Number.MAX_SAFE_INTEGER + 1 } },
+      { ...registration, registeredAtMs: -1 },
+      { ...registration, updatedAtMs: 1.5 },
+    ]) {
+      const bytes = new TextEncoder().encode(JSON.stringify(record));
+      await storage.set("broker-transactions", "__service_worker_broker_registration__", bytes);
+      await assert.rejects(env.first.readRegistration(),
+        error => brokerError(error, "broker_restart_reconciliation_failed"));
+      await assert.rejects(env.first.persistBrokerWork(brokerWork()),
+        error => brokerError(error, "broker_restart_reconciliation_failed"));
+      assert.deepEqual(Array.from(await storage.get("broker-transactions", "__service_worker_broker_registration__")),
+        Array.from(bytes));
+    }
+    assert.equal(await env.first.clearBrokerState(), 1);
+    await env.first.registerBroker(brokerRegistration());
+    assert.equal((await env.first.persistBrokerWork(brokerWork())).leaseEpoch, 1);
+  });
+
+  test(`${backend}: broker invalid clocks cannot publish unreadable durable records`, async () => {
+    const { first, broker } = await brokerEnvironment(backend);
+    const registration = brokerRecord(await first.readRegistration());
+    for (const now of [NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      const store = broker({ now: () => now });
+      for (const operation of [
+        () => store.registerBroker(brokerRegistration()),
+        () => store.setLifecycleState("draining"),
+        () => store.persistBrokerWork(brokerWork()),
+        () => store.persistDurableHandoff(brokerWork()),
+      ]) {
+        await assert.rejects(operation(), error => brokerError(error, "serialization_failed"));
+      }
+    }
+    assert.deepEqual(brokerRecord(await first.readRegistration()), registration);
+    assert.equal((await first.listPendingWork()).length, 0);
+    assert.equal((await first.listDurableHandoffs()).length, 0);
+  });
+}
+
+test("indexeddb: broker lifecycle updates cannot resurrect a concurrently cleared registration", async () => {
+  const env = await brokerEnvironment("indexeddb");
+  let clearing;
+  let armed = true;
+  env.observeReads(key => {
+    if (armed && key === "__service_worker_broker_registration__") {
+      armed = false;
+      clearing = env.broker().clearRegistration();
+    }
+  });
+  await env.first.setLifecycleState("draining");
+  assert.ok(clearing, "start the clear while the lifecycle update is reading its registration");
+  assert.equal(await clearing, true);
+  assert.equal(await env.broker().readRegistration(), null);
+});
+
+test("indexeddb: broker asynchronous transaction abort cannot publish or advance a lease", async () => {
+  const env = await brokerEnvironment("indexeddb");
+  await env.first.persistBrokerWork(brokerWork());
+  env.abortAfterPut(key => key === "broker_work:work-1");
+  await assert.rejects(env.first.persistBrokerWork(brokerWork({ leaseEpoch: 2 })),
+    error => brokerError(error, "storage_failed"));
+  assert.equal((await env.broker().listPendingWork())[0].leaseEpoch, 1);
+  assert.equal((await env.broker().persistBrokerWork(brokerWork({ leaseEpoch: 2 }))).leaseEpoch, 2);
+});
+
+test("localstorage: broker Web Locks fence independent SDK realms and snapshot queued input", async () => {
+  const env = await brokerEnvironment("localstorage");
+  const secondApi = await sdk(env.host);
+  let release;
+  let tail = new Promise(resolve => { release = resolve; });
+  const requests = [];
+  env.brokerHost.navigator = { locks: { request(name, options, callback) {
+    requests.push({ name, mode: options.mode });
+    const pending = tail.then(callback);
+    tail = pending.catch(() => undefined);
+    return pending;
+  } } };
+  const second = new secondApi.BrowserServiceWorkerBrokerStore({
+    backend: "localstorage", globalObject: env.brokerHost, namespace: "broker-transactions",
+  });
+  const request = brokerWork({ leaseEpoch: 3, metadata: { nested: { accepted: true } } });
+  const high = env.first.persistBrokerWork(request);
+  const low = second.persistBrokerWork(brokerWork({ leaseEpoch: 2 }));
+  request.metadata.nested.accepted = false;
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].name, requests[1].name);
+  assert.equal(requests[0].mode, "exclusive");
+  assert.equal(requests[1].mode, "exclusive");
+  release();
+  const results = await Promise.allSettled([high, low]);
+  assert.equal(results[0].status, "fulfilled");
+  assert.equal(results[1].status, "rejected");
+  brokerError(results[1].reason, "broker_restart_reconciliation_failed");
+  const record = (await second.listPendingWork())[0];
+  assert.equal(record.leaseEpoch, 3);
+  assert.equal(record.metadata.nested.accepted, true);
+  assert.equal(requests.at(-1).mode, "shared");
 });
