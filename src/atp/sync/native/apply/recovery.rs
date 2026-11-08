@@ -2,8 +2,9 @@
 
 use super::{
     DestructiveAuthorization, DirectoryEntryKind, DirectoryManifestEntry, DirectoryPath,
-    NativeDirectoryActionState, NativeDirectoryError, NativeDirectoryLimits, NativeDirectorySnapshot,
-    NativeDirectorySyncReport, NativeRoot, Stamp, changed, checkpoint, directory_flags,
+    NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectoryError,
+    NativeDirectoryLimits, NativeDirectorySnapshot, NativeDirectorySyncReport, NativeRoot,
+    Stamp, changed, checkpoint, directory_flags,
     disjoint_roots, guarded_parent, io_error, metadata_stamp, open_guarded_file, os_error,
     record_deletion, record_destination, refused, revalidate_complete, scan_root, stat_at,
     validate_overwrite_metadata, verify_empty_directory,
@@ -13,9 +14,153 @@ use crate::cx::Cx;
 use nix::fcntl::{RenameFlags, openat, renameat2};
 use nix::sys::stat::Mode;
 use nix::unistd::{getegid, geteuid};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+
+/// Serializable association between one original action and its retained inode.
+///
+/// This is untrusted diagnostic input, not a claim that bytes are authentic or an
+/// authorization to restore them. Keep every action in its original position:
+/// the index determines the only permitted `previous-<index>` quarantine name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct NativeDirectoryRecoverySourceAction {
+    /// Original canonical manifest-relative destination.
+    pub path: DirectoryPath,
+    /// Original direction, used to select the explicitly supplied root.
+    pub action: BidirectionalSyncAction,
+    /// Last observed action boundary, serialized in snake_case.
+    #[serde(with = "source_action_state")]
+    pub state: NativeDirectoryActionState,
+    /// Retained original name, if the earlier action quarantined anything.
+    pub quarantine_path: Option<PathBuf>,
+}
+
+impl NativeDirectoryRecoverySourceAction {
+    /// Construct association data; preparation validates it before filesystem use.
+    #[must_use]
+    pub fn new(
+        path: DirectoryPath,
+        action: BidirectionalSyncAction,
+        state: NativeDirectoryActionState,
+        quarantine_path: Option<PathBuf>,
+    ) -> Self {
+        Self { path, action, state, quarantine_path }
+    }
+}
+
+impl From<&NativeDirectoryActionReceipt> for NativeDirectoryRecoverySourceAction {
+    fn from(receipt: &NativeDirectoryActionReceipt) -> Self {
+        Self::new(
+            receipt.path.clone(), receipt.action, receipt.state, receipt.quarantine_path.clone(),
+        )
+    }
+}
+
+/// Persistable association data for freshly prepared native recovery.
+///
+/// It contains no native errors, verified-baseline claim, or cached filesystem
+/// authority. Deserialization alone grants nothing. Preparation validates every
+/// association, confines the exact job directory, and hashes the actual current
+/// originals and destinations before returning an opaque recovery plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct NativeDirectoryRecoverySource {
+    /// Earlier execution identity naming the retained recovery job.
+    pub plan_id: String,
+    /// Whether the earlier operation was only a dry run; such input is refused.
+    pub dry_run: bool,
+    /// Exact retained job directory from the earlier report.
+    pub staging_directory: Option<PathBuf>,
+    /// All original actions, including ones without quarantine, in original order.
+    pub actions: Vec<NativeDirectoryRecoverySourceAction>,
+}
+
+impl NativeDirectoryRecoverySource {
+    /// Construct untrusted association data for later validation and fresh scanning.
+    #[must_use]
+    pub fn new(
+        plan_id: impl Into<String>,
+        dry_run: bool,
+        staging_directory: Option<PathBuf>,
+        actions: Vec<NativeDirectoryRecoverySourceAction>,
+    ) -> Self {
+        Self { plan_id: plan_id.into(), dry_run, staging_directory, actions }
+    }
+
+    /// Decode and validate association JSON within an explicit byte bound.
+    ///
+    /// `max_bytes` must be in `1..=64 MiB`; it is checked before deserialization.
+    /// Native entry/depth bounds and all canonical association checks also apply.
+    /// This performs no filesystem access and establishes no content authenticity.
+    ///
+    /// # Errors
+    /// Refuses an invalid bound, oversized/invalid JSON, or invalid associations.
+    pub fn from_json_slice(
+        bytes: &[u8],
+        max_bytes: usize,
+        limits: NativeDirectoryLimits,
+    ) -> Result<Self, NativeDirectoryError> {
+        limits.validate()?;
+        if max_bytes == 0 || max_bytes > 64 * 1024 * 1024 {
+            return Err(refused(Path::new(""), "recovery source byte bound requires 1..=64 MiB"));
+        }
+        if bytes.len() > max_bytes {
+            return Err(NativeDirectoryError::Limit {
+                path: PathBuf::new(), limit: "max_recovery_source_bytes",
+            });
+        }
+        let source: Self = serde_json::from_slice(bytes)
+            .map_err(|_| refused(Path::new(""), "invalid recovery source JSON"))?;
+        source_inputs(&source, limits)?;
+        Ok(source)
+    }
+}
+
+impl From<&NativeDirectorySyncReport> for NativeDirectoryRecoverySource {
+    fn from(report: &NativeDirectorySyncReport) -> Self {
+        Self::new(
+            report.plan_id.clone(), report.dry_run, report.staging_directory.clone(),
+            report.actions.iter().map(NativeDirectoryRecoverySourceAction::from).collect(),
+        )
+    }
+}
+
+mod source_action_state {
+    use super::NativeDirectoryActionState;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        state: &NativeDirectoryActionState,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match state {
+            NativeDirectoryActionState::NotStarted => "not_started",
+            NativeDirectoryActionState::Unchanged => "unchanged",
+            NativeDirectoryActionState::Staged => "staged",
+            NativeDirectoryActionState::Quarantined => "quarantined",
+            NativeDirectoryActionState::Published => "published",
+        })
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<NativeDirectoryActionState, D::Error> {
+        let state = String::deserialize(deserializer)?;
+        match state.as_str() {
+            "not_started" => Ok(NativeDirectoryActionState::NotStarted),
+            "unchanged" => Ok(NativeDirectoryActionState::Unchanged),
+            "staged" => Ok(NativeDirectoryActionState::Staged),
+            "quarantined" => Ok(NativeDirectoryActionState::Quarantined),
+            "published" => Ok(NativeDirectoryActionState::Published),
+            _ => Err(serde::de::Error::unknown_variant(&state, &[
+                "not_started", "unchanged", "staged", "quarantined", "published",
+            ])),
+        }
+    }
+}
 
 /// Captured contents proposed for restoration at one actual destination.
 ///
@@ -90,6 +235,7 @@ pub struct NativeDirectoryRecoveryReport {
 #[derive(Debug)]
 pub struct PreparedNativeDirectoryRecovery {
     source_plan_id: String,
+    review_id: String,
     local: NativeDirectorySnapshot,
     remote: NativeDirectorySnapshot,
     quarantine: NativeDirectorySnapshot,
@@ -109,6 +255,17 @@ impl PreparedNativeDirectoryRecovery {
     /// Identity supplied by the earlier synchronization report.
     #[must_use]
     pub fn source_plan_id(&self) -> &str { &self.source_plan_id }
+
+    /// Stable identity of these freshly captured restoration effects.
+    ///
+    /// Binds the source plan, selected associations, all three canonical roots,
+    /// their filesystem identities, and captured contents and object guards.
+    /// A caller can compare this with a previously reviewed identity before
+    /// authorizing application. Re-preparing unchanged trees is stable; changed
+    /// originals, destinations, identities, or associations produce another ID.
+    /// This is a local review binding, not authentication of an earlier report.
+    #[must_use]
+    pub fn review_id(&self) -> &str { &self.review_id }
 
     /// Restore the exact captured originals through owned blocking work.
     ///
@@ -172,10 +329,53 @@ pub async fn prepare_native_directory_recovery(
     limits: NativeDirectoryLimits,
 ) -> Result<PreparedNativeDirectoryRecovery, NativeDirectoryError> {
     limits.validate()?;
-    let (job, inputs) = recovery_inputs(report, limits)?;
-    let source_plan_id = report.plan_id.clone();
-    let local_path = local_root.into();
-    let remote_path = remote_root.into();
+    let (job, inputs) = recovery_inputs(
+        &report.plan_id, report.dry_run, report.staging_directory.as_deref(),
+        report.actions.iter().map(|receipt| RecoveryAssociation {
+            path: &receipt.path, action: receipt.action, state: receipt.state,
+            quarantine_path: receipt.quarantine_path.as_deref(),
+        }), limits,
+    )?;
+    prepare_recovery(
+        cx, report.plan_id.clone(), job, inputs, local_root.into(), remote_root.into(), limits,
+    ).await
+}
+
+/// Prepare recovery from a persisted, untrusted association source.
+///
+/// This uses exactly the same canonical path/direction/state checks and fresh
+/// descriptor-confined inventories as [`prepare_native_directory_recovery`].
+/// Caller-provided roots remain explicit; input supplies no content authority.
+/// Use the returned preview and [`PreparedNativeDirectoryRecovery::review_id`]
+/// before granting application authority. Bound external JSON before decoding,
+/// for example with [`NativeDirectoryRecoverySource::from_json_slice`].
+///
+/// # Errors
+/// Refuses malformed or oversized associations, unsupported or changed trees,
+/// absent originals, unavailable capabilities, and cancellation.
+pub async fn prepare_native_directory_recovery_from_source(
+    cx: &Cx,
+    source: &NativeDirectoryRecoverySource,
+    local_root: impl Into<PathBuf>,
+    remote_root: impl Into<PathBuf>,
+    limits: NativeDirectoryLimits,
+) -> Result<PreparedNativeDirectoryRecovery, NativeDirectoryError> {
+    limits.validate()?;
+    let (job, inputs) = source_inputs(source, limits)?;
+    prepare_recovery(
+        cx, source.plan_id.clone(), job, inputs, local_root.into(), remote_root.into(), limits,
+    ).await
+}
+
+async fn prepare_recovery(
+    cx: &Cx,
+    source_plan_id: String,
+    job: PathBuf,
+    inputs: Vec<RecoveryInput>,
+    local_path: PathBuf,
+    remote_path: PathBuf,
+    limits: NativeDirectoryLimits,
+) -> Result<PreparedNativeDirectoryRecovery, NativeDirectoryError> {
     cx.scoped_fs().run_io(move |worker| {
         Ok((|| {
             checkpoint(&worker)?;
@@ -228,8 +428,8 @@ pub async fn prepare_native_directory_recovery(
             entries.sort_by(|a, b| {
                 (&a.destination_root, &a.path).cmp(&(&b.destination_root, &b.path))
             });
-            let prepared = PreparedNativeDirectoryRecovery {
-                source_plan_id, local, remote, quarantine, entries, limits,
+            let mut prepared = PreparedNativeDirectoryRecovery {
+                source_plan_id, review_id: String::new(), local, remote, quarantine, entries, limits,
             };
             validate_projection(&prepared)?;
             // Earlier roots can change while later roots or entries are hashed.
@@ -237,6 +437,7 @@ pub async fn prepare_native_directory_recovery(
                 snapshot.root.revalidate()?;
                 super::super::revalidate_stamps(&worker, snapshot)?;
             }
+            prepared.review_id = recovery_review_id(&worker, &prepared)?;
             Ok(prepared)
         })())
     }).await.map_err(NativeDirectoryError::Runtime)?
@@ -244,27 +445,50 @@ pub async fn prepare_native_directory_recovery(
 
 struct RecoveryInput { local: bool, path: DirectoryPath, source: DirectoryPath }
 
-fn recovery_inputs(
-    report: &NativeDirectorySyncReport,
+struct RecoveryAssociation<'a> {
+    path: &'a DirectoryPath,
+    action: BidirectionalSyncAction,
+    state: NativeDirectoryActionState,
+    quarantine_path: Option<&'a Path>,
+}
+
+fn source_inputs(
+    source: &NativeDirectoryRecoverySource,
+    limits: NativeDirectoryLimits,
+) -> Result<(PathBuf, Vec<RecoveryInput>), NativeDirectoryError> {
+    recovery_inputs(
+        &source.plan_id, source.dry_run, source.staging_directory.as_deref(),
+        source.actions.iter().map(|receipt| RecoveryAssociation {
+            path: &receipt.path, action: receipt.action, state: receipt.state,
+            quarantine_path: receipt.quarantine_path.as_deref(),
+        }), limits,
+    )
+}
+
+fn recovery_inputs<'a>(
+    plan_id: &str,
+    dry_run: bool,
+    staging_directory: Option<&Path>,
+    actions: impl ExactSizeIterator<Item = RecoveryAssociation<'a>>,
     limits: NativeDirectoryLimits,
 ) -> Result<(PathBuf, Vec<RecoveryInput>), NativeDirectoryError> {
     let diagnostic = Path::new("");
-    if report.dry_run || report.plan_id.len() != 64
-        || !report.plan_id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || report.actions.len() > limits.max_entries.saturating_mul(2)
+    if dry_run || plan_id.len() != 64
+        || !plan_id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || actions.len() > limits.max_entries.saturating_mul(2)
     {
         return Err(refused(diagnostic, "invalid or oversized native recovery report"));
     }
-    let job = report.staging_directory.as_ref()
+    let job = staging_directory
         .ok_or_else(|| refused(diagnostic, "report has no recovery directory"))?;
-    let expected_job = format!("asupersync-sync-{}", report.plan_id);
+    let expected_job = format!("asupersync-sync-{plan_id}");
     if !job.is_absolute() || job.file_name() != Some(std::ffi::OsStr::new(&expected_job)) {
         return Err(refused(job, "recovery directory does not match the source plan"));
     }
     let mut inputs = Vec::new();
     let mut targets = BTreeSet::new();
-    for (index, receipt) in report.actions.iter().enumerate() {
-        let Some(path) = &receipt.quarantine_path else {
+    for (index, receipt) in actions.enumerate() {
+        let Some(path) = receipt.quarantine_path else {
             if receipt.state == NativeDirectoryActionState::Quarantined {
                 return Err(refused(job, "quarantined receipt has no recovery name"));
             }
@@ -289,7 +513,7 @@ fn recovery_inputs(
         }
         let normalized = DirectoryPath::normalize(receipt.path.as_str(), PathNormalizationRules::default())
             .map_err(NativeDirectoryError::Manifest)?;
-        if normalized != receipt.path || receipt.path.as_str().contains('\\')
+        if &normalized != receipt.path || receipt.path.as_str().contains('\\')
             || receipt.path.as_str().split('/').count() > limits.max_depth
             || !targets.insert((local, receipt.path.clone()))
             || inputs.len() >= limits.max_entries
@@ -303,7 +527,54 @@ fn recovery_inputs(
         });
     }
     if inputs.is_empty() { return Err(refused(job, "report has no quarantined originals")); }
-    Ok((job.clone(), inputs))
+    Ok((job.to_path_buf(), inputs))
+}
+
+fn recovery_review_id(
+    cx: &Cx,
+    prepared: &PreparedNativeDirectoryRecovery,
+) -> Result<String, NativeDirectoryError> {
+    let mut hash = Sha256::new();
+    hash.update(b"asupersync.native-directory-recovery-review.v1\0");
+    hash_review_field(&mut hash, prepared.source_plan_id.as_bytes());
+    for snapshot in [&prepared.local, &prepared.remote, &prepared.quarantine] {
+        checkpoint(cx)?;
+        hash_review_field(&mut hash, snapshot.root.path.as_os_str().as_encoded_bytes());
+        hash_review_stamp(&mut hash, snapshot.root_stamp);
+        hash.update(snapshot.manifest.tree_root());
+        hash.update((snapshot.guards.len() as u64).to_be_bytes());
+        for (path, stamp) in &snapshot.guards {
+            checkpoint(cx)?;
+            hash_review_field(&mut hash, path.as_str().as_bytes());
+            hash_review_stamp(&mut hash, *stamp);
+        }
+    }
+    hash.update((prepared.entries.len() as u64).to_be_bytes());
+    for entry in &prepared.entries {
+        checkpoint(cx)?;
+        hash_review_field(&mut hash, entry.destination_root.as_os_str().as_encoded_bytes());
+        hash_review_field(&mut hash, entry.path.as_str().as_bytes());
+        hash_review_field(&mut hash, entry.quarantined.path.as_str().as_bytes());
+        hash.update([u8::from(entry.current.is_some())]);
+    }
+    Ok(hex::encode(hash.finalize()))
+}
+
+fn hash_review_field(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+}
+
+fn hash_review_stamp(hash: &mut Sha256, stamp: Stamp) {
+    for value in [stamp.identity.device, stamp.identity.inode, stamp.links, stamp.size] {
+        hash.update(value.to_be_bytes());
+    }
+    for value in [stamp.mode, stamp.uid, stamp.gid] {
+        hash.update(value.to_be_bytes());
+    }
+    for value in [stamp.modified.0, stamp.modified.1, stamp.changed.0, stamp.changed.1] {
+        hash.update(value.to_be_bytes());
+    }
 }
 
 fn validate_projection(prepared: &PreparedNativeDirectoryRecovery) -> Result<(), NativeDirectoryError> {

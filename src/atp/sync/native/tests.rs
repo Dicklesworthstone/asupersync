@@ -86,6 +86,38 @@ fn mirror_authorization() -> DestructiveAuthorization {
 }
 
 #[test]
+fn native_mirror_fresh_plan_ids_differ_across_default_runtime_instances() {
+    let (source, destination, staging) = mirror_roots("fresh-attempts");
+    std::fs::write(source.join("file"), b"new source").unwrap();
+    std::fs::write(destination.join("file"), b"old destination").unwrap();
+    let mut identities = Vec::new();
+    for _ in 0..2 {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let ids = runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            crate::time::timeout(cx.now(), WATCHDOG, async {
+                let prepared = prepare_native_directory_mirror(
+                    &cx, &source, &destination, NativeDirectoryLimits::default(),
+                ).await.unwrap();
+                let review_id = prepared.plan_id().to_owned();
+                let decisions = prepared.preview().clone();
+                let attempted = prepared.with_fresh_plan_id(&cx).unwrap();
+                assert_eq!(attempted.preview(), &decisions);
+                assert_ne!(attempted.plan_id(), review_id);
+                (review_id, attempted.plan_id().to_owned())
+            }).await.unwrap()
+        });
+        assert!(runtime.shutdown_timeout(WATCHDOG));
+        identities.push(ids);
+    }
+    assert_eq!(identities[0].0, identities[1].0, "unchanged review remains deterministic");
+    assert_ne!(identities[0].1, identities[1].1, "native runtime restart must not reuse entropy");
+    assert_eq!(std::fs::read(source.join("file")).unwrap(), b"new source");
+    assert_eq!(std::fs::read(destination.join("file")).unwrap(), b"old destination");
+    assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
+}
+
+#[test]
 fn native_mirror_prepare_is_directional_deterministic_and_read_only() {
     for workers in [1, 2] {
         native(workers, |cx| async move {

@@ -26,7 +26,9 @@ use xattr::FileExt;
 mod recovery;
 pub use recovery::{
     NativeDirectoryRecoveryEntry, NativeDirectoryRecoveryReceipt, NativeDirectoryRecoveryReport,
+    NativeDirectoryRecoverySource, NativeDirectoryRecoverySourceAction,
     NativeDirectoryRecoveryState, PreparedNativeDirectoryRecovery, prepare_native_directory_recovery,
+    prepare_native_directory_recovery_from_source,
 };
 
 /// Last actual filesystem boundary reached by an action.

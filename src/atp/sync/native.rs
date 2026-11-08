@@ -35,7 +35,9 @@ mod session;
 pub use apply::{
     NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectorySyncReport,
     NativeDirectoryRecoveryEntry, NativeDirectoryRecoveryReceipt, NativeDirectoryRecoveryReport,
+    NativeDirectoryRecoverySource, NativeDirectoryRecoverySourceAction,
     NativeDirectoryRecoveryState, PreparedNativeDirectoryRecovery, prepare_native_directory_recovery,
+    prepare_native_directory_recovery_from_source,
 };
 pub use session::{
     NativeDirectorySessionReport, NativeDirectoryStatePublication, NativeDirectorySyncSession,
@@ -198,6 +200,38 @@ impl PreparedNativeDirectorySync {
     #[must_use]
     pub fn plan_id(&self) -> &str {
         &self.plan_id
+    }
+
+    /// Give this prepared attempt a fresh identity for its retained staging job.
+    ///
+    /// The deterministic identity returned by preparation remains useful for
+    /// comparing a reviewed plan with a fresh scan. After that comparison, this
+    /// additive operation separates an execution attempt from earlier retained
+    /// jobs with the same source/destination contents, including a mirror repeated
+    /// after recovery. Decisions, captured guards and authorization do not change.
+    ///
+    /// The nonce comes only from the caller's capability-provided entropy. Default
+    /// native runtimes use OS entropy; deterministic callers retain their chosen
+    /// replay semantics and must not reuse a replay's staging directory.
+    ///
+    /// # Errors
+    /// Refuses a failed cancellation/budget checkpoint or missing entropy authority.
+    pub fn with_fresh_plan_id(mut self, cx: &Cx) -> Result<Self, NativeDirectoryError> {
+        checkpoint(cx)?;
+        if !cx.capabilities().entropy {
+            return Err(refused(
+                self.local.root(),
+                "fresh native plan identity requires context entropy",
+            ));
+        }
+        let mut nonce = [0_u8; 16];
+        cx.random_bytes(&mut nonce);
+        let mut hash = Sha256::new();
+        hash.update(b"asupersync.native-directory-execution-plan.v1\0");
+        hash.update(self.plan_id.as_bytes());
+        hash.update(nonce);
+        self.plan_id = hex::encode(hash.finalize());
+        Ok(self)
     }
 
     /// Actual local inventory used for this review.

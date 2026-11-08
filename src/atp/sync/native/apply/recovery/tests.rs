@@ -70,6 +70,229 @@ fn unstarted(report: &NativeDirectoryRecoveryReport) {
     }));
 }
 
+fn separate_runtime<F, Fut, T>(test: F) -> T
+where
+    F: FnOnce(Cx) -> Fut,
+    Fut: Future<Output = T>,
+{
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let result = runtime.block_on(async move {
+        let cx = Cx::current().unwrap();
+        crate::time::timeout(cx.now(), Duration::from_secs(45), test(cx)).await.unwrap()
+    });
+    assert!(runtime.shutdown_timeout(Duration::from_secs(30)));
+    result
+}
+
+#[test]
+fn native_recovery_serialized_source_restores_originals_without_losing_action_indices() {
+    native(2, |cx| async move {
+        let (local, remote, staging) = roots("serialized-source");
+        for root in [&local, &remote] {
+            fs::write(root.join("a-keep"), b"unchanged").unwrap();
+        }
+        fs::write(local.join("b-new"), b"new entry remains after recovery").unwrap();
+        fs::write(local.join("c-shared"), b"new shared bytes").unwrap();
+        fs::write(remote.join("c-shared"), b"old shared bytes").unwrap();
+        fs::write(remote.join("z-extra"), b"old extra bytes").unwrap();
+        let limits = NativeDirectoryLimits::default();
+        let report = mirror(&cx, &local, &remote, &staging, limits).await;
+        let source = NativeDirectoryRecoverySource::from(&report);
+        assert_eq!(source.actions.len(), 4, "non-quarantining actions retain their positions");
+        let encoded = serde_json::to_vec(&source).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(json["actions"][0]["state"], "unchanged");
+        assert_eq!(json["actions"][2]["state"], "published");
+        assert_eq!(json["actions"][3]["state"], "quarantined");
+        let decoded = NativeDirectoryRecoverySource::from_json_slice(&encoded, encoded.len(), limits)
+            .unwrap();
+        assert_eq!(source, decoded);
+        let legacy_review = prepare_native_directory_recovery(&cx, &report, &local, &remote, limits)
+            .await.unwrap().review_id().to_owned();
+        let prepared = prepare_native_directory_recovery_from_source(
+            &cx, &decoded, &local, &remote, limits,
+        ).await.unwrap();
+        assert_eq!(prepared.review_id(), legacy_review);
+        assert_eq!(prepared.preview().len(), 2);
+        let restored = prepared.apply(&cx, authorized()).await.unwrap();
+        assert!(restored.complete, "{:?}", restored.failure);
+        assert!(restored.actions.iter().all(|entry| entry.durable));
+        assert_eq!(fs::read(remote.join("c-shared")).unwrap(), b"old shared bytes");
+        assert_eq!(fs::read(remote.join("z-extra")).unwrap(), b"old extra bytes");
+        assert_eq!(fs::read(remote.join("b-new")).unwrap(), b"new entry remains after recovery");
+        assert_eq!(fs::read(local.join("c-shared")).unwrap(), b"new shared bytes");
+        let shared = restored.actions.iter().find(|entry| entry.path.as_str() == "c-shared").unwrap();
+        assert_eq!(shared.state, NativeDirectoryRecoveryState::Exchanged);
+        assert_eq!(fs::read(&shared.quarantine_path).unwrap(), b"new shared bytes");
+    });
+}
+
+#[test]
+fn native_recovery_source_bounds_and_forged_associations_refuse_before_effects() {
+    native(1, |cx| async move {
+        let (local, remote, staging) = roots("source-validation");
+        fs::write(remote.join("file"), b"retained original").unwrap();
+        let limits = NativeDirectoryLimits::default();
+        let report = mirror(&cx, &local, &remote, &staging, limits).await;
+        let source = NativeDirectoryRecoverySource::from(&report);
+        let retained = source.actions[0].quarantine_path.clone().unwrap();
+        let encoded = serde_json::to_vec(&source).unwrap();
+        assert!(matches!(
+            NativeDirectoryRecoverySource::from_json_slice(&encoded, encoded.len() - 1, limits),
+            Err(NativeDirectoryError::Limit { limit: "max_recovery_source_bytes", .. })
+        ));
+        for invalid_bound in [0, 64 * 1024 * 1024 + 1] {
+            assert!(NativeDirectoryRecoverySource::from_json_slice(&encoded, invalid_bound, limits).is_err());
+        }
+        let mut unknown: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        unknown["actions"][0]["state"] = "invented_terminal".into();
+        let unknown = serde_json::to_vec(&unknown).unwrap();
+        assert!(NativeDirectoryRecoverySource::from_json_slice(&unknown, unknown.len(), limits).is_err());
+
+        let mut variants = Vec::new();
+        let mut altered = source.clone();
+        altered.dry_run = true;
+        variants.push(altered);
+        let mut altered = source.clone();
+        altered.actions[0].quarantine_path = Some(staging.join("outside-the-job"));
+        variants.push(altered);
+        let mut altered = source.clone();
+        altered.actions[0].path = serde_json::from_str("\"../escape\"").unwrap();
+        variants.push(altered);
+        let mut altered = source.clone();
+        altered.actions[0].state = NativeDirectoryActionState::Published;
+        variants.push(altered);
+        let mut altered = source.clone();
+        altered.actions[0].action = BidirectionalSyncAction::Keep;
+        variants.push(altered);
+        let mut altered = source.clone();
+        altered.actions.insert(0, NativeDirectoryRecoverySourceAction::new(
+            DirectoryPath::normalize("kept", PathNormalizationRules::default()).unwrap(),
+            BidirectionalSyncAction::Keep, NativeDirectoryActionState::Unchanged, None,
+        ));
+        variants.push(altered);
+        for altered in variants {
+            let bytes = serde_json::to_vec(&altered).unwrap();
+            assert!(NativeDirectoryRecoverySource::from_json_slice(&bytes, bytes.len(), limits).is_err());
+            assert!(prepare_native_directory_recovery_from_source(
+                &cx, &altered, &local, &remote, limits,
+            ).await.is_err(), "typed constructors do not bypass association validation");
+        }
+        let mut excessive = source.clone();
+        excessive.actions.extend([source.actions[0].clone(), source.actions[0].clone()]);
+        let small = NativeDirectoryLimits { max_entries: 1, ..limits };
+        let bytes = serde_json::to_vec(&excessive).unwrap();
+        assert!(NativeDirectoryRecoverySource::from_json_slice(&bytes, bytes.len(), small).is_err());
+        assert!(prepare_native_directory_recovery_from_source(
+            &cx, &excessive, &local, &remote, small,
+        ).await.is_err());
+        assert!(!remote.join("file").exists());
+        assert_eq!(fs::read(retained).unwrap(), b"retained original");
+        assert!(!staging.join("outside-the-job").exists());
+    });
+}
+
+#[test]
+fn native_recovery_review_id_tracks_contents_associations_and_root_identity() {
+    native(2, |cx| async move {
+        let (local, remote, staging) = roots("review-binding");
+        for path in ["a", "z"] {
+            fs::write(local.join(path), format!("new {path}")).unwrap();
+            fs::write(remote.join(path), format!("old {path}")).unwrap();
+        }
+        let limits = NativeDirectoryLimits::default();
+        let report = mirror(&cx, &local, &remote, &staging, limits).await;
+        let source = NativeDirectoryRecoverySource::from(&report);
+        let first = prepare_native_directory_recovery_from_source(&cx, &source, &local, &remote, limits)
+            .await.unwrap().review_id().to_owned();
+        let repeated = prepare_native_directory_recovery_from_source(&cx, &source, &local, &remote, limits)
+            .await.unwrap().review_id().to_owned();
+        assert_eq!(first, repeated, "fresh scans of unchanged objects share a review identity");
+
+        fs::write(remote.join("a"), b"concurrent current bytes").unwrap();
+        let destination_changed = prepare_native_directory_recovery_from_source(
+            &cx, &source, &local, &remote, limits,
+        ).await.unwrap().review_id().to_owned();
+        assert_ne!(first, destination_changed);
+        fs::write(source.actions[1].quarantine_path.as_ref().unwrap(), b"changed retained bytes").unwrap();
+        let original_changed = prepare_native_directory_recovery_from_source(
+            &cx, &source, &local, &remote, limits,
+        ).await.unwrap().review_id().to_owned();
+        assert_ne!(destination_changed, original_changed);
+
+        let mut reassociated = source.clone();
+        let original_path = reassociated.actions[0].path.clone();
+        reassociated.actions[0].path = reassociated.actions[1].path.clone();
+        reassociated.actions[1].path = original_path;
+        let association_changed = prepare_native_directory_recovery_from_source(
+            &cx, &reassociated, &local, &remote, limits,
+        ).await.unwrap().review_id().to_owned();
+        assert_ne!(original_changed, association_changed, "review binds each actual restoration target");
+
+        let retained_root = local.with_extension("retained-root");
+        fs::rename(&local, &retained_root).unwrap();
+        fs::create_dir(&local).unwrap();
+        for path in ["a", "z"] {
+            fs::write(local.join(path), fs::read(retained_root.join(path)).unwrap()).unwrap();
+        }
+        let root_changed = prepare_native_directory_recovery_from_source(
+            &cx, &source, &local, &remote, limits,
+        ).await.unwrap().review_id().to_owned();
+        assert_ne!(original_changed, root_changed, "same path and bytes cannot hide a replaced root");
+        assert_eq!(fs::read(remote.join("a")).unwrap(), b"concurrent current bytes");
+        assert_eq!(fs::read(source.actions[1].quarantine_path.as_ref().unwrap()).unwrap(), b"changed retained bytes");
+    });
+}
+
+#[test]
+fn native_mirror_after_serialized_recovery_uses_a_new_retained_job_across_runtimes() {
+    let (local, remote, staging) = roots("mirror-recover-repeat");
+    fs::write(local.join("file"), b"authoritative source").unwrap();
+    fs::write(remote.join("file"), b"destination original").unwrap();
+    let limits = NativeDirectoryLimits::default();
+    let (review_id, first) = separate_runtime(|cx| {
+        let (local, remote, staging) = (&local, &remote, &staging);
+        async move {
+            let prepared = prepare_native_directory_mirror(&cx, local, remote, limits).await.unwrap();
+            let review = prepared.plan_id().to_owned();
+            let report = prepared.with_fresh_plan_id(&cx).unwrap()
+                .apply_with_quarantined_deletions(&cx, authorized(), staging).await.unwrap();
+            assert!(report.complete, "{:?}", report.failure);
+            (review, report)
+        }
+    });
+    let encoded = serde_json::to_vec(&NativeDirectoryRecoverySource::from(&first)).unwrap();
+    separate_runtime(|cx| {
+        let (local, remote, encoded) = (&local, &remote, &encoded);
+        async move {
+            let source = NativeDirectoryRecoverySource::from_json_slice(encoded, encoded.len(), limits).unwrap();
+            let restored = prepare_native_directory_recovery_from_source(&cx, &source, local, remote, limits)
+                .await.unwrap().apply(&cx, authorized()).await.unwrap();
+            assert!(restored.complete, "{:?}", restored.failure);
+            assert!(restored.actions.iter().all(|entry| entry.durable));
+        }
+    });
+    assert_eq!(fs::read(remote.join("file")).unwrap(), b"destination original");
+    let (repeated_review, repeated) = separate_runtime(|cx| {
+        let (local, remote, staging) = (&local, &remote, &staging);
+        async move {
+            let prepared = prepare_native_directory_mirror(&cx, local, remote, limits).await.unwrap();
+            let review = prepared.plan_id().to_owned();
+            let report = prepared.with_fresh_plan_id(&cx).unwrap()
+                .apply_with_quarantined_deletions(&cx, authorized(), staging).await.unwrap();
+            assert!(report.complete, "{:?}", report.failure);
+            (review, report)
+        }
+    });
+    assert_eq!(review_id, repeated_review, "recovery recreated the same mirror inputs");
+    assert_ne!(first.plan_id, repeated.plan_id);
+    assert_ne!(first.staging_directory, repeated.staging_directory);
+    assert_eq!(fs::read(remote.join("file")).unwrap(), b"authoritative source");
+    assert_eq!(fs::read(first.actions[0].quarantine_path.as_ref().unwrap()).unwrap(), b"authoritative source");
+    assert_eq!(fs::read(repeated.actions[0].quarantine_path.as_ref().unwrap()).unwrap(), b"destination original");
+    assert_eq!(fs::read_dir(staging).unwrap().count(), 2, "both distinct recovery jobs remain");
+}
+
 #[test]
 fn native_recovery_restores_deleted_subtree_inodes_and_retains_newly_copied_entries() {
     for workers in [1, 2] {
