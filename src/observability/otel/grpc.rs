@@ -130,8 +130,9 @@ impl OtlpGrpcErrorKind {
     }
 }
 
-/// A terminal collector receipt, decoded only after the complete unary call
-/// succeeds. Metrics, traces, and logs share this protobuf acknowledgement.
+/// A terminal collector receipt, decoded only after a complete successful
+/// native HTTP or unary gRPC export. Metrics, traces, and logs share this
+/// protobuf acknowledgement. The protocol-neutral alias is OtlpSignalResponse.
 ///
 /// A partial-success receipt must never cause the same request to be replayed,
 /// even when every item was rejected. A zero-rejected diagnostic is a warning.
@@ -143,6 +144,13 @@ pub struct OtlpGrpcResponse {
 }
 
 impl OtlpGrpcResponse {
+    pub(super) fn from_acknowledgement(
+        signal: OtlpGrpcSignal,
+        acknowledgement: OtlpHttpResponse,
+    ) -> Self {
+        Self { signal, acknowledgement }
+    }
+
     #[cfg(test)]
     pub(super) fn from_encoded_for_test(
         signal: OtlpGrpcSignal,
