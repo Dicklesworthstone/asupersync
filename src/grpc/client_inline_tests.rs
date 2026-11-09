@@ -2413,3 +2413,293 @@
             assert!(forwarded[0].contains("grpc_timeout="));
         }
     }
+
+
+    #[test]
+    fn response_terminal_publication_survives_consumption_and_reentrant_cancellation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let mut stream = ResponseStream::<u32>::open_with_cancel_hook(Box::new(move || {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        let mut first = Metadata::new();
+        first.insert("x-terminal", "original");
+        stream.cancel_with_metadata(Status::cancelled("original cancellation"), first);
+        let waker = Waker::noop();
+        match poll_stream(&mut stream, waker) {
+            Poll::Ready(Some(Err(status))) => {
+                assert_eq!(status.code(), Code::Cancelled);
+                assert_eq!(status.message(), "original cancellation");
+            }
+            other => panic!("expected original terminal status: {other:?}"),
+        }
+        // Taking the status must not reopen publication or rerun a transport hook.
+        let mut later = Metadata::new();
+        later.insert("x-terminal", "replacement");
+        stream.cancel_with_metadata(Status::internal("late cancel"), later);
+        stream.finish_with_metadata(Status::aborted("late trailers"), Metadata::new());
+        assert!(matches!(poll_stream(&mut stream, waker), Poll::Ready(None)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            stream.terminal_metadata().get("x-terminal"),
+            Some(MetadataValue::Ascii(value)) if value == "original"
+        ));
+    }
+
+    #[test]
+    fn response_cancel_drops_queued_values_after_publishing_and_unlocking() {
+        struct ReenterOnDrop {
+            stream: ResponseStream<ReenterOnDrop>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for ReenterOnDrop {
+            fn drop(&mut self) {
+                {
+                    let state = self.stream.state.try_lock()
+                        .expect("queued user values must not be dropped under the stream mutex");
+                    assert!(state.closed);
+                    assert!(state.items.is_empty());
+                    assert_eq!(state.terminal_status.as_ref().unwrap().code(), Code::Cancelled);
+                }
+                // Real reentry after the lock witness, rather than a scheduling guess.
+                self.stream.cancel(Status::internal("destructor reentered"));
+                assert_eq!(self.stream.buffer_len(), 0);
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut stream = ResponseStream::open();
+        for _ in 0..3 {
+            stream.push(Ok(ReenterOnDrop {
+                stream: stream.clone(),
+                drops: Arc::clone(&drops),
+            })).unwrap();
+        }
+        stream.cancel(Status::cancelled("owner cancellation"));
+        assert_eq!(drops.load(Ordering::SeqCst), 3);
+        let first = poll_stream(&mut stream, Waker::noop());
+        assert!(matches!(first, Poll::Ready(Some(Err(status)))
+            if status.code() == Code::Cancelled && status.message() == "owner cancellation"));
+        assert!(matches!(poll_stream(&mut stream, Waker::noop()), Poll::Ready(None)));
+    }
+
+    #[test]
+    fn response_waiter_eviction_can_reenter_consumer_and_producer_queues() {
+        struct ReenterOnWake {
+            stream: ResponseStream<u32>,
+            calls: Arc<AtomicUsize>,
+        }
+        impl Wake for ReenterOnWake {
+            fn wake(self: Arc<Self>) {
+                assert!(self.stream.state.try_lock().is_ok(),
+                    "evicted waiters must wake outside the stream mutex");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.stream.close();
+            }
+        }
+        for producer in [false, true] {
+            let mut stream = ResponseStream::<u32>::open();
+            if producer {
+                for _ in 0..MAX_STREAM_BUFFERED {
+                    stream.push(Ok(1)).unwrap();
+                }
+            }
+            let evictions = Arc::new(AtomicUsize::new(0));
+            let waker = Waker::from(Arc::new(ReenterOnWake {
+                stream: stream.clone(), calls: Arc::clone(&evictions),
+            }));
+            let mut context = Context::from_waker(&waker);
+            if producer {
+                assert!(stream.poll_reserve(&mut context).is_pending());
+            } else {
+                assert!(poll_stream(&mut stream, &waker).is_pending());
+            }
+            let resumed = Arc::new(AtomicUsize::new(0));
+            for _ in 0..32 {
+                let waker = counting_waker(&resumed);
+                let mut context = Context::from_waker(&waker);
+                if producer {
+                    assert!(stream.poll_reserve(&mut context).is_pending());
+                } else {
+                    assert!(poll_stream(&mut stream, &waker).is_pending());
+                }
+            }
+            assert_eq!(evictions.load(Ordering::SeqCst), 1);
+            assert_eq!(resumed.load(Ordering::SeqCst), 32,
+                "reentrant close must also wake the newly installed waiter");
+            if producer {
+                assert!(matches!(stream.poll_reserve(&mut context), Poll::Ready(Err(_))));
+            } else {
+                assert!(matches!(poll_stream(&mut stream, Waker::noop()), Poll::Ready(None)));
+            }
+        }
+    }
+
+    #[test]
+    fn response_cancel_finishes_wake_fanout_and_transport_hook_before_unwinding() {
+        struct PanicWake;
+        impl Wake for PanicWake {
+            fn wake(self: Arc<Self>) { panic!("first response waiter panic"); }
+        }
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let hook_count = Arc::clone(&cancelled);
+        let mut stream = ResponseStream::<u32>::open_with_cancel_hook(Box::new(move || {
+            hook_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        assert!(poll_stream(&mut stream, &Waker::from(Arc::new(PanicWake))).is_pending());
+        let resumed = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            assert!(poll_stream(&mut stream, &counting_waker(&resumed)).is_pending());
+        }
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stream.cancel(Status::cancelled("stop"));
+        })).expect_err("the first callback panic must still propagate");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"first response waiter panic"));
+        assert_eq!(resumed.load(Ordering::SeqCst), 2, "later consumers cannot be stranded");
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1, "transport cancellation cannot be skipped");
+        assert!(matches!(poll_stream(&mut stream, Waker::noop()),
+            Poll::Ready(Some(Err(status))) if status.code() == Code::Cancelled));
+        stream.cancel(Status::internal("repeat after consumption"));
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(matches!(poll_stream(&mut stream, Waker::noop()), Poll::Ready(None)));
+    }
+
+    #[test]
+    fn response_cancel_retires_every_value_and_transport_even_if_a_destructor_panics() {
+        struct PanicDrop {
+            panic: bool,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for PanicDrop {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                assert!(!self.panic, "queued response destructor panic");
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let hook_count = Arc::clone(&cancelled);
+        let mut stream = ResponseStream::open_with_cancel_hook(Box::new(move || {
+            hook_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        for panic in [true, false, false] {
+            stream.push(Ok(PanicDrop { panic, drops: Arc::clone(&drops) })).unwrap();
+        }
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stream.cancel(Status::cancelled("stop with hostile destructor"));
+        })).is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 3);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(!stream.state.is_poisoned(), "user destructors never run under this lock");
+        assert_eq!(stream.buffer_len(), 0);
+        assert!(matches!(poll_stream(&mut stream, Waker::noop()),
+            Poll::Ready(Some(Err(status))) if status.code() == Code::Cancelled));
+        assert!(matches!(poll_stream(&mut stream, Waker::noop()), Poll::Ready(None)));
+    }
+
+    #[test]
+    fn response_cancel_separates_wake_panic_from_final_waker_drop() {
+        struct PanicWakeAndDrop {
+            drop_during_unwind: Arc<std::sync::atomic::AtomicBool>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Wake for PanicWakeAndDrop {
+            fn wake(self: Arc<Self>) {
+                panic!("first response wake panic");
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                panic!("first response wake panic");
+            }
+        }
+
+        impl Drop for PanicWakeAndDrop {
+            fn drop(&mut self) {
+                let unwinding = std::thread::panicking();
+                self.drop_during_unwind.store(unwinding, Ordering::SeqCst);
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                // Make the regression fail without aborting the test process
+                // when the old consuming wake drops its last owner mid-unwind.
+                if !unwinding {
+                    panic!("secondary response waker drop panic");
+                }
+            }
+        }
+
+        let drop_during_unwind = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let hook_count = Arc::clone(&cancelled);
+        let mut stream = ResponseStream::<u32>::open_with_cancel_hook(Box::new(move || {
+            hook_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        let waker = Waker::from(Arc::new(PanicWakeAndDrop {
+            drop_during_unwind: Arc::clone(&drop_during_unwind),
+            drops: Arc::clone(&drops),
+        }));
+        assert!(poll_stream(&mut stream, &waker).is_pending());
+        drop(waker);
+        let resumed = Arc::new(AtomicUsize::new(0));
+        assert!(poll_stream(&mut stream, &counting_waker(&resumed)).is_pending());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stream.cancel(Status::cancelled("stop"));
+        }))
+        .expect_err("the original wake panic must propagate after cleanup");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"first response wake panic")
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(!drop_during_unwind.load(Ordering::SeqCst));
+        assert_eq!(resumed.load(Ordering::SeqCst), 1);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn response_cancel_after_finish_still_discards_buffered_values() {
+        struct CountDrop(Arc<AtomicUsize>);
+
+        impl Drop for CountDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let hook_count = Arc::clone(&cancelled);
+        let mut stream = ResponseStream::open_with_cancel_hook(Box::new(move || {
+            hook_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        for _ in 0..2 {
+            stream.push(Ok(CountDrop(Arc::clone(&drops)))).unwrap();
+        }
+        let mut metadata = Metadata::new();
+        metadata.insert("x-terminal", "original finish");
+        stream.finish_with_metadata(Status::unavailable("server trailers"), metadata);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        stream.cancel(Status::cancelled("discard unconsumed messages"));
+
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert_eq!(stream.buffer_len(), 0);
+        assert_eq!(
+            stream.terminal_metadata().get("x-terminal"),
+            Some(&MetadataValue::Ascii("original finish".to_string()))
+        );
+        assert!(matches!(
+            poll_stream(&mut stream, Waker::noop()),
+            Poll::Ready(Some(Err(status))) if status.code() == Code::Unavailable
+        ));
+        assert_eq!(cancelled.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            poll_stream(&mut stream, Waker::noop()),
+            Poll::Ready(None)
+        ));
+    }

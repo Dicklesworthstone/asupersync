@@ -3318,6 +3318,8 @@ struct ResponseStreamState<T> {
     items: VecDeque<Result<T, Status>>,
     closed: bool,
     terminal_status: Option<Status>,
+    // Publication is monotone even after a reader takes the terminal status.
+    terminal_published: bool,
     terminal_metadata: Metadata,
     waiters: Vec<Waker>,
     /// Producer wakers parked on [`ResponseStream::poll_reserve`] while the
@@ -3344,6 +3346,7 @@ impl<T> ResponseStreamState<T> {
             items: VecDeque::new(),
             closed: true,
             terminal_status: None,
+            terminal_published: false,
             terminal_metadata: Metadata::new(),
             waiters: Vec::new(),
             producer_waiters: Vec::new(),
@@ -3355,6 +3358,7 @@ impl<T> ResponseStreamState<T> {
             items: VecDeque::new(),
             closed: false,
             terminal_status: None,
+            terminal_published: false,
             terminal_metadata: Metadata::new(),
             waiters: Vec::new(),
             producer_waiters: Vec::new(),
@@ -3365,37 +3369,72 @@ impl<T> ResponseStreamState<T> {
         std::mem::take(&mut self.waiters)
     }
 
-    fn register_waiter(&mut self, waker: &Waker) {
-        if !self
-            .waiters
-            .iter()
-            .any(|existing| existing.will_wake(waker))
-        {
-            if self.waiters.len() >= 32 {
-                let evicted = self.waiters.remove(0);
-                evicted.wake();
-            }
-            self.waiters.push(waker.clone());
+    fn register_waiter(&mut self, candidate: &mut Option<Waker>) -> Option<Waker> {
+        let waker = candidate.as_ref().expect("prepared response waiter");
+        if self.waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return None;
         }
+        let evicted = (self.waiters.len() >= 32).then(|| self.waiters.remove(0));
+        self.waiters.push(candidate.take().expect("prepared response waiter"));
+        evicted
     }
 
     fn take_producer_waiters(&mut self) -> Vec<Waker> {
         std::mem::take(&mut self.producer_waiters)
     }
 
-    fn register_producer_waiter(&mut self, waker: &Waker) {
-        if !self
-            .producer_waiters
-            .iter()
-            .any(|existing| existing.will_wake(waker))
-        {
-            if self.producer_waiters.len() >= 32 {
-                let evicted = self.producer_waiters.remove(0);
-                evicted.wake();
-            }
-            self.producer_waiters.push(waker.clone());
+    fn register_producer_waiter(&mut self, candidate: &mut Option<Waker>) -> Option<Waker> {
+        let waker = candidate.as_ref().expect("prepared response producer");
+        if self.producer_waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return None;
+        }
+        let evicted = (self.producer_waiters.len() >= 32)
+            .then(|| self.producer_waiters.remove(0));
+        self.producer_waiters.push(candidate.take().expect("prepared response producer"));
+        evicted
+    }
+}
+
+// Finish every detached callback before propagating the first panic. A single
+// panicking task must not strand the other consumers/producers or skip the
+// transport cancellation hook. Arbitrary secondary panic payloads may themselves
+// panic on Drop, so use the same containment policy as the I/O duplex boundary.
+fn capture_response_callback(
+    first: &mut Option<Box<dyn Any + Send>>,
+    callback: impl FnOnce(),
+) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+        if first.is_none() {
+            *first = Some(payload);
+        } else {
+            std::mem::forget(payload);
         }
     }
+}
+
+fn finish_response_callbacks(first: Option<Box<dyn Any + Send>>) {
+    if let Some(payload) = first {
+        if std::thread::panicking() {
+            std::mem::forget(payload);
+        } else {
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+fn capture_response_wake(first: &mut Option<Box<dyn Any + Send>>, waker: Waker) {
+    // Keep the owner alive through wake so a wake panic and final-owner
+    // destruction cannot share one unwind.
+    capture_response_callback(first, || waker.wake_by_ref());
+    capture_response_callback(first, || drop(waker));
+}
+
+fn wake_response_waiters(waiters: impl IntoIterator<Item = Waker>) {
+    let mut first = None;
+    for waker in waiters {
+        capture_response_wake(&mut first, waker);
+    }
+    finish_response_callbacks(first);
 }
 
 /// A stream of responses from the server.
@@ -3527,9 +3566,7 @@ impl<T> ResponseStream<T> {
             state.items.push_back(item);
             state.take_waiters()
         };
-        for waker in waiters {
-            waker.wake();
-        }
+        wake_response_waiters(waiters);
         Ok(())
     }
 
@@ -3578,6 +3615,9 @@ impl<T> ResponseStream<T> {
     /// - `Poll::Ready(Err(_))` when the stream is closed — the producer should
     ///   stop rather than spin.
     pub fn poll_reserve(&self, cx: &mut Context<'_>) -> Poll<Result<(), Status>> {
+        // RawWaker clone/drop callbacks may re-enter this stream. Prepare the
+        // candidate before taking the state lock; unused candidates retire last.
+        let mut candidate = Some(cx.waker().clone());
         let mut state = lock_unpoisoned(&self.state);
         if state.closed {
             return Poll::Ready(Err(Status::failed_precondition(
@@ -3587,7 +3627,9 @@ impl<T> ResponseStream<T> {
         if state.items.len() < MAX_STREAM_BUFFERED {
             return Poll::Ready(Ok(()));
         }
-        state.register_producer_waiter(cx.waker());
+        let evicted = state.register_producer_waiter(&mut candidate);
+        drop(state);
+        wake_response_waiters(evicted);
         Poll::Pending
     }
 
@@ -3598,13 +3640,8 @@ impl<T> ResponseStream<T> {
             state.closed = true;
             (state.take_waiters(), state.take_producer_waiters())
         };
-        for waker in waiters {
-            waker.wake();
-        }
-        // Wake parked producers so they re-poll, observe the close, and stop.
-        for waker in producers {
-            waker.wake();
-        }
+        // Both classes must wake even if one callback panics.
+        wake_response_waiters(waiters.into_iter().chain(producers));
     }
 
     /// Close the stream with a terminal status.
@@ -3617,32 +3654,46 @@ impl<T> ResponseStream<T> {
         status: Status,
         metadata: Metadata,
         discard_buffered: bool,
-    ) -> bool {
-        let (waiters, producers, inserted) = {
+    ) {
+        let (waiters, producers, retired, inserted) = {
             let mut state = lock_unpoisoned(&self.state);
             state.closed = true;
-            let inserted = state.terminal_status.is_none();
-            if state.terminal_status.is_none() {
-                if discard_buffered {
-                    state.items.clear();
-                }
+            let inserted = !state.terminal_published;
+            let retired = if discard_buffered {
+                std::mem::take(&mut state.items)
+            } else {
+                VecDeque::new()
+            };
+            if inserted {
+                state.terminal_published = true;
                 state.terminal_status = Some(status);
                 state.terminal_metadata = metadata;
             }
             (
                 state.take_waiters(),
                 state.take_producer_waiters(),
+                retired,
                 inserted,
             )
         };
-        for waker in waiters {
-            waker.wake();
+        // Publish the complete transition before running any user destructor,
+        // waker, or transport hook. A destructor can inspect/re-enter the stream.
+        let mut first = None;
+        for item in retired {
+            capture_response_callback(&mut first, || drop(item));
         }
-        // Wake parked producers so they re-poll, observe the close, and stop.
-        for waker in producers {
-            waker.wake();
+        for waker in waiters.into_iter().chain(producers) {
+            capture_response_wake(&mut first, waker);
         }
-        inserted
+        if inserted && discard_buffered
+            && let Some(on_cancel) = &self.on_cancel
+        {
+            capture_response_callback(&mut first, || {
+                let mut hook = lock_unpoisoned(on_cancel);
+                let _ = hook();
+            });
+        }
+        finish_response_callbacks(first);
     }
 
     /// Cancel the stream immediately with a terminal status and trailing metadata.
@@ -3650,12 +3701,7 @@ impl<T> ResponseStream<T> {
     /// Cancellation is abrupt: queued response items are discarded so the
     /// caller observes the terminal status before any stale buffered payloads.
     pub fn cancel_with_metadata(&self, status: Status, metadata: Metadata) {
-        if self.set_terminal_status(status, metadata, true)
-            && let Some(on_cancel) = &self.on_cancel
-        {
-            let mut hook = lock_unpoisoned(on_cancel);
-            let _ = hook();
-        }
+        self.set_terminal_status(status, metadata, true);
     }
 
     /// Finish the stream with a terminal status after draining queued items.
@@ -3686,15 +3732,14 @@ impl<T: Send> Streaming for ResponseStream<T> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Self::Message, Status>>> {
+        let mut candidate = Some(cx.waker().clone());
         let mut state = lock_unpoisoned(&self.state);
         if let Some(item) = state.items.pop_front() {
             // A buffer slot just freed: wake any producer parked on
             // `poll_reserve` so it observes the window update and resumes.
             let producers = state.take_producer_waiters();
             drop(state);
-            for waker in producers {
-                waker.wake();
-            }
+            wake_response_waiters(producers);
             return Poll::Ready(Some(item));
         }
         if let Some(status) = state.terminal_status.take() {
@@ -3708,7 +3753,9 @@ impl<T: Send> Streaming for ResponseStream<T> {
             drop(state);
             return self.poll_native(native, cx);
         }
-        state.register_waiter(cx.waker());
+        let evicted = state.register_waiter(&mut candidate);
+        drop(state);
+        wake_response_waiters(evicted);
         Poll::Pending
     }
 }
@@ -3733,12 +3780,13 @@ impl<T> ResponseStream<T> {
         let waiters = {
             let mut state = lock_unpoisoned(&self.state);
             state.closed = true;
-            state.terminal_metadata = trailers;
+            if !state.terminal_published {
+                state.terminal_published = true;
+                state.terminal_metadata = trailers;
+            }
             state.take_waiters()
         };
-        for waker in waiters {
-            waker.wake();
-        }
+        wake_response_waiters(waiters);
         Poll::Ready(end)
     }
 }
