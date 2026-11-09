@@ -4,7 +4,7 @@ use super::common::{
     SdkResource, SdkValueError, ValueBudget, attribute_nodes, nanos, owned_attributes,
     owned_attributes_last_wins,
 };
-use crate::cx::Cx;
+use super::queue as delivery;
 use crate::grpc::protobuf::ProtoMessage;
 use crate::observability::otel::export_policy::compare_policy_attributes;
 use crate::observability::otel::{
@@ -18,7 +18,7 @@ use crate::observability::otlp_proto::trace::{
 };
 use opentelemetry::InstrumentationScope as SdkScope;
 use opentelemetry::trace::{SpanId, SpanKind, Status as SdkStatus, TraceState};
-use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
+use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SpanData, SpanExporter};
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -193,7 +193,7 @@ impl OtlpSdkTraceConfig {
         self.max_request_bytes
     }
 
-    fn validate(self) -> Result<(), OtlpSdkTraceError> {
+    pub(super) fn validate(self) -> Result<(), OtlpSdkTraceError> {
         if self.max_spans == 0
             || self.max_spans > MAX_SPANS
             || self.max_scopes == 0
@@ -209,7 +209,7 @@ impl OtlpSdkTraceConfig {
     }
 }
 
-type TraceResource = SdkResource;
+pub(super) type TraceResource = SdkResource;
 
 /// An explicitly installed SDK span exporter using a caller-managed native queue.
 ///
@@ -317,40 +317,24 @@ impl OtlpSdkSpanExporter {
 
 impl SpanExporter for OtlpSdkSpanExporter {
     async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
-        if Cx::current().is_some() {
-            return Err(sdk_error(OtlpSdkTraceError::NativeContext.code()));
-        }
-        self.queue
-            .ensure_managed_active()
-            .map_err(|_| sdk_error("otlp.sdk.traces.owner_unavailable"))?;
-        let resource = self
-            .resource
-            .as_ref()
-            .map_err(|error| sdk_error(error.code()))?;
-        let mapped = map_traces(&batch, resource, &self.policy, &self.config);
-        // Caller-owned spare capacities must not survive through transport waits.
-        drop(batch);
-        let (requests, _) = mapped
-            .map_err(|error| sdk_error(error.code()))?
-            .into_parts();
-        self.queue
-            .enqueue_encoded_with_receipt(OtlpGrpcSignal::Traces, requests)
-            .map_err(|_| sdk_error("otlp.sdk.traces.admission_refused"))?
-            .await
-            .map(|_| ())
-            .map_err(|error| sdk_error(error.code()))
+        delivery::export(&self.queue, OtlpGrpcSignal::Traces, move || {
+            let resource = self.resource.as_ref().map_err(|error| error.code())?;
+            let mapped = map_traces(&batch, resource, &self.policy, &self.config);
+            // Caller-owned spare capacities must not survive through transport waits.
+            drop(batch);
+            mapped
+                .map(|mapped| mapped.into_parts().0)
+                .map_err(|error| error.code())
+        })
+        .await
     }
 
     fn force_flush(&self) -> OTelSdkResult {
-        self.queue
-            .force_flush_blocking(FLUSH_TIMEOUT)
-            .map_err(|_| sdk_error("otlp.sdk.traces.flush_incomplete"))
+        delivery::force_flush(&self.queue, OtlpGrpcSignal::Traces, FLUSH_TIMEOUT)
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
-        self.queue
-            .shutdown_blocking(timeout)
-            .map_err(|_| sdk_error("otlp.sdk.traces.shutdown_incomplete"))
+        delivery::shutdown(&self.queue, OtlpGrpcSignal::Traces, timeout)
     }
 
     fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
@@ -358,11 +342,7 @@ impl SpanExporter for OtlpSdkSpanExporter {
     }
 }
 
-fn sdk_error(code: &'static str) -> OTelSdkError {
-    OTelSdkError::InternalFailure(code.to_owned())
-}
-
-fn prepare_resource(
+pub(super) fn prepare_resource(
     input: &opentelemetry_sdk::Resource,
     config: &OtlpSdkTraceConfig,
 ) -> Result<TraceResource, OtlpSdkTraceError> {
@@ -764,7 +744,7 @@ fn encode_scopes(
     Ok(requests)
 }
 
-fn map_traces(
+pub(super) fn map_traces(
     spans: &[SpanData],
     resource: &TraceResource,
     policy: &OwnedOtlpExportPolicy,

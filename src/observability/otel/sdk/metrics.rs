@@ -1,6 +1,7 @@
 //! Bounded OpenTelemetry SDK 0.32 metrics mapping and acknowledged delivery.
 
 use super::common::{self, SdkValueError, ValueBudget, attribute_nodes};
+use super::queue as delivery;
 use crate::grpc::protobuf::ProtoMessage;
 use crate::observability::otel::export_policy::compare_policy_attributes;
 use crate::observability::otel::{
@@ -18,7 +19,7 @@ use crate::observability::otlp_proto::metrics::{
     ScopeMetrics, Sum,
 };
 use opentelemetry::Value;
-use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
+use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::metrics::Temporality;
 use opentelemetry_sdk::metrics::data::{
     self as sdk, AggregatedMetrics, MetricData as SdkMetricData,
@@ -212,7 +213,7 @@ impl OtlpSdkMetricsConfig {
         self.max_request_bytes
     }
 
-    fn validate(self) -> Result<(), OtlpSdkMetricsError> {
+    pub(super) fn validate(self) -> Result<(), OtlpSdkMetricsError> {
         if self.max_scopes == 0
             || self.max_scopes > MAX_SCOPES
             || self.max_metrics == 0
@@ -322,39 +323,25 @@ impl OtlpSdkMetricExporter {
 
 impl PushMetricExporter for OtlpSdkMetricExporter {
     async fn export(&self, metrics: &sdk::ResourceMetrics) -> OTelSdkResult {
-        self.queue
-            .ensure_managed_active()
-            .map_err(|_| sdk_error("otlp.sdk.metrics.owner_unavailable"))?;
-        let (requests, _) = map_metrics(metrics, &self.policy, &self.config)
-            .map_err(|error| sdk_error(error.code()))?
-            .into_parts();
-        self.queue
-            .enqueue_encoded_with_receipt(OtlpGrpcSignal::Metrics, requests)
-            .map_err(|_| sdk_error("otlp.sdk.metrics.admission_refused"))?
-            .await
-            .map(|_| ())
-            .map_err(|error| sdk_error(error.code()))
+        delivery::export(&self.queue, OtlpGrpcSignal::Metrics, || {
+            map_metrics(metrics, &self.policy, &self.config)
+                .map(|mapped| mapped.into_parts().0)
+                .map_err(|error| error.code())
+        })
+        .await
     }
 
     fn force_flush(&self) -> OTelSdkResult {
-        self.queue
-            .force_flush_blocking(FLUSH_TIMEOUT)
-            .map_err(|_| sdk_error("otlp.sdk.metrics.flush_incomplete"))
+        delivery::force_flush(&self.queue, OtlpGrpcSignal::Metrics, FLUSH_TIMEOUT)
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
-        self.queue
-            .shutdown_blocking(timeout)
-            .map_err(|_| sdk_error("otlp.sdk.metrics.shutdown_incomplete"))
+        delivery::shutdown(&self.queue, OtlpGrpcSignal::Metrics, timeout)
     }
 
     fn temporality(&self) -> Temporality {
         Temporality::Cumulative
     }
-}
-
-fn sdk_error(code: &'static str) -> OTelSdkError {
-    OTelSdkError::InternalFailure(code.to_owned())
 }
 
 struct InputBudget {
@@ -1263,7 +1250,7 @@ fn encode_scopes(
     requests.finish()
 }
 
-fn map_metrics(
+pub(super) fn map_metrics(
     metrics: &sdk::ResourceMetrics,
     policy: &OwnedOtlpExportPolicy,
     config: &OtlpSdkMetricsConfig,

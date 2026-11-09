@@ -11,6 +11,7 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::Duration;
 
 /// Cumulative accounting for an acknowledged native HTTP queue.
 ///
@@ -135,6 +136,24 @@ impl QueuedOtlpHttpExporter {
             .admit_encoded_with_receipt(self.destination(signal), signal, requests)
     }
 
+    pub(in crate::observability::otel) fn ensure_managed_active(&self) -> Result<(), ExportError> {
+        self.queue.ensure_managed_active()
+    }
+
+    pub(in crate::observability::otel) fn force_flush_blocking(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), ExportError> {
+        self.queue.wait_flushed_blocking(timeout, false)
+    }
+
+    pub(in crate::observability::otel) fn shutdown_blocking(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), ExportError> {
+        self.queue.wait_flushed_blocking(timeout, true)
+    }
+
     /// Shared queue and terminal partial-success counters.
     #[must_use]
     pub fn queue_stats(&self) -> OtlpHttpQueueStats {
@@ -217,7 +236,7 @@ pub(super) async fn send(
     let mut sleeper = crate::time::Sleep::with_timer_driver(deadline, timer.clone());
     let sender = OtlpHttpExporter::from_config(config.clone());
     let mut operation: Pin<Box<dyn Future<Output = Result<Vec<u8>, ExportError>> + Send + '_>> =
-        Box::pin(sender.send_otlp_protobuf_response_body_checked(cx, body, true));
+        Box::pin(sender.send_otlp_protobuf_response_body_checked(cx, body, Some(deadline)));
     let mut cancel = OtlpCancelWakerGuard::new(cx);
     let bytes = poll_fn(|task| {
         cancel.refresh(task.waker());
@@ -229,7 +248,16 @@ pub(super) async fn send(
         if timer.now() >= deadline {
             return Poll::Ready(Err("otlp.http.deadline_exceeded"));
         }
-        match operation.as_mut().poll(task) {
+        let outcome = operation.as_mut().poll(task);
+        // Synchronous compression and Ready request continuations still spend
+        // this original budget. Cancellation/deadline wins over their result.
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err("otlp.http.cancelled"));
+        }
+        if timer.now() >= deadline {
+            return Poll::Ready(Err("otlp.http.deadline_exceeded"));
+        }
+        match outcome {
             Poll::Ready(Ok(bytes)) => Poll::Ready(Ok(bytes)),
             // Peer diagnostics, response headers and endpoint text stay out of
             // both the collection error and managed owner's automatic output.
@@ -244,8 +272,13 @@ pub(super) async fn send(
         }
     })
     .await?;
-    let acknowledgement =
-        decode_otlp_http_response(&bytes).map_err(|_| "otlp.http.invalid_response")?;
+    let acknowledgement = decode_otlp_http_response(&bytes);
+    // The bounded decode is part of acknowledgement, not a new time envelope.
+    cx.checkpoint().map_err(|_| "otlp.http.cancelled")?;
+    if timer.now() >= deadline {
+        return Err("otlp.http.deadline_exceeded");
+    }
+    let acknowledgement = acknowledgement.map_err(|_| "otlp.http.invalid_response")?;
     Ok(OtlpSignalResponse::from_acknowledgement(
         signal,
         acknowledgement,

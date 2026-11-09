@@ -4,7 +4,7 @@ use super::common::{
     SdkResource, SdkValueError, ValueBudget, attribute_nodes, nanos, owned_attributes,
     owned_log_attributes, owned_log_value, value_nodes,
 };
-use crate::cx::Cx;
+use super::queue as delivery;
 use crate::grpc::protobuf::ProtoMessage;
 use crate::observability::otel::export_policy::compare_policy_attributes;
 use crate::observability::otel::{
@@ -16,7 +16,9 @@ use crate::observability::otlp_proto::common_and_resource::{InstrumentationScope
 use crate::observability::otlp_proto::logs::{LogRecord, ResourceLogs, ScopeLogs};
 use opentelemetry::logs::Severity;
 use opentelemetry::{Array as SdkArray, InstrumentationScope as SdkScope, Value as SdkValue};
-use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
+#[cfg(test)]
+use opentelemetry_sdk::error::OTelSdkError;
+use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{LogBatch, LogExporter, SdkLogRecord};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -184,7 +186,7 @@ impl OtlpSdkLogConfig {
         self.max_request_bytes
     }
 
-    fn validate(self) -> Result<(), OtlpSdkLogError> {
+    pub(super) fn validate(self) -> Result<(), OtlpSdkLogError> {
         if self.max_records == 0
             || self.max_records > MAX_RECORDS
             || self.max_scopes == 0
@@ -312,41 +314,25 @@ impl OtlpSdkLogExporter {
     /// provider's flush first. A pending blocking wait inside native `Cx` is
     /// refused; use the managed async drain/join path there.
     pub fn force_flush_queue(&self, timeout: Duration) -> OTelSdkResult {
-        self.queue
-            .force_flush_blocking(timeout)
-            .map_err(|_| sdk_error("otlp.sdk.logs.flush_incomplete"))
+        delivery::force_flush(&self.queue, OtlpGrpcSignal::Logs, timeout)
     }
 }
 
 impl LogExporter for OtlpSdkLogExporter {
     async fn export(&self, batch: LogBatch<'_>) -> OTelSdkResult {
-        if Cx::current().is_some() {
-            return Err(sdk_error(OtlpSdkLogError::NativeContext.code()));
-        }
-        self.queue
-            .ensure_managed_active()
-            .map_err(|_| sdk_error("otlp.sdk.logs.owner_unavailable"))?;
-        let resource = self
-            .resource
-            .as_ref()
-            .map_err(|error| sdk_error(error.code()))?;
-        // LogBatch borrows the SDK's records; only compact encoded buffers are
-        // transferred to the native queue. No source records are cloned here.
-        let (requests, _) = map_logs(&batch, resource, &self.policy, &self.config)
-            .map_err(|error| sdk_error(error.code()))?
-            .into_parts();
-        self.queue
-            .enqueue_encoded_with_receipt(OtlpGrpcSignal::Logs, requests)
-            .map_err(|_| sdk_error("otlp.sdk.logs.admission_refused"))?
-            .await
-            .map(|_| ())
-            .map_err(|error| sdk_error(error.code()))
+        delivery::export(&self.queue, OtlpGrpcSignal::Logs, move || {
+            let resource = self.resource.as_ref().map_err(|error| error.code())?;
+            // LogBatch borrows SDK records; only compact encoded buffers are
+            // transferred to the native queue. No source records are cloned here.
+            map_logs(&batch, resource, &self.policy, &self.config)
+                .map(|mapped| mapped.into_parts().0)
+                .map_err(|error| error.code())
+        })
+        .await
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
-        self.queue
-            .shutdown_blocking(timeout)
-            .map_err(|_| sdk_error("otlp.sdk.logs.shutdown_incomplete"))
+        delivery::shutdown(&self.queue, OtlpGrpcSignal::Logs, timeout)
     }
 
     fn event_enabled(&self, _: Severity, _: &str, _: Option<&str>) -> bool {
@@ -360,10 +346,6 @@ impl LogExporter for OtlpSdkLogExporter {
             .map(Arc::new)
             .map_err(Into::into);
     }
-}
-
-fn sdk_error(code: &'static str) -> OTelSdkError {
-    OTelSdkError::InternalFailure(code.to_owned())
 }
 
 struct InputScope<'a> {
@@ -766,7 +748,7 @@ fn encode_scopes(
     Ok(requests)
 }
 
-fn map_logs(
+pub(super) fn map_logs(
     batch: &LogBatch<'_>,
     resource: &SdkResource,
     policy: &OwnedOtlpExportPolicy,

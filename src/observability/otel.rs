@@ -112,6 +112,7 @@ pub use export_policy::{
 mod sdk;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sdk::{
+    OtlpSdkHttpLogExporter, OtlpSdkHttpMetricExporter, OtlpSdkHttpSpanExporter,
     OtlpSdkLogConfig, OtlpSdkLogError, OtlpSdkLogExporter,
     OtlpSdkMetricExporter, OtlpSdkMetricsConfig, OtlpSdkMetricsError,
     OtlpSdkSpanExporter, OtlpSdkTraceConfig, OtlpSdkTraceError,
@@ -7040,7 +7041,7 @@ impl OtlpHttpExporter {
         cx: &crate::cx::Cx,
         request_body: Vec<u8>,
     ) -> Result<Vec<u8>, ExportError> {
-        self.send_otlp_protobuf_response_body_checked(cx, request_body, false)
+        self.send_otlp_protobuf_response_body_checked(cx, request_body, None)
             .await
     }
 
@@ -7048,9 +7049,11 @@ impl OtlpHttpExporter {
         &self,
         cx: &crate::cx::Cx,
         request_body: Vec<u8>,
-        strict_collector: bool,
+        acknowledged_deadline: Option<crate::types::Time>,
     ) -> Result<Vec<u8>, ExportError> {
         use std::cmp;
+
+        let strict_collector = acknowledged_deadline.is_some();
 
         // Existing infallible builders remain source-compatible, but every
         // export fails closed before compression, DNS, or network activity if
@@ -7063,7 +7066,7 @@ impl OtlpHttpExporter {
         loop {
             let response = if strict_collector {
                 self.send_request_with_compression_checked(
-                    cx, &request_body, self.compression, true,
+                    cx, &request_body, self.compression, acknowledged_deadline,
                 ).await
             } else {
                 self.send_request_once(cx, &request_body).await
@@ -7114,7 +7117,7 @@ impl OtlpHttpExporter {
                         // Attempt fallback to uncompressed request
                         match self
                             .send_request_with_compression_checked(
-                                cx, &request_body, false, strict_collector,
+                                cx, &request_body, false, acknowledged_deadline,
                             )
                             .await
                         {
@@ -7239,7 +7242,7 @@ impl OtlpHttpExporter {
         body: &[u8],
         use_compression: bool,
     ) -> Result<Vec<u8>, OtlpError> {
-        self.send_request_with_compression_checked(cx, body, use_compression, false)
+        self.send_request_with_compression_checked(cx, body, use_compression, None)
             .await
     }
 
@@ -7248,10 +7251,12 @@ impl OtlpHttpExporter {
         cx: &crate::cx::Cx,
         body: &[u8],
         use_compression: bool,
-        strict_collector: bool,
+        acknowledged_deadline: Option<crate::types::Time>,
     ) -> Result<Vec<u8>, OtlpError> {
         use crate::http::h1::http_client::HttpClient;
         use crate::http::h1::types::Method;
+
+        let strict_collector = acknowledged_deadline.is_some();
 
         #[cfg(not(feature = "metrics"))]
         return Err(OtlpError::non_retryable(
@@ -7260,6 +7265,17 @@ impl OtlpHttpExporter {
 
         #[cfg(feature = "metrics")]
         {
+            if let Some(deadline) = acknowledged_deadline {
+                cx.checkpoint().map_err(|_| {
+                    OtlpError::non_retryable("OTLP request failed: request cancelled")
+                })?;
+                let timer = cx.timer_driver().ok_or_else(|| {
+                    OtlpError::non_retryable("otlp.http.timer_required")
+                })?;
+                if timer.now() >= deadline {
+                    return Err(OtlpError::non_retryable("OTLP request timeout"));
+                }
+            }
             // OTLP owns retry and endpoint security. Automatic redirects could
             // otherwise downgrade RequireTls or forward a custom credential to
             // another origin, so this transport never follows them.
@@ -7312,15 +7328,22 @@ impl OtlpHttpExporter {
                     .map(|header| (header.name.clone(), header.value.expose().to_owned())),
             );
 
-            // Send under the caller's explicit timer capability. Using the
-            // ambient timeout helper here would put a non-ambient `Cx` and its
-            // timeout on different clocks in deterministic runtimes.
-            let response = drive_otlp_request_with_timeout(cx, self.timeout, async {
+            // Send under the caller's explicit timer capability. The
+            // acknowledged deadline was fixed before compression/body copying;
+            // the driver checks it before polling DNS or network I/O and never
+            // renews it for retries. Legacy calls retain their timeout policy.
+            let request = async {
                 client
                     .request(cx, Method::Post, &self.endpoint, headers, compressed_body)
                     .await
-            })
-            .await?
+            };
+            let response = if acknowledged_deadline.is_some() {
+                drive_otlp_request_with_deadline(
+                    cx, self.timeout, acknowledged_deadline, request,
+                ).await
+            } else {
+                drive_otlp_request_with_timeout(cx, self.timeout, request).await
+            }?
             .map_err(|e| OtlpError::non_retryable(format!("OTLP request failed: {}", e)))?;
 
             // The additive acknowledged queue requires an actual collector
@@ -7433,6 +7456,18 @@ async fn drive_otlp_request_with_timeout<F>(
 where
     F: std::future::Future,
 {
+    drive_otlp_request_with_deadline(cx, timeout, None, future).await
+}
+
+async fn drive_otlp_request_with_deadline<F>(
+    cx: &crate::cx::Cx,
+    timeout: Duration,
+    acknowledged_deadline: Option<crate::types::Time>,
+    future: F,
+) -> Result<F::Output, OtlpError>
+where
+    F: std::future::Future,
+{
     use std::future::{Future, poll_fn};
     use std::pin::pin;
     use std::task::Poll;
@@ -7443,6 +7478,8 @@ where
         .map_or_else(crate::time::wall_now, |driver| driver.now());
     let timeout_nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
     let request_deadline = now.saturating_add_nanos(timeout_nanos);
+    let request_deadline = acknowledged_deadline
+        .map_or(request_deadline, |total| total.min(request_deadline));
     let deadline = cx
         .budget()
         .deadline
@@ -7450,7 +7487,7 @@ where
             request_deadline.min(budget_deadline)
         });
     let effective_timeout = Duration::from_nanos(deadline.duration_since(now));
-    let mut sleeper = if let Some(timer_driver) = timer_driver {
+    let mut sleeper = if let Some(timer_driver) = timer_driver.clone() {
         crate::time::Sleep::with_timer_driver(deadline, timer_driver)
     } else {
         crate::time::sleep(now, effective_timeout)
@@ -7466,9 +7503,31 @@ where
             )));
         }
 
-        // Preserve completed work at the exact timeout boundary, matching the
-        // crate-wide timeout contract.
-        if let Poll::Ready(output) = future.as_mut().poll(task_cx) {
+        let expired = || {
+            timer_driver
+                .as_ref()
+                .map_or_else(crate::time::wall_now, |driver| driver.now()) >= deadline
+        };
+        if acknowledged_deadline.is_some() && expired() {
+            return Poll::Ready(Err(OtlpError::non_retryable("OTLP request timeout")));
+        }
+        let output = future.as_mut().poll(task_cx);
+        if acknowledged_deadline.is_some() {
+            // Compression and a Ready network continuation can consume the
+            // remaining total budget within one poll. Never acknowledge that
+            // work or start another attempt under a newly computed deadline.
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(OtlpError::non_retryable(
+                    "OTLP request failed: request cancelled",
+                )));
+            }
+            if expired() {
+                return Poll::Ready(Err(OtlpError::non_retryable("OTLP request timeout")));
+            }
+        }
+        // Legacy calls preserve completed work at the exact timeout boundary,
+        // matching their established crate-wide timeout contract.
+        if let Poll::Ready(output) = output {
             return Poll::Ready(Ok(output));
         }
         match std::pin::Pin::new(&mut sleeper).poll(task_cx) {
