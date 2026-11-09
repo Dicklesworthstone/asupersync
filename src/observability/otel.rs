@@ -72,7 +72,7 @@ pub use queued::{
     ManagedOtlpControl, ManagedOtlpError, ManagedOtlpExporter, ManagedOtlpOutcome,
     ManagedOtlpReport, OTLP_EXPORT_QUEUE_MAX_BATCHES, OTLP_EXPORT_QUEUE_MAX_BYTES,
     OtlpExportQueueStats, OtlpGrpcQueueReceipt, OtlpGrpcQueueReceiptError, OtlpGrpcQueueStats,
-    QueuedOtlpGrpcExporter,
+    OtlpHttpQueueStats, QueuedOtlpGrpcExporter, QueuedOtlpHttpExporter,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -83,6 +83,21 @@ pub use grpc::{
     OTLP_GRPC_MAX_RETRIES,
     OtlpGrpcError, OtlpGrpcErrorKind, OtlpGrpcExportReport, OtlpGrpcExporter,
     OtlpGrpcResponse, OtlpGrpcRetryPolicy, OtlpGrpcSignal,
+};
+
+/// Protocol-neutral names for the shared native OTLP acknowledgement model.
+/// The original gRPC names remain available and denote these same types.
+#[cfg(not(target_arch = "wasm32"))]
+pub use grpc::{
+    OtlpGrpcExportReport as OtlpExportReport, OtlpGrpcResponse as OtlpSignalResponse,
+    OtlpGrpcSignal as OtlpSignal,
+};
+/// Protocol-neutral collection observations. HTTP failures have no grpc_code;
+/// completed full/partial responses are preserved for both native transports.
+#[cfg(not(target_arch = "wasm32"))]
+pub use queued::{
+    OtlpGrpcQueueReceipt as OtlpQueueReceipt,
+    OtlpGrpcQueueReceiptError as OtlpQueueReceiptError,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7025,6 +7040,16 @@ impl OtlpHttpExporter {
         cx: &crate::cx::Cx,
         request_body: Vec<u8>,
     ) -> Result<Vec<u8>, ExportError> {
+        self.send_otlp_protobuf_response_body_checked(cx, request_body, false)
+            .await
+    }
+
+    async fn send_otlp_protobuf_response_body_checked(
+        &self,
+        cx: &crate::cx::Cx,
+        request_body: Vec<u8>,
+        strict_collector: bool,
+    ) -> Result<Vec<u8>, ExportError> {
         use std::cmp;
 
         // Existing infallible builders remain source-compatible, but every
@@ -7036,7 +7061,14 @@ impl OtlpHttpExporter {
         let mut current_delay = self.initial_retry_delay;
 
         loop {
-            match self.send_request_once(cx, &request_body).await {
+            let response = if strict_collector {
+                self.send_request_with_compression_checked(
+                    cx, &request_body, self.compression, true,
+                ).await
+            } else {
+                self.send_request_once(cx, &request_body).await
+            };
+            match response {
                 Ok(response_body) => return Ok(response_body),
                 Err(OtlpError::Retryable {
                     status_code,
@@ -7051,8 +7083,14 @@ impl OtlpHttpExporter {
 
                     // Calculate retry delay per OTLP spec
                     let delay = if let Some(retry_after) = retry_after {
-                        // Use Retry-After header if present (for 429)
-                        cmp::min(retry_after, self.max_retry_delay)
+                        // Acknowledged delivery honors the collector's minimum;
+                        // its outer total budget bounds even a long wait. Keep
+                        // the established legacy clamp for existing callers.
+                        if strict_collector {
+                            retry_after
+                        } else {
+                            cmp::min(retry_after, self.max_retry_delay)
+                        }
                     } else {
                         // Exponential backoff with jitter for 502/503/504
                         let jitter = Duration::from_millis(deterministic_retry_jitter_ms(
@@ -7075,7 +7113,9 @@ impl OtlpHttpExporter {
                     if self.compression {
                         // Attempt fallback to uncompressed request
                         match self
-                            .send_request_with_compression(cx, &request_body, false)
+                            .send_request_with_compression_checked(
+                                cx, &request_body, false, strict_collector,
+                            )
                             .await
                         {
                             Ok(response_body) => return Ok(response_body),
@@ -7199,6 +7239,17 @@ impl OtlpHttpExporter {
         body: &[u8],
         use_compression: bool,
     ) -> Result<Vec<u8>, OtlpError> {
+        self.send_request_with_compression_checked(cx, body, use_compression, false)
+            .await
+    }
+
+    async fn send_request_with_compression_checked(
+        &self,
+        cx: &crate::cx::Cx,
+        body: &[u8],
+        use_compression: bool,
+        strict_collector: bool,
+    ) -> Result<Vec<u8>, OtlpError> {
         use crate::http::h1::http_client::HttpClient;
         use crate::http::h1::types::Method;
 
@@ -7272,6 +7323,23 @@ impl OtlpHttpExporter {
             .await?
             .map_err(|e| OtlpError::non_retryable(format!("OTLP request failed: {}", e)))?;
 
+            // The additive acknowledged queue requires an actual collector
+            // response. Preserve historical status handling for existing APIs.
+            if strict_collector {
+                if (200..300).contains(&response.status) && response.status != 200 {
+                    return Err(OtlpError::non_retryable(
+                        "otlp.response.invalid_success_status",
+                    ));
+                }
+                if matches!(response.status, 408 | 415) {
+                    return Err(OtlpError::non_retryable("otlp.response.non_retryable_status"));
+                }
+                if response.status == 200
+                    && !response.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                {
+                    return Err(OtlpError::non_retryable("otlp.response.missing_content_type"));
+                }
+            }
             // Handle response per OTLP spec
             classify_otlp_http_response(response.status, &response.headers)?;
             validate_otlp_response_encoding(&response.headers)?;

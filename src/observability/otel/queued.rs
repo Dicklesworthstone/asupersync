@@ -22,6 +22,10 @@ pub use managed::{
 mod grpc;
 pub use grpc::{OtlpGrpcQueueStats, QueuedOtlpGrpcExporter};
 
+#[path = "queued_http.rs"]
+pub(super) mod http;
+pub use http::{OtlpHttpQueueStats, QueuedOtlpHttpExporter};
+
 /// Maximum admitted batches, including the batch currently being delivered.
 pub const OTLP_EXPORT_QUEUE_MAX_BATCHES: usize = 64;
 /// Maximum admitted snapshot, configuration, request, and receipt-reservation bytes.
@@ -42,8 +46,9 @@ pub struct OtlpExportQueueStats {
     /// diagnostic reservations for collections whose receipts are not terminal.
     pub retained_bytes: usize,
     /// Batches acknowledged under the selected transport's delivery contract.
-    /// Native gRPC includes terminal partial-success receipts; inspect
-    /// [`OtlpGrpcQueueStats`] before interpreting this as accepted item counts.
+    /// Acknowledged native queues include terminal partial-success receipts;
+    /// inspect [`OtlpGrpcQueueStats`] or [`OtlpHttpQueueStats`] before
+    /// interpreting this as accepted item counts.
     pub delivered_batches: u64,
     /// Failed or abandoned batches, including unattempted managed backlog.
     /// These are never requeued.
@@ -68,6 +73,7 @@ struct QueueState {
     aborted: bool,
     acknowledged_owner_ready: bool,
     grpc: GrpcPartialStats,
+    http: GrpcPartialStats,
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +82,21 @@ struct GrpcPartialStats {
     rejected_data_points: u64,
     rejected_spans: u64,
     rejected_log_records: u64,
+}
+
+impl GrpcPartialStats {
+    fn record(&mut self, signal: OtlpGrpcSignal, response: &OtlpGrpcResponse) {
+        if !response.is_partial_success() {
+            return;
+        }
+        self.batches = self.batches.saturating_add(1);
+        let rejected = match signal {
+            OtlpGrpcSignal::Metrics => &mut self.rejected_data_points,
+            OtlpGrpcSignal::Traces => &mut self.rejected_spans,
+            OtlpGrpcSignal::Logs => &mut self.rejected_log_records,
+        };
+        *rejected = rejected.saturating_add(response.rejected_items());
+    }
 }
 
 #[derive(Debug)]
@@ -100,6 +121,9 @@ enum Destination {
         exporter: Arc<OtlpGrpcExporter>,
         retry_policy: Option<OtlpGrpcRetryPolicy>,
     },
+    AcknowledgedHttp {
+        config: Arc<OtlpHttpConfig>,
+    },
 }
 
 impl Destination {
@@ -114,6 +138,7 @@ impl Destination {
         match self {
             Self::Http { config, .. } => config_bytes(config),
             Self::Grpc { exporter, .. } => Ok(exporter.configuration_bytes()),
+            Self::AcknowledgedHttp { config } => http::configuration_bytes(config),
         }
     }
 
@@ -122,10 +147,12 @@ impl Destination {
             Self::Grpc { exporter, .. } => exporter
                 .validate_request_size(size)
                 .map_err(|error| ExportError::new(error.to_string())),
-            Self::Http { .. } if size > OWNED_OTLP_DEFAULT_REQUEST_BYTES => {
+            Self::Http { .. } | Self::AcknowledgedHttp { .. }
+                if size > OWNED_OTLP_DEFAULT_REQUEST_BYTES =>
+            {
                 Err(ExportError::new("otlp.queue.encoded_batch_too_large"))
             }
-            Self::Http { .. } => Ok(()),
+            Self::Http { .. } | Self::AcknowledgedHttp { .. } => Ok(()),
         }
     }
 }
@@ -429,6 +456,25 @@ impl Delivery<'_> {
                 sender.legacy_retry_compatibility = *legacy_retry_compatibility;
                 sender.send_otlp_protobuf(cx, body).await?;
             }
+            Destination::AcknowledgedHttp { config } => {
+                let Payload::Encoded { signal, body } = &mut batch.payload else {
+                    return Err(ExportError::new("otlp.queue.invalid_native_payload"));
+                };
+                let body = std::mem::take(body);
+                let response = match http::send(config, cx, *signal, body).await {
+                    Ok(response) => response,
+                    Err(code) => {
+                        if let Some(completion) = &mut batch.completion {
+                            completion.fail(code, None);
+                        }
+                        return Err(ExportError::new(code));
+                    }
+                };
+                self.queue.state.lock().http.record(*signal, &response);
+                if let Some(completion) = &mut batch.completion {
+                    completion.acknowledge(response);
+                }
+            }
             Destination::Grpc {
                 exporter,
                 retry_policy,
@@ -452,16 +498,7 @@ impl Delivery<'_> {
                         return Err(ExportError::new(error.to_string()));
                     }
                 };
-                if response.is_partial_success() {
-                    let mut state = self.queue.state.lock();
-                    state.grpc.batches = state.grpc.batches.saturating_add(1);
-                    let rejected = match signal {
-                        OtlpGrpcSignal::Metrics => &mut state.grpc.rejected_data_points,
-                        OtlpGrpcSignal::Traces => &mut state.grpc.rejected_spans,
-                        OtlpGrpcSignal::Logs => &mut state.grpc.rejected_log_records,
-                    };
-                    *rejected = rejected.saturating_add(response.rejected_items());
-                }
+                self.queue.state.lock().grpc.record(*signal, &response);
                 // A valid partial receipt ends this request. Its rejected
                 // items are counted separately; later batches may proceed.
                 if let Some(completion) = &mut batch.completion {
