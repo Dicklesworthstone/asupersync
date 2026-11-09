@@ -45,6 +45,10 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
+#[path = "connect_options.rs"]
+mod connect_options;
+pub use connect_options::{WebSocketConnectOptions, WebSocketConnectOptionsError};
+
 /// WebSocket message types.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -1359,7 +1363,28 @@ impl WebSocket<TcpStream> {
         url: &str,
         config: WebSocketConfig,
     ) -> Result<Self, WsConnectError> {
-        Self::connect_configured(cx, url, config, false).await
+        Self::connect_configured(cx, url, config, false, Vec::new()).await
+    }
+
+    /// Connect to `ws://` with validated authentication, origin, or tracing headers.
+    ///
+    /// Options are validated before this call performs I/O. DNS, TCP, upgrade
+    /// limits, cancellation, compression, and connection ownership use the
+    /// existing native path. Headers are sent only to this URL; redirects are
+    /// not followed. Use `WebSocket::connect_tls_with_options` with `tls` enabled
+    /// to protect credentials in transit.
+    ///
+    /// Errors preserve their categories, HTTP status and I/O kind, while free
+    /// text is redacted because the peer may echo credentials in its response.
+    pub async fn connect_with_options(
+        cx: &Cx,
+        url: &str,
+        options: WebSocketConnectOptions,
+    ) -> Result<Self, WsConnectError> {
+        let (config, headers, compression) = options.into_parts();
+        Self::connect_configured(cx, url, config, compression, headers)
+            .await
+            .map_err(connect_options::redact_connect_error)
     }
 
     /// Offer bounded permessage-deflate with a fresh dictionary per message.
@@ -1372,11 +1397,12 @@ impl WebSocket<TcpStream> {
     pub async fn connect_with_compression(
         cx: &Cx, url: &str, config: WebSocketConfig,
     ) -> Result<Self, WsConnectError> {
-        Self::connect_configured(cx, url, config, true).await
+        Self::connect_configured(cx, url, config, true, Vec::new()).await
     }
 
     async fn connect_configured(
         cx: &Cx, url: &str, config: WebSocketConfig, compression: bool,
+        headers: Vec<(String, String)>,
     ) -> Result<Self, WsConnectError> {
         // Parse URL
         let parsed = WsUrl::parse(url)?;
@@ -1406,7 +1432,7 @@ impl WebSocket<TcpStream> {
         }
 
         // Perform handshake
-        perform_client_handshake(cx, tcp, &parsed, &config, compression, config.connect_timeout).await
+        perform_client_handshake(cx, tcp, &parsed, &config, compression, config.connect_timeout, &headers).await
     }
 }
 
@@ -1453,7 +1479,29 @@ impl WebSocket<TlsStream<TcpStream>> {
         config: WebSocketConfig,
         connector: &TlsConnector,
     ) -> Result<Self, WsConnectError> {
-        Self::connect_tls_configured(cx, url, config, connector, false).await
+        Self::connect_tls_configured(cx, url, config, connector, false, Vec::new()).await
+    }
+
+    /// Connect to `wss://` with explicit TLS policy and validated upgrade headers.
+    ///
+    /// This authenticates the URL's identity using `connector` and retains the
+    /// single setup budget, cancellation, and ALPN rules of [`Self::connect_tls`].
+    /// The options can also offer the existing bounded compression profile.
+    /// No request or credential is sent before TLS authentication succeeds.
+    ///
+    /// Errors preserve their categories, HTTP status and I/O kind, while free
+    /// text and nested TLS diagnostics are redacted. The existing
+    /// [`Self::connect_tls`] keeps its original detailed errors.
+    pub async fn connect_tls_with_options(
+        cx: &Cx,
+        url: &str,
+        options: WebSocketConnectOptions,
+        connector: &TlsConnector,
+    ) -> Result<Self, WsConnectError> {
+        let (config, headers, compression) = options.into_parts();
+        Self::connect_tls_configured(cx, url, config, connector, compression, headers)
+            .await
+            .map_err(connect_options::redact_connect_error)
     }
 
     /// Connect with TLS and offer bounded permessage-deflate.
@@ -1468,7 +1516,7 @@ impl WebSocket<TlsStream<TcpStream>> {
         config: WebSocketConfig,
         connector: &TlsConnector,
     ) -> Result<Self, WsConnectError> {
-        Self::connect_tls_configured(cx, url, config, connector, true).await
+        Self::connect_tls_configured(cx, url, config, connector, true, Vec::new()).await
     }
 
     async fn connect_tls_configured(
@@ -1477,6 +1525,7 @@ impl WebSocket<TlsStream<TcpStream>> {
         config: WebSocketConfig,
         connector: &TlsConnector,
         compression: bool,
+        headers: Vec<(String, String)>,
     ) -> Result<Self, WsConnectError> {
         let parsed = WsUrl::parse(url).map_err(WsConnectError::InvalidUrl)?;
         if !parsed.tls {
@@ -1519,7 +1568,7 @@ impl WebSocket<TlsStream<TcpStream>> {
         }
         // The outer setup retains the original timer. Starting HTTP must not
         // restore a full timeout after a slow DNS/TCP/TLS phase.
-        setup.run(perform_client_handshake(cx, tls, &parsed, &config, compression, None)).await
+        setup.run(perform_client_handshake(cx, tls, &parsed, &config, compression, None, &headers)).await
     }
 }
 
@@ -1653,6 +1702,7 @@ async fn perform_client_handshake<IO: AsyncRead + AsyncWrite + Unpin>(
     config: &WebSocketConfig,
     compression: bool,
     upgrade_timeout: Option<Duration>,
+    headers: &[(String, String)],
 ) -> Result<WebSocket<IO>, WsConnectError> {
     let scheme = if url.tls { "wss" } else { "ws" };
     let mut handshake = ClientHandshake::new(
@@ -1663,6 +1713,9 @@ async fn perform_client_handshake<IO: AsyncRead + AsyncWrite + Unpin>(
         handshake = handshake.protocol(protocol);
     }
     if compression { handshake = handshake.extension(super::compression::OFFER); }
+    for (name, value) in headers {
+        handshake = handshake.header(name.clone(), value.clone());
+    }
     if cx.checkpoint().is_err() {
         return Err(WsConnectError::Cancelled);
     }
@@ -1863,3 +1916,7 @@ impl From<WsError> for WsConnectError {
 #[cfg(test)]
 #[path = "client_inline_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "connect_options_tests.rs"]
+mod connect_options_tests;
