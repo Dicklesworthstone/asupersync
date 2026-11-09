@@ -1,7 +1,7 @@
 //! Caller-owned, asynchronous metrics export.
 //!
 //! Unlike the synchronous `MetricsExporter` compatibility surface, this path
-//! can drive the native OTLP HTTP transport without blocking a runtime worker
+//! can drive native OTLP HTTP or gRPC transport without blocking a runtime worker
 //! or spawning an unowned exporter task. Timestamps are explicit: a runtime's
 //! monotonic clock is not silently interpreted as a Unix timestamp.
 //!
@@ -58,6 +58,9 @@ mod multi;
 pub use multi::{
     AsyncExportOutcome, AsyncExportReport, AsyncMultiExporter, MAX_ASYNC_METRICS_EXPORTERS,
 };
+
+mod grpc;
+pub use grpc::OtlpGrpcSnapshotExporter;
 
 const MAX_POINTS: usize = 4096;
 const MAX_POINTS_PER_METRIC: usize = 1000;
