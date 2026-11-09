@@ -236,7 +236,9 @@ pub struct HealthService {
     /// Number of active reporters per service.
     reporter_counts: Arc<RwLock<HashMap<String, usize>>>,
     /// Pending async watch waiters keyed by watched service name.
-    watch_waiters: Arc<Mutex<HashMap<String, HashMap<u64, Waker>>>>,
+    /// Shared owners let notification snapshot registrations without invoking
+    /// user-defined Waker clone callbacks under the registry lock.
+    watch_waiters: Arc<Mutex<HashMap<String, HashMap<u64, Arc<Waker>>>>>,
     /// Monotonic waiter identifier source.
     next_waiter_id: Arc<AtomicU64>,
     /// Monotonic version counter, bumped on every status change.
@@ -679,26 +681,68 @@ impl HealthService {
     }
 
     fn register_watch_waiter(&self, service: &str, waiter_id: &mut Option<u64>, waker: &Waker) {
+        // Both cloning and retiring a Waker can run arbitrary executor code.
+        // Publish the replacement and its identity before retiring the old
+        // owner, so reentrant status changes see the complete registration.
+        let incoming = Arc::new(waker.clone());
         let id =
             *waiter_id.get_or_insert_with(|| self.next_waiter_id.fetch_add(1, Ordering::Relaxed));
-        let mut waiters = self.watch_waiters.lock();
-        waiters
-            .entry(service.to_string())
-            .or_default()
-            .insert(id, waker.clone());
+        let retired = {
+            let mut waiters = self.watch_waiters.lock();
+            waiters
+                .entry(service.to_string())
+                .or_default()
+                .insert(id, incoming)
+        };
+        Self::dispatch_watch_waiters(retired, false);
     }
 
     fn unregister_watch_waiter(&self, service: &str, waiter_id: &mut Option<u64>) {
         let Some(id) = waiter_id.take() else {
             return;
         };
-        let mut waiters = self.watch_waiters.lock();
-        let remove_service_entry = waiters.get_mut(service).is_some_and(|service_waiters| {
-            service_waiters.remove(&id);
-            service_waiters.is_empty()
-        });
-        if remove_service_entry {
-            waiters.remove(service);
+        let retired = {
+            let mut waiters = self.watch_waiters.lock();
+            let (retired, remove_service_entry) =
+                if let Some(service_waiters) = waiters.get_mut(service) {
+                    let retired = service_waiters.remove(&id);
+                    (retired, service_waiters.is_empty())
+                } else {
+                    (None, false)
+                };
+            if remove_service_entry {
+                waiters.remove(service);
+            }
+            retired
+        };
+        Self::dispatch_watch_waiters(retired, false);
+    }
+
+    /// Runs every callback outside the registry lock, including final-owner
+    /// destruction. One failing callback must not strand another pending watch.
+    fn dispatch_watch_waiters(waiters: impl IntoIterator<Item = Arc<Waker>>, notify: bool) {
+        let already_unwinding = std::thread::panicking();
+        let mut first_panic = None;
+        for waker in waiters {
+            // Keep the owner alive until wake has returned or been caught, so
+            // a wake panic and a destructor panic cannot share one unwind.
+            let notified = if notify {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref()))
+            } else {
+                Ok(())
+            };
+            let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker)));
+            for payload in [notified, retired].into_iter().filter_map(Result::err) {
+                if !already_unwinding && first_panic.is_none() {
+                    first_panic = Some(payload);
+                } else {
+                    // Opaque secondary payloads can themselves panic on drop.
+                    std::mem::forget(payload);
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -723,18 +767,17 @@ impl HealthService {
             return;
         }
 
-        let mut waiters = self.watch_waiters.lock();
-        let mut wake_list = Vec::new();
-        for key in keys {
-            if let Some(service_waiters) = waiters.get_mut(&key) {
-                wake_list.extend(service_waiters.values().cloned());
+        let wake_list = {
+            let waiters = self.watch_waiters.lock();
+            let mut wake_list = Vec::new();
+            for key in keys {
+                if let Some(service_waiters) = waiters.get(&key) {
+                    wake_list.extend(service_waiters.values().map(Arc::clone));
+                }
             }
-        }
-        drop(waiters);
-
-        for waker in wake_list {
-            waker.wake();
-        }
+            wake_list
+        };
+        Self::dispatch_watch_waiters(wake_list, true);
     }
 }
 

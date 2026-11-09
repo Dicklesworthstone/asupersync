@@ -55,6 +55,51 @@
         Waker::from(counter.clone())
     }
 
+    #[derive(Default)]
+    struct HealthWakerDropState {
+        drops: AtomicUsize,
+        locked_drops: AtomicUsize,
+        waiters_at_drop: AtomicUsize,
+    }
+
+    struct ReentrantHealthDrop {
+        service: HealthService,
+        state: Arc<HealthWakerDropState>,
+    }
+
+    impl Wake for ReentrantHealthDrop {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for ReentrantHealthDrop {
+        fn drop(&mut self) {
+            self.state.drops.fetch_add(1, Ordering::SeqCst);
+            let Some(waiters) = self.service.watch_waiters.try_lock() else {
+                // Record the regression instead of deadlocking the test.
+                self.state.locked_drops.fetch_add(1, Ordering::SeqCst);
+                return;
+            };
+            self.state.waiters_at_drop.store(
+                waiters.get("svc").map_or(0, HashMap::len),
+                Ordering::SeqCst,
+            );
+            drop(waiters);
+            self.service.set_status("svc", ServingStatus::NotServing);
+        }
+    }
+
+    struct PanickingHealthWake;
+
+    impl Wake for PanickingHealthWake {
+        fn wake(self: Arc<Self>) {
+            panic!("health watch wake panic");
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            panic!("health watch wake panic");
+        }
+    }
+
     fn authed_health_request(service: &str) -> Request<HealthCheckRequest> {
         let mut request = Request::new(HealthCheckRequest::new(service));
         let inserted = request
@@ -999,6 +1044,135 @@
             waiter_count_after_drop
         );
         crate::test_complete!("health_watch_async_drop_unregisters_pending_waiter");
+    }
+
+    #[test]
+    fn health_watch_replacement_drops_old_waker_after_publishing_registration() {
+        init_test("health_watch_replacement_drops_old_waker_after_publishing_registration");
+        let service = bearer_token_health_service();
+        service.set_status("svc", ServingStatus::Serving);
+        let request = authed_health_request("svc");
+        let mut stream = futures_lite::future::block_on(service.watch_async(&request))
+            .expect("watch_async should construct a stream")
+            .into_inner();
+        let state = Arc::new(HealthWakerDropState::default());
+
+        {
+            let waker = Waker::from(Arc::new(ReentrantHealthDrop {
+                service: service.clone(),
+                state: Arc::clone(&state),
+            }));
+            let mut cx = Context::from_waker(&waker);
+            assert!(matches!(
+                Streaming::poll_next(Pin::new(&mut stream), &mut cx),
+                Poll::Ready(Some(Ok(HealthCheckResponse {
+                    status: ServingStatus::Serving
+                })))
+            ));
+            assert!(Streaming::poll_next(Pin::new(&mut stream), &mut cx).is_pending());
+        }
+        assert_eq!(state.drops.load(Ordering::SeqCst), 0);
+
+        // The registry now owns the last reference to the old waker. Replacing
+        // it runs a destructor that changes the watched status synchronously.
+        let wake_counter = Arc::new(CountingWake::default());
+        let replacement = counting_waker(&wake_counter);
+        let mut cx = Context::from_waker(&replacement);
+        let poll = Streaming::poll_next(Pin::new(&mut stream), &mut cx);
+        assert!(matches!(
+            poll,
+            Poll::Ready(Some(Ok(HealthCheckResponse {
+                status: ServingStatus::NotServing
+            })))
+        ));
+        assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+        assert_eq!(state.locked_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(state.waiters_at_drop.load(Ordering::SeqCst), 1);
+        assert_eq!(wake_counter.wakes.load(Ordering::SeqCst), 1);
+        assert!(stream.waiter_id.is_none());
+        assert!(service.watch_waiters.lock().is_empty());
+        crate::test_complete!(
+            "health_watch_replacement_drops_old_waker_after_publishing_registration"
+        );
+    }
+
+    #[test]
+    fn health_watch_drop_releases_registration_before_waker_destructor() {
+        init_test("health_watch_drop_releases_registration_before_waker_destructor");
+        let service = bearer_token_health_service();
+        service.set_status("svc", ServingStatus::Serving);
+        let request = authed_health_request("svc");
+        let mut stream = futures_lite::future::block_on(service.watch_async(&request))
+            .expect("watch_async should construct a stream")
+            .into_inner();
+        let state = Arc::new(HealthWakerDropState::default());
+
+        {
+            let waker = Waker::from(Arc::new(ReentrantHealthDrop {
+                service: service.clone(),
+                state: Arc::clone(&state),
+            }));
+            let mut cx = Context::from_waker(&waker);
+            assert!(Streaming::poll_next(Pin::new(&mut stream), &mut cx).is_ready());
+            assert!(Streaming::poll_next(Pin::new(&mut stream), &mut cx).is_pending());
+        }
+        assert_eq!(state.drops.load(Ordering::SeqCst), 0);
+
+        drop(stream);
+
+        assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+        assert_eq!(state.locked_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(state.waiters_at_drop.load(Ordering::SeqCst), 0);
+        assert_eq!(service.get_status("svc"), Some(ServingStatus::NotServing));
+        assert!(service.watch_waiters.lock().is_empty());
+        crate::test_complete!("health_watch_drop_releases_registration_before_waker_destructor");
+    }
+
+    #[test]
+    fn health_watch_wake_panic_does_not_strand_aggregate_watcher() {
+        init_test("health_watch_wake_panic_does_not_strand_aggregate_watcher");
+        let service = bearer_token_health_service();
+        service.set_status("svc", ServingStatus::Serving);
+        let named_request = authed_health_request("svc");
+        let aggregate_request = authed_health_request("");
+        let mut named = futures_lite::future::block_on(service.watch_async(&named_request))
+            .expect("named watch")
+            .into_inner();
+        let mut aggregate = futures_lite::future::block_on(service.watch_async(&aggregate_request))
+            .expect("aggregate watch")
+            .into_inner();
+        let panicking_waker = Waker::from(Arc::new(PanickingHealthWake));
+        let wake_counter = Arc::new(CountingWake::default());
+        let aggregate_waker = counting_waker(&wake_counter);
+        let mut named_cx = Context::from_waker(&panicking_waker);
+        let mut aggregate_cx = Context::from_waker(&aggregate_waker);
+        assert!(Streaming::poll_next(Pin::new(&mut named), &mut named_cx).is_ready());
+        assert!(Streaming::poll_next(Pin::new(&mut named), &mut named_cx).is_pending());
+        assert!(Streaming::poll_next(Pin::new(&mut aggregate), &mut aggregate_cx).is_ready());
+        assert!(Streaming::poll_next(Pin::new(&mut aggregate), &mut aggregate_cx).is_pending());
+
+        // A named transition snapshots the named waiter before the aggregate
+        // waiter, so the panic happens before the healthy callback every time.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.set_status("svc", ServingStatus::NotServing);
+        }));
+        let panic = result.expect_err("the first wake panic remains observable");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"health watch wake panic"));
+        assert_eq!(wake_counter.wakes.load(Ordering::SeqCst), 1);
+
+        for poll in [
+            Streaming::poll_next(Pin::new(&mut named), &mut named_cx),
+            Streaming::poll_next(Pin::new(&mut aggregate), &mut aggregate_cx),
+        ] {
+            assert!(matches!(
+                poll,
+                Poll::Ready(Some(Ok(HealthCheckResponse {
+                    status: ServingStatus::NotServing
+                })))
+            ));
+        }
+        assert!(service.watch_waiters.lock().is_empty());
+        crate::test_complete!("health_watch_wake_panic_does_not_strand_aggregate_watcher");
     }
 
     #[test]
