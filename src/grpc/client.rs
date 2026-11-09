@@ -1870,7 +1870,9 @@ impl NativeH2Target {
             channel.dial_addr(),
         )?;
         target.connect_policy = channel.connect_policy();
-        target.http_connect_proxy = channel.http_connect_proxy.clone();
+        target
+            .http_connect_proxy
+            .clone_from(&channel.http_connect_proxy);
         Ok(target)
     }
 

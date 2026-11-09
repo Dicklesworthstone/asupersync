@@ -236,7 +236,7 @@
         let owner_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&owner_clock));
         let driver_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&driver_clock));
         let restricted = |task, timer, deadline| {
-            let full = Cx::new_with_drivers(
+            let full: Cx = Cx::new_with_drivers(
                 RegionId::new_for_test(0, 1),
                 TaskId::new_for_test(task, 0),
                 Budget::INFINITE.with_deadline(deadline),

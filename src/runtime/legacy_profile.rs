@@ -75,6 +75,39 @@
 //! `spawn_blocking` returns the closure's own value, so it has no error to return and panics instead.
 //! [`LegacyProfile::audit`] accepts a no-blocking profile only for a runtime that really has such a pool.
 //!
+//! # The caller-driven topology
+//!
+//! [`LegacyProfile::caller_driven`] selects a second topology for the same caps: the runtime starts **no thread at
+//! all**. Its one worker sits in the current-thread driver. [`RuntimeBuilder::current_thread`] shares that driver
+//! but also starts a background thread that runs the worker between calls; this topology starts none, so the thread
+//! that calls `Runtime::block_on` or `Runtime::shutdown_drained` is the only thread that ever runs the worker. Every
+//! task, wheel timer, wake and reactor turn of the runtime happens on that thread, inside that call.
+//!
+//! * A caller-driven profile must state `worker_threads == 1` and `blocking_max_threads == 0`. Anything else is
+//!   refused by name ([`TopologyViolation`]) and never downgraded. The runtime keeps `worker_threads == 1` in its
+//!   configuration, so the cap comparison of [`LegacyProfile::audit`] is the one it always was; that no thread exists
+//!   is audited separately, from the runtime's own bookkeeping.
+//! * Blocking work is rejected, never run inline: the pool is [`BlockingAdmissionPolicy::Forbidden`], as for any
+//!   profile with `blocking_max_threads == 0`. A stated live-byte budget ([`LegacyProfile::with_blocking_live_bytes`])
+//!   is accepted and ignored, as for any profile with no blocking thread, so a charged submission is refused as
+//!   `Forbidden` and never as `ChargeTooLarge`.
+//! * [`RuntimeBuilder::build`] refuses, by name, the options that would start a helper thread (the deadline monitor,
+//!   resource sampling) and the ones only a worker thread could honour (`on_thread_start`, `on_thread_stop`).
+//!   [`LegacyProfile::audit`] also requires an empty worker-thread handle list and no monitor or sampler thread. That
+//!   audit runs after the build: an option that starts a thread during the build would have started it before the
+//!   audit refuses it. This revision has no such option. A later revision's background I/O driver option is refused
+//!   by the existing host-kind check when the build begins, which was read and not exercised here.
+//! * Work spawned through a handle (`RuntimeHandle::spawn`) makes no progress until the next `block_on` or root drain
+//!   on some thread. Nothing runs the worker in between, and the first such call picks the work up.
+//! * `thread_stack_bytes` binds no thread in this mode. Tasks run on the calling thread's own stack, which the
+//!   profile does not bound, and [`LegacyCaps::worst_case_stack_bytes`] still counts one worker stack, so its figure
+//!   over-counts. The profile makes no stack claim about the caller's thread.
+//! * `global_queue_limit` is carried and audited like every cap. At the revision this was written against the
+//!   scheduler treats it as advisory (past it, it logs and still schedules), so no hard admission bound follows from
+//!   it in either topology.
+//! * Not counted, as for every profile: the short-lived shutdown and teardown helpers, the process-global fallback
+//!   timer pump that a wall-clock sleep outside any runtime context starts, and any thread the application starts.
+//!
 //! # What this does not show
 //!
 //! * The file system, `net::lookup_all`, STUN, the Kafka producer transaction and consumer calls, and native
@@ -177,6 +210,51 @@ impl fmt::Display for CapViolation {
             ),
         }
     }
+}
+
+/// One way a profile's topology asks for something the topology cannot give. Reported by name, apart from
+/// [`CapViolation`] so that enum, and every `match` over it, stay as they were.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TopologyViolation {
+    /// A caller-driven profile states a worker count other than 1: the one worker is the thread that calls
+    /// `block_on`, and no other count is silently turned into it.
+    CallerDrivenNeedsOneWorker {
+        /// The stated `worker_threads`.
+        worker_threads: usize,
+    },
+    /// A caller-driven profile states blocking threads: the runtime starts no thread, so blocking work is rejected
+    /// (a forbidden pool) and a ceiling above 0 would promise threads that never start.
+    CallerDrivenForbidsBlockingThreads {
+        /// The stated `blocking_max_threads`.
+        blocking_max_threads: usize,
+    },
+}
+
+impl fmt::Display for TopologyViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CallerDrivenNeedsOneWorker { worker_threads } => write!(
+                f,
+                "CallerDrivenNeedsOneWorker: a caller-driven profile states worker_threads {worker_threads}, but its one worker is the calling thread"
+            ),
+            Self::CallerDrivenForbidsBlockingThreads {
+                blocking_max_threads,
+            } => write!(
+                f,
+                "CallerDrivenForbidsBlockingThreads: a caller-driven profile states blocking_max_threads {blocking_max_threads}, but it starts no thread and forbids blocking work"
+            ),
+        }
+    }
+}
+
+/// Which thread topology a profile builds. Private: the public surface is [`LegacyProfile::caller_driven`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Topology {
+    /// The stated number of scheduler worker threads, as the profile has always built them.
+    Threaded,
+    /// No thread at all; see the module docs.
+    CallerDriven,
 }
 
 /// `threads * stack_bytes` in 64 bits, or `None` if either factor or the product does not fit.
@@ -315,19 +393,65 @@ pub struct LegacyProfile {
     stack_budget_bytes: u64,
     /// The blocking pool's live-byte budget, if one was stated. `None` is the profile as it always was.
     blocking_live_bytes: Option<NonZeroUsize>,
+    /// The thread topology. [`Topology::Threaded`] is the profile as it always was.
+    topology: Topology,
 }
 
 impl LegacyProfile {
     /// `stack_budget_bytes` is the ceiling on [`LegacyCaps::worst_case_stack_bytes`]. It is the caller's number;
     /// nothing here supplies one. The profile states no byte budget for the blocking pool: see
-    /// [`Self::with_blocking_live_bytes`].
+    /// [`Self::with_blocking_live_bytes`]. It builds scheduler worker threads, as it always has: see
+    /// [`Self::caller_driven`] for the topology that builds none.
     #[must_use]
     pub const fn new(caps: LegacyCaps, stack_budget_bytes: u64) -> Self {
         Self {
             caps,
             stack_budget_bytes,
             blocking_live_bytes: None,
+            topology: Topology::Threaded,
         }
+    }
+
+    /// This profile in the caller-driven topology: the runtime it builds starts **no thread**, and the thread that
+    /// calls `Runtime::block_on` or `Runtime::shutdown_drained` is the only one that ever runs its worker (see the
+    /// module docs, "The caller-driven topology").
+    ///
+    /// No cap changes. The profile must state `worker_threads == 1` and `blocking_max_threads == 0`; otherwise
+    /// [`Self::topology_violations`] names why and [`Self::validate`], [`Self::builder`] and [`Self::build`] refuse
+    /// it. Blocking work is rejected and never run inline; a stated live-byte budget is ignored, as for any profile
+    /// with no blocking thread.
+    #[must_use]
+    pub const fn caller_driven(self) -> Self {
+        Self {
+            caps: self.caps,
+            stack_budget_bytes: self.stack_budget_bytes,
+            blocking_live_bytes: self.blocking_live_bytes,
+            topology: Topology::CallerDriven,
+        }
+    }
+
+    /// Whether this profile builds the caller-driven topology ([`Self::caller_driven`]).
+    #[must_use]
+    pub const fn is_caller_driven(&self) -> bool {
+        matches!(self.topology, Topology::CallerDriven)
+    }
+
+    /// The most threads the runtime this profile builds can ever own: the scheduler workers it starts plus the
+    /// blocking pool's ceiling. It is 0 for every caller-driven profile that passes [`Self::validate`]. `None` if the
+    /// sum does not fit in 64 bits.
+    ///
+    /// It counts the threads the caps govern. It does not count the short-lived shutdown helpers, a deadline monitor,
+    /// a resource sampler or a background I/O driver thread ([`RuntimeBuilder::background_io_driver`]) configured on
+    /// the builder afterwards, or any thread the application starts. A threaded profile whose builder enables the
+    /// background I/O driver therefore owns one thread more than this ceiling. A caller-driven profile cannot: its
+    /// runtime refuses that option when it is built, so its ceiling of 0 holds.
+    #[must_use]
+    pub fn os_thread_ceiling(&self) -> Option<u64> {
+        let scheduler = match self.topology {
+            Topology::Threaded => u64::try_from(self.caps.worker_threads).ok()?,
+            Topology::CallerDriven => 0,
+        };
+        scheduler.checked_add(u64::try_from(self.caps.blocking_max_threads).ok()?)
     }
 
     /// This profile with its blocking pool also bounded in bytes: [`Self::builder`] selects
@@ -346,6 +470,7 @@ impl LegacyProfile {
             caps: self.caps,
             stack_budget_bytes: self.stack_budget_bytes,
             blocking_live_bytes: Some(max_live_bytes),
+            topology: self.topology,
         }
     }
 
@@ -373,13 +498,41 @@ impl LegacyProfile {
         self.caps.violations(self.stack_budget_bytes)
     }
 
-    /// `Ok` if the stated caps are acceptable, otherwise a `ConfigError` naming every violation.
+    /// Every way the profile's topology asks for something it cannot give, in a fixed order. Empty for every
+    /// profile that is not caller-driven: [`Self::violations`] is about the caps alone and is not changed by the
+    /// topology.
+    #[must_use]
+    pub fn topology_violations(&self) -> Vec<TopologyViolation> {
+        let mut found = Vec::new();
+        if self.is_caller_driven() {
+            if self.caps.worker_threads != 1 {
+                found.push(TopologyViolation::CallerDrivenNeedsOneWorker {
+                    worker_threads: self.caps.worker_threads,
+                });
+            }
+            if self.caps.blocking_max_threads != 0 {
+                found.push(TopologyViolation::CallerDrivenForbidsBlockingThreads {
+                    blocking_max_threads: self.caps.blocking_max_threads,
+                });
+            }
+        }
+        found
+    }
+
+    /// `Ok` if the stated caps and the topology are acceptable, otherwise a `ConfigError` naming every violation
+    /// ([`Self::violations`], then [`Self::topology_violations`]).
     pub fn validate(&self) -> Result<(), Error> {
         let violations = self.violations();
-        if violations.is_empty() {
+        let topology = self.topology_violations();
+        if violations.is_empty() && topology.is_empty() {
             return Ok(());
         }
-        Err(Error::new(ErrorKind::ConfigError).with_message(describe(&violations)))
+        let mut parts = Vec::new();
+        if !violations.is_empty() {
+            parts.push(describe(&violations));
+        }
+        parts.extend(topology.iter().map(ToString::to_string));
+        Err(Error::new(ErrorKind::ConfigError).with_message(parts.join("; ")))
     }
 
     /// A builder carrying exactly the stated caps, after [`Self::validate`]. The caller may keep configuring it,
@@ -403,7 +556,12 @@ impl LegacyProfile {
                 None => BlockingAdmissionPolicy::Bounded { max_queued },
             }
         };
-        let builder = RuntimeBuilder::new()
+        // The caller-driven topology changes who runs the worker, not one cap below: every cap is applied to both.
+        let base = match self.topology {
+            Topology::Threaded => RuntimeBuilder::new(),
+            Topology::CallerDriven => RuntimeBuilder::new().caller_driven_topology(),
+        };
+        let builder = base
             .worker_threads(self.caps.worker_threads)
             .thread_stack_size(self.caps.thread_stack_bytes)
             .global_queue_limit(self.caps.global_queue_limit)
@@ -433,6 +591,7 @@ impl LegacyProfile {
     /// runtime themselves.
     pub fn audit(&self, runtime: &Runtime) -> Result<(), Error> {
         self.validate()?;
+        self.audit_topology(runtime)?;
         // A profile that forbids blocking is only met by a pool that refuses it. A runtime with no pool at all
         // runs blocking work inline, whatever figures it shows.
         if self.caps.blocking_max_threads == 0
@@ -453,6 +612,45 @@ impl LegacyProfile {
         let fields = stated.differing_fields(&carried).join(", ");
         Err(Error::new(ErrorKind::ConfigError).with_message(format!(
             "the runtime does not carry the stated caps ({fields} differ): stated {stated:?}, carried {carried:?}"
+        )))
+    }
+
+    /// The thread half of [`Self::audit`], read from the runtime's own bookkeeping. A caller-driven profile is met
+    /// only by a runtime that holds its worker in the current-thread driver and owns no thread: an empty
+    /// worker-thread handle list (which also covers a background I/O driver thread at a revision that has one), no
+    /// deadline monitor and no resource sampler. A runtime built any other way, `RuntimeBuilder::current_thread()`
+    /// included (it owns a background worker thread), is refused. A threaded profile is judged exactly as it always
+    /// was; this check does not apply to it.
+    ///
+    /// It looks after the build. Options that would start a thread are refused when the runtime is built, before
+    /// they can; this is the backstop for a runtime that was built some other way.
+    fn audit_topology(&self, runtime: &Runtime) -> Result<(), Error> {
+        if !self.is_caller_driven() {
+            return Ok(());
+        }
+        let census = runtime.thread_census();
+        let mut wrong: Vec<String> = Vec::new();
+        if !census.loan_driver {
+            wrong.push("it has no current-thread driver holding the worker".to_string());
+        }
+        if census.worker_thread_handles != 0 {
+            wrong.push(format!(
+                "it owns {} worker-thread handle(s)",
+                census.worker_thread_handles
+            ));
+        }
+        if census.deadline_monitor {
+            wrong.push("it owns a deadline-monitor thread".to_string());
+        }
+        if census.resource_sampler {
+            wrong.push("it owns a resource-sampler thread".to_string());
+        }
+        if wrong.is_empty() {
+            return Ok(());
+        }
+        Err(Error::new(ErrorKind::ConfigError).with_message(format!(
+            "the profile is caller-driven and starts no thread, but {}",
+            wrong.join("; ")
         )))
     }
 
@@ -1612,5 +1810,779 @@ mod tests {
         assert!(job.wait_timeout(WAIT));
         assert_eq!(built.load(Ordering::SeqCst), 1);
         assert_eq!(pool.charged_bytes(), 0);
+    }
+
+    /// The caller-driven topology (module docs, "The caller-driven topology"). These tests run real tasks on real
+    /// runtimes and read the thread each one ran on; they say nothing about the caller's stack, and nothing about any
+    /// target other than the one they run on.
+    mod caller_driven {
+        use super::*;
+        use crate::cx::Cx;
+        use crate::runtime::builder::ThreadCensus;
+        use crate::runtime::{RootDrainOutcome, RootDrainReport, yield_now};
+        use crate::time::sleep;
+        use std::future::Future;
+        use std::sync::atomic::AtomicBool;
+        use std::task::{Poll, Waker};
+        use std::thread::ThreadId;
+
+        /// One worker, no blocking, an 8-entry ready queue and a 2 MiB worker stack.
+        fn caller_caps() -> LegacyCaps {
+            LegacyCaps {
+                worker_threads: 1,
+                thread_stack_bytes: 2 * MIB,
+                blocking_max_threads: 0,
+                blocking_thread_stack_bytes: 0,
+                global_queue_limit: 8,
+                blocking_max_queued: 0,
+            }
+        }
+
+        fn caller_profile() -> LegacyProfile {
+            LegacyProfile::new(caller_caps(), bytes(1, 2 * MIB)).caller_driven()
+        }
+
+        /// The same caps and budget without the topology: the plant's construction, which starts a background worker.
+        fn threaded_twin() -> LegacyProfile {
+            LegacyProfile::new(caller_caps(), bytes(1, 2 * MIB))
+        }
+
+        /// Runs `body` as a task of `runtime`, driven by `block_on` on the calling thread.
+        fn on_runtime<T, F>(runtime: &Runtime, body: F) -> T
+        where
+            F: Future<Output = T> + Send + 'static,
+            T: Send + 'static,
+        {
+            runtime.block_on(runtime.handle().spawn(body))
+        }
+
+        /// Gives the worker turns until `ready`, and fails the test after `WAIT` instead of hanging it.
+        async fn yield_until(what: &str, mut ready: impl FnMut() -> bool) {
+            let started = Instant::now();
+            while !ready() {
+                assert!(
+                    started.elapsed() < WAIT,
+                    "{what} did not happen within {WAIT:?}"
+                );
+                yield_now().await;
+            }
+        }
+
+        /// Records the thread that dropped it.
+        struct DroppedOn(Arc<Mutex<Option<ThreadId>>>);
+
+        impl Drop for DroppedOn {
+            fn drop(&mut self) {
+                *self.0.lock().unwrap() = Some(std::thread::current().id());
+            }
+        }
+
+        /// The thread of the test, of a task, and of the four children that task spawned.
+        #[derive(Debug)]
+        struct Seen {
+            caller: ThreadId,
+            task: ThreadId,
+            children: Vec<ThreadId>,
+        }
+
+        impl Seen {
+            fn all_on_the_caller(&self) -> bool {
+                self.task == self.caller && self.children.iter().all(|child| *child == self.caller)
+            }
+        }
+
+        fn run_tasks(runtime: &Runtime) -> Seen {
+            let caller = std::thread::current().id();
+            let (task, children) = on_runtime(runtime, async {
+                let cx = Cx::current().expect("a runtime task installs its context");
+                let mut handles = Vec::new();
+                for _ in 0..4 {
+                    handles.push(
+                        cx.spawn(|_child| async { std::thread::current().id() })
+                            .expect("spawn a child"),
+                    );
+                }
+                let mut children = Vec::new();
+                for mut handle in handles {
+                    children.push(handle.join(&cx).await.expect("the child finishes"));
+                }
+                (std::thread::current().id(), children)
+            });
+            Seen {
+                caller,
+                task,
+                children,
+            }
+        }
+
+        fn assert_quiescent(report: &RootDrainReport) {
+            assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+            assert_eq!(
+                (
+                    report.live_tasks,
+                    report.pending_obligations,
+                    report.live_regions,
+                    report.queued_finalizers,
+                    report.pending_spawns,
+                ),
+                (0, 0, 0, 0, 0)
+            );
+            assert!(!report.has_pending_obligation_posts);
+        }
+
+        #[test]
+        fn caller_driven_is_a_topology_on_the_same_caps_and_changes_no_cap() {
+            let threaded = threaded_twin();
+            let caller = threaded.caller_driven();
+            assert!(!threaded.is_caller_driven());
+            assert!(caller.is_caller_driven());
+            assert_eq!(caller.caps(), threaded.caps());
+            assert_eq!(caller.stack_budget_bytes(), threaded.stack_budget_bytes());
+            assert_ne!(caller, threaded);
+            assert!(caller.violations().is_empty());
+            assert!(caller.topology_violations().is_empty());
+            assert!(threaded.topology_violations().is_empty());
+            assert!(caller.validate().is_ok());
+            // A stated live-byte budget and the topology compose in either order.
+            let budget = NonZeroUsize::new(4096).unwrap();
+            assert_eq!(
+                threaded.with_blocking_live_bytes(budget).caller_driven(),
+                caller.with_blocking_live_bytes(budget)
+            );
+            // The thread ceiling counts what the caps govern: no thread at all here, the worker in the twin.
+            assert_eq!(caller.os_thread_ceiling(), Some(0));
+            assert_eq!(threaded.os_thread_ceiling(), Some(1));
+            assert_eq!(
+                green().os_thread_ceiling(),
+                Some(3),
+                "one worker and two blocking threads"
+            );
+        }
+
+        #[test]
+        fn caller_driven_with_another_worker_count_is_refused_by_name_and_never_downgraded() {
+            for workers in [0_usize, 2, 4] {
+                let stated = LegacyCaps {
+                    worker_threads: workers,
+                    ..caller_caps()
+                };
+                let profile =
+                    LegacyProfile::new(stated, bytes(workers.max(1), 2 * MIB)).caller_driven();
+                assert_eq!(
+                    profile.topology_violations(),
+                    [TopologyViolation::CallerDrivenNeedsOneWorker {
+                        worker_threads: workers
+                    }]
+                );
+                let error = profile
+                    .validate()
+                    .expect_err("only one worker is the calling thread");
+                assert_eq!(error.kind(), ErrorKind::ConfigError);
+                assert!(
+                    error
+                        .message()
+                        .unwrap()
+                        .contains("CallerDrivenNeedsOneWorker"),
+                    "{:?}",
+                    error.message()
+                );
+                assert!(profile.builder().is_err(), "{workers} workers");
+                assert!(profile.build().is_err(), "{workers} workers");
+            }
+            // Remove the plant: two workers are fine for the threaded profile, and they are real threads.
+            let twin = LegacyProfile::new(
+                LegacyCaps {
+                    worker_threads: 2,
+                    ..caller_caps()
+                },
+                bytes(2, 2 * MIB),
+            );
+            assert!(twin.topology_violations().is_empty());
+            let runtime = twin.build().expect("a threaded two-worker profile builds");
+            assert_eq!(runtime.thread_census().worker_thread_handles, 2);
+        }
+
+        #[test]
+        fn caller_driven_with_blocking_threads_is_refused_by_name_and_violations_come_in_a_fixed_order()
+         {
+            let blocking = LegacyCaps {
+                blocking_max_threads: 2,
+                blocking_thread_stack_bytes: 2 * MIB,
+                blocking_max_queued: 8,
+                ..caller_caps()
+            };
+            let profile = LegacyProfile::new(blocking, bytes(3, 2 * MIB)).caller_driven();
+            assert!(profile.violations().is_empty());
+            assert_eq!(
+                profile.topology_violations(),
+                [TopologyViolation::CallerDrivenForbidsBlockingThreads {
+                    blocking_max_threads: 2
+                }]
+            );
+            let error = profile
+                .validate()
+                .expect_err("blocking threads are refused");
+            assert_eq!(error.kind(), ErrorKind::ConfigError);
+            assert!(
+                error
+                    .message()
+                    .unwrap()
+                    .contains("CallerDrivenForbidsBlockingThreads"),
+                "{:?}",
+                error.message()
+            );
+            assert!(profile.builder().is_err());
+            assert!(profile.build().is_err());
+
+            let both = LegacyProfile::new(
+                LegacyCaps {
+                    worker_threads: 2,
+                    ..blocking
+                },
+                bytes(4, 2 * MIB),
+            )
+            .caller_driven();
+            assert_eq!(
+                both.topology_violations(),
+                [
+                    TopologyViolation::CallerDrivenNeedsOneWorker { worker_threads: 2 },
+                    TopologyViolation::CallerDrivenForbidsBlockingThreads {
+                        blocking_max_threads: 2
+                    },
+                ]
+            );
+            let message = both.validate().unwrap_err().message().unwrap().to_string();
+            assert!(
+                message.find("CallerDrivenNeedsOneWorker")
+                    < message.find("CallerDrivenForbidsBlockingThreads"),
+                "{message}"
+            );
+
+            // Remove the plant: the same blocking caps, threaded, are the profile this module always built.
+            let twin = LegacyProfile::new(blocking, bytes(3, 2 * MIB));
+            assert!(twin.topology_violations().is_empty());
+            assert!(twin.build().is_ok());
+        }
+
+        #[test]
+        fn a_caller_driven_runtime_owns_no_thread_and_the_audit_reads_that_from_the_runtime() {
+            let profile = caller_profile();
+            let runtime = profile.build().expect("a caller-driven profile builds");
+            let census = runtime.thread_census();
+            assert_eq!(
+                census,
+                ThreadCensus {
+                    worker_thread_handles: 0,
+                    deadline_monitor: false,
+                    resource_sampler: false,
+                    loan_driver: true,
+                }
+            );
+            // The configuration still states one worker, so the cap comparison is the one it always was.
+            assert_eq!(runtime.config().worker_threads, 1);
+            assert_eq!(profile.os_thread_ceiling(), Some(0));
+            let pool = runtime
+                .blocking_handle()
+                .expect("a forbidding pool, not an absent one");
+            assert_eq!(pool.admission_policy(), BlockingAdmissionPolicy::Forbidden);
+            assert_eq!(pool.active_threads(), 0);
+            assert!(profile.audit(&runtime).is_ok());
+
+            // Running tasks starts nothing.
+            let seen = run_tasks(&runtime);
+            assert!(seen.all_on_the_caller(), "{seen:?}");
+            assert_eq!(runtime.thread_census(), census);
+            assert_eq!(pool.active_threads(), 0);
+            assert!(profile.audit(&runtime).is_ok());
+        }
+
+        #[test]
+        fn tasks_run_on_the_calling_thread_and_a_construction_that_ignores_the_choice_fails_that_test()
+         {
+            let real = caller_profile().build().expect("a caller-driven runtime");
+            let seen = run_tasks(&real);
+            assert_eq!(seen.children.len(), 4);
+            assert!(seen.all_on_the_caller(), "{seen:?}");
+
+            // The plant: the same caps built from `RuntimeBuilder::new()` alone, as `builder()` did before the
+            // topology existed. Its tasks run on its background worker thread, so the same test fails it.
+            let plant = threaded_twin().build().expect("the plant builds");
+            let planted = run_tasks(&plant);
+            assert!(!planted.all_on_the_caller(), "{planted:?}");
+            assert_ne!(planted.task, planted.caller);
+            assert_eq!(plant.thread_census().worker_thread_handles, 1);
+            let error = caller_profile()
+                .audit(&plant)
+                .expect_err("a runtime that owns a worker thread is not caller-driven");
+            assert_eq!(error.kind(), ErrorKind::ConfigError);
+            assert!(
+                error.message().unwrap().contains("worker-thread handle"),
+                "{:?}",
+                error.message()
+            );
+
+            // Remove the plant: the real runtime passes the test and the audit that refused the plant.
+            assert!(caller_profile().audit(&real).is_ok());
+        }
+
+        #[test]
+        fn a_current_thread_runtime_has_a_background_worker_and_the_audit_refuses_it() {
+            // The trap the module docs name: `RuntimeBuilder::current_thread()` also runs tasks on the caller inside
+            // `block_on`, but it still starts a background worker thread. Built with the profile's caps, it differs
+            // from the caller-driven runtime in that thread and in nothing else.
+            let stated = caller_caps();
+            let current = RuntimeBuilder::current_thread()
+                .thread_stack_size(stated.thread_stack_bytes)
+                .global_queue_limit(stated.global_queue_limit)
+                .blocking_threads(0, 0)
+                .blocking_admission_policy(BlockingAdmissionPolicy::Forbidden)
+                .enable_platform_reactor(false)
+                .build()
+                .expect("a current-thread runtime builds");
+            // It has the same driver as a caller-driven runtime, so the handle list is what tells them apart.
+            let census = current.thread_census();
+            assert_eq!(
+                (census.loan_driver, census.worker_thread_handles),
+                (true, 1)
+            );
+            // Its caps are the stated ones: the threaded twin's audit, which does not read threads, accepts it.
+            assert!(
+                threaded_twin().audit(&current).is_ok(),
+                "only the thread should differ"
+            );
+            let error = caller_profile()
+                .audit(&current)
+                .expect_err("it owns a background worker thread");
+            assert_eq!(error.kind(), ErrorKind::ConfigError);
+            assert!(
+                error.message().unwrap().contains("worker-thread handle"),
+                "{:?}",
+                error.message()
+            );
+
+            // Remove the plant: the real caller-driven runtime has the same driver and no handle, and passes the
+            // audit that refused the current-thread runtime.
+            let real = caller_profile().build().expect("a caller-driven runtime");
+            let real_census = real.thread_census();
+            assert_eq!(
+                (real_census.loan_driver, real_census.worker_thread_handles),
+                (true, 0)
+            );
+            assert!(caller_profile().audit(&real).is_ok());
+        }
+
+        #[test]
+        fn a_timer_fires_on_the_calling_thread_after_its_delay_without_spinning() {
+            let runtime = caller_profile().build().expect("a caller-driven runtime");
+            let caller = std::thread::current().id();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&polls);
+            let started = Instant::now();
+            let fired_on = on_runtime(&runtime, async move {
+                let cx = Cx::current().expect("a runtime task installs its context");
+                let mut sleeper = Box::pin(sleep(cx.now(), Duration::from_millis(50)));
+                std::future::poll_fn(move |poll_cx| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    sleeper.as_mut().poll(poll_cx)
+                })
+                .await;
+                std::thread::current().id()
+            });
+            let elapsed = started.elapsed();
+            assert_eq!(fired_on, caller);
+            assert!(elapsed >= Duration::from_millis(40), "{elapsed:?}");
+            assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+            assert!(
+                polls.load(Ordering::SeqCst) <= 8,
+                "a wait that spins would poll thousands of times, this one polled {}",
+                polls.load(Ordering::SeqCst)
+            );
+            assert_eq!(runtime.thread_census().worker_thread_handles, 0);
+        }
+
+        #[test]
+        fn a_wake_from_another_thread_resumes_the_task_on_the_calling_thread() {
+            let runtime = caller_profile().build().expect("a caller-driven runtime");
+            let caller = std::thread::current().id();
+            let published: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+            let released = Arc::new(AtomicBool::new(false));
+            let waker_thread = {
+                let (slot, flag) = (Arc::clone(&published), Arc::clone(&released));
+                std::thread::spawn(move || {
+                    wait_until("the task parked and published its waker", || {
+                        slot.lock().unwrap().is_some()
+                    });
+                    flag.store(true, Ordering::SeqCst);
+                    let waker = slot.lock().unwrap().take().expect("published above");
+                    waker.wake();
+                })
+            };
+            let (slot, flag) = (Arc::clone(&published), Arc::clone(&released));
+            let resumed_on = on_runtime(&runtime, async move {
+                std::future::poll_fn(move |poll_cx| {
+                    if flag.load(Ordering::SeqCst) {
+                        return Poll::Ready(());
+                    }
+                    *slot.lock().unwrap() = Some(poll_cx.waker().clone());
+                    Poll::Pending
+                })
+                .await;
+                std::thread::current().id()
+            });
+            waker_thread.join().expect("the waking thread finished");
+            assert_eq!(resumed_on, caller);
+        }
+
+        #[test]
+        fn a_cancelled_task_is_cleaned_up_on_the_calling_thread_and_leaves_no_timer() {
+            let runtime = caller_profile().build().expect("a caller-driven runtime");
+            let caller = std::thread::current().id();
+            let dropped_on = Arc::new(Mutex::new(None));
+            let parked = Arc::new(AtomicBool::new(false));
+            let (record, flag) = (Arc::clone(&dropped_on), Arc::clone(&parked));
+            let timers_left = on_runtime(&runtime, async move {
+                let cx = Cx::current().expect("a runtime task installs its context");
+                let mut child = cx
+                    .spawn(move |child_cx| async move {
+                        let _guard = DroppedOn(record);
+                        let mut sleeper =
+                            std::pin::pin!(sleep(child_cx.now(), Duration::from_secs(30)));
+                        std::future::poll_fn(|poll_cx| {
+                            let poll = sleeper.as_mut().poll(poll_cx);
+                            if poll.is_pending() {
+                                flag.store(true, Ordering::Release);
+                            }
+                            poll
+                        })
+                        .await;
+                    })
+                    .expect("spawn the sleeper");
+                yield_until("the child armed its 30-second sleep", || {
+                    parked.load(Ordering::Acquire)
+                })
+                .await;
+                let timer = cx.timer_driver().expect("the runtime wired a timer driver");
+                assert_eq!(timer.pending_count(), 1, "a live timer before the abort");
+                child.abort();
+                let result = child.join(&cx).await;
+                assert_eq!(result, Ok(()), "the sleep acknowledges the cancellation");
+                timer.pending_count()
+            });
+            assert_eq!(timers_left, 0, "joining the cancelled child left no timer");
+            assert_eq!(*dropped_on.lock().unwrap(), Some(caller));
+            assert_eq!(runtime.thread_census().worker_thread_handles, 0);
+        }
+
+        #[test]
+        fn a_root_drain_cancels_parked_work_and_finishes_on_the_calling_thread() {
+            let runtime = caller_profile().build().expect("a caller-driven runtime");
+            let caller = std::thread::current().id();
+            let dropped_on = Arc::new(Mutex::new(None));
+            let parked = Arc::new(AtomicBool::new(false));
+            let (record, flag) = (Arc::clone(&dropped_on), Arc::clone(&parked));
+            // A root-region task that stays parked on a long timer until the drain cancels it.
+            let _sleeper = runtime.handle().spawn(async move {
+                let _guard = DroppedOn(record);
+                let cx = Cx::current().expect("a runtime task installs its context");
+                let mut sleeper = std::pin::pin!(sleep(cx.now(), Duration::from_secs(30)));
+                std::future::poll_fn(|poll_cx| {
+                    let poll = sleeper.as_mut().poll(poll_cx);
+                    if poll.is_pending() {
+                        flag.store(true, Ordering::Release);
+                    }
+                    poll
+                })
+                .await;
+            });
+            runtime.block_on(yield_until("the sleeper armed its timer", || {
+                parked.load(Ordering::Acquire)
+            }));
+            assert!(
+                dropped_on.lock().unwrap().is_none(),
+                "not cancelled before the drain"
+            );
+
+            let report = runtime.shutdown_drained(Duration::from_secs(5));
+            assert_quiescent(&report);
+            assert_eq!(*dropped_on.lock().unwrap(), Some(caller));
+            // A second drain finds the same.
+            assert_quiescent(&runtime.shutdown_drained(Duration::ZERO));
+            assert_eq!(runtime.thread_census().worker_thread_handles, 0);
+        }
+
+        #[test]
+        fn tasks_past_the_ready_queue_limit_are_still_scheduled_and_the_stop_path_drains_on_the_caller()
+         {
+            // `global_queue_limit` is 8 here. At this revision the scheduler treats it as advisory (past it, it logs
+            // and still schedules), so this pins that a full queue neither refuses work nor blocks the stop path. It
+            // is not a hard admission bound, and the profile does not claim one.
+            let runtime = caller_profile().build().expect("a caller-driven runtime");
+            assert_eq!(runtime.config().global_queue_limit, 8);
+            let caller = std::thread::current().id();
+            let seen = on_runtime(&runtime, async {
+                let cx = Cx::current().expect("a runtime task installs its context");
+                let mut handles = Vec::new();
+                for _ in 0..24 {
+                    handles.push(
+                        cx.spawn(|_child| async {
+                            yield_now().await;
+                            std::thread::current().id()
+                        })
+                        .expect("a spawn past the limit is not refused"),
+                    );
+                }
+                let mut ids = Vec::new();
+                for mut handle in handles {
+                    ids.push(handle.join(&cx).await.expect("the child finishes"));
+                }
+                ids
+            });
+            assert_eq!(seen.len(), 24);
+            assert!(seen.iter().all(|id| *id == caller));
+            assert_quiescent(&runtime.shutdown_drained(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn blocking_work_is_rejected_by_type_and_never_run_inline_with_or_without_a_byte_budget() {
+            let budget = NonZeroUsize::new(4096).unwrap();
+            for profile in [
+                caller_profile(),
+                caller_profile().with_blocking_live_bytes(budget),
+            ] {
+                let runtime = profile.build().expect("a caller-driven runtime");
+                assert_eq!(profile.os_thread_ceiling(), Some(0));
+                let pool = runtime
+                    .blocking_handle()
+                    .expect("a forbidding pool, not an absent one");
+                assert_eq!(pool.admission_policy(), BlockingAdmissionPolicy::Forbidden);
+                let ran = Arc::new(AtomicUsize::new(0));
+
+                let for_pool = Arc::clone(&ran);
+                let refused = pool
+                    .try_spawn(move || {
+                        for_pool.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .err()
+                    .map(|refused| refused.kind());
+                assert_eq!(refused, Some(BlockingSpawnErrorKind::Forbidden));
+                // A charged submission is refused as forbidden, in budget or over it, never as too large.
+                for declared in [1_usize, 1 << 20] {
+                    let for_charged = Arc::clone(&ran);
+                    let charged = pool
+                        .try_spawn_charged(
+                            move || {
+                                for_charged.fetch_add(1, Ordering::SeqCst);
+                            },
+                            declared,
+                        )
+                        .err()
+                        .map(|refused| refused.kind());
+                    assert_eq!(
+                        charged,
+                        Some(BlockingSpawnErrorKind::Forbidden),
+                        "{declared}"
+                    );
+                }
+
+                let (for_cx, for_io) = (Arc::clone(&ran), Arc::clone(&ran));
+                let (spawned, io) = runtime.block_on(async move {
+                    let cx = Cx::current().expect("block_on installs the task context");
+                    let spawned = cx
+                        .spawn_blocking(move |_| {
+                            for_cx.fetch_add(1, Ordering::SeqCst);
+                            1_u8
+                        })
+                        .map(|_| ());
+                    let io = crate::runtime::spawn_blocking::spawn_blocking_io(move || {
+                        for_io.fetch_add(1, Ordering::SeqCst);
+                        Ok(1_u8)
+                    })
+                    .await
+                    .map(|_| ());
+                    (spawned, io)
+                });
+                assert!(
+                    matches!(
+                        spawned,
+                        Err(crate::runtime::state::SpawnError::RuntimeUnavailable)
+                    ),
+                    "{spawned:?}"
+                );
+                assert_eq!(
+                    io.expect_err("a forbidden pool refuses").kind(),
+                    std::io::ErrorKind::Unsupported
+                );
+                assert_eq!(
+                    ran.load(Ordering::SeqCst),
+                    0,
+                    "nothing ran, inline or anywhere"
+                );
+                assert_eq!(pool.active_threads(), 0);
+                assert_eq!(runtime.thread_census().worker_thread_handles, 0);
+                assert!(profile.audit(&runtime).is_ok());
+            }
+
+            // Remove the plant: a runtime with no pool at all runs the same call inline on the executor, so the
+            // refusal above is the profile's doing.
+            let absent = RuntimeBuilder::new()
+                .blocking_threads(0, 0)
+                .enable_platform_reactor(false)
+                .build()
+                .unwrap();
+            let admitted = absent.block_on(async {
+                let cx = Cx::current().expect("block_on installs the task context");
+                cx.spawn_blocking(|_| 1_u8).is_ok()
+            });
+            assert!(
+                admitted,
+                "the unchanged behaviour of a runtime with no pool"
+            );
+        }
+
+        #[test]
+        fn options_that_start_or_need_a_thread_are_refused_by_name_when_a_caller_driven_runtime_is_built()
+         {
+            let builder = || {
+                caller_profile()
+                    .builder()
+                    .expect("the caller-driven builder")
+            };
+            let attempts = [
+                (
+                    "the deadline monitor",
+                    builder()
+                        .deadline_monitoring(|monitor| {
+                            monitor.check_interval(Duration::from_secs(60))
+                        })
+                        .build(),
+                ),
+                (
+                    "resource sampling",
+                    builder().resource_sampling(Duration::from_secs(60)).build(),
+                ),
+                ("on_thread_start", builder().on_thread_start(|| {}).build()),
+                ("on_thread_stop", builder().on_thread_stop(|| {}).build()),
+            ];
+            for (what, attempt) in attempts {
+                let error = match attempt {
+                    Err(error) => error,
+                    Ok(_) => panic!("{what} must be refused"),
+                };
+                assert_eq!(error.kind(), ErrorKind::ConfigError, "{what}");
+                let message = error.message().unwrap();
+                assert!(
+                    message.contains("a caller-driven runtime starts no thread")
+                        && message.contains(what),
+                    "{what}: {message}"
+                );
+            }
+            // Several at once are listed together.
+            let error = match builder()
+                .resource_sampling(Duration::from_secs(60))
+                .on_thread_start(|| {})
+                .build()
+            {
+                Err(error) => error,
+                Ok(_) => panic!("two thread options must be refused"),
+            };
+            let message = error.message().unwrap();
+            assert!(
+                message.contains("resource sampling") && message.contains("on_thread_start"),
+                "{message}"
+            );
+
+            // The one thread-starting option the profile's first revision never met: upstream refuses it in `build()`
+            // for any host that does not start native threads, before a reactor or a thread exists. Its message is
+            // its own, so it is checked apart from the options above.
+            let refused = match builder().background_io_driver(true).build() {
+                Err(error) => error,
+                Ok(_) => panic!("background_io_driver must be refused"),
+            };
+            assert_eq!(refused.kind(), ErrorKind::ConfigError);
+            let reason = refused.message().unwrap();
+            assert!(
+                reason.contains("background_io_driver requires native thread host services"),
+                "{reason}"
+            );
+
+            // Remove the plant: the builder left alone builds a runtime that audits clean, and the threaded profile
+            // accepts the same options, because there they start threads.
+            let runtime = builder().build().expect("the untouched builder builds");
+            assert!(caller_profile().audit(&runtime).is_ok());
+            let threaded = threaded_twin()
+                .builder()
+                .expect("the threaded builder")
+                .on_thread_start(|| {})
+                .build();
+            assert!(threaded.is_ok());
+            // The same for the background I/O driver: the threaded profile accepts it, because there it starts the
+            // thread, and the runtime then owns one handle more than the profile's ceiling counts.
+            let with_io = threaded_twin()
+                .builder()
+                .expect("the threaded builder")
+                .background_io_driver(true)
+                .build()
+                .expect("the threaded profile accepts the background I/O driver");
+            assert_eq!(with_io.thread_census().worker_thread_handles, 2);
+            assert_eq!(threaded_twin().os_thread_ceiling(), Some(1));
+            assert!(with_io.shutdown_timeout(WAIT));
+        }
+
+        #[test]
+        fn handle_spawned_work_waits_for_the_next_block_on_and_then_runs_on_that_caller() {
+            let runtime = caller_profile().build().expect("a caller-driven runtime");
+            let caller = std::thread::current().id();
+            let ran_on = Arc::new(Mutex::new(None));
+            let record = Arc::clone(&ran_on);
+            let handle = runtime.handle().spawn(async move {
+                *record.lock().unwrap() = Some(std::thread::current().id());
+                7_u8
+            });
+            std::thread::sleep(SETTLE);
+            assert!(
+                ran_on.lock().unwrap().is_none(),
+                "no thread exists that could have run it"
+            );
+            assert!(!handle.is_finished());
+            assert_eq!(runtime.block_on(handle), 7);
+            assert_eq!(*ran_on.lock().unwrap(), Some(caller));
+
+            // Remove the plant: the threaded twin runs the same task by itself, on a thread of its own.
+            let threaded = threaded_twin().build().expect("the threaded twin");
+            let ran_on = Arc::new(Mutex::new(None));
+            let record = Arc::clone(&ran_on);
+            let _handle = threaded.handle().spawn(async move {
+                *record.lock().unwrap() = Some(std::thread::current().id());
+            });
+            wait_until("the threaded twin ran the task by itself", || {
+                ran_on.lock().unwrap().is_some()
+            });
+            assert_ne!(*ran_on.lock().unwrap(), Some(caller));
+        }
+
+        #[test]
+        fn dropping_a_caller_driven_runtime_returns_before_and_after_a_block_on_and_with_work_unrun()
+         {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                // The worker is still in the driver's `Returned` slot, never borrowed.
+                drop(caller_profile().build().expect("a caller-driven runtime"));
+
+                // The worker went out on a block_on and came back.
+                let used = caller_profile().build().expect("a caller-driven runtime");
+                assert_eq!(on_runtime(&used, async { 3_u8 }), 3);
+                drop(used);
+
+                // Work spawned through a handle that no block_on ever picked up.
+                let idle = caller_profile().build().expect("a caller-driven runtime");
+                let unrun = idle.handle().spawn(async { 5_u8 });
+                drop(idle);
+                drop(unrun);
+                done_tx.send(()).expect("the test is waiting");
+            });
+            done_rx
+                .recv_timeout(WAIT)
+                .expect("dropping a caller-driven runtime must return");
+        }
     }
 }

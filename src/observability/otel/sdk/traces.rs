@@ -575,8 +575,8 @@ fn owned_span(input: &SpanData) -> Result<Span, OtlpSdkTraceError> {
             .collect::<Result<Vec<_>, OtlpSdkTraceError>>()?,
         dropped_links_count: input.links.dropped_count,
         status: Some(Status {
-            code,
             message,
+            code,
             ..Status::default()
         }),
         ..Span::default()

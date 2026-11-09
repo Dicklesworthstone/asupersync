@@ -15,6 +15,12 @@
 //!   and parks until it is returned. While the worker is on loan every
 //!   spawned task, admission turn, wheel timer and reactor turn of the
 //!   runtime runs on the calling thread.
+//! - A runtime built for the caller-driven topology (`LegacyProfile::caller_driven`)
+//!   has no background thread at all: [`CurrentThreadDriver::hold_worker`] leaves
+//!   the worker in the driver's `Returned` slot, so every `block_on` (and every
+//!   root drain) borrows it directly and the calling thread is the only thread
+//!   that ever runs it. Work spawned through a handle therefore waits for the
+//!   next `block_on` or drain.
 //! - The root future is polled in place on the calling thread (it need not
 //!   be `Send` or `'static`), interleaved with the worker's dispatch loop:
 //!   the driver polls the root whenever the root waker fired, gives the
@@ -197,6 +203,32 @@ impl CurrentThreadDriver {
             gateway,
             store_key,
         }
+    }
+
+    /// Keeps `worker` in the driver for a runtime that starts no worker thread
+    /// at all (the caller-driven topology of `LegacyProfile::caller_driven`).
+    ///
+    /// The slot becomes `Returned`, the state the loan protocol already
+    /// reaches whenever a borrower hands the worker back before the background
+    /// thread resumes it, so the first `block_on` takes it through the
+    /// `acquire` fast path and no thread is ever asked to hand it over. Nothing
+    /// ever runs the worker between `block_on` calls. A driver that is no
+    /// longer in its initial state (already closed, or already holding a
+    /// worker) keeps its state and the offered worker is dropped outside the
+    /// slot lock, as every other retirement is.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn hold_worker(&self, worker: ThreeLaneWorker) {
+        let rejected = {
+            let mut slot = self.lock_slot();
+            if matches!(*slot, WorkerSlot::Background) {
+                *slot = WorkerSlot::Returned(erase_worker(Box::new(worker)));
+                None
+            } else {
+                Some(worker)
+            }
+        };
+        self.changed.notify_all();
+        drop(rejected);
     }
 
     fn lock_slot(&self) -> MutexGuard<'_, WorkerSlot> {

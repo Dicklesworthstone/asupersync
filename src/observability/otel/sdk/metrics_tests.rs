@@ -797,7 +797,7 @@ fn packed_sdk_scopes_roll_requests_at_the_shared_byte_bound() {
         |provider| {
             for index in 0..20_i64 {
                 provider
-                    .meter(format!("scope.{index:02}"))
+                    .meter_with_scope(SdkScope::builder(format!("scope.{index:02}")).build())
                     .u64_counter("counter")
                     .build()
                     .add(1, &[SdkAttribute::new("index", index)]);
@@ -844,7 +844,7 @@ fn policy_collapsed_scopes_do_not_duplicate_metric_descriptors_in_one_request() 
         |provider| {
             for index in 0..4_i64 {
                 provider
-                    .meter(format!("source.{index}"))
+                    .meter_with_scope(SdkScope::builder(format!("source.{index}")).build())
                     .u64_counter("counter")
                     .build()
                     .add(1, &[SdkAttribute::new("index", index)]);

@@ -250,6 +250,8 @@ impl Drop for ScopedRuntimeHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeHostServicesKind {
     NativeStdThread,
+    /// Native host with no thread of its own: the caller of `block_on` is the only thread that runs the worker.
+    NativeCallerDriven,
     BrowserMicrotask,
 }
 
@@ -258,6 +260,7 @@ impl RuntimeHostServicesKind {
     const fn as_str(self) -> &'static str {
         match self {
             Self::NativeStdThread => "native-std-thread",
+            Self::NativeCallerDriven => "native-caller-driven",
             Self::BrowserMicrotask => "browser-microtask",
         }
     }
@@ -484,16 +487,9 @@ impl NativeThreadHostServices {
                         let table = table
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        tasks.extend(
-                            table
-                                .iter()
-                                .filter_map(|(_, record)| {
-                                    DeadlineTaskSnapshot::for_native_monitor(
-                                        record,
-                                        &monitor_completions,
-                                    )
-                                }),
-                        );
+                        tasks.extend(table.iter().filter_map(|(_, record)| {
+                            DeadlineTaskSnapshot::for_native_monitor(record, &monitor_completions)
+                        }));
                     }
                     // Consume completions before pruning disappeared tasks.
                     // A shared receipt also covers a task finishing after its
@@ -543,6 +539,105 @@ impl RuntimeHostServices for NativeThreadHostServices {
     ) -> DeadlineMonitorHostService {
         Self::start_deadline_monitor(config, state, dispatch_task_table)
     }
+}
+
+/// Host services of the caller-driven topology (`LegacyProfile::caller_driven`): they start no thread of any kind.
+///
+/// The runtime's one worker is handed to the current-thread driver and stays there, so it runs only on a thread that
+/// is inside `block_on` or a root drain, and the deadline monitor is never started. `on_thread_start` and
+/// `on_thread_stop` belong to worker threads, so they would never run here; [`refuse_caller_driven_thread_config`]
+/// refuses them (and the other thread-starting options) when the runtime is built.
+#[cfg(not(target_arch = "wasm32"))]
+struct CallerDrivenHostServices;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RuntimeHostServices for CallerDrivenHostServices {
+    fn kind(&self) -> RuntimeHostServicesKind {
+        RuntimeHostServicesKind::NativeCallerDriven
+    }
+
+    fn spawn_workers(
+        &self,
+        runtime: &Arc<RuntimeInner>,
+        mut workers: Vec<ThreeLaneWorker>,
+    ) -> io::Result<Vec<std::thread::JoinHandle<()>>> {
+        if workers.len() != 1 {
+            return Err(io::Error::other(format!(
+                "caller-driven host services need exactly one worker, got {}",
+                workers.len()
+            )));
+        }
+        let Some(driver) = runtime.current_thread_driver.get() else {
+            return Err(io::Error::other(
+                "caller-driven host services need the current-thread driver",
+            ));
+        };
+        if let Some(worker) = workers.pop() {
+            driver.hold_worker(worker);
+        }
+        Ok(Vec::new())
+    }
+
+    fn start_deadline_monitor(
+        &self,
+        _config: &RuntimeConfig,
+        _state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        _dispatch_task_table: Option<Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
+    ) -> DeadlineMonitorHostService {
+        DeadlineMonitorHostService::disabled()
+    }
+}
+
+/// A caller-driven runtime starts no thread of any kind, so configuration that would start one, or that only a thread
+/// could honour, is refused when the runtime is built instead of being ignored: the deadline monitor, resource
+/// sampling, and the `on_thread_start` and `on_thread_stop` hooks, which run on worker threads only.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::result_large_err)]
+fn refuse_caller_driven_thread_config(
+    config: &RuntimeConfig,
+    resource_sampling: Option<Duration>,
+) -> Result<(), Error> {
+    let mut refused: Vec<&str> = Vec::new();
+    if config
+        .deadline_monitor
+        .as_ref()
+        .is_some_and(|monitor| monitor.enabled)
+    {
+        refused.push("the deadline monitor (a helper thread)");
+    }
+    if resource_sampling.is_some() {
+        refused.push("resource sampling (a helper thread)");
+    }
+    if config.on_thread_start.is_some() {
+        refused.push("on_thread_start (it runs on worker threads only, and there are none)");
+    }
+    if config.on_thread_stop.is_some() {
+        refused.push("on_thread_stop (it runs on worker threads only, and there are none)");
+    }
+    if refused.is_empty() {
+        return Ok(());
+    }
+    Err(
+        Error::new(crate::error::ErrorKind::ConfigError).with_message(format!(
+            "a caller-driven runtime starts no thread, so it refuses: {}",
+            refused.join("; ")
+        )),
+    )
+}
+
+/// The threads a built runtime owns, read from its own bookkeeping and not from the operating system.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThreadCensus {
+    /// Join handles in the runtime's worker-thread list: the scheduler workers and, at a revision that has one, the
+    /// background I/O driver thread.
+    pub(crate) worker_thread_handles: usize,
+    /// Whether the deadline-monitor thread exists.
+    pub(crate) deadline_monitor: bool,
+    /// Whether the resource-sampler thread exists.
+    pub(crate) resource_sampler: bool,
+    /// Whether the runtime has the current-thread driver, the loan protocol `block_on` borrows the worker through.
+    pub(crate) loan_driver: bool,
 }
 
 fn default_runtime_host_services() -> Arc<dyn RuntimeHostServices> {
@@ -2817,6 +2912,26 @@ impl RuntimeBuilder {
         self.host_services(host_services)
     }
 
+    /// Selects the caller-driven topology of `LegacyProfile::caller_driven`: the
+    /// [`RuntimeBuilder::current_thread`] driver, but with no background worker
+    /// thread. The one worker stays in the driver and only a thread that is
+    /// inside `block_on` or a root drain ever runs it.
+    ///
+    /// It sets no cap. The caller (the profile) states `worker_threads(1)`, which
+    /// is required: with any other count the build fails, because the driver is
+    /// installed for a single worker only. [`Self::build`] refuses, by name, the
+    /// options that would start a helper thread (the deadline monitor, resource
+    /// sampling) or that only a worker thread could honour (`on_thread_start`,
+    /// `on_thread_stop`). Work spawned through a handle makes no progress until
+    /// the next `block_on` or root drain.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub(crate) fn caller_driven_topology(mut self) -> Self {
+        self.current_thread = true;
+        self.host_services = Arc::new(CallerDrivenHostServices);
+        self
+    }
+
     /// Set the runtime-wide admission ceiling for borrowed scoped CPU workers.
     ///
     /// Every [`Cx::scoped_cpu`](crate::cx::Cx::scoped_cpu) call backed by this
@@ -3603,6 +3718,14 @@ impl RuntimeBuilder {
         // deadline-monitor surfaces (E1.2 subsystems 1-3d + step 4). The
         // default shape remains `Unified`; the default flip is E1.3
         // (br-asupersync-sched-hot-path-perf-bt4y5f.2.3) bake evidence.
+        //
+        // The caller-driven topology starts no thread of any kind, so the
+        // configuration that would start one, or that only a thread could
+        // honour, is refused here and never silently ignored.
+        #[cfg(not(target_arch = "wasm32"))]
+        if host_services.kind() == RuntimeHostServicesKind::NativeCallerDriven {
+            refuse_caller_driven_thread_config(&config, resource_sampling)?;
+        }
         let runtime = Runtime::with_config_and_platform_snapshot(
             config,
             reactor,
@@ -5315,13 +5438,30 @@ impl Runtime {
         F: FnOnce(crate::cx::Cx) -> T + Send + 'static,
         T: Send + 'static,
     {
-        self.request_cx_with_budget(Budget::INFINITE).spawn_blocking_drained(f)
+        self.request_cx_with_budget(Budget::INFINITE)
+            .spawn_blocking_drained(f)
     }
 
     /// Returns a handle to the blocking pool, if configured.
     #[must_use]
     pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
         self.inner.blocking_handle()
+    }
+
+    /// The threads this runtime owns, from its own bookkeeping: the worker
+    /// handle list (the audit of a caller-driven profile requires it empty),
+    /// the deadline-monitor and resource-sampler threads, and whether the
+    /// current-thread driver exists. It does not count the blocking pool, which
+    /// has its own handle, the short-lived shutdown helpers, or any thread the
+    /// application started.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn thread_census(&self) -> ThreadCensus {
+        ThreadCensus {
+            worker_thread_handles: self.inner.worker_threads.lock().len(),
+            deadline_monitor: self.inner.deadline_monitor_thread.is_some(),
+            resource_sampler: self.inner.resource_sampler.get().is_some(),
+            loan_driver: self.inner.current_thread_driver.get().is_some(),
+        }
     }
 
     /// Returns the approximate number of ready tasks in the shared global
@@ -5577,7 +5717,7 @@ impl RuntimeHandle {
         self.try_inner()?.spawn_local(future)
     }
 
-/// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context.
+    /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context.
     ///
     /// Creates a Cx in the runtime's root region (never the caller's region) and
     /// passes it to the factory closure. The Cx observes shutdown cancellation when
@@ -5608,7 +5748,7 @@ impl RuntimeHandle {
             .expect("failed to spawn task with cx");
     }
 
-/// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context,
+    /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context,
     /// returning runtime-availability or admission errors instead of panicking.
     ///
     /// Creates a Cx in the runtime's root region (never the caller's region) and
@@ -5689,7 +5829,8 @@ impl RuntimeHandle {
         F: FnOnce(crate::cx::Cx) -> T + Send + 'static,
         T: Send + 'static,
     {
-        self.try_request_cx_with_budget(Budget::INFINITE)?.spawn_blocking_drained(f)
+        self.try_request_cx_with_budget(Budget::INFINITE)?
+            .spawn_blocking_drained(f)
     }
 }
 
@@ -6255,8 +6396,8 @@ impl RuntimeInner {
         })?;
         let shutdown = self.scheduler.shutdown_signal();
         let runtime_handle = RuntimeHandle::weak(self);
-        let mut builder = std::thread::Builder::new()
-            .name(format!("{}-io", self.config.thread_name_prefix));
+        let mut builder =
+            std::thread::Builder::new().name(format!("{}-io", self.config.thread_name_prefix));
         if self.config.thread_stack_size > 0 {
             builder = builder.stack_size(self.config.thread_stack_size);
         }

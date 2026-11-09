@@ -154,7 +154,7 @@ fn scoped_race_all_invalid_input_and_missing_gateway_start_no_user_work() {
     ));
     drop(oversized);
 
-    let missing = owner.with_spawn_gateway(None);
+    let missing = owner.clone().with_spawn_gateway(None);
     let factories = (0..4)
         .map(|index| {
             let calls = Arc::clone(&calls);

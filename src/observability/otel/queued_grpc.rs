@@ -121,7 +121,7 @@ impl QueuedOtlpGrpcExporter {
         self.queue.admit_encoded_with_receipt(
             Destination::Grpc {
                 exporter: Arc::clone(&self.transport),
-                retry_policy: self.retry_policy.clone(),
+                retry_policy: self.retry_policy,
             },
             signal,
             requests,
