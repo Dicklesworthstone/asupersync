@@ -1423,6 +1423,37 @@ impl<C: Codec> GrpcClient<C> {
         })
     }
 
+    /// Make a unary RPC call under an explicit capability context.
+    ///
+    /// The supplied `cx` provides the native call's I/O authority, cancellation,
+    /// and caller deadline even when this future is polled without an ambient
+    /// context or by another task. Each poll installs its restricted capability
+    /// view and restores the previous context before returning or unwinding.
+    /// No context guard is held while the future is suspended.
+    ///
+    /// This delegates to [`Self::unary`], preserving the channel's transport,
+    /// TLS, metadata, message limits, admission, connection reuse, and terminal
+    /// status behavior. It creates no runtime or background task. Dropping the
+    /// call drops its in-flight exchange and releases any unary admission slot;
+    /// a request already delivered to the server cannot be retracted.
+    pub async fn unary_with_cx<Req, Resp>(
+        &mut self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: Request<Req>,
+    ) -> Result<Response<Resp>, Status>
+    where
+        Req: Send + 'static,
+        Resp: Send + 'static,
+    {
+        let mut call = std::pin::pin!(self.unary(path, request));
+        std::future::poll_fn(|task| {
+            let _current = cx.clone().set_current_restricted();
+            call.as_mut().poll(task)
+        })
+        .await
+    }
+
     /// Make a unary RPC call.
     pub async fn unary<Req, Resp>(
         &mut self,
@@ -3257,7 +3288,7 @@ fn ambient_remaining_budget() -> Option<Duration> {
     .flatten()
 }
 
-fn encode_grpc_timeout(timeout: Duration) -> String {
+pub(crate) fn encode_grpc_timeout(timeout: Duration) -> String {
     const MAX_GRPC_TIMEOUT_VALUE: u128 = 99_999_999;
     const GRPC_TIMEOUT_UNITS: [(u128, char); 6] = [
         (3_600_000_000_000, 'H'),
@@ -4363,3 +4394,7 @@ impl ClientInterceptor for MetadataInterceptor {
 #[cfg(test)]
 #[path = "client_inline_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "client/explicit_cx_tests.rs"]
+mod explicit_cx_tests;
