@@ -152,7 +152,7 @@ pub(super) fn framed(payload: &[u8]) -> Bytes {
 pub(super) struct Captured {
     pub(super) stream: u32,
     headers: Vec<Header>,
-    body: Vec<u8>,
+    pub(super) body: Vec<u8>,
 }
 
 pub(super) fn read_request(io: &mut (impl Read + Write)) -> (Connection, Captured) {

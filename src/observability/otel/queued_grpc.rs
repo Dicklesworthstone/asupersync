@@ -7,6 +7,7 @@ use super::{
     OwnedOtlpTraces, managed,
 };
 use crate::Cx;
+use crate::observability::otel::{OwnedOtlpExportPolicy, OwnedOtlpPolicyOutput};
 use std::sync::Arc;
 
 /// Bounded cumulative accounting for a native gRPC producer queue.
@@ -151,6 +152,71 @@ impl QueuedOtlpGrpcExporter {
             .map_err(|error| ExportError::new(error.to_string()))?
             .into_requests();
         self.admit(OtlpGrpcSignal::Logs, requests)
+    }
+
+    /// Apply explicit resource/scope/privacy policy and atomically admit an
+    /// owned metrics collection. The policy overrides equally named transport
+    /// resource attributes. A filtered series collision, mapper error, channel
+    /// limit, or capacity refusal admits no prefix.
+    ///
+    /// The output is the admitted request count and local filtering report;
+    /// it is not a delivery receipt. The policy is applied once before queue
+    /// publication, and the existing retry policy is captured for delivery.
+    pub fn enqueue_owned_metrics_with_policy(
+        &self,
+        metrics: &OwnedOtlpMetrics,
+        point_time_unix_nano: u64,
+        policy: &OwnedOtlpExportPolicy,
+    ) -> Result<OwnedOtlpPolicyOutput<usize>, ExportError> {
+        let attributes: Vec<_> = self.transport.resource_attributes().collect();
+        let (requests, report) = metrics
+            .collect_with_policy(point_time_unix_nano, &attributes, policy)
+            .map_err(|error| ExportError::new(error.to_string()))?
+            .into_parts();
+        let admitted = self.admit(OtlpGrpcSignal::Metrics, requests)?;
+        Ok(OwnedOtlpPolicyOutput::new(admitted, report))
+    }
+
+    /// Apply shared export policy to owned traces, then admit every encoded
+    /// request together. Sampling and original identifiers/timestamps stay with
+    /// the mapper; entirely unsampled input admits no request. The returned
+    /// report describes local filtering separately from collector rejection.
+    pub fn enqueue_owned_traces_with_policy(
+        &self,
+        traces: &OwnedOtlpTraces,
+        spans: &[OtlpTraceSpanInput<'_>],
+        policy: &OwnedOtlpExportPolicy,
+    ) -> Result<OwnedOtlpPolicyOutput<usize>, ExportError> {
+        let attributes: Vec<_> = self.transport.resource_attributes().collect();
+        let (collection, report) = traces
+            .collect_with_policy(spans, &attributes, policy)
+            .map_err(|error| ExportError::new(error.to_string()))?
+            .into_parts();
+        let admitted = self.admit(OtlpGrpcSignal::Traces, collection.into_requests())?;
+        Ok(OwnedOtlpPolicyOutput::new(admitted, report))
+    }
+
+    /// Apply shared export policy to typed logs before atomic admission.
+    /// Original record order and producer timestamps are preserved. Empty
+    /// input admits nothing. A policy or capacity error publishes no prefix;
+    /// accepted payloads cannot be changed by later producer policy choices.
+    pub fn enqueue_owned_logs_with_policy(
+        &self,
+        logs: &OwnedOtlpLogs,
+        records: &[OtlpLogRecordInput<'_>],
+        policy: &OwnedOtlpExportPolicy,
+    ) -> Result<OwnedOtlpPolicyOutput<usize>, ExportError> {
+        let attributes: Vec<_> = self
+            .transport
+            .resource_attributes()
+            .map(|(key, value)| OtlpLogKeyValueInput::string(key, value))
+            .collect();
+        let (collection, report) = logs
+            .collect_with_policy(records, &attributes, policy)
+            .map_err(|error| ExportError::new(error.to_string()))?
+            .into_parts();
+        let admitted = self.admit(OtlpGrpcSignal::Logs, collection.into_requests())?;
+        Ok(OwnedOtlpPolicyOutput::new(admitted, report))
     }
 
     /// Snapshot shared admission and cumulative partial-rejection accounting.

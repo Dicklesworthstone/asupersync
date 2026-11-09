@@ -511,6 +511,94 @@ impl OtlpHttpExporter {
             .admit_encoded(Destination::http(self), OtlpGrpcSignal::Logs, requests)
     }
 
+    /// Apply a shared owned export policy and atomically admit metrics for this
+    /// HTTP endpoint. Policy resource attributes override equally named
+    /// transport attributes. The entire filtered collection is validated before
+    /// admission, including metric-series collision and request-size checks.
+    ///
+    /// Returns the admitted request count and local filtering report, not a
+    /// collector receipt. Existing HTTP delivery, retry, and managed lifetime
+    /// behavior applies to the accepted immutable bodies.
+    pub fn enqueue_owned_metrics_with_policy(
+        &self,
+        metrics: &OwnedOtlpMetrics,
+        point_time_unix_nano: u64,
+        policy: &OwnedOtlpExportPolicy,
+    ) -> Result<OwnedOtlpPolicyOutput<usize>, ExportError> {
+        self.validate_for_export().map_err(ExportError::from)?;
+        let attributes: Vec<_> = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let (requests, report) = metrics
+            .collect_with_policy(point_time_unix_nano, &attributes, policy)
+            .map_err(|error| ExportError::new(error.to_string()))?
+            .into_parts();
+        let admitted = self.export_queue.admit_encoded(
+            Destination::http(self),
+            OtlpGrpcSignal::Metrics,
+            requests,
+        )?;
+        Ok(OwnedOtlpPolicyOutput::new(admitted, report))
+    }
+
+    /// Apply shared resource/scope/privacy policy to traces and admit their
+    /// complete encoded collection to this exact HTTP endpoint. Sampling,
+    /// lineage and timestamps remain governed by the existing mapper.
+    /// Filtering occurs once; an admission refusal accepts no prefix.
+    pub fn enqueue_owned_traces_with_policy(
+        &self,
+        traces: &OwnedOtlpTraces,
+        spans: &[OtlpTraceSpanInput<'_>],
+        policy: &OwnedOtlpExportPolicy,
+    ) -> Result<OwnedOtlpPolicyOutput<usize>, ExportError> {
+        self.validate_for_export().map_err(ExportError::from)?;
+        let attributes: Vec<_> = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let (collection, report) = traces
+            .collect_with_policy(spans, &attributes, policy)
+            .map_err(|error| ExportError::new(error.to_string()))?
+            .into_parts();
+        let admitted = self.export_queue.admit_encoded(
+            Destination::http(self),
+            OtlpGrpcSignal::Traces,
+            collection.into_requests(),
+        )?;
+        Ok(OwnedOtlpPolicyOutput::new(admitted, report))
+    }
+
+    /// Apply shared export policy to structured logs before atomic HTTP queue
+    /// admission. Record order and producer timestamps are preserved; the
+    /// endpoint is never rewritten. The returned counts describe admission and
+    /// local filtering separately from eventual collector acceptance.
+    pub fn enqueue_owned_logs_with_policy(
+        &self,
+        logs: &OwnedOtlpLogs,
+        records: &[OtlpLogRecordInput<'_>],
+        policy: &OwnedOtlpExportPolicy,
+    ) -> Result<OwnedOtlpPolicyOutput<usize>, ExportError> {
+        self.validate_for_export().map_err(ExportError::from)?;
+        let attributes: Vec<_> = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| OtlpLogKeyValueInput::string(key, value))
+            .collect();
+        let (collection, report) = logs
+            .collect_with_policy(records, &attributes, policy)
+            .map_err(|error| ExportError::new(error.to_string()))?
+            .into_parts();
+        let admitted = self.export_queue.admit_encoded(
+            Destination::http(self),
+            OtlpGrpcSignal::Logs,
+            collection.into_requests(),
+        )?;
+        Ok(OwnedOtlpPolicyOutput::new(admitted, report))
+    }
+
     pub(super) fn enqueue_metrics(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
         let bytes = metrics_bytes(metrics)?;
         // Refuse here what delivery could never encode: more than 1000 points
@@ -820,3 +908,7 @@ mod tests;
 #[cfg(test)]
 #[path = "queued_trace_tests.rs"]
 mod trace_tests;
+
+#[cfg(test)]
+#[path = "queued_policy_tests.rs"]
+mod policy_tests;

@@ -4,7 +4,7 @@ use super::{
     OTLP_HTTP_MAX_AUTH_HEADER_NAME_BYTES, OTLP_HTTP_MAX_AUTH_HEADER_VALUE_BYTES,
     OTLP_HTTP_MAX_AUTH_HEADERS, OTLP_HTTP_MAX_ENDPOINT_BYTES, OTLP_HTTP_MAX_RESOURCE_ATTRIBUTES,
     OTLP_HTTP_MAX_RESPONSE_BYTES, OtlpHttpResponse, OtlpLogKeyValueInput, OtlpLogRecordInput,
-    OtlpTraceSpanInput, OwnedOtlpLogs, OwnedOtlpMetrics, OwnedOtlpTraces,
+    OtlpTraceSpanInput, OwnedOtlpLogs, OwnedOtlpMetrics, OwnedOtlpPolicyReport, OwnedOtlpTraces,
     decode_otlp_http_response, transport_owns_header, valid_otlp_resource_attribute,
 };
 use crate::bytes::Bytes;
@@ -18,9 +18,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+mod policy;
 mod retry;
 mod retry_info;
 pub use retry::{OTLP_GRPC_MAX_RETRIES, OtlpGrpcRetryPolicy};
+
+#[cfg(test)]
+mod policy_transport_tests;
 
 /// Maximum configured native OTLP request or response message size: 4 MiB.
 ///
@@ -208,6 +212,7 @@ pub struct OtlpGrpcError {
     completed: Vec<OtlpGrpcResponse>,
     retry_delay: Option<Duration>,
     retry_info_valid: bool,
+    policy_report: Option<OwnedOtlpPolicyReport>,
 }
 
 impl OtlpGrpcError {
@@ -219,6 +224,7 @@ impl OtlpGrpcError {
             completed: Vec::new(),
             retry_delay: None,
             retry_info_valid: true,
+            policy_report: None,
         }
     }
 
@@ -273,6 +279,15 @@ impl OtlpGrpcError {
     pub const fn retry_delay(&self) -> Option<Duration> {
         self.retry_delay
     }
+
+    /// Completed local filtering from a policy-aware collection whose size
+    /// preflight, context checkpoint, or delivery subsequently failed.
+    /// This describes local filtering, not collector acceptance. Earlier
+    /// collector acknowledgements remain in [`Self::completed_responses`].
+    #[must_use]
+    pub const fn policy_report(&self) -> Option<&OwnedOtlpPolicyReport> {
+        self.policy_report.as_ref()
+    }
 }
 
 impl fmt::Debug for OtlpGrpcError {
@@ -283,6 +298,7 @@ impl fmt::Debug for OtlpGrpcError {
             .field("mapping_code", &self.mapping_code)
             .field("completed_requests", &self.completed.len())
             .field("retry_delay", &self.retry_delay)
+            .field("policy_report", &self.policy_report)
             .finish()
     }
 }
