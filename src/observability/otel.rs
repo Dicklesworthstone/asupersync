@@ -71,7 +71,8 @@ mod queued;
 pub use queued::{
     ManagedOtlpControl, ManagedOtlpError, ManagedOtlpExporter, ManagedOtlpOutcome,
     ManagedOtlpReport, OTLP_EXPORT_QUEUE_MAX_BATCHES, OTLP_EXPORT_QUEUE_MAX_BYTES,
-    OtlpExportQueueStats, OtlpGrpcQueueStats, QueuedOtlpGrpcExporter,
+    OtlpExportQueueStats, OtlpGrpcQueueReceipt, OtlpGrpcQueueReceiptError, OtlpGrpcQueueStats,
+    QueuedOtlpGrpcExporter,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -91,6 +92,11 @@ pub use export_policy::{
     OwnedOtlpExportPolicy, OwnedOtlpPolicyError, OwnedOtlpPolicyOutput,
     OwnedOtlpPolicyReport,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+mod sdk;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sdk::{OtlpSdkMetricExporter, OtlpSdkMetricsConfig, OtlpSdkMetricsError};
 
 // =============================================================================
 // Cardinality Management

@@ -2,9 +2,9 @@
 
 use super::{
     Destination, ExportError, ExportQueue, ManagedOtlpError, ManagedOtlpExporter,
-    OtlpExportQueueStats, OtlpGrpcExporter, OtlpGrpcRetryPolicy, OtlpGrpcSignal,
-    OtlpLogKeyValueInput, OtlpLogRecordInput, OtlpTraceSpanInput, OwnedOtlpLogs, OwnedOtlpMetrics,
-    OwnedOtlpTraces, managed,
+    OtlpExportQueueStats, OtlpGrpcExporter, OtlpGrpcQueueReceipt, OtlpGrpcRetryPolicy,
+    OtlpGrpcSignal, OtlpLogKeyValueInput, OtlpLogRecordInput, OtlpTraceSpanInput, OwnedOtlpLogs,
+    OwnedOtlpMetrics, OwnedOtlpTraces, managed,
 };
 use crate::Cx;
 use crate::observability::otel::{OwnedOtlpExportPolicy, OwnedOtlpPolicyOutput};
@@ -53,7 +53,8 @@ pub struct OtlpGrpcQueueStats {
 /// opt-in through [`Self::with_retry_policy`]; the policy is captured at admission
 /// and stays within the delivery/owner bounds. A valid partial receipt is
 /// terminal and never retried. Its rejected items are counted separately while
-/// later batches may continue. Raw collector diagnostics are not retained.
+/// later batches may continue. Optional collection receipts retain bounded
+/// collector diagnostics for explicit inspection, never for Debug output.
 #[derive(Clone)]
 pub struct QueuedOtlpGrpcExporter {
     transport: Arc<OtlpGrpcExporter>,
@@ -101,6 +102,48 @@ impl QueuedOtlpGrpcExporter {
         body: Vec<u8>,
     ) -> Result<(), ExportError> {
         self.admit(signal, vec![body]).map(|_| ())
+    }
+
+    /// Atomically admit a complete collection and return its delivery receipt.
+    /// The receipt waits for every request's payload/credit retirement and
+    /// preserves ordered collector responses, including terminal partial
+    /// success. Dropping it only stops observation; it never abandons or
+    /// replays accepted work. The queue must be driven explicitly or managed.
+    ///
+    /// The bounded receipt reservation is included in admission byte credit.
+    /// Channel limits and queue capacity are checked before publishing any
+    /// prefix. An empty collection produces an immediately ready receipt.
+    pub fn enqueue_encoded_with_receipt(
+        &self,
+        signal: OtlpGrpcSignal,
+        requests: Vec<Vec<u8>>,
+    ) -> Result<OtlpGrpcQueueReceipt, ExportError> {
+        self.queue.admit_encoded_with_receipt(
+            Destination::Grpc {
+                exporter: Arc::clone(&self.transport),
+                retry_policy: self.retry_policy.clone(),
+            },
+            signal,
+            requests,
+        )
+    }
+
+    pub(in crate::observability::otel) fn ensure_managed_active(&self) -> Result<(), ExportError> {
+        self.queue.ensure_managed_active()
+    }
+
+    pub(in crate::observability::otel) fn force_flush_blocking(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<(), ExportError> {
+        self.queue.wait_flushed_blocking(timeout, false)
+    }
+
+    pub(in crate::observability::otel) fn shutdown_blocking(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<(), ExportError> {
+        self.queue.wait_flushed_blocking(timeout, true)
     }
 
     /// Collect owned metrics with an explicit Unix point timestamp and admit

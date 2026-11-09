@@ -143,6 +143,17 @@ pub struct OtlpGrpcResponse {
 }
 
 impl OtlpGrpcResponse {
+    #[cfg(test)]
+    pub(super) fn from_encoded_for_test(
+        signal: OtlpGrpcSignal,
+        body: &[u8],
+    ) -> Result<Self, super::OtlpError> {
+        Ok(Self {
+            signal,
+            acknowledgement: decode_otlp_http_response(body)?,
+        })
+    }
+
     /// Signal acknowledged by this receipt.
     #[must_use]
     pub const fn signal(&self) -> OtlpGrpcSignal {
@@ -189,6 +200,10 @@ pub struct OtlpGrpcExportReport {
 }
 
 impl OtlpGrpcExportReport {
+    pub(super) fn from_responses(responses: Vec<OtlpGrpcResponse>) -> Self {
+        Self { responses }
+    }
+
     /// Completed requests in their original send order, including partial
     /// success and warnings. An empty collection has no receipts or I/O.
     #[must_use]
@@ -770,3 +785,11 @@ fn validate_metadata(metadata: &Metadata) -> Result<(), OtlpGrpcError> {
 #[cfg(test)]
 #[path = "grpc_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "grpc/queue_receipt_tests.rs"]
+mod queue_receipt_tests;
+
+#[cfg(test)]
+#[path = "grpc/sdk_metrics_tests.rs"]
+mod sdk_metrics_tests;

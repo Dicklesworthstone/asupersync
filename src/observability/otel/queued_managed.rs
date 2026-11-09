@@ -115,11 +115,16 @@ impl Shared {
             == Err(EXITED)
         {
             self.retire_queue();
+        } else {
+            let mut state = self.queue.state.lock();
+            if !state.sealed {
+                state.acknowledged_owner_ready = true;
+            }
         }
     }
 
     fn retire_queue(&self) {
-        let pending = {
+        let mut pending = {
             let mut state = self.queue.state.lock();
             state.sealed = true;
             state.stats.queued_batches = 0;
@@ -127,6 +132,10 @@ impl Shared {
         };
         let count = pending.len();
         let bytes: usize = pending.iter().map(|batch| batch.bytes).sum();
+        let completions: Vec<_> = pending
+            .iter_mut()
+            .filter_map(|batch| batch.completion.take())
+            .collect();
         // Drop snapshots and captured credentials before returning their
         // accounting credit. The in-flight Delivery has already retired.
         drop(pending);
@@ -134,7 +143,15 @@ impl Shared {
         state.stats.retained_batches -= count;
         state.stats.retained_bytes -= bytes;
         state.stats.failed_batches = state.stats.failed_batches.saturating_add(count as u64);
+        drop(state);
+        // Abandoned receipts resolve only after their retained payloads and
+        // admission credit are gone, just like the in-flight delivery.
+        drop(completions);
+        let mut state = self.queue.state.lock();
         state.stats.consumer_active = false;
+        state.acknowledged_owner_ready = false;
+        drop(state);
+        self.queue.retired.notify_all();
     }
 
     fn request(&self, abort: bool) {

@@ -575,3 +575,102 @@ fn policy_metadata_and_redaction_growth_respect_collection_byte_budget() {
         OwnedOtlpPolicyError::LimitExceeded
     );
 }
+
+#[test]
+fn typed_metric_identity_distinguishes_nonstring_values_and_nested_arrays() {
+    let values = [
+        AnyValueValue::Int(1),
+        AnyValueValue::Int(2),
+        AnyValueValue::Bool(true),
+        AnyValueValue::String("1".to_owned()),
+        AnyValueValue::Array(
+            crate::observability::otlp_proto::common_and_resource::ArrayValue {
+                values: vec![AnyValue {
+                    value: Some(AnyValueValue::Int(1)),
+                    ..AnyValue::default()
+                }],
+                ..Default::default()
+            },
+        ),
+        AnyValueValue::Array(
+            crate::observability::otlp_proto::common_and_resource::ArrayValue {
+                values: vec![AnyValue {
+                    value: Some(AnyValueValue::Int(2)),
+                    ..AnyValue::default()
+                }],
+                ..Default::default()
+            },
+        ),
+    ];
+    let mut metric = Metric {
+        data: Some(MetricData::Gauge(Gauge {
+            data_points: values
+                .into_iter()
+                .map(|value| NumberDataPoint {
+                    attributes: vec![KeyValue {
+                        key: "typed".to_owned(),
+                        value: Some(AnyValue {
+                            value: Some(value),
+                            ..AnyValue::default()
+                        }),
+                        ..KeyValue::default()
+                    }],
+                    ..NumberDataPoint::default()
+                })
+                .collect(),
+            ..Gauge::default()
+        })),
+        ..Metric::default()
+    };
+    assert!(
+        OwnedOtlpExportPolicy::new()
+            .metric(&mut metric, &mut OwnedOtlpPolicyReport::default())
+            .is_ok()
+    );
+    let policy = OwnedOtlpExportPolicy::new()
+        .try_with_privacy(PrivacyConfig::new().with_drop_label("typed"))
+        .unwrap();
+    assert_eq!(
+        policy.metric(&mut metric, &mut OwnedOtlpPolicyReport::default()),
+        Err(OwnedOtlpPolicyError::MetricSeriesCollision)
+    );
+}
+
+#[test]
+fn sdk_metadata_policy_preserves_independent_schemas_and_existing_typed_scope() {
+    let typed = KeyValue {
+        key: "typed".to_owned(),
+        value: Some(AnyValue {
+            value: Some(AnyValueValue::Int(7)),
+            ..AnyValue::default()
+        }),
+        ..KeyValue::default()
+    };
+    let mut resource = Resource {
+        attributes: vec![typed.clone()],
+        ..Resource::default()
+    };
+    let mut scope = InstrumentationScope {
+        name: "sdk".to_owned(),
+        version: "1".to_owned(),
+        attributes: vec![typed],
+        ..InstrumentationScope::default()
+    };
+    let mut resource_schema = "https://example.test/resource".to_owned();
+    let mut scope_schema = "https://example.test/scope".to_owned();
+    let mut report = OwnedOtlpPolicyReport::default();
+    let policy = OwnedOtlpExportPolicy::new();
+    policy
+        .sdk_resource(&mut resource, &mut resource_schema, &mut report)
+        .unwrap();
+    policy
+        .sdk_scope(&mut scope, &mut scope_schema, &mut report)
+        .unwrap();
+    assert_eq!(resource_schema, "https://example.test/resource");
+    assert_eq!(scope_schema, "https://example.test/scope");
+    assert_eq!(
+        scope.attributes[0].value.as_ref().unwrap().value,
+        Some(AnyValueValue::Int(7))
+    );
+    assert_eq!(report, OwnedOtlpPolicyReport::default());
+}

@@ -496,7 +496,72 @@ impl OwnedOtlpExportPolicy {
         })
     }
 
-    fn metric(
+    /// Apply policy to a prevalidated SDK resource without changing a separate
+    /// instrumentation-scope schema URL.
+    pub(super) fn sdk_resource(
+        &self,
+        resource: &mut Resource,
+        schema_url: &mut String,
+        report: &mut OwnedOtlpPolicyReport,
+    ) -> Result<(), OwnedOtlpPolicyError> {
+        merge_sdk_attributes(&mut resource.attributes, &self.resource_attributes)?;
+        resource.dropped_attributes_count = resource
+            .dropped_attributes_count
+            .saturating_add(self.attributes(&mut resource.attributes, report)?);
+        if let Some(override_url) = &self.schema_url {
+            schema_url.clone_from(override_url);
+        }
+        self.redact_opaque_text("resource.schema_url", schema_url, report);
+        Ok(())
+    }
+
+    /// Preserve SDK scope metadata unless the caller explicitly overrides it.
+    pub(super) fn sdk_scope(
+        &self,
+        scope: &mut InstrumentationScope,
+        schema_url: &mut String,
+        report: &mut OwnedOtlpPolicyReport,
+    ) -> Result<(), OwnedOtlpPolicyError> {
+        if let Some((name, version)) = &self.scope {
+            scope.name.clone_from(name);
+            scope.version.clone_from(version);
+        }
+        merge_sdk_attributes(&mut scope.attributes, &self.scope_attributes)?;
+        scope.dropped_attributes_count = scope
+            .dropped_attributes_count
+            .saturating_add(self.attributes(&mut scope.attributes, report)?);
+        self.redact("scope.name", &mut scope.name, 1024, report)?;
+        self.redact("scope.version", &mut scope.version, 1024, report)?;
+        if let Some(override_url) = &self.schema_url {
+            schema_url.clone_from(override_url);
+        }
+        self.redact_opaque_text("scope.schema_url", schema_url, report);
+        Ok(())
+    }
+
+    /// Conservative additional metadata ownership, admitted before copying SDK
+    /// input. Original metadata is charged separately even if an override wins.
+    pub(super) fn sdk_metadata_reserve(&self) -> (usize, usize) {
+        let attributes = |values: &[(String, String)]| {
+            values.iter().fold(0usize, |bytes, (key, value)| {
+                bytes
+                    .saturating_add(key.len())
+                    .saturating_add(value.len())
+                    .saturating_add(std::mem::size_of::<KeyValue>())
+                    .saturating_add(std::mem::size_of::<AnyValue>())
+            })
+        };
+        let schema_bytes = self.schema_url.as_ref().map_or(0, String::len);
+        let resource = attributes(&self.resource_attributes).saturating_add(schema_bytes);
+        let scope = attributes(&self.scope_attributes)
+            .saturating_add(schema_bytes)
+            .saturating_add(self.scope.as_ref().map_or(0, |(name, version)| {
+                name.len().saturating_add(version.len())
+            }));
+        (resource, scope)
+    }
+
+    pub(super) fn metric(
         &self,
         metric: &mut Metric,
         report: &mut OwnedOtlpPolicyReport,
@@ -552,10 +617,10 @@ impl OwnedOtlpExportPolicy {
             }
             identities.push(attributes.as_slice());
         }
-        identities.sort_by(|left, right| super::compare_owned_otlp_attributes(left, right));
+        identities.sort_by(|left, right| compare_policy_attributes(left, right));
         if identities
             .windows(2)
-            .any(|pair| super::compare_owned_otlp_attributes(pair[0], pair[1]).is_eq())
+            .any(|pair| compare_policy_attributes(pair[0], pair[1]).is_eq())
         {
             return Err(OwnedOtlpPolicyError::MetricSeriesCollision);
         }
@@ -634,6 +699,88 @@ impl OwnedOtlpExportPolicy {
 
 fn compact(value: String) -> String {
     value.into_boxed_str().into_string()
+}
+
+fn merge_sdk_attributes(
+    attributes: &mut Vec<KeyValue>,
+    overrides: &[(String, String)],
+) -> Result<(), OwnedOtlpPolicyError> {
+    for (key, value) in overrides {
+        match attributes.binary_search_by(|attribute| attribute.key.cmp(key)) {
+            Ok(index) => attributes[index] = string_attribute(key, value),
+            Err(index) => {
+                if attributes.len() >= OWNED_OTLP_MAX_ATTRIBUTES {
+                    return Err(OwnedOtlpPolicyError::LimitExceeded);
+                }
+                attributes.insert(index, string_attribute(key, value));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compare complete typed attribute identities without serializing or cloning.
+/// Input sets are sorted and validated; floating zero has one semantic identity.
+pub(super) fn compare_policy_attributes(
+    left: &[KeyValue],
+    right: &[KeyValue],
+) -> std::cmp::Ordering {
+    for (left, right) in left.iter().zip(right) {
+        let order = left
+            .key
+            .cmp(&right.key)
+            .then_with(|| compare_policy_values(left.value.as_ref(), right.value.as_ref()));
+        if !order.is_eq() {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn compare_policy_values(left: Option<&AnyValue>, right: Option<&AnyValue>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let left = left.and_then(|value| value.value.as_ref());
+    let right = right.and_then(|value| value.value.as_ref());
+    let tag = |value: Option<&AnyValueValue>| match value {
+        None => 0,
+        Some(AnyValueValue::String(_)) => 1,
+        Some(AnyValueValue::Bool(_)) => 2,
+        Some(AnyValueValue::Int(_)) => 3,
+        Some(AnyValueValue::Double(_)) => 4,
+        Some(AnyValueValue::Array(_)) => 5,
+        Some(AnyValueValue::KeyValueList(_)) => 6,
+        Some(AnyValueValue::Bytes(_)) => 7,
+        Some(AnyValueValue::StringIndex(_)) => 8,
+    };
+    match (left, right) {
+        (Some(AnyValueValue::String(left)), Some(AnyValueValue::String(right))) => left.cmp(right),
+        (Some(AnyValueValue::Bool(left)), Some(AnyValueValue::Bool(right))) => left.cmp(right),
+        (Some(AnyValueValue::Int(left)), Some(AnyValueValue::Int(right))) => left.cmp(right),
+        (Some(AnyValueValue::Double(left)), Some(AnyValueValue::Double(right))) => {
+            if left == right {
+                Ordering::Equal
+            } else {
+                left.total_cmp(right)
+            }
+        }
+        (Some(AnyValueValue::Array(left)), Some(AnyValueValue::Array(right))) => {
+            for (left, right) in left.values.iter().zip(&right.values) {
+                let order = compare_policy_values(Some(left), Some(right));
+                if !order.is_eq() {
+                    return order;
+                }
+            }
+            left.values.len().cmp(&right.values.len())
+        }
+        (Some(AnyValueValue::KeyValueList(left)), Some(AnyValueValue::KeyValueList(right))) => {
+            compare_policy_attributes(&left.values, &right.values)
+        }
+        (Some(AnyValueValue::Bytes(left)), Some(AnyValueValue::Bytes(right))) => left.cmp(right),
+        (Some(AnyValueValue::StringIndex(left)), Some(AnyValueValue::StringIndex(right))) => {
+            left.cmp(right)
+        }
+        _ => tag(left).cmp(&tag(right)),
+    }
 }
 
 fn admit_attributes(

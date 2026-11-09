@@ -6,6 +6,11 @@
 use super::*;
 use std::collections::VecDeque;
 
+#[path = "queued_receipt.rs"]
+mod receipt;
+use receipt::{CompletionToken, ReceiptRegistration};
+pub use receipt::{OtlpGrpcQueueReceipt, OtlpGrpcQueueReceiptError};
+
 #[path = "queued_managed.rs"]
 mod managed;
 pub use managed::{
@@ -19,7 +24,7 @@ pub use grpc::{OtlpGrpcQueueStats, QueuedOtlpGrpcExporter};
 
 /// Maximum admitted batches, including the batch currently being delivered.
 pub const OTLP_EXPORT_QUEUE_MAX_BATCHES: usize = 64;
-/// Maximum admitted snapshot string or encoded request bytes, including the in-flight batch.
+/// Maximum admitted snapshot, configuration, request, and receipt-reservation bytes.
 ///
 /// Container overhead and temporary protobuf/HTTP encodings are additional;
 /// finite point/attribute limits bound those independently.
@@ -33,7 +38,8 @@ pub struct OtlpExportQueueStats {
     pub queued_batches: usize,
     /// Batches admitted but not yet retired, including the current request.
     pub retained_batches: usize,
-    /// Admitted snapshot/configuration bytes and encoded request allocations.
+    /// Admitted snapshot/configuration bytes, encoded request allocations, and
+    /// diagnostic reservations for collections whose receipts are not terminal.
     pub retained_bytes: usize,
     /// Batches acknowledged under the selected transport's delivery contract.
     /// Native gRPC includes terminal partial-success receipts; inspect
@@ -50,6 +56,7 @@ pub struct OtlpExportQueueStats {
 pub(super) struct ExportQueue {
     state: Mutex<QueueState>,
     ready: crate::sync::Notify,
+    retired: parking_lot::Condvar,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +66,7 @@ struct QueueState {
     managed: bool,
     sealed: bool,
     aborted: bool,
+    acknowledged_owner_ready: bool,
     grpc: GrpcPartialStats,
 }
 
@@ -127,12 +135,13 @@ struct Batch {
     payload: Payload,
     destination: Destination,
     bytes: usize,
+    completion: Option<CompletionToken>,
 }
 
 impl ExportQueue {
     pub(super) fn check_flushed(&self) -> Result<(), ExportError> {
         let state = self.state.lock();
-        if state.stats.retained_batches != 0 {
+        if state.stats.retained_batches != 0 || state.stats.retained_bytes != 0 {
             return Err(ExportError::new(
                 "otlp.queue.pending: drive flush_queued or run_queued with an explicit Cx",
             ));
@@ -179,6 +188,7 @@ impl ExportQueue {
                 legacy_retry_compatibility: exporter.legacy_retry_compatibility,
             },
             bytes,
+            completion: None,
         });
         state.stats.retained_batches += 1;
         state.stats.retained_bytes = retained;
@@ -215,13 +225,45 @@ impl ExportQueue {
         signal: OtlpGrpcSignal,
         requests: Vec<Vec<u8>>,
     ) -> Result<usize, ExportError> {
+        self.admit_encoded_inner(destination, signal, requests, None)
+            .map(|(count, _)| count)
+    }
+
+    fn admit_encoded_with_receipt(
+        self: &Arc<Self>,
+        destination: Destination,
+        signal: OtlpGrpcSignal,
+        requests: Vec<Vec<u8>>,
+    ) -> Result<OtlpGrpcQueueReceipt, ExportError> {
+        self.admit_encoded_inner(destination, signal, requests, Some(Arc::downgrade(self)))
+            .map(|(_, receipt)| receipt.expect("acknowledged admission creates its receipt"))
+    }
+
+    fn admit_encoded_inner(
+        &self,
+        destination: Destination,
+        signal: OtlpGrpcSignal,
+        requests: Vec<Vec<u8>>,
+        receipt_queue: Option<std::sync::Weak<Self>>,
+    ) -> Result<(usize, Option<OtlpGrpcQueueReceipt>), ExportError> {
         let count = requests.len();
         if count == 0 {
-            return Ok(0);
+            return Ok((0, receipt_queue.map(|_| OtlpGrpcQueueReceipt::empty())));
+        }
+        if count > OTLP_EXPORT_QUEUE_MAX_BATCHES {
+            return Err(queue_full());
         }
         let configuration_bytes = destination.configuration_bytes()?;
+        let receipt_bytes = if receipt_queue.is_some() {
+            receipt::RESERVED_BYTES_PER_BATCH
+                .checked_mul(count)
+                .ok_or_else(queue_full)?
+        } else {
+            0
+        };
         let mut bytes = configuration_bytes
             .checked_mul(count)
+            .and_then(|bytes| bytes.checked_add(receipt_bytes))
             .ok_or_else(queue_full)?;
         for request in &requests {
             destination.validate_request_size(request.len())?;
@@ -248,9 +290,11 @@ impl ExportQueue {
         {
             return Err(queue_full());
         }
+        let registration =
+            receipt_queue.map(|queue| ReceiptRegistration::new(count, queue, receipt_bytes));
         // One collection is one admission decision. Publishing a prefix here
         // would make a capacity retry duplicate the earlier accepted spans.
-        for request in requests {
+        for (index, request) in requests.into_iter().enumerate() {
             let bytes = request.capacity() + configuration_bytes;
             state.pending.push_back(Batch {
                 payload: Payload::Encoded {
@@ -259,6 +303,9 @@ impl ExportQueue {
                 },
                 destination: destination.clone(),
                 bytes,
+                completion: registration
+                    .as_ref()
+                    .map(|registration| registration.token(index)),
             });
         }
         state.stats.retained_batches = retained_batches;
@@ -266,7 +313,7 @@ impl ExportQueue {
         state.stats.queued_batches = state.pending.len();
         drop(state);
         self.ready.notify_one();
-        Ok(count)
+        Ok((count, registration.map(ReceiptRegistration::into_receipt)))
     }
 
     async fn flush_prefix(&self, cx: &crate::Cx, timestamp: u64) -> Result<usize, ExportError> {
@@ -352,6 +399,7 @@ struct Consumer<'a> {
 impl Drop for Consumer<'_> {
     fn drop(&mut self) {
         self.queue.state.lock().stats.consumer_active = false;
+        self.queue.retired.notify_all();
     }
 }
 
@@ -392,11 +440,18 @@ impl Delivery<'_> {
                 // delivery keeps its original credit until terminal retirement;
                 // retry shares this same body without another payload copy.
                 let body = std::mem::take(body);
-                let response = match retry_policy {
+                let response = match match retry_policy {
                     Some(policy) => exporter.send_with_retry(cx, *signal, body, policy).await,
                     None => exporter.send_once(cx, *signal, body).await,
-                }
-                .map_err(|error| ExportError::new(error.to_string()))?;
+                } {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Some(completion) = &mut batch.completion {
+                            completion.fail(error.kind().code(), error.grpc_code());
+                        }
+                        return Err(ExportError::new(error.to_string()));
+                    }
+                };
                 if response.is_partial_success() {
                     let mut state = self.queue.state.lock();
                     state.grpc.batches = state.grpc.batches.saturating_add(1);
@@ -409,6 +464,9 @@ impl Delivery<'_> {
                 }
                 // A valid partial receipt ends this request. Its rejected
                 // items are counted separately; later batches may proceed.
+                if let Some(completion) = &mut batch.completion {
+                    completion.acknowledge(response);
+                }
             }
         }
         self.delivered = true;
@@ -418,8 +476,9 @@ impl Delivery<'_> {
 
 impl Drop for Delivery<'_> {
     fn drop(&mut self) {
-        let batch = self.batch.take().expect("delivery retires once");
+        let mut batch = self.batch.take().expect("delivery retires once");
         let bytes = batch.bytes;
+        let completion = batch.completion.take();
         // Release retained snapshots before returning admission credit.
         drop(batch);
         let mut state = self.queue.state.lock();
@@ -430,6 +489,10 @@ impl Drop for Delivery<'_> {
         } else {
             state.stats.failed_batches = state.stats.failed_batches.saturating_add(1);
         }
+        drop(state);
+        self.queue.retired.notify_all();
+        // Publish only after the payload and its admission credit retire.
+        drop(completion);
     }
 }
 
