@@ -177,6 +177,28 @@ impl EncodingPipeline {
         self.encode_internal(object_id, data, None)
     }
 
+    /// Encodes owned bytes with an iterator that can move between worker jobs.
+    ///
+    /// The iterator retains the input, symbol pool, block position, and current
+    /// systematic encoder. Moving it does not restart encoding or rebuild the
+    /// current block's repair matrix. Like [`Self::encode`], each call to
+    /// `next` performs synchronous work; callers choose where to execute it.
+    ///
+    /// Configuration errors are delivered by the first iterator item, just as
+    /// they are for the borrowing iterator. No symbols are generated here.
+    pub fn encode_owned(self, object_id: ObjectId, data: Vec<u8>) -> OwnedEncodingIterator {
+        let mut pipeline = self;
+        let cursor = {
+            let iterator = pipeline.encode(object_id, &data);
+            iterator.cursor
+        };
+        OwnedEncodingIterator {
+            pipeline,
+            data,
+            cursor,
+        }
+    }
+
     /// Encodes data with an explicit repair count per block.
     pub fn encode_with_repair<'a>(
         &'a mut self,
@@ -289,16 +311,18 @@ impl EncodingPipeline {
 
         EncodingIterator {
             pipeline: self,
-            object_id,
             data,
-            blocks,
-            block_index: 0,
-            esi: 0,
-            symbol_size,
-            repair_override,
-            plan_error,
-            systematic_encoder: None,
-            systematic_block_index: None,
+            cursor: EncodingCursor {
+                object_id,
+                blocks,
+                block_index: 0,
+                esi: 0,
+                symbol_size,
+                repair_override,
+                plan_error,
+                systematic_encoder: None,
+                systematic_block_index: None,
+            },
         }
     }
 
@@ -319,16 +343,18 @@ impl EncodingPipeline {
 
         EncodingIterator {
             pipeline: self,
-            object_id,
             data,
-            blocks,
-            block_index: 0,
-            esi: 0,
-            symbol_size,
-            repair_override,
-            plan_error,
-            systematic_encoder: None,
-            systematic_block_index: None,
+            cursor: EncodingCursor {
+                object_id,
+                blocks,
+                block_index: 0,
+                esi: 0,
+                symbol_size,
+                repair_override,
+                plan_error,
+                systematic_encoder: None,
+                systematic_block_index: None,
+            },
         }
     }
 
@@ -494,8 +520,51 @@ fn validate_source_block_k(
 /// Iterator over encoded symbols.
 pub struct EncodingIterator<'a> {
     pipeline: &'a mut EncodingPipeline,
-    object_id: ObjectId,
     data: &'a [u8],
+    cursor: EncodingCursor,
+}
+
+impl Iterator for EncodingIterator<'_> {
+    type Item = Result<EncodedSymbol, EncodingError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.cursor.next(self.pipeline, self.data)
+    }
+}
+
+/// An encoding iterator that owns its input and all incremental encoder state.
+///
+/// Created by [`EncodingPipeline::encode_owned`]. It can be moved into a
+/// blocking job, advanced by a bounded number of symbols, and returned to its
+/// caller without borrowing input or reconstructing the current repair matrix.
+/// It uses the same encoding implementation and symbol order as
+/// [`EncodingIterator`]; it does not create threads or perform asynchronous I/O.
+pub struct OwnedEncodingIterator {
+    pipeline: EncodingPipeline,
+    data: Vec<u8>,
+    cursor: EncodingCursor,
+}
+
+impl OwnedEncodingIterator {
+    /// Statistics for symbols generated so far, independent of transport acceptance.
+    #[must_use]
+    pub const fn stats(&self) -> EncodingStats {
+        self.pipeline.stats()
+    }
+}
+
+impl Iterator for OwnedEncodingIterator {
+    type Item = Result<EncodedSymbol, EncodingError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.cursor.next(&mut self.pipeline, &self.data)
+    }
+}
+
+// The borrowed and owned entry points share one cursor and one implementation.
+// In particular, the expensive systematic encoder moves with the cursor.
+struct EncodingCursor {
+    object_id: ObjectId,
     blocks: Vec<BlockPlan>,
     block_index: usize,
     esi: u32,
@@ -506,10 +575,12 @@ pub struct EncodingIterator<'a> {
     systematic_block_index: Option<usize>,
 }
 
-impl Iterator for EncodingIterator<'_> {
-    type Item = Result<EncodedSymbol, EncodingError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl EncodingCursor {
+    fn next(
+        &mut self,
+        pipeline: &mut EncodingPipeline,
+        data: &[u8],
+    ) -> Option<Result<EncodedSymbol, EncodingError>> {
         if let Some(err) = self.plan_error.take() {
             return Some(Err(err));
         }
@@ -526,7 +597,7 @@ impl Iterator for EncodingIterator<'_> {
             }
 
             let repair = u32::try_from(self.repair_override.unwrap_or_else(|| {
-                compute_repair_count(block.k, self.pipeline.config.repair_overhead)
+                compute_repair_count(block.k, pipeline.config.repair_overhead)
             }))
             .unwrap_or(u32::MAX);
             let total = k.saturating_add(repair);
@@ -543,9 +614,9 @@ impl Iterator for EncodingIterator<'_> {
             self.esi = self.esi.saturating_add(1);
 
             let result = if esi < k {
-                self.emit_source(&block, esi)
+                self.emit_source(pipeline, data, &block, esi)
             } else {
-                self.emit_repair(&block, esi)
+                self.emit_repair(pipeline, data, &block, esi)
             };
 
             return Some(result.map(EncodedSymbol::new));
@@ -553,11 +624,15 @@ impl Iterator for EncodingIterator<'_> {
 
         None
     }
-}
 
-impl EncodingIterator<'_> {
-    fn emit_source(&mut self, block: &BlockPlan, esi: u32) -> Result<Symbol, EncodingError> {
-        let mut buffer = self.pipeline.allocate_buffer(self.symbol_size)?;
+    fn emit_source(
+        &mut self,
+        pipeline: &mut EncodingPipeline,
+        data: &[u8],
+        block: &BlockPlan,
+        esi: u32,
+    ) -> Result<Symbol, EncodingError> {
+        let mut buffer = pipeline.allocate_buffer(self.symbol_size)?;
         let start = block.start + (esi as usize * self.symbol_size);
         let end = min(start + self.symbol_size, block.end());
         let copy_len = end.saturating_sub(start);
@@ -567,11 +642,11 @@ impl EncodingIterator<'_> {
         }
 
         if copy_len > 0 {
-            let slice = &self.data[start..end];
+            let slice = &data[start..end];
             buffer[..slice.len()].copy_from_slice(slice);
         }
 
-        self.pipeline.stats.source_symbols += 1;
+        pipeline.stats.source_symbols += 1;
         Ok(Symbol::new(
             SymbolId::new(self.object_id, block.sbn, esi),
             buffer,
@@ -579,11 +654,17 @@ impl EncodingIterator<'_> {
         ))
     }
 
-    fn emit_repair(&mut self, block: &BlockPlan, esi: u32) -> Result<Symbol, EncodingError> {
-        let mut buffer = self.pipeline.allocate_buffer(self.symbol_size)?;
+    fn emit_repair(
+        &mut self,
+        pipeline: &mut EncodingPipeline,
+        data: &[u8],
+        block: &BlockPlan,
+        esi: u32,
+    ) -> Result<Symbol, EncodingError> {
+        let mut buffer = pipeline.allocate_buffer(self.symbol_size)?;
         buffer.fill(0);
 
-        let encoder = self.systematic_encoder_for(block)?;
+        let encoder = self.systematic_encoder_for(data, block)?;
         let repair = encoder.repair_symbol(esi);
         if repair.len() != self.symbol_size {
             return Err(EncodingError::ComputationFailed {
@@ -596,7 +677,7 @@ impl EncodingIterator<'_> {
         }
         buffer.copy_from_slice(&repair);
 
-        self.pipeline.stats.repair_symbols += 1;
+        pipeline.stats.repair_symbols += 1;
         Ok(Symbol::new(
             SymbolId::new(self.object_id, block.sbn, esi),
             buffer,
@@ -606,11 +687,12 @@ impl EncodingIterator<'_> {
 
     fn systematic_encoder_for(
         &mut self,
+        data: &[u8],
         block: &BlockPlan,
     ) -> Result<&SystematicEncoder, EncodingError> {
         let needs_rebuild = self.systematic_block_index != Some(self.block_index);
         if needs_rebuild {
-            let source_symbols = build_source_symbols(self.data, block, self.symbol_size);
+            let source_symbols = build_source_symbols(data, block, self.symbol_size);
             let seed = seed_for_block(self.object_id, block.sbn);
             let encoder = SystematicEncoder::new(&source_symbols, self.symbol_size, seed)
                 .ok_or_else(|| EncodingError::ComputationFailed {

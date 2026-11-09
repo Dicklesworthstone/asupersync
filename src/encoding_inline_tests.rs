@@ -611,3 +611,134 @@
         assert_eq!(stats.bytes_in, 0);
         assert_eq!(stats.source_symbols, 0);
     }
+
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn owned_encoding_moves_between_jobs_without_restarting_progress() {
+        let config = test_config(4, 20, 1.5);
+        let object = ObjectId::new_for_test(81);
+        let data: Vec<u8> = (0..61).collect();
+        let mut borrowed = EncodingPipeline::new(config.clone(), pool_for(4, 64));
+        let expected = borrowed
+            .encode(object, &data)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let expected_stats = borrowed.stats();
+        let mut owned = EncodingPipeline::new(config, pool_for(4, 64))
+            .encode_owned(object, data);
+        let mut actual = Vec::new();
+
+        loop {
+            // Returning the iterator through the join moves every piece of
+            // progress, including a partially emitted block's repair matrix.
+            let (returned, batch) = std::thread::spawn(move || {
+                let batch = owned
+                    .by_ref()
+                    .take(3)
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                (owned, batch)
+            })
+            .join()
+            .unwrap();
+            owned = returned;
+            if batch.is_empty() {
+                break;
+            }
+            actual.extend(batch);
+        }
+
+        assert_eq!(actual.len(), 26);
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual.id(), expected.id());
+            assert_eq!(actual.kind(), expected.kind());
+            assert_eq!(actual.symbol().data(), expected.symbol().data());
+        }
+        for sbn in 0..3 {
+            let ids: Vec<_> = actual
+                .iter()
+                .filter(|symbol| symbol.id().sbn() == sbn)
+                .map(|symbol| symbol.id().esi())
+                .collect();
+            assert_eq!(ids, (0..8).collect::<Vec<_>>());
+        }
+        let stats = owned.stats();
+        assert_eq!(stats.bytes_in, 61);
+        assert_eq!(stats.blocks, 4);
+        assert_eq!(stats.source_symbols, 16);
+        assert_eq!(stats.repair_symbols, 10);
+        assert_eq!(stats.source_symbols, expected_stats.source_symbols);
+        assert_eq!(stats.repair_symbols, expected_stats.repair_symbols);
+        assert!(owned.next().is_none());
+    }
+
+    #[test]
+    fn owned_encoding_preserves_non_aligned_block_bytes_and_empty_input() {
+        let object = ObjectId::new_for_test(82);
+        let mut owned = EncodingPipeline::new(test_config(4, 6, 1.0), pool_for(4, 8))
+            .encode_owned(object, b"ABCDEFGHIJKLM".to_vec());
+        let expected = [
+            (0, 0, vec![b'A', b'B', b'C', b'D']),
+            (0, 1, vec![b'E', b'F', 0, 0]),
+            (1, 0, vec![b'G', b'H', b'I', b'J']),
+            (1, 1, vec![b'K', b'L', 0, 0]),
+            (2, 0, vec![b'M', 0, 0, 0]),
+        ];
+        for (sbn, esi, bytes) in expected {
+            let symbol = owned.next().unwrap().unwrap();
+            assert_eq!(symbol.id(), SymbolId::new(object, sbn, esi));
+            assert_eq!(symbol.kind(), SymbolKind::Source);
+            assert_eq!(symbol.symbol().data(), bytes);
+        }
+        assert!(owned.next().is_none());
+        assert_eq!(owned.stats().source_symbols, 5);
+
+        let mut empty = EncodingPipeline::new(test_config(4, 6, 1.0), pool_for(4, 8))
+            .encode_owned(object, Vec::new());
+        assert!(empty.next().is_none());
+        assert_eq!(empty.stats().bytes_in, 0);
+        assert_eq!(empty.stats().blocks, 0);
+        assert_eq!(empty.stats().source_symbols, 0);
+        assert_eq!(empty.stats().repair_symbols, 0);
+    }
+
+    #[test]
+    fn owned_encoding_retains_validation_and_pool_failure_boundaries() {
+        let object = ObjectId::new_for_test(83);
+        let mut invalid = EncodingPipeline::new(
+            test_config(4, 0, 1.0),
+            pool_for(4, 8),
+        )
+        .encode_owned(object, vec![1; 4]);
+        assert!(matches!(
+            invalid.next().unwrap(),
+            Err(EncodingError::InvalidConfig { .. })
+        ));
+        assert!(invalid.next().is_none());
+
+        let mut oversized = EncodingPipeline::new(
+            test_config(1, 1, 1.0),
+            pool_for(1, 8),
+        )
+        .encode_owned(object, vec![1; 257]);
+        assert!(matches!(
+            oversized.next().unwrap(),
+            Err(EncodingError::DataTooLarge { size: 257, limit: 256 })
+        ));
+        assert!(oversized.next().is_none());
+
+        let mut exhausted = EncodingPipeline::new(
+            test_config(4, 16, 1.0),
+            pool_for(4, 1),
+        )
+        .encode_owned(object, b"abcdefgh".to_vec());
+        let first = exhausted.next().unwrap().unwrap();
+        assert_eq!(first.symbol().data(), b"abcd");
+        assert!(matches!(
+            exhausted.next().unwrap(),
+            Err(EncodingError::PoolExhausted)
+        ));
+        assert_eq!(exhausted.stats().source_symbols, 1);
+    }
