@@ -789,3 +789,171 @@ fn request_extensions_retire_with_input_on_every_terminal_path() {
         assert!(lease.restricted_drop.load(Ordering::SeqCst));
     }
 }
+
+
+// The input itself can publish cancellation during its poll. Keep the real
+// reflection source owner and its !Unpin input in the test, with a transition
+// immediately before the input poll returns.
+#[derive(Clone, Copy, Debug)]
+enum InputPollCompletion {
+    Pending,
+    Eof,
+    Message,
+    Error,
+}
+
+struct TransitionSource {
+    input: Pin<Box<Source>>,
+    transition: Box<dyn Fn() + Send>,
+    shared: Arc<Shared>,
+    active_at_drop: Arc<AtomicUsize>,
+}
+
+impl Streaming for TransitionSource {
+    type Message = Bytes;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, Status>>> {
+        let this = self.get_mut();
+        let result = this.input.as_mut().poll_next(task);
+        (this.transition)();
+        result
+    }
+}
+
+impl Drop for TransitionSource {
+    fn drop(&mut self) {
+        self.active_at_drop
+            .store(self.shared.active.load(Ordering::Acquire), Ordering::SeqCst);
+    }
+}
+
+fn assert_input_transition_is_terminal(
+    service: &ReflectionRpcService,
+    cx: &Cx,
+    completion: InputPollCompletion,
+    transition: impl Fn() + Send + 'static,
+    expected: Code,
+) {
+    let items = match completion {
+        InputPollCompletion::Message => vec![Ok(Bytes::from_static(LIST))],
+        InputPollCompletion::Error => vec![Err(Status::data_loss("input error before return"))],
+        InputPollCompletion::Pending | InputPollCompletion::Eof => vec![],
+    };
+    let (input, witness) = source(items, matches!(completion, InputPollCompletion::Eof));
+    let active_at_drop = Arc::new(AtomicUsize::new(usize::MAX));
+    let input = TransitionSource {
+        input: Box::pin(input),
+        transition: Box::new(transition),
+        shared: Arc::clone(&service.shared),
+        active_at_drop: Arc::clone(&active_at_drop),
+    };
+    assert!(!cx.is_cancel_requested(), "admission must precede the transition");
+    let (mut output, _) = service.open_stream(cx, input).unwrap().into_parts();
+    assert_eq!(service.active_streams(), 1);
+    let mut task = Context::from_waker(Waker::noop());
+    match output.as_mut().poll_next(&mut task) {
+        Poll::Ready(Some(Err(status))) => assert_eq!(status.code(), expected, "{completion:?}"),
+        other => panic!("{completion:?} must publish one terminal error in the same poll: {other:?}"),
+    }
+    assert_eq!(witness.polls.load(Ordering::SeqCst), 1, "the input reached its transition");
+    assert_eq!(witness.drops.load(Ordering::SeqCst), 1, "terminal input is retired");
+    assert!(witness.restricted_drop.load(Ordering::SeqCst));
+    assert_eq!(active_at_drop.load(Ordering::SeqCst), 1, "input retires before capacity");
+    assert_eq!(service.active_streams(), 0);
+    assert!(matches!(output.as_mut().poll_next(&mut task), Poll::Ready(None)));
+    assert_eq!(witness.polls.load(Ordering::SeqCst), 1, "terminal streams never repoll input");
+}
+
+async fn cancellation_during_input_poll_scenario(parent: Cx) {
+    use crate::cx::ChildRegionSpec;
+
+    let parent = parent.with_remote_cap(RemoteCap::new());
+    let service = rpc(
+        registry().allow_anonymous(),
+        ReflectionRpcConfig { max_streams: 1, ..ReflectionRpcConfig::default() },
+    );
+    for (kind, expected) in [
+        (CancelKind::User, Code::Cancelled),
+        (CancelKind::Timeout, Code::DeadlineExceeded),
+        (CancelKind::PollQuota, Code::ResourceExhausted),
+    ] {
+        for completion in [
+            InputPollCompletion::Pending,
+            InputPollCompletion::Eof,
+            InputPollCompletion::Message,
+            InputPollCompletion::Error,
+        ] {
+            let region = parent.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let signal = region.cx().clone();
+            assert_input_transition_is_terminal(&service, region.cx(), completion, move || {
+                signal.cancel_fast(kind);
+                assert!(signal.is_cancel_requested(), "source published cancellation before return");
+            }, expected);
+            region.close().await.unwrap();
+        }
+    }
+}
+
+#[test]
+fn same_poll_input_cancellation_is_terminal_on_native_one_and_four_workers() {
+    use crate::runtime::RuntimeBuilder;
+    use std::time::Duration;
+
+    for workers in [1, 4] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }.build().unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let completed = Arc::clone(&finished);
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            crate::time::timeout(
+                cx.now(),
+                Duration::from_secs(5),
+                cancellation_during_input_poll_scenario(cx),
+            ).await.expect("reflection input cancellation watchdog");
+            completed.store(true, Ordering::SeqCst);
+        }));
+        assert!(finished.load(Ordering::SeqCst));
+        let report = runtime.shutdown_drained(Duration::from_secs(3));
+        assert_eq!(report.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.pending_obligations, 0);
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn input_poll_reaching_exact_deadline_is_terminal_without_another_poll() {
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId, Time};
+
+    for completion in [
+        InputPollCompletion::Pending,
+        InputPollCompletion::Eof,
+        InputPollCompletion::Message,
+        InputPollCompletion::Error,
+    ] {
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let deadline = Time::from_millis(5);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::new().with_deadline(deadline),
+            None, None, None, Some(timer.clone()), None,
+        ).with_remote_cap(RemoteCap::new());
+        let service = rpc(registry().allow_anonymous(), ReflectionRpcConfig::default());
+        let observation = cx.clone();
+        assert_input_transition_is_terminal(&service, &cx, completion, move || {
+            clock.advance_to(deadline);
+            assert_eq!(observation.now(), deadline, "source returned exactly at the deadline");
+        }, Code::DeadlineExceeded);
+        assert!(timer.is_empty(), "terminal source releases its deadline registration");
+    }
+}

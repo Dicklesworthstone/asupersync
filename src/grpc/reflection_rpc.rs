@@ -463,7 +463,20 @@ impl Streaming for ReflectionStream {
         if this.deadline.as_mut().is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready()) {
             return this.fail(Status::deadline_exceeded("reflection deadline exceeded"));
         }
-        match this.source.as_mut().expect("live reflection input").as_mut().poll_next(task) {
+        let next = this.source.as_mut().expect("live reflection input").as_mut().poll_next(task);
+        // Input polling can publish cancellation or use the remaining deadline.
+        // Recheck before classifying even EOF or an error: otherwise a terminal
+        // input poll could turn an already-cancelled RPC into clean completion.
+        // Retire any produced item before releasing source ownership and capacity.
+        if let Err(status) = checkpoint(&this.cx) {
+            drop(next);
+            return this.fail(status);
+        }
+        if this.deadline.as_mut().is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready()) {
+            drop(next);
+            return this.fail(Status::deadline_exceeded("reflection deadline exceeded"));
+        }
+        match next {
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => { this.finish(); Poll::Ready(None) }
             Poll::Ready(Some(Err(status))) => this.fail(status),
