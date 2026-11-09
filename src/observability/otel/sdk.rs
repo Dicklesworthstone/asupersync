@@ -4,6 +4,9 @@
 //! Delivery runs in a caller-started managed native queue; this module creates
 //! no runtime, global provider, periodic reader, or background thread.
 
+mod common;
 mod metrics;
+mod traces;
 
 pub use metrics::{OtlpSdkMetricExporter, OtlpSdkMetricsConfig, OtlpSdkMetricsError};
+pub use traces::{OtlpSdkSpanExporter, OtlpSdkTraceConfig, OtlpSdkTraceError};

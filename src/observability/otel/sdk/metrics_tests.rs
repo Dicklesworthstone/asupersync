@@ -2,12 +2,15 @@ use super::*;
 use crate::grpc::client::Channel;
 use crate::observability::metrics::MetricsProvider;
 use crate::observability::otel::{OtelMetrics, OtlpGrpcExporter, PrivacyConfig};
+use crate::observability::otlp_proto::common_and_resource::AnyValueValue;
 use opentelemetry::metrics::MeterProvider;
-use opentelemetry::{InstrumentationScope as SdkScope, KeyValue as SdkAttribute};
+use opentelemetry::{Array, InstrumentationScope as SdkScope, KeyValue as SdkAttribute};
 use opentelemetry_sdk::metrics::{
     Aggregation, Instrument, PeriodicReader, SdkMeterProvider, Stream,
 };
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
+use std::time::UNIX_EPOCH;
 
 type MappingResult = Result<OwnedOtlpPolicyOutput<Vec<Vec<u8>>>, OtlpSdkMetricsError>;
 
@@ -725,4 +728,145 @@ fn default_empty_sdk_collection_and_diagnostics_are_value_free() {
     );
     assert!(!format!("{exporter:?}").contains(secret));
     assert!(!format!("{}", OtlpSdkMetricsError::InvalidAttributes).contains(secret));
+}
+
+#[test]
+fn all_admitted_sdk_scopes_share_one_request_without_losing_metadata() {
+    let output = capture(
+        OtlpSdkMetricsConfig::new(),
+        OwnedOtlpExportPolicy::new(),
+        Temporality::Cumulative,
+        |provider| {
+            for index in 0..128_i64 {
+                let scope = SdkScope::builder(format!("scope.{index:03}"))
+                    .with_version("2")
+                    .with_schema_url(format!("https://example.test/scope/{index}"))
+                    .with_attributes([SdkAttribute::new("scope.index", index)])
+                    .build();
+                provider
+                    .meter_with_scope(scope)
+                    .u64_counter("counter")
+                    .build()
+                    .add(1, &[SdkAttribute::new("point.index", index)]);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        output.output().len(),
+        1,
+        "small scopes share native RPC capacity"
+    );
+    let requests = decoded(&output);
+    let resource = &requests[0].resource_metrics[0];
+    assert_eq!(resource.schema_url, "https://example.test/resource");
+    assert_eq!(resource.scope_metrics.len(), 128);
+    let mut seen = BTreeSet::new();
+    for group in &resource.scope_metrics {
+        let scope = group.scope.as_ref().unwrap();
+        let AnyValueValue::Int(index) = attribute(&scope.attributes, "scope.index") else {
+            panic!("typed scope index")
+        };
+        assert!(seen.insert(*index));
+        assert_eq!(scope.name, format!("scope.{index:03}"));
+        assert_eq!(scope.version, "2");
+        assert_eq!(
+            group.schema_url,
+            format!("https://example.test/scope/{index}")
+        );
+        assert_eq!(group.metrics.len(), 1);
+        let Some(MetricData::Sum(sum)) = &group.metrics[0].data else {
+            panic!("sum")
+        };
+        assert_eq!(sum.data_points.len(), 1);
+        assert_eq!(
+            attribute(&sum.data_points[0].attributes, "point.index"),
+            &AnyValueValue::Int(*index)
+        );
+        assert_eq!(sum.data_points[0].value, Some(NumberDataPointValue::Int(1)));
+    }
+    assert_eq!(seen.len(), 128);
+}
+
+#[test]
+fn packed_sdk_scopes_roll_requests_at_the_shared_byte_bound() {
+    let output = capture(
+        OtlpSdkMetricsConfig::new().with_max_request_bytes(512),
+        OwnedOtlpExportPolicy::new(),
+        Temporality::Cumulative,
+        |provider| {
+            for index in 0..20_i64 {
+                provider
+                    .meter(format!("scope.{index:02}"))
+                    .u64_counter("counter")
+                    .build()
+                    .add(1, &[SdkAttribute::new("index", index)]);
+            }
+        },
+    )
+    .unwrap();
+    assert!(output.output().len() > 1);
+    assert!(
+        output.output().len() < 20,
+        "small groups are actually packed"
+    );
+    assert!(output.output().iter().all(|bytes| bytes.len() <= 512));
+    let requests = decoded(&output);
+    let mut seen = BTreeSet::new();
+    for request in &requests {
+        for group in &request.resource_metrics[0].scope_metrics {
+            let Some(MetricData::Sum(sum)) = &group.metrics[0].data else {
+                panic!("sum")
+            };
+            let AnyValueValue::Int(index) = attribute(&sum.data_points[0].attributes, "index")
+            else {
+                panic!("typed index")
+            };
+            assert!(seen.insert(*index));
+            assert_eq!(
+                group.scope.as_ref().unwrap().name,
+                format!("scope.{index:02}")
+            );
+        }
+    }
+    assert_eq!(seen.len(), 20, "every scope survives request rollover");
+}
+
+#[test]
+fn policy_collapsed_scopes_do_not_duplicate_metric_descriptors_in_one_request() {
+    let policy = OwnedOtlpExportPolicy::new()
+        .try_with_scope("merged", "1")
+        .unwrap();
+    let output = capture(
+        OtlpSdkMetricsConfig::new(),
+        policy,
+        Temporality::Cumulative,
+        |provider| {
+            for index in 0..4_i64 {
+                provider
+                    .meter(format!("source.{index}"))
+                    .u64_counter("counter")
+                    .build()
+                    .add(1, &[SdkAttribute::new("index", index)]);
+            }
+        },
+    )
+    .unwrap();
+    let requests = decoded(&output);
+    let mut seen = BTreeSet::new();
+    for request in &requests {
+        let resource = &request.resource_metrics[0];
+        assert_eq!(resource.scope_metrics.len(), 1);
+        let scope = &resource.scope_metrics[0];
+        assert_eq!(scope.scope.as_ref().unwrap().name, "merged");
+        assert_eq!(scope.metrics.len(), 1);
+        let Some(MetricData::Sum(sum)) = &scope.metrics[0].data else {
+            panic!("sum")
+        };
+        let AnyValueValue::Int(index) = attribute(&sum.data_points[0].attributes, "index") else {
+            panic!("typed index")
+        };
+        assert!(seen.insert(*index));
+    }
+    assert_eq!(seen.len(), 4, "disjoint post-policy series remain distinct");
 }

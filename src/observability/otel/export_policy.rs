@@ -627,7 +627,7 @@ impl OwnedOtlpExportPolicy {
         Ok(())
     }
 
-    fn span(
+    pub(super) fn span(
         &self,
         span: &mut crate::observability::otlp_proto::trace::Span,
         report: &mut OwnedOtlpPolicyReport,

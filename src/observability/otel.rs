@@ -96,7 +96,10 @@ pub use export_policy::{
 #[cfg(not(target_arch = "wasm32"))]
 mod sdk;
 #[cfg(not(target_arch = "wasm32"))]
-pub use sdk::{OtlpSdkMetricExporter, OtlpSdkMetricsConfig, OtlpSdkMetricsError};
+pub use sdk::{
+    OtlpSdkMetricExporter, OtlpSdkMetricsConfig, OtlpSdkMetricsError,
+    OtlpSdkSpanExporter, OtlpSdkTraceConfig, OtlpSdkTraceError,
+};
 
 // =============================================================================
 // Cardinality Management

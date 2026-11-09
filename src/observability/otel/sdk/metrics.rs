@@ -1,5 +1,6 @@
 //! Bounded OpenTelemetry SDK 0.32 metrics mapping and acknowledged delivery.
 
+use super::common::{self, SdkValueError, ValueBudget, attribute_nodes};
 use crate::grpc::protobuf::ProtoMessage;
 use crate::observability::otel::export_policy::compare_policy_attributes;
 use crate::observability::otel::{
@@ -8,7 +9,7 @@ use crate::observability::otel::{
 };
 use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
 use crate::observability::otlp_proto::common_and_resource::{
-    AnyValue, AnyValueValue, ArrayValue, InstrumentationScope, KeyValue, Resource,
+    InstrumentationScope, KeyValue, Resource,
 };
 use crate::observability::otlp_proto::metrics::{
     AggregationTemporality, Exemplar, ExemplarValue, ExponentialHistogram,
@@ -16,7 +17,7 @@ use crate::observability::otlp_proto::metrics::{
     HistogramDataPoint, Metric, MetricData, NumberDataPoint, NumberDataPointValue, ResourceMetrics,
     ScopeMetrics, Sum,
 };
-use opentelemetry::{Array, Value};
+use opentelemetry::Value;
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::metrics::Temporality;
 use opentelemetry_sdk::metrics::data::{
@@ -24,18 +25,18 @@ use opentelemetry_sdk::metrics::data::{
 };
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
+
+#[path = "metrics_batch.rs"]
+mod batch;
+use batch::MetricsRequests;
 
 const MAX_SCOPES: usize = 128;
 const MAX_METRICS: usize = 4096;
 const MAX_POINTS: usize = 16_384;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REQUESTS: usize = 64;
-const MAX_ATTRIBUTES: usize = 128;
-const MAX_VALUES: usize = 65_536;
-const MAX_ARRAY_ITEMS: usize = 128;
 const MAX_EXEMPLARS: usize = 128;
 const MAX_BUCKETS: usize = 4096;
 const POINTS_PER_METRIC_REQUEST: usize = 1000;
@@ -100,15 +101,27 @@ impl From<OwnedOtlpPolicyError> for OtlpSdkMetricsError {
     }
 }
 
+impl From<SdkValueError> for OtlpSdkMetricsError {
+    fn from(error: SdkValueError) -> Self {
+        match error {
+            SdkValueError::LimitExceeded => Self::LimitExceeded,
+            SdkValueError::InvalidAttributes => Self::InvalidAttributes,
+            SdkValueError::InvalidNumericValue => Self::InvalidNumericValue,
+            SdkValueError::InvalidTimestamp => Self::InvalidTimestamp,
+        }
+    }
+}
+
 /// Finite, immutable limits admitted by [`OtlpSdkMetricExporter::try_with_config`].
 ///
 /// The default admits at most 128 scopes, 4096 metrics, 16384 points, and 4 MiB
 /// of input accounting and final encoded requests. Individual point/attribute
 /// arrays, exemplars, and buckets also retain the owned protobuf schema bounds.
 /// Container storage is charged conservatively before copying SDK input.
-/// Collections produce at most 64 requests; separate SDK scopes retain separate
-/// request groups, and large metrics split at point boundaries without changing
-/// their cumulative start time or duplicating a descriptor within a request.
+/// Collections produce at most 64 requests. Distinct SDK scopes retain their
+/// metadata while sharing bounded requests. Large metrics split at point
+/// boundaries without changing their cumulative start time or duplicating a
+/// descriptor for the same scope within a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OtlpSdkMetricsConfig {
     max_scopes: usize,
@@ -346,8 +359,7 @@ fn sdk_error(code: &'static str) -> OTelSdkError {
 
 struct InputBudget {
     config: OtlpSdkMetricsConfig,
-    bytes: usize,
-    values: usize,
+    values: ValueBudget,
     points: usize,
     metrics: usize,
     scopes: usize,
@@ -357,8 +369,7 @@ impl InputBudget {
     fn new(config: OtlpSdkMetricsConfig) -> Self {
         Self {
             config,
-            bytes: 0,
-            values: 0,
+            values: ValueBudget::new(config.max_collection_bytes),
             points: 0,
             metrics: 0,
             scopes: 0,
@@ -366,87 +377,18 @@ impl InputBudget {
     }
 
     fn bytes(&mut self, amount: usize) -> Result<(), OtlpSdkMetricsError> {
-        self.bytes = self
-            .bytes
-            .checked_add(amount)
-            .filter(|bytes| *bytes <= self.config.max_collection_bytes)
-            .ok_or(OtlpSdkMetricsError::LimitExceeded)?;
-        Ok(())
+        self.values.bytes(amount).map_err(Into::into)
     }
 
     fn text(&mut self, text: &str, limit: usize) -> Result<(), OtlpSdkMetricsError> {
-        if text.len() > limit {
-            return Err(OtlpSdkMetricsError::LimitExceeded);
-        }
-        self.bytes(text.len())
+        self.values.text(text, limit).map_err(Into::into)
     }
 
     fn attributes<'a>(
         &mut self,
         attributes: impl Iterator<Item = (&'a str, &'a Value)>,
     ) -> Result<(), OtlpSdkMetricsError> {
-        let mut keys = BTreeSet::new();
-        for (key, value) in attributes {
-            if keys.len() == MAX_ATTRIBUTES
-                || key.is_empty()
-                || key.len() > 1024
-                || !keys.insert(key)
-            {
-                return Err(OtlpSdkMetricsError::InvalidAttributes);
-            }
-            self.bytes(std::mem::size_of::<KeyValue>())?;
-            self.text(key, 1024)?;
-            self.value(value)?;
-        }
-        Ok(())
-    }
-
-    fn value_node(&mut self) -> Result<(), OtlpSdkMetricsError> {
-        self.values = self
-            .values
-            .checked_add(1)
-            .filter(|count| *count <= MAX_VALUES)
-            .ok_or(OtlpSdkMetricsError::LimitExceeded)?;
-        self.bytes(std::mem::size_of::<AnyValue>())
-    }
-
-    fn value(&mut self, value: &Value) -> Result<(), OtlpSdkMetricsError> {
-        self.value_node()?;
-        match value {
-            Value::Bool(_) | Value::I64(_) => Ok(()),
-            Value::F64(value) => finite(*value).map(|_| ()),
-            Value::String(value) => self.text(value.as_str(), 4096),
-            Value::Array(array) => match array {
-                Array::Bool(values) => self.scalar_array(values.len()),
-                Array::I64(values) => self.scalar_array(values.len()),
-                Array::F64(values) => {
-                    self.scalar_array(values.len())?;
-                    for value in values {
-                        finite(*value)?;
-                    }
-                    Ok(())
-                }
-                Array::String(values) => {
-                    self.scalar_array(values.len())?;
-                    for value in values {
-                        self.text(value.as_str(), 4096)?;
-                    }
-                    Ok(())
-                }
-                _ => Err(OtlpSdkMetricsError::InvalidAttributes),
-            },
-            _ => Err(OtlpSdkMetricsError::InvalidAttributes),
-        }
-    }
-
-    fn scalar_array(&mut self, len: usize) -> Result<(), OtlpSdkMetricsError> {
-        if len > MAX_ARRAY_ITEMS {
-            return Err(OtlpSdkMetricsError::LimitExceeded);
-        }
-        for _ in 0..len {
-            self.value_node()?;
-        }
-        Ok(())
+        self.values.attributes(attributes).map_err(Into::into)
     }
 
     fn point(&mut self, storage: usize) -> Result<(), OtlpSdkMetricsError> {
@@ -501,23 +443,11 @@ impl Numeric for f64 {
 }
 
 fn finite(value: f64) -> Result<f64, OtlpSdkMetricsError> {
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(OtlpSdkMetricsError::InvalidNumericValue)
-    }
+    common::finite(value).map_err(Into::into)
 }
 
 fn nanos(time: SystemTime, zero_allowed: bool) -> Result<u64, OtlpSdkMetricsError> {
-    let duration = time
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| OtlpSdkMetricsError::InvalidTimestamp)?;
-    let nanos =
-        u64::try_from(duration.as_nanos()).map_err(|_| OtlpSdkMetricsError::InvalidTimestamp)?;
-    if nanos == 0 && !zero_allowed {
-        return Err(OtlpSdkMetricsError::InvalidTimestamp);
-    }
-    Ok(nanos)
+    common::nanos(time, zero_allowed).map_err(Into::into)
 }
 
 fn times(start: Option<SystemTime>, end: SystemTime) -> Result<(u64, u64), OtlpSdkMetricsError> {
@@ -746,63 +676,10 @@ fn preflight(
     Ok(())
 }
 
-fn owned_value(value: &Value) -> Result<AnyValue, OtlpSdkMetricsError> {
-    let value = match value {
-        Value::Bool(value) => AnyValueValue::Bool(*value),
-        Value::I64(value) => AnyValueValue::Int(*value),
-        Value::F64(value) => AnyValueValue::Double(*value),
-        Value::String(value) => AnyValueValue::String(value.as_str().to_owned()),
-        Value::Array(array) => {
-            let scalar = |value| AnyValue {
-                value: Some(value),
-                ..AnyValue::default()
-            };
-            let values = match array {
-                Array::Bool(values) => values
-                    .iter()
-                    .map(|value| scalar(AnyValueValue::Bool(*value)))
-                    .collect(),
-                Array::I64(values) => values
-                    .iter()
-                    .map(|value| scalar(AnyValueValue::Int(*value)))
-                    .collect(),
-                Array::F64(values) => values
-                    .iter()
-                    .map(|value| scalar(AnyValueValue::Double(*value)))
-                    .collect(),
-                Array::String(values) => values
-                    .iter()
-                    .map(|value| scalar(AnyValueValue::String(value.as_str().to_owned())))
-                    .collect(),
-                _ => return Err(OtlpSdkMetricsError::InvalidAttributes),
-            };
-            AnyValueValue::Array(ArrayValue {
-                values,
-                ..ArrayValue::default()
-            })
-        }
-        _ => return Err(OtlpSdkMetricsError::InvalidAttributes),
-    };
-    Ok(AnyValue {
-        value: Some(value),
-        ..AnyValue::default()
-    })
-}
-
 fn owned_attributes<'a>(
     attributes: impl Iterator<Item = (&'a str, &'a Value)>,
 ) -> Result<Vec<KeyValue>, OtlpSdkMetricsError> {
-    let mut attributes = attributes
-        .map(|(key, value)| {
-            Ok(KeyValue {
-                key: key.to_owned(),
-                value: Some(owned_value(value)?),
-                ..KeyValue::default()
-            })
-        })
-        .collect::<Result<Vec<_>, OtlpSdkMetricsError>>()?;
-    attributes.sort_by(|left, right| left.key.cmp(&right.key));
-    Ok(attributes)
+    common::owned_attributes(attributes).map_err(Into::into)
 }
 
 fn owned_exemplars<'a, T: Numeric + 'a>(
@@ -1095,24 +972,6 @@ fn compare_scope_output(left: &ScopeMetrics, right: &ScopeMetrics) -> Ordering {
     left.metrics.len().cmp(&right.metrics.len())
 }
 
-fn value_nodes(value: &AnyValue) -> usize {
-    match value.value.as_ref() {
-        Some(AnyValueValue::Array(array)) => array.values.iter().fold(1usize, |count, value| {
-            count.saturating_add(value_nodes(value))
-        }),
-        Some(AnyValueValue::KeyValueList(list)) => {
-            1usize.saturating_add(attribute_nodes(&list.values))
-        }
-        _ => 1,
-    }
-}
-
-fn attribute_nodes(attributes: &[KeyValue]) -> usize {
-    attributes.iter().fold(0usize, |count, attribute| {
-        count.saturating_add(attribute.value.as_ref().map_or(0, value_nodes))
-    })
-}
-
 fn metric_nodes(metric: &Metric) -> usize {
     let exemplars = |values: &[Exemplar]| {
         values.iter().fold(0usize, |count, exemplar| {
@@ -1310,48 +1169,6 @@ fn partition_metric(
     Ok(parts)
 }
 
-fn append_request(
-    resource: &Resource,
-    resource_schema: &str,
-    scope: &ScopeMetrics,
-    metrics: Vec<Metric>,
-    requests: &mut Vec<Vec<u8>>,
-    encoded_bytes: &mut usize,
-    config: &OtlpSdkMetricsConfig,
-) -> Result<(), OtlpSdkMetricsError> {
-    if metrics.is_empty() {
-        return Ok(());
-    }
-    if requests.len() == MAX_REQUESTS {
-        return Err(OtlpSdkMetricsError::LimitExceeded);
-    }
-    let request = ExportMetricsServiceRequest {
-        resource_metrics: vec![ResourceMetrics {
-            resource: Some(resource.clone()),
-            schema_url: resource_schema.to_owned(),
-            scope_metrics: vec![ScopeMetrics {
-                scope: scope.scope.clone(),
-                schema_url: scope.schema_url.clone(),
-                metrics,
-                ..ScopeMetrics::default()
-            }],
-            ..ResourceMetrics::default()
-        }],
-        ..ExportMetricsServiceRequest::default()
-    };
-    let encoded = request
-        .encode_to_bytes(crate::observability::otel::otlp_request_limits(
-            config.max_request_bytes,
-        ))
-        .map_err(|_| OtlpSdkMetricsError::WireEnvelopeExceeded)?;
-    *encoded_bytes = encoded_bytes
-        .checked_add(encoded.len())
-        .filter(|bytes| *bytes <= config.max_collection_bytes)
-        .ok_or(OtlpSdkMetricsError::LimitExceeded)?;
-    requests.push(encoded.to_vec());
-    Ok(())
-}
-
 fn encode_scopes(
     resource: &Resource,
     resource_schema: &str,
@@ -1363,8 +1180,7 @@ fn encode_scopes(
         .encode_to_bytes(limits)
         .map_err(|_| OtlpSdkMetricsError::WireEnvelopeExceeded)?
         .len();
-    let mut requests = Vec::new();
-    let mut encoded_bytes = 0usize;
+    let mut requests = MetricsRequests::new(resource, resource_schema, config, resource_bytes);
     for mut scope in scopes {
         let scope_value = scope
             .scope
@@ -1385,8 +1201,8 @@ fn encode_scopes(
             .max_request_bytes
             .checked_sub(overhead)
             .ok_or(OtlpSdkMetricsError::WireEnvelopeExceeded)?;
-        let metadata_nodes = attribute_nodes(&resource.attributes)
-            .saturating_add(attribute_nodes(&scope_value.attributes));
+        let scope_nodes = attribute_nodes(&scope_value.attributes);
+        let metadata_nodes = attribute_nodes(&resource.attributes).saturating_add(scope_nodes);
         let node_limit = 4096usize
             .checked_sub(metadata_nodes)
             .ok_or(OtlpSdkMetricsError::LimitExceeded)?;
@@ -1405,14 +1221,19 @@ fn encode_scopes(
                             .iter()
                             .any(|metric| compare_metric(metric, &part.metric).is_eq()))
                 {
-                    append_request(
-                        resource,
-                        resource_schema,
+                    let items = batch_items
+                        .saturating_add(batch.len())
+                        .saturating_add(scope_nodes.saturating_mul(2))
+                        .saturating_add(1);
+                    requests.push(
                         &scope,
                         std::mem::take(&mut batch),
-                        &mut requests,
-                        &mut encoded_bytes,
-                        config,
+                        batch_bytes
+                            .saturating_add(scope_bytes)
+                            .saturating_add(scope.schema_url.len())
+                            .saturating_add(32),
+                        batch_nodes.saturating_add(scope_nodes),
+                        items,
                     )?;
                     batch_bytes = 0;
                     batch_nodes = 0;
@@ -1424,17 +1245,22 @@ fn encode_scopes(
                 batch.push(part.metric);
             }
         }
-        append_request(
-            resource,
-            resource_schema,
+        let items = batch_items
+            .saturating_add(batch.len())
+            .saturating_add(scope_nodes.saturating_mul(2))
+            .saturating_add(1);
+        requests.push(
             &scope,
             batch,
-            &mut requests,
-            &mut encoded_bytes,
-            config,
+            batch_bytes
+                .saturating_add(scope_bytes)
+                .saturating_add(scope.schema_url.len())
+                .saturating_add(32),
+            batch_nodes.saturating_add(scope_nodes),
+            items,
         )?;
     }
-    Ok(requests)
+    requests.finish()
 }
 
 fn map_metrics(

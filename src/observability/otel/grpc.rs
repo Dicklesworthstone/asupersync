@@ -793,3 +793,7 @@ mod queue_receipt_tests;
 #[cfg(test)]
 #[path = "grpc/sdk_metrics_tests.rs"]
 mod sdk_metrics_tests;
+
+#[cfg(test)]
+#[path = "grpc/sdk_trace_tests.rs"]
+mod sdk_trace_tests;
