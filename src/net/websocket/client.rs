@@ -32,11 +32,11 @@ use crate::codec::Decoder;
 use crate::cx::{CancelWakerToken, Cx};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
-#[cfg(feature = "tls")]
+#[cfg(any(feature = "tls", not(target_arch = "wasm32")))]
 use crate::time::{Sleep, TimerDriverHandle};
 #[cfg(feature = "tls")]
 use crate::tls::{TlsConnector, TlsError, TlsStream};
-#[cfg(feature = "tls")]
+#[cfg(any(feature = "tls", not(target_arch = "wasm32")))]
 use crate::types::Time;
 use crate::util::{EntropySource, OsEntropy};
 use std::io;
@@ -48,6 +48,12 @@ use std::time::Duration;
 #[path = "connect_options.rs"]
 mod connect_options;
 pub use connect_options::{WebSocketConnectOptions, WebSocketConnectOptionsError};
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "proxy.rs"]
+mod proxy;
+#[cfg(not(target_arch = "wasm32"))]
+pub use proxy::WebSocketHttpProxy;
 
 /// WebSocket message types.
 #[derive(Debug, Clone)]
@@ -1554,8 +1560,8 @@ impl WebSocket<TlsStream<TcpStream>> {
                 "secure WebSocket DNS connections require TLS SNI",
             )));
         }
-        let ambient = Cx::current().ok_or_else(missing_tls_setup_authority)?;
-        let mut setup = WsTlsSetup::new(cx, &ambient, config.connect_timeout)?;
+        let ambient = Cx::current().ok_or_else(missing_connect_setup_authority)?;
+        let mut setup = WsConnectSetup::new(cx, &ambient, config.connect_timeout)?;
         let tcp = setup.run(async {
             let result = if let Ok(ip) = parsed.host.parse::<std::net::IpAddr>() {
                 TcpStream::connect(std::net::SocketAddr::new(ip, parsed.port)).await
@@ -1586,11 +1592,11 @@ impl WebSocket<TlsStream<TcpStream>> {
     }
 }
 
-#[cfg(feature = "tls")]
-fn missing_tls_setup_authority() -> WsConnectError {
+#[cfg(any(feature = "tls", not(target_arch = "wasm32")))]
+fn missing_connect_setup_authority() -> WsConnectError {
     WsConnectError::Io(io::Error::new(
         io::ErrorKind::PermissionDenied,
-        "secure WebSocket setup requires explicit and current native I/O and timer authority",
+        "WebSocket setup requires explicit and current native I/O and timer authority",
     ))
 }
 
@@ -1606,8 +1612,8 @@ fn map_tls_connect_error(error: TlsError) -> WsConnectError {
 }
 
 /// A single retained deadline and cancellation registration across setup phases.
-#[cfg(feature = "tls")]
-struct WsTlsSetup<'a> {
+#[cfg(any(feature = "tls", not(target_arch = "wasm32")))]
+struct WsConnectSetup<'a> {
     cx: &'a Cx,
     ambient: &'a Cx,
     clock: TimerDriverHandle,
@@ -1617,20 +1623,20 @@ struct WsTlsSetup<'a> {
     ambient_cancel: WsCancelWakerGuard<'a>,
 }
 
-#[cfg(feature = "tls")]
-impl<'a> WsTlsSetup<'a> {
+#[cfg(any(feature = "tls", not(target_arch = "wasm32")))]
+impl<'a> WsConnectSetup<'a> {
     fn new(cx: &'a Cx, ambient: &'a Cx, timeout: Option<Duration>) -> Result<Self, WsConnectError> {
         for context in [cx, ambient] {
             if !context.runtime_mask.has(crate::cx::cap::CapMask::IO)
                 || context.io_driver_handle().is_none()
                 || context.timer_driver().is_none()
             {
-                return Err(missing_tls_setup_authority());
+                return Err(missing_connect_setup_authority());
             }
         }
-        let clock = cx.timer_driver().ok_or_else(missing_tls_setup_authority)?;
+        let clock = cx.timer_driver().ok_or_else(missing_connect_setup_authority)?;
         if !ambient.timer_driver().is_some_and(|ambient_clock| clock.ptr_eq(&ambient_clock)) {
-            return Err(missing_tls_setup_authority());
+            return Err(missing_connect_setup_authority());
         }
         let mut deadline = timeout.map(|timeout| clock.now().saturating_add_nanos(
             u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX),
@@ -1660,7 +1666,7 @@ impl<'a> WsTlsSetup<'a> {
         if self.deadline.is_some_and(|until| self.clock.now() >= until) {
             return Err(WsConnectError::Io(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "secure WebSocket connection setup deadline exceeded",
+                "WebSocket connection setup deadline exceeded",
             )));
         }
         Ok(())
@@ -1675,7 +1681,7 @@ impl<'a> WsTlsSetup<'a> {
             // TCP/DNS/TLS adapters consult the current context. Poll under the
             // supplied context without restoring any authority attenuated by
             // the task that created this setup or the current polling task.
-            let current = Cx::current().ok_or_else(missing_tls_setup_authority)?;
+            let current = Cx::current().ok_or_else(missing_connect_setup_authority)?;
             let mut io_cx = self.cx.clone();
             io_cx.runtime_mask = io_cx.runtime_mask
                 .intersect(self.ambient.runtime_mask)
@@ -1684,7 +1690,7 @@ impl<'a> WsTlsSetup<'a> {
                 || io_cx.timer_driver().is_none()
                 || !current.timer_driver().is_some_and(|clock| self.clock.ptr_eq(&clock))
             {
-                return Poll::Ready(Err(missing_tls_setup_authority()));
+                return Poll::Ready(Err(missing_connect_setup_authority()));
             }
             let _current = Cx::set_current(Some(io_cx));
             self.caller_cancel.refresh(task.waker());

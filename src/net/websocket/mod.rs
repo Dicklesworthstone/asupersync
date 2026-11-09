@@ -72,6 +72,8 @@ pub use client::{
     Message, SlowConsumerPolicy, WebSocket, WebSocketConfig, WebSocketConnectOptions,
     WebSocketConnectOptionsError, WsConnectError,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use client::WebSocketHttpProxy;
 pub use close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
 pub use frame::{CloseCode, Frame, FrameCodec, Opcode, Role, WsError, apply_mask};
 pub use handshake::{
