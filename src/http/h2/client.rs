@@ -532,6 +532,14 @@ impl Http2RequestBuilder {
         &self,
         exact_length: Option<u64>,
     ) -> Result<PreparedRequest, Http2ClientError> {
+        self.prepare_request(exact_length, None)
+    }
+
+    fn prepare_request(
+        &self,
+        exact_length: Option<u64>,
+        extended_protocol: Option<&str>,
+    ) -> Result<PreparedRequest, Http2ClientError> {
         if exact_length.is_some_and(|length| length > self.client.max_request_body as u64) {
             return Err(Http2ClientError::BodyTooLarge {
                 request: true,
@@ -541,10 +549,13 @@ impl Http2RequestBuilder {
         if Method::from_bytes(self.method.as_str().as_bytes()).is_none() {
             return Err(invalid("method is not an HTTP token"));
         }
-        if self.method.as_str() == "CONNECT" {
+        if self.method.as_str() == "CONNECT" && extended_protocol.is_none() {
             return Err(invalid(
                 "CONNECT tunnels require an owned duplex stream API",
             ));
+        }
+        if extended_protocol.is_some() && self.method.as_str() != "CONNECT" {
+            return Err(invalid("extended CONNECT requires the CONNECT method"));
         }
         let mut url = ParsedUrl::parse(&self.url).map_err(|error| invalid(error.to_string()))?;
         url.path
@@ -584,6 +595,9 @@ impl Http2RequestBuilder {
             Header::new(":path", &url.path),
         ];
         let mut content_length = None;
+        if let Some(protocol) = extended_protocol {
+            headers.insert(1, Header::new(":protocol", protocol));
+        }
         for header in &self.headers {
             validate_header_field(&header.name, &header.value)
                 .map_err(|error| invalid(error.to_string()))?;
@@ -593,6 +607,11 @@ impl Http2RequestBuilder {
                 return Err(invalid(
                     "field value has leading or trailing whitespace (RFC 9113 8.2.1)",
                 ));
+            }
+            if extended_protocol.is_some()
+                && matches!(header.name.as_str(), "content-length" | "te" | "trailer")
+            {
+                return Err(invalid("extended CONNECT cannot declare an HTTP body or trailers"));
             }
             match header.name.as_str() {
                 "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding"
@@ -846,6 +865,15 @@ impl ResponseState {
     }
 
     fn headers(&mut self, headers: Vec<Header>, end: bool) -> Result<bool, Http2ClientError> {
+        self.headers_with_connect_semantics(headers, end, false)
+    }
+
+    fn headers_with_connect_semantics(
+        &mut self,
+        headers: Vec<Header>,
+        end: bool,
+        connect: bool,
+    ) -> Result<bool, Http2ClientError> {
         self.header_bytes = self.header_bytes.saturating_add(header_size(&headers));
         if self.header_bytes > HEADER_LIMIT {
             return Err(protocol("response headers exceed 64 KiB"));
@@ -897,7 +925,9 @@ impl ResponseState {
             return Ok(false);
         }
         for header in &headers {
-            if header.name == "content-length" {
+            // RFC 9110 section 9.3.6: successful CONNECT ignores Content-Length.
+            // Keep it in the bounded response metadata, never in tunnel framing.
+            if header.name == "content-length" && !(connect && (200..300).contains(&status)) {
                 if self.content_length.is_some() {
                     return Err(protocol("duplicate response content-length"));
                 }
@@ -2394,6 +2424,12 @@ mod streaming {
         }
     }
 }
+
+#[cfg(feature = "http2-streaming")]
+#[path = "client/tunnel.rs"]
+mod tunnel;
+#[cfg(feature = "http2-streaming")]
+pub use tunnel::{Http2Tunnel, Http2TunnelConfig, Http2TunnelError};
 
 #[cfg(test)]
 #[path = "client_inline_tests.rs"]

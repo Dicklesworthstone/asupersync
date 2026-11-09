@@ -74,6 +74,8 @@ pub use client::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use client::WebSocketHttpProxy;
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub use client::Http2ClientWebSocket;
 pub use close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
 pub use frame::{CloseCode, Frame, FrameCodec, Opcode, Role, WsError, apply_mask};
 pub use handshake::{

@@ -1933,6 +1933,12 @@ impl From<WsError> for WsConnectError {
     }
 }
 
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+#[path = "client/http2.rs"]
+mod http2;
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub use http2::Http2ClientWebSocket;
+
 #[cfg(test)]
 #[path = "client_inline_tests.rs"]
 mod tests;

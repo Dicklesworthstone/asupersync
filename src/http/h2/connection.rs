@@ -106,6 +106,9 @@ pub struct FrameCodec {
     awaiting_continuation: bool,
     /// Native server opt-in; never changes the public exhaustive frame model.
     advertise_extended_connect: bool,
+    /// RFC 8441 permission observed on this wire, outside the exhaustive
+    /// public Setting model. Once granted, a peer cannot withdraw it.
+    peer_extended_connect_enabled: bool,
 }
 
 impl FrameCodec {
@@ -117,12 +120,52 @@ impl FrameCodec {
             partial_header: None,
             awaiting_continuation: false,
             advertise_extended_connect: false,
+            peer_extended_connect_enabled: false,
         }
     }
 
     /// Set the maximum frame size.
     pub fn set_max_frame_size(&mut self, size: u32) {
         self.max_frame_size = size;
+    }
+
+    /// Permission on this decoded connection. The driver must first accept
+    /// the corresponding frame through Connection::process_frame.
+    #[cfg(any(test, all(feature = "http2-streaming", not(target_arch = "wasm32"))))]
+    pub(super) fn peer_supports_extended_connect(&self) -> bool {
+        self.peer_extended_connect_enabled
+    }
+
+    // Inspect without allocating or changing state. Only publish the result
+    // after the whole frame passes the ordinary SETTINGS parser, including
+    // stream identity, ACK length, and every unrelated setting's constraints.
+    fn extended_connect_after_frame(
+        &self,
+        header: &FrameHeader,
+        payload: &Bytes,
+    ) -> Result<bool, H2Error> {
+        let mut enabled = self.peer_extended_connect_enabled;
+        if header.frame_type == FrameType::Settings as u8
+            && !header.has_flag(super::frame::settings_flags::ACK)
+        {
+            for setting in payload.chunks_exact(6) {
+                if setting[0] == 0 && setting[1] == 8 {
+                    let value =
+                        u32::from_be_bytes([setting[2], setting[3], setting[4], setting[5]]);
+                    match value {
+                        0 if enabled => {
+                            return Err(H2Error::protocol(
+                                "SETTINGS_ENABLE_CONNECT_PROTOCOL cannot be withdrawn",
+                            ));
+                        }
+                        1 => enabled = true,
+                        // The ordinary parser rejects non-Boolean values.
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(enabled)
     }
 }
 
@@ -233,6 +276,7 @@ impl FrameCodec {
                 continue;
             }
 
+            let extended_connect = self.extended_connect_after_frame(&header, &payload);
             let frame = match parse_frame(&header, payload) {
                 Ok(frame) => frame,
                 Err(error)
@@ -244,6 +288,7 @@ impl FrameCodec {
                 }
                 Err(error) => return Err(error),
             };
+            self.peer_extended_connect_enabled = extended_connect?;
             match &frame {
                 Frame::Headers(frame) => self.awaiting_continuation = !frame.end_headers,
                 Frame::PushPromise(frame) => self.awaiting_continuation = !frame.end_headers,
@@ -944,6 +989,42 @@ impl Connection {
         });
 
         Ok(stream_id)
+    }
+
+    /// Open a native-client extended CONNECT after this connection's codec
+    /// observed the peer's permission. Validation precedes stream allocation
+    /// and HPACK queuing, so a refused request consumes no stream identifier.
+    ///
+    /// The driver passes its own codec only after processing the decoded
+    /// peer frame successfully. The tunnel starts with both halves open.
+    #[cfg(any(test, all(feature = "http2-streaming", not(target_arch = "wasm32"))))]
+    pub(super) fn open_extended_connect(
+        &mut self,
+        headers: Vec<Header>,
+        codec: &FrameCodec,
+    ) -> Result<u32, H2Error> {
+        if !self.is_client || self.state != ConnectionState::Open {
+            return Err(H2Error::protocol(
+                "extended CONNECT requires an open client connection",
+            ));
+        }
+        if !codec.peer_supports_extended_connect() {
+            return Err(H2Error::protocol(
+                "extended CONNECT requires peer SETTINGS_ENABLE_CONNECT_PROTOCOL",
+            ));
+        }
+        if !headers
+            .iter()
+            .any(|header| header.name == ":method" && header.value == "CONNECT")
+            || !headers.iter().any(|header| header.name == ":protocol")
+        {
+            return Err(H2Error::protocol(
+                "extended CONNECT requires CONNECT and :protocol",
+            ));
+        }
+        validate_h2_pseudo_headers_with_connect(&headers, true, false, true)
+            .map_err(H2Error::protocol)?;
+        self.open_stream(headers, false)
     }
 
     /// Send data on a stream.
@@ -3108,3 +3189,7 @@ mod tests;
 #[cfg(test)]
 #[path = "connection_extended_connect_tests.rs"]
 mod extended_connect_tests;
+
+#[cfg(test)]
+#[path = "connection_extended_connect_client_tests.rs"]
+mod extended_connect_client_tests;
