@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::channel::oneshot;
-use crate::codec::Decoder as _;
 use crate::cx::Cx;
 use crate::runtime::{Runtime, RuntimeBuilder};
 use crate::types::{Budget, CancelKind, TaskId};

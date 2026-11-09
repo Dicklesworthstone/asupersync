@@ -41,14 +41,21 @@ impl WallWatchdog {
         let expired = Arc::clone(&signal);
         let (stop, stopping) = mpsc::channel();
         let thread = std::thread::spawn(move || {
-            if matches!(stopping.recv_timeout(WATCHDOG), Err(mpsc::RecvTimeoutError::Timeout)) {
+            if matches!(
+                stopping.recv_timeout(WATCHDOG),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
                 expired.expired.store(true, Ordering::Release);
                 if let Some(waker) = expired.waiter.lock().unwrap().take() {
                     waker.wake();
                 }
             }
         });
-        Self { signal, stop, thread: Some(thread) }
+        Self {
+            signal,
+            stop,
+            thread: Some(thread),
+        }
     }
 }
 
@@ -110,14 +117,21 @@ where
     // This deadline is independent of the injected virtual protocol clock.
     // Even failure before a peer publishes its witness wakes and ends the test.
     let watchdog = WallWatchdog::new();
-    runtime.block_on_with_cx(driver, Box::pin(async {
-        let mut future = Box::pin(test(owner));
-        poll_fn(|task| {
-            *watchdog.signal.waiter.lock().unwrap() = Some(task.waker().clone());
-            assert!(!watchdog.signal.expired.load(Ordering::Acquire), "gRPC proxy wall watchdog elapsed");
-            future.as_mut().poll(task)
-        }).await;
-    }));
+    runtime.block_on_with_cx(
+        driver,
+        Box::pin(async {
+            let mut future = Box::pin(test(owner));
+            poll_fn(|task| {
+                *watchdog.signal.waiter.lock().unwrap() = Some(task.waker().clone());
+                assert!(
+                    !watchdog.signal.expired.load(Ordering::Acquire),
+                    "gRPC proxy wall watchdog elapsed"
+                );
+                future.as_mut().poll(task)
+            })
+            .await;
+        }),
+    );
     drop(watchdog);
     assert!(runtime.shutdown_timeout(WATCHDOG));
 }
@@ -140,10 +154,12 @@ fn connect_head(io: &mut impl Read, authority: &str) -> String {
 }
 
 fn header_values<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
-    head.lines().filter_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        key.eq_ignore_ascii_case(name).then(|| value.trim())
-    }).collect()
+    head.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+        .collect()
 }
 
 fn framed(payload: &[u8]) -> Bytes {
@@ -189,12 +205,21 @@ struct Rpc {
 fn rpc(path: &'static str, uploads: &[&[u8]], replies: &[&'static [u8]]) -> Rpc {
     Rpc {
         path,
-        request: uploads.iter().flat_map(|message| framed(message).to_vec()).collect(),
+        request: uploads
+            .iter()
+            .flat_map(|message| framed(message).to_vec())
+            .collect(),
         replies: replies.to_vec(),
     }
 }
 
-fn serve_h2(io: &mut (impl Read + Write), mut connection: Connection, calls: &[Rpc], authority: &str, scheme: &str) {
+fn serve_h2(
+    io: &mut (impl Read + Write),
+    mut connection: Connection,
+    calls: &[Rpc],
+    authority: &str,
+    scheme: &str,
+) {
     let mut preface = [0; 24];
     io.read_exact(&mut preface).unwrap();
     assert_eq!(&preface, CLIENT_PREFACE);
@@ -206,11 +231,19 @@ fn serve_h2(io: &mut (impl Read + Write), mut connection: Connection, calls: &[R
         let stream = loop {
             if let Some(frame) = decoder.decode(&mut inbound).unwrap() {
                 let ended = match connection.process_frame(frame).unwrap() {
-                    Some(ReceivedFrame::Headers { stream_id, headers, end_stream }) => {
+                    Some(ReceivedFrame::Headers {
+                        stream_id,
+                        headers,
+                        end_stream,
+                    }) => {
                         assert!(active.is_none(), "one initial header block");
                         active = Some(stream_id);
-                        let value = |name: &str| headers.iter().find(|header| header.name == name)
-                            .map(|header| header.value.as_str());
+                        let value = |name: &str| {
+                            headers
+                                .iter()
+                                .find(|header| header.name == name)
+                                .map(|header| header.value.as_str())
+                        };
                         assert_eq!(value(":authority"), Some(authority));
                         assert_eq!(value(":scheme"), Some(scheme));
                         assert_eq!(value(":path"), Some(call.path));
@@ -219,7 +252,11 @@ fn serve_h2(io: &mut (impl Read + Write), mut connection: Connection, calls: &[R
                         assert_eq!(value("proxy-authorization"), None);
                         end_stream
                     }
-                    Some(ReceivedFrame::Data { stream_id, data, end_stream }) => {
+                    Some(ReceivedFrame::Data {
+                        stream_id,
+                        data,
+                        end_stream,
+                    }) => {
                         assert_eq!(Some(stream_id), active);
                         request.extend_from_slice(&data);
                         end_stream
@@ -238,68 +275,104 @@ fn serve_h2(io: &mut (impl Read + Write), mut connection: Connection, calls: &[R
             }
         };
         assert_eq!(request, call.request);
-        connection.send_headers(stream, vec![
-            Header::new(":status", "200"),
-            Header::new("content-type", "application/grpc"),
-            Header::new("x-origin", "verified"),
-        ], false).unwrap();
+        connection
+            .send_headers(
+                stream,
+                vec![
+                    Header::new(":status", "200"),
+                    Header::new("content-type", "application/grpc"),
+                    Header::new("x-origin", "verified"),
+                ],
+                false,
+            )
+            .unwrap();
         for reply in &call.replies {
             connection.send_data(stream, framed(reply), false).unwrap();
         }
-        connection.send_headers(stream, vec![
-            Header::new("grpc-status", "0"),
-            Header::new("x-finished", "yes"),
-        ], true).unwrap();
+        connection
+            .send_headers(
+                stream,
+                vec![
+                    Header::new("grpc-status", "0"),
+                    Header::new("x-finished", "yes"),
+                ],
+                true,
+            )
+            .unwrap();
         flush(io, &mut connection);
     }
 }
 
 fn request<T>(body: T) -> Request<T> {
     let mut request = Request::new(body);
-    assert!(request.metadata_mut().insert("authorization", "Bearer origin-secret"));
+    assert!(
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer origin-secret")
+    );
     assert!(request.metadata_mut().insert("x-call", "private-call"));
     request
 }
 
 fn proxy(address: SocketAddr) -> HttpConnectProxy {
     HttpConnectProxy::new(format!("http://{address}"))
-        .unwrap().with_authorization(PROXY_AUTH).unwrap()
-        .with_http_client(HttpClient::with_config(crate::http::h1::HttpClientConfig {
-            default_headers: vec![
-                ("Authorization".to_owned(), "http-client-default-secret".to_owned()),
-                ("Proxy-Authorization".to_owned(), "wrong-default-proxy-secret".to_owned()),
-            ],
-            ..Default::default()
-        }))
+        .unwrap()
+        .with_authorization(PROXY_AUTH)
+        .unwrap()
+        .with_http_client(
+            HttpClient::builder()
+                .default_header("Authorization", "http-client-default-secret")
+                .default_header("Proxy-Authorization", "wrong-default-proxy-secret")
+                .build(),
+        )
 }
 
 async fn channel(address: SocketAddr) -> Channel {
-    Channel::builder(ORIGIN).http_connect_proxy(proxy(address))
-        .connect_timeout(WATCHDOG).timeout(WATCHDOG)
-        .connect().await.unwrap()
+    Channel::builder(ORIGIN)
+        .http_connect_proxy(proxy(address))
+        .connect_timeout(WATCHDOG)
+        .timeout(WATCHDOG)
+        .connect()
+        .await
+        .unwrap()
 }
 
 #[test]
 fn proxy_configuration_is_explicit_validated_and_redacted() {
     for url in [
-        "socks5://proxy:1080", "http://user:secret@proxy:3128",
-        "http://proxy:0", "http://proxy:3128/path", "http://proxy?query",
-        "http://proxy/#fragment", "http://proxy\r\nX-Injected: yes",
+        "socks5://proxy:1080",
+        "http://user:secret@proxy:3128",
+        "http://proxy:0",
+        "http://proxy:3128/path",
+        "http://proxy?query",
+        "http://proxy/#fragment",
+        "http://proxy\r\nX-Injected: yes",
     ] {
         assert!(HttpConnectProxy::new(url).is_err(), "accepted {url:?}");
     }
     for auth in ["", "secret\r\nX-Injected: yes", "secret\0"] {
-        assert!(HttpConnectProxy::new("http://proxy:3128").unwrap()
-            .with_authorization(auth).is_err());
+        assert!(
+            HttpConnectProxy::new("http://proxy:3128")
+                .unwrap()
+                .with_authorization(auth)
+                .is_err()
+        );
     }
     let configured = HttpConnectProxy::new("http://[::1]:3128")
-        .unwrap().with_authorization("Bearer sensitive-proxy-token").unwrap();
+        .unwrap()
+        .with_authorization("Bearer sensitive-proxy-token")
+        .unwrap();
     assert_eq!(configured.url, "http://[::1]:3128");
     assert!(!format!("{configured:?}").contains("sensitive-proxy-token"));
     for target in ["http://loopback", "unix:/tmp/grpc-proxy-fixture.sock"] {
-        assert!(futures_lite::future::block_on(
-            Channel::builder(target).http_connect_proxy(configured.clone()).connect(),
-        ).is_err());
+        assert!(
+            futures_lite::future::block_on(
+                Channel::builder(target)
+                    .http_connect_proxy(configured.clone())
+                    .connect(),
+            )
+            .is_err()
+        );
     }
 }
 
@@ -309,25 +382,53 @@ fn native_unary_connect_tunnel_preserves_prefetched_frames_credentials_and_pool_
     let peer = std::thread::spawn(move || {
         let mut socket = accept(&listener);
         let connection = start_tunnel(&mut socket, "origin.invalid:50051");
-        serve_h2(&mut socket, connection, &[
-            rpc("/proxy.Service/Echo", &[b"first"], &[b"reply-one"]),
-            rpc("/proxy.Service/Echo", &[b"second"], &[b"reply-two"]),
-        ], "origin.invalid:50051", "http");
-        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
-            "completed unary calls must reuse their fixed proxy route");
+        serve_h2(
+            &mut socket,
+            connection,
+            &[
+                rpc("/proxy.Service/Echo", &[b"first"], &[b"reply-one"]),
+                rpc("/proxy.Service/Echo", &[b"second"], &[b"reply-two"]),
+            ],
+            "origin.invalid:50051",
+            "http",
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "completed unary calls must reuse their fixed proxy route"
+        );
     });
     run_native(move |_| async move {
-        let channel = Channel::builder(ORIGIN).http_connect_proxy(proxy(address))
-            .connect_timeout(WATCHDOG).timeout(WATCHDOG).reuse_connections(1)
-            .connect().await.unwrap();
+        let channel = Channel::builder(ORIGIN)
+            .http_connect_proxy(proxy(address))
+            .connect_timeout(WATCHDOG)
+            .timeout(WATCHDOG)
+            .reuse_connections(1)
+            .connect()
+            .await
+            .unwrap();
         let mut client = GrpcClient::new(channel.clone());
-        for (body, expected) in [(b"first".as_slice(), b"reply-one".as_slice()), (b"second", b"reply-two")] {
-            let response: Response<Bytes> = Box::pin(client.unary(
-                "/proxy.Service/Echo", request(Bytes::copy_from_slice(body)),
-            )).await.unwrap();
+        for (body, expected) in [
+            (b"first".as_slice(), b"reply-one".as_slice()),
+            (b"second", b"reply-two"),
+        ] {
+            let response: Response<Bytes> = Box::pin(
+                client.unary("/proxy.Service/Echo", request(Bytes::copy_from_slice(body))),
+            )
+            .await
+            .unwrap();
             assert_eq!(response.get_ref().as_ref(), expected);
         }
-        assert_eq!(channel.unary_pool.as_ref().unwrap().idle.lock().unwrap().len(), 1);
+        assert_eq!(
+            channel
+                .unary_pool
+                .as_ref()
+                .unwrap()
+                .idle
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
     });
     peer.join().unwrap();
 }
@@ -338,16 +439,34 @@ async fn next(stream: &mut ResponseStream<Bytes>) -> Option<Result<Bytes, Status
 
 #[test]
 fn native_and_legacy_streaming_facades_use_connect_and_preserve_terminal_metadata() {
-    for shape in ["native-server", "native-bidi", "legacy-server", "legacy-bidi", "legacy-upload"] {
+    for shape in [
+        "native-server",
+        "native-bidi",
+        "legacy-server",
+        "legacy-bidi",
+        "legacy-upload",
+    ] {
         let (listener, address) = listener();
         let peer = std::thread::spawn(move || {
             let mut socket = accept(&listener);
             let connection = start_tunnel(&mut socket, "origin.invalid:50051");
-            let uploads: &[&[u8]] = if shape.ends_with("server") { &[b"request"] } else { &[b"a", b"b"] };
-            let replies: &[&[u8]] = if shape == "legacy-upload" { &[b"one"] } else { &[b"one", b"two"] };
-            serve_h2(&mut socket, connection, &[
-                rpc("/proxy.Service/Stream", uploads, replies),
-            ], "origin.invalid:50051", "http");
+            let uploads: &[&[u8]] = if shape.ends_with("server") {
+                &[b"request"]
+            } else {
+                &[b"a", b"b"]
+            };
+            let replies: &[&[u8]] = if shape == "legacy-upload" {
+                &[b"one"]
+            } else {
+                &[b"one", b"two"]
+            };
+            serve_h2(
+                &mut socket,
+                connection,
+                &[rpc("/proxy.Service/Stream", uploads, replies)],
+                "origin.invalid:50051",
+                "http",
+            );
         });
         run_native(move |cx| async move {
             let channel = channel(address).await;
@@ -359,8 +478,12 @@ fn native_and_legacy_streaming_facades_use_connect_and_preserve_terminal_metadat
             let messages = match shape {
                 "native-server" => {
                     let mut stream = Box::pin(client.into_native_server_streaming(
-                        &cx, "/proxy.Service/Stream", Request::new(Bytes::from_static(b"request")),
-                    )).await.unwrap();
+                        &cx,
+                        "/proxy.Service/Stream",
+                        Request::new(Bytes::from_static(b"request")),
+                    ))
+                    .await
+                    .unwrap();
                     let mut messages = Vec::new();
                     while let Some(message) = stream.message().await.unwrap() {
                         messages.push(message);
@@ -370,8 +493,12 @@ fn native_and_legacy_streaming_facades_use_connect_and_preserve_terminal_metadat
                 }
                 "native-bidi" => {
                     let mut stream = Box::pin(client.into_native_duplex(
-                        &cx, "/proxy.Service/Stream", Request::new(()),
-                    )).await.unwrap();
+                        &cx,
+                        "/proxy.Service/Stream",
+                        Request::new(()),
+                    ))
+                    .await
+                    .unwrap();
                     let mut uploads = [b"a".as_slice(), b"b".as_slice()].into_iter();
                     let mut closed = false;
                     let mut messages = Vec::new();
@@ -395,8 +522,11 @@ fn native_and_legacy_streaming_facades_use_connect_and_preserve_terminal_metadat
                 }
                 "legacy-server" => {
                     let response = Box::pin(client.server_streaming::<Bytes, Bytes>(
-                        "/proxy.Service/Stream", Request::new(Bytes::from_static(b"request")),
-                    )).await.unwrap();
+                        "/proxy.Service/Stream",
+                        Request::new(Bytes::from_static(b"request")),
+                    ))
+                    .await
+                    .unwrap();
                     let mut stream = response.into_inner();
                     let mut messages = Vec::new();
                     while let Some(message) = next(&mut stream).await {
@@ -406,9 +536,10 @@ fn native_and_legacy_streaming_facades_use_connect_and_preserve_terminal_metadat
                     messages
                 }
                 "legacy-bidi" => {
-                    let (mut sink, mut stream) = Box::pin(client.bidi_streaming::<Bytes, Bytes>(
-                        "/proxy.Service/Stream",
-                    )).await.unwrap();
+                    let (mut sink, mut stream) =
+                        Box::pin(client.bidi_streaming::<Bytes, Bytes>("/proxy.Service/Stream"))
+                            .await
+                            .unwrap();
                     sink.send(Bytes::from_static(b"a")).await.unwrap();
                     sink.send(Bytes::from_static(b"b")).await.unwrap();
                     sink.close().await.unwrap();
@@ -420,17 +551,21 @@ fn native_and_legacy_streaming_facades_use_connect_and_preserve_terminal_metadat
                     messages
                 }
                 _ => {
-                    let (mut sink, response) = Box::pin(client.client_streaming::<Bytes, Bytes>(
-                        "/proxy.Service/Stream",
-                    )).await.unwrap();
+                    let (mut sink, response) =
+                        Box::pin(client.client_streaming::<Bytes, Bytes>("/proxy.Service/Stream"))
+                            .await
+                            .unwrap();
                     sink.send(Bytes::from_static(b"a")).await.unwrap();
                     sink.send(Bytes::from_static(b"b")).await.unwrap();
                     sink.close().await.unwrap();
                     vec![response.await.unwrap().into_inner()]
                 }
             };
-            let expected = if shape == "legacy-upload" { vec![Bytes::from_static(b"one")] }
-                else { vec![Bytes::from_static(b"one"), Bytes::from_static(b"two")] };
+            let expected = if shape == "legacy-upload" {
+                vec![Bytes::from_static(b"one")]
+            } else {
+                vec![Bytes::from_static(b"one"), Bytes::from_static(b"two")]
+            };
             assert_eq!(messages, expected, "{shape}");
         });
         peer.join().unwrap();
@@ -442,7 +577,11 @@ fn interceptor_proxy_credentials_are_refused_before_any_transport_is_opened() {
     struct InjectProxyAuth;
     impl ClientInterceptor for InjectProxyAuth {
         fn intercept(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
-            assert!(request.metadata_mut().insert("proxy-authorization", "Bearer misplaced-secret"));
+            assert!(
+                request
+                    .metadata_mut()
+                    .insert("proxy-authorization", "Bearer misplaced-secret")
+            );
             Ok(())
         }
     }
@@ -450,21 +589,30 @@ fn interceptor_proxy_credentials_are_refused_before_any_transport_is_opened() {
     run_native(move |cx| async move {
         let channel = channel(address).await;
         let mut unary = GrpcClient::new(channel.clone()).with_interceptor(InjectProxyAuth);
-        let result: Result<Response<Bytes>, _> = Box::pin(unary.unary(
-            "/proxy.Service/Echo", Request::new(Bytes::new()),
-        )).await;
+        let result: Result<Response<Bytes>, _> =
+            Box::pin(unary.unary("/proxy.Service/Echo", Request::new(Bytes::new()))).await;
         assert_eq!(result.unwrap_err().code(), Code::InvalidArgument);
         let client = GrpcClient::new(channel.clone()).with_interceptor(InjectProxyAuth);
-        let result = Box::pin(client.into_native_duplex(
-            &cx, "/proxy.Service/Stream", Request::new(()),
-        )).await;
+        let result =
+            Box::pin(client.into_native_duplex(&cx, "/proxy.Service/Stream", Request::new(())))
+                .await;
         assert_eq!(result.err().unwrap().code(), Code::InvalidArgument);
         let mut legacy = GrpcClient::new(channel).with_interceptor(InjectProxyAuth);
-        assert_eq!(Box::pin(legacy.server_streaming::<Bytes, Bytes>(
-            "/proxy.Service/Stream", Request::new(Bytes::new()),
-        )).await.err().unwrap().code(), Code::InvalidArgument);
+        assert_eq!(
+            Box::pin(legacy.server_streaming::<Bytes, Bytes>(
+                "/proxy.Service/Stream",
+                Request::new(Bytes::new()),
+            ))
+            .await
+            .err()
+            .unwrap()
+            .code(),
+            Code::InvalidArgument
+        );
     });
-    assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
 }
 
 #[test]
@@ -477,26 +625,39 @@ fn connect_refusal_and_redirect_never_replay_rpc_credentials_or_fall_back_direct
             connect_head(&mut socket, &target.to_string());
             write!(socket, "HTTP/1.1 {status} proxy-secret\r\nLocation: http://{target}/redirect\r\nContent-Length: 0\r\n\r\n").unwrap();
             let mut byte = [0];
-            assert_eq!(socket.read(&mut byte).unwrap(), 0, "refusal must close before sending RPC bytes");
-            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
-                "CONNECT must not retry after a refusal");
+            assert_eq!(
+                socket.read(&mut byte).unwrap(),
+                0,
+                "refusal must close before sending RPC bytes"
+            );
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "CONNECT must not retry after a refusal"
+            );
         });
         run_native(move |_| async move {
             let channel = Channel::builder(format!("http://{target}"))
-                .http_connect_proxy(proxy(address)).timeout(WATCHDOG)
-                .connect().await.unwrap();
+                .http_connect_proxy(proxy(address))
+                .timeout(WATCHDOG)
+                .connect()
+                .await
+                .unwrap();
             let mut client = GrpcClient::new(channel);
             let result: Result<Response<Bytes>, _> = Box::pin(client.unary(
-                "/proxy.Service/Echo", request(Bytes::from_static(b"private-body")),
-            )).await;
+                "/proxy.Service/Echo",
+                request(Bytes::from_static(b"private-body")),
+            ))
+            .await;
             let error = result.unwrap_err();
             assert_eq!(error.code(), Code::Unavailable);
             assert!(error.message().contains(&status.to_string()));
             assert!(!error.message().contains("proxy-secret"));
         });
         peer.join().unwrap();
-        assert!(matches!(origin.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
-            "neither proxy redirects nor direct fallback may open the origin");
+        assert!(
+            matches!(origin.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "neither proxy redirects nor direct fallback may open the origin"
+        );
     }
 }
 
@@ -527,28 +688,39 @@ fn parked_connect_observes_original_owner_cancellation_call_deadline_and_drop() 
                 connect_head(&mut socket, "origin.invalid:50051");
                 observed.publish();
                 let mut byte = [0];
-                assert_eq!(socket.read(&mut byte).unwrap(), 0,
-                    "a parked CONNECT must retire its socket without RPC output");
+                assert_eq!(
+                    socket.read(&mut byte).unwrap(),
+                    0,
+                    "a parked CONNECT must retire its socket without RPC output"
+                );
             });
             let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
             let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
             run_native_with_timer(Some(timer), move |owner| async move {
                 let driver = Cx::current().unwrap();
                 assert_ne!(driver.task_id(), owner.task_id());
-                let channel = Channel::builder(ORIGIN).http_connect_proxy(proxy(address))
-                    .connect_timeout(WATCHDOG).timeout(Duration::from_secs(1))
-                    .connect().await.unwrap();
+                let channel = Channel::builder(ORIGIN)
+                    .http_connect_proxy(proxy(address))
+                    .connect_timeout(WATCHDOG)
+                    .timeout(Duration::from_secs(1))
+                    .connect()
+                    .await
+                    .unwrap();
                 let mut client = GrpcClient::new(channel);
                 let explicit = owner.clone();
                 let mut call = Box::pin(async move {
                     if streaming {
                         Box::pin(client.into_native_duplex(
-                            &explicit, "/proxy.Service/Stream", request(()),
-                        )).await.map(|_| ())
+                            &explicit,
+                            "/proxy.Service/Stream",
+                            request(()),
+                        ))
+                        .await
+                        .map(|_| ())
                     } else {
-                        let response: Result<Response<Bytes>, _> = Box::pin(client.unary(
-                            "/proxy.Service/Echo", request(Bytes::new()),
-                        )).await;
+                        let response: Result<Response<Bytes>, _> =
+                            Box::pin(client.unary("/proxy.Service/Echo", request(Bytes::new())))
+                                .await;
                         response.map(|_| ())
                     }
                 });
@@ -570,7 +742,9 @@ fn parked_connect_observes_original_owner_cancellation_call_deadline_and_drop() 
                     if witness.received.load(Ordering::Acquire) && !interrupted {
                         interrupted = true;
                         match mode {
-                            "cancel" => owner.cancel_with(CancelKind::User, Some("proxy setup stopped")),
+                            "cancel" => {
+                                owner.cancel_with(CancelKind::User, Some("proxy setup stopped"))
+                            }
                             "deadline" => {
                                 clock.advance_to(Time::from_secs(12));
                                 task.waker().wake_by_ref();
@@ -579,16 +753,22 @@ fn parked_connect_observes_original_owner_cancellation_call_deadline_and_drop() 
                         }
                     }
                     Poll::Pending
-                }).await;
+                })
+                .await;
                 drop(call);
                 assert!(interrupted, "CONNECT never parked: {streaming}/{mode}");
                 match mode {
                     "cancel" => assert_eq!(result.unwrap().unwrap_err().code(), Code::Cancelled),
-                    "deadline" => assert_eq!(result.unwrap().unwrap_err().code(), Code::DeadlineExceeded),
+                    "deadline" => {
+                        assert_eq!(result.unwrap().unwrap_err().code(), Code::DeadlineExceeded)
+                    }
                     _ => assert!(result.is_none()),
                 }
                 assert!(owner.inner.read().cancel_waker_registrations.is_empty());
-                assert!(!driver.is_cancel_requested(), "cancelling a call must not cancel its poller");
+                assert!(
+                    !driver.is_cancel_requested(),
+                    "cancelling a call must not cancel its poller"
+                );
             });
             peer.join().unwrap();
         }
@@ -596,21 +776,32 @@ fn parked_connect_observes_original_owner_cancellation_call_deadline_and_drop() 
 }
 
 #[cfg(feature = "tls")]
-const CERT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/server.crt"));
+const CERT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/tls/server.crt"
+));
 
 #[cfg(feature = "tls")]
-fn tls_server<T: Read + Write>(io: T, protocol: &[u8]) -> rustls::StreamOwned<rustls::ServerConnection, T> {
+fn tls_server<T: Read + Write>(
+    io: T,
+    protocol: &[u8],
+) -> rustls::StreamOwned<rustls::ServerConnection, T> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-    let key = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/server.key"));
+    let key = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tls/server.key"
+    ));
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
-    .with_safe_default_protocol_versions().unwrap()
+    .with_safe_default_protocol_versions()
+    .unwrap()
     .with_no_client_auth()
     .with_single_cert(
         vec![CertificateDer::from_pem_slice(CERT).unwrap()],
         PrivateKeyDer::from_pem_slice(key).unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     if !protocol.is_empty() {
         config.alpn_protocols = vec![protocol.to_vec()];
     }
@@ -622,12 +813,15 @@ fn origin_connector(trust: bool) -> crate::tls::TlsConnector {
     use rustls::pki_types::{CertificateDer, pem::PemObject};
     let mut roots = rustls::RootCertStore::empty();
     if trust {
-        roots.add(CertificateDer::from_pem_slice(CERT).unwrap()).unwrap();
+        roots
+            .add(CertificateDer::from_pem_slice(CERT).unwrap())
+            .unwrap();
     }
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
-    .with_safe_default_protocol_versions().unwrap()
+    .with_safe_default_protocol_versions()
+    .unwrap()
     .with_root_certificates(roots)
     .with_no_client_auth();
     config.alpn_protocols = vec![b"h2".to_vec()];
@@ -637,9 +831,15 @@ fn origin_connector(trust: bool) -> crate::tls::TlsConnector {
 #[cfg(feature = "tls")]
 fn tls_proxy(address: SocketAddr, https: bool, trust: bool) -> HttpConnectProxy {
     let scheme = if https { "https" } else { "http" };
-    let roots = if trust { crate::tls::Certificate::from_pem(CERT).unwrap() } else { Vec::new() };
+    let roots = if trust {
+        crate::tls::Certificate::from_pem(CERT).unwrap()
+    } else {
+        Vec::new()
+    };
     HttpConnectProxy::new(format!("{scheme}://localhost:{}", address.port()))
-        .unwrap().with_authorization(PROXY_AUTH).unwrap()
+        .unwrap()
+        .with_authorization(PROXY_AUTH)
+        .unwrap()
         .with_http_client(HttpClient::with_config(crate::http::h1::HttpClientConfig {
             tls_root_certificates: roots,
             ..Default::default()
@@ -650,21 +850,42 @@ fn tls_proxy(address: SocketAddr, https: bool, trust: bool) -> HttpConnectProxy 
 fn serve_tls_route<T: Read + Write>(mut io: T, origin_tls: bool, destination: SocketAddr) {
     if origin_tls {
         connect_head(&mut io, &destination.to_string());
-        io.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").unwrap();
+        io.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .unwrap();
         io.flush().unwrap();
         let mut tls = tls_server(io, b"h2");
         let mut connection = Connection::server(Settings::server());
         connection.queue_initial_settings();
         flush(&mut tls, &mut connection);
-        assert_eq!(tls.conn.server_name(), Some("localhost"), "origin SNI is independent of CONNECT destination");
-        serve_h2(&mut tls, connection, &[
-            rpc("/proxy.Service/Echo", &[b"request"], &[b"authenticated"]),
-        ], "service.invalid", "https");
+        assert_eq!(
+            tls.conn.server_name(),
+            Some("localhost"),
+            "origin SNI is independent of CONNECT destination"
+        );
+        serve_h2(
+            &mut tls,
+            connection,
+            &[rpc(
+                "/proxy.Service/Echo",
+                &[b"request"],
+                &[b"authenticated"],
+            )],
+            "service.invalid",
+            "https",
+        );
     } else {
         let connection = start_tunnel(&mut io, "origin.invalid:50051");
-        serve_h2(&mut io, connection, &[
-            rpc("/proxy.Service/Echo", &[b"request"], &[b"authenticated"]),
-        ], "origin.invalid:50051", "http");
+        serve_h2(
+            &mut io,
+            connection,
+            &[rpc(
+                "/proxy.Service/Echo",
+                &[b"request"],
+                &[b"authenticated"],
+            )],
+            "origin.invalid:50051",
+            "http",
+        );
     }
 }
 
@@ -683,19 +904,29 @@ fn native_connect_routes_authenticate_tls_origins_and_https_proxies_independentl
             }
         });
         run_native(move |_| async move {
-            let uri = if origin_tls { "https://service.invalid" } else { ORIGIN };
+            let uri = if origin_tls {
+                "https://service.invalid"
+            } else {
+                ORIGIN
+            };
             let mut builder = Channel::builder(uri)
                 .http_connect_proxy(tls_proxy(address, https_proxy, true))
-                .connect_timeout(WATCHDOG).timeout(WATCHDOG);
+                .connect_timeout(WATCHDOG)
+                .timeout(WATCHDOG);
             if origin_tls {
-                builder = builder.tls_connector(origin_connector(true))
-                    .tls_server_name("localhost").dial_addr(destination);
+                builder = builder
+                    .tls_connector(origin_connector(true))
+                    .tls_server_name("localhost")
+                    .dial_addr(destination);
             }
             let channel = builder.connect().await.unwrap();
             let mut client = GrpcClient::new(channel);
             let response: Response<Bytes> = Box::pin(client.unary(
-                "/proxy.Service/Echo", request(Bytes::from_static(b"request")),
-            )).await.unwrap();
+                "/proxy.Service/Echo",
+                request(Bytes::from_static(b"request")),
+            ))
+            .await
+            .unwrap();
             assert_eq!(response.get_ref().as_ref(), b"authenticated");
         });
         peer.join().unwrap();
@@ -706,11 +937,15 @@ fn native_connect_routes_authenticate_tls_origins_and_https_proxies_independentl
 fn assert_no_tls_application_bytes(result: std::io::Result<usize>) {
     match result {
         Ok(0) => {}
-        Err(error) if matches!(error.kind(),
-            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe
-            | std::io::ErrorKind::InvalidData
-        ) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::InvalidData
+            ) => {}
         other => panic!("TLS refusal must retire transport before RPC bytes, got {other:?}"),
     }
 }
@@ -718,7 +953,8 @@ fn assert_no_tls_application_bytes(result: std::io::Result<usize>) {
 #[cfg(feature = "tls")]
 fn refuse_origin_tls<T: Read + Write>(mut io: T, destination: SocketAddr, mode: &str) {
     connect_head(&mut io, &destination.to_string());
-    io.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").unwrap();
+    io.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .unwrap();
     io.flush().unwrap();
     // No ALPN overlap completes TLS without negotiating h2 only when the
     // server offers no protocol, so clear the offer in that negative case.
@@ -729,7 +965,12 @@ fn refuse_origin_tls<T: Read + Write>(mut io: T, destination: SocketAddr, mode: 
 #[cfg(feature = "tls")]
 #[test]
 fn connect_tunnels_preserve_origin_identity_trust_and_required_h2_alpn() {
-    for mode in ["wrong-name", "untrusted-origin", "missing-h2", "untrusted-proxy"] {
+    for mode in [
+        "wrong-name",
+        "untrusted-origin",
+        "missing-h2",
+        "untrusted-proxy",
+    ] {
         let (listener, address) = listener();
         let destination: SocketAddr = "127.0.0.1:50123".parse().unwrap();
         let https_proxy = matches!(mode, "untrusted-origin" | "untrusted-proxy");
@@ -750,13 +991,23 @@ fn connect_tunnels_preserve_origin_identity_trust_and_required_h2_alpn() {
             let channel = Channel::builder("https://service.invalid")
                 .http_connect_proxy(tls_proxy(address, https_proxy, mode != "untrusted-proxy"))
                 .tls_connector(origin_connector(mode != "untrusted-origin"))
-                .tls_server_name(if mode == "wrong-name" { "wrong.invalid" } else { "localhost" })
-                .dial_addr(destination).connect_timeout(WATCHDOG).timeout(WATCHDOG)
-                .connect().await.unwrap();
+                .tls_server_name(if mode == "wrong-name" {
+                    "wrong.invalid"
+                } else {
+                    "localhost"
+                })
+                .dial_addr(destination)
+                .connect_timeout(WATCHDOG)
+                .timeout(WATCHDOG)
+                .connect()
+                .await
+                .unwrap();
             let mut client = GrpcClient::new(channel);
             let result: Result<Response<Bytes>, _> = Box::pin(client.unary(
-                "/proxy.Service/Echo", request(Bytes::from_static(b"must-not-send")),
-            )).await;
+                "/proxy.Service/Echo",
+                request(Bytes::from_static(b"must-not-send")),
+            ))
+            .await;
             let error = result.unwrap_err();
             assert_eq!(error.code(), Code::Unavailable, "{mode}");
             if mode == "missing-h2" {

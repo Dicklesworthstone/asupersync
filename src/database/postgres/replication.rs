@@ -16,10 +16,9 @@
 //! and <https://www.postgresql.org/docs/current/protocol-flow.html#PROTOCOL-COPY>.
 
 use super::{
-    CancelWakerGuard, Cx, FrontendMessage, MAX_BACKEND_MESSAGE_LEN, MessageBuffer,
-    MessageReader, Outcome, PgConnectOptions, PgConnection, PgError, PgTlsOptions,
-    cancelled_error, outcome_from_error, quote_postgres_identifier,
-    unexpected_backend_message,
+    CancelWakerGuard, Cx, FrontendMessage, MAX_BACKEND_MESSAGE_LEN, MessageBuffer, MessageReader,
+    Outcome, PgConnectOptions, PgConnection, PgError, PgTlsOptions, cancelled_error,
+    outcome_from_error, quote_postgres_identifier, unexpected_backend_message,
 };
 use crate::cx::{CancelWakerToken, cap::CapMask};
 use crate::io::AsyncWrite;
@@ -71,8 +70,11 @@ impl FromStr for PgLsn {
             .split_once('/')
             .ok_or_else(|| protocol("LSN must have hexadecimal X/Y form"))?;
         let part = |value: &str| {
-            if value.is_empty() || value.len() > 8 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(protocol("LSN components must contain one to eight hexadecimal digits"));
+            if value.is_empty() || value.len() > 8 || !value.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(protocol(
+                    "LSN components must contain one to eight hexadecimal digits",
+                ));
             }
             u32::from_str_radix(value, 16).map_err(|_| protocol("invalid LSN component"))
         };
@@ -109,9 +111,13 @@ impl PgReplicationConfig {
         let slot = slot.into();
         if slot.is_empty()
             || slot.len() > 63
-            || !slot.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            || !slot
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         {
-            return Err(protocol("slot name must be 1..=63 lowercase ASCII letters, digits, or underscores"));
+            return Err(protocol(
+                "slot name must be 1..=63 lowercase ASCII letters, digits, or underscores",
+            ));
         }
         let mut names = Vec::new();
         for name in publications {
@@ -120,7 +126,9 @@ impl PgReplicationConfig {
                 return Err(protocol("too many replication publications"));
             }
             if name.is_empty() || name.len() > 63 || name.as_bytes().contains(&0) {
-                return Err(protocol("publication names must be nonempty, NUL-free, and at most 63 bytes"));
+                return Err(protocol(
+                    "publication names must be nonempty, NUL-free, and at most 63 bytes",
+                ));
             }
             names.push(name);
         }
@@ -145,7 +153,9 @@ impl PgReplicationConfig {
     /// 25-byte XLogData envelope and within the existing PostgreSQL frame cap.
     pub fn with_max_message_bytes(mut self, limit: usize) -> Result<Self, PgError> {
         if !(25..=MAX_BACKEND_MESSAGE_LEN as usize - 4).contains(&limit) {
-            return Err(protocol("replication message limit is outside protocol bounds"));
+            return Err(protocol(
+                "replication message limit is outside protocol bounds",
+            ));
         }
         self.max_message_bytes = limit;
         Ok(self)
@@ -166,7 +176,9 @@ impl PgReplicationConfig {
     }
 
     fn start_command(&self) -> Result<String, PgError> {
-        let names = self.publications.iter()
+        let names = self
+            .publications
+            .iter()
             .map(|name| quote_postgres_identifier(name))
             .collect::<Vec<_>>()
             .join(",");
@@ -174,7 +186,9 @@ impl PgReplicationConfig {
         // quotes are doubled, and backslashes have no escape semantics.
         let mut command = format!(
             "START_REPLICATION SLOT {} LOGICAL {} (proto_version '1', publication_names '{}')",
-            quote_postgres_identifier(&self.slot), self.start_lsn, names.replace('\'', "''"),
+            quote_postgres_identifier(&self.slot),
+            self.start_lsn,
+            names.replace('\'', "''"),
         );
         if self.binary || self.messages {
             command.pop();
@@ -250,7 +264,12 @@ impl PgReplicationFeedback {
         if applied > flushed || flushed > written {
             return Err(protocol("feedback requires applied <= flushed <= written"));
         }
-        Ok(Self { written, flushed, applied, request_reply: false })
+        Ok(Self {
+            written,
+            flushed,
+            applied,
+            request_reply: false,
+        })
     }
 
     /// Ask the primary to send an immediate keepalive response.
@@ -262,15 +281,21 @@ impl PgReplicationFeedback {
 
     /// Last position confirmed written by the application.
     #[must_use]
-    pub const fn written(self) -> PgLsn { self.written }
+    pub const fn written(self) -> PgLsn {
+        self.written
+    }
 
     /// Last position confirmed durably flushed by the application.
     #[must_use]
-    pub const fn flushed(self) -> PgLsn { self.flushed }
+    pub const fn flushed(self) -> PgLsn {
+        self.flushed
+    }
 
     /// Last position confirmed applied by the application.
     #[must_use]
-    pub const fn applied(self) -> PgLsn { self.applied }
+    pub const fn applied(self) -> PgLsn {
+        self.applied
+    }
 
     fn follows(self, previous: Self) -> bool {
         self.written >= previous.written
@@ -301,7 +326,10 @@ impl PgReplicationConnection {
     }
 
     /// Connect with ordinary connection options and the default TLS policy.
-    pub async fn connect_with_options(cx: &Cx, options: PgConnectOptions) -> Outcome<Self, PgError> {
+    pub async fn connect_with_options(
+        cx: &Cx,
+        options: PgConnectOptions,
+    ) -> Outcome<Self, PgError> {
         Self::connect_with_tls_options(cx, options, PgTlsOptions::default()).await
     }
 
@@ -314,7 +342,9 @@ impl PgReplicationConnection {
         if let Err(error) = require_io(cx) {
             return Outcome::Err(error);
         }
-        let timeout = options.connect_timeout.unwrap_or(tls.connect_timeout_duration());
+        let timeout = options
+            .connect_timeout
+            .unwrap_or(tls.connect_timeout_duration());
         let mut control = ReplicationControl::new(cx);
         control.limit_after(timeout);
         // This dedicated outer control owns the whole-connect timeout on the
@@ -323,7 +353,10 @@ impl PgReplicationConnection {
             Ok(PgConnection::connect_with_tls_options_inner(cx, options, tls, true).await)
         });
         match control.drive(cx, connect).await {
-            Ok(Outcome::Ok(connection)) => Outcome::Ok(Self { connection: Some(connection), owner: cx.clone() }),
+            Ok(Outcome::Ok(connection)) => Outcome::Ok(Self {
+                connection: Some(connection),
+                owner: cx.clone(),
+            }),
             Ok(Outcome::Err(error)) | Err(error) => outcome_from_error(error),
             Ok(Outcome::Cancelled(reason)) => Outcome::Cancelled(reason),
             Ok(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
@@ -334,7 +367,11 @@ impl PgReplicationConnection {
     ///
     /// The returned stream exclusively owns the connection. Dropping this
     /// future before startup completes closes it, without replaying the command.
-    pub async fn start(mut self, cx: &Cx, config: PgReplicationConfig) -> Outcome<PgReplicationStream, PgError> {
+    pub async fn start(
+        mut self,
+        cx: &Cx,
+        config: PgReplicationConfig,
+    ) -> Outcome<PgReplicationStream, PgError> {
         let command = match config.start_command() {
             Ok(command) => command,
             Err(error) => return Outcome::Err(error),
@@ -349,7 +386,10 @@ impl PgReplicationConnection {
             Err(error) => return Outcome::Err(error),
         };
         let mut stream = PgReplicationStream {
-            connection: self.connection.take().expect("owned replication connection"),
+            connection: self
+                .connection
+                .take()
+                .expect("owned replication connection"),
             control: ReplicationControl::new(cx),
             max_message_bytes: config.max_message_bytes,
             pending_write: Some(PendingWrite::new(message, WriteKind::Start)),
@@ -371,24 +411,35 @@ impl PgReplicationConnection {
             };
             match tag {
                 b'W' => {
-                    let formats = match PgConnection::parse_copy_response("CopyBothResponse", &data) {
+                    let formats = match PgConnection::parse_copy_response("CopyBothResponse", &data)
+                    {
                         Ok(formats) => formats,
                         Err(error) => return stream.fail(error).await,
                     };
                     if !formats.1.is_empty() {
-                        return stream.fail(protocol("replication CopyBothResponse must have zero columns")).await;
+                        return stream
+                            .fail(protocol(
+                                "replication CopyBothResponse must have zero columns",
+                            ))
+                            .await;
                     }
                     stream.state = StreamState::Streaming;
                     return Outcome::Ok(stream);
                 }
                 b'E' => {
-                    let error = stream.connection.parse_error_response(&data)
+                    let error = stream
+                        .connection
+                        .parse_error_response(&data)
                         .unwrap_or_else(|error| error);
                     return stream.fail(error).await;
                 }
                 _ => match stream.connection.handle_async_backend_message(tag, &data) {
                     Ok(true) => crate::runtime::yield_now().await,
-                    Ok(false) => return stream.fail(unexpected_backend_message("replication startup", tag)).await,
+                    Ok(false) => {
+                        return stream
+                            .fail(unexpected_backend_message("replication startup", tag))
+                            .await;
+                    }
                     Err(error) => return stream.fail(error).await,
                 },
             }
@@ -406,10 +457,19 @@ impl Drop for PgReplicationConnection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StreamState { Starting, Streaming, Completed, Failed }
+enum StreamState {
+    Starting,
+    Streaming,
+    Completed,
+    Failed,
+}
 
 #[derive(Debug, Clone, Copy)]
-enum WriteKind { Start, Feedback(PgReplicationFeedback), Done }
+enum WriteKind {
+    Start,
+    Feedback(PgReplicationFeedback),
+    Done,
+}
 
 struct PendingWrite {
     frame: Vec<u8>,
@@ -419,7 +479,11 @@ struct PendingWrite {
 
 impl PendingWrite {
     fn new(frame: Vec<u8>, kind: WriteKind) -> Self {
-        Self { frame, offset: 0, kind }
+        Self {
+            frame,
+            offset: 0,
+            kind,
+        }
     }
 }
 
@@ -459,7 +523,9 @@ impl fmt::Debug for PgReplicationStream {
 impl PgReplicationStream {
     /// Last complete feedback frame sent to the primary.
     #[must_use]
-    pub const fn feedback(&self) -> PgReplicationFeedback { self.feedback }
+    pub const fn feedback(&self) -> PgReplicationFeedback {
+        self.feedback
+    }
 
     /// Receive one bounded WAL event or keepalive, without reading ahead.
     ///
@@ -490,7 +556,13 @@ impl PgReplicationStream {
                         Ok(event) => event,
                         Err(error) => return self.fail(error).await,
                     };
-                    let reply = matches!(&event, PgReplicationEvent::PrimaryKeepAlive { reply_requested: true, .. });
+                    let reply = matches!(
+                        &event,
+                        PgReplicationEvent::PrimaryKeepAlive {
+                            reply_requested: true,
+                            ..
+                        }
+                    );
                     self.pending_event = Some(event);
                     if reply && !self.sender_done {
                         self.queue_feedback(self.feedback.request_reply(false));
@@ -498,7 +570,9 @@ impl PgReplicationStream {
                 }
                 b'c' if !self.receiver_done => {
                     if !data.is_empty() {
-                        return self.fail(protocol("replication CopyDone must have no body")).await;
+                        return self
+                            .fail(protocol("replication CopyDone must have no body"))
+                            .await;
                     }
                     self.receiver_done = true;
                     if !self.sender_done {
@@ -520,7 +594,9 @@ impl PgReplicationStream {
                         _ => false,
                     };
                     if !valid {
-                        return self.fail(protocol("unexpected replication completion tag")).await;
+                        return self
+                            .fail(protocol("unexpected replication completion tag"))
+                            .await;
                     }
                     self.completions += 1;
                 }
@@ -529,7 +605,9 @@ impl PgReplicationStream {
                         return self.fail(error).await;
                     }
                     if self.connection.inner.transaction_status != b'I' {
-                        return self.fail(protocol("replication completion is not idle")).await;
+                        return self
+                            .fail(protocol("replication completion is not idle"))
+                            .await;
                     }
                     self.state = StreamState::Completed;
                     self.control.sleep = None;
@@ -537,7 +615,9 @@ impl PgReplicationStream {
                     return Outcome::Ok(None);
                 }
                 b'E' => {
-                    let error = self.connection.parse_error_response(&data)
+                    let error = self
+                        .connection
+                        .parse_error_response(&data)
                         .unwrap_or_else(|error| error);
                     // A replication error can require Sync, unlike ordinary
                     // COPY OUT. This dedicated failed connection is closed,
@@ -546,7 +626,11 @@ impl PgReplicationStream {
                 }
                 _ => match self.connection.handle_async_backend_message(tag, &data) {
                     Ok(true) => crate::runtime::yield_now().await,
-                    Ok(false) => return self.fail(unexpected_backend_message("logical replication", tag)).await,
+                    Ok(false) => {
+                        return self
+                            .fail(unexpected_backend_message("logical replication", tag))
+                            .await;
+                    }
                     Err(error) => return self.fail(error).await,
                 },
             }
@@ -558,14 +642,22 @@ impl PgReplicationStream {
     /// The caller, rather than the network reader, decides what has been durably
     /// flushed/applied. A dropped send future retains its exact frame and offset;
     /// the next operation finishes that frame before sending another one.
-    pub async fn send_feedback(&mut self, cx: &Cx, feedback: PgReplicationFeedback) -> Outcome<(), PgError> {
+    pub async fn send_feedback(
+        &mut self,
+        cx: &Cx,
+        feedback: PgReplicationFeedback,
+    ) -> Outcome<(), PgError> {
         if self.state != StreamState::Streaming || self.sender_done || self.receiver_done {
             return Outcome::Err(protocol("replication stream no longer accepts feedback"));
         }
-        let previous = self.pending_write.as_ref().and_then(|pending| match pending.kind {
-            WriteKind::Feedback(feedback) => Some(feedback),
-            _ => None,
-        }).unwrap_or(self.feedback);
+        let previous = self
+            .pending_write
+            .as_ref()
+            .and_then(|pending| match pending.kind {
+                WriteKind::Feedback(feedback) => Some(feedback),
+                _ => None,
+            })
+            .unwrap_or(self.feedback);
         if !feedback.follows(previous) {
             return Outcome::Err(protocol("replication feedback cannot move backwards"));
         }
@@ -635,8 +727,17 @@ impl PgReplicationStream {
             return self.control.drive(cx, async { Ok(()) }).await;
         };
         let stream = &mut self.connection.inner.stream;
-        self.control.drive(cx, poll_fn(|task| poll_pending_write(pending, stream, task))).await?;
-        if let Some(PendingWrite { kind: WriteKind::Feedback(feedback), .. }) = self.pending_write.take() {
+        self.control
+            .drive(
+                cx,
+                poll_fn(|task| poll_pending_write(pending, stream, task)),
+            )
+            .await?;
+        if let Some(PendingWrite {
+            kind: WriteKind::Feedback(feedback),
+            ..
+        }) = self.pending_write.take()
+        {
             self.feedback = feedback;
         }
         Ok(())
@@ -644,9 +745,16 @@ impl PgReplicationStream {
 
     async fn read_message(&mut self, cx: &Cx) -> Result<(u8, Vec<u8>), PgError> {
         let owner = self.control.owner.clone();
-        self.control.drive(cx, self.connection.read_message_buffered(
-            &owner, self.max_message_bytes, "logical replication",
-        )).await
+        self.control
+            .drive(
+                cx,
+                self.connection.read_message_buffered(
+                    &owner,
+                    self.max_message_bytes,
+                    "logical replication",
+                ),
+            )
+            .await
     }
 
     async fn fail<T>(&mut self, error: PgError) -> Outcome<T, PgError> {
@@ -656,8 +764,13 @@ impl PgReplicationStream {
             // The guard closes even when the bounded cancel-drain future is
             // itself dropped while the caller retains this failed stream.
             let owner = self.control.owner.clone();
-            let drain = CloseAfterDrain { connection: &mut self.connection, owner: owner.clone() };
-            owner.with_ambient(drain.connection.wire_cancel_in_drain(&owner)).await;
+            let drain = CloseAfterDrain {
+                connection: &mut self.connection,
+                owner: owner.clone(),
+            };
+            owner
+                .with_ambient(drain.connection.wire_cancel_in_drain(&owner))
+                .await;
         } else {
             self.connection.abort_in_flight_exchange();
         }
@@ -697,11 +810,16 @@ fn poll_pending_write<S: AsyncWrite + Unpin>(
         }
         let remaining = &pending.frame[pending.offset..];
         match Pin::new(&mut *stream).poll_write(task, remaining) {
-            Poll::Ready(Ok(0)) => return Poll::Ready(Err(PgError::Io(io::Error::new(
-                io::ErrorKind::WriteZero, "replication write accepted no bytes",
-            )))),
+            Poll::Ready(Ok(0)) => {
+                return Poll::Ready(Err(PgError::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "replication write accepted no bytes",
+                ))));
+            }
             Poll::Ready(Ok(written)) if written <= remaining.len() => pending.offset += written,
-            Poll::Ready(Ok(_)) => return Poll::Ready(Err(protocol("transport wrote beyond the supplied buffer"))),
+            Poll::Ready(Ok(_)) => {
+                return Poll::Ready(Err(protocol("transport wrote beyond the supplied buffer")));
+            }
             Poll::Ready(Err(error)) => return Poll::Ready(Err(PgError::Io(error))),
             Poll::Pending => return Poll::Pending,
         }
@@ -717,8 +835,10 @@ fn protocol(message: &str) -> PgError {
 fn require_io(cx: &Cx) -> Result<(), PgError> {
     crate::cx::io_gate::require_ambient_io("PostgreSQL replication").map_err(PgError::Io)?;
     if !cx.runtime_mask.has(CapMask::IO) {
-        return Err(PgError::Io(io::Error::new(io::ErrorKind::PermissionDenied,
-            "PostgreSQL replication requires the explicit context's IO capability")));
+        return Err(PgError::Io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "PostgreSQL replication requires the explicit context's IO capability",
+        )));
     }
     Ok(())
 }
@@ -736,7 +856,12 @@ fn parse_event(mut data: Vec<u8>) -> Result<PgReplicationEvent, PgError> {
             let wal_end = PgLsn::new(read_u64(9)?);
             let server_time_micros = read_u64(17)? as i64;
             drop(data.drain(..25));
-            Ok(PgReplicationEvent::XLogData { wal_start, wal_end, server_time_micros, data })
+            Ok(PgReplicationEvent::XLogData {
+                wal_start,
+                wal_end,
+                server_time_micros,
+                data,
+            })
         }
         Some(b'k') if data.len() == 18 => {
             let wal_end = PgLsn::new(read_u64(1)?);
@@ -746,7 +871,11 @@ fn parse_event(mut data: Vec<u8>) -> Result<PgReplicationEvent, PgError> {
                 1 => true,
                 _ => return Err(protocol("invalid keepalive reply flag")),
             };
-            Ok(PgReplicationEvent::PrimaryKeepAlive { wal_end, server_time_micros, reply_requested })
+            Ok(PgReplicationEvent::PrimaryKeepAlive {
+                wal_end,
+                server_time_micros,
+                reply_requested,
+            })
         }
         _ => Err(protocol("invalid logical replication CopyData envelope")),
     }
@@ -786,11 +915,16 @@ impl Drop for PollerCancellation {
 impl ReplicationControl {
     fn new(cx: &Cx) -> Self {
         let initial_poller = Cx::current();
-        let driver = cx.timer_driver()
+        let driver = cx
+            .timer_driver()
             .or_else(|| initial_poller.as_ref().and_then(Cx::timer_driver));
         let mut control = Self {
-            owner: cx.clone(), initial_poller, driver, deadline: None,
-            deadline_is_timeout: false, sleep: None,
+            owner: cx.clone(),
+            initial_poller,
+            driver,
+            deadline: None,
+            deadline_is_timeout: false,
+            sleep: None,
         };
         control.tighten(cx);
         if let Some(poller) = control.initial_poller.clone() {
@@ -800,13 +934,21 @@ impl ReplicationControl {
     }
 
     fn now(&self) -> Time {
-        self.driver.as_ref().map_or_else(crate::time::wall_now, TimerDriverHandle::now)
+        self.driver
+            .as_ref()
+            .map_or_else(crate::time::wall_now, TimerDriverHandle::now)
     }
 
     fn tighten(&mut self, cx: &Cx) {
-        let Some(deadline) = cx.budget().deadline else { return; };
-        let cx_now = cx.timer_driver().map_or_else(crate::time::wall_now, |driver| driver.now());
-        let deadline = self.now().saturating_add_nanos(deadline.as_nanos().saturating_sub(cx_now.as_nanos()));
+        let Some(deadline) = cx.budget().deadline else {
+            return;
+        };
+        let cx_now = cx
+            .timer_driver()
+            .map_or_else(crate::time::wall_now, |driver| driver.now());
+        let deadline = self
+            .now()
+            .saturating_add_nanos(deadline.as_nanos().saturating_sub(cx_now.as_nanos()));
         self.bound(deadline, false);
     }
 
@@ -817,7 +959,9 @@ impl ReplicationControl {
 
     fn bound(&mut self, deadline: Time, timeout: bool) {
         if self.deadline == Some(deadline) {
-            if !timeout { self.deadline_is_timeout = false; }
+            if !timeout {
+                self.deadline_is_timeout = false;
+            }
             return;
         }
         if self.deadline.is_none_or(|current| deadline < current) {
@@ -825,17 +969,22 @@ impl ReplicationControl {
             self.deadline_is_timeout = timeout;
             match &mut self.sleep {
                 Some(sleep) => sleep.reset(deadline),
-                None => self.sleep = Some(self.driver.as_ref().map_or_else(
-                    || Sleep::new(deadline),
-                    |driver| Sleep::with_timer_driver(deadline, driver.clone()),
-                )),
+                None => {
+                    self.sleep = Some(self.driver.as_ref().map_or_else(
+                        || Sleep::new(deadline),
+                        |driver| Sleep::with_timer_driver(deadline, driver.clone()),
+                    ))
+                }
             }
         }
     }
 
     fn expired(&self) -> PgError {
         if self.deadline_is_timeout {
-            PgError::Io(io::Error::new(io::ErrorKind::TimedOut, "PostgreSQL replication connection timed out"))
+            PgError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "PostgreSQL replication connection timed out",
+            ))
         } else {
             PgError::Cancelled(CancelReason::deadline())
         }
@@ -859,12 +1008,16 @@ impl ReplicationControl {
             require_io(cx)?;
             require_io(&owner)?;
             let current = Cx::current();
-            if current.as_ref().is_none_or(|current| poller.as_ref().is_none_or(|previous| {
-                !std::sync::Arc::ptr_eq(&previous.cx.inner, &current.inner)
-            })) {
+            if current.as_ref().is_none_or(|current| {
+                poller.as_ref().is_none_or(|previous| {
+                    !std::sync::Arc::ptr_eq(&previous.cx.inner, &current.inner)
+                })
+            }) {
                 poller = current.map(|cx| PollerCancellation { cx, token: None });
             }
-            for guard in &mut guards { guard.refresh(task.waker()); }
+            for guard in &mut guards {
+                guard.refresh(task);
+            }
             if let Some(poller) = &mut poller {
                 poller.token = Some(poller.cx.refresh_cancel_waker(poller.token, task.waker()));
                 if poller.cx.checkpoint().is_err() {
@@ -882,7 +1035,10 @@ impl ReplicationControl {
                 return Poll::Ready(Err(self.expired()));
             }
             if let Some(sleep) = &mut self.sleep {
-                let _ambient = self.driver.is_none().then(|| owner.clone().set_current_restricted());
+                let _ambient = self
+                    .driver
+                    .is_none()
+                    .then(|| owner.clone().set_current_restricted());
                 if Pin::new(sleep).poll_deadline(task).is_ready() {
                     return Poll::Ready(Err(self.expired()));
                 }
@@ -906,7 +1062,8 @@ impl ReplicationControl {
                 return Poll::Ready(Err(cancelled_error(&poller.cx)));
             }
             result
-        }).await
+        })
+        .await
     }
 }
 
