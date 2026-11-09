@@ -7,16 +7,20 @@
     feature = "tls",
     feature = "test-internals"
 ))]
+// Integration tests are separate crates and do not inherit the library's
+// recursion limit. Match its solver budget for proving `Send` through split
+// TLS I/O, as the other native WebSocket integration tests already do.
+#![recursion_limit = "256"]
 
-use asupersync::net::TcpStream;
+use asupersync::Cx;
 use asupersync::cx::cap::{CapSet, CapSetRuntimeMask};
+use asupersync::net::TcpStream;
 use asupersync::net::websocket::{
     HttpRequest, Message, WebSocket, WebSocketConfig, WsConnectError, compute_accept_key,
 };
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use asupersync::tls::{TlsConnector, TlsStream};
 use asupersync::types::{Budget, CancelKind};
-use asupersync::Cx;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::future::{Future, poll_fn};
 use std::io::{self, Read, Write};
@@ -75,10 +79,18 @@ fn runtime(workers: usize) -> Runtime {
 fn assert_retired(runtime: &Runtime) {
     let started = Instant::now();
     while !runtime.is_quiescent() {
-        assert!(started.elapsed() < WATCHDOG, "WSS setup owner did not retire");
+        assert!(
+            started.elapsed() < WATCHDOG,
+            "WSS setup owner did not retire"
+        );
         std::thread::park_timeout(Duration::from_millis(1));
     }
-    assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     assert_eq!(runtime.draining_region_count(), 0);
 }
@@ -91,23 +103,29 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let runtime = runtime(workers);
-    let clock = runtime.request_cx_with_budget(Budget::INFINITE).timer_driver().unwrap();
+    let clock = runtime
+        .request_cx_with_budget(Budget::INFINITE)
+        .timer_driver()
+        .unwrap();
     let budget = caller_timeout.map_or(Budget::INFINITE, |duration| {
         Budget::INFINITE.with_timeout(clock.now(), duration)
     });
     let caller = runtime.request_cx_with_budget(budget);
     let completed = Arc::new(AtomicBool::new(false));
     let done = Arc::clone(&completed);
-    let mut task = runtime.handle().try_spawn(async move {
-        let ambient = Cx::current().expect("native WSS task context");
-        assert_ne!(ambient.task_id(), caller.task_id());
-        work(ambient, caller).await;
-        done.store(true, Ordering::Release);
-    }).unwrap();
+    let mut task = runtime
+        .handle()
+        .try_spawn(async move {
+            let ambient = Cx::current().expect("native WSS task context");
+            assert_ne!(ambient.task_id(), caller.task_id());
+            work(ambient, caller).await;
+            done.store(true, Ordering::Release);
+        })
+        .unwrap();
     runtime.block_on(async {
-        asupersync::time::timeout(
-            asupersync::time::wall_now(), WATCHDOG, &mut task,
-        ).await.expect("WSS task exceeded watchdog");
+        asupersync::time::timeout(asupersync::time::wall_now(), WATCHDOG, &mut task)
+            .await
+            .expect("WSS task exceeded watchdog");
     });
     assert_retired(&runtime);
     completed.load(Ordering::Acquire)
@@ -116,7 +134,9 @@ where
 fn connector(trusted: bool, protocols: &[&[u8]]) -> TlsConnector {
     let mut roots = rustls::RootCertStore::empty();
     if trusted {
-        roots.add(CertificateDer::from_pem_slice(CERT).unwrap()).unwrap();
+        roots
+            .add(CertificateDer::from_pem_slice(CERT).unwrap())
+            .unwrap();
     }
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
@@ -152,7 +172,8 @@ fn request(peer: &mut impl Read) -> HttpRequest {
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {
         let mut byte = [0];
-        peer.read_exact(&mut byte).expect("decrypted HTTP upgrade request");
+        peer.read_exact(&mut byte)
+            .expect("decrypted HTTP upgrade request");
         head.push(byte[0]);
         assert!(head.len() <= 16 * 1024, "bounded HTTP request fixture");
     }
@@ -197,9 +218,18 @@ fn transport_retired(socket: &mut StdTcpStream) {
         match socket.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => {
-                allowance = allowance.checked_sub(count).expect("bounded residual TLS output");
+                allowance = allowance
+                    .checked_sub(count)
+                    .expect("bounded residual TLS output");
             }
-            Err(error) if matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                break;
+            }
             Err(error) => panic!("acquired WSS transport did not retire: {error:?}"),
         }
     }
@@ -210,11 +240,17 @@ fn no_http_then_retired(peer: &mut Peer) {
     match peer.read(&mut byte) {
         Ok(0) => {}
         Ok(count) => panic!("TLS policy refusal leaked {count} HTTP bytes"),
-        Err(error) => assert!(matches!(error.kind(),
-            io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
-            | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::BrokenPipe
-        ), "unexpected TLS refusal: {error:?}"),
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::InvalidData
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe
+            ),
+            "unexpected TLS refusal: {error:?}"
+        ),
     }
     transport_retired(&mut peer.sock);
 }
@@ -224,16 +260,30 @@ fn native_wss_authenticates_dns_and_ip_preserves_tail_and_split_state() {
     for workers in [0, 2] {
         for alpn in [Some(b"http/1.1".as_slice()), None] {
             let (listener, address) = listener("127.0.0.1");
-            let host = if alpn.is_some() { "localhost" } else { "127.0.0.1" };
+            let host = if alpn.is_some() {
+                "localhost"
+            } else {
+                "127.0.0.1"
+            };
             let peer = std::thread::spawn(move || {
                 let mut peer = server(accept(&listener), alpn);
                 let request = request(&mut peer);
                 assert_eq!(request.method, "GET");
                 assert_eq!(request.path, "/secure?tail=1");
-                assert_eq!(request.header("host"), Some(format!("{host}:{}", address.port()).as_str()));
+                assert_eq!(
+                    request.header("host"),
+                    Some(format!("{host}:{}", address.port()).as_str())
+                );
                 assert_eq!(request.header("sec-websocket-protocol"), Some("chat"));
                 assert_eq!(peer.conn.alpn_protocol(), alpn);
-                assert_eq!(peer.conn.server_name(), if alpn.is_some() { Some("localhost") } else { None });
+                assert_eq!(
+                    peer.conn.server_name(),
+                    if alpn.is_some() {
+                        Some("localhost")
+                    } else {
+                        None
+                    }
+                );
                 let mut head_and_tail = response(&request, "Sec-WebSocket-Protocol: chat\r\n");
                 head_and_tail.extend(frame(0x81, b"tail"));
                 peer.write_all(&head_and_tail).unwrap();
@@ -250,16 +300,30 @@ fn native_wss_authenticates_dns_and_ip_preserves_tail_and_split_state() {
                 let connector = connector(true, &[b"http/1.1"]);
                 let url = format!("wss://{host}:{}/secure?tail=1", address.port());
                 let config = WebSocketConfig::new().protocol("chat").ping_interval(None);
-                let ws = SecureWebSocket::connect_tls(&caller, &url, config, &connector).await.unwrap();
+                let ws = SecureWebSocket::connect_tls(&caller, &url, config, &connector)
+                    .await
+                    .unwrap();
                 assert_eq!(ws.protocol(), Some("chat"));
                 assert!(!ws.compression_enabled());
                 let (mut read, mut write) = ws.split();
-                assert!(matches!(read.recv(&caller).await.unwrap(), Some(Message::Text(text)) if text == "tail"));
-                write.send(&caller, Message::Text("client".to_owned())).await.unwrap();
-                assert!(matches!(read.recv(&caller).await.unwrap(), Some(Message::Binary(bytes)) if bytes.as_ref() == b"reply"));
-                let mut ws = read.reunite(write).expect("TLS state and read tail survive reunite");
+                assert!(
+                    matches!(read.recv(&caller).await.unwrap(), Some(Message::Text(text)) if text == "tail")
+                );
+                write
+                    .send(&caller, Message::Text("client".to_owned()))
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(read.recv(&caller).await.unwrap(), Some(Message::Binary(bytes)) if bytes.as_ref() == b"reply")
+                );
+                let mut ws = read
+                    .reunite(write)
+                    .expect("TLS state and read tail survive reunite");
                 assert_eq!(ws.protocol(), Some("chat"));
-                assert!(matches!(ws.recv(&caller).await.unwrap(), Some(Message::Close(_))));
+                assert!(matches!(
+                    ws.recv(&caller).await.unwrap(),
+                    Some(Message::Close(_))
+                ));
                 assert!(ws.is_closed());
                 assert!(!ambient.is_cancel_requested());
                 assert!(!caller.is_cancel_requested());
@@ -288,19 +352,28 @@ fn native_wss_refuses_untrusted_identity_wrong_ip_and_h2_before_http() {
             let done = native(workers, None, move |ambient, caller| async move {
                 let connector = connector(trusted, &[protocol]);
                 let result = SecureWebSocket::connect_tls(
-                    &caller, &format!("wss://{address}/forbidden"),
-                    WebSocketConfig::new(), &connector,
-                ).await;
+                    &caller,
+                    &format!("wss://{address}/forbidden"),
+                    WebSocketConfig::new(),
+                    &connector,
+                )
+                .await;
                 match result {
-                    Err(WsConnectError::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::InvalidData),
+                    Err(WsConnectError::Io(error)) => {
+                        assert_eq!(error.kind(), io::ErrorKind::InvalidData)
+                    }
                     Err(other) => panic!("wrong TLS policy error: {other:?}"),
                     Ok(_) => panic!("unauthenticated or non-HTTP/1.1 WSS accepted"),
                 }
                 assert!(!caller.is_cancel_requested());
                 assert!(!ambient.is_cancel_requested());
             });
-            peer.join().expect("TLS policy refusal and transport retirement");
-            assert!(done, "workers={workers}, ip={ip}, trusted={trusted}, ALPN={protocol:?}");
+            peer.join()
+                .expect("TLS policy refusal and transport retirement");
+            assert!(
+                done,
+                "workers={workers}, ip={ip}, trusted={trusted}, ALPN={protocol:?}"
+            );
         }
     }
 }
@@ -322,12 +395,20 @@ impl Witness {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Stage { Tls, Http }
+enum Stage {
+    Tls,
+    Http,
+}
 
 #[derive(Clone, Copy, Debug)]
 enum Interrupt {
-    CallerCancel, AmbientCancel, Drop, ConfigDeadline, CallerDeadline,
-    RevokeIo, RevokeTimer,
+    CallerCancel,
+    AmbientCancel,
+    Drop,
+    ConfigDeadline,
+    CallerDeadline,
+    RevokeIo,
+    RevokeTimer,
 }
 
 fn interruption(workers: usize, stage: Stage, mode: Interrupt) {
@@ -353,29 +434,40 @@ fn interruption(workers: usize, stage: Stage, mode: Interrupt) {
                 let request = request(&mut peer);
                 assert_eq!(request.path, "/parked");
                 // There is no header terminator or complete response yet.
-                peer.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade:").unwrap();
+                peer.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade:")
+                    .unwrap();
                 peer.flush().unwrap();
                 // Both branches below retire the exact original socket; no
                 // duplicate handle can accidentally keep the transport alive.
                 observed.publish();
-                let (ambient, caller) = parks.recv_timeout(WATCHDOG).expect("HTTP setup polled Pending after response prefix");
+                let (ambient, caller) = parks
+                    .recv_timeout(WATCHDOG)
+                    .expect("HTTP setup polled Pending after response prefix");
                 interrupt_contexts(mode, &ambient, &caller);
                 transport_retired(&mut peer.sock);
                 return;
             }
         }
         observed.publish();
-        let (ambient, caller) = parks.recv_timeout(WATCHDOG).expect("TLS setup polled Pending after ClientHello");
+        let (ambient, caller) = parks
+            .recv_timeout(WATCHDOG)
+            .expect("TLS setup polled Pending after ClientHello");
         interrupt_contexts(mode, &ambient, &caller);
         transport_retired(&mut socket);
     });
     let caller_timeout = matches!(mode, Interrupt::CallerDeadline).then_some(SETUP_TIMEOUT);
     let done = native(workers, caller_timeout, move |ambient, caller| async move {
         let connector = connector(true, &[b"http/1.1"]);
-        let timeout = if matches!(mode, Interrupt::ConfigDeadline) { Some(SETUP_TIMEOUT) } else { None };
+        let timeout = if matches!(mode, Interrupt::ConfigDeadline) {
+            Some(SETUP_TIMEOUT)
+        } else {
+            None
+        };
         let config = WebSocketConfig::new().connect_timeout(timeout);
         let url = format!("wss://{address}/parked");
-        let mut setup = Box::pin(SecureWebSocket::connect_tls(&caller, &url, config, &connector));
+        let mut setup = Box::pin(SecureWebSocket::connect_tls(
+            &caller, &url, config, &connector,
+        ));
         let mut notified = false;
         let mut restrict_next_poll = false;
         let result = poll_fn(|task| {
@@ -410,20 +502,37 @@ fn interruption(workers: usize, stage: Stage, mode: Interrupt) {
                     Poll::Pending
                 }
             }
-        }).await;
+        })
+        .await;
         drop(setup);
-        assert!(notified, "missing actual Pending witness: {stage:?}, {mode:?}");
+        assert!(
+            notified,
+            "missing actual Pending witness: {stage:?}, {mode:?}"
+        );
         match mode {
             Interrupt::Drop => assert!(result.is_none()),
             Interrupt::CallerCancel | Interrupt::AmbientCancel => {
                 assert!(matches!(result, Some(Err(WsConnectError::Cancelled))));
-                let cancelled = if matches!(mode, Interrupt::CallerCancel) { &caller } else { &ambient };
-                let independent = if matches!(mode, Interrupt::CallerCancel) { &ambient } else { &caller };
+                let cancelled = if matches!(mode, Interrupt::CallerCancel) {
+                    &caller
+                } else {
+                    &ambient
+                };
+                let independent = if matches!(mode, Interrupt::CallerCancel) {
+                    &ambient
+                } else {
+                    &caller
+                };
                 assert_eq!(cancelled.cancel_reason().unwrap().kind, CancelKind::User);
-                assert!(!independent.is_cancel_requested(), "setup must not cancel the other owner");
+                assert!(
+                    !independent.is_cancel_requested(),
+                    "setup must not cancel the other owner"
+                );
             }
             Interrupt::ConfigDeadline => {
-                assert!(matches!(result, Some(Err(WsConnectError::Io(error))) if error.kind() == io::ErrorKind::TimedOut));
+                assert!(
+                    matches!(result, Some(Err(WsConnectError::Io(error))) if error.kind() == io::ErrorKind::TimedOut)
+                );
                 assert!(!caller.is_cancel_requested());
                 assert!(!ambient.is_cancel_requested());
             }
@@ -431,8 +540,12 @@ fn interruption(workers: usize, stage: Stage, mode: Interrupt) {
                 // A Cx checkpoint can classify its expired budget before the
                 // setup timer. Both paths must preserve the caller's bound.
                 match result {
-                    Some(Err(WsConnectError::Cancelled)) => assert_eq!(caller.cancel_reason().unwrap().kind, CancelKind::Deadline),
-                    Some(Err(WsConnectError::Io(error))) => assert_eq!(error.kind(), io::ErrorKind::TimedOut),
+                    Some(Err(WsConnectError::Cancelled)) => {
+                        assert_eq!(caller.cancel_reason().unwrap().kind, CancelKind::Deadline)
+                    }
+                    Some(Err(WsConnectError::Io(error))) => {
+                        assert_eq!(error.kind(), io::ErrorKind::TimedOut)
+                    }
                     _ => panic!("caller deadline did not stop WSS setup"),
                 }
                 assert!(caller.timer_driver().unwrap().now() >= caller.budget().deadline.unwrap());
@@ -440,7 +553,9 @@ fn interruption(workers: usize, stage: Stage, mode: Interrupt) {
             }
             Interrupt::RevokeIo | Interrupt::RevokeTimer => {
                 assert!(restrict_next_poll);
-                assert!(matches!(result, Some(Err(WsConnectError::Io(error))) if error.kind() == io::ErrorKind::PermissionDenied));
+                assert!(
+                    matches!(result, Some(Err(WsConnectError::Io(error))) if error.kind() == io::ErrorKind::PermissionDenied)
+                );
                 assert!(!ambient.is_cancel_requested());
                 assert!(!caller.is_cancel_requested());
             }
@@ -452,10 +567,17 @@ fn interruption(workers: usize, stage: Stage, mode: Interrupt) {
 
 fn interrupt_contexts(mode: Interrupt, ambient: &Cx, caller: &Cx) {
     match mode {
-        Interrupt::CallerCancel => caller.cancel_with(CancelKind::User, Some("explicit WSS owner cancelled")),
-        Interrupt::AmbientCancel => ambient.cancel_with(CancelKind::User, Some("ambient WSS task cancelled")),
-        Interrupt::Drop | Interrupt::ConfigDeadline | Interrupt::CallerDeadline
-        | Interrupt::RevokeIo | Interrupt::RevokeTimer => {}
+        Interrupt::CallerCancel => {
+            caller.cancel_with(CancelKind::User, Some("explicit WSS owner cancelled"))
+        }
+        Interrupt::AmbientCancel => {
+            ambient.cancel_with(CancelKind::User, Some("ambient WSS task cancelled"))
+        }
+        Interrupt::Drop
+        | Interrupt::ConfigDeadline
+        | Interrupt::CallerDeadline
+        | Interrupt::RevokeIo
+        | Interrupt::RevokeTimer => {}
     }
 }
 
@@ -463,9 +585,15 @@ fn interrupt_contexts(mode: Interrupt, ambient: &Cx, caller: &Cx) {
 fn native_wss_parked_tls_and_partial_http_cancel_drop_and_expire() {
     for workers in [0, 2] {
         for stage in [Stage::Tls, Stage::Http] {
-            for mode in [Interrupt::CallerCancel, Interrupt::AmbientCancel, Interrupt::Drop,
-                Interrupt::ConfigDeadline, Interrupt::CallerDeadline,
-                Interrupt::RevokeIo, Interrupt::RevokeTimer] {
+            for mode in [
+                Interrupt::CallerCancel,
+                Interrupt::AmbientCancel,
+                Interrupt::Drop,
+                Interrupt::ConfigDeadline,
+                Interrupt::CallerDeadline,
+                Interrupt::RevokeIo,
+                Interrupt::RevokeTimer,
+            ] {
                 interruption(workers, stage, mode);
             }
         }
@@ -495,13 +623,16 @@ fn native_wss_keeps_one_setup_deadline_across_tls_and_http() {
             assert!(peer.conn.is_handshaking());
             assert!(peer.conn.wants_write());
             hello_seen.publish();
-            parks.recv_timeout(WATCHDOG).expect("TLS handshake actually parked");
+            parks
+                .recv_timeout(WATCHDOG)
+                .expect("TLS handshake actually parked");
             // This intentionally consumes setup time AFTER a native Pending
             // witness; the delay is not used to infer that setup has parked.
             std::thread::sleep(TLS_HOLD);
             let request = request(&mut peer);
             assert_eq!(request.path, "/one-budget");
-            peer.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade:").unwrap();
+            peer.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade:")
+                .unwrap();
             peer.flush().unwrap();
             prefix_seen.publish();
             transport_retired(&mut peer.sock);
@@ -532,16 +663,28 @@ fn native_wss_keeps_one_setup_deadline_across_tls_and_http() {
                         Poll::Pending
                     }
                 }
-            }).await;
+            })
+            .await;
             let elapsed = started.elapsed();
             drop(setup);
-            assert!(tls_parked && http_parked, "both real setup phases must be reached");
-            assert!(matches!(result, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::TimedOut));
-            assert!(elapsed >= TOTAL, "setup expired before its configured budget");
+            assert!(
+                tls_parked && http_parked,
+                "both real setup phases must be reached"
+            );
+            assert!(
+                matches!(result, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
+            );
+            assert!(
+                elapsed >= TOTAL,
+                "setup expired before its configured budget"
+            );
             // A fresh three-second HTTP budget after the two-second TLS hold
             // would finish at five seconds or later. Allow 1.5 seconds of
             // scheduling slack while still rejecting that reset behavior.
-            assert!(elapsed < Duration::from_millis(4500), "setup reset its budget at the TLS/HTTP boundary: {elapsed:?}");
+            assert!(
+                elapsed < Duration::from_millis(4500),
+                "setup reset its budget at the TLS/HTTP boundary: {elapsed:?}"
+            );
             assert!(!caller.is_cancel_requested());
             assert!(!ambient.is_cancel_requested());
         });
@@ -557,39 +700,60 @@ fn native_wss_rejects_plaintext_and_missing_explicit_authority_without_dialing()
         let done = native(workers, None, move |ambient, caller| async move {
             let connector = connector(true, &[b"http/1.1"]);
             let plaintext = SecureWebSocket::connect_tls(
-                &caller, &format!("ws://{address}/downgrade"),
-                WebSocketConfig::new(), &connector,
-            ).await;
+                &caller,
+                &format!("ws://{address}/downgrade"),
+                WebSocketConfig::new(),
+                &connector,
+            )
+            .await;
             assert!(matches!(plaintext, Err(WsConnectError::InvalidUrl(_))));
             let mut without_sni = connector.config().as_ref().clone();
             without_sni.enable_sni = false;
             let without_sni = TlsConnector::new(without_sni);
             let refused_sni = SecureWebSocket::connect_tls(
-                &caller, &format!("wss://localhost:{}/no-sni", address.port()),
-                WebSocketConfig::new(), &without_sni,
-            ).await;
-            assert!(matches!(refused_sni, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput));
+                &caller,
+                &format!("wss://localhost:{}/no-sni", address.port()),
+                WebSocketConfig::new(),
+                &without_sni,
+            )
+            .await;
+            assert!(
+                matches!(refused_sni, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::InvalidInput)
+            );
             let detached = Cx::for_testing();
             let denied = SecureWebSocket::connect_tls(
-                &detached, &format!("wss://{address}/ambient-authority"),
-                WebSocketConfig::new(), &connector,
-            ).await;
-            assert!(matches!(denied, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied));
+                &detached,
+                &format!("wss://{address}/ambient-authority"),
+                WebSocketConfig::new(),
+                &connector,
+            )
+            .await;
+            assert!(
+                matches!(denied, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied)
+            );
             for mask in [
                 <CapSet<true, true, true, false, true> as CapSetRuntimeMask>::MASK,
                 <CapSet<true, false, true, true, true> as CapSetRuntimeMask>::MASK,
             ] {
                 let url = format!("wss://{address}/attenuated-ambient");
                 let mut setup = Box::pin(SecureWebSocket::connect_tls(
-                    &caller, &url, WebSocketConfig::new(), &connector,
+                    &caller,
+                    &url,
+                    WebSocketConfig::new(),
+                    &connector,
                 ));
                 let denied = poll_fn(|task| {
                     let _restriction = Cx::push_restriction(mask);
                     setup.as_mut().poll(task)
-                }).await;
-                assert!(matches!(denied, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied));
+                })
+                .await;
+                assert!(
+                    matches!(denied, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied)
+                );
             }
-            assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+            );
             assert!(!ambient.is_cancel_requested());
             assert!(!caller.is_cancel_requested());
         });
@@ -600,7 +764,8 @@ fn native_wss_rejects_plaintext_and_missing_explicit_authority_without_dialing()
 #[cfg(feature = "compression")]
 #[test]
 fn native_wss_negotiates_compression_over_tls_with_independent_wire_vector() {
-    const PROFILE: &str = "permessage-deflate; server_no_context_takeover; client_no_context_takeover";
+    const PROFILE: &str =
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover";
     // RFC 7692 section 7.2.3.1: "Hello", with the sync-flush tail removed.
     const HELLO: &[u8] = &[0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00];
     for workers in [0, 2] {
@@ -608,13 +773,24 @@ fn native_wss_negotiates_compression_over_tls_with_independent_wire_vector() {
         let peer = std::thread::spawn(move || {
             let mut peer = server(accept(&listener), Some(b"http/1.1"));
             let request = request(&mut peer);
-            assert!(request.header("sec-websocket-extensions").unwrap().contains("permessage-deflate"));
-            let mut head_and_frame = response(&request, &format!("Sec-WebSocket-Extensions: {PROFILE}\r\n"));
+            assert!(
+                request
+                    .header("sec-websocket-extensions")
+                    .unwrap()
+                    .contains("permessage-deflate")
+            );
+            let mut head_and_frame = response(
+                &request,
+                &format!("Sec-WebSocket-Extensions: {PROFILE}\r\n"),
+            );
             head_and_frame.extend(frame(0xc1, HELLO));
             peer.write_all(&head_and_frame).unwrap();
             peer.flush().unwrap();
             let (flags, mut payload) = client_frame(&mut peer);
-            assert_eq!(flags, 0xc1, "encrypted client messages remain compressed and masked");
+            assert_eq!(
+                flags, 0xc1,
+                "encrypted client messages remain compressed and masked"
+            );
             payload.extend_from_slice(&[0, 0, 0xff, 0xff, 3, 0]);
             let mut decoder = flate2::read::DeflateDecoder::new(payload.as_slice());
             let mut decoded = Vec::new();
@@ -628,16 +804,28 @@ fn native_wss_negotiates_compression_over_tls_with_independent_wire_vector() {
         let done = native(workers, None, move |_, caller| async move {
             let connector = connector(true, &[b"http/1.1"]);
             let ws = SecureWebSocket::connect_tls_with_compression(
-                &caller, &format!("wss://{address}/compressed"),
-                WebSocketConfig::new().ping_interval(None), &connector,
-            ).await.unwrap();
+                &caller,
+                &format!("wss://{address}/compressed"),
+                WebSocketConfig::new().ping_interval(None),
+                &connector,
+            )
+            .await
+            .unwrap();
             assert!(ws.compression_enabled());
             let (mut read, mut write) = ws.split();
-            assert!(matches!(read.recv(&caller).await.unwrap(), Some(Message::Text(text)) if text == "Hello"));
-            write.send(&caller, Message::Text("Hello".to_owned())).await.unwrap();
+            assert!(
+                matches!(read.recv(&caller).await.unwrap(), Some(Message::Text(text)) if text == "Hello")
+            );
+            write
+                .send(&caller, Message::Text("Hello".to_owned()))
+                .await
+                .unwrap();
             let mut ws = read.reunite(write).expect("WSS compressed split reunites");
             assert!(ws.compression_enabled());
-            assert!(matches!(ws.recv(&caller).await.unwrap(), Some(Message::Close(_))));
+            assert!(matches!(
+                ws.recv(&caller).await.unwrap(),
+                Some(Message::Close(_))
+            ));
         });
         peer.join().expect("compressed WSS independent peer");
         assert!(done, "compressed WSS workers={workers}");
