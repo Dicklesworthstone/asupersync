@@ -243,6 +243,10 @@ impl Fanout {
     /// it can free a task whose future drops a handle of this call, which
     /// takes this lock again.
     fn register(&self, role: Role, waker: &Waker) {
+        // RawWaker clone/drop callbacks can close a response stream and wake
+        // this fanout. Declare the candidate before the guard so an unused
+        // clone is also dropped after the guard.
+        let incoming = waker.clone();
         let mut wakers = lock_unpoisoned(&self.wakers);
         let slot = match role {
             Role::Sink => &mut wakers.sink,
@@ -250,9 +254,9 @@ impl Fanout {
                 let responses = &mut wakers.responses;
                 let replaced = match responses.iter_mut().find(|(id, _)| *id == responder) {
                     Some((_, current)) if current.will_wake(waker) => None,
-                    Some((_, current)) => Some(std::mem::replace(current, waker.clone())),
+                    Some((_, current)) => Some(std::mem::replace(current, incoming)),
                     None => {
-                        responses.push((responder, waker.clone()));
+                        responses.push((responder, incoming));
                         None
                     }
                 };
@@ -265,7 +269,7 @@ impl Fanout {
             .as_ref()
             .is_some_and(|current| current.will_wake(waker))
         {
-            let replaced = slot.replace(waker.clone());
+            let replaced = slot.replace(incoming);
             drop(wakers);
             drop(replaced);
         }
@@ -381,6 +385,14 @@ impl LegacyNativeCall {
             index.map(|index| wakers.responses.remove(index))
         };
         drop(forgotten);
+    }
+
+    /// Wake response handles after their shared stream ends locally. This
+    /// does not poll or cancel the transport, and leaves the sink untouched.
+    /// Detach before callbacks: a waker can inspect or drop another handle.
+    pub(super) fn wake_responses(&self) {
+        let responses = std::mem::take(&mut lock_unpoisoned(&self.fanout.wakers).responses);
+        super::wake_response_waiters(responses.into_iter().map(|(_, waker)| waker));
     }
 
     /// Response handles with a waker parked on the call.

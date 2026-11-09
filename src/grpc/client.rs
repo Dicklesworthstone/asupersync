@@ -3640,8 +3640,16 @@ impl<T> ResponseStream<T> {
             state.closed = true;
             (state.take_waiters(), state.take_producer_waiters())
         };
-        // Both classes must wake even if one callback panics.
-        wake_response_waiters(waiters.into_iter().chain(producers));
+        // A local close must also wake readers parked on the native call.
+        let mut first = None;
+        for waker in waiters.into_iter().chain(producers) {
+            capture_response_wake(&mut first, waker);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(native) = &self.native {
+            capture_response_callback(&mut first, || native.handle.call().wake_responses());
+        }
+        finish_response_callbacks(first);
     }
 
     /// Close the stream with a terminal status.
@@ -3684,6 +3692,10 @@ impl<T> ResponseStream<T> {
         }
         for waker in waiters.into_iter().chain(producers) {
             capture_response_wake(&mut first, waker);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(native) = &self.native {
+            capture_response_callback(&mut first, || native.handle.call().wake_responses());
         }
         if inserted && discard_buffered
             && let Some(on_cancel) = &self.on_cancel
@@ -3771,7 +3783,20 @@ impl<T> ResponseStream<T> {
     ) -> Poll<Option<Result<T, Status>>> {
         let call = native.handle.call();
         let status = match call.poll_message(cx, native.responder) {
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => {
+                // A local close/finish can run after the outer open-state
+                // check but before this responder registers with the call.
+                // Pending always registered it: recheck the shared state and
+                // drain any late registrations so their next poll sees it.
+                let ready = {
+                    let state = lock_unpoisoned(&self.state);
+                    state.closed || !state.items.is_empty()
+                };
+                if ready {
+                    call.wake_responses();
+                }
+                return Poll::Pending;
+            }
             Poll::Ready(Some(Ok(message))) => return Poll::Ready(Some((native.convert)(message))),
             Poll::Ready(Some(Err(status))) => Some(status),
             Poll::Ready(None) => None,

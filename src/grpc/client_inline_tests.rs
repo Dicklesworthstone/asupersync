@@ -1498,6 +1498,200 @@
             ));
         }
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn quiet_native_response() -> (ResponseStream<u32>, Arc<LegacyNativeCall>) {
+        let feed = Arc::new(Mutex::new(Feed::default()));
+        let call = LegacyNativeCall::new(
+            Box::new(FedCall(feed)),
+            LegacyShape::ServerStreaming,
+        );
+        (ResponseStream::native(Arc::clone(&call)), call)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn local_close_and_finish_wake_parked_native_response_clones() {
+        for finish in [false, true] {
+            let (mut first, call) = quiet_native_response();
+            let mut second = first.clone();
+            let mut forgotten = first.clone();
+            let first_count = Arc::new(AtomicUsize::new(0));
+            let second_count = Arc::new(AtomicUsize::new(0));
+            let forgotten_count = Arc::new(AtomicUsize::new(0));
+            let first_waker = counting_waker(&first_count);
+            let second_waker = counting_waker(&second_count);
+            let forgotten_waker = counting_waker(&forgotten_count);
+            assert!(poll_stream(&mut first, &first_waker).is_pending());
+            assert!(poll_stream(&mut second, &second_waker).is_pending());
+            assert!(poll_stream(&mut forgotten, &forgotten_waker).is_pending());
+            assert_eq!(call.parked_responders(), 3);
+            assert_eq!(first_count.load(Ordering::SeqCst), 0);
+            assert_eq!(second_count.load(Ordering::SeqCst), 0);
+            drop(forgotten);
+            assert_eq!(call.parked_responders(), 2);
+
+            if finish {
+                first.finish_with_metadata(
+                    Status::permission_denied("local finish"),
+                    Metadata::new(),
+                );
+            } else {
+                first.close();
+            }
+
+            assert_eq!(first_count.load(Ordering::SeqCst), 1);
+            assert_eq!(second_count.load(Ordering::SeqCst), 1);
+            assert_eq!(forgotten_count.load(Ordering::SeqCst), 0);
+            assert_eq!(call.parked_responders(), 0);
+            match poll_stream(&mut first, &first_waker) {
+                Poll::Ready(Some(Err(status))) => {
+                    assert!(finish);
+                    assert_eq!(status.code(), Code::PermissionDenied);
+                }
+                Poll::Ready(None) => assert!(!finish),
+                other => panic!("unexpected local end: {other:?}"),
+            }
+            assert!(matches!(
+                poll_stream(&mut second, &second_waker),
+                Poll::Ready(None)
+            ));
+            assert!(matches!(
+                poll_stream(&mut first, &first_waker),
+                Poll::Ready(None)
+            ));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_pending_repairs_local_end_before_responder_registration() {
+        for finish in [false, true] {
+            let (mut reader, call) = quiet_native_response();
+            let count = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(&count);
+            if finish {
+                reader.finish_with_metadata(
+                    Status::permission_denied("finished before registration"),
+                    Metadata::new(),
+                );
+            } else {
+                reader.close();
+            }
+            assert_eq!(call.parked_responders(), 0);
+
+            // A poll that already passed the outer open-state check may only
+            // reach the backend after the local close drained its waiters.
+            // Resume exactly there, using the real native poll/registration.
+            let native = reader.native.as_ref().expect("native response handle");
+            let mut task = Context::from_waker(&waker);
+            assert!(reader.poll_native(native, &mut task).is_pending());
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                call.parked_responders(), 0,
+                "the repaired wake must also retire the late registration"
+            );
+            match poll_stream(&mut reader, &waker) {
+                Poll::Ready(Some(Err(status))) => {
+                    assert!(finish);
+                    assert_eq!(status.code(), Code::PermissionDenied);
+                }
+                Poll::Ready(None) => assert!(!finish),
+                other => panic!("unexpected repaired native poll: {other:?}"),
+            }
+            assert!(matches!(
+                poll_stream(&mut reader, &waker),
+                Poll::Ready(None)
+            ));
+            drop(reader);
+            assert_eq!(call.parked_responders(), 0);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn local_native_end_completes_both_fanouts_and_cancel_hook_after_panic() {
+        struct PanickingWake(Arc<AtomicUsize>);
+        impl Wake for PanickingWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("local/native terminal wake panic");
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("local/native terminal wake panic");
+            }
+        }
+
+        for end in ["close", "finish", "cancel"] {
+            for native_panics in [false, true] {
+                let (mut stream, call) = quiet_native_response();
+                let mut other = stream.clone();
+                let panics = Arc::new(AtomicUsize::new(0));
+                let first_count = Arc::new(AtomicUsize::new(0));
+                let other_count = Arc::new(AtomicUsize::new(0));
+                let producer_count = Arc::new(AtomicUsize::new(0));
+                let hostile = Waker::from(Arc::new(PanickingWake(Arc::clone(&panics))));
+                let first_waker = if native_panics {
+                    hostile.clone()
+                } else {
+                    counting_waker(&first_count)
+                };
+                let producer_waker = if native_panics {
+                    counting_waker(&producer_count)
+                } else {
+                    hostile.clone()
+                };
+                assert!(poll_stream(&mut stream, &first_waker).is_pending());
+                assert!(poll_stream(&mut other, &counting_waker(&other_count)).is_pending());
+                for value in 0..MAX_STREAM_BUFFERED {
+                    stream.push(Ok(value as u32)).expect("buffered response");
+                }
+                let mut task = Context::from_waker(&producer_waker);
+                assert!(stream.poll_reserve(&mut task).is_pending());
+
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match end {
+                        "close" => stream.close(),
+                        "finish" => stream.finish_with_metadata(
+                            Status::permission_denied("local finish"),
+                            Metadata::new(),
+                        ),
+                        "cancel" => stream.cancel(Status::cancelled("local cancel")),
+                        _ => unreachable!(),
+                    }
+                })).expect_err("the first wake panic must propagate");
+                assert_eq!(
+                    panic.downcast_ref::<&str>(),
+                    Some(&"local/native terminal wake panic")
+                );
+                assert_eq!(panics.load(Ordering::SeqCst), 1);
+                assert_eq!(other_count.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    first_count.load(Ordering::SeqCst),
+                    if native_panics { 0 } else { 1 }
+                );
+                assert_eq!(
+                    producer_count.load(Ordering::SeqCst),
+                    if native_panics { 1 } else { 0 }
+                );
+                assert_eq!(call.parked_responders(), 0);
+                assert!(!stream.state.is_poisoned());
+
+                if end == "cancel" {
+                    // The native cancel hook must run even after a local or
+                    // native waiter panicked. Read the actual backend result.
+                    let (status, _) = native_terminal_snapshot(&stream);
+                    assert_eq!(status.expect("native cancellation").code(), Code::Cancelled);
+                    let native = stream.native.as_ref().expect("native response handle");
+                    call.forget_responder(native.responder);
+                    assert_eq!(call.parked_responders(), 0);
+                    assert_eq!(stream.buffer_len(), 0);
+                }
+            }
+        }
+    }
+
     /// A unix: target's path was used verbatim (asupersync-mu5yhv finding
     /// 6): `unix:///tmp/my%20app.sock` dialled a file named with a literal
     /// `%20`, and a query or fragment stayed in the file name.
