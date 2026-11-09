@@ -84,6 +84,14 @@ pub use grpc::{
     OtlpGrpcResponse, OtlpGrpcRetryPolicy, OtlpGrpcSignal,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+mod export_policy;
+#[cfg(not(target_arch = "wasm32"))]
+pub use export_policy::{
+    OwnedOtlpExportPolicy, OwnedOtlpPolicyError, OwnedOtlpPolicyOutput,
+    OwnedOtlpPolicyReport,
+};
+
 // =============================================================================
 // Cardinality Management
 // =============================================================================
@@ -1760,6 +1768,21 @@ impl OwnedOtlpMetrics {
         Ok(encoded)
     }
 
+    /// Collect with explicit resource, scope, and privacy policy.
+    ///
+    /// Filtering happens on owned models before encoding. A policy that makes
+    /// two points of the same metric indistinguishable is rejected without
+    /// advancing the collection timestamp. The legacy [`Self::collect`] path
+    /// remains unchanged.
+    pub fn collect_with_policy(
+        &self,
+        point_time_unix_nano: u64,
+        resource_attributes: &[(&str, &str)],
+        policy: &OwnedOtlpExportPolicy,
+    ) -> Result<OwnedOtlpPolicyOutput<Vec<Vec<u8>>>, OwnedOtlpPolicyError> {
+        export_policy::collect_metrics(self, point_time_unix_nano, resource_attributes, policy)
+    }
+
     fn cardinality_available<T>(
         &self,
         map: &BTreeMap<OwnedMetricStream, T>,
@@ -2981,6 +3004,20 @@ impl OwnedOtlpTraces {
             sampled_spans: sampled_count,
             unsampled_spans,
         })
+    }
+
+    /// Collect spans with an explicit shared export policy.
+    ///
+    /// Sampling, lineage, and producer drop counts retain their existing
+    /// semantics. The report separately counts policy filtering, including
+    /// resource/scope, span, event, and link attributes.
+    pub fn collect_with_policy(
+        &self,
+        spans: &[OtlpTraceSpanInput<'_>],
+        resource_attributes: &[(&str, &str)],
+        policy: &OwnedOtlpExportPolicy,
+    ) -> Result<OwnedOtlpPolicyOutput<OwnedOtlpTraceCollection>, OwnedOtlpPolicyError> {
+        export_policy::collect_traces(self, spans, resource_attributes, policy)
     }
 }
 
@@ -4354,6 +4391,21 @@ impl OwnedOtlpLogs {
             record_count: records.len(),
             producer_dropped_attributes,
         })
+    }
+
+    /// Collect typed records with an explicit shared export policy.
+    ///
+    /// String values are filtered recursively, including structured bodies.
+    /// Opaque byte values are preserved unless their enclosing attribute key
+    /// is dropped; the policy makes no textual PII guarantee for bytes.
+    /// Producer drop counts remain distinct from the policy report.
+    pub fn collect_with_policy(
+        &self,
+        records: &[OtlpLogRecordInput<'_>],
+        resource_attributes: &[OtlpLogKeyValueInput<'_>],
+        policy: &OwnedOtlpExportPolicy,
+    ) -> Result<OwnedOtlpPolicyOutput<OwnedOtlpLogCollection>, OwnedOtlpPolicyError> {
+        export_policy::collect_logs(self, records, resource_attributes, policy)
     }
 }
 
