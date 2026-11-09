@@ -3770,24 +3770,45 @@ impl<T> ResponseStream<T> {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<T, Status>>> {
         let call = native.handle.call();
-        let end = match call.poll_message(cx, native.responder) {
+        let status = match call.poll_message(cx, native.responder) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Some(Ok(message))) => return Poll::Ready(Some((native.convert)(message))),
-            Poll::Ready(Some(Err(status))) => Some(Err(status)),
+            Poll::Ready(Some(Err(status))) => Some(status),
             Poll::Ready(None) => None,
         };
-        let trailers = call.trailers().unwrap_or_default();
-        let waiters = {
+        self.finish_native(status, call.trailers().unwrap_or_default())
+    }
+
+    /// Native polling runs outside the stream lock. Another clone can publish
+    /// or consume the end before that poll returns, so every native completion
+    /// must use the same terminal slot as local finish and cancellation.
+    fn finish_native(
+        &self,
+        status: Option<Status>,
+        trailers: Metadata,
+    ) -> Poll<Option<Result<T, Status>>> {
+        let (waiters, producers) = {
             let mut state = lock_unpoisoned(&self.state);
             state.closed = true;
             if !state.terminal_published {
                 state.terminal_published = true;
+                state.terminal_status = status;
                 state.terminal_metadata = trailers;
             }
-            state.take_waiters()
+            (state.take_waiters(), state.take_producer_waiters())
         };
-        wake_response_waiters(waiters);
-        Poll::Ready(end)
+        wake_response_waiters(waiters.into_iter().chain(producers));
+
+        // Take the result after detached callbacks finish: a panicking waker
+        // leaves the queued item/status available, and no arbitrary T is owned
+        // while a wake unwinds. A reentrant consumer may already have taken it.
+        let mut state = lock_unpoisoned(&self.state);
+        Poll::Ready(
+            state
+                .items
+                .pop_front()
+                .or_else(|| state.terminal_status.take().map(Err)),
+        )
     }
 }
 

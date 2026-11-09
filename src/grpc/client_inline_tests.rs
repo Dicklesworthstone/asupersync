@@ -837,6 +837,9 @@
     struct Feed {
         messages: VecDeque<u32>,
         ended: bool,
+        end_status: Option<Status>,
+        trailers: Option<Metadata>,
+        on_trailers: Option<Box<dyn FnOnce() + Send>>,
         waker: Option<Waker>,
     }
 
@@ -892,12 +895,21 @@
         }
 
         fn trailers(&self) -> Option<Metadata> {
-            None
+            let (callback, trailers) = {
+                let mut feed = lock_unpoisoned(&self.0);
+                (feed.on_trailers.take(), feed.trailers.clone())
+            };
+            if let Some(callback) = callback {
+                callback();
+            }
+            trailers
         }
 
         // Recorded at the end, as both native owners do.
         fn status(&self) -> Option<Status> {
-            lock_unpoisoned(&self.0).ended.then(Status::ok)
+            let feed = lock_unpoisoned(&self.0);
+            feed.ended
+                .then(|| feed.end_status.clone().unwrap_or_else(Status::ok))
         }
 
         fn cancel(&mut self) {}
@@ -1263,6 +1275,229 @@
         crate::test_complete!("dropping_a_parked_waker_that_owns_a_stream_clone_does_not_deadlock");
     }
 
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finished_native_response(
+        status: Status,
+        trailers: Metadata,
+    ) -> (ResponseStream<u32>, Arc<Mutex<Feed>>) {
+        let feed = Arc::new(Mutex::new(Feed {
+            ended: true,
+            end_status: Some(status),
+            trailers: Some(trailers),
+            ..Feed::default()
+        }));
+        let call = LegacyNativeCall::new(
+            Box::new(FedCall(Arc::clone(&feed))),
+            LegacyShape::ServerStreaming,
+        );
+        (ResponseStream::native(call), feed)
+    }
+
+    // Split a real LegacyNativeCall poll from its stream completion, so a
+    // competing consumer or cancellation can run in that exact interval.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_terminal_snapshot(stream: &ResponseStream<u32>) -> (Option<Status>, Metadata) {
+        let native = stream.native.as_ref().expect("native response handle");
+        let call = native.handle.call();
+        let mut task = Context::from_waker(Waker::noop());
+        let status = match call.poll_message(&mut task, native.responder) {
+            Poll::Ready(Some(Err(status))) => Some(status),
+            Poll::Ready(None) => None,
+            _ => panic!("the fed native call must have reached its end"),
+        };
+        (status, call.trailers().unwrap_or_default())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_response_completion_observes_local_finish() {
+        for native_status in [Status::ok(), Status::unavailable("transport failed")] {
+            for consumed in [false, true] {
+                let mut native_trailers = Metadata::new();
+                assert!(native_trailers.insert("x-end", "native"));
+                let (mut stream, feed) =
+                    finished_native_response(native_status.clone(), native_trailers);
+                let mut observer = stream.clone();
+                lock_unpoisoned(&feed).on_trailers = Some(Box::new(move || {
+                    let mut local_trailers = Metadata::new();
+                    assert!(local_trailers.insert("x-end", "local"));
+                    observer.finish_with_metadata(
+                        Status::permission_denied("finished locally"),
+                        local_trailers,
+                    );
+                    if consumed {
+                        assert!(matches!(
+                            poll_stream(&mut observer, Waker::noop()),
+                            Poll::Ready(Some(Err(status)))
+                                if status.code() == Code::PermissionDenied
+                                    && status.message() == "finished locally"
+                        ));
+                    }
+                }));
+
+                // This runs the actual native poll path. Reading its trailers
+                // publishes (and optionally consumes) a local end before the
+                // in-flight native completion returns to the stream state.
+                match poll_stream(&mut stream, Waker::noop()) {
+                    Poll::Ready(None) => assert!(consumed),
+                    Poll::Ready(Some(Err(status))) => {
+                        assert!(!consumed);
+                        assert_eq!(status.code(), Code::PermissionDenied);
+                        assert_eq!(status.message(), "finished locally");
+                    }
+                    other => panic!("unexpected native completion: {other:?}"),
+                }
+                assert!(matches!(
+                    stream.terminal_metadata().get("x-end"),
+                    Some(MetadataValue::Ascii(value)) if value == "local"
+                ));
+                assert!(matches!(
+                    poll_stream(&mut stream, Waker::noop()),
+                    Poll::Ready(None)
+                ));
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_response_completion_shares_cancelled_terminal() {
+        for native_status in [Status::ok(), Status::data_loss("bad transport frame")] {
+            for consumed in [false, true] {
+                let mut native_trailers = Metadata::new();
+                assert!(native_trailers.insert("x-end", "native"));
+                let (mut stream, _) =
+                    finished_native_response(native_status.clone(), native_trailers);
+                let mut other = stream.clone();
+                let (native_end, trailers) = native_terminal_snapshot(&stream);
+                let mut local_trailers = Metadata::new();
+                assert!(local_trailers.insert("x-end", "cancel"));
+                stream.cancel_with_metadata(
+                    Status::resource_exhausted("local stop"),
+                    local_trailers,
+                );
+                if consumed {
+                    assert!(matches!(
+                        poll_stream(&mut other, Waker::noop()),
+                        Poll::Ready(Some(Err(status)))
+                            if status.code() == Code::ResourceExhausted
+                                && status.message() == "local stop"
+                    ));
+                }
+
+                match stream.finish_native(native_end, trailers) {
+                    Poll::Ready(None) => assert!(consumed),
+                    Poll::Ready(Some(Err(status))) => {
+                        assert!(!consumed);
+                        assert_eq!(status.code(), Code::ResourceExhausted);
+                        assert_eq!(status.message(), "local stop");
+                    }
+                    other => panic!("unexpected cancelled completion: {other:?}"),
+                }
+                assert!(matches!(
+                    stream.terminal_metadata().get("x-end"),
+                    Some(MetadataValue::Ascii(value)) if value == "cancel"
+                ));
+                for reader in [&mut stream, &mut other] {
+                    assert!(matches!(
+                        poll_stream(reader, Waker::noop()),
+                        Poll::Ready(None)
+                    ));
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_response_completion_delivers_transport_error_once() {
+        let mut trailers = Metadata::new();
+        assert!(trailers.insert("x-end", "native"));
+        let (mut first, _) =
+            finished_native_response(Status::data_loss("bad frame"), trailers);
+        let mut second = first.clone();
+        // Both clones may have passed the outer open-state check before either
+        // native poll publishes its end. The backend retains that same status.
+        let (first_end, first_trailers) = native_terminal_snapshot(&first);
+        let (second_end, second_trailers) = native_terminal_snapshot(&second);
+        assert_eq!(first_end.as_ref().map(Status::code), Some(Code::DataLoss));
+        assert_eq!(second_end.as_ref().map(Status::code), Some(Code::DataLoss));
+        assert!(matches!(
+            first.finish_native(first_end, first_trailers),
+            Poll::Ready(Some(Err(status)))
+                if status.code() == Code::DataLoss && status.message() == "bad frame"
+        ));
+        assert!(matches!(
+            second.finish_native(second_end, second_trailers),
+            Poll::Ready(None)
+        ));
+        assert!(matches!(
+            first.terminal_metadata().get("x-end"),
+            Some(MetadataValue::Ascii(value)) if value == "native"
+        ));
+        for reader in [&mut first, &mut second] {
+            assert!(matches!(
+                poll_stream(reader, Waker::noop()),
+                Poll::Ready(None)
+            ));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_response_completion_drains_buffered_items_and_wakes_producers() {
+        for local_finish in [false, true] {
+            let mut trailers = Metadata::new();
+            assert!(trailers.insert("x-end", "native"));
+            let (mut stream, feed) =
+                finished_native_response(Status::data_loss("bad frame"), trailers);
+            let mut producer = stream.clone();
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(&wakes);
+            lock_unpoisoned(&feed).on_trailers = Some(Box::new(move || {
+                for value in 0..MAX_STREAM_BUFFERED {
+                    producer.push(Ok(value as u32)).expect("buffered response");
+                }
+                let mut task = Context::from_waker(&waker);
+                assert!(producer.poll_reserve(&mut task).is_pending());
+                if local_finish {
+                    let mut local_trailers = Metadata::new();
+                    assert!(local_trailers.insert("x-end", "local"));
+                    producer.finish_with_metadata(
+                        Status::permission_denied("finished locally"),
+                        local_trailers,
+                    );
+                }
+            }));
+
+            for value in 0..MAX_STREAM_BUFFERED {
+                assert!(matches!(
+                    poll_stream(&mut stream, Waker::noop()),
+                    Poll::Ready(Some(Ok(item))) if item == value as u32
+                ));
+                assert_eq!(wakes.load(Ordering::SeqCst), 1);
+            }
+            let expected = if local_finish {
+                Code::PermissionDenied
+            } else {
+                Code::DataLoss
+            };
+            assert!(matches!(
+                poll_stream(&mut stream, Waker::noop()),
+                Poll::Ready(Some(Err(status))) if status.code() == expected
+            ));
+            assert!(matches!(
+                stream.terminal_metadata().get("x-end"),
+                Some(MetadataValue::Ascii(value))
+                    if value == if local_finish { "local" } else { "native" }
+            ));
+            assert!(matches!(
+                poll_stream(&mut stream, Waker::noop()),
+                Poll::Ready(None)
+            ));
+        }
+    }
     /// A unix: target's path was used verbatim (asupersync-mu5yhv finding
     /// 6): `unix:///tmp/my%20app.sock` dialled a file named with a literal
     /// `%20`, and a query or fragment stayed in the file name.
