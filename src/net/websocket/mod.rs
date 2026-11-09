@@ -81,6 +81,8 @@ pub use handshake::{
     WsUrl, compute_accept_key,
 };
 pub use server::{ServerWebSocket, WebSocketAcceptor, WsAcceptError};
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub use server::{Http2WebSocket, Http2WebSocketCompletion};
 pub use split::{
     CloseSentWebSocketWrite, OpenWebSocketWrite, ReuniteError as WsReuniteError,
     TypedWebSocketWrite, WebSocketRead, WebSocketWrite, WebSocketWriteCloseSent,

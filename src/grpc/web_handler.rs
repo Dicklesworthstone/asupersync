@@ -253,7 +253,7 @@ async fn collect_streaming_request(
     request: StreamingServerRequest,
     config: &GrpcWebConfig,
 ) -> Result<HttpRequest, HttpResponse> {
-    let StreamingServerRequest { head, peer_addr, mut body } = request;
+    let StreamingServerRequest { head, peer_addr, mut body, .. } = request;
     let mut request = HttpRequest {
         method: head.method,
         uri: head.uri,

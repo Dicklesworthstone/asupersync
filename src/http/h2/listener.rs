@@ -800,12 +800,19 @@ fn request_from_h2_parts(
 }
 
 #[cfg(feature = "http2-streaming")]
-fn request_head_from_h2_headers(
-    headers: Vec<Header>,
-) -> Result<(crate::http::h1::stream::RequestHead, Option<u64>), H2Error> {
+struct H2StreamingRequestHead {
+    head: crate::http::h1::stream::RequestHead,
+    declared_length: Option<u64>,
+    extended_connect: Option<(String, String, String)>,
+}
+
+#[cfg(feature = "http2-streaming")]
+fn request_head_from_h2_headers(headers: Vec<Header>) -> Result<H2StreamingRequestHead, H2Error> {
     let mut method = None;
     let mut path = None;
     let mut authority = None;
+    let mut scheme = None;
+    let mut protocol = None;
     let mut regular = Vec::with_capacity(headers.len());
     let mut declared_length = None;
     for header in headers {
@@ -813,9 +820,8 @@ fn request_head_from_h2_headers(
             ":method" => method = Some(header.value),
             ":path" => path = Some(header.value),
             ":authority" => authority = Some(header.value),
-            // `:scheme` has no h1 `Request` equivalent; `:protocol` is the
-            // RFC 8441 extended-CONNECT marker, validated upstream.
-            ":scheme" | ":protocol" => {}
+            ":scheme" => scheme = Some(header.value),
+            ":protocol" => protocol = Some(header.value),
             name if name.starts_with(':') => {
                 return Err(H2Error::protocol(format!(
                     "unexpected request pseudo-header {name}"
@@ -849,6 +855,26 @@ fn request_head_from_h2_headers(
         H2Error::protocol(":path pseudo-header missing (CONNECT is not supported by this listener)")
     })?;
 
+    let extended_connect = match protocol {
+        Some(protocol) => {
+            let authority = authority
+                .as_ref()
+                .ok_or_else(|| H2Error::protocol("extended CONNECT requires :authority"))?;
+            if regular.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("host") && !value.eq_ignore_ascii_case(authority)
+            }) {
+                return Err(H2Error::protocol(
+                    "extended CONNECT Host conflicts with :authority",
+                ));
+            }
+            Some((
+                protocol,
+                scheme.ok_or_else(|| H2Error::protocol("extended CONNECT requires :scheme"))?,
+                authority.clone(),
+            ))
+        }
+        None => None,
+    };
     let mut request_headers = Vec::with_capacity(regular.len() + 1);
     if let Some(authority) = authority
         && !regular
@@ -860,15 +886,16 @@ fn request_head_from_h2_headers(
     }
     request_headers.extend(regular);
 
-    Ok((
-        crate::http::h1::stream::RequestHead {
+    Ok(H2StreamingRequestHead {
+        head: crate::http::h1::stream::RequestHead {
             method,
             uri,
             version: Version::Http2,
             headers: request_headers,
         },
         declared_length,
-    ))
+        extended_connect,
+    })
 }
 
 fn should_strip_h2_response_header(lowered: &str, value: &str) -> bool {
@@ -1226,6 +1253,12 @@ impl Http2BodySender {
     }
 
     /// Finish the response without trailers.
+    ///
+    /// For a successful, explicitly enabled extended CONNECT, the listener
+    /// may publish this output half-close while the request still drains its
+    /// input. Its request region and in-flight credit remain owned until the
+    /// producer and all descendants retire. Ordinary responses retain their
+    /// existing producer-completion barrier before terminal END_STREAM.
     pub fn finish(&mut self, cx: &Cx) -> Result<(), HttpError> {
         if self.terminal == Http2ProducerTerminal::Trailers {
             return Ok(());
@@ -2048,6 +2081,10 @@ enum ProducedReceive {
 struct ProducedCancellationGuard {
     producer_cx: Cx,
     armed: bool,
+    // Minted only for a transport-admitted, successful extended CONNECT.
+    duplex_tunnel: bool,
+    // Output may close while the same owned request still drains its input.
+    half_closed: bool,
 }
 
 impl ProducedCancellationGuard {
@@ -2055,7 +2092,48 @@ impl ProducedCancellationGuard {
         Self {
             producer_cx,
             armed: true,
+            duplex_tunnel: false,
+            half_closed: false,
         }
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    fn with_duplex_tunnel(mut self, enabled: bool) -> Self {
+        self.duplex_tunnel = enabled;
+        self
+    }
+
+    fn reset_code(&self) -> ErrorCode {
+        if self.duplex_tunnel {
+            ErrorCode::Cancel
+        } else {
+            ErrorCode::InternalError
+        }
+    }
+
+    fn explicit_tunnel_finish_bytes(&self, body: &OutgoingBody) -> Option<u64> {
+        #[cfg(feature = "http2-streaming")]
+        if self.duplex_tunnel {
+            return body.explicit_finish_bytes();
+        }
+        let _ = body;
+        None
+    }
+
+    fn poll_tunnel_finish_bytes(
+        &self,
+        body: &OutgoingBody,
+        task_cx: &mut std::task::Context<'_>,
+    ) -> Option<u64> {
+        #[cfg(feature = "http2-streaming")]
+        if self.duplex_tunnel {
+            return match body.poll_explicit_finish_bytes(task_cx) {
+                Poll::Ready(total) => Some(total),
+                Poll::Pending => None,
+            };
+        }
+        let _ = (body, task_cx);
+        None
     }
 
     fn cancel(&mut self, message: &'static str) {
@@ -2080,6 +2158,18 @@ impl Drop for ProducedCancellationGuard {
 impl ActiveProducedBody {
     fn cancel(&mut self, message: &'static str) {
         self.cancellation.cancel(message);
+    }
+
+    fn ready_for_tunnel_half_close(&self) -> bool {
+        self.cancellation.duplex_tunnel
+            && !self.cancellation.half_closed
+            && self.body_eof
+            && self.pending_initial_response.is_none()
+            && self.pending_trailers.is_none()
+            && self.receive != ProducedReceive::Cancelled
+            && self.cancellation.producer_cx.checkpoint().is_ok()
+            && self.cancellation.explicit_tunnel_finish_bytes(&self.body)
+                == Some(self.emitted_bytes)
     }
 }
 
@@ -2185,6 +2275,7 @@ fn finalize_produced_body_if_ready(
 ) {
     enum FinalizeAction {
         Wait,
+        TunnelHalfClose,
         Reset {
             diagnostic: Option<(&'static str, &'static str)>,
         },
@@ -2198,6 +2289,7 @@ fn finalize_produced_body_if_ready(
             return;
         };
         match state.producer_outcome {
+            None if state.ready_for_tunnel_half_close() => FinalizeAction::TunnelHalfClose,
             None => FinalizeAction::Wait,
             // The body saw the cancellation before the producer committed its
             // terminal frames under a mask (br-asupersync-o3oqer). The producer
@@ -2275,6 +2367,33 @@ fn finalize_produced_body_if_ready(
 
     match action {
         FinalizeAction::Wait => {}
+        FinalizeAction::TunnelHalfClose => {
+            // RFC 8441 maps server-first WebSocket transport closure to this
+            // END_STREAM. The exact explicit-finish witness and observed body
+            // EOF prove every committed DATA byte precedes it. Keep the body,
+            // cancellation guard, request owner and in-flight credit until the
+            // peer input and the actual request region finish independently.
+            if conn
+                .send_data(stream_id, crate::bytes::Bytes::new(), true)
+                .is_ok()
+            {
+                if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                    state.cancellation.half_closed = true;
+                }
+            } else {
+                record_h2_body_diagnostic(
+                    stream_id,
+                    WebBodyDiagnostic::ResponseProducerFailure,
+                    "extended CONNECT output half-close could not be queued",
+                );
+                conn.reset_stream(stream_id, ErrorCode::Cancel);
+                cancel_produced_body(
+                    produced_bodies,
+                    stream_id,
+                    "HTTP/2 tunnel output half-close failed",
+                );
+            }
+        }
         FinalizeAction::Redrain => {
             if let Some(state) = produced_bodies.get_mut(&stream_id) {
                 state.body_eof = false;
@@ -2285,7 +2404,12 @@ fn finalize_produced_body_if_ready(
             if let Some((code, cause)) = diagnostic {
                 record_h2_body_diagnostic_code(stream_id, code, cause);
             }
-            conn.reset_stream(stream_id, ErrorCode::InternalError);
+            let code = produced_bodies
+                .get(&stream_id)
+                .map_or(ErrorCode::InternalError, |state| {
+                    state.cancellation.reset_code()
+                });
+            conn.reset_stream(stream_id, code);
             cancel_produced_body(
                 produced_bodies,
                 stream_id,
@@ -2297,11 +2421,15 @@ fn finalize_produced_body_if_ready(
                 .remove(&stream_id)
                 .expect("produced body exists for terminal action");
             let result = match terminal_action {
+                FinalizeAction::EmptyEof if state.cancellation.half_closed => Ok(()),
                 FinalizeAction::EmptyEof => {
                     conn.send_data(stream_id, crate::bytes::Bytes::new(), true)
                 }
                 FinalizeAction::Trailers(trailers) => conn.send_headers(stream_id, trailers, true),
-                FinalizeAction::Wait | FinalizeAction::Redrain | FinalizeAction::Reset { .. } => {
+                FinalizeAction::Wait
+                | FinalizeAction::TunnelHalfClose
+                | FinalizeAction::Redrain
+                | FinalizeAction::Reset { .. } => {
                     unreachable!()
                 }
             };
@@ -2319,7 +2447,7 @@ fn finalize_produced_body_if_ready(
                     WebBodyDiagnostic::ResponseProducerFailure,
                     "terminal response frame could not be queued",
                 );
-                conn.reset_stream(stream_id, ErrorCode::InternalError);
+                conn.reset_stream(stream_id, state.cancellation.reset_code());
                 state.cancel("HTTP/2 terminal produced response frame could not be queued");
             }
         }
@@ -2651,11 +2779,19 @@ fn poll_produced_body_event(
             return Poll::Pending;
         }
 
-        let remaining_is_terminal_only = matches!(
-            state.producer_outcome,
-            Some(Http2ProducerOutcome::Finished { total_bytes, .. })
-                if total_bytes == state.emitted_bytes
-        );
+        // A zero DATA window must not hide a completed tunnel's zero-byte
+        // END_STREAM. Subscribe before checking credit: the channel clears its
+        // ordinary receive waker after Ready, so a later explicit finish needs
+        // its own bounded wakeup while this producer waits for peer input.
+        let tunnel_finish = state
+            .cancellation
+            .poll_tunnel_finish_bytes(&state.body, task_cx);
+        let remaining_is_terminal_only = tunnel_finish == Some(state.emitted_bytes)
+            || matches!(
+                state.producer_outcome,
+                Some(Http2ProducerOutcome::Finished { total_bytes, .. })
+                    if total_bytes == state.emitted_bytes
+            );
         if conn.available_send_capacity(stream_id) == 0 && !remaining_is_terminal_only {
             return Poll::Pending;
         }
@@ -3868,10 +4004,22 @@ where
         let local_max_frame_size = settings.max_frame_size;
         let mut conn = Connection::server_with_time_getter(settings, time_getter);
         conn.set_malformed_header_isolation(malformed_header_isolation);
+        #[cfg(feature = "http2-streaming")]
+        let extended_connect_enabled = incoming
+            .as_ref()
+            .is_some_and(StreamingRequests::extended_connect_enabled);
+        #[cfg(feature = "http2-streaming")]
+        if extended_connect_enabled {
+            conn.enable_extended_connect();
+        }
         conn.queue_initial_settings();
         conn.set_initial_connection_recv_window(initial_connection_window_size)
             .map_err(io::Error::other)?;
         let mut framed = listener_framed(stream, local_max_frame_size);
+        #[cfg(feature = "http2-streaming")]
+        if extended_connect_enabled {
+            framed.codec_mut().enable_extended_connect();
+        }
 
         let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
         // Per-stream request assembly: headers arrive first, DATA accumulates
@@ -4661,6 +4809,7 @@ where
                         let Some(mut response) = state.pending_initial_response.take() else {
                             continue;
                         };
+                        let reset_code = state.cancellation.reset_code();
                         let queued = headers
                             .map_err(|_| {
                                 H2Error::connection(
@@ -4693,7 +4842,7 @@ where
                                 WebBodyDiagnostic::ResponseProducerFailure,
                                 "produced response initial headers could not be queued",
                             );
-                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            conn.reset_stream(stream_id, reset_code);
                             cancel_produced_body(
                                 &mut produced_bodies,
                                 stream_id,
@@ -4710,13 +4859,14 @@ where
                         let Some(state) = produced_bodies.get_mut(&stream_id) else {
                             continue;
                         };
+                        let reset_code = state.cancellation.reset_code();
                         let Some(emitted_bytes) = state.emitted_bytes.checked_add(data_len) else {
                             record_h2_body_diagnostic(
                                 stream_id,
                                 WebBodyDiagnostic::ResponseProducerFailure,
                                 "produced response byte accounting overflowed",
                             );
-                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            conn.reset_stream(stream_id, reset_code);
                             cancel_produced_body(
                                 &mut produced_bodies,
                                 stream_id,
@@ -4731,7 +4881,7 @@ where
                                 WebBodyDiagnostic::ResponseProducerFailure,
                                 "produced DATA could not be queued",
                             );
-                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            conn.reset_stream(stream_id, reset_code);
                             cancel_produced_body(
                                 &mut produced_bodies,
                                 stream_id,
@@ -4753,13 +4903,14 @@ where
                         let Some(state) = produced_bodies.get_mut(&stream_id) else {
                             continue;
                         };
+                        let reset_code = state.cancellation.reset_code();
                         if state.pending_trailers.replace(trailers).is_some() || state.body_eof {
                             record_h2_body_diagnostic(
                                 stream_id,
                                 WebBodyDiagnostic::ResponseProducerFailure,
                                 "produced response emitted duplicate terminal frames",
                             );
-                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            conn.reset_stream(stream_id, reset_code);
                             cancel_produced_body(
                                 &mut produced_bodies,
                                 stream_id,
@@ -4905,7 +5056,7 @@ where
                                 "produced response could not start on a writable stream",
                             );
                             cancellation.cancel("HTTP/2 produced response could not start");
-                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            conn.reset_stream(stream_id, cancellation.reset_code());
                             drop(guard);
                             continue;
                         }
@@ -4922,7 +5073,7 @@ where
                                 );
                                 cancellation
                                     .cancel("HTTP/2 produced response headers could not be queued");
-                                conn.reset_stream(stream_id, ErrorCode::InternalError);
+                                conn.reset_stream(stream_id, cancellation.reset_code());
                                 drop(guard);
                                 continue;
                             }
@@ -4979,7 +5130,7 @@ where
                                     WebBodyDiagnostic::ResponseProducerFailure,
                                     "response producer completed more than once",
                                 );
-                                conn.reset_stream(stream_id, ErrorCode::InternalError);
+                                conn.reset_stream(stream_id, state.cancellation.reset_code());
                                 cancel_produced_body(
                                     &mut produced_bodies,
                                     stream_id,
@@ -5577,8 +5728,11 @@ impl<F> Http2Listener<F> {
     /// Run live request ingress and produced response egress in the same
     /// admitted request child region. The producer may retain and consume the
     /// incoming body after the handler returns. Cancellation, peer reset, and
-    /// output rejection cancel that owner; terminal response frames wait for
-    /// the producer and all of its descendants and finalizers to retire.
+    /// output rejection cancel that owner. Successful response completion waits
+    /// for the producer and all of its descendants and finalizers to retire.
+    /// An explicitly enabled, successful extended CONNECT may publish a verified
+    /// output half-close before that barrier; its input, producer, and in-flight
+    /// admission remain owned until the request region completes.
     #[cfg(feature = "http2-streaming")]
     pub async fn run_streaming_produced<Fut>(
         self,

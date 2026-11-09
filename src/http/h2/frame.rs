@@ -781,6 +781,16 @@ impl SettingsFrame {
                 return Err(H2Error::protocol("SETTINGS_ENABLE_PUSH must be 0 or 1"));
             }
 
+            // RFC 8441 Section 3: this setting is Boolean even when this
+            // endpoint does not use extended CONNECT. Keep the public
+            // exhaustive Setting enum source compatible; the native server's
+            // opt-in encoder advertises the extension separately.
+            if id == 0x8 && value > 1 {
+                return Err(H2Error::protocol(
+                    "SETTINGS_ENABLE_CONNECT_PROTOCOL must be 0 or 1",
+                ));
+            }
+
             // RFC 7540 Section 6.5.2: SETTINGS_INITIAL_WINDOW_SIZE MUST be <= 2^31-1
             if id == 0x4 && value > MAX_INITIAL_WINDOW_SIZE {
                 return Err(H2Error::flow_control(
@@ -805,6 +815,16 @@ impl SettingsFrame {
     /// Encode this frame.
     #[inline]
     pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
+        self.encode_with_connect_protocol(dst, false)
+    }
+
+    /// Encode the server's monotonic RFC 8441 opt-in without adding a variant
+    /// to the public exhaustive setting model. ACKs never carry parameters.
+    pub(super) fn encode_with_connect_protocol(
+        &self,
+        dst: &mut BytesMut,
+        enable_connect_protocol: bool,
+    ) -> Result<(), H2Error> {
         let mut flags = 0u8;
         if self.ack {
             flags |= settings_flags::ACK;
@@ -817,8 +837,14 @@ impl SettingsFrame {
             validate_setting_for_encode(*setting)?;
         }
 
+        let extended_connect = enable_connect_protocol && !self.ack;
+        let setting_count = encoded_settings
+            .len()
+            .checked_add(usize::from(extended_connect))
+            .ok_or_else(|| H2Error::frame_size("too many SETTINGS parameters"))?;
+
         let header = FrameHeader {
-            length: checked_frame_length_product(encoded_settings.len(), 6)?,
+            length: checked_frame_length_product(setting_count, 6)?,
             frame_type: FrameType::Settings as u8,
             flags,
             stream_id: 0,
@@ -828,6 +854,10 @@ impl SettingsFrame {
         for setting in encoded_settings {
             dst.put_u16(setting.id());
             dst.put_u32(setting.value());
+        }
+        if extended_connect {
+            dst.put_u16(0x8);
+            dst.put_u32(1);
         }
         Ok(())
     }

@@ -104,6 +104,8 @@ pub struct FrameCodec {
     /// Unknown extensions cannot interrupt a field block, even though the
     /// public codec otherwise skips them.
     awaiting_continuation: bool,
+    /// Native server opt-in; never changes the public exhaustive frame model.
+    advertise_extended_connect: bool,
 }
 
 impl FrameCodec {
@@ -114,6 +116,7 @@ impl FrameCodec {
             max_frame_size: super::frame::DEFAULT_MAX_FRAME_SIZE,
             partial_header: None,
             awaiting_continuation: false,
+            advertise_extended_connect: false,
         }
     }
 
@@ -164,6 +167,12 @@ impl ListenerFrameCodec {
 
     pub(super) fn set_max_frame_size(&mut self, size: u32) {
         self.0.set_max_frame_size(size);
+    }
+
+    /// Pair with Connection::enable_extended_connect before the first SETTINGS.
+    #[cfg_attr(not(feature = "http2-streaming"), allow(dead_code))]
+    pub(super) fn enable_extended_connect(&mut self) {
+        self.0.advertise_extended_connect = true;
     }
 }
 
@@ -253,7 +262,12 @@ impl<T: AsRef<Frame>> Encoder<T> for FrameCodec {
         // br-asupersync-pt23uf: Frame::encode now returns Result; propagate
         // FRAME_SIZE_ERROR to the connection codec layer instead of the
         // previous panic on >16M payloads.
-        item.as_ref().encode(dst)?;
+        match item.as_ref() {
+            Frame::Settings(settings) if self.advertise_extended_connect => {
+                settings.encode_with_connect_protocol(dst, true)?;
+            }
+            frame => frame.encode(dst)?,
+        }
         Ok(())
     }
 }
@@ -386,6 +400,8 @@ pub struct Connection {
     hpack_decoder: hpack::Decoder,
     /// Opt-in recovery of fully decoded malformed HTTP field blocks.
     malformed_header_isolation: bool,
+    /// Server permission for RFC 8441, paired with its wire advertisement.
+    extended_connect_enabled: bool,
     /// Connection-level send window.
     send_window: i32,
     /// Connection-level receive window.
@@ -476,6 +492,7 @@ impl Connection {
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
             malformed_header_isolation: false,
+            extended_connect_enabled: false,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             initial_recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
@@ -533,6 +550,7 @@ impl Connection {
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
             malformed_header_isolation: false,
+            extended_connect_enabled: false,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             initial_recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
@@ -565,6 +583,16 @@ impl Connection {
     /// failures still consume the peer-reset rate-limit budget.
     pub fn set_malformed_header_isolation(&mut self, enabled: bool) {
         self.malformed_header_isolation = enabled;
+    }
+
+    /// Enable request validation for a server that advertises RFC 8441 through
+    /// its listener codec. This permission cannot be withdrawn mid-connection.
+    #[cfg_attr(
+        any(target_arch = "wasm32", not(feature = "http2-streaming")),
+        allow(dead_code)
+    )]
+    pub(super) fn enable_extended_connect(&mut self) {
+        self.extended_connect_enabled = true;
     }
 
     /// Configure the RST_STREAM rate limit for CVE-2023-44487 protection.
@@ -1795,7 +1823,12 @@ impl Connection {
         // no-pseudo-headers path inside the validator while still
         // applying the regular-header validations
         // (lowercase names, connection-specific header ban).
-        if let Err(why) = validate_h2_pseudo_headers(&headers, is_request, is_trailers) {
+        if let Err(why) = validate_h2_pseudo_headers_with_connect(
+            &headers,
+            is_request,
+            is_trailers,
+            self.extended_connect_enabled,
+        ) {
             return Err(H2Error::stream(stream_id, ErrorCode::ProtocolError, why));
         }
 
@@ -2744,7 +2777,9 @@ pub enum ReceivedFrame {
 ///      MUST have `:method`. Non-CONNECT requests MUST also have
 ///      `:scheme` and `:path`. CONNECT requests MUST have `:authority`
 ///      and MUST NOT have `:scheme` or `:path` (RFC 9113 §8.5). Must
-///      NOT have `:status`.
+///      NOT have `:status`. The settings-aware variant below permits
+///      extended CONNECT only after the native server opts in, and then
+///      requires a protocol token and all three URI pseudo-headers.
 ///    - **response** (`is_request == false`, client receiving HEADERS):
 ///      MUST have `:status` and MUST NOT have `:method`/`:scheme`/
 ///      `:path`/`:authority`/`:protocol` (RFC 9113 §8.3.2).
@@ -2752,9 +2787,9 @@ pub enum ReceivedFrame {
 ///    NOT contain uppercase ASCII (RFC 9113 §8.2.1). Pseudo-headers
 ///    are exempt.
 ///
-/// **What this does NOT validate** (deeper §8.3.1 value-syntax checks
-/// — path-form, scheme syntax, authority form, status range, method
-/// token, header-value byte set): those are the depth implemented in
+/// **What this does NOT validate for ordinary requests** (deeper §8.3.1
+/// value-syntax checks — path-form, scheme syntax, authority form, status
+/// range, method token, header-value byte set): those are the depth implemented in
 /// `crate::http::h3_native::validate_request_pseudo_headers_with_settings`
 /// and represent a follow-up. The structural rules above are the ones
 /// flagged by the bead and are the highest-value subset because they
@@ -2765,6 +2800,15 @@ fn validate_h2_pseudo_headers(
     headers: &[Header],
     is_request: bool,
     is_trailers: bool,
+) -> Result<(), &'static str> {
+    validate_h2_pseudo_headers_with_connect(headers, is_request, is_trailers, false)
+}
+
+fn validate_h2_pseudo_headers_with_connect(
+    headers: &[Header],
+    is_request: bool,
+    is_trailers: bool,
+    enable_connect_protocol: bool,
 ) -> Result<(), &'static str> {
     // br-asupersync-0eyf7t — RFC 9113 §8.1: "Trailer fields MUST NOT
     // include pseudo-header fields (Section 8.3)". Reject any
@@ -2819,6 +2863,10 @@ fn validate_h2_pseudo_headers(
     let mut seen_status = false;
     let mut seen_protocol = false;
     let mut method_value: Option<&[u8]> = None;
+    let mut scheme_value = "";
+    let mut path_value = "";
+    let mut authority_value = "";
+    let mut protocol_value = "";
 
     for h in headers {
         let name: &[u8] = h.name.as_bytes();
@@ -2827,10 +2875,8 @@ fn validate_h2_pseudo_headers(
         }
         // RFC 9113 §8.2.1: field values MUST NOT start or end with SP or HTAB.
         if h.value.starts_with([' ', '\t']) || h.value.ends_with([' ', '\t']) {
-            return Err(
-                "header field value has leading or trailing whitespace \
-                 (RFC 9113 §8.2.1 violation)",
-            );
+            return Err("header field value has leading or trailing whitespace \
+                 (RFC 9113 §8.2.1 violation)");
         }
         if name.first().copied() == Some(b':') {
             // Pseudo-header.
@@ -2851,12 +2897,14 @@ fn validate_h2_pseudo_headers(
                         return Err("duplicate :scheme pseudo-header");
                     }
                     seen_scheme = true;
+                    scheme_value = h.value.as_str();
                 }
                 b":path" => {
                     if seen_path {
                         return Err("duplicate :path pseudo-header");
                     }
                     seen_path = true;
+                    path_value = h.value.as_str();
                     if h.value.is_empty() {
                         return Err("empty :path pseudo-header");
                     }
@@ -2866,6 +2914,7 @@ fn validate_h2_pseudo_headers(
                         return Err("duplicate :authority pseudo-header");
                     }
                     seen_authority = true;
+                    authority_value = h.value.as_str();
                 }
                 b":status" => {
                     if seen_status {
@@ -2878,6 +2927,7 @@ fn validate_h2_pseudo_headers(
                         return Err("duplicate :protocol pseudo-header");
                     }
                     seen_protocol = true;
+                    protocol_value = h.value.as_str();
                 }
                 _ => {
                     return Err("unknown pseudo-header field \
@@ -2929,20 +2979,28 @@ fn validate_h2_pseudo_headers(
             if !seen_authority {
                 return Err("CONNECT request missing required :authority pseudo-header");
             }
-            // RFC 9113 §8.5: CONNECT requests MUST NOT include :scheme
-            // or :path. Extended CONNECT (RFC 8441 / :protocol) is
-            // the documented exception, allowed only when negotiated
-            // via SETTINGS_ENABLE_CONNECT_PROTOCOL — that negotiation
-            // is not represented in the structural validation here,
-            // so we follow the conservative §8.5 rule. A future
-            // pass that wires SETTINGS_ENABLE_CONNECT_PROTOCOL
-            // through to this validator should relax this branch
-            // (and align with h3_native's
-            // `validate_request_pseudo_headers_with_settings`).
-            if seen_protocol && (seen_scheme || seen_path) {
-                // Tolerate :protocol presence for the extended-CONNECT
-                // case (the deeper :protocol value validation lives
-                // in the follow-up). Fall through.
+            if seen_protocol {
+                if !enable_connect_protocol {
+                    return Err("extended CONNECT requires SETTINGS_ENABLE_CONNECT_PROTOCOL");
+                }
+                if !seen_scheme || !seen_path {
+                    return Err("extended CONNECT requires :scheme and :path");
+                }
+                if !valid_extended_connect_protocol(protocol_value) {
+                    return Err("invalid extended CONNECT :protocol token");
+                }
+                if !valid_extended_connect_scheme(scheme_value) {
+                    return Err("invalid extended CONNECT :scheme");
+                }
+                if !valid_extended_connect_authority(authority_value) {
+                    return Err("invalid extended CONNECT :authority");
+                }
+                if !path_value.starts_with('/')
+                    || path_value.contains('#')
+                    || path_value.bytes().any(|byte| byte <= 0x20 || byte == 0x7f)
+                {
+                    return Err("invalid extended CONNECT :path");
+                }
             } else if seen_scheme || seen_path {
                 return Err("CONNECT request must not include :scheme or :path \
                      (RFC 9113 §8.5)");
@@ -2975,6 +3033,78 @@ fn validate_h2_pseudo_headers(
     Ok(())
 }
 
+fn valid_extended_connect_scheme(scheme: &str) -> bool {
+    scheme
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+        && scheme
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
+fn valid_extended_connect_authority(authority: &str) -> bool {
+    if authority.is_empty()
+        || authority.contains(['@', '/', '?', '#', '\\'])
+        || authority.bytes().any(|byte| byte <= 0x20 || byte == 0x7f)
+    {
+        return false;
+    }
+    let valid_port = |port: &str| {
+        !port.is_empty()
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok()
+    };
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((literal, rest)) = bracketed.split_once(']') else {
+            return false;
+        };
+        return literal.parse::<std::net::Ipv6Addr>().is_ok()
+            && (rest.is_empty() || rest.strip_prefix(':').is_some_and(valid_port));
+    }
+    if authority.contains(['[', ']']) {
+        return false;
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) => !host.is_empty() && !host.contains(':') && valid_port(port),
+        None => true,
+    }
+}
+
+fn valid_extended_connect_protocol(protocol: &str) -> bool {
+    fn token(value: &str) -> bool {
+        !value.is_empty()
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'-'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                    )
+            })
+    }
+    match protocol.split_once('/') {
+        Some((name, version)) => token(name) && token(version),
+        None => token(protocol),
+    }
+}
+
 #[cfg(test)]
 #[path = "connection_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "connection_extended_connect_tests.rs"]
+mod extended_connect_tests;

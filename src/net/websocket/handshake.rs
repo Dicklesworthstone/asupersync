@@ -743,6 +743,84 @@ impl ServerHandshake {
         // Compute accept key
         let accept_key = compute_accept_key(client_key);
 
+        Ok(self.negotiate(request, accept_key))
+    }
+
+    // RFC 8441 retains version/subprotocol/extension negotiation, while the
+    // HTTP/1 Upgrade and key/accept exchange do not apply. The caller must
+    // first verify transport-minted extended-CONNECT metadata.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    pub(super) fn accept_http2(
+        &self,
+        headers: &[(String, String)],
+    ) -> Result<AcceptResponse, HandshakeError> {
+        let mut request = HttpRequest {
+            method: "CONNECT".to_owned(),
+            path: String::new(),
+            headers: BTreeMap::new(),
+        };
+        for (name, value) in headers {
+            if [
+                "connection",
+                "upgrade",
+                "keep-alive",
+                "proxy-connection",
+                "transfer-encoding",
+                "content-length",
+                "sec-websocket-key",
+                "sec-websocket-accept",
+            ]
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved))
+            {
+                return Err(HandshakeError::InvalidRequest(
+                    "HTTP/2 WebSocket request contains a forbidden handshake header".to_owned(),
+                ));
+            }
+            if [
+                "sec-websocket-version",
+                "sec-websocket-protocol",
+                "sec-websocket-extensions",
+            ]
+            .iter()
+            .any(|selected| name.eq_ignore_ascii_case(selected))
+            {
+                insert_header(&mut request.headers, name, value)?;
+            }
+        }
+        match request.header("sec-websocket-version") {
+            Some("13") => {}
+            Some(_) => {
+                return Err(HandshakeError::UnsupportedVersion(
+                    "HTTP/2 WebSocket requires version 13".to_owned(),
+                ));
+            }
+            None => return Err(HandshakeError::MissingHeader("Sec-WebSocket-Version")),
+        }
+        if let Some(protocols) = request.header("sec-websocket-protocol") {
+            let mut seen = std::collections::BTreeSet::new();
+            for protocol in protocols.split(',').map(str::trim) {
+                if protocol.is_empty()
+                    || !protocol.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+                    })
+                    || !seen.insert(protocol)
+                {
+                    return Err(HandshakeError::InvalidRequest(
+                        "invalid HTTP/2 WebSocket subprotocol list".to_owned(),
+                    ));
+                }
+            }
+        }
+        let mut response = self.negotiate(&request, String::new());
+        response.extensions = super::compression::negotiate_server(
+            &response.extensions,
+            request.header("sec-websocket-extensions"),
+        )?;
+        Ok(response)
+    }
+
+    fn negotiate(&self, request: &HttpRequest, accept_key: String) -> AcceptResponse {
         // Negotiate subprotocol.
         //
         // RFC 6455 §4.2.2: the server selects one of the client-offered
@@ -795,11 +873,11 @@ impl ServerHandshake {
                     accepted
                 });
 
-        Ok(AcceptResponse {
+        AcceptResponse {
             accept_key,
             protocol: selected_protocol,
             extensions: negotiated_extensions,
-        })
+        }
     }
 
     /// Generate a rejection response with the given HTTP status code.

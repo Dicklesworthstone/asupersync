@@ -147,11 +147,8 @@ impl OwnedRequests {
                             .await;
                     }
                 };
-                let request = StreamingServerRequest {
-                    head,
-                    peer_addr,
-                    body,
-                };
+                let mut request = StreamingServerRequest::new(head, body);
+                request.peer_addr = peer_addr;
                 let handler_cx = body_cx.clone();
                 let handler = region.run_with_protocol_drain(
                     source,

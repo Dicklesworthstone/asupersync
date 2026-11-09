@@ -1931,11 +1931,8 @@ where
         execution.config.incoming_body_frame_capacity,
         execution.config.incoming_body_queued_bytes,
     );
-    let request = StreamingServerRequest {
-        head: execution.head,
-        peer_addr: execution.peer_addr,
-        body,
-    };
+    let mut request = StreamingServerRequest::new(execution.head, body);
+    request.peer_addr = execution.peer_addr;
     let handler = race_force_close(
         execution.request.shutdown.as_ref(),
         region.run_with_protocol_drain(
@@ -3039,11 +3036,8 @@ where
         config.incoming_body_frame_capacity,
         config.incoming_body_queued_bytes,
     );
-    let request = StreamingServerRequest {
-        head: streaming.head,
-        peer_addr: streaming.peer_addr,
-        body,
-    };
+    let mut request = StreamingServerRequest::new(streaming.head, body);
+    request.peer_addr = streaming.peer_addr;
     let handler = handler(request_cx.clone(), request);
     let handler = async move { Some(handler.await) };
     async {

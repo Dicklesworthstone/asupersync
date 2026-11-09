@@ -1228,16 +1228,15 @@ fn produced_request(cx: &Cx, mut request: HttpRequest, path: &str) -> StreamingS
         IncomingRequestBody::channel(cx, BodyKind::ContentLength(request.body.len() as u64));
     futures_lite::future::block_on(writer.push_bytes(cx, &request.body)).unwrap();
     writer.finish(cx).unwrap();
-    StreamingServerRequest {
-        head: RequestHead {
+    StreamingServerRequest::new(
+        RequestHead {
             method: request.method,
             uri: request.uri,
             version: Version::Http11,
             headers: request.headers,
         },
-        peer_addr: None,
         body,
-    }
+    )
 }
 
 #[test]

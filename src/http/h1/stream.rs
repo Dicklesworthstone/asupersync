@@ -2721,7 +2721,41 @@ impl ChunkedEncoder {
 
 /// Private allocation identity shared by exactly one outgoing channel pair.
 #[derive(Debug)]
-struct OutgoingBodyChannelIdentity;
+struct OutgoingBodyChannelIdentity {
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    explicit_finish_bytes: AtomicU64,
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    explicit_finish_published: AtomicU8,
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    explicit_finish_waker: Mutex<Option<Waker>>,
+}
+
+impl OutgoingBodyChannelIdentity {
+    fn new() -> Self {
+        Self {
+            #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+            explicit_finish_bytes: AtomicU64::new(0),
+            #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+            explicit_finish_published: AtomicU8::new(0),
+            #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+            explicit_finish_waker: Mutex::new(None),
+        }
+    }
+
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    fn publish_explicit_finish(&self, bytes: u64) {
+        self.explicit_finish_bytes.store(bytes, Ordering::Relaxed);
+        self.explicit_finish_published.store(1, Ordering::Release);
+    }
+
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    fn wake_explicit_finish(&self) {
+        let waker = self.explicit_finish_waker.lock().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
 
 /// Body receiver for outgoing streams.
 #[derive(Debug)]
@@ -2740,6 +2774,47 @@ pub struct OutgoingBody {
 }
 
 impl OutgoingBody {
+    /// A plain explicit finish, bound to this channel and its accepted bytes.
+    /// Merely dropping a sender or sending trailers never creates this proof.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    pub(crate) fn explicit_finish_bytes(&self) -> Option<u64> {
+        (self.channel_identity.explicit_finish_published.load(Ordering::Acquire) != 0)
+            .then(|| self.channel_identity.explicit_finish_bytes.load(Ordering::Relaxed))
+    }
+
+    /// Subscribe before a zero peer window prevents ordinary DATA polling.
+    /// The finish proof and this registration are rechecked together, so the
+    /// final half-close cannot lose a wake after the last DATA frame consumed
+    /// the ordinary channel receive registration.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    pub(crate) fn poll_explicit_finish_bytes(&self, cx: &mut Context<'_>) -> Poll<u64> {
+        if let Some(bytes) = self.explicit_finish_bytes() {
+            let retired = self.channel_identity.explicit_finish_waker.lock().take();
+            drop(retired);
+            return Poll::Ready(bytes);
+        }
+        // RawWaker clone and destruction can call arbitrary code. Keep both
+        // outside the registration lock, including an unused candidate.
+        let mut incoming = Some(cx.waker().clone());
+        let retired = {
+            let mut registered = self.channel_identity.explicit_finish_waker.lock();
+            if registered.as_ref().is_some_and(|old| old.will_wake(cx.waker())) {
+                None
+            } else {
+                std::mem::replace(&mut *registered, incoming.take())
+            }
+        };
+        drop(retired);
+        drop(incoming);
+        if let Some(bytes) = self.explicit_finish_bytes() {
+            let retired = self.channel_identity.explicit_finish_waker.lock().take();
+            drop(retired);
+            Poll::Ready(bytes)
+        } else {
+            Poll::Pending
+        }
+    }
+
     /// Creates a bounded outgoing body channel.
     #[must_use]
     pub fn channel(cx: &Cx, kind: BodyKind) -> (OutgoingBodySender, Self) {
@@ -2780,7 +2855,7 @@ impl OutgoingBody {
         max_frame_bytes: Option<NonZeroUsize>,
     ) -> (OutgoingBodySender, Self) {
         let (tx, rx) = mpsc::channel(capacity);
-        let channel_identity = Arc::new(OutgoingBodyChannelIdentity);
+        let channel_identity = Arc::new(OutgoingBodyChannelIdentity::new());
         let body = Self {
             receiver: rx,
             initial_headers: None,
@@ -3128,7 +3203,14 @@ impl OutgoingBodySender {
             return Err(HttpError::BadContentLength);
         }
         self.finished = true;
+        // Publish the byte-bound proof before sender retirement can wake a
+        // concurrent receiver. The dedicated wake also reaches a tunnel
+        // driver parked with zero peer DATA credit and no data subscription.
+        #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+        self.channel_identity.publish_explicit_finish(self.total_bytes);
         self.close_sender();
+        #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+        self.channel_identity.wake_explicit_finish();
         Ok(())
     }
 
@@ -3351,6 +3433,10 @@ pub struct StreamingServerRequest {
     pub peer_addr: Option<std::net::SocketAddr>,
     /// Typed request body.
     pub body: IncomingRequestBody,
+    // Only the protocol driver can mint this capability after validating its
+    // negotiated extended-CONNECT pseudo-headers. Ordinary headers cannot
+    // turn an HTTP/1 request into an HTTP/2 tunnel.
+    extended_connect: Option<(String, String, String)>,
 }
 
 impl StreamingServerRequest {
@@ -3361,7 +3447,51 @@ impl StreamingServerRequest {
             head,
             peer_addr: None,
             body,
+            extended_connect: None,
         }
+    }
+
+    /// The negotiated extended-CONNECT protocol, when supplied by an
+    /// enabled native HTTP/2 streaming listener.
+    ///
+    /// This metadata comes from the validated `:protocol` pseudo-header;
+    /// a regular header with the same spelling cannot create it.
+    #[must_use]
+    pub fn extended_connect_protocol(&self) -> Option<&str> {
+        self.extended_connect
+            .as_ref()
+            .map(|(protocol, _, _)| protocol.as_str())
+    }
+
+    /// The validated `:scheme` of an extended-CONNECT request.
+    #[must_use]
+    pub fn extended_connect_scheme(&self) -> Option<&str> {
+        self.extended_connect
+            .as_ref()
+            .map(|(_, scheme, _)| scheme.as_str())
+    }
+
+    /// The validated `:authority` of an extended-CONNECT request.
+    ///
+    /// The native listener rejects a conflicting regular Host header before
+    /// admission, so existing host policy and this metadata identify the same
+    /// service. This value is never used as a forward-proxy destination.
+    #[must_use]
+    pub fn extended_connect_authority(&self) -> Option<&str> {
+        self.extended_connect
+            .as_ref()
+            .map(|(_, _, authority)| authority.as_str())
+    }
+
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    pub(crate) fn with_extended_connect(
+        mut self,
+        protocol: String,
+        scheme: String,
+        authority: String,
+    ) -> Self {
+        self.extended_connect = Some((protocol, scheme, authority));
+        self
     }
 
     /// Creates a typed request with a channel-backed body.

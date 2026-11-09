@@ -38,6 +38,11 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+mod http2;
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub use http2::{Http2WebSocket, Http2WebSocketCompletion};
+
 const MAX_PENDING_PONGS: usize = 16;
 
 fn enqueue_pending_pong(
@@ -284,6 +289,11 @@ pub struct ServerWebSocket<IO> {
     write_buf: BytesMut,
     /// Close handshake state.
     close_handshake: CloseHandshake,
+    // An HTTP/2 adapter may publish its transport half-close while the
+    // request stays alive to drain its peer. Authorize that publication only
+    // after validated mutual Close frames, never after a forced/raw EOF.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    http2_close_authorization: Option<std::sync::Arc<crate::sync::atomic::AtomicBool>>,
     /// Configuration.
     #[allow(dead_code)] // retained for potential config inspection
     config: WebSocketConfig,
@@ -330,6 +340,8 @@ where
             read_buf,
             write_buf: BytesMut::with_capacity(8192),
             close_handshake,
+            #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+            http2_close_authorization: None,
             config,
             assembler: MessageAssembler::new(max_message_size),
             protocol: accept.protocol,
@@ -643,6 +655,8 @@ where
                 // RFC 6455 section 5.5.1: the server closes the transport
                 // once both Close frames have been exchanged. A failed
                 // shutdown cannot change the already validated peer reason.
+                #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+                self.authorize_http2_transport_close();
                 let _ = self.io.shutdown().await;
                 Ok(())
             })
@@ -723,9 +737,24 @@ where
 
         // RFC 6455 section 5.5.1: the server closes the TCP connection once
         // the close handshake ends (the client waits for it to).
+        #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+        self.authorize_http2_transport_close();
         self.io.shutdown().await.map_err(WsError::Io)?;
         self.close_handshake.discard_peer_close();
         Ok(())
+    }
+
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    fn authorize_http2_transport_close(&self) {
+        if let Some(authorization) = &self.http2_close_authorization {
+            authorization.store(
+                self.close_handshake.is_closed()
+                    && self.close_handshake.peer_reason().is_some()
+                    && !self.close_handshake.timed_out()
+                    && self.write_buf.is_empty(),
+                crate::sync::atomic::Ordering::Release,
+            );
+        }
     }
 
     /// Send a ping frame.

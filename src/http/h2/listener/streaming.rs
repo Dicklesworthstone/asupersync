@@ -8,6 +8,7 @@ use crate::http::h1::stream::{
     FramedIncomingRequestBodyWriter, IncomingBodyAdmissionError, IncomingBodyError,
     IncomingRequestBody, RequestHead, StreamingServerRequest,
 };
+use std::num::NonZeroU64;
 use std::task::Context;
 
 const REQUEST_FRAME_CAPACITY: usize = 8;
@@ -60,6 +61,7 @@ pub struct Http2StreamingListenerConfig {
     /// streaming loads per connection can tune this setting accordingly.
     pub connection_request_body_buffer_bytes: NonZeroUsize,
     request_body_policy: Option<RequestBodyPolicy>,
+    extended_connect_max_bytes: Option<NonZeroU64>,
 }
 
 impl std::fmt::Debug for Http2StreamingListenerConfig {
@@ -74,6 +76,10 @@ impl std::fmt::Debug for Http2StreamingListenerConfig {
             .field(
                 "has_request_body_policy",
                 &self.request_body_policy.is_some(),
+            )
+            .field(
+                "extended_connect_max_bytes",
+                &self.extended_connect_max_bytes,
             )
             .finish()
     }
@@ -90,11 +96,32 @@ impl Default for Http2StreamingListenerConfig {
             )
             .expect("positive connection reservation"),
             request_body_policy: None,
+            extended_connect_max_bytes: None,
         }
     }
 }
 
 impl Http2StreamingListenerConfig {
+    /// Advertise and accept RFC 8441 extended CONNECT on this listener.
+    ///
+    /// The explicit limit bounds cumulative inbound tunnel DATA over the
+    /// entire request lifetime, replacing `listener.max_body_size` only for
+    /// negotiated extended-CONNECT requests. Request-body policies can still
+    /// tighten it. The existing per-request queue, connection reservation,
+    /// request deadline, and idle deadline continue to apply.
+    ///
+    /// Use the produced streaming-response lane for duplex protocols, such as
+    /// `WebSocketAcceptor::accept_http2`. Ordinary requests keep their existing
+    /// body limit. The default does not advertise or accept extended CONNECT.
+    /// A successful tunnel's explicit output finish may emit END_STREAM while
+    /// its request-owned input drains; the producer, descendants, and admission
+    /// credit remain live until the actual request region completes.
+    #[must_use]
+    pub fn with_extended_connect(mut self, max_tunnel_bytes: NonZeroU64) -> Self {
+        self.extended_connect_max_bytes = Some(max_tunnel_bytes);
+        self
+    }
+
     /// Add an admission policy evaluated after transport header validation and
     /// host checks, before allocating a request region or body channel.
     ///
@@ -212,7 +239,10 @@ enum StreamingCoordinator {
 impl StreamingCoordinator {
     fn poll_completion(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
         match self {
-            Self::Root(handle) => handle.as_mut().poll(cx).map(|result| result.map_err(|_| ())),
+            Self::Root(handle) => handle
+                .as_mut()
+                .poll(cx)
+                .map(|result| result.map_err(|_| ())),
             Self::Owned { handle, .. } => handle.poll_join(cx).map(|result| result.map_err(|_| ())),
         }
     }
@@ -406,6 +436,10 @@ pub(super) struct StreamingRequests {
 }
 
 impl StreamingRequests {
+    pub(super) fn extended_connect_enabled(&self) -> bool {
+        self.dispatch.config.extended_connect_max_bytes.is_some()
+    }
+
     pub(super) fn new(dispatch: StreamingDispatch) -> Self {
         Self {
             dispatch,
@@ -490,7 +524,11 @@ impl StreamingRequests {
             conn.reset_stream(stream_id, ErrorCode::RefusedStream);
             return false;
         }
-        let (head, declared_length) = match request_head_from_h2_headers(headers) {
+        let H2StreamingRequestHead {
+            head,
+            declared_length,
+            extended_connect,
+        } = match request_head_from_h2_headers(headers) {
             Ok(parts) => parts,
             Err(_) => {
                 conn.reset_stream(stream_id, ErrorCode::ProtocolError);
@@ -506,6 +544,7 @@ impl StreamingRequests {
             return false;
         }
         let suppress_response_body = head.method == Method::Head;
+        let extended_connect_request = extended_connect.is_some();
         let config = &self.dispatch.config;
         if let Err(rejection) =
             validate_host_header(&head.headers, head.version, &config.listener.allowed_hosts)
@@ -513,15 +552,27 @@ impl StreamingRequests {
             self.reject(
                 conn,
                 stream_id,
-                Response::new(rejection.status(), rejection.reason(), rejection.body().into_bytes())
-                    .with_header("content-type", "text/plain; charset=utf-8"),
+                Response::new(
+                    rejection.status(),
+                    rejection.reason(),
+                    rejection.body().into_bytes(),
+                )
+                .with_header("content-type", "text/plain; charset=utf-8"),
                 suppress_response_body,
                 end_stream,
                 response_guards,
             );
             return false;
         }
-        let mut max_body_size = config.listener.max_body_size as u64;
+        let mut max_body_size = if extended_connect.is_some() {
+            let Some(limit) = config.extended_connect_max_bytes else {
+                conn.reset_stream(stream_id, ErrorCode::ProtocolError);
+                return false;
+            };
+            limit.get()
+        } else {
+            config.listener.max_body_size as u64
+        };
         if let Some(policy) = &config.request_body_policy {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| policy(&head))) {
                 Ok(Ok(Some(limit))) => max_body_size = max_body_size.min(limit),
@@ -651,13 +702,12 @@ impl StreamingRequests {
                         {
                             return StreamingHopResponse::Buffered(invalid_h2_response_fallback());
                         }
-                        match handler(StreamingServerRequest {
-                            head,
-                            peer_addr,
-                            body,
-                        })
-                        .await
-                        {
+                        let mut request = StreamingServerRequest::new(head, body);
+                        request.peer_addr = peer_addr;
+                        if let Some((protocol, scheme, authority)) = extended_connect {
+                            request = request.with_extended_connect(protocol, scheme, authority);
+                        }
+                        match handler(request).await {
                             H2DispatchResponse::Buffered(response) => {
                                 StreamingHopResponse::Buffered(response)
                             }
@@ -683,6 +733,8 @@ impl StreamingRequests {
                                 // the child or transfers production to an orphan.
                                 let (response, body, sender, producer) =
                                     plan.into_parts(&request_cx);
+                                let duplex_tunnel = extended_connect_request
+                                    && (200..300).contains(&response.status);
                                 let Ok(permit) = body_response_sender.reserve(&request_cx).await
                                 else {
                                     return StreamingHopResponse::Produced(
@@ -696,7 +748,8 @@ impl StreamingRequests {
                                         body,
                                         cancellation: ProducedCancellationGuard::new(
                                             request_cx.clone(),
-                                        ),
+                                        )
+                                        .with_duplex_tunnel(duplex_tunnel),
                                         guard: body_guard,
                                     })
                                     .is_err()
@@ -784,10 +837,12 @@ impl StreamingRequests {
             }
         };
         let coordinator = match owner {
-            Some(owner) => owner.spawn(coordinator).map(|handle| StreamingCoordinator::Owned {
-                handle,
-                owner: owner.clone(),
-            }),
+            Some(owner) => owner
+                .spawn(coordinator)
+                .map(|handle| StreamingCoordinator::Owned {
+                    handle,
+                    owner: owner.clone(),
+                }),
             None => runtime
                 .try_spawn(async move {
                     if let Some(cx) = Cx::current() {

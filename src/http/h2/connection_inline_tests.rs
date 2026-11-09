@@ -5277,9 +5277,7 @@
     #[test]
     fn vqpx88_extended_connect_with_protocol_ok() {
         // RFC 8441 extended-CONNECT carries :protocol with :scheme/:path
-        // when SETTINGS_ENABLE_CONNECT_PROTOCOL has been negotiated. The
-        // structural validator tolerates this combination; the deeper
-        // settings-aware check lives in the follow-up parity pass.
+        // only when SETTINGS_ENABLE_CONNECT_PROTOCOL has been advertised.
         let headers = vec![
             h(":method", "CONNECT"),
             h(":protocol", "websocket"),
@@ -5287,7 +5285,8 @@
             h(":path", "/chat"),
             h(":authority", "example.com"),
         ];
-        assert!(validate_h2_pseudo_headers(&headers, true, false).is_ok());
+        assert!(validate_h2_pseudo_headers(&headers, true, false).is_err());
+        assert!(validate_h2_pseudo_headers_with_connect(&headers, true, false, true).is_ok());
     }
 
     #[test]
