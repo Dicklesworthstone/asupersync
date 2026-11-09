@@ -1816,11 +1816,15 @@ not make a measured throughput or full
 strict session-derived authentication, and atomic whole-message publication.
 Its `send_offloaded` and `send_value_offloaded` methods run encoding, signing,
 and optional bounded JSON serialization on the explicit `Cx`'s blocking pool.
-They use the same message format and codec as the existing inline methods.
+The matching `recv_offloaded` and `recv_value_offloaded` methods move header
+and symbol verification, decoding, and optional JSON deserialization onto a
+worker. These paths use the same message format and codec as the inline methods.
 
 ```rust
 use asupersync::Cx;
-use asupersync::channel::erasure::{AuthenticatedEcError, AuthenticatedEcSender};
+use asupersync::channel::erasure::{
+    AuthenticatedEcError, AuthenticatedEcReceiver, AuthenticatedEcSender,
+};
 
 async fn publish_message(
     sender: &mut AuthenticatedEcSender,
@@ -1828,6 +1832,14 @@ async fn publish_message(
     bytes: Vec<u8>,
 ) -> Result<u64, AuthenticatedEcError> {
     let mut session = sender.start_send_offloaded(cx, bytes).await?;
+    session.run().await
+}
+
+async fn receive_message(
+    receiver: &mut AuthenticatedEcReceiver,
+    cx: &Cx,
+) -> Result<Vec<u8>, AuthenticatedEcError> {
+    let mut session = receiver.start_recv_offloaded(cx)?;
     session.run().await
 }
 ```
@@ -1838,6 +1850,17 @@ session aborts publication. A private slot stays with worker-owned input,
 workspace and output until they are released, so repeated cancellation cannot
 accumulate abandoned encoding jobs from one sender. Queue storage, inputs
 awaiting admission, and an overlapping inline operation are separate costs.
+
+The receiver has its own worker slot and retains the dequeued authenticated
+envelope until delivery. Dropping a borrowing receive wait resumes the same
+worker and result. Cancelling or dropping the entire receive session, or a
+worker admission failure, leaves the envelope available to the next receive
+before any later queued message. An inline receive can also recover that
+retained message. A new session may repeat decoding and deserialization;
+retain the session when application deserializers must not be invoked again.
+Completed authentication, coding or JSON errors consume that invalid message
+and allow the next message to proceed.
+
 An active codec or serializer is cooperative only at its surrounding
 checkpoints; region shutdown still waits for actual worker retirement. Missing,
 forbidden or unavailable worker resources fail without inline fallback.

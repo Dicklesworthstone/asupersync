@@ -587,3 +587,377 @@ fn serialization_overflow_and_worker_panic_abort_without_consuming_message_id() 
         quiescent(&runtime);
     });
 }
+
+#[test]
+fn queued_receive_resumes_one_worker_and_preserves_fifo_on_both_schedulers() {
+    bounded(|| {
+        for workers in [1, 2] {
+            let runtime = runtime_with_workers(workers);
+            let pool = runtime.blocking_handle().unwrap();
+            let mut held = hold_worker(&pool);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let (mut tx, mut rx) = pair(2);
+                let first: Vec<u8> = (0..513).map(|i| (i % 251) as u8).collect();
+                tx.send(&cx, &first).await.unwrap();
+                tx.send(&cx, b"second").await.unwrap();
+                let mut session = rx.start_recv_offloaded(&cx).unwrap();
+                assert_eq!(tx.tx.telemetry_snapshot(11).queued_messages, 2);
+                assert_eq!(pool.pending_count(), 0);
+                pending_once(session.run()).await;
+                until(|| pool.pending_count() == 1).await;
+                assert_eq!(tx.tx.telemetry_snapshot(11).queued_messages, 1);
+                let mut heartbeat = cx.spawn(|_| async { 23 }).unwrap();
+                assert_eq!(heartbeat.join(&cx).await.unwrap(), 23);
+                for _ in 0..3 {
+                    pending_once(session.run()).await;
+                    crate::runtime::yield_now().await;
+                    assert_eq!(pool.pending_count(), 1);
+                    assert_eq!(tx.tx.telemetry_snapshot(11).queued_messages, 1);
+                }
+                assert!(!session.is_finished());
+                held.release();
+                assert_eq!(session.run().await.unwrap(), first);
+                assert!(session.is_finished());
+                assert!(matches!(
+                    session.run().await,
+                    Err(AuthenticatedEcError::InvalidSession(_))
+                ));
+                drop(session);
+                assert!(rx.pending.is_none());
+                assert_eq!(rx.recv_offloaded(&cx).await.unwrap(), b"second");
+                assert!(rx.pending.is_none());
+                assert_eq!(rx.offload.available_permits(), 1);
+            }));
+            quiescent(&runtime);
+        }
+    });
+}
+
+#[test]
+fn dropped_receive_retains_fifo_and_gates_only_the_next_offloaded_decode() {
+    bounded(|| {
+        for inline in [false, true] {
+            let runtime = runtime();
+            let pool = runtime.blocking_handle().unwrap();
+            let mut held = hold_worker(&pool);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let (mut tx, mut rx) = pair(2);
+                tx.send(&cx, b"retained first").await.unwrap();
+                tx.send(&cx, b"queued second").await.unwrap();
+                let mut session = rx.start_recv_offloaded(&cx).unwrap();
+                pending_once(session.run()).await;
+                until(|| pool.pending_count() == 1).await;
+                drop(session);
+                assert_eq!(rx.pending.as_ref().unwrap().header.header.message_id, 0);
+                assert_eq!(rx.offload.available_permits(), 0);
+                assert_eq!(tx.tx.telemetry_snapshot(12).queued_messages, 1);
+
+                if inline {
+                    // The legacy inline path deliberately permits its own
+                    // workspace while abandoned offloaded work retires.
+                    assert_eq!(rx.recv(&cx).await.unwrap(), b"retained first");
+                    assert!(rx.pending.is_none());
+                    assert_eq!(tx.tx.telemetry_snapshot(12).queued_messages, 1);
+                    assert_eq!(rx.recv(&cx).await.unwrap(), b"queued second");
+                    assert_eq!(tx.tx.telemetry_snapshot(12).queued_messages, 0);
+                    assert_eq!(pool.pending_count(), 1);
+                    held.release();
+                    until(|| rx.offload.available_permits() == 1).await;
+                } else {
+                    let mut retry = rx.start_recv_offloaded(&cx).unwrap();
+                    for _ in 0..3 {
+                        pending_once(retry.run()).await;
+                        crate::runtime::yield_now().await;
+                        assert_eq!(tx.tx.telemetry_snapshot(12).queued_messages, 1);
+                        assert_eq!(
+                            pool.pending_count(),
+                            1,
+                            "retry waits before admitting a second decode"
+                        );
+                    }
+                    held.release();
+                    assert_eq!(retry.run().await.unwrap(), b"retained first");
+                    drop(retry);
+                    assert!(rx.pending.is_none());
+                    assert_eq!(rx.recv_offloaded(&cx).await.unwrap(), b"queued second");
+                }
+                assert!(rx.pending.is_none());
+                assert_eq!(rx.offload.available_permits(), 1);
+            }));
+            quiescent(&runtime);
+        }
+    });
+}
+
+#[test]
+fn cancelled_receive_keeps_pending_message_for_a_fresh_live_owner() {
+    bounded(|| {
+        let runtime = runtime();
+        let pool = runtime.blocking_handle().unwrap();
+        let mut held = hold_worker(&pool);
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let (mut tx, rx) = pair(2);
+            tx.send(&cx, b"cancel does not consume").await.unwrap();
+            tx.send(&cx, b"next message").await.unwrap();
+            let mut owner = cx
+                .spawn(move |owner| async move {
+                    let mut rx = rx;
+                    let mut session = rx.start_recv_offloaded(&owner).unwrap();
+                    assert!(matches!(
+                        session.run().await,
+                        Err(AuthenticatedEcError::Message(EcError::Cancelled))
+                    ));
+                    assert!(session.is_finished());
+                    drop(session);
+                    rx
+                })
+                .unwrap();
+            until(|| pool.pending_count() == 1).await;
+            owner.abort();
+            let mut rx = owner.join(&cx).await.unwrap();
+            assert_eq!(rx.pending.as_ref().unwrap().header.header.message_id, 0);
+            assert_eq!(tx.tx.telemetry_snapshot(13).queued_messages, 1);
+            let mut retry = rx.start_recv_offloaded(&cx).unwrap();
+            pending_once(retry.run()).await;
+            assert_eq!(pool.pending_count(), 1);
+            held.release();
+            assert_eq!(retry.run().await.unwrap(), b"cancel does not consume");
+            drop(retry);
+            assert!(rx.pending.is_none());
+            assert_eq!(rx.recv_offloaded(&cx).await.unwrap(), b"next message");
+        }));
+        quiescent(&runtime);
+    });
+}
+
+#[test]
+fn receive_resource_refusal_and_worker_authorization_failure_preserve_delivery() {
+    bounded(|| {
+        for forbidden in [false, true] {
+            let builder = RuntimeBuilder::current_thread().enable_platform_reactor(false);
+            let runtime = if forbidden {
+                builder
+                    .blocking_threads(1, 1)
+                    .blocking_admission_policy(BlockingAdmissionPolicy::Forbidden)
+            } else {
+                builder.blocking_threads(0, 0)
+            }
+            .build()
+            .unwrap();
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let (mut tx, mut rx) = pair(1);
+                tx.send(&cx, b"still queued").await.unwrap();
+                assert!(matches!(
+                    rx.start_recv_offloaded(&cx),
+                    Err(AuthenticatedEcError::WorkerAdmission(
+                        SpawnError::RuntimeUnavailable
+                    ))
+                ));
+                assert!(
+                    rx.pending.is_none(),
+                    "resource refusal happens before dequeue"
+                );
+                assert_eq!(tx.tx.telemetry_snapshot(14).queued_messages, 1);
+                assert_eq!(rx.recv(&cx).await.unwrap(), b"still queued");
+            }));
+            quiescent(&runtime);
+        }
+
+        let key = AuthKey::from_seed(101);
+        let runtime = RuntimeBuilder::current_thread()
+            .enable_platform_reactor(false)
+            .blocking_threads(1, 1)
+            .require_spawn_authorization(key.clone())
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let root = Cx::current().unwrap();
+            let parent = root.clone().with_macaroon(MacaroonToken::mint(
+                &key,
+                &format!("spawn:region_{}", root.region_id().as_u64()),
+                "receive-admission-test",
+            ));
+            let mut task = parent
+                .spawn(|cx| async move {
+                    let target = format!("spawn:region_{}", cx.region_id().as_u64());
+                    let denied = cx.clone().with_macaroon(MacaroonToken::mint(
+                        &AuthKey::from_seed(102),
+                        &target,
+                        "denied-decode-worker",
+                    ));
+                    let (mut tx, mut rx) = pair(1);
+                    tx.send(&cx, b"retry after refusal").await.unwrap();
+                    let mut session = rx.start_recv_offloaded(&denied).unwrap();
+                    assert!(matches!(
+                        session.run().await,
+                        Err(AuthenticatedEcError::WorkerAdmission(
+                            SpawnError::AuthorizationDenied { .. }
+                        ))
+                    ));
+                    drop(session);
+                    assert_eq!(tx.tx.telemetry_snapshot(14).queued_messages, 0);
+                    assert_eq!(rx.pending.as_ref().unwrap().header.header.message_id, 0);
+                    assert_eq!(rx.offload.available_permits(), 1);
+                    assert_eq!(
+                        rx.recv_offloaded(&cx).await.unwrap(),
+                        b"retry after refusal"
+                    );
+                    assert!(rx.pending.is_none());
+                })
+                .unwrap();
+            task.join(&root).await.unwrap();
+        });
+        quiescent(&runtime);
+    });
+}
+
+#[test]
+fn offloaded_receive_repairs_loss_and_tampering_and_consumes_invalid_envelopes() {
+    bounded(|| {
+        let runtime = runtime();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let (mut tx, mut rx) = pair(3);
+            let data: Vec<u8> = (0_u8..=255).cycle().take(900).collect();
+            let mut messages = Vec::new();
+            for bytes in [&data[..], b"invalid header", b"after invalid"] {
+                tx.send(&cx, bytes).await.unwrap();
+                messages.push(rx.rx.try_recv().unwrap());
+            }
+            let repairable = &mut messages[0];
+            repairable.symbols.remove(0);
+            let mut corrupted = repairable.symbols[0].symbol().clone();
+            corrupted.data_mut()[0] ^= 1;
+            repairable.symbols[0] = crate::security::AuthenticatedSymbol::from_parts(
+                corrupted,
+                *repairable.symbols[0].tag(),
+            );
+            repairable.symbols.push(repairable.symbols[1].clone());
+            repairable.symbols.reverse();
+            messages[1].header.header.message_size -= 1;
+            for message in messages {
+                tx.tx.try_send(message).unwrap();
+            }
+            assert_eq!(rx.recv_offloaded(&cx).await.unwrap(), data);
+            assert!(matches!(
+                rx.recv_offloaded(&cx).await,
+                Err(AuthenticatedEcError::Message(EcError::AuthenticationFailed))
+            ));
+            assert!(
+                rx.pending.is_none(),
+                "completed invalid message is consumed once"
+            );
+            assert_eq!(rx.recv_offloaded(&cx).await.unwrap(), b"after invalid");
+            assert!(rx.pending.is_none());
+            assert!(rx.rx.is_empty());
+        }));
+        quiescent(&runtime);
+    });
+}
+
+#[test]
+fn typed_receive_resumes_off_thread_and_json_failure_consumes_only_one_message() {
+    #[derive(Debug)]
+    struct ObservedValue {
+        text: String,
+        on_worker: bool,
+    }
+    impl<'de> serde::Deserialize<'de> for ObservedValue {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let on_worker = std::thread::current()
+                .name()
+                .is_some_and(|name| name.contains("-blocking-"));
+            Ok(Self {
+                text: serde::Deserialize::deserialize(deserializer)?,
+                on_worker,
+            })
+        }
+    }
+
+    bounded(|| {
+        let runtime = runtime();
+        let pool = runtime.blocking_handle().unwrap();
+        let mut held = hold_worker(&pool);
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let (mut tx, mut rx) = pair(2);
+            tx.send_value(&cx, &"typed first").await.unwrap();
+            let mut session = rx.start_recv_value_offloaded::<ObservedValue>(&cx).unwrap();
+            pending_once(session.run()).await;
+            until(|| pool.pending_count() == 1).await;
+            for _ in 0..3 {
+                pending_once(session.run()).await;
+                assert_eq!(pool.pending_count(), 1);
+            }
+            held.release();
+            let value = session.run().await.unwrap();
+            assert_eq!(value.text, "typed first");
+            assert!(value.on_worker);
+            assert!(session.is_finished());
+            assert!(matches!(
+                session.run().await,
+                Err(AuthenticatedEcError::InvalidSession(_))
+            ));
+            drop(session);
+            tx.send(&cx, b"{ malformed JSON").await.unwrap();
+            tx.send_value(&cx, &"after JSON error").await.unwrap();
+            assert!(matches!(
+                rx.recv_value_offloaded::<String>(&cx).await,
+                Err(AuthenticatedEcError::Message(EcError::Serialization(_)))
+            ));
+            assert!(rx.pending.is_none());
+            assert_eq!(
+                rx.recv_value_offloaded::<String>(&cx).await.unwrap(),
+                "after JSON error"
+            );
+            assert!(rx.rx.is_empty());
+        }));
+        quiescent(&runtime);
+    });
+}
+
+#[test]
+fn deserializer_panic_retains_the_message_for_another_decode_type() {
+    struct PanicDeserialize;
+    impl<'de> serde::Deserialize<'de> for PanicDeserialize {
+        fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+            panic!("typed receiver worker panic");
+        }
+    }
+
+    bounded(|| {
+        let runtime = runtime();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let (mut tx, mut rx) = pair(1);
+            tx.send_value(&cx, &"survives worker panic").await.unwrap();
+            let mut session = rx
+                .start_recv_value_offloaded::<PanicDeserialize>(&cx)
+                .unwrap();
+            assert!(matches!(
+                session.run().await,
+                Err(AuthenticatedEcError::WorkerFailed(_))
+            ));
+            assert!(session.is_finished());
+            assert!(matches!(
+                session.run().await,
+                Err(AuthenticatedEcError::WorkerFailed(_))
+            ));
+            drop(session);
+            assert_eq!(rx.pending.as_ref().unwrap().header.header.message_id, 0);
+            assert_eq!(rx.offload.available_permits(), 1);
+            assert_eq!(tx.tx.telemetry_snapshot(15).queued_messages, 0);
+            assert_eq!(
+                rx.recv_value_offloaded::<String>(&cx).await.unwrap(),
+                "survives worker panic"
+            );
+            assert!(rx.pending.is_none());
+            assert!(rx.rx.is_empty());
+        }));
+        quiescent(&runtime);
+    });
+}

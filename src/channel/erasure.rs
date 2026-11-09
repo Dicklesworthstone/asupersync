@@ -61,7 +61,7 @@ use sha2::{Digest, Sha256};
 
 #[path = "erasure_offloaded.rs"]
 mod offloaded;
-pub use offloaded::AuthenticatedEcSendSession;
+pub use offloaded::{AuthenticatedEcReceiveSession, AuthenticatedEcSendSession};
 
 const AUTHENTICATED_HEADER_DOMAIN: &[u8] =
     b"asupersync::channel::erasure::authenticated-header::v1";
@@ -761,14 +761,18 @@ struct AuthenticatedEcEnvelope {
 /// Each queued message has at most the configured maximum block's symbol
 /// count, each of `symbol_size` bytes. Checked arithmetic rejects an
 /// unrepresentable aggregate queue bound. In addition to queued/reserved
-/// messages, one receiver may hold a message and decoder workspace. Encoder
-/// and decoder scratch space, allocator overhead, caller-owned input, and
-/// returned decoded values are not queue bytes. The original send and receive
-/// methods perform coding synchronously. [`AuthenticatedEcSender::send_offloaded`]
-/// moves encoding and authentication to the explicit context's blocking pool.
-/// An endpoint's private worker slot bounds abandoned offloaded work separately
-/// from queue capacity; cancelling a reservation does not free that slot until
-/// its worker-owned input, workspace and result have been destroyed.
+/// messages, one receiver may retain a dequeued message. Encoder and decoder
+/// scratch space, allocator overhead, caller-owned input, and returned decoded
+/// values are not queue bytes. The original send and receive methods perform
+/// coding synchronously. [`AuthenticatedEcSender::send_offloaded`] and
+/// [`AuthenticatedEcReceiver::recv_offloaded`] move coding and authentication
+/// to the explicit context's blocking pool. Each endpoint's private worker slot
+/// bounds abandoned offloaded work separately from queue capacity; cancelling
+/// a reservation does not free that slot until its worker-owned input,
+/// workspace and result have been destroyed. An inline operation can run while
+/// its endpoint's previous offloaded operation retires, using separate scratch
+/// space. Retained receive envelopes share their symbol storage with a retiring
+/// worker rather than copying it.
 ///
 /// # Errors
 ///
@@ -815,7 +819,13 @@ pub fn authenticated_channel(
             next_message_id: Some(0),
             offload: std::sync::Arc::new(crate::sync::Semaphore::new(1)),
         },
-        AuthenticatedEcReceiver { config, auth, rx },
+        AuthenticatedEcReceiver {
+            config,
+            auth,
+            rx,
+            offload: std::sync::Arc::new(crate::sync::Semaphore::new(1)),
+            pending: None,
+        },
     ))
 }
 
@@ -1016,11 +1026,24 @@ impl std::io::Write for BoundedEcJsonWriter {
 }
 
 /// Receiving half of a bounded authenticated erasure channel.
-#[derive(Debug)]
 pub struct AuthenticatedEcReceiver {
     config: EcConfig,
     auth: SecurityContext,
     rx: mpsc::Receiver<AuthenticatedEcEnvelope>,
+    offload: std::sync::Arc<crate::sync::Semaphore>,
+    // Offloaded receives retain the authenticated envelope until delivery so
+    // cancellation, worker admission failure and abandoned sessions lose no
+    // message. The worker only clones this Arc, never the symbol payloads.
+    pending: Option<std::sync::Arc<AuthenticatedEcEnvelope>>,
+}
+
+impl fmt::Debug for AuthenticatedEcReceiver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthenticatedEcReceiver")
+            .field("config", &self.config)
+            .field("pending", &self.pending.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AuthenticatedEcReceiver {
@@ -1031,7 +1054,16 @@ impl AuthenticatedEcReceiver {
     /// Invalid envelopes are consumed and reported; they cannot poison the next
     /// message. A forged symbol is treated as an erasure by the authenticated
     /// decoder, so authentic survivors may still recover the payload.
+    ///
+    /// An envelope retained by a cancelled or dropped offloaded receive is
+    /// received before any later queued message. This method verifies and
+    /// decodes that envelope synchronously using this call's context.
     pub async fn recv(&mut self, cx: &Cx) -> Result<Vec<u8>, AuthenticatedEcError> {
+        if self.pending.is_some() {
+            cx.checkpoint().map_err(|_| EcError::Cancelled)?;
+            let message = self.pending.take().expect("a retained receive envelope exists");
+            return self.decode(&message);
+        }
         let message = self.rx.recv(cx).await.map_err(|error| match error {
             mpsc::RecvError::Cancelled => EcError::Cancelled,
             mpsc::RecvError::Disconnected | mpsc::RecvError::Empty => EcError::TransportClosed,
@@ -1040,40 +1072,7 @@ impl AuthenticatedEcReceiver {
     }
 
     fn decode(&self, message: &AuthenticatedEcEnvelope) -> Result<Vec<u8>, AuthenticatedEcError> {
-        // Geometry validation inside verify is allocation-free. No received
-        // size or symbol count reaches decoder allocation before authentication.
-        message.header.verify(&self.auth)?;
-        let header = &message.header.header;
-        let expected = self.config.plan(header.message_size as usize)?;
-        if header.symbol_size != self.config.symbol_size
-            || header.source_symbols != expected.source_symbols
-            || header.total_symbols != expected.total_symbols
-        {
-            return Err(AuthenticatedEcError::InvalidEnvelope(
-                "header geometry differs from the channel configuration",
-            ));
-        }
-        if message.symbols.len() > usize::from(header.total_symbols) {
-            return Err(AuthenticatedEcError::InvalidEnvelope(
-                "received symbol count exceeds the message bound",
-            ));
-        }
-        for authenticated in &message.symbols {
-            let symbol = authenticated.symbol();
-            let id = symbol.id();
-            if symbol.data().len() != usize::from(header.symbol_size)
-                || id.object_id() != ObjectId::new(header.message_id, 0)
-                || id.sbn() != 0
-                || id.esi() >= u32::from(header.total_symbols)
-                || symbol.kind().is_source() != (id.esi() < u32::from(header.source_symbols))
-            {
-                return Err(AuthenticatedEcError::InvalidEnvelope(
-                    "symbol geometry differs from the authenticated header",
-                ));
-            }
-        }
-        decode_message_authenticated(&message.header, &message.symbols, &self.auth)
-            .map_err(AuthenticatedEcError::Message)
+        decode_authenticated_envelope(&self.config, &self.auth, message)
     }
 
     /// Receives an authenticated message and deserializes its JSON value.
@@ -1085,6 +1084,47 @@ impl AuthenticatedEcReceiver {
         serde_json::from_slice(&bytes)
             .map_err(|error| EcError::Serialization(error.to_string()).into())
     }
+}
+
+fn decode_authenticated_envelope(
+    config: &EcConfig,
+    auth: &SecurityContext,
+    message: &AuthenticatedEcEnvelope,
+) -> Result<Vec<u8>, AuthenticatedEcError> {
+    // Geometry validation inside verify is allocation-free. No received size
+    // or symbol count reaches decoder allocation before authentication.
+    message.header.verify(auth)?;
+    let header = &message.header.header;
+    let expected = config.plan(header.message_size as usize)?;
+    if header.symbol_size != config.symbol_size
+        || header.source_symbols != expected.source_symbols
+        || header.total_symbols != expected.total_symbols
+    {
+        return Err(AuthenticatedEcError::InvalidEnvelope(
+            "header geometry differs from the channel configuration",
+        ));
+    }
+    if message.symbols.len() > usize::from(header.total_symbols) {
+        return Err(AuthenticatedEcError::InvalidEnvelope(
+            "received symbol count exceeds the message bound",
+        ));
+    }
+    for authenticated in &message.symbols {
+        let symbol = authenticated.symbol();
+        let id = symbol.id();
+        if symbol.data().len() != usize::from(header.symbol_size)
+            || id.object_id() != ObjectId::new(header.message_id, 0)
+            || id.sbn() != 0
+            || id.esi() >= u32::from(header.total_symbols)
+            || symbol.kind().is_source() != (id.esi() < u32::from(header.source_symbols))
+        {
+            return Err(AuthenticatedEcError::InvalidEnvelope(
+                "symbol geometry differs from the authenticated header",
+            ));
+        }
+    }
+    decode_message_authenticated(&message.header, &message.symbols, auth)
+        .map_err(AuthenticatedEcError::Message)
 }
 
 /// The per-message erasure-coding plan derived from a message size.
