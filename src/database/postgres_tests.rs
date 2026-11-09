@@ -93,7 +93,7 @@ mod tests {
             let deadline = epoch + std::time::Duration::from_millis(100);
             let clock = Arc::new(VirtualClock::starting_at(epoch));
             let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
-            let full = Cx::new_with_drivers(
+            let full: Cx = Cx::new_with_drivers(
                 RegionId::new_for_test(0, 1),
                 TaskId::new_for_test(1, 0),
                 Budget::INFINITE.with_deadline(deadline),
@@ -226,7 +226,9 @@ mod tests {
             let mut stream = NeverReadyStream;
             let mut buf = [0_u8; 1];
             let mut operation = Box::pin(read_exact_from(&caller, &mut stream, &mut buf));
-            let result = operation.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            let result = operation
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()));
             if expired {
                 assert!(matches!(
                     result,
@@ -249,7 +251,9 @@ mod tests {
                         interrupted,
                     };
                     let mut operation = Box::pin(read_exact_from(&caller, &mut stream, &mut buf));
-                    let result = operation.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+                    let result = operation
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()));
                     let expected = if interrupted {
                         io::ErrorKind::Interrupted
                     } else {
@@ -288,9 +292,7 @@ mod tests {
 
         impl DeadlinePeer {
             fn start(
-                handler: impl FnOnce(&std::net::TcpListener, &mut std::net::TcpStream)
-                    + Send
-                    + 'static,
+                handler: impl FnOnce(&std::net::TcpListener, &mut std::net::TcpStream) + Send + 'static,
             ) -> Self {
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 let addr = listener.local_addr().unwrap();
@@ -390,7 +392,9 @@ mod tests {
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
                         let mut frame = [0_u8; 16];
-                        cancel.read_exact(&mut frame).expect("complete CancelRequest");
+                        cancel
+                            .read_exact(&mut frame)
+                            .expect("complete CancelRequest");
                         assert_eq!(&frame[..4], &16_i32.to_be_bytes());
                         assert_eq!(&frame[4..8], &80_877_102_i32.to_be_bytes());
                         assert_eq!(&frame[8..12], &42_i32.to_be_bytes());
@@ -543,11 +547,18 @@ mod tests {
                     "workers={workers} phase={phase} result={result:?}"
                 );
                 assert!(retired, "all operation registrations must retire");
-                assert!(timer.is_empty(), "all operation deadline timers must retire");
+                assert!(
+                    timer.is_empty(),
+                    "all operation deadline timers must retire"
+                );
                 let drain = runtime.shutdown_drained(Duration::from_secs(5));
                 assert_eq!(drain.outcome, crate::runtime::RootDrainOutcome::Quiescent);
                 assert_eq!(
-                    (drain.live_tasks, drain.live_regions, drain.pending_obligations),
+                    (
+                        drain.live_tasks,
+                        drain.live_regions,
+                        drain.pending_obligations
+                    ),
                     (0, 0, 0)
                 );
                 assert_eq!((drain.pending_spawns, drain.queued_finalizers), (0, 0));
@@ -1792,7 +1803,10 @@ mod tests {
         peer.write_all(&command_complete_message("SELECT 1"))
             .unwrap();
         peer.write_all(&ready_for_query(b'I')).unwrap();
-        match conn.query_unchecked(cx, "SELECT 'after-copy' AS value").await {
+        match conn
+            .query_unchecked(cx, "SELECT 'after-copy' AS value")
+            .await
+        {
             Outcome::Ok(rows) => {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].get_str("value").unwrap(), "after-copy");
@@ -2367,8 +2381,11 @@ mod tests {
             let cx = Cx::for_testing();
             peer.write_all(&parameter_status_message("application_name", "copy-export"))
                 .unwrap();
-            peer.write_all(&backend_message(b'N', b"SNOTICE\0C00000\0Mexport starting\0\0"))
-                .unwrap();
+            peer.write_all(&backend_message(
+                b'N',
+                b"SNOTICE\0C00000\0Mexport starting\0\0",
+            ))
+            .unwrap();
             peer.write_all(&copy_out_response_message(
                 Format::Text,
                 &[Format::Text, Format::Text],
@@ -2381,7 +2398,10 @@ mod tests {
                 other => panic!("expected COPY OUT stream: {other:?}"),
             };
             assert_eq!(copy.response().overall_format(), Format::Text);
-            assert_eq!(copy.response().column_formats(), &[Format::Text, Format::Text]);
+            assert_eq!(
+                copy.response().column_formats(),
+                &[Format::Text, Format::Text]
+            );
             assert_eq!(copy.chunks_received(), 0);
             assert_eq!(copy.bytes_received(), 0);
             assert!(copy.completion().is_none());
@@ -2422,7 +2442,12 @@ mod tests {
             }
             assert_eq!(conn.parameter("application_name"), Some("copy-export"));
             assert_eq!(conn.parameter("TimeZone"), Some("UTC"));
-            assert_notification(conn.notifications().next(&cx).await, 42, "exports", "started");
+            assert_notification(
+                conn.notifications().next(&cx).await,
+                42,
+                "exports",
+                "started",
+            );
             assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
 
             let written = read_until_contains(&mut peer, b"SELECT 'after-copy' AS value\0");
@@ -2440,8 +2465,11 @@ mod tests {
         run_copy_out_test(async {
             let (mut conn, mut peer) = make_test_connection_with_peer();
             let cx = Cx::for_testing();
-            peer.write_all(&copy_out_response_message(Format::Binary, &[Format::Binary]))
-                .unwrap();
+            peer.write_all(&copy_out_response_message(
+                Format::Binary,
+                &[Format::Binary],
+            ))
+            .unwrap();
             let chunks: &[&[u8]] = &[
                 b"PGCOPY\n\xff\r\n\0\0\0\0\0\0\0\0\0",
                 b"\0\x01\0\0\0\x04\0\0\0\x2a",
@@ -2452,7 +2480,10 @@ mod tests {
                 peer.write_all(&backend_message(b'd', chunk)).unwrap();
             }
             write_copy_out_completion(&mut peer, 1);
-            let mut copy = match conn.copy_out(&cx, "COPY binary_rows TO STDOUT BINARY").await {
+            let mut copy = match conn
+                .copy_out(&cx, "COPY binary_rows TO STDOUT BINARY")
+                .await
+            {
                 Outcome::Ok(copy) => copy,
                 other => panic!("expected binary COPY OUT stream: {other:?}"),
             };
@@ -2512,7 +2543,11 @@ mod tests {
             let cx = Cx::for_testing();
             peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
                 .unwrap();
-            for chunk in [b"one\n".as_slice(), b"two\n".as_slice(), b"three\n".as_slice()] {
+            for chunk in [
+                b"one\n".as_slice(),
+                b"two\n".as_slice(),
+                b"three\n".as_slice(),
+            ] {
                 peer.write_all(&backend_message(b'd', chunk)).unwrap();
             }
             write_copy_out_completion(&mut peer, 3);
@@ -2520,7 +2555,9 @@ mod tests {
                 Outcome::Ok(copy) => copy,
                 other => panic!("expected COPY stream: {other:?}"),
             };
-            assert!(matches!(copy.next_chunk(&cx).await, Outcome::Ok(Some(chunk)) if chunk == b"one\n"));
+            assert!(
+                matches!(copy.next_chunk(&cx).await, Outcome::Ok(Some(chunk)) if chunk == b"one\n")
+            );
             assert_eq!(copy.chunks_received(), 1);
             let complete = match copy.finish(&cx).await {
                 Outcome::Ok(complete) => complete,
@@ -2544,10 +2581,14 @@ mod tests {
                 if after_start {
                     peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
                         .unwrap();
-                    peer.write_all(&backend_message(b'd', b"partial\n")).unwrap();
+                    peer.write_all(&backend_message(b'd', b"partial\n"))
+                        .unwrap();
                 }
-                peer.write_all(&error_response_message("57014", "backend stopped this COPY"))
-                    .unwrap();
+                peer.write_all(&error_response_message(
+                    "57014",
+                    "backend stopped this COPY",
+                ))
+                .unwrap();
                 peer.write_all(&backend_message(b'N', b"SNOTICE\0C00000\0Mdraining\0\0"))
                     .unwrap();
                 peer.write_all(&parameter_status_message("TimeZone", "UTC"))
@@ -2566,7 +2607,10 @@ mod tests {
                         Outcome::Ok(Some(chunk)) if chunk == b"partial\n"
                     ));
                     let result = copy.next_chunk(&cx).await.map(drop);
-                    assert!(copy.completion().is_none(), "failed COPY has no success summary");
+                    assert!(
+                        copy.completion().is_none(),
+                        "failed COPY has no success summary"
+                    );
                     result
                 } else {
                     conn.copy_out(&cx, "COPY broken TO STDOUT").await.map(drop)
@@ -2580,7 +2624,12 @@ mod tests {
                 }
                 assert_eq!(conn.inner.transaction_status, b'I');
                 assert_eq!(conn.parameter("TimeZone"), Some("UTC"));
-                assert_notification(conn.notifications().next(&cx).await, 73, "exports", "failed");
+                assert_notification(
+                    conn.notifications().next(&cx).await,
+                    73,
+                    "exports",
+                    "failed",
+                );
                 assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
             }
         });
@@ -2597,7 +2646,8 @@ mod tests {
                 if after_start {
                     peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
                         .unwrap();
-                    peer.write_all(&backend_message(b'd', b"partial\n")).unwrap();
+                    peer.write_all(&backend_message(b'd', b"partial\n"))
+                        .unwrap();
                 }
                 // A FATAL error (e.g. pg_terminate_backend) is followed by the
                 // server closing the socket, never by ReadyForQuery.
@@ -2650,7 +2700,10 @@ mod tests {
                 {
                     let mut next = Box::pin(copy.next_chunk(&cx));
                     std::future::poll_fn(|task_cx| {
-                        assert!(next.as_mut().poll(task_cx).is_pending(), "next chunk must park");
+                        assert!(
+                            next.as_mut().poll(task_cx).is_pending(),
+                            "next chunk must park"
+                        );
                         Poll::Ready(())
                     })
                     .await;
@@ -2666,13 +2719,18 @@ mod tests {
                         cx.set_cancel_reason(expected.clone());
                         match next.await {
                             Outcome::Cancelled(actual) => assert_eq!(actual, expected),
-                            other => panic!("parked COPY must preserve caller cancellation: {other:?}"),
+                            other => {
+                                panic!("parked COPY must preserve caller cancellation: {other:?}")
+                            }
                         }
                     }
                 }
                 assert!(copy.completion().is_none());
                 drop(copy);
-                assert!(conn.inner.closed, "unfinished COPY must not be returned to a pool");
+                assert!(
+                    conn.inner.closed,
+                    "unfinished COPY must not be returned to a pool"
+                );
                 assert_copy_out_peer_closed(&mut peer, b"COPY active TO STDOUT\0");
             }
         });
@@ -2703,7 +2761,10 @@ mod tests {
                 })
                 .await;
             }
-            assert!(conn.inner.closed, "incomplete COPY startup must not appear reusable");
+            assert!(
+                conn.inner.closed,
+                "incomplete COPY startup must not appear reusable"
+            );
             assert_eq!(conn.inner.backend_frame.header_read, 2);
             let written = read_until_contains(&mut peer, b"COPY pending TO STDOUT\0");
             assert_eq!(frontend_body(&written, 0), b"COPY pending TO STDOUT\0");
@@ -2721,8 +2782,14 @@ mod tests {
                     copy_out_response_message(Format::Text, &[Format::Binary]),
                 ),
                 ("invalid overall format", backend_message(b'H', &[2, 0, 0])),
-                ("truncated column formats", backend_message(b'H', &[0, 0, 1])),
-                ("wrong COPY direction", copy_in_response_message(Format::Text, &[Format::Text])),
+                (
+                    "truncated column formats",
+                    backend_message(b'H', &[0, 0, 1]),
+                ),
+                (
+                    "wrong COPY direction",
+                    copy_in_response_message(Format::Text, &[Format::Text]),
+                ),
                 ("data before metadata", backend_message(b'd', b"unexpected")),
                 ("command before metadata", command_complete_message("SET")),
                 ("empty query before metadata", backend_message(b'I', b"")),
@@ -2736,7 +2803,10 @@ mod tests {
                     Outcome::Err(PgError::Protocol(_)) => {}
                     other => panic!("{name}: startup must reject invalid COPY mode: {other:?}"),
                 }
-                assert!(conn.inner.closed, "{name}: startup failure must close the connection");
+                assert!(
+                    conn.inner.closed,
+                    "{name}: startup failure must close the connection"
+                );
                 assert_copy_out_peer_closed(&mut peer, b"COPY malformed TO STDOUT\0");
             }
         });
@@ -2754,8 +2824,11 @@ mod tests {
                 let cx = Cx::for_testing();
                 let progress = Arc::new(AtomicUsize::new(usize::MAX));
                 conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
-                peer.write_all(&copy_out_response_message(Format::Binary, &[Format::Binary]))
-                    .unwrap();
+                peer.write_all(&copy_out_response_message(
+                    Format::Binary,
+                    &[Format::Binary],
+                ))
+                .unwrap();
                 let mut copy = match conn.copy_out(&cx, "COPY bytes TO STDOUT BINARY").await {
                     Outcome::Ok(copy) => copy,
                     other => panic!("expected COPY stream: {other:?}"),
@@ -2833,7 +2906,10 @@ mod tests {
                     })
                     .await;
                 }
-                assert!(copy.completion().is_none(), "ReadyForQuery is required for success");
+                assert!(
+                    copy.completion().is_none(),
+                    "ReadyForQuery is required for success"
+                );
                 if !waiting_for_ready {
                     peer.write_all(&command[2..]).unwrap();
                     peer.write_all(&ready[..2]).unwrap();
@@ -2863,8 +2939,11 @@ mod tests {
             conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
             peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
                 .unwrap();
-            peer.write_all(&error_response_message("XX001", "original export diagnostic"))
-                .unwrap();
+            peer.write_all(&error_response_message(
+                "XX001",
+                "original export diagnostic",
+            ))
+            .unwrap();
             let ready = ready_for_query(b'I');
             peer.write_all(&ready[..2]).unwrap();
             let mut copy = match conn.copy_out(&cx, "COPY failing TO STDOUT").await {
@@ -2909,13 +2988,24 @@ mod tests {
             let mut cases = vec![
                 ("command before done", command.clone()),
                 ("ready before done", ready_for_query(b'I')),
-                ("data after done", [done.clone(), backend_message(b'd', b"late")].concat()),
+                (
+                    "data after done",
+                    [done.clone(), backend_message(b'd', b"late")].concat(),
+                ),
                 ("duplicate done", [done.clone(), done.clone()].concat()),
-                ("ready before command", [done.clone(), ready_for_query(b'I')].concat()),
+                (
+                    "ready before command",
+                    [done.clone(), ready_for_query(b'I')].concat(),
+                ),
                 ("done with body", backend_message(b'c', b"unexpected")),
                 (
                     "data after command",
-                    [done.clone(), command.clone(), backend_message(b'd', b"late")].concat(),
+                    [
+                        done.clone(),
+                        command.clone(),
+                        backend_message(b'd', b"late"),
+                    ]
+                    .concat(),
                 ),
                 (
                     "duplicate command",
@@ -2961,9 +3051,15 @@ mod tests {
                     matches!(outcome, Outcome::Err(PgError::Protocol(_))),
                     "{name}: invalid protocol must fail, got {outcome:?}"
                 );
-                assert!(copy.completion().is_none(), "{name}: malformed stream cannot complete");
+                assert!(
+                    copy.completion().is_none(),
+                    "{name}: malformed stream cannot complete"
+                );
                 drop(copy);
-                assert!(conn.inner.closed, "{name}: malformed stream must poison the connection");
+                assert!(
+                    conn.inner.closed,
+                    "{name}: malformed stream must poison the connection"
+                );
             }
         });
     }
@@ -3035,7 +3131,10 @@ mod tests {
                 Outcome::Ok(copy) => copy,
                 other => panic!("expected initial COPY metadata: {other:?}"),
             };
-            assert!(matches!(copy.next_chunk(&cx).await, Outcome::Err(PgError::Protocol(_))));
+            assert!(matches!(
+                copy.next_chunk(&cx).await,
+                Outcome::Err(PgError::Protocol(_))
+            ));
             drop(copy);
             assert!(conn.inner.closed);
             assert_eq!(conn.inner.backend_frame.body.capacity(), 0);
@@ -6735,7 +6834,9 @@ mod tests {
             runtime
                 .block_on(PgConnection::send_cancel_request(target, 42, 1337))
                 .expect("cancel reaches the original peer without resolving the stale host");
-            let (mut cancel, _) = listener.accept().expect("original listener receives cancel");
+            let (mut cancel, _) = listener
+                .accept()
+                .expect("original listener receives cancel");
             cancel
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
@@ -6779,11 +6880,11 @@ mod tests {
             .expect("native runtime");
         runtime.block_on(async {
             let cx = Cx::current().expect("native context");
-            let mut connection =
-                match PgConnection::connect_with_options(&cx, first_options).await {
-                    Outcome::Ok(connection) => connection,
-                    other => panic!("connect to first backend: {other:?}"),
-                };
+            let mut connection = match PgConnection::connect_with_options(&cx, first_options).await
+            {
+                Outcome::Ok(connection) => connection,
+                other => panic!("connect to first backend: {other:?}"),
+            };
             assert_eq!(
                 connection.inner.cancel_target.endpoint,
                 CancelEndpoint::Tcp(first_address)
@@ -10604,7 +10705,11 @@ mod tests {
                 let pending =
                     std::future::poll_fn(|task_cx| Poll::Ready(reset.as_mut().poll(task_cx))).await;
                 assert!(pending.is_pending());
-                assert_eq!(progress.load(Ordering::Acquire), 0, "reset read must be parked");
+                assert_eq!(
+                    progress.load(Ordering::Acquire),
+                    0,
+                    "reset read must be parked"
+                );
                 let stats = pool.stats();
                 assert_eq!((stats.total, stats.active, stats.idle), (1, 1, 0));
 
@@ -10612,7 +10717,10 @@ mod tests {
                 let queued =
                     std::future::poll_fn(|task_cx| Poll::Ready(contender.as_mut().poll(task_cx)))
                         .await;
-                assert!(queued.is_pending(), "the reset must retain exclusive ownership");
+                assert!(
+                    queued.is_pending(),
+                    "the reset must retain exclusive ownership"
+                );
                 assert_eq!(pool.stats().pending_waiters, 1);
                 drop(contender);
                 assert_eq!(pool.stats().pending_waiters, 0);
@@ -10621,7 +10729,10 @@ mod tests {
                 let _ = timer.process_timers();
                 let completed =
                     std::future::poll_fn(|task_cx| Poll::Ready(reset.as_mut().poll(task_cx))).await;
-                assert!(completed.is_ready(), "return must finish when the reset expires");
+                assert!(
+                    completed.is_ready(),
+                    "return must finish when the reset expires"
+                );
                 drop(reset);
                 let stats = pool.stats();
                 assert_eq!((stats.total, stats.active, stats.idle), (0, 0, 0));
@@ -10629,7 +10740,9 @@ mod tests {
                 assert_eq!(stats.pending_waiters, 0);
                 pool.close();
             });
-            server.join().expect("silent backend observed the socket close");
+            server
+                .join()
+                .expect("silent backend observed the socket close");
         }
     }
 
@@ -12866,11 +12979,9 @@ mod tests {
             });
             let mut conn = make_test_connection();
             conn.inner.options = options;
-            conn.inner.cancel_target = CancelTarget::from_connected_stream(
-                &conn.inner.options,
-                &conn.inner.stream,
-            )
-            .expect("capture connected cancellation endpoint");
+            conn.inner.cancel_target =
+                CancelTarget::from_connected_stream(&conn.inner.options, &conn.inner.stream)
+                    .expect("capture connected cancellation endpoint");
             let cx = crate::cx::Cx::for_testing();
 
             // The local state mirrors a server-side idle timeout detected
@@ -12953,11 +13064,9 @@ mod tests {
 
             let mut conn = make_test_connection();
             conn.inner.options = options;
-            conn.inner.cancel_target = CancelTarget::from_connected_stream(
-                &conn.inner.options,
-                &conn.inner.stream,
-            )
-            .expect("capture connected cancellation endpoint");
+            conn.inner.cancel_target =
+                CancelTarget::from_connected_stream(&conn.inner.options, &conn.inner.stream)
+                    .expect("capture connected cancellation endpoint");
             conn.inner.next_stmt_id = 2;
             conn.inner.closed = true;
             let old_handle = |name: &str, sql: &str| PgStatement {
@@ -13097,11 +13206,9 @@ mod tests {
             let (options, server) = spawn_deterministic_postgres_server(|_stream| {});
             let mut conn = make_test_connection();
             conn.inner.options = options.clone();
-            conn.inner.cancel_target = CancelTarget::from_connected_stream(
-                &conn.inner.options,
-                &conn.inner.stream,
-            )
-            .expect("capture connected cancellation endpoint");
+            conn.inner.cancel_target =
+                CancelTarget::from_connected_stream(&conn.inner.options, &conn.inner.stream)
+                    .expect("capture connected cancellation endpoint");
             conn.inner.max_result_rows = 17;
             let timeout = std::time::Duration::from_millis(500);
             conn.set_statement_timeout_override(Some(timeout));
@@ -13269,11 +13376,9 @@ mod tests {
             });
             let mut conn = make_test_connection();
             conn.inner.options = options;
-            conn.inner.cancel_target = CancelTarget::from_connected_stream(
-                &conn.inner.options,
-                &conn.inner.stream,
-            )
-            .expect("capture connected cancellation endpoint");
+            conn.inner.cancel_target =
+                CancelTarget::from_connected_stream(&conn.inner.options, &conn.inner.stream)
+                    .expect("capture connected cancellation endpoint");
             let cx = crate::cx::Cx::for_testing();
             conn.inner.subscribed_channels.insert("jobs".to_string());
             conn.inner

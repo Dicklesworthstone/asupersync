@@ -238,23 +238,24 @@ pub mod resume;
 
 /// Manifest-authorized publication through the canonical ATP sparse writer.
 pub use manifest_sink::{
-    ManifestFileCancellation, ManifestFileCancellationError,
-    ManifestFileJournalConfig, ManifestFileJournalError, ManifestFileRestoreConfig,
-    ManifestFileSink, ManifestFileSinkConfig,
+    ManifestFileCancellation, ManifestFileCancellationError, ManifestFileJournalConfig,
+    ManifestFileJournalError, ManifestFileRestoreConfig, ManifestFileSink, ManifestFileSinkConfig,
 };
 
 // Keep the transport adapter beside its existing trait, not in a second writer,
 // verifier, or filesystem subsystem. All actual disk work uses ScopedSparseWriter.
+#[path = "commit/manifest_sink"]
 mod manifest_sink {
-    use super::{LiveStreamCommitSink, LiveStreamReceipt};
     use super::super::MAX_LIVE_EPOCH_BYTES;
-    use crate::atp::journal::sparse_writer::{ScopedSparseWriter, ScopedWriterResult, SparseWriterError};
+    use super::{LiveStreamCommitSink, LiveStreamReceipt};
+    use crate::atp::journal::sparse_writer::{
+        ScopedSparseWriter, ScopedWriterResult, SparseWriterError,
+    };
     use crate::atp::journal::{
-        AppendJournal, FsyncPolicy, JournalCancelReport, JournalCancelRequest,
-        JournalCheckpoint, JournalCheckpointReport, JournalConfig,
-        JournalCheckpointRequest, JournalCommitReport, JournalCommitRequest,
-        JournalPublication, JournalRecord, JournalRestoreLimits, SparseWriterConfig, TransferResumeStatus,
-        WriteOptions,
+        AppendJournal, FsyncPolicy, JournalCancelReport, JournalCancelRequest, JournalCheckpoint,
+        JournalCheckpointReport, JournalCheckpointRequest, JournalCommitReport,
+        JournalCommitRequest, JournalConfig, JournalPublication, JournalRecord,
+        JournalRestoreLimits, SparseWriterConfig, TransferResumeStatus, WriteOptions,
     };
     use crate::atp::manifest::{ChunkBoundary, Manifest};
     use crate::atp::manifest_chunk_commitment::ManifestChunkCommitment;
@@ -420,10 +421,17 @@ mod manifest_sink {
     type Work = Pin<Box<dyn Future<Output = io::Result<Completion>> + Send>>;
 
     enum Completion {
-        Written { count: usize, digest: [u8; 32], next_hash: Sha256 },
+        Written {
+            count: usize,
+            digest: [u8; 32],
+            next_hash: Sha256,
+        },
         Flushed(u64),
         Committed(PathBuf),
-        Checkpoint { bytes: u64, report: Box<JournalCheckpointReport> },
+        Checkpoint {
+            bytes: u64,
+            report: Box<JournalCheckpointReport>,
+        },
         JournalCommitted(Box<JournalCommitReport>),
         JournalCancelled(Box<JournalCancelReport>),
     }
@@ -450,36 +458,56 @@ mod manifest_sink {
             bytes: &[u8],
             digest: [u8; 32],
         ) -> io::Result<()> {
-            let end = offset.checked_add(bytes.len() as u64)
-                .ok_or_else(|| integrity_error("manifest sink chunk offset overflows".to_owned()))?;
+            let end = offset.checked_add(bytes.len() as u64).ok_or_else(|| {
+                integrity_error("manifest sink chunk offset overflows".to_owned())
+            })?;
             while let Some(boundary) = boundaries.get(self.next) {
-                if boundary.byte_offset > end { break; }
+                if boundary.byte_offset > end {
+                    break;
+                }
                 if boundary.size_bytes == 0 {
                     // Construction already checked the range and empty digest.
                     self.next += 1;
                     continue;
                 }
-                if boundary.byte_offset == end { break; }
-                let boundary_end = boundary.byte_offset.checked_add(boundary.size_bytes)
+                if boundary.byte_offset == end {
+                    break;
+                }
+                let boundary_end = boundary
+                    .byte_offset
+                    .checked_add(boundary.size_bytes)
                     .ok_or_else(|| integrity_error("manifest chunk range overflows".to_owned()))?;
                 let from = offset.max(boundary.byte_offset);
                 let to = end.min(boundary_end);
                 if from >= to {
-                    return Err(integrity_error("manifest sink skipped a chunk range".to_owned()));
+                    return Err(integrity_error(
+                        "manifest sink skipped a chunk range".to_owned(),
+                    ));
                 }
-                let actual = if boundary.byte_offset == offset && boundary_end == end
+                let actual = if boundary.byte_offset == offset
+                    && boundary_end == end
                     && self.partial.is_none()
                 {
                     // This digest was computed locally for exactly this batch.
                     digest
                 } else {
-                    self.partial.get_or_insert_with(Sha256::new)
+                    self.partial
+                        .get_or_insert_with(Sha256::new)
                         .update(&bytes[(from - offset) as usize..(to - offset) as usize]);
-                    if to < boundary_end { break; }
-                    self.partial.take().expect("partial chunk was hashed").finalize().into()
+                    if to < boundary_end {
+                        break;
+                    }
+                    self.partial
+                        .take()
+                        .expect("partial chunk was hashed")
+                        .finalize()
+                        .into()
                 };
                 if actual != boundary.content_hash {
-                    return Err(integrity_error(format!("manifest chunk {} hash mismatch", boundary.index)));
+                    return Err(integrity_error(format!(
+                        "manifest chunk {} hash mismatch",
+                        boundary.index
+                    )));
                 }
                 self.next += 1;
             }
@@ -488,11 +516,15 @@ mod manifest_sink {
 
         fn finish(&mut self, boundaries: &[ChunkBoundary], offset: u64) -> io::Result<()> {
             while let Some(boundary) = boundaries.get(self.next) {
-                if boundary.size_bytes != 0 || boundary.byte_offset > offset { break; }
+                if boundary.size_bytes != 0 || boundary.byte_offset > offset {
+                    break;
+                }
                 self.next += 1;
             }
             if self.next != boundaries.len() || self.partial.is_some() {
-                return Err(integrity_error("manifest sink ended before chunk verification".to_owned()));
+                return Err(integrity_error(
+                    "manifest sink ended before chunk verification".to_owned(),
+                ));
             }
             Ok(())
         }
@@ -516,11 +548,15 @@ mod manifest_sink {
             // io::Error delegates source() to its custom payload's source. Keep
             // the new publication observation visible rather than skipping it;
             // preserve the historical source chain for every other error.
-            if let Some(error) = self.0.get_ref()
+            if let Some(error) = self
+                .0
+                .get_ref()
                 .and_then(|error| error.downcast_ref::<ManifestFileJournalError>())
             {
                 Some(error)
-            } else if let Some(error) = self.0.get_ref()
+            } else if let Some(error) = self
+                .0
+                .get_ref()
                 .and_then(|error| error.downcast_ref::<ManifestFileCancellationError>())
             {
                 Some(error)
@@ -616,21 +652,41 @@ mod manifest_sink {
         /// Manifest checks and construction are offloaded. Invalid authority,
         /// identity, length, pin or bounds cannot create staging or a destination.
         pub async fn new(cx: &Cx, config: ManifestFileSinkConfig) -> io::Result<Self> {
-            let (config, expected_bytes) = cx.scoped_fs().run_io(move |_| {
-                let length = validate(&config)?;
-                Ok((config, length))
-            }).await.map_err(io::Error::other)?;
+            let (config, expected_bytes) = cx
+                .scoped_fs()
+                .run_io(move |_| {
+                    let length = validate(&config)?;
+                    Ok((config, length))
+                })
+                .await
+                .map_err(io::Error::other)?;
             let object_id = config.object_id.clone();
-            let writer = domain(ScopedSparseWriter::new(
-                cx, config.object_id, config.destination, config.writer,
-            ).await)?;
+            let writer = domain(
+                ScopedSparseWriter::new(cx, config.object_id, config.destination, config.writer)
+                    .await,
+            )?;
             domain(writer.set_expected_size(cx, expected_bytes).await)?;
             Ok(Self {
-                writer, object_id, manifest: config.manifest, expected: config.expected_chunk_commitment,
-                expected_bytes, max_chunks: config.max_chunks, written: 0, chunks: 0,
-                hash: Sha256::new(), checks: ChunkChecks::default(), flushed: None, pending: None, unreported: None,
-                receipt: None, published: None, journal: None, cancellation: None,
-                failure: None, shutdown: false, poisoned: false,
+                writer,
+                object_id,
+                manifest: config.manifest,
+                expected: config.expected_chunk_commitment,
+                expected_bytes,
+                max_chunks: config.max_chunks,
+                written: 0,
+                chunks: 0,
+                hash: Sha256::new(),
+                checks: ChunkChecks::default(),
+                flushed: None,
+                pending: None,
+                unreported: None,
+                receipt: None,
+                published: None,
+                journal: None,
+                cancellation: None,
+                failure: None,
+                shutdown: false,
+                poisoned: false,
             })
         }
 
@@ -659,23 +715,33 @@ mod manifest_sink {
             config: ManifestFileSinkConfig,
             journal: ManifestFileJournalConfig,
         ) -> io::Result<Self> {
-            let (config, journal) = cx.scoped_fs().run_io(move |_| {
-                if journal.transfer_id.is_empty()
-                    || config.writer.fsync_policy == FsyncPolicy::Never
-                    || config.destination.to_str().is_none()
-                {
-                    return Err(invalid("journaled sink requires an ID, durable policy and UTF-8 destination"));
-                }
-                let summary = match journal.journal.get_resume_summary(&journal.transfer_id) {
-                    Outcome::Ok(summary) => summary,
-                    Outcome::Err(error) => return Err(io::Error::other(error)),
-                    other => return Err(io::Error::other(format!("journal admission did not complete: {other:?}"))),
-                };
-                if summary.status != TransferResumeStatus::Unknown {
-                    return Err(invalid("journaled sink requires an unused transfer ID"));
-                }
-                Ok((config, journal))
-            }).await.map_err(io::Error::other)?;
+            let (config, journal) = cx
+                .scoped_fs()
+                .run_io(move |_| {
+                    if journal.transfer_id.is_empty()
+                        || config.writer.fsync_policy == FsyncPolicy::Never
+                        || config.destination.to_str().is_none()
+                    {
+                        return Err(invalid(
+                            "journaled sink requires an ID, durable policy and UTF-8 destination",
+                        ));
+                    }
+                    let summary = match journal.journal.get_resume_summary(&journal.transfer_id) {
+                        Outcome::Ok(summary) => summary,
+                        Outcome::Err(error) => return Err(io::Error::other(error)),
+                        other => {
+                            return Err(io::Error::other(format!(
+                                "journal admission did not complete: {other:?}"
+                            )));
+                        }
+                    };
+                    if summary.status != TransferResumeStatus::Unknown {
+                        return Err(invalid("journaled sink requires an unused transfer ID"));
+                    }
+                    Ok((config, journal))
+                })
+                .await
+                .map_err(io::Error::other)?;
             let limits = JournalRestoreLimits {
                 max_bytes: config.max_bytes,
                 max_chunks: config.max_chunks,
@@ -683,12 +749,19 @@ mod manifest_sink {
             };
             let mut sink = Self::new(cx, config).await?;
             sink.journal = Some(JournalState {
-                owner: Some(journal.journal), transfer_id: journal.transfer_id,
-                timestamp: journal.timestamp, limits, checkpoint: None,
-                publication: None, released: false,
+                owner: Some(journal.journal),
+                transfer_id: journal.transfer_id,
+                timestamp: journal.timestamp,
+                limits,
+                checkpoint: None,
+                publication: None,
+                released: false,
             });
             let request = sink.journal_request()?;
-            let report = sink.writer.checkpoint_to_journal(cx, request).await
+            let report = sink
+                .writer
+                .checkpoint_to_journal(cx, request)
+                .await
                 .map_err(io::Error::other)?;
             sink.observe_checkpoint(0, report)?;
             Ok(sink)
@@ -731,39 +804,86 @@ mod manifest_sink {
             config: ManifestFileSinkConfig,
             restore: ManifestFileRestoreConfig,
         ) -> io::Result<Self> {
-            let state = cx.scoped_fs().run_io(move |child| {
-                prepare_restore(config, restore, || child.checkpoint()
-                    .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error)))
-            }).await.map_err(io::Error::other)?;
+            let state = cx
+                .scoped_fs()
+                .run_io(move |child| {
+                    prepare_restore(config, restore, || {
+                        child
+                            .checkpoint()
+                            .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))
+                    })
+                })
+                .await
+                .map_err(io::Error::other)?;
             Self::restore_prepared(cx, state).await
         }
 
         async fn restore_prepared(cx: &Cx, state: RestoreState) -> io::Result<Self> {
             let RestoreState {
-                config, journal, transfer_id, timestamp, source, expected_bytes,
-                written, chunks, hash, checks, limits,
+                config,
+                journal,
+                transfer_id,
+                timestamp,
+                source,
+                expected_bytes,
+                written,
+                chunks,
+                hash,
+                checks,
+                limits,
             } = state;
             let owner = Arc::new(journal);
-            let writer = domain(ScopedSparseWriter::restore_from_journal(
-                cx, Arc::clone(&owner), transfer_id.clone(), source,
-                config.destination, config.writer, limits,
-            ).await)?;
+            let writer = domain(
+                ScopedSparseWriter::restore_from_journal(
+                    cx,
+                    Arc::clone(&owner),
+                    transfer_id.clone(),
+                    source,
+                    config.destination,
+                    config.writer,
+                    limits,
+                )
+                .await,
+            )?;
             // The awaited scoped job has retired its capture before returning.
             // Refuse rather than ever downgrade if exclusive ownership is lost.
             let journal = Arc::try_unwrap(owner)
                 .map_err(|_| io::Error::other("restored journal owner is still shared"))?;
             let mut sink = Self {
-                writer, object_id: config.object_id, manifest: config.manifest,
-                expected: config.expected_chunk_commitment, expected_bytes,
-                max_chunks: config.max_chunks, written, chunks, hash, checks,
-                flushed: None, pending: None, unreported: None, receipt: None,
-                published: None, journal: Some(JournalState {
-                    owner: Some(journal), transfer_id, timestamp, limits,
-                    checkpoint: None, publication: None, released: false,
-                }), cancellation: None, failure: None, shutdown: false, poisoned: false,
+                writer,
+                object_id: config.object_id,
+                manifest: config.manifest,
+                expected: config.expected_chunk_commitment,
+                expected_bytes,
+                max_chunks: config.max_chunks,
+                written,
+                chunks,
+                hash,
+                checks,
+                flushed: None,
+                pending: None,
+                unreported: None,
+                receipt: None,
+                published: None,
+                journal: Some(JournalState {
+                    owner: Some(journal),
+                    transfer_id,
+                    timestamp,
+                    limits,
+                    checkpoint: None,
+                    publication: None,
+                    released: false,
+                }),
+                cancellation: None,
+                failure: None,
+                shutdown: false,
+                poisoned: false,
             };
             let request = sink.journal_request()?;
-            let report = sink.writer.checkpoint_to_journal(cx, request).await
+            let report = sink
+                .writer
+                .checkpoint_to_journal(cx, request)
+                .await
                 .map_err(io::Error::other)?;
             sink.observe_checkpoint(written, report)?;
             Ok(sink)
@@ -774,7 +894,9 @@ mod manifest_sink {
         /// proof that a peer observed an ACK. It may lag a running operation.
         #[must_use]
         pub fn journal_checkpoint(&self) -> Option<&JournalCheckpoint> {
-            self.journal.as_ref().and_then(|state| state.checkpoint.as_ref())
+            self.journal
+                .as_ref()
+                .and_then(|state| state.checkpoint.as_ref())
         }
 
         /// Last terminal publisher observation received from journaled commit.
@@ -782,7 +904,9 @@ mod manifest_sink {
         /// rollback. Confirmed can coexist with failed completion persistence.
         #[must_use]
         pub fn journal_publication(&self) -> Option<&JournalPublication> {
-            self.journal.as_ref().and_then(|state| state.publication.as_ref())
+            self.journal
+                .as_ref()
+                .and_then(|state| state.publication.as_ref())
         }
 
         /// Retire only an already retained operation; do not start a new flush,
@@ -805,7 +929,8 @@ mod manifest_sink {
                     },
                     other => other,
                 }
-            }).await
+            })
+            .await
         }
 
         /// Permanently stop this sink and return its quiescent journal owner.
@@ -816,30 +941,59 @@ mod manifest_sink {
         /// Retain the checkpoint path with the journal for physical restoration.
         pub fn release_journal(&mut self) -> io::Result<AppendJournal> {
             if self.pending.is_some() || self.poisoned {
-                return Err(io::Error::new(io::ErrorKind::WouldBlock, "drain the retained operation before journal handoff"));
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "drain the retained operation before journal handoff",
+                ));
             }
-            let state = self.journal.as_mut().ok_or_else(|| invalid("sink is not journaled"))?;
-            let owner = state.owner.take().ok_or_else(|| invalid("journal owner unavailable; reopen retained storage"))?;
+            let state = self
+                .journal
+                .as_mut()
+                .ok_or_else(|| invalid("sink is not journaled"))?;
+            let owner = state
+                .owner
+                .take()
+                .ok_or_else(|| invalid("journal owner unavailable; reopen retained storage"))?;
             state.released = true;
             self.shutdown = true;
             Ok(owner)
         }
 
         fn journal_request(&mut self) -> io::Result<JournalCheckpointRequest> {
-            let state = self.journal.as_mut().ok_or_else(|| invalid("sink is not journaled"))?;
-            let journal = state.owner.take().ok_or_else(|| invalid("journal owner unavailable; no unjournaled fallback"))?;
+            let state = self
+                .journal
+                .as_mut()
+                .ok_or_else(|| invalid("sink is not journaled"))?;
+            let journal = state
+                .owner
+                .take()
+                .ok_or_else(|| invalid("journal owner unavailable; no unjournaled fallback"))?;
             Ok(JournalCheckpointRequest {
-                journal, transfer_id: state.transfer_id.clone(), manifest: Arc::clone(&self.manifest),
-                limits: state.limits, timestamp: state.timestamp,
+                journal,
+                transfer_id: state.transfer_id.clone(),
+                manifest: Arc::clone(&self.manifest),
+                limits: state.limits,
+                timestamp: state.timestamp,
             })
         }
 
-        fn observe_checkpoint(&mut self, bytes: u64, report: JournalCheckpointReport) -> io::Result<()> {
-            let state = self.journal.as_mut().expect("checkpoint retains its journal mode");
+        fn observe_checkpoint(
+            &mut self,
+            bytes: u64,
+            report: JournalCheckpointReport,
+        ) -> io::Result<()> {
+            let state = self
+                .journal
+                .as_mut()
+                .expect("checkpoint retains its journal mode");
             state.owner = Some(report.journal);
             let checkpoint = domain(Ok(report.outcome))?;
-            if checkpoint.summary.contiguous_prefix_bytes != bytes || checkpoint.summary.durable_bytes != bytes {
-                return Err(io::Error::other("checkpoint does not match the live sink prefix"));
+            if checkpoint.summary.contiguous_prefix_bytes != bytes
+                || checkpoint.summary.durable_bytes != bytes
+            {
+                return Err(io::Error::other(
+                    "checkpoint does not match the live sink prefix",
+                ));
             }
             state.checkpoint = Some(checkpoint);
             self.flushed = Some(bytes);
@@ -847,7 +1001,10 @@ mod manifest_sink {
         }
 
         fn observe_commit(&mut self, report: JournalCommitReport) -> io::Result<()> {
-            let state = self.journal.as_mut().expect("commit retains its journal mode");
+            let state = self
+                .journal
+                .as_mut()
+                .expect("commit retains its journal mode");
             state.owner = Some(report.journal);
             if let JournalPublication::Confirmed(path) = &report.publication {
                 // Preserve actual publication BEFORE inspecting persistence.
@@ -855,10 +1012,15 @@ mod manifest_sink {
             }
             state.publication = Some(report.publication.clone());
             let path = domain(Ok(report.outcome)).map_err(|source| {
-                io::Error::other(ManifestFileJournalError { publication: report.publication, source })
+                io::Error::other(ManifestFileJournalError {
+                    publication: report.publication,
+                    source,
+                })
             })?;
             if self.published.as_ref() != Some(&path) {
-                return Err(io::Error::other("journal commit success lacks matching publication evidence"));
+                return Err(io::Error::other(
+                    "journal commit success lacks matching publication evidence",
+                ));
             }
             Ok(())
         }
@@ -866,12 +1028,16 @@ mod manifest_sink {
         /// Successful core write receipts observed by this sink, not peer ACKs.
         /// A still-pending write may have additional effects not yet observed here.
         #[must_use]
-        pub fn written_bytes(&self) -> u64 { self.written }
+        pub fn written_bytes(&self) -> u64 {
+            self.written
+        }
 
         /// The actual successful local publication path, not a sender receipt.
         /// None also covers an unresolved commit error; it does NOT prove rollback.
         #[must_use]
-        pub fn published_path(&self) -> Option<&Path> { self.published.as_deref() }
+        pub fn published_path(&self) -> Option<&Path> {
+            self.published.as_deref()
+        }
 
         /// Consume the sink and request explicit cleanup through the same writer.
         /// Any retained job is first abandoned, then the writer's admission gate
@@ -884,7 +1050,9 @@ mod manifest_sink {
             if self.journal.is_some() {
                 // Never delete a checkpoint's payload while its journal still
                 // authorizes recovery. A durable cancellation policy is separate.
-                return Err(invalid("journaled sink retains recovery files; drain and release its journal"));
+                return Err(invalid(
+                    "journaled sink retains recovery files; drain and release its journal",
+                ));
             }
             let writer = self.writer.clone();
             drop(self);
@@ -929,14 +1097,21 @@ mod manifest_sink {
             timestamp: u64,
         ) -> io::Result<ManifestFileCancellation> {
             if reason.is_empty() || reason.len() > 4096 {
-                return Err(invalid("cancellation reason must contain 1..=4096 UTF-8 bytes"));
+                return Err(invalid(
+                    "cancellation reason must contain 1..=4096 UTF-8 bytes",
+                ));
             }
-            let journal = self.journal.as_ref().ok_or_else(|| invalid("sink is not journaled"))?;
+            let journal = self
+                .journal
+                .as_ref()
+                .ok_or_else(|| invalid("sink is not journaled"))?;
             if journal.released {
                 return Err(invalid("journal ownership was released"));
             }
             if self.poisoned {
-                return Err(io::Error::other("manifest sink cannot cancel after an unobserved panic"));
+                return Err(io::Error::other(
+                    "manifest sink cannot cancel after an unobserved panic",
+                ));
             }
             if let Some(cancellation) = &self.cancellation {
                 if cancellation.reason != reason || cancellation.timestamp != timestamp {
@@ -945,8 +1120,11 @@ mod manifest_sink {
             } else {
                 self.check_cancellation_admission(cx)?;
                 self.cancellation = Some(Cancellation {
-                    reason: reason.to_owned(), timestamp, started: false,
-                    observation: None, result: None,
+                    reason: reason.to_owned(),
+                    timestamp,
+                    started: false,
+                    observation: None,
+                    result: None,
                 });
                 self.shutdown = true;
             }
@@ -957,7 +1135,9 @@ mod manifest_sink {
         /// None also covers a still-running job or lost gateway result.
         #[must_use]
         pub fn journal_cancellation(&self) -> Option<ManifestFileCancellation> {
-            self.cancellation.as_ref().and_then(|state| state.observation)
+            self.cancellation
+                .as_ref()
+                .and_then(|state| state.observation)
         }
 
         /// Retry only a cleanup failure whose cancellation barrier was confirmed.
@@ -972,22 +1152,31 @@ mod manifest_sink {
             &mut self,
             cx: &Cx,
         ) -> io::Result<ManifestFileCancellation> {
-            let has_owner = self.journal.as_ref()
+            let has_owner = self
+                .journal
+                .as_ref()
                 .is_some_and(|state| !state.released && state.owner.is_some());
             let retryable = self.cancellation.as_ref().is_some_and(|state| {
                 matches!(&state.result, Some(Err(_)))
-                    && state.observation == Some(ManifestFileCancellation {
-                        cancellation_persisted: true, cleanup_attempted: true,
-                    })
+                    && state.observation
+                        == Some(ManifestFileCancellation {
+                            cancellation_persisted: true,
+                            cleanup_attempted: true,
+                        })
             });
             if self.poisoned || self.pending.is_some() || !has_owner || !retryable {
-                return Err(invalid("only confirmed journaled cleanup failure can be retried"));
+                return Err(invalid(
+                    "only confirmed journaled cleanup failure can be retried",
+                ));
             }
             // Preserve the preceding confirmed cancellation and its cleanup
             // failure when this retry is already inadmissible. The actual
             // gateway checks again at dispatch, so this is not a reservation.
             self.check_cancellation_admission(cx)?;
-            let state = self.cancellation.as_mut().expect("retry checked cancellation state");
+            let state = self
+                .cancellation
+                .as_mut()
+                .expect("retry checked cancellation state");
             state.started = false;
             state.observation = None;
             state.result = None;
@@ -1002,14 +1191,17 @@ mod manifest_sink {
             } else {
                 Err(ScopedFsError::CapabilityDenied)
             };
-            admission.map_err(|source| Failure(Arc::new(io::Error::other(ManifestFileCancellationError {
-                // This invocation has not started a cancellation attempt. In
-                // particular, do not relabel a previous attempt's observation
-                // as the result of this rejected retry.
-                observation: None,
-                publication: self.journal_publication().cloned(),
-                source: io::Error::other(source),
-            }))).repeat())
+            admission.map_err(|source| {
+                Failure(Arc::new(io::Error::other(ManifestFileCancellationError {
+                    // This invocation has not started a cancellation attempt. In
+                    // particular, do not relabel a previous attempt's observation
+                    // as the result of this rejected retry.
+                    observation: None,
+                    publication: self.journal_publication().cloned(),
+                    source: io::Error::other(source),
+                })))
+                .repeat()
+            })
         }
 
         fn cancellation_result(&self) -> Option<io::Result<ManifestFileCancellation>> {
@@ -1024,9 +1216,14 @@ mod manifest_sink {
 
         fn fail_cancellation(&mut self, source: io::Error) -> io::Error {
             let publication = self.journal_publication().cloned();
-            let state = self.cancellation.as_mut().expect("cancellation owns its result");
+            let state = self
+                .cancellation
+                .as_mut()
+                .expect("cancellation owns its result");
             let failure = Failure(Arc::new(io::Error::other(ManifestFileCancellationError {
-                observation: state.observation, publication, source,
+                observation: state.observation,
+                publication,
+                source,
             })));
             let reported = failure.repeat();
             state.result = Some(Err(failure));
@@ -1034,13 +1231,17 @@ mod manifest_sink {
         }
 
         fn observe_cancellation(&mut self, report: JournalCancelReport) -> io::Result<()> {
-            self.journal.as_mut().expect("cancellation retains its journal mode")
+            self.journal
+                .as_mut()
+                .expect("cancellation retains its journal mode")
                 .owner = Some(report.journal);
             let observation = ManifestFileCancellation {
                 cancellation_persisted: report.cancellation_persisted,
                 cleanup_attempted: report.cleanup_attempted,
             };
-            self.cancellation.as_mut().expect("cancellation owns its observation")
+            self.cancellation
+                .as_mut()
+                .expect("cancellation owns its observation")
                 .observation = Some(observation);
             if let Err(error) = domain(Ok(report.outcome)) {
                 return Err(self.fail_cancellation(error));
@@ -1050,7 +1251,9 @@ mod manifest_sink {
                     "successful cancellation lacks its terminal and cleanup barriers",
                 )));
             }
-            self.cancellation.as_mut().expect("cancellation owns its result")
+            self.cancellation
+                .as_mut()
+                .expect("cancellation owns its result")
                 .result = Some(Ok(()));
             Ok(())
         }
@@ -1085,27 +1288,38 @@ mod manifest_sink {
                 }
                 let journal = match self.journal.as_mut() {
                     Some(state) if !state.released => state,
-                    _ => return Poll::Ready(Err(self.fail_cancellation(invalid(
-                        "journal ownership was released",
-                    )))),
+                    _ => {
+                        return Poll::Ready(Err(
+                            self.fail_cancellation(invalid("journal ownership was released"))
+                        ));
+                    }
                 };
                 let owner = match journal.owner.take() {
                     Some(owner) => owner,
-                    None => return Poll::Ready(Err(self.fail_cancellation(invalid(
-                        "journal owner unavailable; reopen retained storage",
-                    )))),
+                    None => {
+                        return Poll::Ready(Err(self.fail_cancellation(invalid(
+                            "journal owner unavailable; reopen retained storage",
+                        ))));
+                    }
                 };
-                let cancellation = self.cancellation.as_mut().expect("cancellation is installed");
+                let cancellation = self
+                    .cancellation
+                    .as_mut()
+                    .expect("cancellation is installed");
                 let request = JournalCancelRequest {
-                    journal: owner, transfer_id: journal.transfer_id.clone(),
-                    manifest: Arc::clone(&self.manifest), reason: cancellation.reason.clone(),
+                    journal: owner,
+                    transfer_id: journal.transfer_id.clone(),
+                    manifest: Arc::clone(&self.manifest),
+                    reason: cancellation.reason.clone(),
                     timestamp: cancellation.timestamp,
                 };
                 cancellation.started = true;
                 let writer = self.writer.clone();
                 let cx = cx.clone();
                 self.pending = Some(Box::pin(async move {
-                    let report = writer.cancel_to_journal(&cx, request).await
+                    let report = writer
+                        .cancel_to_journal(&cx, request)
+                        .await
                         .map_err(io::Error::other)?;
                     Ok(Completion::JournalCancelled(Box::new(report)))
                 }));
@@ -1135,20 +1349,32 @@ mod manifest_sink {
         // never reopen admission or clear the original failure to do so.
         fn drive_pending(&mut self, task: &mut Context<'_>) -> Poll<io::Result<()>> {
             if self.poisoned {
-                return Poll::Ready(Err(io::Error::other("manifest sink cannot repoll after panic")));
+                return Poll::Ready(Err(io::Error::other(
+                    "manifest sink cannot repoll after panic",
+                )));
             }
-            let cancellation_job = self.cancellation.as_ref()
+            let cancellation_job = self
+                .cancellation
+                .as_ref()
                 .is_some_and(|state| state.started && state.result.is_none());
-            let Some(pending) = self.pending.as_mut() else { return Poll::Ready(Ok(())); };
+            let Some(pending) = self.pending.as_mut() else {
+                return Poll::Ready(Ok(()));
+            };
             self.poisoned = true;
             let result = pending.as_mut().poll(task);
             self.poisoned = false;
-            let Poll::Ready(result) = result else { return Poll::Pending; };
+            let Poll::Ready(result) = result else {
+                return Poll::Pending;
+            };
             // Retire the future before another method can observe terminal state.
             // Never repoll a Ready async function or replace an admitted job.
             self.pending = None;
             match result {
-                Ok(Completion::Written { count, digest, next_hash }) => {
+                Ok(Completion::Written {
+                    count,
+                    digest,
+                    next_hash,
+                }) => {
                     self.written += count as u64; // Bounded before admission.
                     self.chunks += 1;
                     self.hash = next_hash;
@@ -1182,7 +1408,9 @@ mod manifest_sink {
 
     impl AsyncWrite for ManifestFileSink {
         fn poll_write(
-            self: Pin<&mut Self>, task: &mut Context<'_>, bytes: &[u8],
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            bytes: &[u8],
         ) -> Poll<io::Result<usize>> {
             let this = self.get_mut();
             if this.shutdown || this.receipt.is_some() {
@@ -1206,12 +1434,18 @@ mod manifest_sink {
                     }
                     return Poll::Ready(Ok(receipt.count));
                 }
-                if bytes.is_empty() { return Poll::Ready(Ok(0)); }
+                if bytes.is_empty() {
+                    return Poll::Ready(Ok(0));
+                }
                 if this.written == this.expected_bytes {
-                    return Poll::Ready(Err(this.fail(invalid("write exceeds expected manifest length"))));
+                    return Poll::Ready(Err(
+                        this.fail(invalid("write exceeds expected manifest length"))
+                    ));
                 }
                 if this.chunks == this.max_chunks {
-                    return Poll::Ready(Err(this.fail(invalid("manifest sink write receipt limit exhausted"))));
+                    return Poll::Ready(Err(
+                        this.fail(invalid("manifest sink write receipt limit exhausted"))
+                    ));
                 }
                 let cx = match current_context() {
                     Ok(cx) => cx,
@@ -1223,8 +1457,13 @@ mod manifest_sink {
                 let payload = bytes[..count].to_vec();
                 let digest = Sha256::digest(&payload).into();
                 let checked = match this.manifest.objects.get(&this.object_id) {
-                    Some(object) => this.checks.accept(&object.chunk_boundaries, this.written, &payload, digest),
-                    None => Err(integrity_error("selected manifest object is absent".to_owned())),
+                    Some(object) => {
+                        this.checks
+                            .accept(&object.chunk_boundaries, this.written, &payload, digest)
+                    }
+                    None => Err(integrity_error(
+                        "selected manifest object is absent".to_owned(),
+                    )),
                 };
                 if let Err(error) = checked {
                     // No disk job for the completing batch, and no later method
@@ -1236,11 +1475,21 @@ mod manifest_sink {
                 let writer = this.writer.clone();
                 let offset = this.written;
                 this.pending = Some(Box::pin(async move {
-                    let range = domain(writer.write_chunk(&cx, offset, payload, WriteOptions::default()).await)?;
+                    let range = domain(
+                        writer
+                            .write_chunk(&cx, offset, payload, WriteOptions::default())
+                            .await,
+                    )?;
                     if range.offset != offset || range.size != count as u64 {
-                        return Err(io::Error::other("sparse writer returned a mismatched write receipt"));
+                        return Err(io::Error::other(
+                            "sparse writer returned a mismatched write receipt",
+                        ));
                     }
-                    Ok(Completion::Written { count, digest, next_hash })
+                    Ok(Completion::Written {
+                        count,
+                        digest,
+                        next_hash,
+                    })
                 }));
             }
         }
@@ -1254,7 +1503,9 @@ mod manifest_sink {
                     Poll::Ready(Ok(())) => {}
                 }
                 if this.unreported.is_some() {
-                    return Poll::Ready(Err(invalid("consume the pending write receipt before flushing")));
+                    return Poll::Ready(Err(invalid(
+                        "consume the pending write receipt before flushing",
+                    )));
                 }
                 if this.published.is_some() || this.flushed == Some(this.written) {
                     return Poll::Ready(Ok(()));
@@ -1271,9 +1522,14 @@ mod manifest_sink {
                         Err(error) => return Poll::Ready(Err(this.fail(error))),
                     };
                     this.pending = Some(Box::pin(async move {
-                        let report = writer.checkpoint_to_journal(&cx, request).await
+                        let report = writer
+                            .checkpoint_to_journal(&cx, request)
+                            .await
                             .map_err(io::Error::other)?;
-                        Ok(Completion::Checkpoint { bytes, report: Box::new(report) })
+                        Ok(Completion::Checkpoint {
+                            bytes,
+                            report: Box::new(report),
+                        })
                     }));
                     continue;
                 }
@@ -1297,10 +1553,16 @@ mod manifest_sink {
 
     impl LiveStreamCommitSink for ManifestFileSink {
         fn poll_commit(
-            self: Pin<&mut Self>, task: &mut Context<'_>, receipt: &LiveStreamReceipt,
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            receipt: &LiveStreamReceipt,
         ) -> Poll<io::Result<()>> {
             let this = self.get_mut();
-            if this.receipt.as_ref().is_some_and(|expected| expected != receipt) {
+            if this
+                .receipt
+                .as_ref()
+                .is_some_and(|expected| expected != receipt)
+            {
                 // A different caller must not replace or repoll the transaction.
                 // Keep the original future/receipt available for its owner's drain.
                 return Poll::Ready(Err(invalid("commit receipt differs from admitted stream")));
@@ -1311,19 +1573,28 @@ mod manifest_sink {
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                     Poll::Ready(Ok(())) => {}
                 }
-                if this.published.is_some() { return Poll::Ready(Ok(())); }
+                if this.published.is_some() {
+                    return Poll::Ready(Ok(()));
+                }
                 if this.unreported.is_some() {
-                    return Poll::Ready(Err(invalid("consume the pending write receipt before commit")));
+                    return Poll::Ready(Err(invalid(
+                        "consume the pending write receipt before commit",
+                    )));
                 }
                 let digest: [u8; 32] = this.hash.clone().finalize().into();
-                if this.written != this.expected_bytes || receipt.prefix.bytes != this.written
+                if this.written != this.expected_bytes
+                    || receipt.prefix.bytes != this.written
                     || receipt.source_sha256 != digest
                 {
-                    return Poll::Ready(Err(this.fail(invalid("commit receipt does not match staged stream"))));
+                    return Poll::Ready(Err(
+                        this.fail(invalid("commit receipt does not match staged stream"))
+                    ));
                 }
                 let checked = match this.manifest.objects.get(&this.object_id) {
                     Some(object) => this.checks.finish(&object.chunk_boundaries, this.written),
-                    None => Err(integrity_error("selected manifest object is absent".to_owned())),
+                    None => Err(integrity_error(
+                        "selected manifest object is absent".to_owned(),
+                    )),
                 };
                 if let Err(error) = checked {
                     return Poll::Ready(Err(this.fail(error)));
@@ -1342,16 +1613,27 @@ mod manifest_sink {
                         Err(error) => return Poll::Ready(Err(this.fail(error))),
                     };
                     this.pending = Some(Box::pin(async move {
-                        let report = writer.verify_and_commit_to_journal(&cx, JournalCommitRequest {
-                            checkpoint, expected_chunk_commitment: expected,
-                        }).await.map_err(io::Error::other)?;
+                        let report = writer
+                            .verify_and_commit_to_journal(
+                                &cx,
+                                JournalCommitRequest {
+                                    checkpoint,
+                                    expected_chunk_commitment: expected,
+                                },
+                            )
+                            .await
+                            .map_err(io::Error::other)?;
                         Ok(Completion::JournalCommitted(Box::new(report)))
                     }));
                     continue;
                 }
                 this.pending = Some(Box::pin(async move {
                     let result = match expected {
-                        Some(expected) => writer.verify_and_commit_with_chunk_commitment(&cx, manifest, expected).await,
+                        Some(expected) => {
+                            writer
+                                .verify_and_commit_with_chunk_commitment(&cx, manifest, expected)
+                                .await
+                        }
                         None => writer.verify_and_commit(&cx, manifest).await,
                     };
                     domain(result).map(Completion::Committed)
@@ -1361,7 +1643,8 @@ mod manifest_sink {
     }
 
     fn current_context() -> io::Result<Cx> {
-        Cx::current().ok_or_else(|| io::Error::other("manifest sink requires a current native task context"))
+        Cx::current()
+            .ok_or_else(|| io::Error::other("manifest sink requires a current native task context"))
     }
 
     fn invalid(message: &'static str) -> io::Error {
@@ -1375,39 +1658,59 @@ mod manifest_sink {
             Err(error) => Err(io::Error::other(error)),
             // A sticky cancellation must not become an endlessly retried
             // Interrupted result inside AsyncWriteExt::write_all.
-            Ok(Outcome::Cancelled(reason)) => Err(io::Error::other(format!("sparse writer cancelled: {reason:?}"))),
-            Ok(Outcome::Panicked(payload)) => Err(io::Error::other(format!("sparse writer panicked: {payload:?}"))),
+            Ok(Outcome::Cancelled(reason)) => Err(io::Error::other(format!(
+                "sparse writer cancelled: {reason:?}"
+            ))),
+            Ok(Outcome::Panicked(payload)) => Err(io::Error::other(format!(
+                "sparse writer panicked: {payload:?}"
+            ))),
         }
     }
 
     fn validate(config: &ManifestFileSinkConfig) -> io::Result<u64> {
         if let Some(expected) = config.expected_chunk_commitment {
-            expected.verify(&config.manifest).map_err(io::Error::other)?;
+            expected
+                .verify(&config.manifest)
+                .map_err(io::Error::other)?;
         } else {
             config.manifest.validate().map_err(io::Error::other)?;
         }
-        let object = config.manifest.objects.get(&config.object_id)
+        let object = config
+            .manifest
+            .objects
+            .get(&config.object_id)
             .ok_or_else(|| invalid("manifest does not contain the selected file"))?;
         if object.id != config.object_id || object.kind != ObjectKind::FileObject {
             return Err(invalid("manifest selection is not the same regular file"));
         }
-        let length = object.size_bytes.ok_or_else(|| invalid("manifest file length is required"))?;
-        if length > config.max_bytes || length.div_ceil(MAX_LIVE_EPOCH_BYTES as u64) > u64::from(config.max_chunks) {
+        let length = object
+            .size_bytes
+            .ok_or_else(|| invalid("manifest file length is required"))?;
+        if length > config.max_bytes
+            || length.div_ceil(MAX_LIVE_EPOCH_BYTES as u64) > u64::from(config.max_chunks)
+        {
             return Err(invalid("manifest file exceeds sink byte or receipt limits"));
         }
         let chunk_only = !config.object_id.is_content_addressed() && object.content_hash.is_none();
         if chunk_only && config.expected_chunk_commitment.is_none() {
-            return Err(invalid("chunk-only file requires an independently trusted commitment"));
+            return Err(invalid(
+                "chunk-only file requires an independently trusted commitment",
+            ));
         }
         let mut covered = 0;
         for chunk in &object.chunk_boundaries {
-            let end = chunk.byte_offset.checked_add(chunk.size_bytes)
+            let end = chunk
+                .byte_offset
+                .checked_add(chunk.size_bytes)
                 .filter(|end| *end <= length)
                 .ok_or_else(|| invalid("manifest chunk lies outside the expected file"))?;
             if chunk.size_bytes == 0 {
                 let empty: [u8; 32] = Sha256::digest(b"").into();
                 if chunk.content_hash != empty {
-                    return Err(integrity_error(format!("manifest chunk {} hash mismatch", chunk.index)));
+                    return Err(integrity_error(format!(
+                        "manifest chunk {} hash mismatch",
+                        chunk.index
+                    )));
                 }
             }
             if chunk_only && (chunk.size_bytes == 0 || chunk.byte_offset != covered) {
@@ -1427,8 +1730,12 @@ mod manifest_sink {
         match outcome {
             Outcome::Ok(value) => Ok(value),
             Outcome::Err(error) => Err(io::Error::other(error)),
-            Outcome::Cancelled(reason) => Err(io::Error::other(format!("journal restore cancelled: {reason:?}"))),
-            Outcome::Panicked(payload) => Err(io::Error::other(format!("journal restore panicked: {payload:?}"))),
+            Outcome::Cancelled(reason) => Err(io::Error::other(format!(
+                "journal restore cancelled: {reason:?}"
+            ))),
+            Outcome::Panicked(payload) => Err(io::Error::other(format!(
+                "journal restore panicked: {payload:?}"
+            ))),
         }
     }
 
@@ -1439,11 +1746,14 @@ mod manifest_sink {
     ) -> io::Result<RestoreState> {
         checkpoint()?;
         let expected_bytes = validate(&config)?;
-        if restore.transfer_id.is_empty() || restore.transfer_id.len() > 4096
+        if restore.transfer_id.is_empty()
+            || restore.transfer_id.len() > 4096
             || config.writer.fsync_policy == FsyncPolicy::Never
             || config.destination.to_str().is_none()
         {
-            return Err(invalid("journal restore requires a bounded ID, durable policy and UTF-8 destination"));
+            return Err(invalid(
+                "journal restore requires a bounded ID, durable policy and UTF-8 destination",
+            ));
         }
         if !std::fs::metadata(&restore.journal_config.base_dir)?.is_dir() {
             return Err(invalid("restore journal path is not an existing directory"));
@@ -1451,63 +1761,102 @@ mod manifest_sink {
         checkpoint()?;
         let journal = journal_value(AppendJournal::new(restore.journal_config, restore.auth_key))?;
         let summary = journal_value(journal.get_resume_summary(&restore.transfer_id))?;
-        if !summary.is_resumable() || summary.total_size != Some(expected_bytes)
+        if !summary.is_resumable()
+            || summary.total_size != Some(expected_bytes)
             || summary.contiguous_prefix_bytes != summary.durable_bytes
         {
-            return Err(invalid("manifest sink restore requires a receiving contiguous checkpoint"));
+            return Err(invalid(
+                "manifest sink restore requires a receiving contiguous checkpoint",
+            ));
         }
         let chunks = u32::try_from(summary.durable_chunks.len())
             .map_err(|_| invalid("restore receipt count exceeds the sink limit"))?;
         let mut written = 0_u64;
         let mut max_chunk = 0_usize;
         for chunk in &summary.durable_chunks {
-            let end = written.checked_add(chunk.chunk_size)
+            let end = written
+                .checked_add(chunk.chunk_size)
                 .filter(|end| *end <= expected_bytes)
                 .ok_or_else(|| invalid("restore receipt exceeds the expected object"))?;
             let size = usize::try_from(chunk.chunk_size)
                 .map_err(|_| invalid("restore receipt exceeds address space"))?;
             if chunk.chunk_offset != written || size == 0 || size > MAX_LIVE_EPOCH_BYTES {
-                return Err(invalid("restore receipts must form a bounded contiguous prefix"));
+                return Err(invalid(
+                    "restore receipts must form a bounded contiguous prefix",
+                ));
             }
             written = end;
             max_chunk = max_chunk.max(size);
         }
-        if written != summary.durable_bytes || chunks > config.max_chunks
+        if written != summary.durable_bytes
+            || chunks > config.max_chunks
             || (expected_bytes - written).div_ceil(MAX_LIVE_EPOCH_BYTES as u64)
                 > u64::from(config.max_chunks - chunks)
         {
-            return Err(invalid("restored prefix leaves insufficient byte or receipt capacity"));
+            return Err(invalid(
+                "restored prefix leaves insufficient byte or receipt capacity",
+            ));
         }
         let entries = journal_value(journal.get_transfer_entries(&restore.transfer_id))?;
         let mut offered = false;
         for entry in &entries {
             let (offset, size, hash) = match &entry.record {
-                JournalRecord::Offer { object_id, manifest_root, total_size, .. } => {
-                    if object_id != &config.object_id || manifest_root != &config.manifest.merkle_root
+                JournalRecord::Offer {
+                    object_id,
+                    manifest_root,
+                    total_size,
+                    ..
+                } => {
+                    if object_id != &config.object_id
+                        || manifest_root != &config.manifest.merkle_root
                         || *total_size != expected_bytes
                     {
-                        return Err(invalid("restore offer differs from the trusted manifest selection"));
+                        return Err(invalid(
+                            "restore offer differs from the trusted manifest selection",
+                        ));
                     }
                     offered = true;
                     continue;
                 }
-                JournalRecord::ChunkReceived { chunk_offset, chunk_size, chunk_hash, .. } =>
-                    (*chunk_offset, *chunk_size, Some(chunk_hash)),
-                JournalRecord::ChunkVerified { chunk_offset, chunk_size, verified_hash, .. } =>
-                    (*chunk_offset, *chunk_size, Some(verified_hash)),
-                JournalRecord::ChunkWritten { chunk_offset, chunk_size, .. } =>
-                    (*chunk_offset, *chunk_size, None),
+                JournalRecord::ChunkReceived {
+                    chunk_offset,
+                    chunk_size,
+                    chunk_hash,
+                    ..
+                } => (*chunk_offset, *chunk_size, Some(chunk_hash)),
+                JournalRecord::ChunkVerified {
+                    chunk_offset,
+                    chunk_size,
+                    verified_hash,
+                    ..
+                } => (*chunk_offset, *chunk_size, Some(verified_hash)),
+                JournalRecord::ChunkWritten {
+                    chunk_offset,
+                    chunk_size,
+                    ..
+                } => (*chunk_offset, *chunk_size, None),
                 JournalRecord::Accept { .. } | JournalRecord::ProofDigest { .. } => continue,
-                _ => return Err(invalid("restore history contains a non-receiving transition")),
+                _ => {
+                    return Err(invalid(
+                        "restore history contains a non-receiving transition",
+                    ));
+                }
             };
             // A partial journal append must not import uncheckpointed ranges or
             // silently discard the receipts that the next checkpoint must honor.
-            let found = summary.durable_chunks.binary_search_by_key(&offset, |chunk| chunk.chunk_offset)
-                .ok().and_then(|index| summary.durable_chunks.get(index));
-            if !offered || found.is_none_or(|chunk| chunk.chunk_size != size
-                || hash.is_some_and(|hash| *hash != chunk.chunk_hash))
+            let found = summary
+                .durable_chunks
+                .binary_search_by_key(&offset, |chunk| chunk.chunk_offset)
+                .ok()
+                .and_then(|index| summary.durable_chunks.get(index));
+            if !offered
+                || found.is_none_or(|chunk| {
+                    chunk.chunk_size != size || hash.is_some_and(|hash| *hash != chunk.chunk_hash)
+                })
             {
-                return Err(invalid("restore history contains an incomplete or conflicting receipt"));
+                return Err(invalid(
+                    "restore history contains an incomplete or conflicting receipt",
+                ));
             }
         }
         if !offered {
@@ -1517,16 +1866,23 @@ mod manifest_sink {
         let mut source = std::fs::File::open(&restore.source_path)?;
         let metadata = source.metadata()?;
         if !metadata.is_file() || metadata.len() < written || metadata.len() > expected_bytes {
-            return Err(invalid("restore source is not a compatible whole-object file"));
+            return Err(invalid(
+                "restore source is not a compatible whole-object file",
+            ));
         }
         source.seek(SeekFrom::Start(0))?;
         let mut buffer = Vec::new();
-        buffer.try_reserve_exact(max_chunk)
+        buffer
+            .try_reserve_exact(max_chunk)
             .map_err(|error| io::Error::other(format!("restore buffer allocation: {error}")))?;
         let mut hash = Sha256::new();
         let mut checks = ChunkChecks::default();
-        let boundaries = &config.manifest.objects.get(&config.object_id)
-            .expect("validated manifest retains its selected file").chunk_boundaries;
+        let boundaries = &config
+            .manifest
+            .objects
+            .get(&config.object_id)
+            .expect("validated manifest retains its selected file")
+            .chunk_boundaries;
         for chunk in &summary.durable_chunks {
             buffer.resize(chunk.chunk_size as usize, 0);
             let mut filled = 0;
@@ -1542,19 +1898,32 @@ mod manifest_sink {
             }
             let digest: [u8; 32] = Sha256::digest(&buffer).into();
             if digest != chunk.chunk_hash {
-                return Err(integrity_error(format!("restore payload hash mismatch at offset {}", chunk.chunk_offset)));
+                return Err(integrity_error(format!(
+                    "restore payload hash mismatch at offset {}",
+                    chunk.chunk_offset
+                )));
             }
             checks.accept(boundaries, chunk.chunk_offset, &buffer, digest)?;
             hash.update(&buffer);
         }
         checkpoint()?;
         let limits = JournalRestoreLimits {
-            max_bytes: config.max_bytes, max_chunks: config.max_chunks,
+            max_bytes: config.max_bytes,
+            max_chunks: config.max_chunks,
             max_chunk_bytes: MAX_LIVE_EPOCH_BYTES,
         };
         Ok(RestoreState {
-            config, journal, transfer_id: restore.transfer_id, timestamp: restore.timestamp,
-            source, expected_bytes, written, chunks, hash, checks, limits,
+            config,
+            journal,
+            transfer_id: restore.transfer_id,
+            timestamp: restore.timestamp,
+            source,
+            expected_bytes,
+            written,
+            chunks,
+            hash,
+            checks,
+            limits,
         })
     }
 
@@ -1577,8 +1946,13 @@ mod manifest_sink {
         use std::time::Duration;
 
         fn runtime(workers: usize, blocking: usize) -> Runtime {
-            let builder = if workers == 1 { RuntimeBuilder::current_thread() }
-                else { RuntimeBuilder::new().worker_threads(workers).with_sharded_state(true) };
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::new()
+                    .worker_threads(workers)
+                    .with_sharded_state(true)
+            };
             builder.blocking_threads(1, blocking).build().unwrap()
         }
 
@@ -1590,19 +1964,27 @@ mod manifest_sink {
             assert_eq!(report.pending_obligations, 0);
         }
 
-        fn config(data: &[u8], destination: PathBuf, policy: CommitPolicy) -> ManifestFileSinkConfig {
+        fn config(
+            data: &[u8],
+            destination: PathBuf,
+            policy: CommitPolicy,
+        ) -> ManifestFileSinkConfig {
             let object = Object::file(data.to_vec());
             let object_id = object.id.clone();
             let mut graph = ObjectGraph::new();
             graph.add_root(object).unwrap();
             ManifestFileSinkConfig {
                 object_id,
-                manifest: Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap()),
+                manifest: Arc::new(
+                    Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap(),
+                ),
                 expected_chunk_commitment: None,
                 destination,
                 writer: SparseWriterConfig {
-                    enable_preallocation: false, fsync_policy: FsyncPolicy::Never,
-                    commit_policy: policy, ..SparseWriterConfig::default()
+                    enable_preallocation: false,
+                    fsync_policy: FsyncPolicy::Never,
+                    commit_policy: policy,
+                    ..SparseWriterConfig::default()
                 },
                 max_bytes: data.len() as u64,
                 max_chunks: 100,
@@ -1612,33 +1994,55 @@ mod manifest_sink {
         fn receipt(data: &[u8]) -> LiveStreamReceipt {
             LiveStreamReceipt {
                 prefix: LiveStreamPrefix {
-                    stream_nonce: [1; 32], epochs: u64::from(!data.is_empty()),
-                    bytes: data.len() as u64, chain: [2; 32],
+                    stream_nonce: [1; 32],
+                    epochs: u64::from(!data.is_empty()),
+                    bytes: data.len() as u64,
+                    chain: [2; 32],
                 },
                 source_sha256: Sha256::digest(data).into(),
             }
         }
 
-        async fn commit(sink: &mut ManifestFileSink, receipt: &LiveStreamReceipt) -> io::Result<()> {
+        async fn commit(
+            sink: &mut ManifestFileSink,
+            receipt: &LiveStreamReceipt,
+        ) -> io::Result<()> {
             poll_fn(|task| Pin::new(&mut *sink).poll_commit(task, receipt)).await
         }
 
         fn with_hints(
-            mut options: ManifestFileSinkConfig, bytes: &[u8], ranges: &[(usize, usize)],
+            mut options: ManifestFileSinkConfig,
+            bytes: &[u8],
+            ranges: &[(usize, usize)],
         ) -> ManifestFileSinkConfig {
             use crate::atp::manifest::{ChunkStrategy, MerkleRoot};
             let manifest = Arc::make_mut(&mut options.manifest);
-            manifest.objects.get_mut(&options.object_id).unwrap().chunk_boundaries =
-                ranges.iter().enumerate().map(|(index, &(start, end))| ChunkBoundary {
-                    index: index as u32, byte_offset: start as u64, size_bytes: (end - start) as u64,
+            manifest
+                .objects
+                .get_mut(&options.object_id)
+                .unwrap()
+                .chunk_boundaries = ranges
+                .iter()
+                .enumerate()
+                .map(|(index, &(start, end))| ChunkBoundary {
+                    index: index as u32,
+                    byte_offset: start as u64,
+                    size_bytes: (end - start) as u64,
                     content_hash: Sha256::digest(&bytes[start..end]).into(),
-                    strategy: ChunkStrategy::FixedSize, metadata: None,
-                }).collect();
+                    strategy: ChunkStrategy::FixedSize,
+                    metadata: None,
+                })
+                .collect();
             manifest.merkle_root = MerkleRoot::from_manifest_components(
-                &manifest.objects, &manifest.chunk_plan, &manifest.raptorq_layout,
-                &manifest.compression_policy, &manifest.encryption_policy,
-                &manifest.capability_policy, &manifest.transform_order,
-                &manifest.transform_proof_policy, &manifest.repair_groups,
+                &manifest.objects,
+                &manifest.chunk_plan,
+                &manifest.raptorq_layout,
+                &manifest.compression_policy,
+                &manifest.encryption_policy,
+                &manifest.capability_policy,
+                &manifest.transform_order,
+                &manifest.transform_proof_policy,
+                &manifest.repair_groups,
             );
             manifest.validate().unwrap();
             options
@@ -1646,7 +2050,8 @@ mod manifest_sink {
 
         fn journal_config(base: &Path) -> crate::atp::journal::JournalConfig {
             crate::atp::journal::JournalConfig {
-                base_dir: base.join("journal"), force_sync: false,
+                base_dir: base.join("journal"),
+                force_sync: false,
                 max_journal_size: u64::MAX,
                 ..crate::atp::journal::JournalConfig::default()
             }
@@ -1654,12 +2059,21 @@ mod manifest_sink {
 
         fn journal_input(base: &Path) -> ManifestFileJournalConfig {
             ManifestFileJournalConfig {
-                journal: AppendJournal::new(journal_config(base), crate::security::AuthKey::from_seed(42)).unwrap(),
-                transfer_id: "live-checkpoint".to_owned(), timestamp: 71,
+                journal: AppendJournal::new(
+                    journal_config(base),
+                    crate::security::AuthKey::from_seed(42),
+                )
+                .unwrap(),
+                transfer_id: "live-checkpoint".to_owned(),
+                timestamp: 71,
             }
         }
 
-        fn durable_config(data: &[u8], destination: PathBuf, policy: CommitPolicy) -> ManifestFileSinkConfig {
+        fn durable_config(
+            data: &[u8],
+            destination: PathBuf,
+            policy: CommitPolicy,
+        ) -> ManifestFileSinkConfig {
             let mut config = config(data, destination, policy);
             config.writer.fsync_policy = FsyncPolicy::BeforeCommit;
             config
@@ -1671,7 +2085,9 @@ mod manifest_sink {
                 if let Some(error) = source.downcast_ref::<ManifestFileCancellationError>() {
                     return error;
                 }
-                source = source.source().expect("cancellation error lost its typed observation");
+                source = source
+                    .source()
+                    .expect("cancellation error lost its typed observation");
             }
         }
 
@@ -1679,7 +2095,11 @@ mod manifest_sink {
         fn live_journal_cancellation_cleans_only_after_persistence_and_is_observably_idempotent() {
             use crate::atp::journal::JournalRecord;
             for workers in [1, 2] {
-                for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                for policy in [
+                    CommitPolicy::AtomicRename,
+                    CommitPolicy::CopyAndVerify,
+                    CommitPolicy::LinkAndUnlink,
+                ] {
                     for quarantine in [false, true] {
                         for data in [b"".as_slice(), b"abcdefgh".as_slice()] {
                             let directory = tempfile::tempdir().unwrap();
@@ -1690,42 +2110,103 @@ mod manifest_sink {
                                 let mut config = durable_config(data, path.clone(), policy);
                                 config.writer.enable_quarantine = quarantine;
                                 let mut sink = ManifestFileSink::new_journaled(
-                                    &cx, config, journal_input(directory.path()),
-                                ).await.unwrap();
-                                let staging = sink.journal_checkpoint().unwrap().source_path.clone();
-                                cx.scoped_fs().write(path.clone(), b"keep destination".to_vec()).await.unwrap();
+                                    &cx,
+                                    config,
+                                    journal_input(directory.path()),
+                                )
+                                .await
+                                .unwrap();
+                                let staging =
+                                    sink.journal_checkpoint().unwrap().source_path.clone();
+                                cx.scoped_fs()
+                                    .write(path.clone(), b"keep destination".to_vec())
+                                    .await
+                                    .unwrap();
                                 if !data.is_empty() {
                                     sink.write_all(&data[..3]).await.unwrap();
                                     sink.flush().await.unwrap();
                                 }
-                                let observed = sink.cancel_journaled(&cx, "application stopped", 72).await.unwrap();
-                                assert_eq!(observed, ManifestFileCancellation {
-                                    cancellation_persisted: true, cleanup_attempted: true,
-                                });
+                                let observed = sink
+                                    .cancel_journaled(&cx, "application stopped", 72)
+                                    .await
+                                    .unwrap();
+                                assert_eq!(
+                                    observed,
+                                    ManifestFileCancellation {
+                                        cancellation_persisted: true,
+                                        cleanup_attempted: true,
+                                    }
+                                );
                                 assert_eq!(sink.journal_cancellation(), Some(observed));
                                 assert!(!staging.exists());
                                 assert_eq!(std::fs::read(&path).unwrap(), b"keep destination");
                                 let owner = sink.journal.as_ref().unwrap().owner.as_ref().unwrap();
                                 let sequence = owner.get_stats().sequence;
-                                assert_eq!(owner.get_resume_summary("live-checkpoint").unwrap().status,
-                                    TransferResumeStatus::Cancelled { reason: "application stopped".to_owned() });
-                                assert!(matches!(&owner.get_transfer_entries("live-checkpoint").unwrap().last().unwrap().record,
-                                    JournalRecord::Cancellation { .. }));
-                                assert_eq!(sink.cancel_journaled(&cx, "application stopped", 72).await.unwrap(), observed);
-                                assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
-                                assert_eq!(sink.write(b"x").await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
-                                assert_eq!(sink.flush().await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
-                                assert_eq!(commit(&mut sink, &receipt(data)).await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+                                assert_eq!(
+                                    owner.get_resume_summary("live-checkpoint").unwrap().status,
+                                    TransferResumeStatus::Cancelled {
+                                        reason: "application stopped".to_owned()
+                                    }
+                                );
+                                assert!(matches!(
+                                    &owner
+                                        .get_transfer_entries("live-checkpoint")
+                                        .unwrap()
+                                        .last()
+                                        .unwrap()
+                                        .record,
+                                    JournalRecord::Cancellation { .. }
+                                ));
+                                assert_eq!(
+                                    sink.cancel_journaled(&cx, "application stopped", 72)
+                                        .await
+                                        .unwrap(),
+                                    observed
+                                );
+                                assert_eq!(
+                                    sink.journal
+                                        .as_ref()
+                                        .unwrap()
+                                        .owner
+                                        .as_ref()
+                                        .unwrap()
+                                        .get_stats()
+                                        .sequence,
+                                    sequence
+                                );
+                                assert_eq!(
+                                    sink.write(b"x").await.unwrap_err().kind(),
+                                    io::ErrorKind::BrokenPipe
+                                );
+                                assert_eq!(
+                                    sink.flush().await.unwrap_err().kind(),
+                                    io::ErrorKind::BrokenPipe
+                                );
+                                assert_eq!(
+                                    commit(&mut sink, &receipt(data)).await.unwrap_err().kind(),
+                                    io::ErrorKind::BrokenPipe
+                                );
                                 assert!(sink.retry_journaled_cancellation(&cx).await.is_err());
                                 let mut owner = sink.release_journal().unwrap();
                                 let cfg = journal_config(directory.path());
-                                let summary = cx.scoped_fs().run_io(move |_| {
-                                    owner.compact().unwrap();
-                                    drop(owner);
-                                    let owner = AppendJournal::new(cfg, crate::security::AuthKey::from_seed(42)).unwrap();
-                                    Ok(owner.get_resume_summary("live-checkpoint").unwrap())
-                                }).await.unwrap();
-                                assert!(matches!(summary.status, TransferResumeStatus::Cancelled { .. }));
+                                let summary = cx
+                                    .scoped_fs()
+                                    .run_io(move |_| {
+                                        owner.compact().unwrap();
+                                        drop(owner);
+                                        let owner = AppendJournal::new(
+                                            cfg,
+                                            crate::security::AuthKey::from_seed(42),
+                                        )
+                                        .unwrap();
+                                        Ok(owner.get_resume_summary("live-checkpoint").unwrap())
+                                    })
+                                    .await
+                                    .unwrap();
+                                assert!(matches!(
+                                    summary.status,
+                                    TransferResumeStatus::Cancelled { .. }
+                                ));
                             });
                             drained(&runtime);
                         }
@@ -1742,9 +2223,18 @@ mod manifest_sink {
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
                     let path = directory.path().join("destination");
-                    let options = with_hints(durable_config(b"abcdefgh", path.clone(), CommitPolicy::AtomicRename),
-                        b"abcdefgh", &[(0, 4), (4, 8)]);
-                    let mut sink = ManifestFileSink::new_journaled(&cx, options, journal_input(directory.path())).await.unwrap();
+                    let options = with_hints(
+                        durable_config(b"abcdefgh", path.clone(), CommitPolicy::AtomicRename),
+                        b"abcdefgh",
+                        &[(0, 4), (4, 8)],
+                    );
+                    let mut sink = ManifestFileSink::new_journaled(
+                        &cx,
+                        options,
+                        journal_input(directory.path()),
+                    )
+                    .await
+                    .unwrap();
                     let staging = sink.journal_checkpoint().unwrap().source_path.clone();
                     sink.write_all(b"abcd").await.unwrap();
                     sink.flush().await.unwrap();
@@ -1874,36 +2364,63 @@ mod manifest_sink {
                 let runtime = runtime(workers, 2);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    let mut sink = ManifestFileSink::new_journaled(&cx,
-                        durable_config(b"data", directory.path().join("destination"), CommitPolicy::AtomicRename),
-                        journal_input(directory.path())).await.unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(
+                        &cx,
+                        durable_config(
+                            b"data",
+                            directory.path().join("destination"),
+                            CommitPolicy::AtomicRename,
+                        ),
+                        journal_input(directory.path()),
+                    )
+                    .await
+                    .unwrap();
                     sink.write_all(b"data").await.unwrap();
                     let staging = sink.journal_checkpoint().unwrap().source_path.clone();
                     let owner = sink.journal.as_mut().unwrap().owner.take().unwrap();
                     let mut cfg = journal_config(directory.path());
                     cfg.max_journal_size = 1;
                     let blocker_base = cfg.base_dir.clone();
-                    let owner = cx.scoped_fs().run_io(move |_| {
-                        drop(owner);
-                        let owner = AppendJournal::new(cfg, crate::security::AuthKey::from_seed(42)).unwrap();
-                        // The real append precedes automatic compaction. A new
-                        // directory at its next generation prevents consolidation.
-                        let next = owner.get_stats().generation + 1;
-                        std::fs::create_dir(blocker_base.join(format!("journal_gen_{next:06}.dat")))?;
-                        Ok(owner)
-                    }).await.unwrap();
+                    let owner = cx
+                        .scoped_fs()
+                        .run_io(move |_| {
+                            drop(owner);
+                            let owner =
+                                AppendJournal::new(cfg, crate::security::AuthKey::from_seed(42))
+                                    .unwrap();
+                            // The real append precedes automatic compaction. A new
+                            // directory at its next generation prevents consolidation.
+                            let next = owner.get_stats().generation + 1;
+                            std::fs::create_dir(
+                                blocker_base.join(format!("journal_gen_{next:06}.dat")),
+                            )?;
+                            Ok(owner)
+                        })
+                        .await
+                        .unwrap();
                     sink.journal.as_mut().unwrap().owner = Some(owner);
                     let error = sink.cancel_journaled(&cx, "stop", 77).await.unwrap_err();
                     let observation = Some(ManifestFileCancellation {
-                        cancellation_persisted: false, cleanup_attempted: false,
+                        cancellation_persisted: false,
+                        cleanup_attempted: false,
                     });
                     assert_eq!(cancellation_failure(&error).observation, observation);
                     assert_eq!(sink.journal_cancellation(), observation);
                     assert_eq!(std::fs::read(&staging).unwrap(), b"data");
-                    assert!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap()
-                        .get_resume_summary("live-checkpoint").is_err());
-                    assert!(matches!(sink.writer.cancel(&cx).await.unwrap(),
-                        Outcome::Err(SparseWriterError::CommitFailed(_))));
+                    assert!(
+                        sink.journal
+                            .as_ref()
+                            .unwrap()
+                            .owner
+                            .as_ref()
+                            .unwrap()
+                            .get_resume_summary("live-checkpoint")
+                            .is_err()
+                    );
+                    assert!(matches!(
+                        sink.writer.cancel(&cx).await.unwrap(),
+                        Outcome::Err(SparseWriterError::CommitFailed(_))
+                    ));
                     assert!(sink.retry_journaled_cancellation(&cx).await.is_err());
                     let repeated = sink.cancel_journaled(&cx, "stop", 77).await.unwrap_err();
                     assert_eq!(error.to_string(), repeated.to_string());
@@ -1921,9 +2438,16 @@ mod manifest_sink {
                 let runtime = runtime(workers, 2);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    let mut cfg = durable_config(b"data", directory.path().join("destination"), CommitPolicy::AtomicRename);
+                    let mut cfg = durable_config(
+                        b"data",
+                        directory.path().join("destination"),
+                        CommitPolicy::AtomicRename,
+                    );
                     cfg.writer.enable_quarantine = false;
-                    let mut sink = ManifestFileSink::new_journaled(&cx, cfg, journal_input(directory.path())).await.unwrap();
+                    let mut sink =
+                        ManifestFileSink::new_journaled(&cx, cfg, journal_input(directory.path()))
+                            .await
+                            .unwrap();
                     sink.write_all(b"data").await.unwrap();
                     let staging = sink.journal_checkpoint().unwrap().source_path.clone();
                     let retained = directory.path().join("retained-payload");
@@ -1932,42 +2456,138 @@ mod manifest_sink {
                     std::fs::rename(&staging, &retained).unwrap();
                     std::fs::create_dir(&staging).unwrap();
                     let error = sink.cancel_journaled(&cx, "stop", 78).await.unwrap_err();
-                    assert_eq!(cancellation_failure(&error).observation, Some(ManifestFileCancellation {
-                        cancellation_persisted: true, cleanup_attempted: true,
-                    }));
-                    assert!(matches!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap()
-                        .get_resume_summary("live-checkpoint").unwrap().status,
-                        TransferResumeStatus::Cancelled { .. }));
-                    let sequence = sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence;
+                    assert_eq!(
+                        cancellation_failure(&error).observation,
+                        Some(ManifestFileCancellation {
+                            cancellation_persisted: true,
+                            cleanup_attempted: true,
+                        })
+                    );
+                    assert!(matches!(
+                        sink.journal
+                            .as_ref()
+                            .unwrap()
+                            .owner
+                            .as_ref()
+                            .unwrap()
+                            .get_resume_summary("live-checkpoint")
+                            .unwrap()
+                            .status,
+                        TransferResumeStatus::Cancelled { .. }
+                    ));
+                    let sequence = sink
+                        .journal
+                        .as_ref()
+                        .unwrap()
+                        .owner
+                        .as_ref()
+                        .unwrap()
+                        .get_stats()
+                        .sequence;
                     assert!(sink.cancel_journaled(&cx, "stop", 78).await.is_err());
-                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
-                    let previous_error = sink.cancellation.as_ref().unwrap().result.as_ref()
-                        .unwrap().as_ref().unwrap_err().to_string();
-                    let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                    assert_eq!(
+                        sink.journal
+                            .as_ref()
+                            .unwrap()
+                            .owner
+                            .as_ref()
+                            .unwrap()
+                            .get_stats()
+                            .sequence,
+                        sequence
+                    );
+                    let previous_error = sink
+                        .cancellation
+                        .as_ref()
+                        .unwrap()
+                        .result
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap_err()
+                        .to_string();
+                    let region = cx
+                        .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
                     let child = region.cx();
                     child.cancel_with(crate::types::CancelKind::User, Some("before cleanup retry"));
                     let refused = sink.retry_journaled_cancellation(child).await.unwrap_err();
                     assert_eq!(cancellation_failure(&refused).observation, None);
-                    assert_eq!(sink.journal_cancellation(), Some(ManifestFileCancellation {
-                        cancellation_persisted: true, cleanup_attempted: true,
-                    }));
-                    assert_eq!(sink.cancellation.as_ref().unwrap().result.as_ref()
-                        .unwrap().as_ref().unwrap_err().to_string(), previous_error);
+                    assert_eq!(
+                        sink.journal_cancellation(),
+                        Some(ManifestFileCancellation {
+                            cancellation_persisted: true,
+                            cleanup_attempted: true,
+                        })
+                    );
+                    assert_eq!(
+                        sink.cancellation
+                            .as_ref()
+                            .unwrap()
+                            .result
+                            .as_ref()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap_err()
+                            .to_string(),
+                        previous_error
+                    );
                     assert!(sink.pending.is_none());
-                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
+                    assert_eq!(
+                        sink.journal
+                            .as_ref()
+                            .unwrap()
+                            .owner
+                            .as_ref()
+                            .unwrap()
+                            .get_stats()
+                            .sequence,
+                        sequence
+                    );
                     region.close().await.unwrap();
-                    std::fs::rename(&staging, directory.path().join("retained-fault-directory")).unwrap();
+                    std::fs::rename(&staging, directory.path().join("retained-fault-directory"))
+                        .unwrap();
                     std::fs::rename(&retained, &staging).unwrap();
                     let observed = sink.retry_journaled_cancellation(&cx).await.unwrap();
                     assert!(observed.cancellation_persisted && observed.cleanup_attempted);
-                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence + 1);
+                    assert_eq!(
+                        sink.journal
+                            .as_ref()
+                            .unwrap()
+                            .owner
+                            .as_ref()
+                            .unwrap()
+                            .get_stats()
+                            .sequence,
+                        sequence + 1
+                    );
                     assert!(!staging.exists());
-                    let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                    let region = cx
+                        .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
                     let child = region.cx();
-                    child.cancel_with(crate::types::CancelKind::User, Some("after completed cleanup"));
+                    child.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("after completed cleanup"),
+                    );
                     // Observing the retained result is not fresh cleanup work.
-                    assert_eq!(sink.cancel_journaled(child, "stop", 78).await.unwrap(), observed);
-                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence + 1);
+                    assert_eq!(
+                        sink.cancel_journaled(child, "stop", 78).await.unwrap(),
+                        observed
+                    );
+                    assert_eq!(
+                        sink.journal
+                            .as_ref()
+                            .unwrap()
+                            .owner
+                            .as_ref()
+                            .unwrap()
+                            .get_stats()
+                            .sequence,
+                        sequence + 1
+                    );
                     region.close().await.unwrap();
                     assert!(sink.retry_journaled_cancellation(&cx).await.is_err());
                 });
@@ -1983,8 +2603,13 @@ mod manifest_sink {
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
                     let path = directory.path().join("destination");
-                    let mut sink = ManifestFileSink::new_journaled(&cx,
-                        durable_config(b"data", path.clone(), CommitPolicy::AtomicRename), journal_input(directory.path())).await.unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(
+                        &cx,
+                        durable_config(b"data", path.clone(), CommitPolicy::AtomicRename),
+                        journal_input(directory.path()),
+                    )
+                    .await
+                    .unwrap();
                     sink.write_all(b"data").await.unwrap();
                     let (started, mut start) = oneshot::channel();
                     let (release, wait) = mpsc::channel();
@@ -1997,13 +2622,16 @@ mod manifest_sink {
                     poll_fn(|task| {
                         assert!(blocked.as_mut().poll(task).is_pending());
                         start.poll_recv_uninterruptible(task)
-                    }).await.unwrap();
+                    })
+                    .await
+                    .unwrap();
                     let expected = receipt(b"data");
                     let mut committing = Box::pin(commit(&mut sink, &expected));
                     poll_fn(|task| {
                         assert!(committing.as_mut().poll(task).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     drop(committing);
                     assert!(sink.pending.is_some());
                     assert!(sink.receipt.is_some());
@@ -2011,23 +2639,43 @@ mod manifest_sink {
                     poll_fn(|task| {
                         assert!(cancelling.as_mut().poll(task).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     drop(cancelling);
                     release.send(()).unwrap();
                     blocked.await.unwrap();
-                    let error = sink.cancel_journaled(&cx, "too late", 79).await.unwrap_err();
+                    let error = sink
+                        .cancel_journaled(&cx, "too late", 79)
+                        .await
+                        .unwrap_err();
                     assert_eq!(cancellation_failure(&error).observation, None);
-                    assert_eq!(cancellation_failure(&error).publication,
-                        Some(JournalPublication::Confirmed(path.clone())));
+                    assert_eq!(
+                        cancellation_failure(&error).publication,
+                        Some(JournalPublication::Confirmed(path.clone()))
+                    );
                     assert_eq!(sink.published_path(), Some(path.as_path()));
-                    assert_eq!(sink.journal_publication(), Some(&JournalPublication::Confirmed(path.clone())));
+                    assert_eq!(
+                        sink.journal_publication(),
+                        Some(&JournalPublication::Confirmed(path.clone()))
+                    );
                     assert_eq!(std::fs::read(&path).unwrap(), b"data");
                     let owner = sink.release_journal().unwrap();
-                    assert!(owner.get_transfer_entries("live-checkpoint").unwrap().iter().all(|entry| {
-                        !matches!(&entry.record, crate::atp::journal::JournalRecord::Cancellation { .. })
-                    }));
-                    assert!(matches!(owner.get_resume_summary("live-checkpoint").unwrap().status,
-                        TransferResumeStatus::Committed { .. }));
+                    assert!(
+                        owner
+                            .get_transfer_entries("live-checkpoint")
+                            .unwrap()
+                            .iter()
+                            .all(|entry| {
+                                !matches!(
+                                    &entry.record,
+                                    crate::atp::journal::JournalRecord::Cancellation { .. }
+                                )
+                            })
+                    );
+                    assert!(matches!(
+                        owner.get_resume_summary("live-checkpoint").unwrap().status,
+                        TransferResumeStatus::Committed { .. }
+                    ));
                 });
                 drained(&runtime);
             }
@@ -2040,30 +2688,68 @@ mod manifest_sink {
                 let runtime = runtime(workers, 2);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    let mut ordinary = ManifestFileSink::new(&cx,
-                        config(b"data", directory.path().join("ordinary"), CommitPolicy::AtomicRename)).await.unwrap();
-                    assert_eq!(ordinary.cancel_journaled(&cx, "stop", 80).await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                    let mut ordinary = ManifestFileSink::new(
+                        &cx,
+                        config(
+                            b"data",
+                            directory.path().join("ordinary"),
+                            CommitPolicy::AtomicRename,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        ordinary
+                            .cancel_journaled(&cx, "stop", 80)
+                            .await
+                            .unwrap_err()
+                            .kind(),
+                        io::ErrorKind::InvalidInput
+                    );
                     ordinary.write_all(b"data").await.unwrap();
                     commit(&mut ordinary, &receipt(b"data")).await.unwrap();
-                    let mut sink = ManifestFileSink::new_journaled(&cx,
-                        durable_config(b"data", directory.path().join("journaled"), CommitPolicy::AtomicRename),
-                        journal_input(directory.path())).await.unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(
+                        &cx,
+                        durable_config(
+                            b"data",
+                            directory.path().join("journaled"),
+                            CommitPolicy::AtomicRename,
+                        ),
+                        journal_input(directory.path()),
+                    )
+                    .await
+                    .unwrap();
                     for reason in [String::new(), "x".repeat(4097)] {
-                        assert_eq!(sink.cancel_journaled(&cx, &reason, 80).await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                        assert_eq!(
+                            sink.cancel_journaled(&cx, &reason, 80)
+                                .await
+                                .unwrap_err()
+                                .kind(),
+                            io::ErrorKind::InvalidInput
+                        );
                         assert!(sink.cancellation.is_none());
                         assert!(!sink.shutdown);
                     }
                     sink.write_all(b"data").await.unwrap();
                     let staging = sink.journal_checkpoint().unwrap().source_path.clone();
-                    let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                    let region = cx
+                        .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
                     let child = region.cx();
-                    child.cancel_with(crate::types::CancelKind::User, Some("before explicit cleanup"));
+                    child.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("before explicit cleanup"),
+                    );
                     let error = sink.cancel_journaled(child, "stop", 80).await.unwrap_err();
                     let observed = cancellation_failure(&error);
                     assert_eq!(observed.observation, None);
-                    assert!(matches!(observed.source.get_ref()
-                        .and_then(|source| source.downcast_ref::<crate::fs::scoped::ScopedFsError>()),
-                        Some(crate::fs::scoped::ScopedFsError::Checkpoint(_))));
+                    assert!(matches!(
+                        observed.source.get_ref().and_then(|source| {
+                            source.downcast_ref::<crate::fs::scoped::ScopedFsError>()
+                        }),
+                        Some(crate::fs::scoped::ScopedFsError::Checkpoint(_))
+                    ));
                     assert!(sink.journal.as_ref().unwrap().owner.is_some());
                     assert!(sink.cancellation.is_none());
                     assert!(!sink.shutdown);
@@ -2088,11 +2774,27 @@ mod manifest_sink {
                 let runtime = runtime(workers, 1);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    let mut sink = ManifestFileSink::new_journaled(&cx,
-                        durable_config(b"data", directory.path().join("destination"), CommitPolicy::AtomicRename),
-                        journal_input(directory.path())).await.unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(
+                        &cx,
+                        durable_config(
+                            b"data",
+                            directory.path().join("destination"),
+                            CommitPolicy::AtomicRename,
+                        ),
+                        journal_input(directory.path()),
+                    )
+                    .await
+                    .unwrap();
                     let staging = sink.journal_checkpoint().unwrap().source_path.clone();
-                    let sequence = sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence;
+                    let sequence = sink
+                        .journal
+                        .as_ref()
+                        .unwrap()
+                        .owner
+                        .as_ref()
+                        .unwrap()
+                        .get_stats()
+                        .sequence;
                     let (started, mut start) = oneshot::channel();
                     let (release, wait) = mpsc::channel();
                     let fs = cx.scoped_fs();
@@ -2104,33 +2806,56 @@ mod manifest_sink {
                     poll_fn(|task| {
                         assert!(blocked.as_mut().poll(task).is_pending());
                         start.poll_recv_uninterruptible(task)
-                    }).await.unwrap();
+                    })
+                    .await
+                    .unwrap();
                     let mut writing = Box::pin(sink.write(b"data"));
                     poll_fn(|task| {
                         assert!(writing.as_mut().poll(task).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     drop(writing);
-                    assert!(sink.pending.is_some(), "write must be queued behind the sole occupied worker");
-                    let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                    assert!(
+                        sink.pending.is_some(),
+                        "write must be queued behind the sole occupied worker"
+                    );
+                    let region = cx
+                        .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
                     let child = region.cx();
                     child.cancel_with(crate::types::CancelKind::User, Some("reject fresh cleanup"));
                     let mut cancelling = Box::pin(sink.cancel_journaled(child, "stop", 81));
                     let error = poll_fn(|task| match cancelling.as_mut().poll(task) {
                         Poll::Ready(Err(error)) => Poll::Ready(error),
                         _ => panic!("known refusal must not poll or wait for the queued write"),
-                    }).await;
+                    })
+                    .await;
                     drop(cancelling);
                     let refused = cancellation_failure(&error);
                     assert_eq!(refused.observation, None);
-                    assert!(matches!(refused.source.get_ref()
-                        .and_then(|error| error.downcast_ref::<crate::fs::scoped::ScopedFsError>()),
-                        Some(crate::fs::scoped::ScopedFsError::Checkpoint(_))));
+                    assert!(matches!(
+                        refused.source.get_ref().and_then(|error| error
+                            .downcast_ref::<crate::fs::scoped::ScopedFsError>(
+                        )),
+                        Some(crate::fs::scoped::ScopedFsError::Checkpoint(_))
+                    ));
                     assert!(sink.pending.is_some());
                     assert!(sink.cancellation.is_none());
                     assert!(!sink.shutdown);
                     assert_eq!(sink.written_bytes(), 0);
-                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
+                    assert_eq!(
+                        sink.journal
+                            .as_ref()
+                            .unwrap()
+                            .owner
+                            .as_ref()
+                            .unwrap()
+                            .get_stats()
+                            .sequence,
+                        sequence
+                    );
                     assert!(std::fs::read(&staging).unwrap().is_empty());
                     release.send(()).unwrap();
                     blocked.await.unwrap();
@@ -2149,15 +2874,24 @@ mod manifest_sink {
         fn journaled_sink_checkpoints_each_prefix_and_reopens_terminal_publication() {
             use crate::atp::journal::JournalRecord;
             for workers in [1, 2] {
-                for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                for policy in [
+                    CommitPolicy::AtomicRename,
+                    CommitPolicy::CopyAndVerify,
+                    CommitPolicy::LinkAndUnlink,
+                ] {
                     for data in [b"".as_slice(), b"abcdefgh".as_slice()] {
                         let directory = tempfile::tempdir().unwrap();
                         let runtime = runtime(workers, 2);
                         runtime.block_on(async {
                             let cx = Cx::current().unwrap();
                             let path = directory.path().join("destination");
-                            let mut sink = ManifestFileSink::new_journaled(&cx,
-                                durable_config(data, path.clone(), policy), journal_input(directory.path())).await.unwrap();
+                            let mut sink = ManifestFileSink::new_journaled(
+                                &cx,
+                                durable_config(data, path.clone(), policy),
+                                journal_input(directory.path()),
+                            )
+                            .await
+                            .unwrap();
                             let initial = sink.journal_checkpoint().unwrap().clone();
                             assert_eq!(initial.summary.durable_bytes, 0);
                             assert_eq!(initial.summary.total_size, Some(data.len() as u64));
@@ -2166,7 +2900,10 @@ mod manifest_sink {
                             let mut written = 0;
                             for batch in data.chunks(3) {
                                 sink.write_all(batch).await.unwrap();
-                                assert_eq!(sink.journal_checkpoint().unwrap().summary.durable_bytes, written);
+                                assert_eq!(
+                                    sink.journal_checkpoint().unwrap().summary.durable_bytes,
+                                    written
+                                );
                                 written += batch.len() as u64;
                                 sink.flush().await.unwrap();
                                 let saved = sink.journal_checkpoint().unwrap();
@@ -2174,32 +2911,80 @@ mod manifest_sink {
                                 assert_eq!(saved.summary.contiguous_prefix_bytes, written);
                                 assert_eq!(saved.source_path, initial.source_path);
                                 assert!(!path.exists());
-                                let sequence = sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence;
+                                let sequence = sink
+                                    .journal
+                                    .as_ref()
+                                    .unwrap()
+                                    .owner
+                                    .as_ref()
+                                    .unwrap()
+                                    .get_stats()
+                                    .sequence;
                                 sink.flush().await.unwrap();
-                                assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
+                                assert_eq!(
+                                    sink.journal
+                                        .as_ref()
+                                        .unwrap()
+                                        .owner
+                                        .as_ref()
+                                        .unwrap()
+                                        .get_stats()
+                                        .sequence,
+                                    sequence
+                                );
                             }
                             commit(&mut sink, &receipt(data)).await.unwrap();
-                            assert_eq!(sink.journal_publication(), Some(&JournalPublication::Confirmed(path.clone())));
+                            assert_eq!(
+                                sink.journal_publication(),
+                                Some(&JournalPublication::Confirmed(path.clone()))
+                            );
                             assert_eq!(std::fs::read(&path).unwrap(), data);
                             let owner = sink.release_journal().unwrap();
                             let entries = owner.get_transfer_entries("live-checkpoint").unwrap();
                             assert!(matches!(&entries[0].record, JournalRecord::Offer { .. }));
                             for chunk in entries[1..entries.len() - 2].chunks(3) {
-                                assert!(matches!(&chunk[0].record, JournalRecord::ChunkReceived { .. }));
-                                assert!(matches!(&chunk[1].record, JournalRecord::ChunkVerified { .. }));
-                                assert!(matches!(&chunk[2].record, JournalRecord::ChunkWritten { .. }));
+                                assert!(matches!(
+                                    &chunk[0].record,
+                                    JournalRecord::ChunkReceived { .. }
+                                ));
+                                assert!(matches!(
+                                    &chunk[1].record,
+                                    JournalRecord::ChunkVerified { .. }
+                                ));
+                                assert!(matches!(
+                                    &chunk[2].record,
+                                    JournalRecord::ChunkWritten { .. }
+                                ));
                             }
-                            assert!(matches!(&entries[entries.len() - 2].record, JournalRecord::CommitIntent { .. }));
-                            assert!(matches!(&entries[entries.len() - 1].record, JournalRecord::CommitComplete { .. }));
+                            assert!(matches!(
+                                &entries[entries.len() - 2].record,
+                                JournalRecord::CommitIntent { .. }
+                            ));
+                            assert!(matches!(
+                                &entries[entries.len() - 1].record,
+                                JournalRecord::CommitComplete { .. }
+                            ));
                             let reopen = journal_config(directory.path());
-                            let summary = cx.scoped_fs().run_io(move |_| {
-                                drop(owner);
-                                let reopened = AppendJournal::new(reopen, crate::security::AuthKey::from_seed(42)).unwrap();
-                                Ok(reopened.get_resume_summary("live-checkpoint").unwrap())
-                            }).await.unwrap();
-                            assert_eq!(summary.status, TransferResumeStatus::Committed {
-                                final_path: path.to_str().unwrap().to_owned(), committed_size: data.len() as u64,
-                            });
+                            let summary = cx
+                                .scoped_fs()
+                                .run_io(move |_| {
+                                    drop(owner);
+                                    let reopened = AppendJournal::new(
+                                        reopen,
+                                        crate::security::AuthKey::from_seed(42),
+                                    )
+                                    .unwrap();
+                                    Ok(reopened.get_resume_summary("live-checkpoint").unwrap())
+                                })
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                summary.status,
+                                TransferResumeStatus::Committed {
+                                    final_path: path.to_str().unwrap().to_owned(),
+                                    committed_size: data.len() as u64,
+                                }
+                            );
                         });
                         drained(&runtime);
                     }
@@ -2215,26 +3000,72 @@ mod manifest_sink {
                 let runtime = runtime(workers, 2);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    let config = durable_config(b"abcdefgh", directory.path().join("first"), CommitPolicy::AtomicRename);
+                    let config = durable_config(
+                        b"abcdefgh",
+                        directory.path().join("first"),
+                        CommitPolicy::AtomicRename,
+                    );
                     let manifest = Arc::clone(&config.manifest);
-                    let mut sink = ManifestFileSink::new_journaled(&cx, config, journal_input(directory.path())).await.unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(
+                        &cx,
+                        config,
+                        journal_input(directory.path()),
+                    )
+                    .await
+                    .unwrap();
                     sink.write_all(b"abcd").await.unwrap();
                     sink.flush().await.unwrap();
                     let checkpoint = sink.journal_checkpoint().unwrap().clone();
                     let mut owner = sink.release_journal().unwrap();
                     drop(sink);
-                    cx.scoped_fs().run_io(move |_| { owner.compact().unwrap(); drop(owner); Ok(()) }).await.unwrap();
+                    cx.scoped_fs()
+                        .run_io(move |_| {
+                            owner.compact().unwrap();
+                            drop(owner);
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
                     let destination = directory.path().join("restored");
-                    let restored = ScopedSparseWriter::restore_from_storage(&cx, JournalRestoreRequest {
-                        journal_config: journal_config(directory.path()), auth_key: crate::security::AuthKey::from_seed(42),
-                        transfer_id: "live-checkpoint".to_owned(), source_path: checkpoint.source_path.clone(),
-                        final_path: destination.clone(), writer_config: SparseWriterConfig {
-                            enable_preallocation: false, ..SparseWriterConfig::default()
-                        }, limits: JournalRestoreLimits { max_bytes: 8, max_chunks: 4, max_chunk_bytes: MAX_LIVE_EPOCH_BYTES },
-                    }).await.unwrap().unwrap();
-                    assert_eq!(restored.checked_receive_offset(&cx).await.unwrap().unwrap(), 4);
-                    let mut receiving = restored.resume_exact_at(&cx, b"efghNEXT".as_slice(), manifest,
-                        ScopedReceiveOptions { max_bytes: 8, max_chunks: 4, chunk_size: 4 }, 4).unwrap();
+                    let restored = ScopedSparseWriter::restore_from_storage(
+                        &cx,
+                        JournalRestoreRequest {
+                            journal_config: journal_config(directory.path()),
+                            auth_key: crate::security::AuthKey::from_seed(42),
+                            transfer_id: "live-checkpoint".to_owned(),
+                            source_path: checkpoint.source_path.clone(),
+                            final_path: destination.clone(),
+                            writer_config: SparseWriterConfig {
+                                enable_preallocation: false,
+                                ..SparseWriterConfig::default()
+                            },
+                            limits: JournalRestoreLimits {
+                                max_bytes: 8,
+                                max_chunks: 4,
+                                max_chunk_bytes: MAX_LIVE_EPOCH_BYTES,
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(
+                        restored.checked_receive_offset(&cx).await.unwrap().unwrap(),
+                        4
+                    );
+                    let mut receiving = restored
+                        .resume_exact_at(
+                            &cx,
+                            b"efghNEXT".as_slice(),
+                            manifest,
+                            ScopedReceiveOptions {
+                                max_bytes: 8,
+                                max_chunks: 4,
+                                chunk_size: 4,
+                            },
+                            4,
+                        )
+                        .unwrap();
                     assert_eq!(receiving.wait().await.unwrap().unwrap(), destination);
                     assert_eq!(receiving.take_source().unwrap(), b"NEXT");
                     assert_eq!(std::fs::read(destination).unwrap(), b"abcdefgh");
@@ -2254,22 +3085,42 @@ mod manifest_sink {
                     let cx = Cx::current().unwrap();
                     let output = directory.path().join("output");
                     std::fs::create_dir(&output).unwrap();
-                    let mut config = durable_config(b"data", output.join("file"), CommitPolicy::AtomicRename);
+                    let mut config =
+                        durable_config(b"data", output.join("file"), CommitPolicy::AtomicRename);
                     let mut journal = journal_input(directory.path());
                     match case {
                         0 => config.writer.fsync_policy = FsyncPolicy::Never,
                         1 => journal.transfer_id.clear(),
-                        2 => config.expected_chunk_commitment = Some(ManifestChunkCommitment::new([0; 32])),
+                        2 => {
+                            config.expected_chunk_commitment =
+                                Some(ManifestChunkCommitment::new([0; 32]))
+                        }
                         3 => config.max_bytes = 3,
-                        4 => { journal.journal.append(JournalRecord::Cancellation {
-                            transfer_id: journal.transfer_id.clone(), reason: "retained stop".to_owned(),
-                            timestamp: 1, auth_tag: crate::security::AuthenticationTag::zero(),
-                        }).unwrap(); journal.journal.flush().unwrap(); }
+                        4 => {
+                            journal
+                                .journal
+                                .append(JournalRecord::Cancellation {
+                                    transfer_id: journal.transfer_id.clone(),
+                                    reason: "retained stop".to_owned(),
+                                    timestamp: 1,
+                                    auth_tag: crate::security::AuthenticationTag::zero(),
+                                })
+                                .unwrap();
+                            journal.journal.flush().unwrap();
+                        }
                         _ => unreachable!(),
                     }
-                    assert!(ManifestFileSink::new_journaled(&cx, config, journal).await.is_err());
+                    assert!(
+                        ManifestFileSink::new_journaled(&cx, config, journal)
+                            .await
+                            .is_err()
+                    );
                     assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
-                    let reopened = AppendJournal::new(journal_config(directory.path()), crate::security::AuthKey::from_seed(42)).unwrap();
+                    let reopened = AppendJournal::new(
+                        journal_config(directory.path()),
+                        crate::security::AuthKey::from_seed(42),
+                    )
+                    .unwrap();
                     assert_eq!(reopened.get_stats().sequence, u64::from(case == 4));
                 });
                 drained(&runtime);
@@ -2284,21 +3135,48 @@ mod manifest_sink {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let path = directory.path().join("destination");
-                cx.scoped_fs().write(path.clone(), b"original".to_vec()).await.unwrap();
-                let mut sink = ManifestFileSink::new_journaled(&cx,
-                    durable_config(b"abcdefgh", path.clone(), CommitPolicy::CopyAndVerify), journal_input(directory.path())).await.unwrap();
+                cx.scoped_fs()
+                    .write(path.clone(), b"original".to_vec())
+                    .await
+                    .unwrap();
+                let mut sink = ManifestFileSink::new_journaled(
+                    &cx,
+                    durable_config(b"abcdefgh", path.clone(), CommitPolicy::CopyAndVerify),
+                    journal_input(directory.path()),
+                )
+                .await
+                .unwrap();
                 sink.write_all(b"tampered").await.unwrap();
                 sink.flush().await.unwrap();
                 assert_eq!(sink.journal_checkpoint().unwrap().summary.durable_bytes, 8);
                 let error = commit(&mut sink, &receipt(b"tampered")).await.unwrap_err();
                 assert!(error.to_string().contains("hash mismatch"));
-                assert_eq!(sink.journal_publication(), Some(&JournalPublication::NotAttempted));
+                assert_eq!(
+                    sink.journal_publication(),
+                    Some(&JournalPublication::NotAttempted)
+                );
                 assert!(sink.published_path().is_none());
-                assert_eq!(commit(&mut sink, &receipt(b"tampered")).await.unwrap_err().to_string(), error.to_string());
+                assert_eq!(
+                    commit(&mut sink, &receipt(b"tampered"))
+                        .await
+                        .unwrap_err()
+                        .to_string(),
+                    error.to_string()
+                );
                 let journal = sink.release_journal().unwrap();
-                assert!(journal.get_transfer_entries("live-checkpoint").unwrap().iter().all(|entry| {
-                    !matches!(&entry.record, JournalRecord::CommitIntent { .. } | JournalRecord::CommitComplete { .. })
-                }));
+                assert!(
+                    journal
+                        .get_transfer_entries("live-checkpoint")
+                        .unwrap()
+                        .iter()
+                        .all(|entry| {
+                            !matches!(
+                                &entry.record,
+                                JournalRecord::CommitIntent { .. }
+                                    | JournalRecord::CommitComplete { .. }
+                            )
+                        })
+                );
                 assert_eq!(std::fs::read(path).unwrap(), b"original");
             });
             drained(&runtime);
@@ -2361,12 +3239,35 @@ mod manifest_sink {
                 drop(input.journal);
                 let mut config = journal_config(directory.path());
                 config.max_journal_size = 1;
-                input.journal = AppendJournal::new(config.clone(), crate::security::AuthKey::from_seed(42)).unwrap();
+                input.journal =
+                    AppendJournal::new(config.clone(), crate::security::AuthKey::from_seed(42))
+                        .unwrap();
                 let path = directory.path().join("destination");
-                let mut sink = ManifestFileSink::new_journaled(&cx,
-                    durable_config(b"data", path.clone(), CommitPolicy::AtomicRename), input).await.unwrap();
-                let generation = sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().generation;
-                cx.scoped_fs().write(config.base_dir.join(format!("journal_gen_{:06}.dat", generation + 1)), vec![1]).await.unwrap();
+                let mut sink = ManifestFileSink::new_journaled(
+                    &cx,
+                    durable_config(b"data", path.clone(), CommitPolicy::AtomicRename),
+                    input,
+                )
+                .await
+                .unwrap();
+                let generation = sink
+                    .journal
+                    .as_ref()
+                    .unwrap()
+                    .owner
+                    .as_ref()
+                    .unwrap()
+                    .get_stats()
+                    .generation;
+                cx.scoped_fs()
+                    .write(
+                        config
+                            .base_dir
+                            .join(format!("journal_gen_{:06}.dat", generation + 1)),
+                        vec![1],
+                    )
+                    .await
+                    .unwrap();
                 sink.write_all(b"data").await.unwrap();
                 let error = sink.flush().await.unwrap_err();
                 assert!(error.to_string().contains("checkpoint journal"));
@@ -2375,10 +3276,22 @@ mod manifest_sink {
                 assert_eq!(sink.flushed, Some(0));
                 assert!(sink.pending.is_none());
                 assert!(sink.journal.as_ref().unwrap().owner.is_some());
-                assert_eq!(sink.flush().await.unwrap_err().to_string(), error.to_string());
-                assert_eq!(commit(&mut sink, &receipt(b"data")).await.unwrap_err().to_string(), error.to_string());
+                assert_eq!(
+                    sink.flush().await.unwrap_err().to_string(),
+                    error.to_string()
+                );
+                assert_eq!(
+                    commit(&mut sink, &receipt(b"data"))
+                        .await
+                        .unwrap_err()
+                        .to_string(),
+                    error.to_string()
+                );
                 let journal = sink.release_journal().unwrap();
-                assert!(matches!(journal.get_resume_summary("live-checkpoint"), Outcome::Err(_)));
+                assert!(matches!(
+                    journal.get_resume_summary("live-checkpoint"),
+                    Outcome::Err(_)
+                ));
                 assert!(!path.exists());
             });
             drained(&runtime);
@@ -2391,41 +3304,79 @@ mod manifest_sink {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let path = directory.path().join("destination");
-                let mut sink = ManifestFileSink::new_journaled(&cx,
-                    durable_config(b"data", path.clone(), CommitPolicy::AtomicRename), journal_input(directory.path())).await.unwrap();
+                let mut sink = ManifestFileSink::new_journaled(
+                    &cx,
+                    durable_config(b"data", path.clone(), CommitPolicy::AtomicRename),
+                    journal_input(directory.path()),
+                )
+                .await
+                .unwrap();
                 sink.write_all(b"data").await.unwrap();
                 let checkpoint = sink.journal_request().unwrap();
                 let writer = sink.writer.clone();
                 let child = cx.clone();
                 sink.receipt = Some(receipt(b"data"));
                 sink.pending = Some(Box::pin(async move {
-                    let mut report = writer.verify_and_commit_to_journal(&child, JournalCommitRequest {
-                        checkpoint, expected_chunk_commitment: None,
-                    }).await.map_err(io::Error::other)?;
-                    assert!(matches!(report.publication, JournalPublication::Confirmed(_)));
+                    let mut report = writer
+                        .verify_and_commit_to_journal(
+                            &child,
+                            JournalCommitRequest {
+                                checkpoint,
+                                expected_chunk_commitment: None,
+                            },
+                        )
+                        .await
+                        .map_err(io::Error::other)?;
+                    assert!(matches!(
+                        report.publication,
+                        JournalPublication::Confirmed(_)
+                    ));
                     // Deliberately fault the adapter's report boundary after
                     // REAL publication. This is not a failed-storage simulation.
-                    report.outcome = Outcome::Err(SparseWriterError::WriteFailed("completion receipt unavailable".to_owned()));
+                    report.outcome = Outcome::Err(SparseWriterError::WriteFailed(
+                        "completion receipt unavailable".to_owned(),
+                    ));
                     Ok(Completion::JournalCommitted(Box::new(report)))
                 }));
                 let error = commit(&mut sink, &receipt(b"data")).await.unwrap_err();
                 assert!(error.to_string().contains("completion receipt unavailable"));
                 assert_eq!(sink.published_path(), Some(path.as_path()));
-                assert_eq!(sink.journal_publication(), Some(&JournalPublication::Confirmed(path.clone())));
+                assert_eq!(
+                    sink.journal_publication(),
+                    Some(&JournalPublication::Confirmed(path.clone()))
+                );
                 assert_eq!(std::fs::read(&path).unwrap(), b"data");
                 let mut current: &(dyn std::error::Error + 'static) = &error;
                 let mut found = false;
                 loop {
                     if let Some(observation) = current.downcast_ref::<ManifestFileJournalError>() {
-                        assert_eq!(observation.publication, JournalPublication::Confirmed(path.clone()));
+                        assert_eq!(
+                            observation.publication,
+                            JournalPublication::Confirmed(path.clone())
+                        );
                         found = true;
                         break;
                     }
-                    match current.source() { Some(source) => current = source, None => break }
+                    match current.source() {
+                        Some(source) => current = source,
+                        None => break,
+                    }
                 }
-                assert!(found, "owned receiver reports must retain publication even after sink drop");
-                cx.scoped_fs().write(path.clone(), b"later".to_vec()).await.unwrap();
-                assert_eq!(commit(&mut sink, &receipt(b"data")).await.unwrap_err().to_string(), error.to_string());
+                assert!(
+                    found,
+                    "owned receiver reports must retain publication even after sink drop"
+                );
+                cx.scoped_fs()
+                    .write(path.clone(), b"later".to_vec())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    commit(&mut sink, &receipt(b"data"))
+                        .await
+                        .unwrap_err()
+                        .to_string(),
+                    error.to_string()
+                );
                 assert_eq!(std::fs::read(path).unwrap(), b"later");
                 assert!(sink.release_journal().is_ok());
             });
@@ -2441,16 +3392,36 @@ mod manifest_sink {
                 let cx = Cx::current().unwrap();
                 let output = directory.path().join("output");
                 std::fs::create_dir(&output).unwrap();
-                let config = durable_config(b"data", output.join("data"), CommitPolicy::AtomicRename);
-                let unpolled = ManifestFileSink::new_journaled(&cx, config.clone(), journal_input(directory.path()));
+                let config =
+                    durable_config(b"data", output.join("data"), CommitPolicy::AtomicRename);
+                let unpolled = ManifestFileSink::new_journaled(
+                    &cx,
+                    config.clone(),
+                    journal_input(directory.path()),
+                );
                 assert_send(&unpolled);
                 drop(unpolled);
-                let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                let region = cx
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
                 let child = region.cx();
-                child.cancel_with(crate::types::CancelKind::User, Some("before journaled sink"));
-                assert!(ManifestFileSink::new_journaled(child, config, journal_input(directory.path())).await.is_err());
+                child.cancel_with(
+                    crate::types::CancelKind::User,
+                    Some("before journaled sink"),
+                );
+                assert!(
+                    ManifestFileSink::new_journaled(child, config, journal_input(directory.path()))
+                        .await
+                        .is_err()
+                );
                 assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
-                assert_eq!(std::fs::read_dir(journal_config(directory.path()).base_dir).unwrap().count(), 0);
+                assert_eq!(
+                    std::fs::read_dir(journal_config(directory.path()).base_dir)
+                        .unwrap()
+                        .count(),
+                    0
+                );
                 region.close().await.unwrap();
             });
             drained(&runtime);
@@ -2463,26 +3434,42 @@ mod manifest_sink {
         }
 
         impl AsyncWrite for JournalFlushGate {
-            fn poll_write(mut self: Pin<&mut Self>, task: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                task: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
                 Pin::new(&mut self.inner).poll_write(task, bytes)
             }
 
-            fn poll_flush(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                task: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
                 if self.inner.written_bytes() == 4 && !self.gate.released.load(Ordering::SeqCst) {
                     *self.gate.wake.lock() = Some(task.waker().clone());
                     self.gate.entered.store(true, Ordering::SeqCst);
-                    if !self.gate.released.load(Ordering::SeqCst) { return Poll::Pending; }
+                    if !self.gate.released.load(Ordering::SeqCst) {
+                        return Poll::Pending;
+                    }
                 }
                 Pin::new(&mut self.inner).poll_flush(task)
             }
 
-            fn poll_shutdown(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                task: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
                 Pin::new(&mut self.inner).poll_shutdown(task)
             }
         }
 
         impl LiveStreamCommitSink for JournalFlushGate {
-            fn poll_commit(mut self: Pin<&mut Self>, task: &mut Context<'_>, receipt: &LiveStreamReceipt) -> Poll<io::Result<()>> {
+            fn poll_commit(
+                mut self: Pin<&mut Self>,
+                task: &mut Context<'_>,
+                receipt: &LiveStreamReceipt,
+            ) -> Poll<io::Result<()>> {
                 self.commit_entered.store(true, Ordering::SeqCst);
                 Pin::new(&mut self.inner).poll_commit(task, receipt)
             }
@@ -2490,8 +3477,10 @@ mod manifest_sink {
 
         #[test]
         fn real_mtls_journaled_sink_withholds_ack_on_checkpoint_failure() {
-            use crate::net::atp::sdk::{AtpSdk, NativeClientAuthorization, NativeClientCertificateId, SessionConfig};
             use crate::net::atp::sdk::native_auth::live::{LiveStreamConfig, LiveStreamError};
+            use crate::net::atp::sdk::{
+                AtpSdk, NativeClientAuthorization, NativeClientCertificateId, SessionConfig,
+            };
             use rustls::pki_types::ServerName;
             for workers in [1, 2] {
                 for fail_storage in [false, true] {
@@ -2500,41 +3489,112 @@ mod manifest_sink {
                     runtime.block_on(async {
                         let cx = Cx::current().unwrap();
                         let scope = cx.scope();
-                        let sdk = AtpSdk::new_in_process(SessionConfig { max_concurrent_transfers: 1, ..SessionConfig::default() });
-                        let roots = || { let mut roots = rustls::RootCertStore::empty(); roots.add(certificate("ca")).unwrap(); roots };
+                        let sdk = AtpSdk::new_in_process(SessionConfig {
+                            max_concurrent_transfers: 1,
+                            ..SessionConfig::default()
+                        });
+                        let roots = || {
+                            let mut roots = rustls::RootCertStore::empty();
+                            roots.add(certificate("ca")).unwrap();
+                            roots
+                        };
                         let mut limits = LiveStreamConfig::default();
                         limits.epoch_bytes = 4;
                         limits.max_bytes = 8;
                         limits.operation_timeout = Duration::from_secs(5);
-                        let sender = sdk.live_stream_sender(limits.clone(), ServerName::try_from("localhost").unwrap(), roots(), identity("allowed")).unwrap();
-                        let client = NativeClientCertificateId::from_certificate(&certificate("allowed"));
-                        let receiver = sdk.live_stream_receiver(limits, identity("server"), NativeClientAuthorization::new(roots(), [client]).unwrap()).unwrap();
+                        let sender = sdk
+                            .live_stream_sender(
+                                limits.clone(),
+                                ServerName::try_from("localhost").unwrap(),
+                                roots(),
+                                identity("allowed"),
+                            )
+                            .unwrap();
+                        let client =
+                            NativeClientCertificateId::from_certificate(&certificate("allowed"));
+                        let receiver = sdk
+                            .live_stream_receiver(
+                                limits,
+                                identity("server"),
+                                NativeClientAuthorization::new(roots(), [client]).unwrap(),
+                            )
+                            .unwrap();
                         let mut journal_config = journal_config(directory.path());
-                        if fail_storage { journal_config.max_journal_size = 1; }
+                        if fail_storage {
+                            journal_config.max_journal_size = 1;
+                        }
                         let selected = journal_config.clone();
-                        let owner = cx.scoped_fs().run_io(move |_| {
-                            Ok(AppendJournal::new(selected, crate::security::AuthKey::from_seed(42)).unwrap())
-                        }).await.unwrap();
+                        let owner = cx
+                            .scoped_fs()
+                            .run_io(move |_| {
+                                Ok(AppendJournal::new(
+                                    selected,
+                                    crate::security::AuthKey::from_seed(42),
+                                )
+                                .unwrap())
+                            })
+                            .await
+                            .unwrap();
                         let path = directory.path().join("destination");
-                        let sink = ManifestFileSink::new_journaled(&cx,
+                        let sink = ManifestFileSink::new_journaled(
+                            &cx,
                             durable_config(b"abcdefgh", path.clone(), CommitPolicy::CopyAndVerify),
-                            ManifestFileJournalConfig { journal: owner, transfer_id: "live-checkpoint".to_owned(), timestamp: 71 }).await.unwrap();
+                            ManifestFileJournalConfig {
+                                journal: owner,
+                                transfer_id: "live-checkpoint".to_owned(),
+                                timestamp: 71,
+                            },
+                        )
+                        .await
+                        .unwrap();
                         let initial = sink.journal_checkpoint().unwrap().clone();
-                        let generation = sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().generation;
+                        let generation = sink
+                            .journal
+                            .as_ref()
+                            .unwrap()
+                            .owner
+                            .as_ref()
+                            .unwrap()
+                            .get_stats()
+                            .generation;
                         let gate = Arc::new(Gate::default());
                         let commit_entered = Arc::new(AtomicBool::new(false));
-                        let listener = receiver.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+                        let listener = receiver
+                            .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                            .await
+                            .unwrap();
                         let address = listener.local_addr().unwrap();
-                        let mut receiving = listener.spawn_receive_committing(&cx, &scope, JournalFlushGate {
-                            inner: sink, gate: Arc::clone(&gate), commit_entered: Arc::clone(&commit_entered),
-                        }).unwrap();
+                        let mut receiving = listener
+                            .spawn_receive_committing(
+                                &cx,
+                                &scope,
+                                JournalFlushGate {
+                                    inner: sink,
+                                    gate: Arc::clone(&gate),
+                                    commit_entered: Arc::clone(&commit_entered),
+                                },
+                            )
+                            .unwrap();
                         let consumed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                        let mut sending = sender.spawn_send_reader(&cx, &scope, address, CountingSource {
-                            data: b"abcdefgh", position: 0, consumed: Arc::clone(&consumed),
-                        }).unwrap();
+                        let mut sending = sender
+                            .spawn_send_reader(
+                                &cx,
+                                &scope,
+                                address,
+                                CountingSource {
+                                    data: b"abcdefgh",
+                                    position: 0,
+                                    consumed: Arc::clone(&consumed),
+                                },
+                            )
+                            .unwrap();
                         crate::time::timeout(cx.now(), Duration::from_secs(5), async {
-                            while !gate.entered.load(Ordering::SeqCst) { crate::runtime::yield_now().await; }
-                        }).await.expect("receiver never reached its first prefix flush");
+                            while !gate.entered.load(Ordering::SeqCst) {
+                                crate::runtime::yield_now().await;
+                            }
+                        })
+                        .await
+                        .expect("receiver never reached its first prefix flush");
                         assert_eq!(consumed.load(Ordering::SeqCst), 4);
                         assert!(!sending.is_finished());
                         assert!(!receiving.is_finished());
@@ -2545,22 +3605,45 @@ mod manifest_sink {
                         // This stable boundary permits a read-only reopen and an
                         // intentional disk fault without racing an active append.
                         let selected = journal_config.clone();
-                        let prefix = cx.scoped_fs().run_io(move |_| {
-                            Ok(AppendJournal::new(selected, crate::security::AuthKey::from_seed(42))
-                                .unwrap().get_resume_summary("live-checkpoint").unwrap())
-                        }).await.unwrap();
+                        let prefix = cx
+                            .scoped_fs()
+                            .run_io(move |_| {
+                                Ok(AppendJournal::new(
+                                    selected,
+                                    crate::security::AuthKey::from_seed(42),
+                                )
+                                .unwrap()
+                                .get_resume_summary("live-checkpoint")
+                                .unwrap())
+                            })
+                            .await
+                            .unwrap();
                         assert_eq!(prefix.durable_bytes, 0);
                         if fail_storage {
-                            cx.scoped_fs().write(journal_config.base_dir.join(format!("journal_gen_{:06}.dat", generation + 1)), vec![1]).await.unwrap();
+                            cx.scoped_fs()
+                                .write(
+                                    journal_config
+                                        .base_dir
+                                        .join(format!("journal_gen_{:06}.dat", generation + 1)),
+                                    vec![1],
+                                )
+                                .await
+                                .unwrap();
                         }
                         gate.released.store(true, Ordering::SeqCst);
                         let wake = gate.wake.lock().take();
-                        if let Some(wake) = wake { wake.wake(); }
-                        let (sent, received) = futures_lite::future::zip(sending.join(&cx), receiving.join(&cx)).await;
+                        if let Some(wake) = wake {
+                            wake.wake();
+                        }
+                        let (sent, received) =
+                            futures_lite::future::zip(sending.join(&cx), receiving.join(&cx)).await;
                         let received = received.unwrap();
                         let sent = sent.unwrap();
                         if fail_storage {
-                            assert!(sent.outcome.is_err(), "no Proof or next epoch after a failed checkpoint");
+                            assert!(
+                                sent.outcome.is_err(),
+                                "no Proof or next epoch after a failed checkpoint"
+                            );
                             assert!(matches!(received.outcome, Err(LiveStreamError::Io(error))
                                 if error.to_string().contains("checkpoint journal")));
                             assert_eq!(received.sink_written_bytes, 4);
@@ -2573,17 +3656,30 @@ mod manifest_sink {
                             assert_eq!(std::fs::read(&path).unwrap(), b"abcdefgh");
                             assert!(commit_entered.load(Ordering::SeqCst));
                         }
-                        let summary = cx.scoped_fs().run_io(move |_| {
-                            Ok(AppendJournal::new(journal_config, crate::security::AuthKey::from_seed(42))
-                                .unwrap().get_resume_summary("live-checkpoint").unwrap())
-                        }).await.unwrap();
+                        let summary = cx
+                            .scoped_fs()
+                            .run_io(move |_| {
+                                Ok(AppendJournal::new(
+                                    journal_config,
+                                    crate::security::AuthKey::from_seed(42),
+                                )
+                                .unwrap()
+                                .get_resume_summary("live-checkpoint")
+                                .unwrap())
+                            })
+                            .await
+                            .unwrap();
                         if fail_storage {
                             assert_eq!(summary.status, TransferResumeStatus::Resumable);
                             assert_eq!(summary.durable_bytes, 0);
                         } else {
-                            assert_eq!(summary.status, TransferResumeStatus::Committed {
-                                final_path: path.to_str().unwrap().to_owned(), committed_size: 8,
-                            });
+                            assert_eq!(
+                                summary.status,
+                                TransferResumeStatus::Committed {
+                                    final_path: path.to_str().unwrap().to_owned(),
+                                    committed_size: 8,
+                                }
+                            );
                         }
                         assert_eq!(receiver.active_streams(), 0);
                     });
@@ -2599,21 +3695,37 @@ mod manifest_sink {
             for start in 0..=8 {
                 for end in start..=8 {
                     let boundaries = [ChunkBoundary {
-                        index: 0, byte_offset: start as u64, size_bytes: (end - start) as u64,
+                        index: 0,
+                        byte_offset: start as u64,
+                        size_bytes: (end - start) as u64,
                         content_hash: Sha256::digest(&expected[start..end]).into(),
-                        strategy: ChunkStrategy::FixedSize, metadata: None,
+                        strategy: ChunkStrategy::FixedSize,
+                        metadata: None,
                     }];
                     for split in 1..=9 {
                         for changed in 0..=8 {
                             let mut bytes = *expected;
-                            if changed != 8 { bytes[changed] ^= 1; }
+                            if changed != 8 {
+                                bytes[changed] ^= 1;
+                            }
                             let mut checks = ChunkChecks::default();
-                            let result = bytes.chunks(split).enumerate().try_for_each(|(index, batch)| {
-                                checks.accept(&boundaries, (index * split) as u64, batch,
-                                    Sha256::digest(batch).into())
-                            }).and_then(|()| checks.finish(&boundaries, 8));
-                            assert_eq!(result.is_ok(), !(start..end).contains(&changed),
-                                "range {start}..{end}, split {split}, changed {changed}");
+                            let result = bytes
+                                .chunks(split)
+                                .enumerate()
+                                .try_for_each(|(index, batch)| {
+                                    checks.accept(
+                                        &boundaries,
+                                        (index * split) as u64,
+                                        batch,
+                                        Sha256::digest(batch).into(),
+                                    )
+                                })
+                                .and_then(|()| checks.finish(&boundaries, 8));
+                            assert_eq!(
+                                result.is_ok(),
+                                !(start..end).contains(&changed),
+                                "range {start}..{end}, split {split}, changed {changed}"
+                            );
                         }
                     }
                 }
@@ -2627,12 +3739,24 @@ mod manifest_sink {
                 let runtime = runtime(workers, 2);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                    for policy in [
+                        CommitPolicy::AtomicRename,
+                        CommitPolicy::CopyAndVerify,
+                        CommitPolicy::LinkAndUnlink,
+                    ] {
                         for bad_prefix in [false, true] {
-                            let path = directory.path().join(format!("early-{policy:?}-{bad_prefix}"));
-                            cx.scoped_fs().write(path.clone(), b"original".to_vec()).await.unwrap();
-                            let options = with_hints(config(b"abcdefghijkl", path.clone(), policy),
-                                b"abcdefghijkl", &[(0, 6), (6, 12)]);
+                            let path = directory
+                                .path()
+                                .join(format!("early-{policy:?}-{bad_prefix}"));
+                            cx.scoped_fs()
+                                .write(path.clone(), b"original".to_vec())
+                                .await
+                                .unwrap();
+                            let options = with_hints(
+                                config(b"abcdefghijkl", path.clone(), policy),
+                                b"abcdefghijkl",
+                                &[(0, 6), (6, 12)],
+                            );
                             let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
                             let prefix = if bad_prefix { b"Xbc" } else { b"abc" };
                             sink.write_all(prefix).await.unwrap();
@@ -2649,9 +3773,21 @@ mod manifest_sink {
                             assert_eq!(stats.chunk_count, 1);
                             let hash: [u8; 32] = sink.hash.clone().finalize().into();
                             assert_eq!(hash, <[u8; 32]>::from(Sha256::digest(prefix)));
-                            assert_eq!(sink.write(b"ghijkl").await.unwrap_err().to_string(), error.to_string());
-                            assert_eq!(sink.flush().await.unwrap_err().to_string(), error.to_string());
-                            assert_eq!(commit(&mut sink, &receipt(b"abcdefghijkl")).await.unwrap_err().to_string(), error.to_string());
+                            assert_eq!(
+                                sink.write(b"ghijkl").await.unwrap_err().to_string(),
+                                error.to_string()
+                            );
+                            assert_eq!(
+                                sink.flush().await.unwrap_err().to_string(),
+                                error.to_string()
+                            );
+                            assert_eq!(
+                                commit(&mut sink, &receipt(b"abcdefghijkl"))
+                                    .await
+                                    .unwrap_err()
+                                    .to_string(),
+                                error.to_string()
+                            );
                             assert!(sink.published_path().is_none());
                             assert_eq!(std::fs::read(&path).unwrap(), b"original");
                             sink.cancel(&cx).await.unwrap();
@@ -2670,11 +3806,18 @@ mod manifest_sink {
                 let runtime = runtime(workers, 2);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                    for policy in [
+                        CommitPolicy::AtomicRename,
+                        CommitPolicy::CopyAndVerify,
+                        CommitPolicy::LinkAndUnlink,
+                    ] {
                         for split in [1, 3, 8] {
                             let path = directory.path().join(format!("chunks-{policy:?}-{split}"));
-                            let options = with_hints(config(b"abcdefgh", path.clone(), policy),
-                                b"abcdefgh", &[(0, 0), (0, 2), (2, 5), (5, 8), (8, 8)]);
+                            let options = with_hints(
+                                config(b"abcdefgh", path.clone(), policy),
+                                b"abcdefgh",
+                                &[(0, 0), (0, 2), (2, 5), (5, 8), (8, 8)],
+                            );
                             let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
                             for batch in b"abcdefgh".chunks(split) {
                                 sink.write_all(batch).await.unwrap();
@@ -2699,10 +3842,22 @@ mod manifest_sink {
                 let runtime = runtime(1, 2);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    let mut options = with_hints(config(data, directory.path().join("absent"), CommitPolicy::AtomicRename),
-                        data, &[(data.len(), data.len())]);
+                    let mut options = with_hints(
+                        config(
+                            data,
+                            directory.path().join("absent"),
+                            CommitPolicy::AtomicRename,
+                        ),
+                        data,
+                        &[(data.len(), data.len())],
+                    );
                     let manifest = Arc::make_mut(&mut options.manifest);
-                    manifest.objects.get_mut(&options.object_id).unwrap().chunk_boundaries[0].content_hash[0] ^= 1;
+                    manifest
+                        .objects
+                        .get_mut(&options.object_id)
+                        .unwrap()
+                        .chunk_boundaries[0]
+                        .content_hash[0] ^= 1;
                     // Legacy root/structural validation deliberately permits this
                     // descriptor change. The new content preflight must reject it.
                     manifest.validate().unwrap();
@@ -2721,9 +3876,15 @@ mod manifest_sink {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let path = directory.path().join("partial-hints");
-                cx.scoped_fs().write(path.clone(), b"original".to_vec()).await.unwrap();
-                let options = with_hints(config(b"abcdefgh", path.clone(), CommitPolicy::CopyAndVerify),
-                    b"abcdefgh", &[(1, 3), (5, 7)]);
+                cx.scoped_fs()
+                    .write(path.clone(), b"original".to_vec())
+                    .await
+                    .unwrap();
+                let options = with_hints(
+                    config(b"abcdefgh", path.clone(), CommitPolicy::CopyAndVerify),
+                    b"abcdefgh",
+                    &[(1, 3), (5, 7)],
+                );
                 let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
                 sink.write_all(b"XbcdYfgZ").await.unwrap();
                 assert_eq!(sink.checks.next, 2);
@@ -2744,8 +3905,11 @@ mod manifest_sink {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let path = directory.path().join("crossing-hash");
-                let options = with_hints(config(b"abcdefgh", path.clone(), CommitPolicy::AtomicRename),
-                    b"abcdefgh", &[(0, 8)]);
+                let options = with_hints(
+                    config(b"abcdefgh", path.clone(), CommitPolicy::AtomicRename),
+                    b"abcdefgh",
+                    &[(0, 8)],
+                );
                 let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
                 sink.write_all(b"abc").await.unwrap();
                 assert!(sink.checks.partial.is_some());
@@ -2757,10 +3921,18 @@ mod manifest_sink {
                     wait.recv_timeout(Duration::from_secs(10)).unwrap();
                     Ok(())
                 }));
-                poll_fn(|task| { assert!(blocker.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                poll_fn(|task| {
+                    assert!(blocker.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
                 start.recv(&cx).await.unwrap();
                 let mut writing = Box::pin(sink.write_all(b"def"));
-                poll_fn(|task| { assert!(writing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                poll_fn(|task| {
+                    assert!(writing.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
                 drop(writing);
                 assert!(sink.pending.is_some());
                 assert_eq!(sink.written_bytes(), 3);
@@ -2785,7 +3957,11 @@ mod manifest_sink {
         }
 
         impl crate::io::AsyncRead for CountingSource {
-            fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut crate::io::ReadBuf<'_>) -> Poll<io::Result<()>> {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buf: &mut crate::io::ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
                 let count = buf.remaining().min(self.data.len() - self.position);
                 buf.put_slice(&self.data[self.position..self.position + count]);
                 self.position += count;
@@ -2796,8 +3972,10 @@ mod manifest_sink {
 
         #[test]
         fn real_mtls_chunk_mismatch_stops_the_sender_before_its_second_epoch() {
-            use crate::net::atp::sdk::{AtpSdk, NativeClientAuthorization, NativeClientCertificateId, SessionConfig};
             use crate::net::atp::sdk::native_auth::live::{LiveStreamConfig, LiveStreamError};
+            use crate::net::atp::sdk::{
+                AtpSdk, NativeClientAuthorization, NativeClientCertificateId, SessionConfig,
+            };
             use rustls::pki_types::ServerName;
             for workers in [1, 2] {
                 let directory = tempfile::tempdir().unwrap();
@@ -2855,17 +4033,32 @@ mod manifest_sink {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let data: Vec<u8> = (0..2 * MAX_LIVE_EPOCH_BYTES + 7)
-                    .map(|index| (index % 251) as u8).collect();
+                    .map(|index| (index % 251) as u8)
+                    .collect();
                 let path = directory.path().join("bounded-write");
                 let mut options = config(&data, path.clone(), CommitPolicy::CopyAndVerify);
                 options.max_chunks = 3;
                 let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
                 assert_eq!(sink.write(&data).await.unwrap(), MAX_LIVE_EPOCH_BYTES);
-                assert_eq!(sink.write(&data[MAX_LIVE_EPOCH_BYTES..]).await.unwrap(), MAX_LIVE_EPOCH_BYTES);
-                assert_eq!(sink.write(&data[2 * MAX_LIVE_EPOCH_BYTES..]).await.unwrap(), 7);
+                assert_eq!(
+                    sink.write(&data[MAX_LIVE_EPOCH_BYTES..]).await.unwrap(),
+                    MAX_LIVE_EPOCH_BYTES
+                );
+                assert_eq!(
+                    sink.write(&data[2 * MAX_LIVE_EPOCH_BYTES..]).await.unwrap(),
+                    7
+                );
                 assert_eq!(sink.written_bytes(), data.len() as u64);
                 assert_eq!(sink.chunks, 3);
-                assert_eq!(sink.writer.get_stats(&cx).await.unwrap().unwrap().chunk_count, 3);
+                assert_eq!(
+                    sink.writer
+                        .get_stats(&cx)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .chunk_count,
+                    3
+                );
                 sink.flush().await.unwrap();
                 assert!(!path.exists());
                 commit(&mut sink, &receipt(&data)).await.unwrap();
@@ -2881,10 +4074,17 @@ mod manifest_sink {
                 let runtime = runtime(workers, 2);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                    for policy in [
+                        CommitPolicy::AtomicRename,
+                        CommitPolicy::CopyAndVerify,
+                        CommitPolicy::LinkAndUnlink,
+                    ] {
                         for data in [b"".as_slice(), b"abcdefgh".as_slice()] {
                             let path = directory.path().join(format!("{policy:?}-{}", data.len()));
-                            let mut sink = ManifestFileSink::new(&cx, config(data, path.clone(), policy)).await.unwrap();
+                            let mut sink =
+                                ManifestFileSink::new(&cx, config(data, path.clone(), policy))
+                                    .await
+                                    .unwrap();
                             for part in data.chunks(3) {
                                 sink.write_all(part).await.unwrap();
                                 sink.flush().await.unwrap();
@@ -2901,8 +4101,14 @@ mod manifest_sink {
                             commit(&mut sink, &expected).await.unwrap();
                             let mut other = expected.clone();
                             other.prefix.stream_nonce[0] ^= 1;
-                            assert_eq!(commit(&mut sink, &other).await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
-                            assert_eq!(sink.write(b"x").await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+                            assert_eq!(
+                                commit(&mut sink, &other).await.unwrap_err().kind(),
+                                io::ErrorKind::InvalidInput
+                            );
+                            assert_eq!(
+                                sink.write(b"x").await.unwrap_err().kind(),
+                                io::ErrorKind::BrokenPipe
+                            );
                         }
                     }
                 });
@@ -2920,28 +4126,50 @@ mod manifest_sink {
                 let cx = Cx::current().unwrap();
                 for pinned in [false, true] {
                     for corrupt in [false, true] {
-                        let path = directory.path().join(format!("integrity-{pinned}-{corrupt}"));
-                        cx.scoped_fs().write(path.clone(), b"original destination".to_vec()).await.unwrap();
-                        let mut options = config(b"abcdefgh", path.clone(), CommitPolicy::CopyAndVerify);
+                        let path = directory
+                            .path()
+                            .join(format!("integrity-{pinned}-{corrupt}"));
+                        cx.scoped_fs()
+                            .write(path.clone(), b"original destination".to_vec())
+                            .await
+                            .unwrap();
+                        let mut options =
+                            config(b"abcdefgh", path.clone(), CommitPolicy::CopyAndVerify);
                         if pinned {
                             let manifest = Arc::make_mut(&mut options.manifest);
                             let mut object = manifest.objects.remove(&options.object_id).unwrap();
-                            options.object_id = ObjectId::manifest(ManifestId::from_manifest_bytes(b"live-manifest-file"));
+                            options.object_id = ObjectId::manifest(
+                                ManifestId::from_manifest_bytes(b"live-manifest-file"),
+                            );
                             object.id = options.object_id.clone();
                             object.content_hash = None;
-                            object.chunk_boundaries = b"abcdefgh".chunks(4).enumerate().map(|(index, part)| ChunkBoundary {
-                                index: index as u32, byte_offset: (index * 4) as u64, size_bytes: part.len() as u64,
-                                content_hash: Sha256::digest(part).into(), strategy: ChunkStrategy::FixedSize, metadata: None,
-                            }).collect();
+                            object.chunk_boundaries = b"abcdefgh"
+                                .chunks(4)
+                                .enumerate()
+                                .map(|(index, part)| ChunkBoundary {
+                                    index: index as u32,
+                                    byte_offset: (index * 4) as u64,
+                                    size_bytes: part.len() as u64,
+                                    content_hash: Sha256::digest(part).into(),
+                                    strategy: ChunkStrategy::FixedSize,
+                                    metadata: None,
+                                })
+                                .collect();
                             manifest.objects.insert(options.object_id.clone(), object);
                             manifest.roots = vec![options.object_id.clone()];
                             manifest.merkle_root = MerkleRoot::from_manifest_components(
-                                &manifest.objects, &manifest.chunk_plan, &manifest.raptorq_layout,
-                                &manifest.compression_policy, &manifest.encryption_policy,
-                                &manifest.capability_policy, &manifest.transform_order,
-                                &manifest.transform_proof_policy, &manifest.repair_groups,
+                                &manifest.objects,
+                                &manifest.chunk_plan,
+                                &manifest.raptorq_layout,
+                                &manifest.compression_policy,
+                                &manifest.encryption_policy,
+                                &manifest.capability_policy,
+                                &manifest.transform_order,
+                                &manifest.transform_proof_policy,
+                                &manifest.repair_groups,
                             );
-                            options.expected_chunk_commitment = Some(ManifestChunkCommitment::from_manifest(manifest).unwrap());
+                            options.expected_chunk_commitment =
+                                Some(ManifestChunkCommitment::from_manifest(manifest).unwrap());
                         }
                         let data = if corrupt { b"tampered" } else { b"abcdefgh" };
                         let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
@@ -2952,9 +4180,26 @@ mod manifest_sink {
                             assert_eq!(error.kind(), io::ErrorKind::Other);
                             assert!(error.to_string().contains("hash mismatch"));
                             assert_eq!(sink.written_bytes(), 0);
-                            assert_eq!(sink.writer.get_stats(&cx).await.unwrap().unwrap().chunk_count, 0);
-                            assert_eq!(sink.flush().await.unwrap_err().to_string(), error.to_string());
-                            assert_eq!(commit(&mut sink, &receipt(data)).await.unwrap_err().to_string(), error.to_string());
+                            assert_eq!(
+                                sink.writer
+                                    .get_stats(&cx)
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                                    .chunk_count,
+                                0
+                            );
+                            assert_eq!(
+                                sink.flush().await.unwrap_err().to_string(),
+                                error.to_string()
+                            );
+                            assert_eq!(
+                                commit(&mut sink, &receipt(data))
+                                    .await
+                                    .unwrap_err()
+                                    .to_string(),
+                                error.to_string()
+                            );
                             assert!(sink.published_path().is_none());
                             assert_eq!(std::fs::read(&path).unwrap(), b"original destination");
                             sink.cancel(&cx).await.unwrap();
@@ -2968,7 +4213,13 @@ mod manifest_sink {
                             let error = result.unwrap_err();
                             assert_eq!(error.kind(), io::ErrorKind::Other);
                             assert!(error.to_string().contains("hash mismatch"));
-                            assert_eq!(commit(&mut sink, &receipt(data)).await.unwrap_err().to_string(), error.to_string());
+                            assert_eq!(
+                                commit(&mut sink, &receipt(data))
+                                    .await
+                                    .unwrap_err()
+                                    .to_string(),
+                                error.to_string()
+                            );
                             assert!(sink.published_path().is_none());
                             assert_eq!(std::fs::read(&path).unwrap(), b"original destination");
                             sink.cancel(&cx).await.unwrap();
@@ -2989,11 +4240,18 @@ mod manifest_sink {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 for case in 0..4 {
-                    let mut options = config(b"abcdefgh", directory.path().join("absent"), CommitPolicy::AtomicRename);
+                    let mut options = config(
+                        b"abcdefgh",
+                        directory.path().join("absent"),
+                        CommitPolicy::AtomicRename,
+                    );
                     match case {
                         0 => options.max_bytes = 7,
                         1 => options.max_chunks = 0,
-                        2 => options.expected_chunk_commitment = Some(ManifestChunkCommitment::new([0; 32])),
+                        2 => {
+                            options.expected_chunk_commitment =
+                                Some(ManifestChunkCommitment::new([0; 32]))
+                        }
                         3 => options.object_id = ObjectId::content(ContentId::from_bytes(b"other")),
                         _ => unreachable!(),
                     }
@@ -3005,15 +4263,26 @@ mod manifest_sink {
                 options.max_chunks = 1;
                 let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
                 sink.write_all(b"abcd").await.unwrap();
-                assert_eq!(sink.write(b"efgh").await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                assert_eq!(
+                    sink.write(b"efgh").await.unwrap_err().kind(),
+                    io::ErrorKind::InvalidInput
+                );
                 assert_eq!(sink.written_bytes(), 4);
                 assert!(!path.exists());
                 assert!(commit(&mut sink, &receipt(b"abcdefgh")).await.is_err());
                 sink.cancel(&cx).await.unwrap();
                 let path = directory.path().join("oversized");
-                let mut sink = ManifestFileSink::new(&cx, config(b"abcd", path.clone(), CommitPolicy::AtomicRename)).await.unwrap();
+                let mut sink = ManifestFileSink::new(
+                    &cx,
+                    config(b"abcd", path.clone(), CommitPolicy::AtomicRename),
+                )
+                .await
+                .unwrap();
                 assert_eq!(sink.write(b"abcdefgh").await.unwrap(), 4);
-                assert_eq!(sink.write(b"efgh").await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                assert_eq!(
+                    sink.write(b"efgh").await.unwrap_err().kind(),
+                    io::ErrorKind::InvalidInput
+                );
                 assert_eq!(sink.written_bytes(), 4);
                 assert!(!path.exists());
             });
@@ -3028,7 +4297,12 @@ mod manifest_sink {
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
                     let path = directory.path().join("retained-write");
-                    let mut sink = ManifestFileSink::new(&cx, config(b"abcdefgh", path.clone(), CommitPolicy::AtomicRename)).await.unwrap();
+                    let mut sink = ManifestFileSink::new(
+                        &cx,
+                        config(b"abcdefgh", path.clone(), CommitPolicy::AtomicRename),
+                    )
+                    .await
+                    .unwrap();
                     let (started, mut start) = oneshot::channel();
                     let (release, wait) = mpsc::channel();
                     let fs = cx.scoped_fs();
@@ -3037,10 +4311,18 @@ mod manifest_sink {
                         wait.recv_timeout(Duration::from_secs(10)).unwrap();
                         Ok(())
                     }));
-                    poll_fn(|task| { assert!(blocker.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                    poll_fn(|task| {
+                        assert!(blocker.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
                     start.recv(&cx).await.unwrap();
                     let mut writing = Box::pin(sink.write_all(b"abcdefgh"));
-                    poll_fn(|task| { assert!(writing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                    poll_fn(|task| {
+                        assert!(writing.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
                     drop(writing);
                     assert!(sink.pending.is_some());
                     assert_eq!(sink.written_bytes(), 0);
@@ -3071,16 +4353,31 @@ mod manifest_sink {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let path = directory.path().join("authority");
-                let mut sink = ManifestFileSink::new(&cx, config(b"data", path.clone(), CommitPolicy::AtomicRename)).await.unwrap();
+                let mut sink = ManifestFileSink::new(
+                    &cx,
+                    config(b"data", path.clone(), CommitPolicy::AtomicRename),
+                )
+                .await
+                .unwrap();
                 let error = poll_fn(|task| {
                     let _restricted = cx.restrict::<crate::cx::NoCaps>().set_current_restricted();
                     Pin::new(&mut sink).poll_write(task, b"data")
-                }).await.unwrap_err();
+                })
+                .await
+                .unwrap_err();
                 assert_eq!(error.kind(), io::ErrorKind::Other);
                 assert_eq!(sink.written_bytes(), 0);
                 assert!(sink.pending.is_none());
                 assert!(!path.exists());
-                assert_eq!(sink.writer.get_stats(&cx).await.unwrap().unwrap().total_bytes_written, 0);
+                assert_eq!(
+                    sink.writer
+                        .get_stats(&cx)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .total_bytes_written,
+                    0
+                );
                 sink.cancel(&cx).await.unwrap();
             });
             drained(&runtime);
@@ -3093,7 +4390,12 @@ mod manifest_sink {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let path = directory.path().join("retained-commit");
-                let mut sink = ManifestFileSink::new(&cx, config(b"data", path.clone(), CommitPolicy::AtomicRename)).await.unwrap();
+                let mut sink = ManifestFileSink::new(
+                    &cx,
+                    config(b"data", path.clone(), CommitPolicy::AtomicRename),
+                )
+                .await
+                .unwrap();
                 sink.write_all(b"data").await.unwrap();
                 let (started, mut start) = oneshot::channel();
                 let (release, wait) = mpsc::channel();
@@ -3103,15 +4405,26 @@ mod manifest_sink {
                     wait.recv_timeout(Duration::from_secs(10)).unwrap();
                     Ok(())
                 }));
-                poll_fn(|task| { assert!(blocker.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                poll_fn(|task| {
+                    assert!(blocker.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
                 start.recv(&cx).await.unwrap();
                 let expected = receipt(b"data");
                 let mut committing = Box::pin(commit(&mut sink, &expected));
-                poll_fn(|task| { assert!(committing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                poll_fn(|task| {
+                    assert!(committing.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
                 drop(committing);
                 let mut wrong = expected.clone();
                 wrong.prefix.chain[0] ^= 1;
-                assert_eq!(commit(&mut sink, &wrong).await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                assert_eq!(
+                    commit(&mut sink, &wrong).await.unwrap_err().kind(),
+                    io::ErrorKind::InvalidInput
+                );
                 assert!(sink.pending.is_some());
                 assert!(!path.exists());
                 release.send(()).unwrap();
@@ -3119,7 +4432,10 @@ mod manifest_sink {
                 commit(&mut sink, &expected).await.unwrap();
                 assert_eq!(std::fs::read(&path).unwrap(), b"data");
                 // An idempotent observation must not republish over a later file.
-                cx.scoped_fs().write(path.clone(), b"later".to_vec()).await.unwrap();
+                cx.scoped_fs()
+                    .write(path.clone(), b"later".to_vec())
+                    .await
+                    .unwrap();
                 commit(&mut sink, &expected).await.unwrap();
                 assert_eq!(std::fs::read(path).unwrap(), b"later");
             });
@@ -3133,23 +4449,42 @@ mod manifest_sink {
             wake: parking_lot::Mutex<Option<Waker>>,
         }
 
-        struct GatedSink { inner: ManifestFileSink, gate: Arc<Gate> }
+        struct GatedSink {
+            inner: ManifestFileSink,
+            gate: Arc<Gate>,
+        }
         impl AsyncWrite for GatedSink {
-            fn poll_write(mut self: Pin<&mut Self>, task: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                task: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
                 Pin::new(&mut self.inner).poll_write(task, bytes)
             }
-            fn poll_flush(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                task: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
                 Pin::new(&mut self.inner).poll_flush(task)
             }
-            fn poll_shutdown(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                task: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
                 Pin::new(&mut self.inner).poll_shutdown(task)
             }
         }
         impl LiveStreamCommitSink for GatedSink {
-            fn poll_commit(mut self: Pin<&mut Self>, task: &mut Context<'_>, receipt: &LiveStreamReceipt) -> Poll<io::Result<()>> {
+            fn poll_commit(
+                mut self: Pin<&mut Self>,
+                task: &mut Context<'_>,
+                receipt: &LiveStreamReceipt,
+            ) -> Poll<io::Result<()>> {
                 *self.gate.wake.lock() = Some(task.waker().clone());
                 self.gate.entered.store(true, Ordering::SeqCst);
-                if !self.gate.released.load(Ordering::SeqCst) { return Poll::Pending; }
+                if !self.gate.released.load(Ordering::SeqCst) {
+                    return Poll::Pending;
+                }
                 Pin::new(&mut self.inner).poll_commit(task, receipt)
             }
         }
@@ -3158,27 +4493,44 @@ mod manifest_sink {
         fn certificate(name: &str) -> rustls::pki_types::CertificateDer<'static> {
             use rustls::pki_types::{CertificateDer, pem::PemObject};
             let fixtures: serde_json::Value = serde_json::from_str(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/atp_native_auth_identities.json",
-            ))).unwrap();
-            let text = if name == "ca" { &fixtures["ca"] } else { &fixtures["identities"][name]["certificate"] };
-            CertificateDer::pem_reader_iter(&mut io::BufReader::new(text.as_str().unwrap().as_bytes()))
-                .next().unwrap().unwrap()
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/atp_native_auth_identities.json",
+            )))
+            .unwrap();
+            let text = if name == "ca" {
+                &fixtures["ca"]
+            } else {
+                &fixtures["identities"][name]["certificate"]
+            };
+            CertificateDer::pem_reader_iter(&mut io::BufReader::new(
+                text.as_str().unwrap().as_bytes(),
+            ))
+            .next()
+            .unwrap()
+            .unwrap()
         }
 
         fn identity(name: &str) -> crate::net::atp::sdk::NativeTlsIdentity {
             use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
             let fixtures: serde_json::Value = serde_json::from_str(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/atp_native_auth_identities.json",
-            ))).unwrap();
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/atp_native_auth_identities.json",
+            )))
+            .unwrap();
             let text = fixtures["identities"][name]["key"].as_str().unwrap();
-            let key = PrivateKeyDer::pem_reader_iter(&mut io::BufReader::new(text.as_bytes())).next().unwrap().unwrap();
+            let key = PrivateKeyDer::pem_reader_iter(&mut io::BufReader::new(text.as_bytes()))
+                .next()
+                .unwrap()
+                .unwrap();
             crate::net::atp::sdk::NativeTlsIdentity::new(vec![certificate(name)], key).unwrap()
         }
 
         #[test]
         fn real_mtls_receiver_requires_manifest_publication_before_sender_proof() {
-            use crate::net::atp::sdk::{AtpSdk, NativeClientAuthorization, NativeClientCertificateId, SessionConfig};
             use crate::net::atp::sdk::native_auth::live::{LiveStreamConfig, LiveStreamError};
+            use crate::net::atp::sdk::{
+                AtpSdk, NativeClientAuthorization, NativeClientCertificateId, SessionConfig,
+            };
             use rustls::pki_types::ServerName;
             for workers in [1, 2] {
                 for corrupt in [false, true] {
