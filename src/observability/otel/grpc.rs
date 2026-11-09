@@ -797,3 +797,7 @@ mod sdk_metrics_tests;
 #[cfg(test)]
 #[path = "grpc/sdk_trace_tests.rs"]
 mod sdk_trace_tests;
+
+#[cfg(test)]
+#[path = "grpc/sdk_logs_tests.rs"]
+mod sdk_logs_tests;

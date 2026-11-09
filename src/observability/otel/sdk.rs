@@ -5,8 +5,10 @@
 //! no runtime, global provider, periodic reader, or background thread.
 
 mod common;
+mod logs;
 mod metrics;
 mod traces;
 
+pub use logs::{OtlpSdkLogConfig, OtlpSdkLogError, OtlpSdkLogExporter};
 pub use metrics::{OtlpSdkMetricExporter, OtlpSdkMetricsConfig, OtlpSdkMetricsError};
 pub use traces::{OtlpSdkSpanExporter, OtlpSdkTraceConfig, OtlpSdkTraceError};

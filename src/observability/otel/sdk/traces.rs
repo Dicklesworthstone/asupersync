@@ -1,7 +1,7 @@
 //! OpenTelemetry SDK spans delivered through an acknowledged native queue.
 
 use super::common::{
-    SdkValueError, ValueBudget, attribute_nodes, nanos, owned_attributes,
+    SdkResource, SdkValueError, ValueBudget, attribute_nodes, nanos, owned_attributes,
     owned_attributes_last_wins,
 };
 use crate::cx::Cx;
@@ -209,23 +209,7 @@ impl OtlpSdkTraceConfig {
     }
 }
 
-struct TraceResource {
-    resource: Resource,
-    schema_url: String,
-    input_bytes: usize,
-    value_nodes: usize,
-}
-
-impl TraceResource {
-    fn empty() -> Self {
-        Self {
-            resource: Resource::default(),
-            schema_url: String::new(),
-            input_bytes: std::mem::size_of::<Self>(),
-            value_nodes: 0,
-        }
-    }
-}
+type TraceResource = SdkResource;
 
 /// An explicitly installed SDK span exporter using a caller-managed native queue.
 ///
@@ -236,6 +220,8 @@ impl TraceResource {
 /// synchronously wait for export on the emitting thread. Therefore this SDK
 /// exporter refuses an active native `Cx` before admission; native async callers
 /// can use the owned trace exporter directly.
+/// The simple processor acquires its own exporter mutex before this guard runs,
+/// so the guard does not replace the off-runtime emission requirement.
 ///
 /// Export completes only after every admitted request has a terminal collector
 /// response. Valid partial success is terminal success: rejected span counts are
@@ -380,19 +366,7 @@ fn prepare_resource(
     input: &opentelemetry_sdk::Resource,
     config: &OtlpSdkTraceConfig,
 ) -> Result<TraceResource, OtlpSdkTraceError> {
-    let mut budget = ValueBudget::new(config.max_collection_bytes);
-    budget.bytes(std::mem::size_of::<TraceResource>())?;
-    budget.attributes(input.iter().map(|(key, value)| (key.as_str(), value)))?;
-    budget.text(input.schema_url().unwrap_or_default(), 2048)?;
-    Ok(TraceResource {
-        resource: Resource {
-            attributes: owned_attributes(input.iter().map(|(key, value)| (key.as_str(), value)))?,
-            ..Resource::default()
-        },
-        schema_url: input.schema_url().unwrap_or_default().to_owned(),
-        input_bytes: budget.byte_count(),
-        value_nodes: budget.node_count(),
-    })
+    SdkResource::prepare(input, config.max_collection_bytes).map_err(Into::into)
 }
 
 fn trace_state_size(state: &TraceState) -> Result<usize, OtlpSdkTraceError> {

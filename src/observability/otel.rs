@@ -97,6 +97,7 @@ pub use export_policy::{
 mod sdk;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sdk::{
+    OtlpSdkLogConfig, OtlpSdkLogError, OtlpSdkLogExporter,
     OtlpSdkMetricExporter, OtlpSdkMetricsConfig, OtlpSdkMetricsError,
     OtlpSdkSpanExporter, OtlpSdkTraceConfig, OtlpSdkTraceError,
 };

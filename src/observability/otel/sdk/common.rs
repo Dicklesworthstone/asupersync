@@ -2,8 +2,9 @@
 //! collection before constructing any owned OTLP values.
 
 use crate::observability::otlp_proto::common_and_resource::{
-    AnyValue, AnyValueValue, ArrayValue, KeyValue,
+    AnyValue, AnyValueValue, ArrayValue, KeyValue, KeyValueList, Resource,
 };
+use opentelemetry::logs::AnyValue as LogValue;
 use opentelemetry::{Array, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MAX_ATTRIBUTES: usize = 128;
 const MAX_ARRAY_ITEMS: usize = 128;
 const MAX_VALUES: usize = 65_536;
+const MAX_LOG_VALUE_DEPTH: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SdkValueError {
@@ -157,6 +159,116 @@ impl ValueBudget {
         }
         Ok(())
     }
+
+    /// Admit every raw SDK log attribute, including overwritten updates.
+    pub(super) fn log_attributes<'a>(
+        &mut self,
+        attributes: impl Iterator<Item = (&'a str, &'a LogValue)>,
+    ) -> Result<(), SdkValueError> {
+        for (index, (key, value)) in attributes.enumerate() {
+            if index == MAX_ATTRIBUTES || key.is_empty() || key.len() > 1024 {
+                return Err(SdkValueError::InvalidAttributes);
+            }
+            self.bytes(std::mem::size_of::<KeyValue>())?;
+            self.text(key, 1024)?;
+            self.log_value(value, 1)?;
+        }
+        Ok(())
+    }
+
+    /// Bound recursive SDK log values before copying strings, bytes, or maps.
+    pub(super) fn log_value(
+        &mut self,
+        value: &LogValue,
+        depth: usize,
+    ) -> Result<(), SdkValueError> {
+        if depth == 0 || depth > MAX_LOG_VALUE_DEPTH {
+            return Err(SdkValueError::LimitExceeded);
+        }
+        self.value_node()?;
+        match value {
+            LogValue::Int(_) | LogValue::Boolean(_) => Ok(()),
+            LogValue::Double(value) => finite(*value).map(|_| ()),
+            LogValue::String(value) => self.text(value.as_str(), 4096),
+            LogValue::Bytes(value) => {
+                if value.len() > 4096 {
+                    return Err(SdkValueError::LimitExceeded);
+                }
+                self.bytes(value.len())
+            }
+            LogValue::ListAny(values) => {
+                if values.len() > MAX_ARRAY_ITEMS {
+                    return Err(SdkValueError::LimitExceeded);
+                }
+                for value in values.iter() {
+                    self.log_value(value, depth + 1)?;
+                }
+                Ok(())
+            }
+            LogValue::Map(values) => {
+                if values.len() > MAX_ARRAY_ITEMS {
+                    return Err(SdkValueError::LimitExceeded);
+                }
+                // HashMap iteration scans capacity, including empty buckets.
+                // Admit that finite source envelope before its first scan.
+                self.bytes(
+                    values
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(opentelemetry::Key, LogValue)>()),
+                )?;
+                for (key, value) in values.iter() {
+                    if key.as_str().is_empty() || key.as_str().len() > 1024 {
+                        return Err(SdkValueError::InvalidAttributes);
+                    }
+                    self.bytes(std::mem::size_of::<KeyValue>())?;
+                    self.text(key.as_str(), 1024)?;
+                    self.log_value(value, depth + 1)?;
+                }
+                Ok(())
+            }
+            _ => Err(SdkValueError::InvalidAttributes),
+        }
+    }
+}
+
+/// Compact, prevalidated SDK resource shared by the log and span bridges.
+pub(super) struct SdkResource {
+    pub(super) resource: Resource,
+    pub(super) schema_url: String,
+    pub(super) input_bytes: usize,
+    pub(super) value_nodes: usize,
+}
+
+impl SdkResource {
+    pub(super) fn empty() -> Self {
+        Self {
+            resource: Resource::default(),
+            schema_url: String::new(),
+            input_bytes: std::mem::size_of::<Self>(),
+            value_nodes: 0,
+        }
+    }
+
+    pub(super) fn prepare(
+        input: &opentelemetry_sdk::Resource,
+        max_bytes: usize,
+    ) -> Result<Self, SdkValueError> {
+        let mut budget = ValueBudget::new(max_bytes);
+        budget.bytes(std::mem::size_of::<Self>())?;
+        budget.attributes(input.iter().map(|(key, value)| (key.as_str(), value)))?;
+        budget.text(input.schema_url().unwrap_or_default(), 2048)?;
+        Ok(Self {
+            resource: Resource {
+                attributes: owned_attributes(
+                    input.iter().map(|(key, value)| (key.as_str(), value)),
+                )?,
+                ..Resource::default()
+            },
+            schema_url: input.schema_url().unwrap_or_default().to_owned(),
+            input_bytes: budget.byte_count(),
+            value_nodes: budget.node_count(),
+        })
+    }
 }
 
 pub(super) fn finite(value: f64) -> Result<f64, SdkValueError> {
@@ -245,7 +357,7 @@ pub(super) fn owned_attributes_last_wins<'a>(
     owned_attributes(selected.into_iter())
 }
 
-fn value_nodes(value: &AnyValue) -> usize {
+pub(super) fn value_nodes(value: &AnyValue) -> usize {
     match value.value.as_ref() {
         Some(AnyValueValue::Array(array)) => array.values.iter().fold(1usize, |count, value| {
             count.saturating_add(value_nodes(value))
@@ -255,6 +367,62 @@ fn value_nodes(value: &AnyValue) -> usize {
         }
         _ => 1,
     }
+}
+
+/// Map a log value only after complete borrowed collection validation.
+pub(super) fn owned_log_value(value: &LogValue) -> Result<AnyValue, SdkValueError> {
+    let value = match value {
+        LogValue::Int(value) => AnyValueValue::Int(*value),
+        LogValue::Double(value) => AnyValueValue::Double(*value),
+        LogValue::String(value) => AnyValueValue::String(value.as_str().to_owned()),
+        LogValue::Boolean(value) => AnyValueValue::Bool(*value),
+        LogValue::Bytes(value) => AnyValueValue::Bytes(value.as_slice().to_vec()),
+        LogValue::ListAny(values) => AnyValueValue::Array(ArrayValue {
+            values: values
+                .iter()
+                .map(owned_log_value)
+                .collect::<Result<Vec<_>, _>>()?,
+            ..ArrayValue::default()
+        }),
+        LogValue::Map(values) => {
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+            AnyValueValue::KeyValueList(KeyValueList {
+                values: entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        Ok(KeyValue {
+                            key: key.as_str().to_owned(),
+                            value: Some(owned_log_value(value)?),
+                            ..KeyValue::default()
+                        })
+                    })
+                    .collect::<Result<Vec<_>, SdkValueError>>()?,
+                ..KeyValueList::default()
+            })
+        }
+        _ => return Err(SdkValueError::InvalidAttributes),
+    };
+    Ok(AnyValue {
+        value: Some(value),
+        ..AnyValue::default()
+    })
+}
+
+pub(super) fn owned_log_attributes<'a>(
+    attributes: impl Iterator<Item = (&'a str, &'a LogValue)>,
+) -> Result<Vec<KeyValue>, SdkValueError> {
+    let selected: BTreeMap<_, _> = attributes.collect();
+    selected
+        .into_iter()
+        .map(|(key, value)| {
+            Ok(KeyValue {
+                key: key.to_owned(),
+                value: Some(owned_log_value(value)?),
+                ..KeyValue::default()
+            })
+        })
+        .collect()
 }
 
 pub(super) fn attribute_nodes(attributes: &[KeyValue]) -> usize {

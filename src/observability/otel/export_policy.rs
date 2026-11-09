@@ -670,7 +670,7 @@ impl OwnedOtlpExportPolicy {
         Ok(())
     }
 
-    fn log(
+    pub(super) fn log(
         &self,
         record: &mut crate::observability::otlp_proto::logs::LogRecord,
         report: &mut OwnedOtlpPolicyReport,

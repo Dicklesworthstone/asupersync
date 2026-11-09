@@ -250,8 +250,8 @@ h3-websocket-e2e = []
 raptorq-roundtrip-e2e = []
 # Focused no-mock obligation cleanup E2E harness for asupersync-9u057b.5.
 obligation-cleanup-e2e = []
-# OpenTelemetry metrics provider only. The normal dependency graph for this
-# feature stays Tokio-free; OTLP protobuf helpers remain fuzz/test-only.
+# OpenTelemetry provider bridges for metrics, traces, and logs. The normal
+# dependency graph stays Tokio-free; OTLP protobuf helpers remain fuzz/test-only.
 metrics = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
@@ -504,9 +504,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 # Explicit opt-in bridge for dependencies that still emit through `log`.
 # Test helpers never install this bridge implicitly.
 tracing-log = { version = "0.2", optional = true }
-# Optional OpenTelemetry metrics provider
-opentelemetry = { version = "0.32", default-features = false, features = ["metrics", "trace"], optional = true }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics", "trace"], optional = true }
+# Optional OpenTelemetry provider bridges
+opentelemetry = { version = "0.32", default-features = false, features = ["metrics", "trace", "logs"], optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics", "trace", "logs"], optional = true }
 regex = { version = "1.12", optional = true }
 # Retained Unicode 16.0.0 table backend for the internal regex semantic
 # staging layer. This is already present in the regex stack; the direct edge
