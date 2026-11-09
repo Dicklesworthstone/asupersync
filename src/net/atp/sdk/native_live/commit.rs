@@ -244,7 +244,7 @@ pub use manifest_sink::{
 
 // Keep the transport adapter beside its existing trait, not in a second writer,
 // verifier, or filesystem subsystem. All actual disk work uses ScopedSparseWriter.
-#[path = "commit/manifest_sink"]
+#[cfg_attr(test, path = "commit/manifest_sink")]
 mod manifest_sink {
     use super::super::MAX_LIVE_EPOCH_BYTES;
     use super::{LiveStreamCommitSink, LiveStreamReceipt};

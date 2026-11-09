@@ -836,14 +836,15 @@ fn tls_proxy(address: SocketAddr, https: bool, trust: bool) -> HttpConnectProxy 
     } else {
         Vec::new()
     };
+    let mut http_client = HttpClient::builder();
+    for certificate in roots {
+        http_client = http_client.add_root_certificate(certificate);
+    }
     HttpConnectProxy::new(format!("{scheme}://localhost:{}", address.port()))
         .unwrap()
         .with_authorization(PROXY_AUTH)
         .unwrap()
-        .with_http_client(HttpClient::with_config(crate::http::h1::HttpClientConfig {
-            tls_root_certificates: roots,
-            ..Default::default()
-        }))
+        .with_http_client(http_client.build())
 }
 
 #[cfg(feature = "tls")]
