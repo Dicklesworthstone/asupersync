@@ -13,9 +13,13 @@ pub use managed::{
     ManagedOtlpReport,
 };
 
+#[path = "queued_grpc.rs"]
+mod grpc;
+pub use grpc::{OtlpGrpcQueueStats, QueuedOtlpGrpcExporter};
+
 /// Maximum admitted batches, including the batch currently being delivered.
 pub const OTLP_EXPORT_QUEUE_MAX_BATCHES: usize = 64;
-/// Maximum admitted snapshot string or encoded trace bytes, including the in-flight batch.
+/// Maximum admitted snapshot string or encoded request bytes, including the in-flight batch.
 ///
 /// Container overhead and temporary protobuf/HTTP encodings are additional;
 /// finite point/attribute limits bound those independently.
@@ -29,9 +33,11 @@ pub struct OtlpExportQueueStats {
     pub queued_batches: usize,
     /// Batches admitted but not yet retired, including the current request.
     pub retained_batches: usize,
-    /// Admitted snapshot/configuration string bytes and encoded trace bytes.
+    /// Admitted snapshot/configuration bytes and encoded request allocations.
     pub retained_bytes: usize,
-    /// Batches fully acknowledged by the collector.
+    /// Batches acknowledged under the selected transport's delivery contract.
+    /// Native gRPC includes terminal partial-success receipts; inspect
+    /// [`OtlpGrpcQueueStats`] before interpreting this as accepted item counts.
     pub delivered_batches: u64,
     /// Failed or abandoned batches, including unattempted managed backlog.
     /// These are never requeued.
@@ -53,20 +59,73 @@ struct QueueState {
     managed: bool,
     sealed: bool,
     aborted: bool,
+    grpc: GrpcPartialStats,
+}
+
+#[derive(Debug, Default)]
+struct GrpcPartialStats {
+    batches: u64,
+    rejected_data_points: u64,
+    rejected_spans: u64,
+    rejected_log_records: u64,
 }
 
 #[derive(Debug)]
 enum Payload {
     Metrics(MetricsSnapshot),
     Logs(LogsSnapshot),
-    Traces(Vec<u8>),
+    Encoded {
+        signal: OtlpGrpcSignal,
+        body: Vec<u8>,
+    },
+}
+
+/// A batch captures only transport configuration, never its producer queue.
+/// In particular, the native transport has no queue back-reference.
+#[derive(Debug, Clone)]
+enum Destination {
+    Http {
+        config: OtlpHttpConfig,
+        legacy_retry_compatibility: bool,
+    },
+    Grpc {
+        exporter: Arc<OtlpGrpcExporter>,
+        retry_policy: Option<OtlpGrpcRetryPolicy>,
+    },
+}
+
+impl Destination {
+    fn http(exporter: &OtlpHttpExporter) -> Self {
+        Self::Http {
+            config: exporter.snapshot_config(),
+            legacy_retry_compatibility: exporter.legacy_retry_compatibility,
+        }
+    }
+
+    fn configuration_bytes(&self) -> Result<usize, ExportError> {
+        match self {
+            Self::Http { config, .. } => config_bytes(config),
+            Self::Grpc { exporter, .. } => Ok(exporter.configuration_bytes()),
+        }
+    }
+
+    fn validate_request_size(&self, size: usize) -> Result<(), ExportError> {
+        match self {
+            Self::Grpc { exporter, .. } => exporter
+                .validate_request_size(size)
+                .map_err(|error| ExportError::new(error.to_string())),
+            Self::Http { .. } if size > OWNED_OTLP_DEFAULT_REQUEST_BYTES => {
+                Err(ExportError::new("otlp.queue.encoded_batch_too_large"))
+            }
+            Self::Http { .. } => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug)]
 struct Batch {
     payload: Payload,
-    config: OtlpHttpConfig,
-    legacy_retry_compatibility: bool,
+    destination: Destination,
     bytes: usize,
 }
 
@@ -115,8 +174,10 @@ impl ExportQueue {
         // callbacks or wakers run under this lock.
         state.pending.push_back(Batch {
             payload: payload(),
-            config,
-            legacy_retry_compatibility: exporter.legacy_retry_compatibility,
+            destination: Destination::Http {
+                config,
+                legacy_retry_compatibility: exporter.legacy_retry_compatibility,
+            },
             bytes,
         });
         state.stats.retained_batches += 1;
@@ -141,25 +202,47 @@ impl ExportQueue {
         exporter: &OtlpHttpExporter,
         requests: Vec<Vec<u8>>,
     ) -> Result<usize, ExportError> {
+        self.admit_encoded(
+            Destination::http(exporter),
+            OtlpGrpcSignal::Traces,
+            requests,
+        )
+    }
+
+    fn admit_encoded(
+        &self,
+        destination: Destination,
+        signal: OtlpGrpcSignal,
+        requests: Vec<Vec<u8>>,
+    ) -> Result<usize, ExportError> {
         let count = requests.len();
         if count == 0 {
             return Ok(0);
         }
-        let config = exporter.snapshot_config();
-        let configuration_bytes = config_bytes(&config)?;
-        let mut bytes = configuration_bytes.checked_mul(count).ok_or_else(queue_full)?;
+        let configuration_bytes = destination.configuration_bytes()?;
+        let mut bytes = configuration_bytes
+            .checked_mul(count)
+            .ok_or_else(queue_full)?;
         for request in &requests {
-            if request.len() > OWNED_OTLP_DEFAULT_REQUEST_BYTES {
-                return Err(ExportError::new("otlp.queue.encoded_batch_too_large"));
-            }
-            add_bytes(&mut bytes, request.len())?;
+            destination.validate_request_size(request.len())?;
+            // Raw producers may supply a tiny Vec with a large allocation.
+            // Retained capacity, not merely its visible length, consumes credit.
+            add_bytes(&mut bytes, request.capacity())?;
         }
         let mut state = self.state.lock();
         if state.sealed {
             return Err(ExportError::new("otlp.queue.closed"));
         }
-        let retained_batches = state.stats.retained_batches.checked_add(count).ok_or_else(queue_full)?;
-        let retained_bytes = state.stats.retained_bytes.checked_add(bytes).ok_or_else(queue_full)?;
+        let retained_batches = state
+            .stats
+            .retained_batches
+            .checked_add(count)
+            .ok_or_else(queue_full)?;
+        let retained_bytes = state
+            .stats
+            .retained_bytes
+            .checked_add(bytes)
+            .ok_or_else(queue_full)?;
         if retained_batches > OTLP_EXPORT_QUEUE_MAX_BATCHES
             || retained_bytes > OTLP_EXPORT_QUEUE_MAX_BYTES
         {
@@ -168,11 +251,13 @@ impl ExportQueue {
         // One collection is one admission decision. Publishing a prefix here
         // would make a capacity retry duplicate the earlier accepted spans.
         for request in requests {
-            let bytes = request.len() + configuration_bytes;
+            let bytes = request.capacity() + configuration_bytes;
             state.pending.push_back(Batch {
-                payload: Payload::Traces(request),
-                config: config.clone(),
-                legacy_retry_compatibility: exporter.legacy_retry_compatibility,
+                payload: Payload::Encoded {
+                    signal,
+                    body: request,
+                },
+                destination: destination.clone(),
                 bytes,
             });
         }
@@ -182,6 +267,70 @@ impl ExportQueue {
         drop(state);
         self.ready.notify_one();
         Ok(count)
+    }
+
+    async fn flush_prefix(&self, cx: &crate::Cx, timestamp: u64) -> Result<usize, ExportError> {
+        if timestamp == 0 {
+            return Err(ExportError::new("otlp.queue.invalid_timestamp"));
+        }
+        let _consumer = self.consumer()?;
+        let count = self.state.lock().stats.queued_batches;
+        for _ in 0..count {
+            cx.checkpoint()
+                .map_err(|_| ExportError::new("otlp.queue.cancelled"))?;
+            let mut delivery = self.take().expect("exclusive consumer owns prefix");
+            delivery.send(cx, timestamp).await?;
+        }
+        Ok(count)
+    }
+
+    async fn run(
+        &self,
+        cx: &crate::Cx,
+        mut unix_time_nanos: impl FnMut() -> u64,
+    ) -> Result<(), ExportError> {
+        use std::future::{Future, poll_fn};
+        use std::pin::pin;
+        use std::task::Poll;
+
+        let _consumer = self.consumer()?;
+        let mut cancel = OtlpCancelWakerGuard::new(cx);
+        let mut deadline = cx.budget().deadline.map(|deadline| {
+            cx.timer_driver().map_or_else(
+                || crate::time::sleep_until(deadline),
+                |driver| crate::time::Sleep::with_timer_driver(deadline, driver),
+            )
+        });
+        loop {
+            let mut ready = pin!(
+                self.ready
+                    .wait_until(|| self.state.lock().stats.queued_batches != 0)
+            );
+            poll_fn(|task_cx| {
+                cancel.refresh(task_cx.waker());
+                if cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(ExportError::new("otlp.queue.cancelled")));
+                }
+                if let Some(deadline) = deadline.as_mut()
+                    && std::pin::Pin::new(deadline)
+                        .poll_deadline(task_cx)
+                        .is_ready()
+                {
+                    return Poll::Ready(Err(ExportError::new("otlp.queue.deadline_exceeded")));
+                }
+                ready.as_mut().poll(task_cx).map(Ok)
+            })
+            .await?;
+            // The caller's clock stays outside all locks, and an invalid
+            // timestamp never consumes accepted telemetry.
+            let timestamp = unix_time_nanos();
+            if timestamp == 0 {
+                return Err(ExportError::new("otlp.queue.invalid_timestamp"));
+            }
+            if let Some(mut delivery) = self.take() {
+                delivery.send(cx, timestamp).await?;
+            }
+        }
     }
 
     fn take(&self) -> Option<Delivery<'_>> {
@@ -214,20 +363,54 @@ struct Delivery<'a> {
 
 impl Delivery<'_> {
     async fn send(&mut self, cx: &crate::Cx, point_time: u64) -> Result<(), ExportError> {
-        let batch = self.batch.as_ref().expect("delivery owns its batch");
-        let body = match &batch.payload {
-            Payload::Metrics(snapshot) => encode_metrics(snapshot, point_time, &batch.config)?,
-            Payload::Logs(snapshot) => snapshot.to_otlp_protobuf(),
-            Payload::Traces(body) => body.clone(),
-        };
-        if body.len() > OWNED_OTLP_DEFAULT_REQUEST_BYTES {
-            return Err(ExportError::new("otlp.queue.encoded_batch_too_large"));
+        let batch = self.batch.as_mut().expect("delivery owns its batch");
+        match &batch.destination {
+            Destination::Http {
+                config,
+                legacy_retry_compatibility,
+            } => {
+                let body = match &batch.payload {
+                    Payload::Metrics(snapshot) => encode_metrics(snapshot, point_time, config)?,
+                    Payload::Logs(snapshot) => snapshot.to_otlp_protobuf(),
+                    Payload::Encoded { body, .. } => body.clone(),
+                };
+                batch.destination.validate_request_size(body.len())?;
+                // HTTP keeps its established retry and positive-rejection
+                // behavior. A newer producer clone cannot redirect this batch.
+                let mut sender = OtlpHttpExporter::from_config(config.clone());
+                sender.legacy_retry_compatibility = *legacy_retry_compatibility;
+                sender.send_otlp_protobuf(cx, body).await?;
+            }
+            Destination::Grpc {
+                exporter,
+                retry_policy,
+            } => {
+                let Payload::Encoded { signal, body } = &mut batch.payload else {
+                    return Err(ExportError::new("otlp.queue.invalid_native_payload"));
+                };
+                // Move the admitted allocation into the native call. The
+                // delivery keeps its original credit until terminal retirement;
+                // retry shares this same body without another payload copy.
+                let body = std::mem::take(body);
+                let response = match retry_policy {
+                    Some(policy) => exporter.send_with_retry(cx, *signal, body, policy).await,
+                    None => exporter.send_once(cx, *signal, body).await,
+                }
+                .map_err(|error| ExportError::new(error.to_string()))?;
+                if response.is_partial_success() {
+                    let mut state = self.queue.state.lock();
+                    state.grpc.batches = state.grpc.batches.saturating_add(1);
+                    let rejected = match signal {
+                        OtlpGrpcSignal::Metrics => &mut state.grpc.rejected_data_points,
+                        OtlpGrpcSignal::Traces => &mut state.grpc.rejected_spans,
+                        OtlpGrpcSignal::Logs => &mut state.grpc.rejected_log_records,
+                    };
+                    *rejected = rejected.saturating_add(response.rejected_items());
+                }
+                // A valid partial receipt ends this request. Its rejected
+                // items are counted separately; later batches may proceed.
+            }
         }
-        // Capture each batch's destination and credentials at admission. A
-        // fluent configuration change on another clone cannot redirect it.
-        let mut sender = OtlpHttpExporter::from_config(batch.config.clone());
-        sender.legacy_retry_compatibility = batch.legacy_retry_compatibility;
-        sender.send_otlp_protobuf(cx, body).await?;
         self.delivered = true;
         Ok(())
     }
@@ -271,12 +454,61 @@ impl OtlpHttpExporter {
         spans: &[OtlpTraceSpanInput<'_>],
     ) -> Result<usize, ExportError> {
         self.validate_for_export().map_err(ExportError::from)?;
-        let attributes = self.resource_attributes.iter()
+        let attributes = self
+            .resource_attributes
+            .iter()
             .map(|(key, value)| (key.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        let collection = traces.collect(spans, &attributes)
+        let collection = traces
+            .collect(spans, &attributes)
             .map_err(|error| ExportError::new(error.to_string()))?;
-        self.export_queue.admit_traces(self, collection.into_requests())
+        self.export_queue
+            .admit_traces(self, collection.into_requests())
+    }
+
+    /// Encode and atomically admit an owned metrics collection using its
+    /// explicit point timestamp. Every request retains this exporter's exact
+    /// HTTP endpoint and configuration. A capacity refusal admits no prefix.
+    /// Existing HTTP retry and partial-rejection behavior applies at delivery.
+    pub fn enqueue_owned_metrics(
+        &self,
+        metrics: &OwnedOtlpMetrics,
+        point_time_unix_nano: u64,
+    ) -> Result<usize, ExportError> {
+        self.validate_for_export().map_err(ExportError::from)?;
+        let attributes = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let requests = metrics
+            .collect(point_time_unix_nano, &attributes)
+            .map_err(|error| ExportError::new(error.to_string()))?;
+        self.export_queue
+            .admit_encoded(Destination::http(self), OtlpGrpcSignal::Metrics, requests)
+    }
+
+    /// Encode and atomically admit structured owned logs, preserving typed
+    /// bodies and producer timestamps. The caller selects the HTTP endpoint;
+    /// this method never rewrites it. Empty input admits nothing. Existing
+    /// HTTP retry and partial-rejection behavior applies at delivery.
+    pub fn enqueue_owned_logs(
+        &self,
+        logs: &OwnedOtlpLogs,
+        records: &[OtlpLogRecordInput<'_>],
+    ) -> Result<usize, ExportError> {
+        self.validate_for_export().map_err(ExportError::from)?;
+        let attributes = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| OtlpLogKeyValueInput::string(key, value))
+            .collect::<Vec<_>>();
+        let requests = logs
+            .collect(records, &attributes)
+            .map_err(|error| ExportError::new(error.to_string()))?
+            .into_requests();
+        self.export_queue
+            .admit_encoded(Destination::http(self), OtlpGrpcSignal::Logs, requests)
     }
 
     pub(super) fn enqueue_metrics(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
@@ -326,21 +558,9 @@ impl OtlpHttpExporter {
         cx: &crate::Cx,
         point_time_unix_nano: u64,
     ) -> Result<usize, ExportError> {
-        if point_time_unix_nano == 0 {
-            return Err(ExportError::new("otlp.queue.invalid_timestamp"));
-        }
-        let _consumer = self.export_queue.consumer()?;
-        let count = self.queue_stats().queued_batches;
-        for _ in 0..count {
-            cx.checkpoint()
-                .map_err(|_| ExportError::new("otlp.queue.cancelled"))?;
-            let mut delivery = self
-                .export_queue
-                .take()
-                .expect("exclusive consumer owns prefix");
-            delivery.send(cx, point_time_unix_nano).await?;
-        }
-        Ok(count)
+        self.export_queue
+            .flush_prefix(cx, point_time_unix_nano)
+            .await
     }
 
     /// Drive queued exports inside a caller-owned task until cancellation or
@@ -350,51 +570,9 @@ impl OtlpHttpExporter {
     pub async fn run_queued(
         &self,
         cx: &crate::Cx,
-        mut unix_time_nanos: impl FnMut() -> u64,
+        unix_time_nanos: impl FnMut() -> u64,
     ) -> Result<(), ExportError> {
-        use std::future::{Future, poll_fn};
-        use std::pin::pin;
-        use std::task::Poll;
-
-        let _consumer = self.export_queue.consumer()?;
-        let mut cancel = OtlpCancelWakerGuard::new(cx);
-        let mut deadline = cx.budget().deadline.map(|deadline| {
-            cx.timer_driver().map_or_else(
-                || crate::time::sleep_until(deadline),
-                |driver| crate::time::Sleep::with_timer_driver(deadline, driver),
-            )
-        });
-        loop {
-            let mut ready = pin!(
-                self.export_queue
-                    .ready
-                    .wait_until(|| { self.queue_stats().queued_batches != 0 })
-            );
-            poll_fn(|task_cx| {
-                cancel.refresh(task_cx.waker());
-                if cx.checkpoint().is_err() {
-                    return Poll::Ready(Err(ExportError::new("otlp.queue.cancelled")));
-                }
-                if let Some(deadline) = deadline.as_mut()
-                    && std::pin::Pin::new(deadline)
-                        .poll_deadline(task_cx)
-                        .is_ready()
-                {
-                    return Poll::Ready(Err(ExportError::new("otlp.queue.deadline_exceeded")));
-                }
-                ready.as_mut().poll(task_cx).map(Ok)
-            })
-            .await?;
-            // Read and validate the caller's clock before dequeueing, so a
-            // broken clock does not consume accepted telemetry.
-            let timestamp = unix_time_nanos();
-            if timestamp == 0 {
-                return Err(ExportError::new("otlp.queue.invalid_timestamp"));
-            }
-            if let Some(mut delivery) = self.export_queue.take() {
-                delivery.send(cx, timestamp).await?;
-            }
-        }
+        self.export_queue.run(cx, unix_time_nanos).await
     }
 }
 

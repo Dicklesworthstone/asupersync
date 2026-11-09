@@ -60,12 +60,15 @@ fn encoded_bytes_and_configuration_are_reserved_for_every_request() {
     let later = exporter.clone().with_bearer_token("later-token");
     let delivery = later.export_queue.take().unwrap();
     let batch = delivery.batch.as_ref().unwrap();
-    let Payload::Traces(body) = &batch.payload else {
+    let Payload::Encoded { signal: OtlpGrpcSignal::Traces, body } = &batch.payload else {
         panic!("trace admission must retain the already encoded request");
     };
-    assert_eq!(batch.config.auth_headers.len(), 1);
-    assert_eq!(batch.config.auth_headers[0].value.0, "Bearer original-token");
-    assert_eq!(batch.bytes, body.len() + config_bytes(&batch.config).unwrap());
+    let Destination::Http { config, .. } = &batch.destination else {
+        panic!("trace admission must retain its HTTP transport");
+    };
+    assert_eq!(config.auth_headers.len(), 1);
+    assert_eq!(config.auth_headers[0].value.0, "Bearer original-token");
+    assert_eq!(batch.bytes, body.capacity() + config_bytes(config).unwrap());
     assert_eq!(later.queue_stats().retained_bytes, batch.bytes);
     drop(delivery);
     assert_eq!(later.queue_stats().retained_bytes, 0);

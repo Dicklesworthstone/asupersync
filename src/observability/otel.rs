@@ -71,7 +71,7 @@ mod queued;
 pub use queued::{
     ManagedOtlpControl, ManagedOtlpError, ManagedOtlpExporter, ManagedOtlpOutcome,
     ManagedOtlpReport, OTLP_EXPORT_QUEUE_MAX_BATCHES, OTLP_EXPORT_QUEUE_MAX_BYTES,
-    OtlpExportQueueStats,
+    OtlpExportQueueStats, OtlpGrpcQueueStats, QueuedOtlpGrpcExporter,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

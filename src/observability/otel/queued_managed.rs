@@ -1,8 +1,8 @@
 //! Region-owned lifetime and cancellation-safe observation for queued OTLP.
 
 use super::{
-    ExportError, ExportQueue, OtlpCancelWakerGuard, OtlpExportQueueStats,
-    OtlpHttpExporter, OtlpLogsHttpExporter, Payload,
+    ExportError, ExportQueue, OtlpCancelWakerGuard, OtlpExportQueueStats, OtlpHttpExporter,
+    OtlpLogsHttpExporter, Payload,
 };
 use crate::cx::{ChildRegion, ChildRegionError, ChildRegionSpec, Cx};
 use crate::record::region::RegionCloseOutcome;
@@ -109,9 +109,11 @@ impl Shared {
         // handle. Conversely, synchronous spawn rejection drops the factory
         // without accepting ownership of the existing queue. Commit this
         // handoff only after submission succeeds.
-        if self.lifecycle.compare_exchange(
-            STARTING, ACTIVE, Ordering::AcqRel, Ordering::Acquire,
-        ) == Err(EXITED) {
+        if self
+            .lifecycle
+            .compare_exchange(STARTING, ACTIVE, Ordering::AcqRel, Ordering::Acquire)
+            == Err(EXITED)
+        {
             self.retire_queue();
         }
     }
@@ -179,7 +181,10 @@ impl<'a> AdmissionClaim<'a> {
         }
         state.managed = true;
         state.stats.consumer_active = true;
-        Ok(Self { queue, submitted: false })
+        Ok(Self {
+            queue,
+            submitted: false,
+        })
     }
 
     fn commit(mut self) {
@@ -205,7 +210,8 @@ pub struct ManagedOtlpControl {
 
 impl std::fmt::Debug for ManagedOtlpControl {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("ManagedOtlpControl")
+        formatter
+            .debug_struct("ManagedOtlpControl")
             .field("sealed", &self.is_sealed())
             .finish_non_exhaustive()
     }
@@ -232,8 +238,7 @@ impl ManagedOtlpControl {
     }
 }
 
-type Closing =
-    Pin<Box<dyn Future<Output = Result<RegionCloseOutcome, ChildRegionError>> + Send>>;
+type Closing = Pin<Box<dyn Future<Output = Result<RegionCloseOutcome, ChildRegionError>> + Send>>;
 
 /// Owns the actual queued-export task and its child region until quiescence.
 ///
@@ -255,7 +260,8 @@ pub struct ManagedOtlpExporter {
 
 impl std::fmt::Debug for ManagedOtlpExporter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("ManagedOtlpExporter")
+        formatter
+            .debug_struct("ManagedOtlpExporter")
             .field("region_id", &self.region_id)
             .field("task_id", &self.task_id)
             .field("completed", &self.completed)
@@ -326,7 +332,10 @@ impl ManagedOtlpExporter {
             return Poll::Ready(Err(ManagedOtlpError::AlreadyJoined));
         }
         if self.joined.is_none() {
-            let task = self.task.as_mut().expect("owned OTLP task before retirement");
+            let task = self
+                .task
+                .as_mut()
+                .expect("owned OTLP task before retirement");
             let joined = std::task::ready!(task.poll_join(cx));
             self.task_id = task.task_id();
             self.joined = Some(joined);
@@ -337,7 +346,11 @@ impl ManagedOtlpExporter {
             self.closing = Some(Box::pin(region.close_with_outcome()));
         }
         let closed = std::task::ready!(
-            self.closing.as_mut().expect("retained OTLP region close").as_mut().poll(cx)
+            self.closing
+                .as_mut()
+                .expect("retained OTLP region close")
+                .as_mut()
+                .poll(cx)
         );
         drop(self.closing.take());
         self.completed = true;
@@ -398,53 +411,7 @@ impl OtlpHttpExporter {
         }
         check_owner_admission(cx)?;
         self.validate_for_export().map_err(ExportError::from)?;
-        let region = cx.open_child_region(ChildRegionSpec::inherit()).await?;
-        if let Err(error) = check_owner_admission(cx) {
-            region.close().await?;
-            return Err(ManagedOtlpError::Admission(error));
-        }
-        let claim = match AdmissionClaim::new(&self.export_queue) {
-            Ok(claim) => claim,
-            Err(error) => {
-                region.close().await?;
-                return Err(ManagedOtlpError::Admission(error));
-            }
-        };
-        let shared = Arc::new(Shared {
-            queue: Arc::clone(&self.export_queue),
-            lifecycle: AtomicU8::new(STARTING),
-            outcome: Mutex::new(None),
-        });
-        let task_shared = Arc::clone(&shared);
-        let owner = cx.clone();
-        // Capture outside the factory so pre-first-poll cancellation also
-        // retires accepted backlog, without needing the user loop to execute.
-        let exit = ExitGuard(Arc::clone(&shared));
-        let task = region.cx().spawn(move |task_cx| async move {
-            let _exit = exit;
-            let outcome = run(&task_shared, &task_cx, &owner, unix_time_nanos).await;
-            *task_shared.outcome.lock() = Some(outcome);
-        });
-        let task = match task {
-            Ok(task) => task,
-            Err(error) => {
-                drop(claim);
-                region.close().await?;
-                return Err(ManagedOtlpError::Spawn(error));
-            }
-        };
-        claim.commit();
-        shared.activate();
-        Ok(ManagedOtlpExporter {
-            control: ManagedOtlpControl { shared },
-            region_id: region.region_id(),
-            task_id: task.task_id(),
-            region: Some(region),
-            task: Some(task),
-            joined: None,
-            closing: None,
-            completed: false,
-        })
+        spawn_queue(&self.export_queue, cx, unix_time_nanos).await
     }
 }
 
@@ -456,8 +423,70 @@ impl OtlpLogsHttpExporter {
     }
 }
 
+/// Share the proven region/task lifecycle across transport-specific producers.
+/// Every caller supplies an independent queue owner; transport snapshots held
+/// by that queue never own or point back to the queue itself.
+pub(super) async fn spawn_queue(
+    queue: &Arc<ExportQueue>,
+    cx: &Cx,
+    unix_time_nanos: impl FnMut() -> u64 + Send + 'static,
+) -> Result<ManagedOtlpExporter, ManagedOtlpError> {
+    if cx.spawn_gateway_handle().is_none() || cx.timer_driver().is_none() {
+        return Err(ManagedOtlpError::RuntimeRequired);
+    }
+    check_owner_admission(cx)?;
+    let region = cx.open_child_region(ChildRegionSpec::inherit()).await?;
+    if let Err(error) = check_owner_admission(cx) {
+        region.close().await?;
+        return Err(ManagedOtlpError::Admission(error));
+    }
+    let claim = match AdmissionClaim::new(queue) {
+        Ok(claim) => claim,
+        Err(error) => {
+            region.close().await?;
+            return Err(ManagedOtlpError::Admission(error));
+        }
+    };
+    let shared = Arc::new(Shared {
+        queue: Arc::clone(queue),
+        lifecycle: AtomicU8::new(STARTING),
+        outcome: Mutex::new(None),
+    });
+    let task_shared = Arc::clone(&shared);
+    let owner = cx.clone();
+    // Capture outside the factory so pre-first-poll cancellation also retires
+    // accepted backlog, without needing the user loop to execute.
+    let exit = ExitGuard(Arc::clone(&shared));
+    let task = region.cx().spawn(move |task_cx| async move {
+        let _exit = exit;
+        let outcome = run(&task_shared, &task_cx, &owner, unix_time_nanos).await;
+        *task_shared.outcome.lock() = Some(outcome);
+    });
+    let task = match task {
+        Ok(task) => task,
+        Err(error) => {
+            drop(claim);
+            region.close().await?;
+            return Err(ManagedOtlpError::Spawn(error));
+        }
+    };
+    claim.commit();
+    shared.activate();
+    Ok(ManagedOtlpExporter {
+        control: ManagedOtlpControl { shared },
+        region_id: region.region_id(),
+        task_id: task.task_id(),
+        region: Some(region),
+        task: Some(task),
+        joined: None,
+        closing: None,
+        completed: false,
+    })
+}
+
 fn cancel_reason(cx: &Cx) -> CancelReason {
-    cx.cancel_reason().unwrap_or_else(|| CancelReason::user("managed OTLP owner cancelled"))
+    cx.cancel_reason()
+        .unwrap_or_else(|| CancelReason::user("managed OTLP owner cancelled"))
 }
 
 fn cancelled_outcome(cx: &Cx) -> ManagedOtlpOutcome {
@@ -525,7 +554,8 @@ async fn run(
                 return Poll::Ready(Err(ManagedOtlpOutcome::DeadlineExceeded));
             }
             ready.as_mut().poll(task).map(Ok)
-        }).await;
+        })
+        .await;
         if let Err(outcome) = ready {
             return outcome;
         }
@@ -537,7 +567,7 @@ async fn run(
         };
         let timestamp = match &delivery.batch.as_ref().expect("owned delivery").payload {
             Payload::Metrics(_) => unix_time_nanos(),
-            Payload::Logs(_) | Payload::Traces(_) => 1,
+            Payload::Logs(_) | Payload::Encoded { .. } => 1,
         };
         if timestamp == 0 {
             return ManagedOtlpOutcome::Failed(ExportError::new("otlp.queue.invalid_timestamp"));
@@ -581,7 +611,8 @@ async fn run(
                 return Poll::Ready(Err(ManagedOtlpOutcome::Aborted));
             }
             Poll::Pending
-        }).await;
+        })
+        .await;
         if let Err(outcome) = sent {
             return outcome;
         }

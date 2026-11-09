@@ -99,8 +99,11 @@
         let changed = exporter.clone().with_bearer_token("later-credential");
         let delivery = changed.export_queue.take().unwrap();
         let batch = delivery.batch.as_ref().unwrap();
-        assert!(batch.config.auth_headers.is_empty());
-        let body = encode_metrics(&snapshot, 42, &batch.config).unwrap();
+        let Destination::Http { config, .. } = &batch.destination else {
+            panic!("HTTP admission must retain its original transport");
+        };
+        assert!(config.auth_headers.is_empty());
+        let body = encode_metrics(&snapshot, 42, config).unwrap();
         // Decode under the encoder's envelope, like the sibling OTLP tests. A
         // body-sized envelope leaves too little work budget for the nested
         // metric messages.

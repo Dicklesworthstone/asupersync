@@ -981,3 +981,211 @@ fn caller_tls_channel_preserves_authority_auth_metadata_and_redaction() {
     });
     peer.join().unwrap();
 }
+
+#[cfg(feature = "tls")]
+#[test]
+fn metadata_admission_compacts_ascii_and_binary_backing_before_queue_retention() {
+    use crate::observability::otel::{OTLP_EXPORT_QUEUE_MAX_BATCHES, QueuedOtlpGrpcExporter};
+
+    let (listener, address) = listener();
+    run_native(|_cx| async move {
+        let channel = Channel::builder("https://collector.invalid")
+            .tls_connector(tls_connector())
+            .tls_server_name("localhost")
+            .dial_addr(address)
+            .connect()
+            .await
+            .unwrap();
+        let mut ascii = String::with_capacity(1024 * 1024);
+        ascii.push_str(SECRET);
+        let old_ascii_capacity = ascii.capacity();
+        let mut storage = vec![0x55; 1024 * 1024];
+        storage[100..103].copy_from_slice(&[0, 0xff, 1]);
+        let backing = Bytes::from(storage);
+        let tiny_slice = backing.slice(100..103);
+        let old_binary_pointer = tiny_slice.as_ptr();
+        let mut metadata = Metadata::new();
+        metadata.reserve(16_384);
+        assert!(metadata.insert("authorization", ascii));
+        assert!(metadata.insert_bin("proof-bin", tiny_slice));
+
+        let exporter = OtlpGrpcExporter::new(channel)
+            .unwrap()
+            .try_with_metadata(metadata)
+            .unwrap();
+        assert_eq!(exporter.metadata.len(), 2);
+        let Some(MetadataValue::Ascii(stored_ascii)) = exporter.metadata.get("authorization")
+        else {
+            panic!("ASCII credential retained its type");
+        };
+        assert_eq!(stored_ascii, SECRET);
+        assert!(stored_ascii.capacity() < old_ascii_capacity);
+        assert!(stored_ascii.capacity() <= OTLP_HTTP_MAX_AUTH_HEADER_VALUE_BYTES);
+        let Some(MetadataValue::Binary(stored_binary)) = exporter.metadata.get("proof-bin") else {
+            panic!("binary credential retained its type");
+        };
+        assert_eq!(stored_binary.as_ref(), &[0, 0xff, 1]);
+        assert!(
+            !std::ptr::eq(stored_binary.as_ptr(), old_binary_pointer),
+            "a tiny binary view must not retain the caller's large backing allocation"
+        );
+        // Keep the original allocation alive across the pointer assertion, so
+        // allocator address reuse cannot masquerade as retained ownership.
+        assert_eq!(&backing[100..103], &[0, 0xff, 1]);
+        let charge = exporter.configuration_bytes();
+        assert!(
+            charge < 1024,
+            "retained configuration follows compact values"
+        );
+        let debug = format!("{exporter:?}");
+        for sensitive in [SECRET, "authorization", "proof-bin", "collector.invalid"] {
+            assert!(!debug.contains(sensitive));
+        }
+
+        let queue = QueuedOtlpGrpcExporter::new(exporter);
+        for _ in 0..OTLP_EXPORT_QUEUE_MAX_BATCHES {
+            queue
+                .enqueue_encoded(OtlpGrpcSignal::Metrics, Vec::new())
+                .unwrap();
+        }
+        let stats = queue.queue_stats().queue;
+        assert_eq!(stats.retained_batches, OTLP_EXPORT_QUEUE_MAX_BATCHES);
+        assert_eq!(stats.retained_bytes, charge * OTLP_EXPORT_QUEUE_MAX_BATCHES);
+        assert_eq!(stats.delivered_batches, 0);
+        assert_eq!(stats.failed_batches, 0);
+    });
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn metadata_compaction_preserves_count_limits_and_refuses_invalid_raw_entries() {
+    let (listener, address) = listener();
+    run_native(|_cx| async move {
+        let channel = Channel::builder("https://collector.invalid")
+            .tls_connector(tls_connector())
+            .tls_server_name("localhost")
+            .dial_addr(address)
+            .connect()
+            .await
+            .unwrap();
+        let mut maximum = Metadata::new();
+        maximum.reserve(16_384);
+        for index in 0..32 {
+            assert!(maximum.insert(format!("x-{index}"), SECRET));
+        }
+        let exporter = OtlpGrpcExporter::new(channel.clone())
+            .unwrap()
+            .try_with_metadata(maximum)
+            .unwrap();
+        assert_eq!(exporter.metadata.len(), 32);
+        for index in 0..32 {
+            let Some(MetadataValue::Ascii(value)) = exporter.metadata.get(&format!("x-{index}"))
+            else {
+                panic!("metadata compaction preserves every valid field");
+            };
+            assert_eq!(value, SECRET);
+        }
+
+        let mut excessive = exporter.metadata.clone();
+        assert!(excessive.insert("one-too-many", SECRET));
+        let raw_invalid = [
+            // Rebuilding before validation would normalize this into a valid
+            // lowercase credential field and accidentally admit it.
+            Metadata::from_raw_entries_for_tests(vec![(
+                "Authorization".to_owned(),
+                MetadataValue::Ascii(SECRET.to_owned()),
+            )]),
+            Metadata::from_raw_entries_for_tests(vec![(
+                "authorization".to_owned(),
+                MetadataValue::Ascii(format!("{SECRET}\r\n")),
+            )]),
+            Metadata::from_raw_entries_for_tests(vec![(
+                "proof".to_owned(),
+                MetadataValue::Binary(Bytes::from_static(b"private-proof")),
+            )]),
+            excessive,
+        ];
+        for metadata in raw_invalid {
+            let error = OtlpGrpcExporter::new(channel.clone())
+                .unwrap()
+                .try_with_metadata(metadata)
+                .unwrap_err();
+            assert_eq!(error.kind(), OtlpGrpcErrorKind::InvalidMetadata);
+            let text = format!("{error:?} {error}");
+            for sensitive in [
+                SECRET,
+                "authorization",
+                "private-proof",
+                "collector.invalid",
+            ] {
+                assert!(!text.contains(sensitive));
+            }
+        }
+    });
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+}
+
+#[test]
+fn native_queue_charges_resource_string_capacity_and_refuses_oversized_configuration() {
+    use crate::observability::otel::{
+        OTLP_EXPORT_QUEUE_MAX_BYTES, OtlpGrpcQueueStats, QueuedOtlpGrpcExporter,
+    };
+
+    let (listener, address) = listener();
+    run_native(|_cx| async move {
+        let channel = Channel::connect(format!("http://{address}")).await.unwrap();
+        let uri_bytes = channel.uri().len();
+        for oversized_key in [false, true] {
+            let mut key = String::with_capacity(if oversized_key {
+                OTLP_EXPORT_QUEUE_MAX_BYTES + 1
+            } else {
+                "service.name".len()
+            });
+            key.push_str("service.name");
+            let mut value = String::with_capacity(if oversized_key {
+                SECRET.len()
+            } else {
+                OTLP_EXPORT_QUEUE_MAX_BYTES + 1
+            });
+            value.push_str(SECRET);
+            let capacity = key.capacity() + value.capacity();
+            let exporter = OtlpGrpcExporter::new(channel.clone())
+                .unwrap()
+                .try_with_resource_attributes([(key, value)])
+                .unwrap();
+            assert_eq!(exporter.configuration_bytes(), uri_bytes + capacity);
+            let queue = QueuedOtlpGrpcExporter::new(exporter);
+            let error = queue
+                .enqueue_encoded(OtlpGrpcSignal::Logs, Vec::new())
+                .unwrap_err();
+            assert_eq!(queue.queue_stats(), OtlpGrpcQueueStats::default());
+            assert!(!format!("{error:?} {error}").contains(SECRET));
+        }
+
+        let mut key = String::with_capacity(1024);
+        key.push_str("service.name");
+        let mut value = String::with_capacity(4096);
+        value.push_str(SECRET);
+        let capacity = key.capacity() + value.capacity();
+        let exporter = OtlpGrpcExporter::new(channel)
+            .unwrap()
+            .try_with_resource_attributes([(key, value)])
+            .unwrap();
+        let queue = QueuedOtlpGrpcExporter::new(exporter);
+        queue
+            .enqueue_encoded(OtlpGrpcSignal::Traces, Vec::new())
+            .unwrap();
+        let stats = queue.queue_stats().queue;
+        assert_eq!(stats.retained_batches, 1);
+        assert_eq!(stats.retained_bytes, uri_bytes + capacity);
+        assert_eq!(stats.delivered_batches, 0);
+    });
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+}

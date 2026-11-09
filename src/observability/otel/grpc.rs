@@ -433,13 +433,27 @@ impl OtlpGrpcExporter {
     /// Keys must be unique, valid lowercase gRPC names and must not reserve
     /// transport headers or the `grpc-` prefix. At most 32 fields and 8 KiB of
     /// HTTP/2 header-list bytes are admitted. Binary values include their
-    /// base64 expansion in that bound. A failed builder makes no network call.
+    /// base64 expansion in that bound. Values are copied into compact owned
+    /// storage so a small binary slice or string cannot retain a much larger
+    /// caller allocation. A failed builder makes no network call.
     pub fn try_with_metadata(mut self, metadata: Metadata) -> Result<Self, OtlpGrpcError> {
         validate_metadata(&metadata)?;
         if !metadata.is_empty() && !self.encrypted() {
             return Err(OtlpGrpcError::new(OtlpGrpcErrorKind::InsecureMetadata));
         }
-        self.metadata = metadata;
+        let mut compact = Metadata::new();
+        for (key, value) in metadata.iter() {
+            let inserted = match value {
+                MetadataValue::Ascii(value) => compact.insert(key, value.as_str()),
+                MetadataValue::Binary(value) => {
+                    compact.insert_bin(key, Bytes::copy_from_slice(value.as_ref()))
+                }
+            };
+            if !inserted {
+                return Err(OtlpGrpcError::new(OtlpGrpcErrorKind::InvalidMetadata));
+            }
+        }
+        self.metadata = compact;
         Ok(self)
     }
 
@@ -629,7 +643,29 @@ impl OtlpGrpcExporter {
         Ok(report)
     }
 
-    fn validate_request_size(&self, size: usize) -> Result<(), OtlpGrpcError> {
+    // Queue credit covers retained string/binary payload allocations, while
+    // finite container overhead and caller-owned channel resources are extra.
+    // Metadata is compacted on admission; resource strings retain their actual
+    // capacities. Charging this for every batch is conservative for a shared
+    // immutable transport. Saturation makes any overflow fail queue admission.
+    pub(super) fn configuration_bytes(&self) -> usize {
+        let mut bytes = self.channel.uri().len();
+        for (key, value) in self.metadata.iter() {
+            let value_bytes = match value {
+                MetadataValue::Ascii(value) => value.capacity(),
+                MetadataValue::Binary(value) => value.len(),
+            };
+            bytes = bytes.saturating_add(key.len()).saturating_add(value_bytes);
+        }
+        for (key, value) in &self.resource_attributes {
+            bytes = bytes
+                .saturating_add(key.capacity())
+                .saturating_add(value.capacity());
+        }
+        bytes
+    }
+
+    pub(super) fn validate_request_size(&self, size: usize) -> Result<(), OtlpGrpcError> {
         if size > self.channel.config().max_send_message_size {
             return Err(OtlpGrpcError::new(OtlpGrpcErrorKind::RequestTooLarge));
         }
