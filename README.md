@@ -1810,6 +1810,41 @@ establish any required receiver acknowledgement or durability. These APIs do
 not make a measured throughput or full
 `ErasureCodedChannel` completion claim.
 
+### Offloaded authenticated channel messages
+
+`channel::erasure::authenticated_channel` composes bounded message admission,
+strict session-derived authentication, and atomic whole-message publication.
+Its `send_offloaded` and `send_value_offloaded` methods run encoding, signing,
+and optional bounded JSON serialization on the explicit `Cx`'s blocking pool.
+They use the same message format and codec as the existing inline methods.
+
+```rust
+use asupersync::Cx;
+use asupersync::channel::erasure::{AuthenticatedEcError, AuthenticatedEcSender};
+
+async fn publish_message(
+    sender: &mut AuthenticatedEcSender,
+    cx: &Cx,
+    bytes: Vec<u8>,
+) -> Result<u64, AuthenticatedEcError> {
+    let mut session = sender.start_send_offloaded(cx, bytes).await?;
+    session.run().await
+}
+```
+
+Capacity and the checked send obligation are reserved before coding starts.
+Dropping `run()` retains the reservation and worker progress; dropping the
+session aborts publication. A private slot stays with worker-owned input,
+workspace and output until they are released, so repeated cancellation cannot
+accumulate abandoned encoding jobs from one sender. Queue storage, inputs
+awaiting admission, and an overlapping inline operation are separate costs.
+An active codec or serializer is cooperative only at its surrounding
+checkpoints; region shutdown still waits for actual worker retirement. Missing,
+forbidden or unavailable worker resources fail without inline fallback.
+Success means the complete message entered the local channel, not that a peer
+decoded or durably stored it. This remains an in-memory channel; it does not
+add a network transport or a measured performance claim.
+
 ### One-Command RaptorQ Validation
 
 Use the deterministic E2E wrapper with `--bundle` to run staged unit/perf-smoke gates plus scenario coverage with a single command:

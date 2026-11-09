@@ -59,6 +59,10 @@ use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use crate::util::DetRng;
 use sha2::{Digest, Sha256};
 
+#[path = "erasure_offloaded.rs"]
+mod offloaded;
+pub use offloaded::AuthenticatedEcSendSession;
+
 const AUTHENTICATED_HEADER_DOMAIN: &[u8] =
     b"asupersync::channel::erasure::authenticated-header::v1";
 const TRANSFER_DIGEST_DOMAIN: &[u8] = b"asupersync::channel::erasure::transfer-digest::v1";
@@ -715,6 +719,15 @@ pub enum AuthenticatedEcError {
     /// A transport envelope exceeds the configured geometry or symbol bounds.
     #[error("invalid authenticated erasure envelope: {0}")]
     InvalidEnvelope(&'static str),
+    /// The explicit context could not admit a blocking worker.
+    #[error("authenticated erasure worker admission refused: {0}")]
+    WorkerAdmission(#[source] crate::runtime::SpawnError),
+    /// A worker panicked or failed to publish its result.
+    #[error("authenticated erasure worker failed: {0}")]
+    WorkerFailed(&'static str),
+    /// A completed or poisoned session cannot be resumed.
+    #[error("invalid authenticated erasure session: {0}")]
+    InvalidSession(&'static str),
 }
 
 #[derive(Debug)]
@@ -750,8 +763,12 @@ struct AuthenticatedEcEnvelope {
 /// unrepresentable aggregate queue bound. In addition to queued/reserved
 /// messages, one receiver may hold a message and decoder workspace. Encoder
 /// and decoder scratch space, allocator overhead, caller-owned input, and
-/// returned decoded values are not queue bytes. Coding runs synchronously
-/// after admission; this API does not preempt a long coding poll.
+/// returned decoded values are not queue bytes. The original send and receive
+/// methods perform coding synchronously. [`AuthenticatedEcSender::send_offloaded`]
+/// moves encoding and authentication to the explicit context's blocking pool.
+/// An endpoint's private worker slot bounds abandoned offloaded work separately
+/// from queue capacity; cancelling a reservation does not free that slot until
+/// its worker-owned input, workspace and result have been destroyed.
 ///
 /// # Errors
 ///
@@ -796,6 +813,7 @@ pub fn authenticated_channel(
             auth: auth.clone(),
             tx,
             next_message_id: Some(0),
+            offload: std::sync::Arc::new(crate::sync::Semaphore::new(1)),
         },
         AuthenticatedEcReceiver { config, auth, rx },
     ))
@@ -812,6 +830,9 @@ pub struct AuthenticatedEcSender {
     auth: SecurityContext,
     tx: mpsc::Sender<AuthenticatedEcEnvelope>,
     next_message_id: Option<u64>,
+    // Separate from queue capacity: a cancelled reservation may return its
+    // message slot before an already-running matrix operation can retire.
+    offload: std::sync::Arc<crate::sync::Semaphore>,
 }
 
 fn authenticated_send_error<T>(error: mpsc::SendError<T>) -> AuthenticatedEcError {
@@ -855,6 +876,7 @@ impl AuthenticatedEcSender {
             permit,
             message_id,
             next_message_id: &mut self.next_message_id,
+            offload: &self.offload,
         })
     }
 
@@ -898,6 +920,7 @@ pub struct AuthenticatedEcPermit<'a> {
     permit: mpsc::SendPermit<'a, AuthenticatedEcEnvelope>,
     message_id: u64,
     next_message_id: &'a mut Option<u64>,
+    offload: &'a std::sync::Arc<crate::sync::Semaphore>,
 }
 
 impl AuthenticatedEcPermit<'_> {
@@ -907,10 +930,14 @@ impl AuthenticatedEcPermit<'_> {
         let (header, symbols) =
             self.config
                 .encode_message_authenticated(self.message_id, message, self.auth)?;
+        self.publish(AuthenticatedEcEnvelope { header, symbols })
+    }
+
+    fn publish(self, message: AuthenticatedEcEnvelope) -> Result<u64, AuthenticatedEcError> {
         self.cx.checkpoint().map_err(|_| EcError::Cancelled)?;
         let (result, notification) = self
             .permit
-            .try_send_deferred_wake(AuthenticatedEcEnvelope { header, symbols });
+            .try_send_deferred_wake(message);
         if result.is_ok() {
             // Publication is authoritative even if an arbitrary receiver wake
             // panics. Retire this id before invoking that callback.
@@ -925,27 +952,31 @@ impl AuthenticatedEcPermit<'_> {
     /// Serializes at most the configured message bytes, then commits them.
     pub fn send_value<T: serde::Serialize>(self, value: &T) -> Result<u64, AuthenticatedEcError> {
         self.cx.checkpoint().map_err(|_| EcError::Cancelled)?;
-        let mut writer = BoundedEcJsonWriter {
-            bytes: Vec::new(),
-            maximum: self.config.max_message_size,
-            rejected_size: None,
-        };
-        let serialized = serde_json::to_writer(&mut writer, value);
-        if let Some(size) = writer.rejected_size {
-            return Err(EcError::MessageTooLarge {
-                size,
-                max: writer.maximum,
-            }
-            .into());
-        }
-        serialized.map_err(|error| EcError::Serialization(error.to_string()))?;
-        self.send(&writer.bytes)
+        let bytes = serialize_bounded(value, self.config.max_message_size)?;
+        self.send(&bytes)
     }
 
     /// Explicitly aborts the send obligation and returns the reserved capacity.
     pub fn abort(self) {
         self.permit.abort();
     }
+}
+
+fn serialize_bounded<T: serde::Serialize>(
+    value: &T,
+    maximum: usize,
+) -> Result<Vec<u8>, EcError> {
+    let mut writer = BoundedEcJsonWriter {
+        bytes: Vec::new(),
+        maximum,
+        rejected_size: None,
+    };
+    let serialized = serde_json::to_writer(&mut writer, value);
+    if let Some(size) = writer.rejected_size {
+        return Err(EcError::MessageTooLarge { size, max: maximum });
+    }
+    serialized.map_err(|error| EcError::Serialization(error.to_string()))?;
+    Ok(writer.bytes)
 }
 
 struct BoundedEcJsonWriter {
