@@ -497,3 +497,520 @@ fn readiness_change_retains_the_same_pending_candidate_without_advancing_the_ite
 
 #[path = "session_budget_tests.rs"]
 mod budget_tests;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod offloaded_send {
+    use super::*;
+    use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
+    use crate::runtime::{
+        BlockingAdmissionPolicy, RootDrainOutcome, Runtime, RuntimeBuilder,
+    };
+    use crate::types::Budget;
+    use std::future::poll_fn;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const WAIT: Duration = Duration::from_secs(10);
+
+    fn bounded(test: impl FnOnce() + Send + 'static) {
+        let (send, receive) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
+            let _ = send.send(result);
+        });
+        let result = receive
+            .recv_timeout(Duration::from_secs(45))
+            .expect("offloaded send must finish within its wall watchdog");
+        worker.join().unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    fn runtime() -> Runtime {
+        RuntimeBuilder::current_thread()
+            .enable_platform_reactor(false)
+            .blocking_threads(1, 1)
+            .build()
+            .unwrap()
+    }
+
+    struct HeldWorker {
+        release: Option<mpsc::Sender<()>>,
+        work: BlockingTaskHandle,
+    }
+
+    impl HeldWorker {
+        fn release(&mut self) {
+            if let Some(release) = self.release.take() {
+                release.send(()).unwrap();
+            }
+            assert!(self.work.wait_timeout(WAIT));
+        }
+    }
+
+    impl Drop for HeldWorker {
+        fn drop(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+            let _ = self.work.wait_timeout(WAIT);
+        }
+    }
+
+    fn hold_worker(pool: &BlockingPoolHandle) -> HeldWorker {
+        let (started, entered) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let work = pool
+            .try_spawn(move || {
+                started.send(()).unwrap();
+                wait.recv_timeout(WAIT).unwrap();
+            })
+            .unwrap();
+        entered.recv_timeout(WAIT).unwrap();
+        HeldWorker {
+            release: Some(release),
+            work,
+        }
+    }
+
+    async fn pending_once<F: Future>(future: F) {
+        let mut future = std::pin::pin!(future);
+        poll_fn(|task| {
+            assert!(future.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    fn await_queued(runtime: &Runtime, pool: &BlockingPoolHandle) {
+        runtime.block_on(async {
+            let until = Instant::now() + WAIT;
+            while pool.pending_count() == 0 {
+                assert!(
+                    Instant::now() < until,
+                    "encode job must reach the occupied pool"
+                );
+                crate::runtime::yield_now::yield_now().await;
+            }
+        });
+        assert_eq!(pool.pending_count(), 1, "one encode job per session");
+    }
+
+    fn quiescent(runtime: &Runtime) {
+        let report = runtime.shutdown_drained(WAIT);
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.pending_obligations, 0);
+    }
+
+    #[test]
+    fn queued_encode_retains_one_job_across_dropped_waits_and_allows_heartbeat() {
+        bounded(|| {
+            let runtime = runtime();
+            let pool = runtime.blocking_handle().unwrap();
+            let mut held = hold_worker(&pool);
+            let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+            let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+            let data: Vec<u8> = (0..513).map(|n| (n % 251) as u8).collect();
+            let object = ObjectId::new(5, 12);
+            let expected_sink = GatedSink::new(usize::MAX, true);
+            let expected = sender(expected_sink.clone())
+                .send_object(&Cx::for_testing(), object, &data)
+                .unwrap();
+            let sink = GatedSink::new(usize::MAX, true);
+            let mut sending = sender(sink.clone());
+            let mut session = sending
+                .start_send_object_offloaded(&owner, object, data)
+                .unwrap();
+
+            assert_eq!(pool.pending_count(), 0, "construction admits no work");
+            assert_eq!(sink.0.lock().unwrap().calls, 0);
+            runtime.block_on(pending_once(session.run()));
+            await_queued(&runtime, &pool);
+            runtime.block_on(async {
+                let mut heartbeat = driver.spawn(|_| async { 17 }).unwrap();
+                assert_eq!(heartbeat.join(&driver).await.unwrap(), 17);
+                for _ in 0..3 {
+                    pending_once(session.run()).await;
+                    crate::runtime::yield_now::yield_now().await;
+                    assert_eq!(pool.pending_count(), 1);
+                }
+            });
+            assert_eq!(session.symbols_sent(), 0);
+            assert_eq!(sink.0.lock().unwrap().calls, 0);
+            assert!(!session.is_finished());
+
+            held.release();
+            let outcome = runtime.block_on(session.run()).unwrap();
+            assert_eq!(outcome.object_id, object);
+            assert_eq!(outcome.source_symbols, expected.source_symbols);
+            assert_eq!(outcome.repair_symbols, expected.repair_symbols);
+            assert_eq!(outcome.symbols_sent, expected.symbols_sent);
+            assert_eq!(sink.accepted(), expected_sink.accepted());
+            assert_eq!(session.symbols_sent(), expected.symbols_sent);
+            assert!(session.is_finished());
+            drop(session);
+            quiescent(&runtime);
+        });
+    }
+
+    #[test]
+    fn backpressure_drains_the_bounded_batch_before_admitting_more_encoding() {
+        bounded(|| {
+            for symbol_size in [64_u16, 4096] {
+                let runtime = runtime();
+                let pool = runtime.blocking_handle().unwrap();
+                let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+                let mut config = config();
+                config.encoding.symbol_size = symbol_size;
+                config.encoding.max_block_size = usize::from(symbol_size) * 64;
+                let sink = GatedSink::new(1, false);
+                let mut sending = RaptorQSenderBuilder::new()
+                    .config(config)
+                    .transport(sink.clone())
+                    .security(SecurityContext::new(AuthKey::from_seed(42)))
+                    .build()
+                    .unwrap();
+                let mut session = sending
+                    .start_send_object_offloaded(
+                        &owner,
+                        ObjectId::new(5, 12),
+                        vec![19; usize::from(symbol_size) * 40 + 5],
+                    )
+                    .unwrap();
+
+                runtime.block_on(async {
+                    let until = Instant::now() + WAIT;
+                    while sink.accepted().is_empty() {
+                        assert!(Instant::now() < until, "first batch must finish");
+                        pending_once(session.run()).await;
+                        crate::runtime::yield_now::yield_now().await;
+                    }
+                });
+                assert_eq!(session.symbols_sent(), 1);
+                assert_eq!(sink.accepted().len(), 1);
+
+                // Reaching the sink proves the first job completed. Occupy the
+                // only worker before permitting any more transport acceptance.
+                let mut held = hold_worker(&pool);
+                runtime.block_on(async {
+                    for _ in 0..3 {
+                        pending_once(session.run()).await;
+                        crate::runtime::yield_now::yield_now().await;
+                        assert_eq!(
+                            pool.pending_count(),
+                            0,
+                            "a blocked batch must not admit encode-ahead work"
+                        );
+                    }
+                });
+                assert_eq!(session.symbols_sent(), 1);
+
+                sink.release(usize::MAX, false);
+                runtime.block_on(async {
+                    let until = Instant::now() + WAIT;
+                    while pool.pending_count() == 0 {
+                        assert!(
+                            Instant::now() < until,
+                            "exhausting the first batch must queue the next job"
+                        );
+                        pending_once(session.run()).await;
+                        crate::runtime::yield_now::yield_now().await;
+                    }
+                });
+                let accepted = sink.accepted();
+                let batch_size = 32.min(64 * 1024 / usize::from(symbol_size));
+                assert_eq!(accepted.len(), batch_size);
+                assert_eq!(session.symbols_sent(), batch_size);
+                assert!(
+                    accepted
+                        .iter()
+                        .map(|symbol| symbol.symbol().data().len())
+                        .sum::<usize>()
+                        <= 64 * 1024
+                );
+                assert_eq!(pool.pending_count(), 1);
+                assert!(!session.is_finished());
+
+                let calls = sink.0.lock().unwrap().calls;
+                owner.set_cancel_requested(true);
+                let error = runtime.block_on(session.run()).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Cancelled);
+                assert!(session.is_finished());
+                assert_eq!(session.symbols_sent(), batch_size);
+                assert_eq!(sink.accepted(), accepted);
+                assert_eq!(sink.0.lock().unwrap().calls, calls);
+                held.release();
+                drop(session);
+                quiescent(&runtime);
+                assert_eq!(sink.accepted(), accepted);
+            }
+        });
+    }
+
+    #[test]
+    fn offloaded_symbols_match_inline_and_dropped_flush_commits_metrics_once() {
+        bounded(|| {
+            for size in [0, 257, 513] {
+                let runtime = runtime();
+                let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+                let object = ObjectId::new(5, 12);
+                let data: Vec<u8> = (0..size).map(|n| (n % 251) as u8).collect();
+                let mut config = config();
+                config.encoding.max_block_size = 256;
+                let expected_sink = GatedSink::new(usize::MAX, true);
+                let expected = RaptorQSenderBuilder::new()
+                    .config(config.clone())
+                    .transport(expected_sink.clone())
+                    .security(SecurityContext::new(AuthKey::from_seed(42)))
+                    .build()
+                    .unwrap()
+                    .send_object(&Cx::for_testing(), object, &data)
+                    .unwrap();
+
+                let mut metrics = Metrics::new();
+                let symbols_metric = metrics.counter("raptorq.symbols_sent");
+                let objects_metric = metrics.counter("raptorq.objects_sent");
+                let sink = GatedSink::new(usize::MAX, false);
+                let mut sending = RaptorQSenderBuilder::new()
+                    .config(config)
+                    .transport(sink.clone())
+                    .security(SecurityContext::new(AuthKey::from_seed(42)))
+                    .metrics(metrics)
+                    .build()
+                    .unwrap();
+                let mut session = sending
+                    .start_send_object_offloaded(&owner, object, data)
+                    .unwrap();
+
+                runtime.block_on(async {
+                    let until = Instant::now() + WAIT;
+                    while sink.0.lock().unwrap().flushes == 0 {
+                        assert!(Instant::now() < until, "all batches must reach flush");
+                        pending_once(session.run()).await;
+                        crate::runtime::yield_now::yield_now().await;
+                    }
+                    // Drop another borrowing wait after witnessing blocked flush.
+                    pending_once(session.run()).await;
+                });
+                assert_eq!(sink.accepted(), expected_sink.accepted());
+                assert_eq!(session.symbols_sent(), expected.symbols_sent);
+                assert_eq!(symbols_metric.get(), expected.symbols_sent as u64);
+                assert_eq!(objects_metric.get(), 0);
+                assert!(!session.is_finished());
+
+                sink.release(usize::MAX, true);
+                let outcome = runtime.block_on(session.run()).unwrap();
+                assert_eq!(outcome.object_id, object);
+                assert_eq!(outcome.source_symbols, expected.source_symbols);
+                assert_eq!(outcome.repair_symbols, expected.repair_symbols);
+                assert_eq!(outcome.symbols_sent, expected.symbols_sent);
+                assert_eq!(sink.accepted(), expected_sink.accepted());
+                assert_eq!(symbols_metric.get(), expected.symbols_sent as u64);
+                assert_eq!(objects_metric.get(), 1);
+                assert!(session.is_finished());
+                let calls = sink.0.lock().unwrap().calls;
+                assert!(runtime.block_on(session.run()).is_err());
+                assert_eq!(sink.0.lock().unwrap().calls, calls);
+                assert_eq!(objects_metric.get(), 1);
+                drop(session);
+                quiescent(&runtime);
+            }
+        });
+    }
+
+    #[test]
+    fn offload_refuses_missing_or_forbidden_pool_and_missing_key_before_io() {
+        bounded(|| {
+            let sink = GatedSink::new(usize::MAX, true);
+            let mut sending = sender(sink.clone());
+            assert!(
+                sending
+                    .start_send_object_offloaded(
+                        &Cx::for_testing(),
+                        ObjectId::new(5, 12),
+                        vec![7; 64],
+                    )
+                    .is_err()
+            );
+            assert_eq!(sink.0.lock().unwrap().calls, 0);
+
+            for forbidden in [false, true] {
+                let builder = RuntimeBuilder::current_thread().enable_platform_reactor(false);
+                let runtime = if forbidden {
+                    builder
+                        .blocking_threads(1, 1)
+                        .blocking_admission_policy(BlockingAdmissionPolicy::Forbidden)
+                        .build()
+                        .unwrap()
+                } else {
+                    builder.blocking_threads(0, 0).build().unwrap()
+                };
+                let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+                assert!(
+                    sending
+                        .start_send_object_offloaded(
+                            &owner,
+                            ObjectId::new(5, 12),
+                            vec![7; 64],
+                        )
+                        .is_err()
+                );
+                assert_eq!(sink.0.lock().unwrap().calls, 0);
+                quiescent(&runtime);
+            }
+
+            let runtime = runtime();
+            let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+            let mut unsigned = RaptorQSenderBuilder::new()
+                .config(config())
+                .transport(sink.clone())
+                .build()
+                .unwrap();
+            assert!(
+                unsigned
+                    .start_send_object_offloaded(
+                        &owner,
+                        ObjectId::new(5, 12),
+                        vec![7; 64],
+                    )
+                    .is_err()
+            );
+            assert_eq!(runtime.blocking_handle().unwrap().pending_count(), 0);
+            assert_eq!(sink.0.lock().unwrap().calls, 0);
+            quiescent(&runtime);
+        });
+    }
+
+    #[test]
+    fn spawn_authorization_failure_never_encodes_inline_or_polls_the_sink() {
+        bounded(|| {
+            let runtime = RuntimeBuilder::current_thread()
+                .enable_platform_reactor(false)
+                .blocking_threads(1, 1)
+                .require_spawn_authorization(AuthKey::from_seed(999))
+                .build()
+                .unwrap();
+            let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+            let sink = GatedSink::new(usize::MAX, true);
+            let mut sending = sender(sink.clone());
+            let mut session = sending
+                .start_send_object_offloaded(
+                    &owner,
+                    ObjectId::new(5, 12),
+                    vec![7; 513],
+                )
+                .unwrap();
+            let error = runtime.block_on(session.run()).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DispatchFailed);
+            assert_eq!(session.symbols_sent(), 0);
+            assert!(session.is_finished());
+            assert!(sink.accepted().is_empty());
+            assert_eq!(sink.0.lock().unwrap().calls, 0);
+            assert_eq!(runtime.blocking_handle().unwrap().pending_count(), 0);
+            assert_eq!(
+                runtime.block_on(session.run()).unwrap_err().kind(),
+                ErrorKind::DispatchFailed
+            );
+            assert_eq!(sink.0.lock().unwrap().calls, 0);
+            drop(session);
+            quiescent(&runtime);
+        });
+    }
+
+    #[test]
+    fn cancel_or_drop_keeps_queued_encoding_owned_until_pool_retirement() {
+        bounded(|| {
+            for cancel in [false, true] {
+                let runtime = runtime();
+                let pool = runtime.blocking_handle().unwrap();
+                let mut held = hold_worker(&pool);
+                let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+                let sink = GatedSink::new(usize::MAX, true);
+                let mut sending = sender(sink.clone());
+                let mut session = Some(
+                    sending
+                        .start_send_object_offloaded(
+                            &owner,
+                            ObjectId::new(5, 12),
+                            vec![3; 513],
+                        )
+                        .unwrap(),
+                );
+                runtime.block_on(pending_once(session.as_mut().unwrap().run()));
+                await_queued(&runtime, &pool);
+
+                if cancel {
+                    owner.set_cancel_requested(true);
+                    let error = runtime
+                        .block_on(session.as_mut().unwrap().run())
+                        .unwrap_err();
+                    assert_eq!(error.kind(), ErrorKind::Cancelled);
+                    assert!(session.as_ref().unwrap().is_finished());
+                } else {
+                    session = None;
+                }
+                assert!(sink.accepted().is_empty());
+                assert_eq!(sink.0.lock().unwrap().calls, 0);
+                let report = runtime.shutdown_drained(Duration::from_millis(20));
+                assert_eq!(report.outcome, RootDrainOutcome::TimedOut, "{report:?}");
+                assert!(
+                    report.live_tasks > 0,
+                    "abandoning the session cannot detach queued pool work"
+                );
+                held.release();
+                quiescent(&runtime);
+                assert!(sink.accepted().is_empty());
+                assert_eq!(sink.0.lock().unwrap().calls, 0);
+                drop(session);
+            }
+        });
+    }
+
+    #[test]
+    fn owner_mask_does_not_widen_an_encode_workers_inherited_deadline() {
+        bounded(|| {
+            let runtime = runtime();
+            let owner = runtime.request_cx_with_budget(
+                Budget::INFINITE.with_deadline(crate::types::Time::ZERO),
+            );
+            let sink = GatedSink::new(usize::MAX, true);
+            let mut sending = sender(sink.clone());
+            owner.masked(|| {
+                assert!(owner.checkpoint().is_ok());
+                let mut session = sending
+                    .start_send_object_offloaded(
+                        &owner,
+                        ObjectId::new(5, 12),
+                        vec![7; 64],
+                    )
+                    .unwrap();
+
+                // The masked owner can initiate work. The independently
+                // admitted child still has its original elapsed deadline.
+                runtime.block_on(pending_once(session.run()));
+                assert!(!session.is_finished());
+                assert_eq!(sink.0.lock().unwrap().calls, 0);
+                let error = runtime.block_on(session.run()).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Cancelled);
+                assert!(
+                    owner.checkpoint().is_ok(),
+                    "the owner remains masked when its child is cancelled"
+                );
+                assert_eq!(session.symbols_sent(), 0);
+                assert!(session.is_finished());
+                assert_eq!(
+                    runtime.block_on(session.run()).unwrap_err().kind(),
+                    ErrorKind::Cancelled
+                );
+            });
+            assert!(sink.accepted().is_empty());
+            assert_eq!(sink.0.lock().unwrap().calls, 0);
+            assert_eq!(owner.checkpoint().unwrap_err().kind(), ErrorKind::Cancelled);
+            quiescent(&runtime);
+        });
+    }
+
+}

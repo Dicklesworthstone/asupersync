@@ -35,8 +35,9 @@ pub mod systematic;
 
 pub use builder::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 pub use pipeline::{
-    RaptorQReceiveSession, RaptorQReceiver, RaptorQSendSession, RaptorQSender,
-    RaptorQSymbolSendSession, ReceiveAuthenticationSummary, ReceiveOutcome, SendOutcome, SendProgress,
+    RaptorQOffloadedSendSession, RaptorQReceiveSession, RaptorQReceiver, RaptorQSendSession,
+    RaptorQSender, RaptorQSymbolSendSession, ReceiveAuthenticationSummary, ReceiveOutcome,
+    SendOutcome, SendProgress,
 };
 pub use proof::{DecodeConfig, DecodeProof, DecodeProofBuilder, FailureReason, ProofOutcome};
 

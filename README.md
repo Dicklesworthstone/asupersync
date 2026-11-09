@@ -1761,6 +1761,55 @@ On the decode side, the runtime uses a policy-driven deterministic planner inste
 - Dense-factor artifacts are cached with bounded capacity and explicit hit/miss/eviction telemetry in decode stats (`src/raptorq/decoder.rs`).
 - GF(256) kernels are selected deterministically per process, with policy snapshots for dual-lane fused operations and optional SIMD acceleration behind `simd-intrinsics` (`src/raptorq/gf256.rs`).
 
+### Resumable asynchronous symbol transfers
+
+`RaptorQSender::start_send_object` and
+`RaptorQReceiver::start_receive_object` return session owners whose borrowing
+`run()` waits can be dropped and resumed. They retain the original explicit
+`Cx`, deadline, pending transport state, and symbol progress. These async APIs
+require an authentication key; legacy permissive modes cannot disable it.
+The synchronous `send_object` and `receive_object` helpers still require
+immediate transport readiness.
+
+On a native runtime with an enabled blocking pool, use
+`start_send_object_offloaded` for owned input and
+`start_receive_object_offloaded` for decoding. Sending moves the input
+`Vec<u8>` into the session without copying it, then prepares the symbol pool,
+encodes, and signs on blocking workers. It retains the current repair matrix
+between jobs. One job produces at most 32 symbols and 64 KiB of encoded payload;
+another job starts only after that batch is accepted by the sink. A
+backpressured sink therefore holds bounded output without occupying a blocking
+worker. Input storage, configured pool buffers, and matrix workspace remain
+separate memory costs.
+
+```rust
+use asupersync::{Cx, Error};
+use asupersync::raptorq::{RaptorQSender, SendOutcome};
+use asupersync::transport::SymbolSink;
+use asupersync::types::ObjectId;
+
+async fn send_owned<T: SymbolSink + Unpin>(
+    sender: &mut RaptorQSender<T>,
+    cx: &Cx,
+    object_id: ObjectId,
+    bytes: Vec<u8>,
+) -> Result<SendOutcome, Error> {
+    let mut session = sender.start_send_object_offloaded(cx, object_id, bytes)?;
+    session.run().await
+}
+```
+
+Both offloaded paths refuse missing or forbidden pool/spawn authority and never
+fall back to inline computation. A dropped borrowing wait retains its job.
+Cancellation or session destruction requests abort, but an already running
+matrix solve must finish before its owning region can drain. Workers inherit
+the budget and keep independent cancellation state; masking the session owner
+does not mask its child workers. Send success means local sink acceptance and
+flush; communicate object parameters through a trusted path and separately
+establish any required receiver acknowledgement or durability. These APIs do
+not make a measured throughput or full
+`ErasureCodedChannel` completion claim.
+
 ### One-Command RaptorQ Validation
 
 Use the deterministic E2E wrapper with `--bundle` to run staged unit/perf-smoke gates plus scenario coverage with a single command:
