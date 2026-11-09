@@ -635,3 +635,30 @@
         assert_eq!(frame.opcode, Opcode::Close);
         assert!(frame.payload.is_empty());
     }
+
+    #[test]
+    fn peer_close_receipt_preserves_first_reason_until_delivery_or_abort() {
+        let first = Frame::close(Some(4001), Some("maintenance"));
+        let expected = CloseReason {
+            code: None,
+            raw_code: Some(4001),
+            text: Some("maintenance".to_owned()),
+        };
+        let mut handshake = CloseHandshake::new();
+        assert!(handshake.receive_close(&first).unwrap().is_some());
+        assert!(handshake.has_pending_peer_close());
+        assert!(handshake.take_peer_close().is_none(), "an unflushed echo is not complete");
+        assert!(handshake.receive_close(&Frame::close(Some(1000), None)).unwrap().is_none());
+        handshake.mark_response_sent();
+        assert_eq!(handshake.take_peer_close(), Some(expected.clone()));
+        assert!(handshake.take_peer_close().is_none());
+        assert_eq!(handshake.peer_reason(), Some(&expected));
+        assert!(handshake.receive_close(&first).unwrap().is_none());
+        assert!(!handshake.has_pending_peer_close(), "a duplicate cannot rearm delivery");
+
+        handshake.reset();
+        assert!(handshake.receive_close(&first).unwrap().is_some());
+        handshake.force_close(CloseReason::going_away());
+        assert!(handshake.take_peer_close().is_none(), "abortive close has no success receipt");
+        assert_eq!(handshake.peer_reason(), Some(&expected), "diagnostics survive an abort");
+    }

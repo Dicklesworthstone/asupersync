@@ -596,6 +596,36 @@
     }
 
     #[test]
+    fn retried_recv_delivers_an_empty_peer_close_once() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let io = TestIo::with_read_data(encode_server_frame(Frame::close(None, None)))
+            .with_pending_first_write();
+        let mut ws = WebSocket::from_upgraded(io, WebSocketConfig::default());
+        let cx = Cx::for_testing();
+        let mut receive = Box::pin(ws.recv(&cx));
+        assert!(receive.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        drop(receive);
+        let receipt = future::block_on(ws.recv(&cx)).unwrap();
+        assert!(matches!(receipt, Some(Message::Close(Some(reason))) if reason == CloseReason::empty()));
+        assert!(future::block_on(ws.recv(&cx)).unwrap().is_none());
+        assert_eq!(ws.io.written.len(), 6, "an empty masked Close is echoed once");
+    }
+
+    #[test]
+    fn completed_explicit_close_consumes_its_own_peer_reply() {
+        let io = TestIo::with_read_data(encode_server_frame(
+            Frame::close(Some(1001), Some("closing reply"))));
+        let mut ws = WebSocket::from_upgraded(io, WebSocketConfig::default());
+        let cx = Cx::for_testing();
+        future::block_on(ws.close(&cx, CloseReason::normal())).unwrap();
+        assert!(future::block_on(ws.recv(&cx)).unwrap().is_none());
+        assert_eq!(ws.close_handshake.peer_reason().unwrap().text.as_deref(), Some("closing reply"));
+        assert_eq!(ws.io.written.len(), 8);
+    }
+
+    #[test]
     fn message_assembler_binary_single_frame() {
         let mut assembler = MessageAssembler::new(1024);
         let frame = Frame {

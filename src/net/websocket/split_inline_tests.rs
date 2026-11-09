@@ -897,7 +897,9 @@
                 assert!(first.as_mut().poll(&mut poll_cx).is_pending());
             }
             assert_eq!(write.close_state(), CloseState::CloseReceived);
-            assert!(read.recv(&cx).await.expect("retried recv").is_none());
+            assert!(matches!(read.recv(&cx).await.expect("retried recv"),
+                Some(Message::Close(Some(reason))) if reason == CloseReason::normal()));
+            assert!(read.recv(&cx).await.expect("notification is delivered once").is_none());
             assert_eq!(write.close_state(), CloseState::Closed);
             let ws = read.reunite(write).expect("split halves must reunite");
             assert_eq!(
@@ -929,7 +931,9 @@
                 let mut recv = Box::pin(read.recv(&cx));
                 assert!(recv.as_mut().poll(&mut poll_cx).is_pending());
             }
-            assert!(read.recv(&cx).await.expect("retried recv").is_none());
+            assert!(matches!(read.recv(&cx).await.expect("retried recv"),
+                Some(Message::Close(Some(reason))) if reason == CloseReason::normal()));
+            assert!(read.recv(&cx).await.expect("notification is delivered once").is_none());
             let state = read.shared.lock();
             assert_eq!(state.close_handshake.state(), CloseState::Closed);
             assert_eq!(
@@ -3208,4 +3212,184 @@
                 "data after the failure must not be delivered, got {second:?}"
             );
         });
+    }
+
+    #[test]
+    fn dropped_recv_retains_peer_close_at_write_flush_and_permit_waits() {
+        for server_role in [false, true] {
+            for parked_at in 0..3 {
+                let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([1, 2, 3, 4]));
+                let peer = Frame::close(Some(4001), Some("maintenance: café"));
+                let mut wire = if server_role {
+                    encode_client_frame_with_entropy(&peer, entropy.as_ref())
+                } else {
+                    encode_server_frame(peer)
+                };
+                let duplicate = Frame::close(Some(1000), Some("later reason"));
+                wire.extend(if server_role {
+                    encode_client_frame_with_entropy(&duplicate, entropy.as_ref())
+                } else {
+                    encode_server_frame(duplicate)
+                });
+                let mut io = TestIo::new(wire);
+                io.stall_writes = parked_at == 0;
+                io.stall_flush_after_write = parked_at == 1;
+                let ws = WebSocket::from_upgraded_with_entropy(
+                    io, WebSocketConfig::default(), Arc::clone(&entropy));
+                let (mut read, write) = ws.split();
+                if server_role {
+                    read.shared.lock().codec = FrameCodec::server();
+                }
+                let permit = (parked_at == 2)
+                    .then(|| future::block_on(acquire_write_permit(&read.shared)));
+                let cx = test_cx_with_entropy(Arc::clone(&entropy));
+                let mut task = Context::from_waker(Waker::noop());
+                let mut receive = Box::pin(read.recv(&cx));
+                assert!(receive.as_mut().poll(&mut task).is_pending());
+                {
+                    let shared = write.shared.lock();
+                    assert!(shared.close_handshake.has_pending_peer_close());
+                    assert_eq!(shared.close_handshake.state(), CloseState::CloseReceived);
+                    assert_eq!(shared.writer_waiters.len(), usize::from(parked_at == 2));
+                    assert_eq!(shared.io.written.is_empty(), parked_at != 1);
+                }
+                drop(receive);
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                assert!(write.shared.lock().writer_waiters.is_empty());
+                drop(permit);
+                {
+                    let mut shared = write.shared.lock();
+                    shared.io.stall_writes = false;
+                    shared.io.stall_flush_after_write = false;
+                }
+                let notification = future::block_on(read.recv(&cx)).expect("retry completes the echo");
+                let Some(Message::Close(Some(reason))) = notification else {
+                    panic!("peer Close notification was lost: {notification:?}");
+                };
+                assert_eq!(reason.code, None);
+                assert_eq!(reason.raw_code, Some(4001));
+                assert_eq!(reason.text.as_deref(), Some("maintenance: café"));
+                assert!(future::block_on(read.recv(&cx)).unwrap().is_none(),
+                    "buffered duplicate Close must not replace or redeliver the first reason");
+                let ws = read.reunite(write).expect("dropped receive releases writer ownership");
+                let expected = Frame::close(Some(4001), None);
+                assert_eq!(ws.io.written, if server_role {
+                    encode_server_frame(expected)
+                } else {
+                    encode_client_frame_with_entropy(&expected, entropy.as_ref())
+                }, "retry emits exactly one echo");
+            }
+        }
+    }
+
+    #[test]
+    fn pending_peer_close_receipt_survives_split_and_reunite() {
+        for start_split in [false, true] {
+            for stall_flush in [false, true] {
+                let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([4, 3, 2, 1]));
+                let peer = CloseReason::with_text(super::super::CloseCode::GoingAway, "redeploy");
+                let mut io = TestIo::new(encode_server_frame(peer.to_frame()));
+                io.stall_writes = !stall_flush;
+                io.stall_flush_after_write = stall_flush;
+                let mut ws = WebSocket::from_upgraded_with_entropy(
+                    io, WebSocketConfig::default(), Arc::clone(&entropy));
+                let cx = test_cx_with_entropy(Arc::clone(&entropy));
+                let mut task = Context::from_waker(Waker::noop());
+                if start_split {
+                    let (mut read, write) = ws.split();
+                    let mut receive = Box::pin(read.recv(&cx));
+                    assert!(receive.as_mut().poll(&mut task).is_pending());
+                    drop(receive);
+                    ws = read.reunite(write).expect("receipt is owned by the handshake");
+                    ws.io.stall_writes = false;
+                    ws.io.stall_flush_after_write = false;
+                    assert!(matches!(future::block_on(ws.recv(&cx)).unwrap(),
+                        Some(Message::Close(Some(reason))) if reason == peer));
+                    assert!(future::block_on(ws.recv(&cx)).unwrap().is_none());
+                } else {
+                    let mut receive = Box::pin(ws.recv(&cx));
+                    assert!(receive.as_mut().poll(&mut task).is_pending());
+                    drop(receive);
+                    ws.io.stall_writes = false;
+                    ws.io.stall_flush_after_write = false;
+                    let (mut read, write) = ws.split();
+                    assert!(matches!(future::block_on(read.recv(&cx)).unwrap(),
+                        Some(Message::Close(Some(reason))) if reason == peer));
+                    assert!(future::block_on(read.recv(&cx)).unwrap().is_none());
+                    ws = read.reunite(write).unwrap();
+                }
+                assert_eq!(ws.io.written,
+                    encode_client_frame_with_entropy(&CloseReason::going_away().to_frame(), entropy.as_ref()));
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn retained_peer_close_obeys_cancellation_and_original_deadline() {
+        for cancel in [false, true] {
+            for expire in [false, true] {
+                if !cancel && !expire { continue; }
+                let (clock, timer, cx) = close_timer_context(100);
+                let peer = encode_server_frame(Frame::close(Some(1001), Some("server restart")));
+                let (mut read, write) =
+                    websocket_with_close_timeout(TestIo::new(peer).with_stalled_flush()).split();
+                let counter = CountingWake::new();
+                let waker = Waker::from(Arc::clone(&counter));
+                let mut task = Context::from_waker(&waker);
+                let mut receive = Box::pin(read.recv(&cx));
+                assert!(receive.as_mut().poll(&mut task).is_pending());
+                let before = counter.count();
+                if cancel { cx.set_cancel_requested(true); }
+                if expire {
+                    clock.set(Time::from_secs(110));
+                    assert!(timer.process_timers() > 0);
+                }
+                assert!(counter.count() > before, "never-ready flush must be woken");
+                let result = receive.as_mut().poll(&mut task);
+                if cancel {
+                    assert!(matches!(result, Poll::Ready(Err(WsError::Io(ref error)))
+                        if error.kind() == io::ErrorKind::Interrupted), "{result:?}");
+                } else {
+                    assert!(matches!(result, Poll::Ready(Ok(None))), "{result:?}");
+                }
+                drop(receive);
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                assert!(write.shared.lock().writer_waiters.is_empty());
+                write.shared.lock().io.stall_flush_after_write = false;
+                let (_, _, retry_cx) = close_timer_context(1000);
+                let retry = future::block_on(read.recv(&retry_cx)).unwrap();
+                if expire {
+                    assert!(retry.is_none(), "timeout must not become a graceful-close receipt");
+                    assert!(!write.shared.lock().close_handshake.has_pending_peer_close());
+                } else {
+                    assert!(matches!(retry, Some(Message::Close(Some(reason)))
+                        if reason.raw_code == Some(1001) && reason.text.as_deref() == Some("server restart")));
+                    assert!(future::block_on(read.recv(&retry_cx)).unwrap().is_none());
+                }
+                let ws = read.reunite(write).unwrap();
+                assert_eq!(ws.io.written.len(), 8, "retry must not resend the masked Close");
+            }
+        }
+    }
+
+    #[test]
+    fn retained_close_receipt_preserves_existing_control_frame_policy() {
+        // W4 is an owner-reserved policy choice: this receipt fix must not
+        // reject Ping/Pong after Close or skip a previously buffered Ping.
+        let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([1, 3, 5, 7]));
+        let mut incoming = encode_server_frame(CloseReason::normal().to_frame());
+        incoming.extend(encode_server_frame(Frame::ping(Bytes::from_static(b"peer ping"))));
+        let ws = WebSocket::from_upgraded_with_entropy(
+            TestIo::new(incoming), WebSocketConfig::default(), Arc::clone(&entropy));
+        let (mut read, mut write) = ws.split();
+        let cx = test_cx_with_entropy(Arc::clone(&entropy));
+        assert!(matches!(future::block_on(read.recv(&cx)).unwrap(), Some(Message::Close(_))));
+        future::block_on(write.ping(Bytes::from_static(b"local ping"))).unwrap();
+        assert!(future::block_on(read.recv(&cx)).unwrap().is_none());
+        let ws = read.reunite(write).unwrap();
+        let mut expected = encode_client_frame_with_entropy(&CloseReason::normal().to_frame(), entropy.as_ref());
+        expected.extend(encode_client_frame_with_entropy(&Frame::ping(Bytes::from_static(b"local ping")), entropy.as_ref()));
+        expected.extend(encode_client_frame_with_entropy(&Frame::pong(Bytes::from_static(b"peer ping")), entropy.as_ref()));
+        assert_eq!(ws.io.written, expected);
     }

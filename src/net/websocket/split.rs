@@ -1075,6 +1075,11 @@ where
                 )));
             }
 
+            let pending_close = self.shared.lock().close_handshake.has_pending_peer_close();
+            if pending_close {
+                return self.finish_peer_close(cx).await;
+            }
+
             let update = {
                 let shared = &mut *self.shared.lock();
                 if shared.heartbeat.failed() {
@@ -1208,7 +1213,7 @@ where
                         let timeout = self.shared.lock().close_handshake.close_timeout();
                         let candidate = CloseDeadline::new(Some(cx), timeout);
                         let changed = Arc::clone(&self.shared.lock().close_changed);
-                        let flush_close = (|| {
+                        let received = (|| {
                             let shared = &mut *self.shared.lock();
                             let response = shared.close_handshake.receive_close(&frame)?;
                             if response.is_some() || shared.close_flush_pending {
@@ -1218,41 +1223,21 @@ where
                                 // CloseReceived must never be visible without
                                 // its retained echo: the write half may retry
                                 // close concurrently as soon as this lock drops.
-                                shared.codec.encode_with_entropy(
+                                if let Err(error) = shared.codec.encode_with_entropy(
                                     &response_frame,
                                     &mut shared.write_buf,
                                     cx.entropy(),
-                                )?;
+                                ) {
+                                    shared.force_close(CloseReason::new(error.as_close_code(), None));
+                                    return Err(error);
+                                }
                                 shared.close_flush_pending = true;
-                                Ok::<_, WsError>(true)
-                            } else {
-                                // A peer Close can cross a dropped local close
-                                // before its first byte was written. Finishing
-                                // the handshake must still flush our retained
-                                // Close, including a prior cancelled retry.
-                                Ok(shared.close_flush_pending)
                             }
+                            Ok::<_, WsError>(())
                         })();
                         changed.notify_waiters();
-                        let flush_close = flush_close?;
-
-                        if flush_close {
-                            let deadline = self.shared.lock().heartbeat.write_deadline();
-                            let send_result = super::heartbeat::wait_until(
-                                cx,
-                                deadline,
-                                std::pin::pin!(flush_write_buf_with_cx(&self.shared, Some(cx))),
-                            )
-                            .await;
-                            if send_result?.is_none() {
-                                self.fail_heartbeat();
-                                return Err(super::heartbeat::timeout_error());
-                            }
-                            self.shared.lock().close_handshake.mark_response_sent();
-                        }
-
-                        let reason = CloseReason::parse(&frame.payload).ok();
-                        return Ok(Some(Message::Close(reason)));
+                        received?;
+                        return self.finish_peer_close(cx).await;
                     }
                     _ => {
                         // Only the read half mutates assembly. Take it out for
@@ -1281,38 +1266,7 @@ where
                     }
                 }
             } else {
-                // A retained Close (our echo, or our own Close after a
-                // crossing peer Close) whose flush an earlier recv dropped is
-                // resumed before this recv reports the end or waits for input;
-                // a retried recv used to return without ever writing it
-                // (br-asupersync-4en1sw W1). Only once the peer's Close is in:
-                // in CloseSent the peer's Close is read first, as before.
-                let resume_close_flush = {
-                    let mut shared = self.shared.lock();
-                    shared.heartbeat.note_drained();
-                    shared.close_flush_pending
-                        && shared.close_handshake.state() != CloseState::CloseSent
-                };
-                if resume_close_flush {
-                    let deadline = self.shared.lock().heartbeat.write_deadline();
-                    let send_result = super::heartbeat::wait_until(
-                        cx,
-                        deadline,
-                        std::pin::pin!(flush_write_buf_with_cx(&self.shared, Some(cx))),
-                    )
-                    .await;
-                    if send_result?.is_none() {
-                        self.fail_heartbeat();
-                        return Err(super::heartbeat::timeout_error());
-                    }
-                    let shared = &mut *self.shared.lock();
-                    if !shared.close_flush_pending
-                        && shared.close_handshake.state() == CloseState::CloseReceived
-                    {
-                        shared.close_handshake.mark_response_sent();
-                    }
-                    continue;
-                }
+                self.shared.lock().heartbeat.note_drained();
 
                 // Check if closed
                 if self.shared.lock().close_handshake.is_closed() {
@@ -1339,6 +1293,32 @@ where
                 }
             }
         }
+    }
+
+    /// Retain the peer notification until its echo or crossing Close finishes
+    /// flushing. Dropping this future leaves both obligations available for
+    /// the next receive, even if the halves are reunited in the meantime.
+    async fn finish_peer_close(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
+        let flush_close = self.shared.lock().close_flush_pending;
+        if flush_close {
+            let deadline = self.shared.lock().heartbeat.write_deadline();
+            let send_result = super::heartbeat::wait_until(
+                cx,
+                deadline,
+                std::pin::pin!(flush_write_buf_with_cx(&self.shared, Some(cx))),
+            )
+            .await;
+            if send_result?.is_none() {
+                self.fail_heartbeat();
+                return Err(super::heartbeat::timeout_error());
+            }
+        }
+        cx.checkpoint().map_err(|_| {
+            WsError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+        })?;
+        let mut shared = self.shared.lock();
+        shared.close_handshake.mark_response_sent();
+        Ok(shared.close_handshake.take_peer_close().map(|reason| Message::Close(Some(reason))))
     }
 
     /// Check if the connection is open.

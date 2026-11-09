@@ -458,6 +458,9 @@ pub struct CloseHandshake {
     our_reason: Option<CloseReason>,
     /// Peer's close reason (if they initiated).
     peer_reason: Option<CloseReason>,
+    /// The validated peer Close has not yet been returned by a receive.
+    /// Its bounded reason survives dropped flush/shutdown futures and split.
+    peer_close_pending: bool,
     /// Captured by the first actual close operation, not by each waiter.
     deadline: Option<CloseDeadline>,
 }
@@ -494,6 +497,7 @@ impl CloseHandshake {
             config,
             our_reason: None,
             peer_reason: None,
+            peer_close_pending: false,
             deadline: None,
         }
     }
@@ -526,6 +530,27 @@ impl CloseHandshake {
     #[must_use]
     pub fn peer_reason(&self) -> Option<&CloseReason> {
         self.peer_reason.as_ref()
+    }
+
+    pub(super) const fn has_pending_peer_close(&self) -> bool {
+        self.peer_close_pending
+    }
+
+    /// Consume only the application notification, preserving the peer reason
+    /// for diagnostics. Callers finish their retained output and any required
+    /// transport shutdown before taking it, with no await after this point.
+    pub(super) fn take_peer_close(&mut self) -> Option<CloseReason> {
+        if !self.peer_close_pending || !self.state.is_closed() {
+            return None;
+        }
+        let reason = self.peer_reason.clone();
+        self.peer_close_pending = false;
+        reason
+    }
+
+    /// A completed explicit close consumes its peer reply itself.
+    pub(super) fn discard_peer_close(&mut self) {
+        self.peer_close_pending = false;
     }
 
     /// Get the close timeout.
@@ -604,6 +629,7 @@ impl CloseHandshake {
                 // be accepted during parsing but must not be sent back.
                 let response_code = reason.outbound_wire_code();
                 self.peer_reason = Some(reason);
+                self.peer_close_pending = true;
                 let response = if let Some(response_code) = response_code {
                     Frame::close(Some(response_code), None)
                 } else {
@@ -615,6 +641,7 @@ impl CloseHandshake {
                 // We sent close, peer is responding - handshake complete
                 self.state = CloseState::Closed;
                 self.peer_reason = Some(reason);
+                self.peer_close_pending = true;
                 Ok(None)
             }
             CloseState::CloseReceived | CloseState::Closed => {
@@ -639,6 +666,7 @@ impl CloseHandshake {
     /// (timeout, error, etc.).
     pub fn force_close(&mut self, reason: CloseReason) {
         self.state = CloseState::Closed;
+        self.peer_close_pending = false;
         if self.our_reason.is_none() {
             self.our_reason = Some(reason);
         }
@@ -652,6 +680,7 @@ impl CloseHandshake {
         self.state = CloseState::Open;
         self.our_reason = None;
         self.peer_reason = None;
+        self.peer_close_pending = false;
         self.deadline = None;
     }
 }

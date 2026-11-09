@@ -700,6 +700,9 @@ where
             if self.heartbeat.failed() {
                 return Ok(None);
             }
+            if self.close_handshake.has_pending_peer_close() {
+                return self.finish_peer_close(cx).await;
+            }
             match self.heartbeat.update(
                 cx,
                 self.config.ping_interval,
@@ -801,42 +804,13 @@ where
                                 // Publish the retained echo before a deadline
                                 // or cancellation wait can return. A retry of
                                 // CloseReceived must always have bytes to flush.
-                                self.encode_frame_with_entropy(&response, cx.entropy())?;
-                            }
-                            let close_deadline = self
-                                .close_handshake
-                                .deadline()
-                                .expect("peer close deadline installed");
-                            let heartbeat_deadline = self.heartbeat.write_deadline();
-                            let send_result = close_deadline
-                                .wait(
-                                    Some(cx),
-                                    super::heartbeat::wait_until(
-                                        cx,
-                                        heartbeat_deadline,
-                                        std::pin::pin!(self.flush_write_buf_with_cx(Some(cx))),
-                                    ),
-                                )
-                                .await?;
-                            match send_result {
-                                None => {
-                                    self.force_close(CloseReason::going_away());
-                                    return Ok(None);
+                                if let Err(error) = self.encode_frame_with_entropy(&response, cx.entropy()) {
+                                    self.force_close(CloseReason::new(error.as_close_code(), None));
+                                    return Err(error);
                                 }
-                                Some(None) => {
-                                    self.heartbeat.fail();
-                                    self.force_close(CloseReason::new(
-                                        super::CloseCode::Abnormal,
-                                        None,
-                                    ));
-                                    return Err(super::heartbeat::timeout_error());
-                                }
-                                Some(Some(())) => {}
                             }
-                            self.close_handshake.mark_response_sent();
                         }
-                        let reason = CloseReason::parse(&frame.payload).ok();
-                        return Ok(Some(Message::Close(reason)));
+                        return self.finish_peer_close(cx).await;
                     }
                     _ => match self.assembler.push_frame(frame) {
                         Ok(Some(msg)) => return Ok(Some(msg)),
@@ -879,6 +853,45 @@ where
                 }
             }
         }
+    }
+
+    /// Resume the peer Close before reading another frame. The handshake owns
+    /// its notification while a flush is pending, including after reunite.
+    async fn finish_peer_close(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
+        if self.close_flush_pending {
+            let close_deadline = self
+                .close_handshake
+                .deadline()
+                .expect("peer close deadline installed");
+            let heartbeat_deadline = self.heartbeat.write_deadline();
+            let send_result = close_deadline
+                .wait(
+                    Some(cx),
+                    super::heartbeat::wait_until(
+                        cx,
+                        heartbeat_deadline,
+                        std::pin::pin!(self.flush_write_buf_with_cx(Some(cx))),
+                    ),
+                )
+                .await?;
+            match send_result {
+                None => {
+                    self.force_close(CloseReason::going_away());
+                    return Ok(None);
+                }
+                Some(None) => {
+                    self.heartbeat.fail();
+                    self.force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                    return Err(super::heartbeat::timeout_error());
+                }
+                Some(Some(())) => {}
+            }
+        }
+        self.close_handshake.mark_response_sent();
+        cx.checkpoint().map_err(|_| {
+            WsError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+        })?;
+        Ok(self.close_handshake.take_peer_close().map(|reason| Message::Close(Some(reason))))
     }
 
     /// Initiate a close handshake.
@@ -926,6 +939,7 @@ where
         }
 
         self.io.shutdown().await.map_err(WsError::Io)?;
+        self.close_handshake.discard_peer_close();
         Ok(())
     }
 

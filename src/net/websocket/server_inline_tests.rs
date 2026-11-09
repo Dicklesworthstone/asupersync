@@ -32,6 +32,9 @@
         pending_first_read: bool,
         write_behavior: WriteBehavior,
         pending_first_flush: bool,
+        stall_writes: bool,
+        stall_flush: bool,
+        stall_shutdown: bool,
         flush_calls: usize,
         shutdown_calls: usize,
     }
@@ -50,6 +53,9 @@
                 pending_first_read: false,
                 write_behavior: WriteBehavior::Immediate,
                 pending_first_flush: false,
+                stall_writes: false,
+                stall_flush: false,
+                stall_shutdown: false,
                 flush_calls: 0,
                 shutdown_calls: 0,
             }
@@ -125,6 +131,9 @@
             cx: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
+            if self.stall_writes {
+                return Poll::Pending;
+            }
             if self.fail_writes {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -155,6 +164,9 @@
             cx: &mut std::task::Context<'_>,
         ) -> Poll<io::Result<()>> {
             self.flush_calls += 1;
+            if self.stall_flush {
+                return Poll::Pending;
+            }
             if self.pending_first_flush {
                 self.pending_first_flush = false;
                 cx.waker().wake_by_ref();
@@ -168,6 +180,9 @@
             _cx: &mut std::task::Context<'_>,
         ) -> Poll<io::Result<()>> {
             self.shutdown_calls += 1;
+            if self.stall_shutdown {
+                return Poll::Pending;
+            }
             Poll::Ready(Ok(()))
         }
     }
@@ -837,7 +852,163 @@
                 .expect("close handshake");
             assert!(ws.is_closed());
             assert_eq!(ws.io.shutdown_calls, 1);
+            assert!(ws.recv(&cx).await.unwrap().is_none(), "explicit close consumes its reply");
+            assert_eq!(ws.io.shutdown_calls, 1);
         });
+    }
+
+    #[test]
+    fn server_recv_retains_peer_close_through_write_flush_and_shutdown() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        for parked_at in 0..3 {
+            let peer = Frame::close(Some(4002), Some("deployment complete"));
+            let mut io = TestIo::with_read_data(encode_client_frame(peer));
+            io.stall_writes = parked_at == 0;
+            io.stall_flush = parked_at == 1;
+            io.stall_shutdown = parked_at == 2;
+            let mut ws = ServerWebSocket::from_upgraded(io, WebSocketConfig::default(),
+                AcceptResponse { accept_key: String::new(), protocol: None, extensions: Vec::new() }, &[]);
+            let cx = Cx::for_testing();
+            let mut receive = Box::pin(ws.recv(&cx));
+            assert!(receive.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            drop(receive);
+            assert!(ws.close_handshake.has_pending_peer_close());
+            assert_eq!(ws.io.written.is_empty(), parked_at == 0);
+            assert_eq!(ws.io.shutdown_calls, usize::from(parked_at == 2));
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            ws.io.stall_writes = false;
+            ws.io.stall_flush = false;
+            ws.io.stall_shutdown = false;
+            let receipt = future::block_on(ws.recv(&cx)).unwrap();
+            let Some(Message::Close(Some(reason))) = receipt else {
+                panic!("server lost the peer Close: {receipt:?}");
+            };
+            assert_eq!(reason.code, None);
+            assert_eq!(reason.raw_code, Some(4002));
+            assert_eq!(reason.text.as_deref(), Some("deployment complete"));
+            assert_eq!(ws.io.written, encode_server_frame(Frame::close(Some(4002), None)));
+            assert_eq!(ws.io.shutdown_calls, if parked_at == 2 { 2 } else { 1 });
+            let shutdown_calls = ws.io.shutdown_calls;
+            assert!(future::block_on(ws.recv(&cx)).unwrap().is_none());
+            assert_eq!(ws.io.shutdown_calls, shutdown_calls, "delivered receipt is not replayed");
+        }
+    }
+
+    #[test]
+    fn server_crossing_close_delivers_peer_reason_and_finishes_shutdown() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let mut io = TestIo::with_read_data(encode_client_frame(
+            Frame::close(Some(1001), Some("peer restart"))));
+        io.stall_flush = true;
+        let mut ws = ServerWebSocket::from_upgraded(io, WebSocketConfig::default(),
+            AcceptResponse { accept_key: String::new(), protocol: None, extensions: Vec::new() }, &[]);
+        let cx = Cx::for_testing();
+        let mut sending = Box::pin(ws.send(&cx, Message::Close(Some(CloseReason::normal()))));
+        assert!(sending.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        drop(sending);
+        // The local buffer is empty, but the crossing Close still owes its
+        // transport flush before the peer notification can be delivered.
+        assert!(ws.write_buf.is_empty());
+        let mut receiving = Box::pin(ws.recv(&cx));
+        assert!(receiving.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        drop(receiving);
+        assert!(ws.close_handshake.has_pending_peer_close());
+        assert_eq!(ws.io.shutdown_calls, 0);
+        ws.io.stall_flush = false;
+        ws.io.stall_shutdown = true;
+        let mut receiving = Box::pin(ws.recv(&cx));
+        assert!(receiving.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        drop(receiving);
+        ws.io.stall_shutdown = false;
+        let receipt = future::block_on(ws.recv(&cx)).unwrap();
+        assert!(matches!(receipt, Some(Message::Close(Some(reason)))
+            if reason.raw_code == Some(1001) && reason.text.as_deref() == Some("peer restart")));
+        assert!(future::block_on(ws.recv(&cx)).unwrap().is_none());
+        assert_eq!(ws.io.written, encode_server_frame(CloseReason::normal().to_frame()),
+            "the peer response must not generate a second local Close");
+        assert_eq!(ws.io.shutdown_calls, 2);
+    }
+
+    #[test]
+    fn server_dropped_recv_or_explicit_close_keeps_receipt_deadline_and_cancel_priority() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Wake, Waker};
+
+        struct WakeCount(AtomicUsize);
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+            fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        for via_explicit_close in [false, true] {
+        for (cancel, expire) in [(false, true), (true, false), (true, true)] {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100)));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let cx = Cx::new_with_drivers(RegionId::new_for_test(78, 1), TaskId::new_for_test(78, 1),
+                Budget::INFINITE, None, None, None, Some(timer.clone()), None);
+            let mut io = TestIo::with_read_data(encode_client_frame(Frame::close(Some(1000), None)));
+            io.stall_shutdown = true;
+            let mut config = WebSocketConfig::default();
+            config.close_config.close_timeout = Duration::from_secs(10);
+            config.ping_interval = None;
+            let mut ws = ServerWebSocket::from_upgraded(io, config,
+                AcceptResponse { accept_key: String::new(), protocol: None, extensions: Vec::new() }, &[]);
+            let counter = Arc::new(WakeCount(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            let mut first = Box::pin(async {
+                if via_explicit_close {
+                    ws.close(&cx, CloseReason::going_away()).await.map(|()| None)
+                } else {
+                    ws.recv(&cx).await
+                }
+            });
+            assert!(first.as_mut().poll(&mut task).is_pending());
+            clock.set(Time::from_secs(106));
+            drop(first);
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            let mut retry = Box::pin(ws.recv(&cx));
+            assert!(retry.as_mut().poll(&mut task).is_pending());
+            clock.set(Time::from_secs(109));
+            assert_eq!(timer.process_timers(), 0);
+            let before = counter.0.load(Ordering::SeqCst);
+            if cancel { cx.set_cancel_requested(true); }
+            if expire {
+                clock.set(Time::from_secs(110));
+                assert!(timer.process_timers() > 0, "retry retains the original close deadline");
+            }
+            assert!(counter.0.load(Ordering::SeqCst) > before, "parked shutdown must be woken");
+            let result = retry.as_mut().poll(&mut task);
+            if cancel {
+                assert!(matches!(result, Poll::Ready(Err(WsError::Io(ref error)))
+                    if error.kind() == io::ErrorKind::Interrupted), "{result:?}");
+            } else {
+                assert!(matches!(result, Poll::Ready(Ok(None))), "{result:?}");
+            }
+            drop(retry);
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            ws.io.stall_shutdown = false;
+            let receipt = future::block_on(ws.recv(&Cx::for_testing())).unwrap();
+            if expire {
+                assert!(receipt.is_none(),
+                    "a timed-out shutdown never turns into a successful peer Close receipt");
+            } else {
+                assert!(matches!(receipt, Some(Message::Close(Some(reason))) if reason == CloseReason::normal()),
+                    "cancellation must leave the receipt for a later caller");
+                assert!(future::block_on(ws.recv(&Cx::for_testing())).unwrap().is_none());
+            }
+            assert!(!ws.close_handshake.has_pending_peer_close());
+            assert_eq!(ws.io.written, encode_server_frame(Frame::close(
+                Some(if via_explicit_close { 1001 } else { 1000 }), None)));
+        }
+        }
     }
 
     #[test]

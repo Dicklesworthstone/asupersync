@@ -26,7 +26,7 @@
 //! ```
 
 use super::client::{Message, MessageAssembler, SlowConsumerPolicy, WebSocketConfig};
-use super::close::{CloseHandshake, CloseReason, CloseState};
+use super::close::{CloseDeadline, CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{AcceptResponse, HandshakeError, HttpRequest, ServerHandshake};
 use crate::bytes::BytesMut;
@@ -457,6 +457,9 @@ where
             if self.heartbeat.failed() {
                 return Ok(None);
             }
+            if self.close_handshake.has_pending_peer_close() {
+                return self.finish_peer_close(cx).await;
+            }
             match self.heartbeat.update(
                 cx,
                 self.config.ping_interval,
@@ -548,36 +551,19 @@ where
                         self.heartbeat.received_pong(&frame.payload);
                     }
                     Opcode::Close => {
-                        // Handle close handshake
+                        let candidate =
+                            CloseDeadline::new(Some(cx), self.close_handshake.close_timeout());
                         if let Some(response) = self.close_handshake.receive_close(&frame)? {
-                            let deadline = self.heartbeat.write_deadline();
-                            let send_result = super::heartbeat::wait_until(
-                                cx,
-                                deadline,
-                                std::pin::pin!(async {
-                                    self.encode_frame(response)?;
-                                    self.flush_write_buf_with_cx(Some(cx)).await
-                                }),
-                            )
-                            .await;
-                            if send_result?.is_none() {
-                                self.heartbeat.fail();
-                                self.close_handshake.force_close(CloseReason::new(
-                                    super::CloseCode::Abnormal,
-                                    None,
-                                ));
-                                return Err(super::heartbeat::timeout_error());
+                            // Retain the echo and its application notification
+                            // before the first flush or shutdown can park.
+                            if let Err(error) = self.encode_frame(response) {
+                                self.close_handshake
+                                    .force_close(CloseReason::new(error.as_close_code(), None));
+                                return Err(error);
                             }
-                            self.close_handshake.mark_response_sent();
-                            // RFC 6455 section 5.5.1: once both Close frames
-                            // have been exchanged the server MUST close the
-                            // TCP connection at once. The handshake is
-                            // complete, so a failed shutdown changes nothing
-                            // the caller could act on.
-                            let _ = self.io.shutdown().await;
                         }
-                        let reason = CloseReason::parse(&frame.payload).ok();
-                        return Ok(Some(Message::Close(reason)));
+                        self.close_handshake.start_deadline(candidate);
+                        return self.finish_peer_close(cx).await;
                     }
                     _ => match self.assembler.push_frame(frame) {
                         Ok(Some(msg)) => return Ok(Some(msg)),
@@ -627,6 +613,50 @@ where
         }
     }
 
+    /// Complete a retained peer Close, including the server's transport
+    /// shutdown, before consuming its notification. A dropped receive resumes
+    /// the same output and deadline instead of losing the status and reason.
+    async fn finish_peer_close(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
+        if !self.close_handshake.has_pending_peer_close() {
+            return Ok(None);
+        }
+        let deadline = self
+            .close_handshake
+            .deadline()
+            .expect("peer close deadline installed");
+        let completed = deadline
+            .wait(Some(cx), async {
+                let heartbeat_deadline = self.heartbeat.write_deadline();
+                let flushed = super::heartbeat::wait_until(
+                    cx,
+                    heartbeat_deadline,
+                    std::pin::pin!(self.flush_write_buf_with_cx(Some(cx))),
+                )
+                .await?;
+                if flushed.is_none() {
+                    self.heartbeat.fail();
+                    self.close_handshake
+                        .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                    return Err(super::heartbeat::timeout_error());
+                }
+                self.close_handshake.mark_response_sent();
+                // RFC 6455 section 5.5.1: the server closes the transport
+                // once both Close frames have been exchanged. A failed
+                // shutdown cannot change the already validated peer reason.
+                let _ = self.io.shutdown().await;
+                Ok(())
+            })
+            .await?;
+        if completed.is_none() {
+            self.close_handshake.force_close(CloseReason::going_away());
+            return Ok(None);
+        }
+        cx.checkpoint().map_err(|_| {
+            WsError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+        })?;
+        Ok(self.close_handshake.take_peer_close().map(|reason| Message::Close(Some(reason))))
+    }
+
     /// Initiate a close handshake.
     ///
     /// Sends a close frame, waits for the peer's response, then shuts down the
@@ -637,41 +667,33 @@ where
         // otherwise held close() until cancellation (br-asupersync-fmw87f).
         // On expiry the connection is closed as when the peer does not
         // answer.
-        let now = cx
-            .timer_driver()
-            .map_or_else(crate::time::wall_now, |driver| driver.now());
-        let timeout_duration = self.close_handshake.close_timeout();
-        if let Ok(result) =
-            crate::time::timeout(now, timeout_duration, self.close_exchange(cx, reason)).await
-        {
-            return result;
+        self.close_handshake.start_deadline(CloseDeadline::new(
+            Some(cx), self.close_handshake.close_timeout()));
+        let deadline = self.close_handshake.deadline().expect("close deadline installed");
+        match deadline.wait(Some(cx), self.close_exchange(cx, reason, &deadline)).await? {
+            Some(()) => Ok(()),
+            None => {
+                self.close_handshake.force_close(CloseReason::going_away());
+                Ok(())
+            }
         }
-        self.close_handshake.force_close(CloseReason::going_away());
-        Ok(())
     }
 
     async fn close_exchange(
         &mut self,
         cx: &crate::cx::Cx,
         reason: CloseReason,
+        deadline: &CloseDeadline,
     ) -> Result<(), WsError> {
         self.initiate_close_with_cx(Some(cx), reason).await?;
 
-        // Wait for close response (with timeout)
-        let timeout_duration = self.close_handshake.close_timeout();
-        let current_time = || {
-            cx.timer_driver()
-                .map_or_else(crate::time::wall_now, |driver| driver.now())
-        };
-        let initial_time = current_time();
-        let deadline = initial_time + timeout_duration;
-
         while !self.close_handshake.is_closed() {
-            let time_now = current_time();
-
-            if time_now >= deadline {
+            // An always-ready peer must not extend the retained deadline by
+            // preventing the outer timeout from getting another poll.
+            if deadline.elapsed() {
+                deadline.expire();
                 self.close_handshake.force_close(CloseReason::going_away());
-                break;
+                return Ok(());
             }
 
             // Try to receive close response
@@ -691,28 +713,9 @@ where
                     }
                 },
                 None => {
-                    let time_now = current_time();
-
-                    if time_now >= deadline {
+                    if self.read_more(cx).await? == 0 {
                         self.close_handshake.force_close(CloseReason::going_away());
                         break;
-                    }
-                    let remaining =
-                        std::time::Duration::from_nanos(deadline.duration_since(time_now));
-
-                    match crate::time::timeout(time_now, remaining, self.read_more(cx)).await {
-                        Ok(Ok(n)) => {
-                            if n == 0 {
-                                self.close_handshake.force_close(CloseReason::going_away());
-                                break;
-                            }
-                        }
-                        Ok(Err(e)) => return Err(e),
-                        Err(_) => {
-                            // Timeout elapsed
-                            self.close_handshake.force_close(CloseReason::going_away());
-                            break;
-                        }
                     }
                 }
             }
@@ -721,6 +724,7 @@ where
         // RFC 6455 section 5.5.1: the server closes the TCP connection once
         // the close handshake ends (the client waits for it to).
         self.io.shutdown().await.map_err(WsError::Io)?;
+        self.close_handshake.discard_peer_close();
         Ok(())
     }
 
