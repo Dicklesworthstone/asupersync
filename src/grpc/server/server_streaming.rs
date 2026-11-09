@@ -518,7 +518,7 @@ impl Server {
         let initial_metadata_limit = self.config.max_metadata_size;
         let dispatch = self.dispatch_unary(request, move |request| async move {
             let call_cx = Cx::current().unwrap_or_else(|| owner.clone());
-            let stream = poll_cancellable(
+            let stream = poll_application(
                 &owner,
                 &call_cx,
                 async {
@@ -652,6 +652,67 @@ pub(super) async fn poll_cancellable<F: Future>(
     .await
 }
 
+/// Poll application setup or a source without accepting a result produced
+/// after that same poll cancelled the call or exhausted its deadline.
+///
+/// This boundary is deliberately separate from `poll_cancellable`: a
+/// completed transport write must keep its receipt so the caller can finish
+/// accounting for a whole message before observing cancellation. Application
+/// outputs have not been published yet and are retired if the post-poll gate
+/// refuses them. The enclosing adapter contains user Drop panics.
+pub(super) async fn poll_application<F: Future>(
+    owner: &Cx,
+    call: &Cx,
+    future: F,
+    deadline: Option<&StreamDeadline>,
+) -> Result<F::Output, Status> {
+    let mut future = std::pin::pin!(future);
+    poll_cancellable(
+        owner,
+        call,
+        poll_fn(|task_cx| {
+            let polled = future.as_mut().poll(task_cx);
+            if let Err(status) = application_checkpoint(owner, call, deadline) {
+                // A ready factory may own a stream or other retained captures.
+                // Retire that output before publishing the terminal refusal.
+                drop(polled);
+                return Poll::Ready(Err(status));
+            }
+            polled.map(Ok)
+        }),
+        deadline,
+    )
+    .await?
+}
+
+fn application_checkpoint(
+    owner: &Cx,
+    call: &Cx,
+    deadline: Option<&StreamDeadline>,
+) -> Result<(), Status> {
+    if owner.checkpoint().is_err() {
+        let status = cancellation_status(owner);
+        let kind = owner
+            .cancel_reason()
+            .map_or(CancelKind::ParentCancelled, |reason| reason.kind);
+        call.cancel_with(kind, Some("gRPC response owner cancelled"));
+        return Err(status);
+    }
+    if call.checkpoint().is_err() {
+        return Err(cancellation_status(call));
+    }
+    if deadline.is_some_and(StreamDeadline::expired) {
+        call.cancel_with(
+            CancelKind::Timeout,
+            Some("gRPC streaming deadline exceeded"),
+        );
+        return Err(Status::deadline_exceeded(
+            "gRPC stream deadline exceeded",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn forward_messages<S: ServerStreamSink>(
     owner: &Cx,
@@ -683,7 +744,7 @@ pub(super) async fn forward_messages<S: ServerStreamSink>(
     drop(initial);
     let mut messages_this_turn = 0;
     loop {
-        let next = poll_cancellable(
+        let next = poll_application(
             owner,
             cx,
             poll_fn(|task_cx| stream.as_mut().poll_next(task_cx)),
@@ -725,6 +786,9 @@ pub(super) async fn forward_messages<S: ServerStreamSink>(
         }
     }
     drop(stream); // No successful terminal status before stream destruction.
+    // A source destructor can request cancellation too. Its EOF alone cannot
+    // authorize successful trailers after that cleanup changed the call state.
+    application_checkpoint(owner, cx, Some(deadline))?;
     Ok(Response::with_metadata(Bytes::new(), trailers))
 }
 

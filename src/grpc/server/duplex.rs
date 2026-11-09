@@ -1,7 +1,7 @@
 //! Native registered RPC dispatch with live, bounded request and response bodies.
 
 use super::server_streaming::{
-    StreamDeadline, bounded_terminal_trailers, forward_messages, poll_cancellable,
+    StreamDeadline, bounded_terminal_trailers, forward_messages, poll_application,
 };
 use super::{
     CompressionEncoding, Cx, HostPolicy, HttpResponse, Metadata, Request, Response, RuntimeHandle,
@@ -616,7 +616,7 @@ impl Server {
                     ));
                 }
                 let call_cx = owner.clone();
-                let stream = poll_cancellable(
+                let stream = poll_application(
                     &owner,
                     &call_cx,
                     async {

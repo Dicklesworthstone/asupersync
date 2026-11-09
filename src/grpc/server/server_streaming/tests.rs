@@ -53,6 +53,11 @@ enum Mode {
     PollPanic,
     LatePollPanic,
     DropPanic,
+    CancelAtEof,
+    CancelWithMessage,
+    CancelWithError,
+    CancelWhilePending,
+    CancelOnDrop,
 }
 
 struct Probe {
@@ -178,6 +183,23 @@ impl Streaming for FixtureStream {
         let index = self.index;
         self.index += 1;
         match self.mode {
+            Mode::CancelAtEof => {
+                self.cx.cancel_with(CancelKind::User, Some("source cancelled at EOF"));
+                Poll::Ready(None)
+            }
+            Mode::CancelWithMessage => {
+                self.cx.cancel_with(CancelKind::User, Some("source cancelled with a value"));
+                Poll::Ready(Some(Ok(Bytes::from_static(b"must not be published"))))
+            }
+            Mode::CancelWithError => {
+                self.cx.cancel_with(CancelKind::User, Some("source cancelled with an error"));
+                Poll::Ready(Some(Err(Status::invalid_argument("late source error"))))
+            }
+            Mode::CancelWhilePending => {
+                self.cx.cancel_with(CancelKind::User, Some("source cancelled while pending"));
+                Poll::Pending
+            }
+            Mode::CancelOnDrop => Poll::Ready(None),
             Mode::PollPanic => panic!("private source poll panic"),
             Mode::LatePollPanic if index == 1 => panic!("private late source panic"),
             Mode::Never => Poll::Pending,
@@ -200,6 +222,9 @@ impl Streaming for FixtureStream {
 impl Drop for FixtureStream {
     fn drop(&mut self) {
         self.probe.drops.fetch_add(1, Ordering::SeqCst);
+        if matches!(self.mode, Mode::CancelOnDrop) {
+            self.cx.cancel_with(CancelKind::User, Some("source cancelled during cleanup"));
+        }
         let _ = self.probe.retired.send(());
         assert!(!matches!(self.mode, Mode::DropPanic), "private source drop panic");
     }
@@ -510,6 +535,35 @@ fn native_empty_stream_has_success_trailers_without_a_phantom_message() {
             assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
         },
     );
+}
+
+#[test]
+fn native_same_poll_source_cancellation_never_publishes_success_or_partial_data() {
+    for mode in [
+        Mode::CancelAtEof,
+        Mode::CancelWithMessage,
+        Mode::CancelWithError,
+        Mode::CancelWhilePending,
+        Mode::CancelOnDrop,
+    ] {
+        let probe = wire_case(
+            mode, 65_535, "/test.Watch/Values", None, false,
+            move |peer, starts, retired, probe| {
+                let call = starts.recv_timeout(Duration::from_secs(2))
+                    .expect("source poll witnessed before terminal status");
+                peer.finish();
+                retired.recv_timeout(Duration::from_secs(2))
+                    .expect("cancelled source retired");
+                assert!(call.is_cancel_requested(), "{mode:?}");
+                assert_eq!(peer.reply.reset, None, "{mode:?}");
+                assert!(peer.reply.body.is_empty(), "{mode:?}");
+                assert_eq!(peer.reply.trailer("grpc-status"), Some("1"), "{mode:?}");
+                assert_eq!(probe.polls.load(Ordering::SeqCst), 1, "{mode:?}");
+                assert_eq!(probe.drops.load(Ordering::SeqCst), 1, "{mode:?}");
+            },
+        );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1, "{mode:?}");
+    }
 }
 
 #[test]
@@ -1017,6 +1071,182 @@ fn captured_deadline_does_not_restart_between_messages_or_change_clock_domains()
         Poll::Ready(Err(status)) if status.code() == Code::DeadlineExceeded
     ));
     assert_eq!(polls.get(), 1, "no new message after the admitted deadline");
+}
+
+#[test]
+fn application_poll_rechecks_same_turn_cancellation_for_every_source_result() {
+    for cancel_owner in [false, true] {
+        for (kind, code) in [
+            (CancelKind::User, Code::Cancelled),
+            (CancelKind::Deadline, Code::DeadlineExceeded),
+            (CancelKind::CostBudget, Code::ResourceExhausted),
+        ] {
+            for result_kind in 0..4 {
+                let owner = Cx::for_testing();
+                let call = Cx::for_testing();
+                let cancelled = if cancel_owner { &owner } else { &call };
+                let polls = std::cell::Cell::new(0);
+                let source = poll_fn(|_| {
+                    polls.set(polls.get() + 1);
+                    cancelled.cancel_with(kind, Some("same-poll source cancellation"));
+                    match result_kind {
+                        0 => Poll::Pending,
+                        1 => Poll::Ready(None),
+                        2 => Poll::Ready(Some(Ok(Bytes::from_static(b"late")))),
+                        _ => Poll::Ready(Some(Err(Status::invalid_argument("late error")))),
+                    }
+                });
+                let mut execution = Box::pin(poll_application(&owner, &call, source, None));
+                assert!(matches!(
+                    execution.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                    Poll::Ready(Err(status)) if status.code() == code
+                ), "owner={cancel_owner}, cause={kind:?}, result={result_kind}");
+                assert_eq!(polls.get(), 1);
+                assert_eq!(call.cancel_reason().unwrap().kind, kind);
+            }
+        }
+    }
+}
+
+#[test]
+fn application_poll_rechecks_frozen_deadline_after_ready_and_pending() {
+    for ready in [false, true] {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+        let owner = virtual_cx(&clock, None, 1);
+        let call = virtual_cx(&clock, None, 2);
+        let mut metadata = Metadata::new();
+        assert!(metadata.insert("grpc-timeout", "2S"));
+        let deadline = StreamDeadline::capture(&owner, &metadata, &ServerConfig::default());
+        let polls = std::cell::Cell::new(0);
+        let source = poll_fn(|_| {
+            polls.set(polls.get() + 1);
+            clock.advance_to(Time::from_secs(12));
+            if ready { Poll::Ready(7_u8) } else { Poll::Pending }
+        });
+        let mut execution = Box::pin(poll_application(&owner, &call, source, Some(&deadline)));
+        assert!(matches!(
+            execution.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Err(status)) if status.code() == Code::DeadlineExceeded
+        ));
+        assert_eq!(polls.get(), 1);
+        assert!(!owner.is_cancel_requested());
+        assert_eq!(call.cancel_reason().unwrap().kind, CancelKind::Timeout);
+    }
+}
+
+#[test]
+fn application_poll_retires_owned_output_before_reporting_cancellation() {
+    struct Owned(Arc<AtomicUsize>);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let owner = Cx::for_testing();
+    let call = Cx::for_testing();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let setup = async {
+        call.cancel_with(CancelKind::User, Some("factory cancelled"));
+        Owned(Arc::clone(&drops))
+    };
+    let mut execution = Box::pin(poll_application(&owner, &call, setup, None));
+    assert!(matches!(
+        execution.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(status)) if status.code() == Code::Cancelled
+    ));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    drop(execution);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn completed_transport_poll_keeps_its_receipt_before_next_application_gate() {
+    let owner = Cx::for_testing();
+    let call = Cx::for_testing();
+    let polls = std::cell::Cell::new(0);
+    let write = async {
+        polls.set(polls.get() + 1);
+        call.cancel_with(CancelKind::User, Some("cancel after committed write"));
+        7_u8
+    };
+    let mut execution = Box::pin(poll_cancellable(&owner, &call, write, None));
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(matches!(execution.as_mut().poll(&mut task), Poll::Ready(Ok(7))));
+    assert_eq!(polls.get(), 1);
+    drop(execution);
+
+    let mut next = Box::pin(poll_application(&owner, &call, std::future::ready(()), None));
+    assert!(matches!(
+        next.as_mut().poll(&mut task),
+        Poll::Ready(Err(status)) if status.code() == Code::Cancelled
+    ));
+}
+
+#[test]
+fn cancellation_during_complete_frame_write_preserves_message_boundary() {
+    struct CancelAfterWrite(Vec<u8>);
+    impl ServerStreamSink for CancelAfterWrite {
+        const REGION_NAME: &'static str = "test-grpc-completed-write";
+
+        fn initial_headers_pending(&self) -> bool { false }
+
+        fn send_initial_headers(&mut self, _: HeaderMap) -> Result<(), HttpError> {
+            panic!("no deferred headers in this fixture")
+        }
+
+        fn send_chunk<'a>(
+            &'a mut self,
+            cx: &'a Cx,
+            data: &'a [u8],
+        ) -> impl Future<Output = Result<(), HttpError>> + Send + 'a {
+            async move {
+                self.0.extend_from_slice(data);
+                cx.cancel_with(CancelKind::User, Some("cancel after a complete message write"));
+                Ok(())
+            }
+        }
+
+        fn send_trailers<'a>(
+            &'a mut self,
+            _: &'a Cx,
+            _: HeaderMap,
+        ) -> impl Future<Output = Result<(), HttpError>> + Send + 'a {
+            async { Ok(()) }
+        }
+    }
+
+    let owner = Cx::for_testing();
+    let call = Cx::for_testing();
+    let server = Server::builder().build();
+    let deadline = StreamDeadline::capture(&owner, &Metadata::new(), server.config());
+    let (codec, _) = server.streaming_output_codec(None).unwrap();
+    let mut source = crate::grpc::streaming::StreamingRequest::open();
+    source.push(Bytes::from_static(b"x")).unwrap();
+    source.close();
+    let mut sink = CancelAfterWrite(Vec::new());
+    let mut partial = false;
+    let mut transport_error = None;
+    let mut execution = Box::pin(forward_messages(
+        &owner,
+        &call,
+        RegisteredServerStream::new(source),
+        codec,
+        &mut sink,
+        &mut partial,
+        &mut transport_error,
+        1024,
+        1024,
+        &deadline,
+    ));
+    assert!(matches!(
+        execution.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(status)) if status.code() == Code::Cancelled
+    ));
+    drop(execution);
+    assert!(!partial, "the successful write committed the complete message");
+    assert!(transport_error.is_none());
+    assert_eq!(sink.0, [0, 0, 0, 0, 1, b'x']);
 }
 
 #[test]
