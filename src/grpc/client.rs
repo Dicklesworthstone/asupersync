@@ -2696,10 +2696,22 @@ fn ambient_cancellation_status(context: &str) -> Option<Status> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+const MAX_NATIVE_UNARY_INFORMATIONAL_RESPONSES: u8 = 16;
+
+// Retain room for one initial and one trailing block at the HTTP/2 default
+// limit. Informational responses share this allowance, rather than adding an
+// unbounded sequence of independently admissible metadata blocks.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_NATIVE_UNARY_METADATA_BYTES: usize =
+    2 * crate::http::h2::settings::DEFAULT_MAX_HEADER_LIST_SIZE as usize;
+
+#[cfg(not(target_arch = "wasm32"))]
 struct NativeUnaryAccumulator {
     max_body_bytes: usize,
     body: BytesMut,
     metadata: Metadata,
+    metadata_bytes: usize,
+    informational_responses: u8,
     http_status: Option<u16>,
     content_type_valid: bool,
     grpc_encoding: Option<String>,
@@ -2716,6 +2728,8 @@ impl NativeUnaryAccumulator {
             max_body_bytes: max_message_size.saturating_add(5),
             body: BytesMut::new(),
             metadata: Metadata::new(),
+            metadata_bytes: 0,
+            informational_responses: 0,
             http_status: None,
             content_type_valid: false,
             grpc_encoding: None,
@@ -2772,6 +2786,18 @@ impl NativeUnaryAccumulator {
     }
 
     fn observe_headers(&mut self, headers: Vec<Header>) -> Result<(), Status> {
+        // Bound the entire call before retaining names/values or decoding
+        // binary fields. A per-block H2 limit alone does not bound a sequence
+        // of informational responses. Header::size uses H2's name+value+32
+        // accounting, including an allowance for each retained field.
+        let metadata_bytes = headers
+            .iter()
+            .try_fold(self.metadata_bytes, |used, header| used.checked_add(header.size()))
+            .filter(|used| *used <= MAX_NATIVE_UNARY_METADATA_BYTES)
+            .ok_or_else(|| {
+                Status::resource_exhausted("gRPC unary response metadata exceeds its byte limit")
+            })?;
+
         // Compression belongs to the initial final response headers. Retaining
         // a replacement from trailers (or a second initial field) would let a
         // peer rewrite an unsupported/unaccepted encoding to identity before
@@ -2786,6 +2812,18 @@ impl NativeUnaryAccumulator {
                     .parse::<u16>()
                     .is_ok_and(|status| (100..200).contains(&status))
         });
+        if informational
+            && self.informational_responses >= MAX_NATIVE_UNARY_INFORMATIONAL_RESPONSES
+        {
+            return Err(Status::resource_exhausted(
+                "gRPC unary response exceeds its informational-header limit",
+            ));
+        }
+        self.metadata_bytes = metadata_bytes;
+        if informational {
+            self.informational_responses += 1;
+        }
+
         for Header { name, value } in headers {
             if name == ":status" {
                 let status = value

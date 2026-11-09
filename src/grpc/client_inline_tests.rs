@@ -694,6 +694,153 @@
         assert_eq!(accumulator.finish().unwrap_err().code(), Code::ResourceExhausted);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_unary_informational_limit_allows_a_normal_final_response() {
+        let mut accumulator = NativeUnaryAccumulator::new(1024);
+        for _ in 0..MAX_NATIVE_UNARY_INFORMATIONAL_RESPONSES {
+            accumulator
+                .observe(1, unary_headers(&[(":status", "103"), ("x-early", "hint")], false))
+                .expect("bounded informational response");
+        }
+        accumulator
+            .observe(
+                1,
+                unary_headers(&[(":status", "200"), ("content-type", "application/grpc")], false),
+            )
+            .unwrap();
+        accumulator
+            .observe(
+                1,
+                ReceivedFrame::Data {
+                    stream_id: 1,
+                    data: Bytes::from_static(&[0, 0, 0, 0, 0]),
+                    end_stream: false,
+                },
+            )
+            .unwrap();
+        accumulator.observe(1, unary_headers(&[("grpc-status", "0")], true)).unwrap();
+        let response = accumulator.finish().expect("the final response has its own admission");
+        assert_eq!(response.body.as_ref(), &[0, 0, 0, 0, 0]);
+        assert_eq!(response.metadata.len(), usize::from(MAX_NATIVE_UNARY_INFORMATIONAL_RESPONSES));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_unary_refuses_excess_informational_headers_before_retaining_them() {
+        let mut accumulator = NativeUnaryAccumulator::new(1024);
+        for _ in 0..MAX_NATIVE_UNARY_INFORMATIONAL_RESPONSES {
+            accumulator.observe(1, unary_headers(&[(":status", "103")], false)).unwrap();
+        }
+        let retained_bytes = accumulator.metadata_bytes;
+        let error = accumulator
+            .observe(
+                1,
+                unary_headers(
+                    &[
+                        (":status", "103"),
+                        ("x-private", "collector-secret"),
+                        ("grpc-status-details-bin", "invalid base64?!"),
+                    ],
+                    false,
+                ),
+            )
+            .expect_err("even tiny informational blocks have a finite count");
+        assert_eq!(error.code(), Code::ResourceExhausted);
+        assert!(!error.message().contains("collector-secret"));
+        assert_eq!(accumulator.metadata_bytes, retained_bytes);
+        assert_eq!(accumulator.informational_responses, MAX_NATIVE_UNARY_INFORMATIONAL_RESPONSES);
+        assert!(accumulator.metadata.is_empty());
+        assert!(accumulator.grpc_details.is_none());
+        assert!(!accumulator.is_complete());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sized_unary_headers(mut headers: Vec<Header>, padding_key: &str) -> Vec<Header> {
+        let padding = Header::new(padding_key, "");
+        let overhead = headers.iter().map(Header::size).sum::<usize>() + padding.size();
+        let block_limit = crate::http::h2::settings::DEFAULT_MAX_HEADER_LIST_SIZE as usize;
+        headers.push(Header::new(padding_key, "v".repeat(block_limit - overhead)));
+        assert_eq!(headers.iter().map(Header::size).sum::<usize>(), block_limit);
+        headers
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_unary_metadata_budget_preserves_full_initial_and_trailing_blocks() {
+        let mut accumulator = NativeUnaryAccumulator::new(1024);
+        accumulator
+            .observe_headers(sized_unary_headers(
+                vec![Header::new(":status", "200"), Header::new("content-type", "application/grpc")],
+                "x-initial",
+            ))
+            .expect("the existing full initial block remains admissible");
+        accumulator
+            .observe(
+                1,
+                ReceivedFrame::Data {
+                    stream_id: 1,
+                    data: Bytes::from_static(&[0, 0, 0, 0, 0]),
+                    end_stream: false,
+                },
+            )
+            .unwrap();
+        accumulator
+            .observe(
+                1,
+                ReceivedFrame::Headers {
+                    stream_id: 1,
+                    headers: sized_unary_headers(vec![Header::new("grpc-status", "0")], "x-trailing"),
+                    end_stream: true,
+                },
+            )
+            .expect("the existing full trailing block remains admissible");
+        assert_eq!(accumulator.metadata_bytes, MAX_NATIVE_UNARY_METADATA_BYTES);
+        assert!(accumulator.is_complete());
+        let response = accumulator.finish().expect("normal success at the aggregate boundary");
+        assert!(response.metadata.get("x-initial").is_some());
+        assert!(response.metadata.get("x-trailing").is_some());
+        assert_eq!(response.body.as_ref(), &[0, 0, 0, 0, 0]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_unary_metadata_budget_covers_every_block_before_decoding_or_mutation() {
+        let mut accumulator = NativeUnaryAccumulator::new(1024);
+        accumulator
+            .observe_headers(sized_unary_headers(vec![Header::new(":status", "103")], "x-early"))
+            .unwrap();
+        accumulator
+            .observe_headers(sized_unary_headers(
+                vec![Header::new(":status", "200"), Header::new("content-type", "application/grpc")],
+                "x-initial",
+            ))
+            .unwrap();
+        assert_eq!(accumulator.metadata_bytes, MAX_NATIVE_UNARY_METADATA_BYTES);
+        let retained_fields = accumulator.metadata.len();
+        let error = accumulator
+            .observe(
+                1,
+                unary_headers(
+                    &[
+                        ("grpc-status", "0"),
+                        ("x-private", "collector-secret"),
+                        ("grpc-status-details-bin", "invalid base64?!"),
+                    ],
+                    true,
+                ),
+            )
+            .expect_err("individually valid blocks cannot grow aggregate metadata without bound");
+        assert_eq!(error.code(), Code::ResourceExhausted);
+        assert!(!error.message().contains("collector-secret"));
+        assert_eq!(accumulator.metadata_bytes, MAX_NATIVE_UNARY_METADATA_BYTES);
+        assert_eq!(accumulator.metadata.len(), retained_fields);
+        assert!(accumulator.metadata.get("x-private").is_none());
+        assert_eq!(accumulator.grpc_status, None);
+        assert!(accumulator.grpc_details.is_none());
+        assert!(!accumulator.is_complete());
+    }
+
     #[test]
     fn validate_rpc_path_rejects_empty_or_extra_segments() {
         for path in ["/test.Svc/", "//Method", "/test.Svc/Method/Extra"] {
