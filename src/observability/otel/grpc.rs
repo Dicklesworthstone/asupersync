@@ -1,4 +1,4 @@
-//! Native OTLP/gRPC export without exporter-level retries.
+//! Native OTLP/gRPC export over a caller-owned channel, with opt-in bounded retries.
 
 use super::{
     OTLP_HTTP_MAX_AUTH_HEADER_NAME_BYTES, OTLP_HTTP_MAX_AUTH_HEADER_VALUE_BYTES,
@@ -17,6 +17,10 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
+
+mod retry;
+mod retry_info;
+pub use retry::{OTLP_GRPC_MAX_RETRIES, OtlpGrpcRetryPolicy};
 
 /// Maximum configured native OTLP request or response message size: 4 MiB.
 ///
@@ -84,6 +88,16 @@ pub enum OtlpGrpcErrorKind {
     Rpc,
     /// The collector's successful unary response is malformed OTLP protobuf.
     InvalidResponse,
+    /// A retry count or exponential delay bound is invalid.
+    InvalidRetryPolicy,
+    /// Bounded retry requires an authorized timer from the supplied context.
+    RetryTimerUnavailable,
+    /// Jittered retry requires the supplied context's entropy authority.
+    RetryEntropyUnavailable,
+    /// The configured number of retries has been consumed.
+    RetryExhausted,
+    /// The total export deadline elapsed or cannot accommodate the next delay.
+    RetryBudgetExhausted,
 }
 
 impl OtlpGrpcErrorKind {
@@ -103,6 +117,11 @@ impl OtlpGrpcErrorKind {
             Self::Context => "otlp.grpc.context",
             Self::Rpc => "otlp.grpc.rpc",
             Self::InvalidResponse => "otlp.grpc.invalid_response",
+            Self::InvalidRetryPolicy => "otlp.grpc.invalid_retry_policy",
+            Self::RetryTimerUnavailable => "otlp.grpc.retry_timer_unavailable",
+            Self::RetryEntropyUnavailable => "otlp.grpc.retry_entropy_unavailable",
+            Self::RetryExhausted => "otlp.grpc.retry_exhausted",
+            Self::RetryBudgetExhausted => "otlp.grpc.retry_budget_exhausted",
         }
     }
 }
@@ -187,6 +206,8 @@ pub struct OtlpGrpcError {
     grpc_code: Option<Code>,
     mapping_code: Option<&'static str>,
     completed: Vec<OtlpGrpcResponse>,
+    retry_delay: Option<Duration>,
+    retry_info_valid: bool,
 }
 
 impl OtlpGrpcError {
@@ -196,12 +217,19 @@ impl OtlpGrpcError {
             grpc_code: None,
             mapping_code: None,
             completed: Vec::new(),
+            retry_delay: None,
+            retry_info_valid: true,
         }
     }
 
-    fn rpc(code: Code) -> Self {
+    fn rpc(status: &crate::grpc::Status) -> Self {
+        // Keep only the validated numeric throttle. Raw peer details and
+        // messages never enter the export error or its automatic formatting.
+        let delay = retry_info::retry_delay(status);
         Self {
-            grpc_code: Some(code),
+            grpc_code: Some(status.code()),
+            retry_delay: delay.as_ref().ok().copied().flatten(),
+            retry_info_valid: delay.is_ok(),
             ..Self::new(OtlpGrpcErrorKind::Rpc)
         }
     }
@@ -237,6 +265,14 @@ impl OtlpGrpcError {
     pub fn completed_responses(&self) -> &[OtlpGrpcResponse] {
         &self.completed
     }
+
+    /// A validated minimum delay requested by the collector's RetryInfo.
+    /// This alone is not permission to retry: the status, context, attempt
+    /// bound, and remaining total export budget must also permit it.
+    #[must_use]
+    pub const fn retry_delay(&self) -> Option<Duration> {
+        self.retry_delay
+    }
 }
 
 impl fmt::Debug for OtlpGrpcError {
@@ -246,6 +282,7 @@ impl fmt::Debug for OtlpGrpcError {
             .field("grpc_code", &self.grpc_code)
             .field("mapping_code", &self.mapping_code)
             .field("completed_requests", &self.completed.len())
+            .field("retry_delay", &self.retry_delay)
             .finish()
     }
 }
@@ -280,9 +317,10 @@ impl std::error::Error for OtlpGrpcError {}
 /// or admission. The `metrics` feature enables this native-only exporter.
 /// Configure the channel's explicit TLS connector before supplying credentials.
 ///
-/// Each encoded request makes one logical native unary invocation and carries
-/// the smaller of the exporter timeout (10 seconds by default) and any channel
-/// timeout. There are no exporter-level retries. An enabled channel pool keeps
+/// By default each encoded request makes one logical native unary invocation
+/// and carries the smaller of the exporter timeout (10 seconds by default)
+/// and any channel timeout. [`Self::send_with_retry`] explicitly opts one
+/// request into finite retries under that single total timeout. An enabled pool keeps
 /// its existing recovery on a fresh connection when a reused connection proves
 /// a call unprocessed; acknowledged requests are never replayed. The native
 /// client also enforces the explicit [`Cx`]'s cancellation, deadline, and budget.
@@ -466,23 +504,41 @@ impl OtlpGrpcExporter {
         signal: OtlpGrpcSignal,
         request_body: Vec<u8>,
     ) -> Result<OtlpGrpcResponse, OtlpGrpcError> {
+        self.send_attempt(
+            cx,
+            signal,
+            Bytes::from(request_body),
+            self.effective_timeout(),
+        )
+        .await
+    }
+
+    fn effective_timeout(&self) -> Duration {
+        self.channel
+            .config()
+            .timeout
+            .map_or(self.timeout, |limit| limit.min(self.timeout))
+    }
+
+    async fn send_attempt(
+        &self,
+        cx: &Cx,
+        signal: OtlpGrpcSignal,
+        request_body: Bytes,
+        timeout: Duration,
+    ) -> Result<OtlpGrpcResponse, OtlpGrpcError> {
         checkpoint(cx)?;
         self.validate_request_size(request_body.len())?;
         let mut metadata = self.metadata.clone();
-        let timeout = self
-            .channel
-            .config()
-            .timeout
-            .map_or(self.timeout, |limit| limit.min(self.timeout));
         // Caller metadata cannot set this reserved field. unary_with_cx further
         // tightens it to the remaining owner deadline without replacing Cx.
         let _ = metadata.insert_or_replace("grpc-timeout", encode_grpc_timeout(timeout));
-        let request = Request::with_metadata(Bytes::from(request_body), metadata);
+        let request = Request::with_metadata(request_body, metadata);
         let mut client = GrpcClient::new(self.channel.clone());
         let response: Response<Bytes> = client
             .unary_with_cx(cx, signal.method_path(), request)
             .await
-            .map_err(|status| OtlpGrpcError::rpc(status.code()))?;
+            .map_err(|status| OtlpGrpcError::rpc(&status))?;
         let acknowledgement = decode_otlp_http_response(&response.into_inner())
             .map_err(|_| OtlpGrpcError::new(OtlpGrpcErrorKind::InvalidResponse))?;
         Ok(OtlpGrpcResponse {

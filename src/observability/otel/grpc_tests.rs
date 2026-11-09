@@ -26,13 +26,13 @@ const WATCHDOG: Duration = Duration::from_secs(10);
 const SECRET: &str = "fake-collector-secret";
 
 #[derive(Default)]
-struct Signal {
-    ready: AtomicBool,
-    waiter: Mutex<Option<Waker>>,
+pub(super) struct Signal {
+    pub(super) ready: AtomicBool,
+    pub(super) waiter: Mutex<Option<Waker>>,
 }
 
 impl Signal {
-    fn publish(&self) {
+    pub(super) fn publish(&self) {
         self.ready.store(true, Ordering::Release);
         let waiter = self.waiter.lock().unwrap().take();
         if let Some(waiter) = waiter {
@@ -41,14 +41,14 @@ impl Signal {
     }
 }
 
-struct WallWatchdog {
-    signal: Arc<Signal>,
+pub(super) struct WallWatchdog {
+    pub(super) signal: Arc<Signal>,
     stop: mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WallWatchdog {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let signal = Arc::new(Signal::default());
         let expired = Arc::clone(&signal);
         let (stop, stopped) = mpsc::channel();
@@ -77,7 +77,7 @@ impl Drop for WallWatchdog {
     }
 }
 
-fn run_native<F, Fut>(test: F)
+pub(super) fn run_native<F, Fut>(test: F)
 where
     F: FnOnce(Cx) -> Fut,
     Fut: Future<Output = ()>,
@@ -106,14 +106,14 @@ where
     assert!(runtime.shutdown_timeout(WATCHDOG));
 }
 
-fn listener() -> (TcpListener, SocketAddr) {
+pub(super) fn listener() -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     (listener, address)
 }
 
-fn accept(listener: &TcpListener) -> TcpStream {
+pub(super) fn accept(listener: &TcpListener) -> TcpStream {
     let until = Instant::now() + WATCHDOG;
     loop {
         match listener.accept() {
@@ -132,7 +132,7 @@ fn accept(listener: &TcpListener) -> TcpStream {
     }
 }
 
-fn flush(io: &mut impl Write, connection: &mut Connection) {
+pub(super) fn flush(io: &mut impl Write, connection: &mut Connection) {
     let mut bytes = BytesMut::new();
     while let Some(frame) = connection.next_frame() {
         frame.encode(&mut bytes).unwrap();
@@ -141,7 +141,7 @@ fn flush(io: &mut impl Write, connection: &mut Connection) {
     io.flush().unwrap();
 }
 
-fn framed(payload: &[u8]) -> Bytes {
+pub(super) fn framed(payload: &[u8]) -> Bytes {
     let mut bytes = Vec::with_capacity(payload.len() + 5);
     bytes.push(0);
     bytes.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
@@ -149,13 +149,13 @@ fn framed(payload: &[u8]) -> Bytes {
     Bytes::from(bytes)
 }
 
-struct Captured {
-    stream: u32,
+pub(super) struct Captured {
+    pub(super) stream: u32,
     headers: Vec<Header>,
     body: Vec<u8>,
 }
 
-fn read_request(io: &mut (impl Read + Write)) -> (Connection, Captured) {
+pub(super) fn read_request(io: &mut (impl Read + Write)) -> (Connection, Captured) {
     let mut preface = [0; 24];
     io.read_exact(&mut preface).unwrap();
     assert_eq!(&preface, CLIENT_PREFACE);
@@ -213,14 +213,14 @@ fn read_request(io: &mut (impl Read + Write)) -> (Connection, Captured) {
 }
 
 impl Captured {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|header| header.name == name)
             .map(|header| header.value.as_str())
     }
 
-    fn assert_request(&self, signal: OtlpGrpcSignal, body: &[u8]) {
+    pub(super) fn assert_request(&self, signal: OtlpGrpcSignal, body: &[u8]) {
         assert_eq!(self.header(":method"), Some("POST"));
         assert_eq!(self.header(":path"), Some(signal.method_path()));
         assert_eq!(self.header("content-type"), Some("application/grpc"));
@@ -232,7 +232,7 @@ impl Captured {
         );
     }
 
-    fn assert_timeout(&self, maximum: Duration) {
+    pub(super) fn assert_timeout(&self, maximum: Duration) {
         let timeout =
             crate::grpc::server::parse_grpc_timeout(self.header("grpc-timeout").unwrap()).unwrap();
         assert!(!timeout.is_zero() && timeout <= maximum);
@@ -275,7 +275,7 @@ fn respond(
     flush(io, connection);
 }
 
-fn partial(rejected: u8, diagnostic: &str) -> Vec<u8> {
+pub(super) fn partial(rejected: u8, diagnostic: &str) -> Vec<u8> {
     // Independent canonical protobuf bytes: outer partial_success field1;
     // inner int64 rejected field1 and string diagnostic field2.
     assert!(rejected < 128 && diagnostic.len() < 120);

@@ -79,8 +79,9 @@ mod grpc;
 #[cfg(not(target_arch = "wasm32"))]
 pub use grpc::{
     OTLP_GRPC_DEFAULT_TIMEOUT, OTLP_GRPC_MAX_MESSAGE_BYTES, OTLP_GRPC_MAX_METADATA_BYTES,
+    OTLP_GRPC_MAX_RETRIES,
     OtlpGrpcError, OtlpGrpcErrorKind, OtlpGrpcExportReport, OtlpGrpcExporter,
-    OtlpGrpcResponse, OtlpGrpcSignal,
+    OtlpGrpcResponse, OtlpGrpcRetryPolicy, OtlpGrpcSignal,
 };
 
 // =============================================================================
