@@ -545,6 +545,400 @@
         });
     }
 
+    type SemanticPayloadCase = (&'static str, TraceEventKind, TraceData, TraceData);
+
+    fn budget_payload(
+        deadline_ns: Option<u64>,
+        poll_quota: u64,
+        cost_quota: Option<u64>,
+        priority: u8,
+        elapsed_ns: Option<u64>,
+    ) -> TraceData {
+        TraceData::Budget {
+            task: task(1),
+            region: region(2),
+            protocol: "grpc".into(),
+            deadline_ns,
+            poll_quota,
+            cost_quota,
+            priority,
+            source: None,
+            elapsed_ns,
+            outcome: Some("ok".into()),
+        }
+    }
+
+    /// br-asupersync-vcu2oz M5: vary semantic payload fields while retaining
+    /// the same event kind and diagnostic label. The old projection compared
+    /// every pair below as equal.
+    fn semantic_payload_cases() -> Vec<SemanticPayloadCase> {
+        use crate::monitor::DownReason;
+        use crate::record::{ObligationKind, ObligationState};
+        use crate::types::{CancelKind, CancelReason};
+
+        let budget = budget_payload(Some(100), 200, Some(300), 4, Some(5));
+        let mut cases = Vec::new();
+        for (name, changed) in [
+            (
+                "deadline",
+                budget_payload(Some(101), 200, Some(300), 4, Some(5)),
+            ),
+            (
+                "no deadline",
+                budget_payload(None, 200, Some(300), 4, Some(5)),
+            ),
+            (
+                "poll quota",
+                budget_payload(Some(100), 201, Some(300), 4, Some(5)),
+            ),
+            (
+                "cost quota",
+                budget_payload(Some(100), 200, Some(301), 4, Some(5)),
+            ),
+            (
+                "no cost quota",
+                budget_payload(Some(100), 200, None, 4, Some(5)),
+            ),
+            (
+                "priority",
+                budget_payload(Some(100), 200, Some(300), 5, Some(5)),
+            ),
+            (
+                "elapsed time",
+                budget_payload(Some(100), 200, Some(300), 4, Some(6)),
+            ),
+            (
+                "no elapsed time",
+                budget_payload(Some(100), 200, Some(300), 4, None),
+            ),
+        ] {
+            cases.push((name, TraceEventKind::BudgetConsumed, budget.clone(), changed));
+        }
+
+        let futurelock = |held| TraceData::Futurelock {
+            task: task(1),
+            region: region(2),
+            idle_steps: 10,
+            held,
+        };
+        let held = vec![(obligation(3), ObligationKind::SendPermit)];
+        for (name, changed) in [
+            (
+                "held obligation id",
+                vec![(obligation(4), ObligationKind::SendPermit)],
+            ),
+            (
+                "held obligation generation",
+                vec![(
+                    ObligationId::from_arena(ArenaIndex::new(3, 1)),
+                    ObligationKind::SendPermit,
+                )],
+            ),
+            (
+                "held obligation kind",
+                vec![(obligation(3), ObligationKind::Ack)],
+            ),
+        ] {
+            assert_eq!(held.len(), changed.len());
+            cases.push((
+                name,
+                TraceEventKind::FuturelockDetected,
+                futurelock(held.clone()),
+                futurelock(changed),
+            ));
+        }
+
+        let mut reason =
+            CancelReason::with_origin(CancelKind::User, region(3), Time::from_nanos(100))
+                .with_task(task(4));
+        reason.message = Some("stop".into());
+        reason.cause = Some(Box::new(
+            CancelReason::with_origin(CancelKind::Shutdown, region(5), Time::from_nanos(90))
+                .with_task(task(6))
+                .with_cause(CancelReason::with_origin(
+                    CancelKind::Timeout,
+                    region(7),
+                    Time::from_nanos(80),
+                )),
+        ));
+        let mut reasons = Vec::new();
+        let mut changed = reason.clone();
+        changed.origin_region = region(8);
+        reasons.push(("cancel origin region", changed));
+        let mut changed = reason.clone();
+        changed.origin_region = RegionId::from_arena(ArenaIndex::new(3, 1));
+        reasons.push(("cancel origin region generation", changed));
+        let mut changed = reason.clone();
+        changed.origin_task = Some(task(9));
+        reasons.push(("cancel origin task", changed));
+        let mut changed = reason.clone();
+        changed.origin_task = Some(TaskId::from_arena(ArenaIndex::new(4, 1)));
+        reasons.push(("cancel origin task generation", changed));
+        let mut changed = reason.clone();
+        changed.origin_task = None;
+        reasons.push(("cancel missing origin task", changed));
+        let mut changed = reason.clone();
+        changed.timestamp = Time::from_nanos(101);
+        reasons.push(("cancel timestamp", changed));
+        let mut changed = reason.clone();
+        changed.cause.as_mut().unwrap().origin_region = region(8);
+        reasons.push(("cancel parent origin", changed));
+        let mut changed = reason.clone();
+        changed.cause.as_mut().unwrap().cause.as_mut().unwrap().kind = CancelKind::Shutdown;
+        reasons.push(("cancel root cause", changed));
+        let mut changed = reason.clone();
+        changed.cause = None;
+        reasons.push(("cancel missing cause", changed));
+        let mut changed = reason.clone();
+        changed.truncated = true;
+        changed.truncated_at_depth = Some(3);
+        reasons.push(("cancel truncated chain", changed));
+
+        for (name, changed) in reasons {
+            // Display intentionally summarizes cancellation for users. It is
+            // not a sufficient key for deterministic causal equivalence.
+            assert_eq!(reason.to_string(), changed.to_string());
+            cases.push((
+                name,
+                TraceEventKind::CancelRequest,
+                TraceData::Cancel {
+                    task: task(1),
+                    region: region(2),
+                    reason: reason.clone(),
+                },
+                TraceData::Cancel {
+                    task: task(1),
+                    region: region(2),
+                    reason: changed.clone(),
+                },
+            ));
+            cases.push((
+                name,
+                TraceEventKind::RegionCancelled,
+                TraceData::RegionCancel {
+                    region: region(2),
+                    reason: reason.clone(),
+                },
+                TraceData::RegionCancel {
+                    region: region(2),
+                    reason: changed,
+                },
+            ));
+        }
+
+        let reused_task = TaskId::from_arena(ArenaIndex::new(1, 1));
+        let reused_region = RegionId::from_arena(ArenaIndex::new(2, 1));
+        let reused_obligation = ObligationId::from_arena(ArenaIndex::new(3, 1));
+        let obligation_payload = |obligation| TraceData::Obligation {
+            obligation,
+            task: task(1),
+            region: region(2),
+            kind: ObligationKind::SendPermit,
+            state: ObligationState::Reserved,
+            duration_ns: None,
+            abort_reason: None,
+        };
+        cases.extend([
+            (
+                "task generation",
+                TraceEventKind::Schedule,
+                TraceData::Task {
+                    task: task(1),
+                    region: region(2),
+                },
+                TraceData::Task {
+                    task: reused_task,
+                    region: region(2),
+                },
+            ),
+            (
+                "region generation",
+                TraceEventKind::Schedule,
+                TraceData::Task {
+                    task: task(1),
+                    region: region(2),
+                },
+                TraceData::Task {
+                    task: task(1),
+                    region: reused_region,
+                },
+            ),
+            (
+                "parent generation",
+                TraceEventKind::RegionCreated,
+                TraceData::Region {
+                    region: region(1),
+                    parent: Some(region(2)),
+                },
+                TraceData::Region {
+                    region: region(1),
+                    parent: Some(reused_region),
+                },
+            ),
+            (
+                "obligation generation",
+                TraceEventKind::ObligationReserve,
+                obligation_payload(obligation(3)),
+                obligation_payload(reused_obligation),
+            ),
+        ]);
+
+        let earlier = Time::from_nanos(1_000);
+        let later = Time::from_nanos(1_001);
+        assert_eq!(earlier.to_string(), later.to_string());
+        let down = |completion_vt| TraceData::Down {
+            monitor_ref: 1,
+            watcher: task(1),
+            monitored: task(2),
+            completion_vt,
+            reason: DownReason::Normal,
+        };
+        let exit = |failure_vt| TraceData::Exit {
+            link_ref: 1,
+            from: task(1),
+            to: task(2),
+            failure_vt,
+            reason: DownReason::Error("failed".into()),
+        };
+        cases.extend([
+            (
+                "time advance old nanosecond",
+                TraceEventKind::TimeAdvance,
+                TraceData::Time {
+                    old: earlier,
+                    new: Time::from_nanos(2_000),
+                },
+                TraceData::Time {
+                    old: later,
+                    new: Time::from_nanos(2_000),
+                },
+            ),
+            (
+                "time advance new nanosecond",
+                TraceEventKind::TimeAdvance,
+                TraceData::Time {
+                    old: Time::ZERO,
+                    new: earlier,
+                },
+                TraceData::Time {
+                    old: Time::ZERO,
+                    new: later,
+                },
+            ),
+            (
+                "timer deadline nanosecond",
+                TraceEventKind::TimerScheduled,
+                TraceData::Timer {
+                    timer_id: 1,
+                    deadline: Some(earlier),
+                },
+                TraceData::Timer {
+                    timer_id: 1,
+                    deadline: Some(later),
+                },
+            ),
+            (
+                "down completion nanosecond",
+                TraceEventKind::DownDelivered,
+                down(earlier),
+                down(later),
+            ),
+            (
+                "exit failure nanosecond",
+                TraceEventKind::ExitDelivered,
+                exit(earlier),
+                exit(later),
+            ),
+        ]);
+        cases
+    }
+
+    #[test]
+    fn summaries_preserve_semantic_payloads() {
+        init_test("summaries_preserve_semantic_payloads");
+        for (name, kind, before, after) in semantic_payload_cases() {
+            assert_ne!(before, after, "fixture must differ: {name} ({kind:?})");
+            let expected =
+                TraceEventSummary::from_event(&TraceEvent::new(7, Time::ZERO, kind, before));
+            let actual =
+                TraceEventSummary::from_event(&TraceEvent::new(7, Time::ZERO, kind, after));
+            assert_ne!(expected, actual, "lost {name} in {kind:?}");
+        }
+        crate::test_complete!("summaries_preserve_semantic_payloads");
+    }
+
+    #[test]
+    fn determinism_oracle_detects_semantic_payload_divergence() {
+        init_test("determinism_oracle_detects_semantic_payload_divergence");
+        for (name, kind, before, after) in semantic_payload_cases() {
+            let runs = AtomicUsize::new(0);
+            let result = DeterminismOracle::new().verify(LabConfig::new(42), |runtime| {
+                record_message(runtime, "before".into());
+                let data = if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                    before.clone()
+                } else {
+                    after.clone()
+                };
+                runtime
+                    .trace()
+                    .record_event(|seq| TraceEvent::new(seq, Time::ZERO, kind, data));
+                record_message(runtime, "after".into());
+            });
+            let violation = result.expect_err(&format!("lost {name} in {kind:?}"));
+            assert_eq!(violation.divergence_index, 1, "{name} ({kind:?})");
+            assert_eq!(violation.trace1_len, 3);
+            assert_eq!(violation.trace2_len, 3);
+            let expected =
+                TraceEventSummary::from_event(&TraceEvent::new(1, Time::ZERO, kind, before));
+            let actual =
+                TraceEventSummary::from_event(&TraceEvent::new(1, Time::ZERO, kind, after));
+            assert_eq!(violation.expected, Some(expected), "{name} ({kind:?})");
+            assert_eq!(violation.actual, Some(actual), "{name} ({kind:?})");
+            assert_eq!(violation.context_before.len(), 1);
+            assert_eq!(violation.context_after_expected.len(), 1);
+            assert_eq!(violation.context_after_actual.len(), 1);
+            assert_eq!(violation.context_before[0].data_summary, "msg=before");
+            assert_eq!(violation.context_after_expected[0].data_summary, "msg=after");
+            assert_eq!(violation.context_after_actual[0].data_summary, "msg=after");
+        }
+        crate::test_complete!("determinism_oracle_detects_semantic_payload_divergence");
+    }
+
+    #[test]
+    fn semantic_payload_equality_still_ignores_enclosing_event_time() {
+        init_test("semantic_payload_equality_still_ignores_enclosing_event_time");
+        for (name, kind, data, _) in semantic_payload_cases() {
+            let earlier = TraceEventSummary::from_event(&TraceEvent::new(
+                7,
+                Time::from_nanos(10),
+                kind,
+                data.clone(),
+            ));
+            let later = TraceEventSummary::from_event(&TraceEvent::new(
+                7,
+                Time::from_nanos(20),
+                kind,
+                data.clone(),
+            ));
+            assert_eq!(earlier, later, "{name} ({kind:?})");
+            assert_ne!(earlier.time_nanos, later.time_nanos);
+
+            let runs = AtomicUsize::new(0);
+            let result = DeterminismOracle::new().verify(LabConfig::new(42), |runtime| {
+                let time = if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Time::from_nanos(10)
+                } else {
+                    Time::from_nanos(20)
+                };
+                runtime
+                    .trace()
+                    .record_event(|seq| TraceEvent::new(seq, time, kind, data.clone()));
+            });
+            assert!(result.is_ok(), "{name} ({kind:?}): {result:?}");
+        }
+        crate::test_complete!("semantic_payload_equality_still_ignores_enclosing_event_time");
+    }
+
     /// A message summary keeps the whole message. Cut at byte 100, it
     /// panicked inside a multi-byte character (br-asupersync-vcu2oz M5).
     #[test]

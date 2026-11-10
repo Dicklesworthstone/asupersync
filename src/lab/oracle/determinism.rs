@@ -255,11 +255,12 @@ pub struct TraceEventSummary {
     pub data_summary: String,
 }
 
-/// Custom equality implementation that excludes timing for determinism.
+/// Custom equality implementation that excludes the enclosing event timestamp.
 ///
-/// Time is excluded from comparison because nanosecond-precision timing
-/// can vary under chaos injection, making deterministic oracles flaky.
-/// Only logical sequence (seq), event kind, and data matter for determinism.
+/// The enclosing event timestamp is display-only because nanosecond-precision
+/// observation timing can vary under chaos injection. Timing inside the payload
+/// remains semantic: timer deadlines, budget consumption, and cancellation
+/// attribution must reproduce along with the sequence, event kind, and data.
 impl PartialEq for TraceEventSummary {
     fn eq(&self, other: &Self) -> bool {
         self.seq == other.seq && self.kind == other.kind && self.data_summary == other.data_summary
@@ -281,6 +282,10 @@ impl TraceEventSummary {
     }
 
     /// Summarizes trace data for comparison.
+    ///
+    /// Arena IDs use their scalar `Debug` form (index and generation): their
+    /// user-facing `Display` form drops the generation and aliases reused slots.
+    /// Payload times use exact nanoseconds because `Time::Display` rounds them.
     #[allow(clippy::too_many_lines)]
     fn summarize_data(data: &TraceData) -> String {
         use std::fmt::Write;
@@ -288,23 +293,27 @@ impl TraceEventSummary {
         match data {
             TraceData::None => String::new(),
             TraceData::Task { task, region } => {
-                format!("task={task} region={region}")
+                format!("task={task:?} region={region:?}")
             }
             TraceData::Budget {
                 task,
                 region,
                 protocol,
+                deadline_ns,
+                poll_quota,
+                cost_quota,
+                priority,
                 source,
+                elapsed_ns,
                 outcome,
-                ..
             } => {
                 format!(
-                    "budget task={task} region={region} protocol={protocol} source={source:?} outcome={outcome:?}"
+                    "budget task={task:?} region={region:?} protocol={protocol:?} deadline_ns={deadline_ns:?} poll_quota={poll_quota} cost_quota={cost_quota:?} priority={priority} source={source:?} elapsed_ns={elapsed_ns:?} outcome={outcome:?}"
                 )
             }
             TraceData::Region { region, parent } => parent.as_ref().map_or_else(
-                || format!("region={region} parent=None"),
-                |p| format!("region={region} parent={p}"),
+                || format!("region={region:?} parent=None"),
+                |p| format!("region={region:?} parent={p:?}"),
             ),
             TraceData::Obligation {
                 obligation,
@@ -316,7 +325,7 @@ impl TraceEventSummary {
                 abort_reason,
             } => {
                 let mut summary = format!(
-                    "obligation={obligation} task={task} region={region} kind={kind:?} state={state:?}"
+                    "obligation={obligation:?} task={task:?} region={region:?} kind={kind:?} state={state:?}"
                 );
                 if let Some(duration) = duration_ns {
                     let _ = write!(summary, " duration_ns={duration}");
@@ -331,10 +340,11 @@ impl TraceEventSummary {
                 region,
                 reason,
             } => {
-                format!("task={task} region={region} reason={reason}")
+                let reason = Self::summarize_cancel_reason(reason);
+                format!("task={task:?} region={region:?} reason={reason}")
             }
             TraceData::Time { old, new } => {
-                format!("old={old} new={new}")
+                format!("old={}ns new={}ns", old.as_nanos(), new.as_nanos())
             }
             TraceData::Futurelock {
                 task,
@@ -342,10 +352,18 @@ impl TraceEventSummary {
                 idle_steps,
                 held,
             } => {
-                format!(
-                    "task={task} region={region} idle={idle_steps} held_count={}",
+                let mut summary = format!(
+                    "task={task:?} region={region:?} idle={idle_steps} held_count={} held=[",
                     held.len()
-                )
+                );
+                for (index, (obligation, kind)) in held.iter().enumerate() {
+                    if index != 0 {
+                        summary.push_str(", ");
+                    }
+                    let _ = write!(summary, "{obligation:?}:{kind}");
+                }
+                summary.push(']');
+                summary
             }
             // The whole message: a prefix compared runs that differed after
             // it as equal, and cutting at a byte offset panicked inside a
@@ -354,7 +372,7 @@ impl TraceEventSummary {
             TraceData::Chaos { kind, task, detail } => {
                 let mut summary = format!("chaos={kind}");
                 if let Some(t) = task {
-                    let _ = write!(summary, " task={t}");
+                    let _ = write!(summary, " task={t:?}");
                 }
                 if !detail.is_empty() {
                     let _ = write!(summary, " detail={detail}");
@@ -362,11 +380,12 @@ impl TraceEventSummary {
                 summary
             }
             TraceData::RegionCancel { region, reason } => {
-                format!("region={region} reason={reason}")
+                let reason = Self::summarize_cancel_reason(reason);
+                format!("region={region:?} reason={reason}")
             }
             TraceData::Timer { timer_id, deadline } => deadline.map_or_else(
                 || format!("timer={timer_id}"),
-                |d| format!("timer={timer_id} deadline={d}"),
+                |d| format!("timer={timer_id} deadline={}ns", d.as_nanos()),
             ),
             TraceData::IoRequested { token, interest } => {
                 format!("io_token={token} interest={interest:#x}")
@@ -399,7 +418,7 @@ impl TraceEventSummary {
                 watcher_region,
                 monitored,
             } => format!(
-                "monitor_ref={monitor_ref} watcher={watcher} watcher_region={watcher_region} monitored={monitored}"
+                "monitor_ref={monitor_ref} watcher={watcher:?} watcher_region={watcher_region:?} monitored={monitored:?}"
             ),
             TraceData::Down {
                 monitor_ref,
@@ -408,7 +427,8 @@ impl TraceEventSummary {
                 completion_vt,
                 reason,
             } => format!(
-                "down monitor_ref={monitor_ref} watcher={watcher} monitored={monitored} completion_vt={completion_vt} reason={reason}"
+                "down monitor_ref={monitor_ref} watcher={watcher:?} monitored={monitored:?} completion_vt={}ns reason={reason}",
+                completion_vt.as_nanos()
             ),
             TraceData::Link {
                 link_ref,
@@ -417,7 +437,7 @@ impl TraceEventSummary {
                 task_b,
                 region_b,
             } => format!(
-                "link_ref={link_ref} a={task_a} region_a={region_a} b={task_b} region_b={region_b}"
+                "link_ref={link_ref} a={task_a:?} region_a={region_a:?} b={task_b:?} region_b={region_b:?}"
             ),
             TraceData::Exit {
                 link_ref,
@@ -426,7 +446,8 @@ impl TraceEventSummary {
                 failure_vt,
                 reason,
             } => format!(
-                "exit link_ref={link_ref} from={from} to={to} failure_vt={failure_vt} reason={reason}"
+                "exit link_ref={link_ref} from={from:?} to={to:?} failure_vt={}ns reason={reason}",
+                failure_vt.as_nanos()
             ),
             TraceData::Worker {
                 worker_id,
@@ -437,9 +458,44 @@ impl TraceEventSummary {
                 region,
                 obligation,
             } => format!(
-                "worker={worker_id} job_id={job_id} decision_seq={decision_seq} replay_hash={replay_hash} task={task} region={region} obligation={obligation}"
+                "worker={worker_id} job_id={job_id} decision_seq={decision_seq} replay_hash={replay_hash} task={task:?} region={region:?} obligation={obligation:?}"
             ),
         }
+    }
+
+    /// `CancelReason::Display` omits origin and cause-chain attribution. Those
+    /// fields can distinguish different causal histories with the same visible
+    /// cancellation kind/message, so compare the complete retained chain. Walk
+    /// it iteratively and format only stable values, never pointer identities.
+    fn summarize_cancel_reason(reason: &crate::types::CancelReason) -> String {
+        use std::fmt::Write;
+
+        let mut summary = String::from("[");
+        for (index, cause) in reason.chain().enumerate() {
+            if index != 0 {
+                summary.push_str(", ");
+            }
+            let _ = write!(
+                summary,
+                "{{kind={} origin_region={:?} origin_task=",
+                cause.kind, cause.origin_region
+            );
+            if let Some(task) = cause.origin_task {
+                let _ = write!(summary, "{task:?}");
+            } else {
+                summary.push_str("none");
+            }
+            let _ = write!(
+                summary,
+                " timestamp_ns={} message={:?} truncated={} truncated_at_depth={:?}}}",
+                cause.timestamp.as_nanos(),
+                cause.message,
+                cause.truncated,
+                cause.truncated_at_depth,
+            );
+        }
+        summary.push(']');
+        summary
     }
 }
 
