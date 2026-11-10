@@ -130,6 +130,9 @@ use crate::obligation::lyapunov::{
     LyapunovGovernor, PotentialWeights, SchedulingSuggestion, StateSnapshot,
 };
 use crate::observability::spectral_health::{SpectralHealthMonitor, SpectralThresholds};
+use crate::observability::task_inspector::{
+    SCHEDULER_SNAPSHOT_SCHEMA_V1, SchedulerQueueDepths, SchedulerSnapshot, SchedulerWorkerSnapshot,
+};
 use crate::runtime::config::SchedulerPlacementMode;
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::reactor::Reactor;
@@ -2464,6 +2467,9 @@ pub struct ThreeLaneScheduler {
     local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>>,
     /// Per-worker non-stealable queues for local (`!Send`) tasks.
     local_ready: SmallVec<[Arc<LocalReadyQueue>; 16]>,
+    /// Existing fast-queue length counters retained for inspection after workers
+    /// move to threads. These handles retain no task source or queue entries.
+    fast_queue_lengths: Vec<Arc<AtomicUsize>>,
     /// Per-worker parkers for targeted wakeups.
     parkers: SmallVec<[Parker; 16]>,
     /// Worker handles for thread spawning.
@@ -2978,6 +2984,7 @@ impl ThreeLaneScheduler {
                 )
             })
             .collect();
+        let fast_queue_lengths = fast_queues.iter().map(LocalQueue::len_counter).collect();
 
         // One process-unique local-store key per runtime, shared by all its
         // workers (GH#58, asupersync-1fyc8f).
@@ -3126,6 +3133,7 @@ impl ThreeLaneScheduler {
             schedule_capture,
             local_schedulers,
             local_ready,
+            fast_queue_lengths,
             parkers,
             workers,
             preemption_fairness_snapshots,
@@ -4103,6 +4111,73 @@ impl ThreeLaneScheduler {
             .iter()
             .map(|snapshot| snapshot.read().clone())
             .collect()
+    }
+
+    /// Captures scheduler configuration, approximate lane depths, and live
+    /// worker-local fairness certificates in O(workers) time and space.
+    ///
+    /// This works after [`Self::take_workers`]. It reads existing counters and
+    /// queue sizes without visiting task records, draining work, or pruning
+    /// stale entries. Each lock is released before the next is acquired;
+    /// queues and certificates are independent observations, not an atomic
+    /// runnable-task census or a proof of quiescence.
+    #[must_use]
+    pub fn scheduler_snapshot(&self) -> SchedulerSnapshot {
+        let global_queues = SchedulerQueueDepths {
+            cancel: self.global.cancel_count(),
+            timed: self.global.timed_count(),
+            ready: self.global.ready_count(),
+        };
+        let ready_combiner_pending = self.global.ready_combiner_snapshot().pending_len;
+        let workers = self
+            .local_schedulers
+            .iter()
+            .enumerate()
+            .map(|(worker_id, scheduler)| {
+                let priority_queues = {
+                    let scheduler = scheduler.lock();
+                    SchedulerQueueDepths {
+                        cancel: scheduler.approx_cancel_len(),
+                        timed: scheduler.approx_timed_len(),
+                        ready: scheduler.approx_ready_len(),
+                    }
+                };
+                let local_ready = self.local_ready[worker_id].lock().len();
+                let fairness = self.preemption_fairness_snapshots[worker_id].read().clone();
+                SchedulerWorkerSnapshot {
+                    worker_id,
+                    cohort: self
+                        .worker_cohort_map
+                        .as_ref()
+                        .map_or(0, |map| map[worker_id]),
+                    priority_queues,
+                    fast_ready: self.fast_queue_lengths[worker_id].load(Ordering::Relaxed),
+                    local_ready,
+                    lifo_occupied: self.coordinator.lifo_slots[worker_id]
+                        .task
+                        .load(Ordering::Relaxed)
+                        != 0,
+                    fairness,
+                }
+            })
+            .collect();
+        SchedulerSnapshot {
+            schema_version: SCHEDULER_SNAPSHOT_SCHEMA_V1.to_string(),
+            queue_depths_approximate: true,
+            atomic_snapshot: false,
+            fairness_publish_interval_dispatches: PREEMPTION_FAIRNESS_PUBLISH_INTERVAL,
+            worker_count: self.local_schedulers.len(),
+            idle_workers: self.coordinator.idle_workers.load(Ordering::Relaxed),
+            shutdown_requested: self.is_shutdown(),
+            placement_mode: self.placement_mode.as_str().to_string(),
+            cohort_count: self.cohort_count,
+            parking_enabled: self.enable_parking,
+            steal_batch_size: self.steal_batch_size,
+            global_ready_queue_warning_threshold: self.global_queue_limit,
+            global_queues,
+            ready_combiner_pending,
+            workers,
+        }
     }
 
     /// Signals all workers to shutdown.
@@ -5316,7 +5391,7 @@ pub struct StarvationStats {
 /// This is an observed dispatch-step certificate. It does not prove wall-clock
 /// latency, bounded task poll duration, or global priority ordering across
 /// workers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PreemptionFairnessCertificate {
     /// Worker-local baseline cancel streak limit `L`.
     pub base_limit: usize,

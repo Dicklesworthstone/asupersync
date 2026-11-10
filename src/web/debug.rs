@@ -16,6 +16,8 @@
 //! - `GET /debug/ws` — WebSocket endpoint (upgrade + one-shot JSON push)
 //! - `GET /inspector` (also `/debug/inspector`) — Versioned core-model snapshot
 //!   when an inspector provider is installed, otherwise JSON `503`
+//! - `GET /scheduler` (also `/debug/scheduler`) — Approximate scheduler queues
+//!   and worker fairness observations, without capturing task/region records
 //!
 //! Inspector exports default to [`InspectorProfile::Shareable`]. Diagnostic text
 //! requires explicit server-side configuration; request parameters cannot enable
@@ -54,7 +56,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
-use crate::observability::{InspectorProfile, InspectorSnapshot, TaskInspectorConfig};
+use crate::observability::{
+    InspectorProfile, InspectorSnapshot, SchedulerSnapshot, TaskInspectorConfig,
+};
 use crate::runtime::{MemoryResidencyAccountingSnapshot, RuntimeHandle, RuntimeSnapshot};
 use crate::tracing_compat::info;
 use base64::Engine as _;
@@ -76,12 +80,19 @@ pub type MemoryResidencySnapshotFn =
 pub type InspectorSnapshotFn =
     Arc<dyn Fn(InspectorProfile) -> Option<InspectorSnapshot> + Send + Sync>;
 
-/// Default upper bound on a serialized inspector response body (16 MiB).
+/// Captures a scheduler-only snapshot without collecting runtime records.
+///
+/// Return `None` if unavailable. This runs on a connection thread and must not
+/// drive or wait for runtime work. It is independent of [`InspectorSnapshotFn`].
+pub type SchedulerSnapshotFn = Arc<dyn Fn() -> Option<SchedulerSnapshot> + Send + Sync>;
+
+/// Default upper bound on a serialized inspector or scheduler response (16 MiB).
 pub const DEFAULT_INSPECTOR_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct InspectorEndpoint {
     snapshot_fn: Option<InspectorSnapshotFn>,
+    scheduler_snapshot_fn: Option<SchedulerSnapshotFn>,
     profile: InspectorProfile,
     max_response_bytes: usize,
 }
@@ -90,6 +101,7 @@ impl Default for InspectorEndpoint {
     fn default() -> Self {
         Self {
             snapshot_fn: None,
+            scheduler_snapshot_fn: None,
             profile: InspectorProfile::Shareable,
             max_response_bytes: DEFAULT_INSPECTOR_MAX_RESPONSE_BYTES,
         }
@@ -184,19 +196,33 @@ impl DebugServer {
         self
     }
 
+    /// Installs the provider for `GET /scheduler` and `GET /debug/scheduler`.
+    ///
+    /// These routes never invoke the full record inspector provider. Missing
+    /// providers and providers returning `None` produce JSON `503` responses.
+    #[must_use]
+    pub fn with_scheduler_snapshot_fn(mut self, snapshot_fn: SchedulerSnapshotFn) -> Self {
+        self.inspector.scheduler_snapshot_fn = Some(snapshot_fn);
+        self
+    }
+
     /// Binds inspector requests to a native runtime's live record tables.
     ///
     /// Each request acquires the runtime's state, task, and obligation tables
     /// through [`RuntimeHandle::task_inspector`] in their canonical lock order.
     /// The owned snapshot is serialized only after those locks are released.
+    /// Scheduler requests use [`RuntimeHandle::scheduler_snapshot`] separately,
+    /// without collecting or locking the runtime's task/region records.
     /// The supplied handle retains its ordinary strong or weak lifetime semantics.
     #[must_use]
     pub fn with_runtime_inspector(self, runtime: RuntimeHandle) -> Self {
+        let scheduler_runtime = runtime.clone();
         self.with_inspector_snapshot_fn(Arc::new(move |profile| {
             runtime
                 .task_inspector(TaskInspectorConfig::default())
                 .map(|inspector| inspector.runtime_snapshot(profile))
         }))
+        .with_scheduler_snapshot_fn(Arc::new(move || scheduler_runtime.scheduler_snapshot()))
     }
 
     /// Sets the inspector text policy at server setup time.
@@ -211,7 +237,7 @@ impl DebugServer {
         self
     }
 
-    /// Bounds the serialized inspector body, without truncating its schema.
+    /// Bounds serialized inspector and scheduler bodies without truncation.
     ///
     /// Oversized snapshots return JSON `503` instead of partial snapshot data.
     /// The default is [`DEFAULT_INSPECTOR_MAX_RESPONSE_BYTES`]. A zero limit
@@ -435,6 +461,9 @@ fn handle_connection(
         "/inspector" | "/debug/inspector" => {
             handle_inspector_request(&mut stream, inspector);
         }
+        "/scheduler" | "/debug/scheduler" => {
+            handle_scheduler_request(&mut stream, inspector);
+        }
         "/debug" | "/debug/" => {
             let _ = write_response(
                 &mut stream,
@@ -518,30 +547,65 @@ fn handle_inspector_request(stream: &mut TcpStream, inspector: &InspectorEndpoin
     } else {
         snapshot
     };
+    write_bounded_snapshot_response(
+        stream,
+        &snapshot,
+        inspector.max_response_bytes,
+        br#"{"error":"inspector_response_too_large"}"#,
+        br#"{"error":"inspector_serialization_failed"}"#,
+    );
+}
+
+fn handle_scheduler_request(stream: &mut TcpStream, inspector: &InspectorEndpoint) {
+    let Some(snapshot_fn) = &inspector.scheduler_snapshot_fn else {
+        let _ = write_inspector_response(stream, 503, br#"{"error":"scheduler_unavailable"}"#);
+        return;
+    };
+    let snapshot = match panic::catch_unwind(AssertUnwindSafe(|| snapshot_fn())) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            let _ = write_inspector_response(stream, 503, br#"{"error":"scheduler_unavailable"}"#);
+            return;
+        }
+        Err(payload) => {
+            std::mem::forget(payload);
+            let _ =
+                write_inspector_response(stream, 500, br#"{"error":"scheduler_capture_failed"}"#);
+            return;
+        }
+    };
+    write_bounded_snapshot_response(
+        stream,
+        &snapshot,
+        inspector.max_response_bytes,
+        br#"{"error":"scheduler_response_too_large"}"#,
+        br#"{"error":"scheduler_serialization_failed"}"#,
+    );
+}
+
+fn write_bounded_snapshot_response<T: serde::Serialize>(
+    stream: &mut TcpStream,
+    snapshot: &T,
+    max_response_bytes: usize,
+    too_large_error: &[u8],
+    serialization_error: &[u8],
+) {
     let mut body = InspectorJsonBuffer {
         bytes: Vec::new(),
-        max_bytes: inspector.max_response_bytes,
+        max_bytes: max_response_bytes,
         limit_exceeded: false,
     };
     // Serialize before sending headers so a limit failure cannot produce a
     // successful HTTP response containing truncated JSON.
-    match serde_json::to_writer(&mut body, &snapshot) {
+    match serde_json::to_writer(&mut body, snapshot) {
         Ok(()) => {
             let _ = write_inspector_response(stream, 200, &body.bytes);
         }
         Err(_) if body.limit_exceeded => {
-            let _ = write_inspector_response(
-                stream,
-                503,
-                br#"{"error":"inspector_response_too_large"}"#,
-            );
+            let _ = write_inspector_response(stream, 503, too_large_error);
         }
         Err(_) => {
-            let _ = write_inspector_response(
-                stream,
-                500,
-                br#"{"error":"inspector_serialization_failed"}"#,
-            );
+            let _ = write_inspector_response(stream, 500, serialization_error);
         }
     }
 }

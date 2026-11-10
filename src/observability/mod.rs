@@ -334,9 +334,11 @@ pub use swarm_pressure_governor::{
 pub use task_inspector::{
     INSPECTOR_SNAPSHOT_SCHEMA_V1, InspectorBudget, InspectorCheckpoint, InspectorCounters,
     InspectorCoverage, InspectorObligation, InspectorProfile, InspectorRegion, InspectorSnapshot,
-    InspectorTask, InspectorWaitEdge, TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot,
-    TaskDetails, TaskDetailsWire, TaskInspector, TaskInspectorConfig, TaskRegionCountWire,
-    TaskStateInfo, TaskSummary, TaskSummaryWire,
+    InspectorTask, InspectorWaitEdge, RUNTIME_INSPECTOR_SNAPSHOT_SCHEMA_V1,
+    RuntimeInspectorSnapshot, SCHEDULER_SNAPSHOT_SCHEMA_V1, SchedulerQueueDepths,
+    SchedulerSnapshot, SchedulerWorkerSnapshot, TASK_CONSOLE_WIRE_SCHEMA_V1,
+    TaskConsoleWireSnapshot, TaskDetails, TaskDetailsWire, TaskInspector, TaskInspectorConfig,
+    TaskRegionCountWire, TaskStateInfo, TaskSummary, TaskSummaryWire,
 };
 pub use w3c_trace_context::{
     SpanId as W3CSpanId, TraceContextError, TraceFlags, TraceId, W3CBaggage, W3CPropagationContext,

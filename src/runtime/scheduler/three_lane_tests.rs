@@ -1229,6 +1229,92 @@ fn lbhnh0_live_fairness_snapshot_publication_boundaries() {
 }
 
 #[test]
+fn inspector_scheduler_snapshot_preserves_queues_after_workers_move() {
+    let state = state_with_virtual_clock();
+    let mut scheduler = ThreeLaneScheduler::new(2, &state);
+    scheduler.set_worker_cohort_map(&[0, 2]).unwrap();
+    scheduler.set_scheduler_placement_mode(SchedulerPlacementMode::ThroughputFirst);
+    scheduler.set_global_queue_limit(7);
+    let workers = scheduler.take_workers();
+
+    scheduler
+        .global
+        .inject_cancel(TaskId::new_for_test(1, 1), 90);
+    scheduler
+        .global
+        .inject_timed(TaskId::new_for_test(2, 1), Time::from_secs(10));
+    scheduler
+        .global
+        .inject_ready(TaskId::new_for_test(3, 1), 20);
+    workers[0].schedule_local(TaskId::new_for_test(4, 1), 10);
+    let promoted = TaskId::new_for_test(5, 1);
+    workers[0].schedule_local(promoted, 250);
+    workers[0].schedule_local_cancel(promoted, 250);
+    workers[0].schedule_local_timed(TaskId::new_for_test(6, 1), Time::from_secs(20));
+    workers[1].fast_queue.push(TaskId::new_for_test(7, 1));
+    workers[1].fast_queue.push(TaskId::new_for_test(8, 1));
+    let local = TaskId::new_for_test(9, 1);
+    let cancelled_local = TaskId::new_for_test(10, 1);
+    {
+        let mut queue = scheduler.local_ready[1].lock();
+        queue.push_back(local);
+        queue.push_back(cancelled_local);
+        queue.tombstone(cancelled_local);
+    }
+    let lifo = lifo_word(TaskId::new_for_test(11, 1)).unwrap();
+    scheduler.coordinator.lifo_slots[1]
+        .task
+        .store(lifo, Ordering::Relaxed);
+
+    let snapshot = scheduler.scheduler_snapshot();
+    assert_eq!(snapshot.schema_version, SCHEDULER_SNAPSHOT_SCHEMA_V1);
+    assert!(snapshot.queue_depths_approximate);
+    assert!(!snapshot.atomic_snapshot);
+    assert_eq!(snapshot.worker_count, 2);
+    assert_eq!(snapshot.workers.len(), 2);
+    assert_eq!(snapshot.placement_mode, "throughput_first");
+    assert_eq!(snapshot.cohort_count, 3);
+    assert_eq!(snapshot.global_ready_queue_warning_threshold, 7);
+    assert_eq!(snapshot.global_queues.cancel, 1);
+    assert_eq!(snapshot.global_queues.timed, 1);
+    assert_eq!(snapshot.global_queues.ready, 1);
+    assert_eq!(snapshot.ready_combiner_pending, 0);
+    assert_eq!(snapshot.workers[0].worker_id, 0);
+    assert_eq!(snapshot.workers[0].cohort, 0);
+    assert_eq!(snapshot.workers[0].priority_queues.cancel, 1);
+    assert_eq!(snapshot.workers[0].priority_queues.timed, 1);
+    assert_eq!(
+        snapshot.workers[0].priority_queues.ready, 2,
+        "the stale promoted entry must remain visible; inspection must not prune it"
+    );
+    assert_eq!(snapshot.workers[1].worker_id, 1);
+    assert_eq!(snapshot.workers[1].cohort, 2);
+    assert_eq!(snapshot.workers[1].fast_ready, 2);
+    assert_eq!(snapshot.workers[1].local_ready, 1);
+    assert!(snapshot.workers[1].lifo_occupied);
+    assert_eq!(scheduler.scheduler_snapshot(), snapshot);
+    let json = serde_json::to_string(&snapshot).unwrap();
+    assert_eq!(
+        serde_json::from_str::<SchedulerSnapshot>(&json).unwrap(),
+        snapshot
+    );
+
+    // Retained counter handles still follow the actual moved worker's queue.
+    workers[1].fast_queue.push(TaskId::new_for_test(12, 1));
+    assert_eq!(scheduler.scheduler_snapshot().workers[1].fast_ready, 3);
+    assert_eq!(
+        scheduler.coordinator.lifo_slots[1]
+            .task
+            .load(Ordering::Relaxed),
+        lifo
+    );
+    assert_eq!(scheduler.local_ready[1].lock().pop_front(), Some(local));
+    assert_eq!(workers[0].local.lock().pop(), Some(promoted));
+    scheduler.shutdown();
+    assert!(scheduler.scheduler_snapshot().shutdown_requested);
+}
+
+#[test]
 fn test_timed_work_not_due_stays_in_queue() {
     use crate::time::{TimerDriverHandle, VirtualClock};
 

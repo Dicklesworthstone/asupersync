@@ -1152,6 +1152,13 @@ impl Scheduler {
         self.cancel_lane.len()
     }
 
+    /// Counts timed-heap entries without pruning stale promotions or removals.
+    /// Includes deadlines that are not due and is only an advisory observation.
+    #[inline]
+    pub(crate) fn approx_timed_len(&self) -> usize {
+        self.timed_lane.len()
+    }
+
     /// Returns the current ready-lane head without removing it.
     #[inline]
     #[must_use]

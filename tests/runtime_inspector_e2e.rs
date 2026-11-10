@@ -29,10 +29,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::observability::{
-    BlockReason, INSPECTOR_SNAPSHOT_SCHEMA_V1, InspectorProfile, InspectorSnapshot, TaskInspector,
-    TaskInspectorConfig, TaskStateInfo,
+    BlockReason, INSPECTOR_SNAPSHOT_SCHEMA_V1, InspectorProfile, InspectorSnapshot,
+    RUNTIME_INSPECTOR_SNAPSHOT_SCHEMA_V1, RuntimeInspectorSnapshot, SCHEDULER_SNAPSHOT_SCHEMA_V1,
+    TaskInspector, TaskInspectorConfig, TaskStateInfo,
 };
-use asupersync::runtime::{RuntimeBuilder, yield_now};
+use asupersync::runtime::{Runtime, RuntimeBuilder, yield_now};
 use asupersync::types::{CancelKind, CancelReason, TaskId};
 
 /// Upper bound on cooperative yields while waiting for a condition; each
@@ -47,6 +48,127 @@ async fn yield_until(mut probe: impl FnMut() -> bool) -> bool {
         yield_now().await;
     }
     probe()
+}
+
+#[test]
+fn production_scheduler_and_enriched_inspector_report_live_worker_progress() {
+    for workers in [1, 2] {
+        for sharded in [false, true] {
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::multi_thread().worker_threads(workers)
+            };
+            let runtime = builder
+                .with_sharded_state(sharded)
+                .enable_time()
+                .build()
+                .unwrap();
+            let runtime_handle = runtime.handle();
+            let (tx, mut rx) = mpsc::channel::<()>(1);
+            let parked = Arc::new(AtomicBool::new(false));
+            let task_parked = Arc::clone(&parked);
+            let ambient_handle = runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                cx.checkpoint_with("private-enriched-inspector-checkpoint")
+                    .unwrap();
+                let mut task = cx
+                    .spawn(move |task_cx| async move {
+                        // More than one publication interval per configured worker,
+                        // even if this task migrates between workers while yielding.
+                        for _ in 0..(128 * workers) {
+                            yield_now().await;
+                        }
+                        task_parked.store(true, Ordering::SeqCst);
+                        rx.recv(&task_cx).await.unwrap();
+                        Runtime::current_handle().unwrap()
+                    })
+                    .unwrap();
+                assert!(yield_until(|| parked.load(Ordering::SeqCst)).await);
+                let task_id = task.task_id();
+                let scheduler = runtime.scheduler_snapshot();
+                assert_eq!(scheduler.schema_version, SCHEDULER_SNAPSHOT_SCHEMA_V1);
+                assert_eq!(scheduler.worker_count, workers);
+                assert_eq!(scheduler.workers.len(), workers);
+                assert!(scheduler.queue_depths_approximate);
+                assert!(!scheduler.atomic_snapshot);
+                assert!(
+                    scheduler
+                        .workers
+                        .iter()
+                        .map(|worker| worker.fairness.ready_dispatches)
+                        .sum::<u64>()
+                        >= 64,
+                    "workers={workers} sharded={sharded}: live worker certificates must advance"
+                );
+                let handle_scheduler = runtime_handle.scheduler_snapshot().unwrap();
+                assert_eq!(handle_scheduler.worker_count, workers);
+
+                let full = runtime.inspector_snapshot(InspectorProfile::Full);
+                assert_eq!(full.schema_version, RUNTIME_INSPECTOR_SNAPSHOT_SCHEMA_V1);
+                assert_eq!(full.records.schema_version, INSPECTOR_SNAPSHOT_SCHEMA_V1);
+                assert!(full.records.coverage.record_tables_locked);
+                assert_eq!(full.records.coverage.external_obligation_table, sharded);
+                assert!(
+                    full.records
+                        .tasks
+                        .iter()
+                        .any(|record| record.details.id == task_id)
+                );
+                assert_eq!(full.scheduler.worker_count, workers);
+                assert!(
+                    serde_json::to_string(&full)
+                        .unwrap()
+                        .contains("private-enriched-inspector-checkpoint")
+                );
+                let shareable = full.into_shareable();
+                assert_eq!(shareable.records.profile, InspectorProfile::Shareable);
+                let json = serde_json::to_string(&shareable).unwrap();
+                assert!(!json.contains("private-enriched-inspector-checkpoint"));
+                assert_eq!(
+                    serde_json::from_str::<RuntimeInspectorSnapshot>(&json).unwrap(),
+                    shareable
+                );
+                let via_handle = runtime_handle
+                    .inspector_snapshot(InspectorProfile::Shareable)
+                    .unwrap();
+                assert!(
+                    via_handle
+                        .records
+                        .tasks
+                        .iter()
+                        .any(|record| record.details.id == task_id)
+                );
+
+                tx.reserve(&cx).await.unwrap().try_send(()).unwrap();
+                let ambient_handle = task.join(&cx).await.unwrap();
+                assert!(
+                    yield_until(|| {
+                        !runtime
+                            .inspector_snapshot(InspectorProfile::Shareable)
+                            .records
+                            .tasks
+                            .iter()
+                            .any(|record| record.details.id == task_id)
+                    })
+                    .await
+                );
+                ambient_handle
+            });
+            assert!(ambient_handle.scheduler_snapshot().is_some());
+            drop(runtime_handle);
+            drop(runtime);
+            // Current-thread block_on installs a strong ambient handle; native
+            // background workers install weak handles to avoid runtime cycles.
+            assert_eq!(ambient_handle.scheduler_snapshot().is_some(), workers == 1);
+            assert_eq!(
+                ambient_handle
+                    .inspector_snapshot(InspectorProfile::Shareable)
+                    .is_some(),
+                workers == 1
+            );
+        }
+    }
 }
 
 fn is_terminal(state: &TaskStateInfo) -> bool {

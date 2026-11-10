@@ -91,6 +91,71 @@
     }
 
     #[test]
+    fn scheduler_http_uses_its_own_provider_and_preserves_response_boundaries() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let expected = runtime.scheduler_snapshot();
+        let expected_bytes = serde_json::to_vec(&expected).unwrap();
+        let record_captures = Arc::new(AtomicUsize::new(0));
+        for limit in [expected_bytes.len(), expected_bytes.len() - 1, 0] {
+            let snapshot = expected.clone();
+            let captures = Arc::clone(&record_captures);
+            let mut server = inspector_server()
+                .with_inspector_snapshot_fn(Arc::new(move |_| {
+                    captures.fetch_add(1, Ordering::Relaxed);
+                    None
+                }))
+                .with_scheduler_snapshot_fn(Arc::new(move || Some(snapshot.clone())))
+                .with_inspector_max_response_bytes(limit);
+            server.start().unwrap();
+            for path in ["/scheduler", "/debug/scheduler"] {
+                let response = request_server(&server, "GET", path);
+                assert!(response.contains("Cache-Control: no-store\r\n"));
+                assert!(response.contains("X-Content-Type-Options: nosniff\r\n"));
+                if limit == expected_bytes.len() {
+                    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+                    assert_eq!(response_body(&response).as_bytes(), expected_bytes);
+                    let parsed: SchedulerSnapshot =
+                        serde_json::from_str(response_body(&response)).unwrap();
+                    assert_eq!(parsed, expected);
+                } else {
+                    assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+                    let error: serde_json::Value =
+                        serde_json::from_str(response_body(&response)).unwrap();
+                    assert_eq!(error["error"], "scheduler_response_too_large");
+                    assert!(error.get("workers").is_none());
+                }
+            }
+        }
+        assert_eq!(record_captures.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn scheduler_http_unavailable_and_capture_failure_are_explicit() {
+        let mut unavailable = inspector_server();
+        unavailable.start().unwrap();
+        let response = request_server(&unavailable, "GET", "/scheduler");
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert_eq!(
+            response_body(&response),
+            r#"{"error":"scheduler_unavailable"}"#
+        );
+
+        let mut failed = inspector_server().with_scheduler_snapshot_fn(Arc::new(|| {
+            panic!("adversarial scheduler provider"); // ubs:ignore -- panic boundary fixture
+        }));
+        failed.start().unwrap();
+        let response = request_server(&failed, "GET", "/scheduler");
+        assert!(response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+        assert_eq!(
+            response_body(&response),
+            r#"{"error":"scheduler_capture_failed"}"#
+        );
+        assert!(!response.contains("adversarial scheduler provider"));
+    }
+
+    #[test]
     fn inspector_http_defaults_to_shareable_and_query_cannot_escalate() {
         let mut full = inspector_fixture();
         let expected = full.clone().into_shareable();
@@ -327,6 +392,14 @@
                         crate::observability::INSPECTOR_SNAPSHOT_SCHEMA_V1
                     );
                     assert_eq!(held.profile, InspectorProfile::Shareable);
+                    let scheduler_response = request_server(&server, "GET", "/scheduler");
+                    assert!(scheduler_response.starts_with("HTTP/1.1 200 OK\r\n"));
+                    let scheduler: SchedulerSnapshot =
+                        serde_json::from_str(response_body(&scheduler_response)).unwrap();
+                    assert_eq!(scheduler.worker_count, workers);
+                    assert_eq!(scheduler.workers.len(), workers);
+                    assert!(scheduler.queue_depths_approximate);
+                    assert!(!scheduler.atomic_snapshot);
                     assert!(held.coverage.record_tables_locked);
                     assert_eq!(held.coverage.external_obligation_table, sharded);
                     let obligation = held

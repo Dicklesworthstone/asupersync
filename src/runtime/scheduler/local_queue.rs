@@ -371,6 +371,12 @@ impl LocalQueue {
         self.cached_len.load(Ordering::Relaxed)
     }
 
+    /// Retain the existing count for inspection without retaining the queue's
+    /// task source, entries, or runtime state after workers are dropped.
+    pub(crate) fn len_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.cached_len)
+    }
+
     /// Returns a stable snapshot of queued task IDs for observability/tests.
     ///
     /// The snapshot is captured under a single queue lock so callers can use

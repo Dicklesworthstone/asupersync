@@ -162,7 +162,8 @@ use crate::observability::ObservabilityConfig;
 use crate::observability::diagnostics::Diagnostics;
 use crate::observability::metrics::MetricsProvider;
 use crate::observability::task_inspector::{
-    RuntimeStateSource, TaskInspector, TaskInspectorConfig,
+    InspectorProfile, RUNTIME_INSPECTOR_SNAPSHOT_SCHEMA_V1, RuntimeInspectorSnapshot,
+    RuntimeStateSource, SchedulerSnapshot, TaskInspector, TaskInspectorConfig,
 };
 use crate::record::RegionLimits;
 use crate::runtime::RuntimeState;
@@ -5320,6 +5321,28 @@ impl Runtime {
         )
     }
 
+    /// Captures scheduler lane depths and published worker fairness observations.
+    ///
+    /// Collection is O(workers), reads existing counters, and does not scan or
+    /// lock runtime record tables. Queue depths are approximate; workers and
+    /// queues are sampled independently. See [`SchedulerSnapshot`] for limits.
+    #[must_use]
+    pub fn scheduler_snapshot(&self) -> SchedulerSnapshot {
+        self.inner.scheduler.scheduler_snapshot()
+    }
+
+    /// Captures live runtime records together with scheduler observations.
+    ///
+    /// The existing record snapshot is preserved inside an additive envelope.
+    /// Record locks are released before scheduler queues are observed; the
+    /// components do not form one atomic snapshot. Use
+    /// [`Self::scheduler_snapshot`] when task/region/obligation records are not
+    /// needed, to avoid their capture cost.
+    #[must_use]
+    pub fn inspector_snapshot(&self, profile: InspectorProfile) -> RuntimeInspectorSnapshot {
+        self.inner.inspector_snapshot(profile)
+    }
+
     /// Build a [`Diagnostics`] engine bound to this runtime's live state.
     ///
     /// `explain_task_blocked`, `explain_region_open`, `explain_cancellation`,
@@ -5546,6 +5569,29 @@ impl RuntimeHandle {
             None,
             config,
         ))
+    }
+
+    /// Captures scheduler observations without scanning runtime record tables.
+    ///
+    /// Returns `None` if a weak handle's runtime has been torn down. See
+    /// [`Runtime::scheduler_snapshot`] for cost and consistency limits.
+    #[must_use]
+    pub fn scheduler_snapshot(&self) -> Option<SchedulerSnapshot> {
+        let inner = self.try_inner().ok()?;
+        Some(inner.scheduler.scheduler_snapshot())
+    }
+
+    /// Captures live records and independently sampled scheduler observations.
+    ///
+    /// Returns `None` if a weak handle's runtime has been torn down. See
+    /// [`Runtime::inspector_snapshot`] for locking and consistency limits.
+    #[must_use]
+    pub fn inspector_snapshot(
+        &self,
+        profile: InspectorProfile,
+    ) -> Option<RuntimeInspectorSnapshot> {
+        let inner = self.try_inner().ok()?;
+        Some(inner.inspector_snapshot(profile))
     }
 
     /// Snapshot of the trace buffer of the runtime behind this handle.
@@ -6380,6 +6426,29 @@ impl Drop for CallerTaskRegistration {
 }
 
 impl RuntimeInner {
+    fn inspector_snapshot(&self, profile: InspectorProfile) -> RuntimeInspectorSnapshot {
+        let records = TaskInspector::from_source(
+            RuntimeStateSource::Shared {
+                state: Arc::clone(&self.state),
+                tasks: self.scheduler.dispatch_task_table(),
+                obligations: self
+                    .sharded_state
+                    .as_ref()
+                    .map(|shards| Arc::clone(&shards.obligations)),
+            },
+            None,
+            TaskInspectorConfig::default(),
+        )
+        .runtime_snapshot(profile);
+        // Capture completed and released B -> A -> C before touching queue locks.
+        let scheduler = self.scheduler.scheduler_snapshot();
+        RuntimeInspectorSnapshot {
+            schema_version: RUNTIME_INSPECTOR_SNAPSHOT_SCHEMA_V1.to_string(),
+            records,
+            scheduler,
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::result_large_err)]
     fn start_background_io_driver(self: &Arc<Self>) -> Result<(), Error> {

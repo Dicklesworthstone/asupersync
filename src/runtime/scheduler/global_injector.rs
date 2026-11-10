@@ -596,6 +596,12 @@ impl GlobalInjector {
         self.cancel_queue.len()
     }
 
+    /// Returns the approximate timed-lane depth, including future deadlines.
+    #[inline]
+    pub(crate) fn timed_count(&self) -> usize {
+        self.timed_count.load(Ordering::Relaxed)
+    }
+
     /// Returns true if the timed lane has pending work.
     #[inline]
     #[must_use]

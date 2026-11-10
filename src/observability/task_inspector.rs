@@ -28,6 +28,7 @@ use crate::record::{
     ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState, RegionRecord,
 };
 use crate::runtime::obligation_table::ObligationTable;
+use crate::runtime::scheduler::three_lane::PreemptionFairnessCertificate;
 use crate::runtime::state::{LoserDrainHistoryEvent, RuntimeState};
 use crate::runtime::task_table::TaskTable;
 use crate::sync::ContendedMutex;
@@ -364,6 +365,121 @@ pub const TASK_CONSOLE_WIRE_SCHEMA_V1: &str = "asupersync.task_console_wire.v1";
 
 /// Stable schema identifier for the combined runtime-inspector snapshot.
 pub const INSPECTOR_SNAPSHOT_SCHEMA_V1: &str = "asupersync.inspector_snapshot.v1";
+
+/// Stable schema identifier for the scheduler-only inspection surface.
+pub const SCHEDULER_SNAPSHOT_SCHEMA_V1: &str = "asupersync.scheduler_snapshot.v1";
+
+/// Stable schema identifier for live records together with scheduler observations.
+pub const RUNTIME_INSPECTOR_SNAPSHOT_SCHEMA_V1: &str = "asupersync.runtime_inspector_snapshot.v1";
+
+/// Approximate lane depths, sampled without removing or pruning queued work.
+///
+/// These are queue entries, not distinct runnable tasks. Priority heaps may
+/// retain stale entries after promotion or cancellation. Concurrent transfers
+/// can be observed in both their source and destination, or in neither.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SchedulerQueueDepths {
+    /// Entries in the cancellation lane.
+    pub cancel: usize,
+    /// Entries in the deadline lane, including deadlines that are not due.
+    pub timed: usize,
+    /// Entries in the ready lane, excluding separate fast/local queues and LIFO slots.
+    pub ready: usize,
+}
+
+/// Read-only observations of one worker, ordered by worker id in the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SchedulerWorkerSnapshot {
+    /// Zero-based worker id.
+    pub worker_id: usize,
+    /// Configured placement cohort; zero when no explicit map was installed.
+    pub cohort: usize,
+    /// Physical priority-heap depths; stale entries are not pruned by inspection.
+    pub priority_queues: SchedulerQueueDepths,
+    /// Cached depth of the stealable fast-ready queue.
+    pub fast_ready: usize,
+    /// Non-stealable ready entries for local (`!Send`) tasks, excluding tombstones.
+    pub local_ready: usize,
+    /// Whether the worker's LIFO ready slot was occupied when sampled.
+    pub lifo_occupied: bool,
+    /// Most recently published worker-local dispatch-step certificate.
+    ///
+    /// This can lag the queue observations. It does not prove wall-clock
+    /// latency, bounded task poll duration, or fairness across workers.
+    pub fairness: PreemptionFairnessCertificate,
+}
+
+/// Versioned, O(workers) scheduler inspection without scanning runtime records.
+///
+/// All depths are approximate and sampled separately. Their sum is not an
+/// authoritative runnable-task count, and an empty snapshot does not prove
+/// quiescence. Collection does not dispatch tasks, drain intake, or prune heaps.
+/// It acquires one small queue or certificate lock at a time and never acquires
+/// the runtime's record-table locks. Controller decisions are not included;
+/// their absence does not indicate that an adaptive policy is disabled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SchedulerSnapshot {
+    /// Schema version identifier.
+    pub schema_version: String,
+    /// Always true: queue counts are observations, not scheduling invariants.
+    pub queue_depths_approximate: bool,
+    /// Always false: there is no global atomic observation of all queues/workers.
+    pub atomic_snapshot: bool,
+    /// Maximum successful dispatches between a busy worker's certificate updates.
+    /// Workers also publish before becoming idle and when their run loop exits.
+    pub fairness_publish_interval_dispatches: u64,
+    /// Number of configured workers, including workers moved to execution threads.
+    pub worker_count: usize,
+    /// Dispatch loops currently observing no work, not an exact parked-thread count.
+    pub idle_workers: usize,
+    /// Whether scheduler shutdown has been requested.
+    pub shutdown_requested: bool,
+    /// Configured scheduler placement mode.
+    pub placement_mode: String,
+    /// Configured cohort span (largest cohort index plus one).
+    pub cohort_count: usize,
+    /// Whether idle workers are permitted to park.
+    pub parking_enabled: bool,
+    /// Maximum ready-task steal batch size.
+    pub steal_batch_size: usize,
+    /// Advisory global-ready queue warning threshold; zero means no threshold.
+    /// This is not an admission limit and does not reject ready work.
+    pub global_ready_queue_warning_threshold: usize,
+    /// Approximate global injection-lane depths.
+    pub global_queues: SchedulerQueueDepths,
+    /// Ready entries awaiting publication by the global ready combiner.
+    pub ready_combiner_pending: usize,
+    /// Per-worker observations in worker-id order.
+    pub workers: Vec<SchedulerWorkerSnapshot>,
+}
+
+/// Additive live-runtime envelope preserving the existing record snapshot schema.
+///
+/// Records and scheduler state are captured separately. Record locks are
+/// released before any scheduler queue lock is acquired, so the two components
+/// must not be treated as one atomic state or used to infer quiescence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RuntimeInspectorSnapshot {
+    /// Schema version identifier for this envelope.
+    pub schema_version: String,
+    /// Existing V1 record snapshot, with its original coverage semantics.
+    pub records: InspectorSnapshot,
+    /// Live scheduler observations, independent of the record capture.
+    pub scheduler: SchedulerSnapshot,
+}
+
+impl RuntimeInspectorSnapshot {
+    /// Remove free-form record text while preserving scheduler observations.
+    #[must_use]
+    pub fn into_shareable(mut self) -> Self {
+        self.records = self.records.into_shareable();
+        self
+    }
+}
 
 /// Controls whether a runtime snapshot includes free-form diagnostic text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
