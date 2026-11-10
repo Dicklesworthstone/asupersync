@@ -28,7 +28,10 @@ pub mod transport_conformance_tests;
 #[cfg(test)]
 pub mod tls_conformance_harness;
 
-pub use connection::{NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError};
+pub use connection::{
+    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
+    NativeQuicStreamSendError, NativeQuicStreamSendPermit,
+};
 pub use connection_manager::{
     AcceptedNativeQuicConnection, ConnectionRouter, ConnectionRouterError, ConnectionRouterStats,
     ConnectionTimerEvent, QuicTimerScheduler, RoutingResult, TimerType,

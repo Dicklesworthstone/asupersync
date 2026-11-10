@@ -258,6 +258,160 @@ fn path_stats_exposed_for_phase_c() {
     assert_eq!(stats.pto_count, 0);
 }
 
+#[test]
+fn reserved_send_preserves_payload_and_credit_until_commit() {
+    let cx = test_cx();
+    let (mut client, mut server) = established_pair(&cx);
+    let stream = client.open_control_stream(&cx).unwrap();
+    let before = client.inner().streams().stream(stream).unwrap().clone();
+    let credit = client.inner().streams().connection_send_remaining();
+
+    {
+        let permit = client.reserve_stream_send(&cx, stream, 4).unwrap();
+        assert_eq!(permit.stream_id(), stream);
+        assert_eq!(permit.capacity(), 4);
+        // Leaving this scope abandons the reservation before any payload moves.
+    }
+    client.reserve_stream_send(&cx, stream, 4).unwrap().abort();
+    assert_eq!(client.inner().streams().stream(stream).unwrap(), &before);
+    assert_eq!(client.inner().streams().connection_send_remaining(), credit);
+    assert!(!client.has_pending_stream_frames(stream));
+
+    let payload = Bytes::copy_from_slice(b"kept");
+    let allocation = payload.as_ptr();
+    let refused = client
+        .reserve_stream_send(&cx, stream, 3)
+        .unwrap()
+        .commit(payload, true)
+        .expect_err("an oversized commit must return the original payload");
+    assert_eq!(refused.data().as_ref(), b"kept");
+    assert_eq!(refused.data().as_ptr(), allocation);
+    assert!(matches!(
+        refused.error(),
+        NativeQuicConnectionError::InvalidState(_)
+    ));
+    let (_, payload) = refused.into_parts();
+    assert_eq!(client.inner().streams().stream(stream).unwrap(), &before);
+    assert_eq!(client.inner().streams().connection_send_remaining(), credit);
+    assert!(!client.has_pending_stream_frames(stream));
+
+    client
+        .reserve_stream_send(&cx, stream, payload.len())
+        .unwrap()
+        .commit(payload, true)
+        .expect("the recovered allocation can be committed once");
+    assert_eq!(client.pending_stream_data_bytes(stream), 4);
+    assert_eq!(
+        client.inner().streams().connection_send_remaining(),
+        credit - 4
+    );
+    pump_until_idle(&cx, &mut client, &mut server, DEFAULT_MAX_PACKET_BYTES, 100)
+        .expect("committed bytes reach the peer through normal packet assembly");
+    assert_eq!(
+        server.read_control(&cx, stream, 64).unwrap().as_ref(),
+        b"kept"
+    );
+    assert!(server.read_control(&cx, stream, 64).unwrap().is_empty());
+    assert!(server.is_control_eof(stream).unwrap());
+}
+
+#[test]
+fn reserved_send_has_an_explicit_cancellation_commit_boundary() {
+    let transport_cx = test_cx();
+    let operation_cx = test_cx();
+    let (mut client, mut server) = established_pair(&transport_cx);
+    let stream = client.open_control_stream(&transport_cx).unwrap();
+    let payload = Bytes::copy_from_slice(b"cancel boundary");
+    let before = client.inner().streams().stream(stream).unwrap().clone();
+
+    operation_cx.set_cancel_requested(true);
+    assert!(matches!(
+        client.reserve_stream_send(&operation_cx, stream, payload.len()),
+        Err(NativeQuicConnectionError::Cancelled)
+    ));
+    assert_eq!(payload.as_ref(), b"cancel boundary");
+    assert_eq!(client.inner().streams().stream(stream).unwrap(), &before);
+
+    operation_cx.set_cancel_requested(false);
+    let permit = client
+        .reserve_stream_send(&operation_cx, stream, payload.len())
+        .expect("the uncancelled operation is admitted");
+    operation_cx.set_cancel_requested(true);
+    permit
+        .commit(payload, true)
+        .expect("commit does not reopen cancellation after successful admission");
+    pump_until_idle(
+        &transport_cx,
+        &mut client,
+        &mut server,
+        DEFAULT_MAX_PACKET_BYTES,
+        100,
+    )
+    .unwrap();
+    assert_eq!(
+        server
+            .read_control(&transport_cx, stream, 64)
+            .unwrap()
+            .as_ref(),
+        b"cancel boundary"
+    );
+    assert!(server.is_control_eof(stream).unwrap());
+}
+
+#[test]
+fn reserved_send_honors_shared_credit_and_allows_fin_at_zero_credit() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        send_window: 4,
+        recv_window: 4,
+        connection_send_limit: 6,
+        connection_recv_limit: 6,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).unwrap();
+    let first = client.open_control_stream(&cx).unwrap();
+    let second = client.open_control_stream(&cx).unwrap();
+
+    client
+        .reserve_stream_send(&cx, first, 4)
+        .unwrap()
+        .commit(Bytes::from_static(b"abcd"), false)
+        .unwrap();
+    assert!(client.reserve_stream_send(&cx, first, 1).is_err());
+    assert!(client.reserve_stream_send(&cx, second, 3).is_err());
+    assert_eq!(client.inner().streams().connection_send_remaining(), 2);
+    assert_eq!(client.pending_stream_data_bytes(second), 0);
+
+    client.reserve_stream_send(&cx, second, 2).unwrap().abort();
+    client
+        .reserve_stream_send(&cx, second, 2)
+        .unwrap()
+        .commit(Bytes::from_static(b"ef"), false)
+        .unwrap();
+    assert_eq!(client.inner().streams().connection_send_remaining(), 0);
+    for stream in [first, second] {
+        client
+            .reserve_stream_send(&cx, stream, 0)
+            .unwrap()
+            .commit(Bytes::new(), true)
+            .expect("FIN needs no additional flow-control credit");
+    }
+    pump_until_idle(&cx, &mut client, &mut server, DEFAULT_MAX_PACKET_BYTES, 100).unwrap();
+    assert_eq!(
+        server.read_control(&cx, first, 64).unwrap().as_ref(),
+        b"abcd"
+    );
+    assert_eq!(
+        server.read_control(&cx, second, 64).unwrap().as_ref(),
+        b"ef"
+    );
+    assert!(server.is_control_eof(first).unwrap());
+    assert!(server.is_control_eof(second).unwrap());
+}
+
 fn reassembly_test_connection(cx: &Cx) -> asupersync::net::quic_native::NativeQuicConnection {
     let mut connection =
         asupersync::net::quic_native::NativeQuicConnection::new(NativeQuicConnectionConfig {

@@ -1975,6 +1975,234 @@
     }
 
     #[test]
+    fn stream_send_reservation_abort_preserves_all_stream_state_and_credit() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.streams
+            .set_fresh_stream_send_limit(stream, 8)
+            .expect("limit");
+        conn.streams.constrain_connection_send_limit_for_testing(8);
+        let original = conn.streams.stream(stream).expect("stream").clone();
+        let controls = conn.pending_control_frames.clone();
+
+        {
+            let permit = conn.reserve_stream_send(&cx, stream, 8).expect("reserve");
+            assert_eq!(permit.stream_id(), stream);
+            assert_eq!(permit.capacity(), 8);
+        }
+        conn.reserve_stream_send(&cx, stream, 8)
+            .expect("reserve again")
+            .abort();
+
+        assert_eq!(conn.streams.stream(stream).expect("stream"), &original);
+        assert_eq!(conn.streams.connection_send_remaining(), 8);
+        assert_eq!(conn.pending_control_frames, controls);
+        conn.reserve_stream_send(&cx, stream, 8)
+            .expect("all credit remains")
+            .commit(Bytes::from_static(b"12345678"), true)
+            .expect("commit");
+        let sent = conn.streams.stream(stream).expect("stream");
+        assert_eq!(sent.send_offset, 8);
+        assert_eq!(sent.send_final_size, Some(8));
+        assert_eq!(sent.pending_stream_frame_count(), 1);
+        assert_eq!(conn.streams.connection_send_remaining(), 0);
+    }
+
+    #[test]
+    fn stream_send_reservation_short_commit_charges_only_payload_and_allows_fin() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.streams
+            .set_fresh_stream_send_limit(stream, 8)
+            .expect("limit");
+        conn.streams.constrain_connection_send_limit_for_testing(8);
+
+        conn.reserve_stream_send(&cx, stream, 8)
+            .expect("reserve")
+            .commit(Bytes::from_static(b"abc"), false)
+            .expect("short commit");
+        assert_eq!(conn.streams.stream_send_credit_remaining(stream), 5);
+        assert_eq!(conn.streams.connection_send_remaining(), 5);
+        conn.reserve_stream_send(&cx, stream, 5)
+            .expect("unused capacity remains")
+            .commit(Bytes::from_static(b"defgh"), false)
+            .expect("consume remaining credit");
+        conn.reserve_stream_send(&cx, stream, 0)
+            .expect("FIN does not require payload credit")
+            .commit(Bytes::new(), true)
+            .expect("FIN commit");
+
+        let sent = conn.streams.stream(stream).expect("stream");
+        assert_eq!(sent.send_offset, 8);
+        assert_eq!(sent.send_final_size, Some(8));
+        assert_eq!(sent.pending_stream_frame_count(), 3);
+        assert_eq!(conn.streams.connection_send_remaining(), 0);
+        assert_eq!(
+            conn.reserve_stream_send(&cx, stream, 0)
+                .expect_err("finished"),
+            NativeQuicConnectionError::Stream(QuicStreamError::SendFinished { final_size: 8 }),
+        );
+    }
+
+    #[test]
+    fn stream_send_oversized_commit_returns_original_payload_without_admission() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        let original = conn.streams.stream(stream).expect("stream").clone();
+        let credit = conn.streams.connection_send_remaining();
+        let controls = conn.pending_control_frames.clone();
+        let payload = Bytes::from(vec![1, 2, 3, 4]);
+        let original_ptr = payload.as_ptr();
+
+        let err = conn
+            .reserve_stream_send(&cx, stream, 3)
+            .expect("reserve")
+            .commit(payload, true)
+            .expect_err("payload exceeds reservation");
+        assert_eq!(err.data().as_ptr(), original_ptr);
+        assert_eq!(err.data().as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(
+            err.error(),
+            &NativeQuicConnectionError::InvalidState(
+                "stream payload exceeds reserved send capacity",
+            ),
+        );
+        assert_eq!(conn.streams.stream(stream).expect("stream"), &original);
+        assert_eq!(conn.streams.connection_send_remaining(), credit);
+        assert_eq!(conn.pending_control_frames, controls);
+
+        let (_, payload) = err.into_parts();
+        conn.reserve_stream_send(&cx, stream, payload.len())
+            .expect("retry with enough capacity")
+            .commit(payload, true)
+            .expect("retry commits");
+        assert_eq!(conn.streams.stream(stream).expect("stream").send_offset, 4);
+    }
+
+    #[test]
+    fn stream_send_reservation_preserves_both_blocked_signals_and_error_precedence() {
+        let cx = test_cx();
+        // When both windows are exhausted, the stream's limit wins as in the
+        // preexisting writer. Connection-only exhaustion advertises MAX_DATA.
+        for (stream_limit, connection_limit) in [(2, 8), (8, 3), (2, 3)] {
+            let mut conn = established_conn();
+            let stream = conn.open_local_bidi(&cx).expect("open");
+            conn.streams
+                .set_fresh_stream_send_limit(stream, stream_limit)
+                .expect("limit");
+            conn.streams
+                .constrain_connection_send_limit_for_testing(connection_limit);
+            let original = conn.streams.stream(stream).expect("stream").clone();
+            let mut legacy = conn.clone();
+
+            let err = conn
+                .reserve_stream_send(&cx, stream, 4)
+                .expect_err("blocked");
+            let legacy_err = legacy
+                .write_stream_bytes(&cx, stream, Bytes::from_static(b"data"), true)
+                .expect_err("legacy writer blocked");
+            assert_eq!(err, legacy_err);
+            assert_eq!(
+                err,
+                NativeQuicConnectionError::Stream(QuicStreamError::Flow(
+                    FlowControlError::Exhausted {
+                        attempted: 4,
+                        remaining: stream_limit.min(connection_limit),
+                    },
+                )),
+            );
+            assert_eq!(conn.pending_control_frames, legacy.pending_control_frames);
+            if stream_limit < 4 {
+                assert!(conn.pending_control_frames.iter().any(|frame| matches!(
+                    frame,
+                    QuicFrame::StreamDataBlocked { stream_id, maximum_stream_data }
+                        if stream_id.value() == stream.0
+                            && maximum_stream_data.value() == stream_limit
+                )));
+            } else {
+                assert!(conn.pending_control_frames.iter().any(|frame| matches!(
+                    frame,
+                    QuicFrame::DataBlocked { maximum_data }
+                        if maximum_data.value() == connection_limit
+                )));
+            }
+            assert_eq!(conn.streams.stream(stream).expect("stream"), &original);
+            assert_eq!(conn.streams.connection_send_remaining(), connection_limit);
+            let controls = conn.pending_control_frames.clone();
+            conn.reserve_stream_send(&cx, stream, 4)
+                .expect_err("still blocked");
+            assert_eq!(conn.pending_control_frames, controls, "deduplicate BLOCKED");
+        }
+    }
+
+    #[test]
+    fn stream_send_reservation_checks_cancellation_before_state_and_never_at_commit() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        let controls = conn.pending_control_frames.clone();
+        let cancelled = test_cx();
+        cancelled.set_cancel_requested(true);
+        let unknown = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 999);
+        assert_eq!(
+            conn.reserve_stream_send(&cancelled, unknown, usize::MAX)
+                .expect_err("cancellation precedes stream lookup and credit"),
+            NativeQuicConnectionError::Cancelled,
+        );
+        assert_eq!(conn.pending_control_frames, controls);
+
+        let permit = conn.reserve_stream_send(&cx, stream, 3).expect("reserve");
+        cx.set_cancel_requested(true);
+        permit
+            .commit(Bytes::from_static(b"abc"), true)
+            .expect("committed");
+        assert_eq!(conn.streams.stream(stream).expect("stream").send_offset, 3);
+        assert_eq!(
+            conn.streams.stream(stream).expect("stream").send_final_size,
+            Some(3)
+        );
+        assert_eq!(
+            conn.write_stream_bytes(&cx, stream, Bytes::new(), false),
+            Err(NativeQuicConnectionError::Cancelled),
+            "legacy writer still observes cancellation before finished state",
+        );
+    }
+
+    #[test]
+    fn stream_send_reservation_refuses_unknown_remote_uni_and_terminal_streams() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let unknown = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 999);
+        let remote_uni = StreamId::local(StreamRole::Server, StreamDirection::Unidirectional, 0);
+        assert_eq!(
+            conn.reserve_stream_send(&cx, unknown, 1)
+                .expect_err("unknown stream"),
+            NativeQuicConnectionError::StreamTable(StreamTableError::UnknownStream(unknown)),
+        );
+        assert_eq!(
+            conn.reserve_stream_send(&cx, remote_uni, 1)
+                .expect_err("read only"),
+            NativeQuicConnectionError::StreamTable(StreamTableError::StreamNotWritable(remote_uni)),
+        );
+
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.streams
+            .set_fresh_stream_send_limit(stream, 0)
+            .expect("limit");
+        conn.reset_stream_send(&cx, stream, 42, 0).expect("reset");
+        let controls = conn.pending_control_frames.clone();
+        assert_eq!(
+            conn.reserve_stream_send(&cx, stream, 1)
+                .expect_err("reset before flow control"),
+            NativeQuicConnectionError::Stream(QuicStreamError::SendStopped { code: 42 }),
+        );
+        assert_eq!(conn.pending_control_frames, controls, "no spurious BLOCKED");
+    }
+
+    #[test]
     fn stream_flow_exhaustion_queues_stream_data_blocked() {
         let cx = test_cx();
         let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig {

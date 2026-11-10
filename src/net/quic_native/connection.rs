@@ -169,6 +169,111 @@ impl From<QuicStreamError> for NativeQuicConnectionError {
     }
 }
 
+/// A refused stream-send commit that retains ownership of its payload.
+///
+/// A payload larger than the reservation is returned without admitting bytes
+/// or FIN. Use [`Self::into_parts`] to retry with an appropriately sized permit.
+#[derive(Debug)]
+pub struct NativeQuicStreamSendError {
+    error: NativeQuicConnectionError,
+    data: Bytes,
+}
+
+impl NativeQuicStreamSendError {
+    /// The reason the payload was not admitted.
+    #[must_use]
+    pub fn error(&self) -> &NativeQuicConnectionError {
+        &self.error
+    }
+
+    /// The original, unmodified payload.
+    #[must_use]
+    pub fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    /// Recover the refusal reason and the original payload for retry.
+    #[must_use]
+    pub fn into_parts(self) -> (NativeQuicConnectionError, Bytes) {
+        (self.error, self.data)
+    }
+}
+
+impl fmt::Display for NativeQuicStreamSendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for NativeQuicStreamSendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Exclusive permission to admit up to [`Self::capacity`] bytes to a stream.
+///
+/// Reserving checks cancellation, stream state, and both flow-control windows
+/// without taking a payload or charging credit. The connection borrow prevents
+/// another operation from spending that capacity or changing the stream before
+/// commit. Dropping or aborting a permit admits no bytes or FIN.
+///
+/// This is a synchronous admission boundary. Commit does not observe
+/// cancellation again, await transport progress, or establish peer delivery.
+/// Release the permit before driving network I/O or waiting for more credit.
+#[must_use = "commit the reserved stream send, or drop/abort it without sending"]
+pub struct NativeQuicStreamSendPermit<'a> {
+    connection: &'a mut NativeQuicConnection,
+    stream: StreamId,
+    capacity: usize,
+}
+
+impl fmt::Debug for NativeQuicStreamSendPermit<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeQuicStreamSendPermit")
+            .field("stream", &self.stream)
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl NativeQuicStreamSendPermit<'_> {
+    /// Stream whose state and send capacity are held by this permit.
+    #[must_use]
+    pub fn stream_id(&self) -> StreamId {
+        self.stream
+    }
+
+    /// Maximum number of payload bytes this permit admits.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Atomically admit the payload and optional FIN to the local send queue.
+    ///
+    /// Only the actual payload length is charged to flow control. Cancellation
+    /// requested after reservation does not revoke this synchronous commit.
+    /// An oversized payload is returned intact without sending bytes or FIN.
+    pub fn commit(self, data: Bytes, fin: bool) -> Result<(), NativeQuicStreamSendError> {
+        if data.len() > self.capacity {
+            return Err(NativeQuicStreamSendError {
+                error: NativeQuicConnectionError::InvalidState(
+                    "stream payload exceeds reserved send capacity",
+                ),
+                data,
+            });
+        }
+        self.connection
+            .streams
+            .write_stream_bytes_reserved(self.stream, data, fin);
+        Ok(())
+    }
+
+    /// Release this reservation without charging credit or admitting bytes/FIN.
+    pub fn abort(self) {}
+}
+
 /// Configuration for a native QUIC connection state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeQuicConnectionConfig {
@@ -1168,6 +1273,49 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Reserve stream-send capacity before transferring ownership of a payload.
+    ///
+    /// This checks `cx`, connection/stream state, and both flow-control windows
+    /// synchronously. No application bytes, FIN, or send credit are consumed
+    /// until [`NativeQuicStreamSendPermit::commit`]. A flow-control refusal
+    /// queues the same BLOCKED notification as [`Self::write_stream_bytes`].
+    ///
+    /// On refusal the caller still owns its payload and can drive the connection
+    /// and use [`Self::poll_stream_send_capacity`] before retrying. A successful
+    /// permit exclusively borrows this connection; release it before waiting
+    /// for network progress. Commit records local admission, not a peer ACK.
+    pub fn reserve_stream_send(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        max_bytes: usize,
+    ) -> Result<NativeQuicStreamSendPermit<'_>, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.reserve_stream_send_after_checkpoint(id, max_bytes)
+    }
+
+    fn reserve_stream_send_after_checkpoint(
+        &mut self,
+        id: StreamId,
+        max_bytes: usize,
+    ) -> Result<NativeQuicStreamSendPermit<'_>, NativeQuicConnectionError> {
+        self.ensure_data_state()?;
+        let len = max_bytes as u64;
+        let result = self.streams.validate_stream_write(id, len);
+        if let Err(StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted {
+            ..
+        }))) = &result
+        {
+            self.queue_blocked_frame(id, len);
+        }
+        result.map_err(map_stream_table_error)?;
+        Ok(NativeQuicStreamSendPermit {
+            connection: self,
+            stream: id,
+            capacity: max_bytes,
+        })
+    }
+
     /// Queue application bytes for reliable STREAM frame emission.
     pub fn write_stream_bytes(
         &mut self,
@@ -1192,17 +1340,9 @@ impl NativeQuicConnection {
         data: Bytes,
         fin: bool,
     ) -> Result<(), NativeQuicConnectionError> {
-        self.ensure_data_state()?;
-        let len = data.len() as u64;
-        let result = self.streams.write_stream_bytes(id, data, fin);
-        if let Err(StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted {
-            ..
-        }))) = &result
-        {
-            self.queue_blocked_frame(id, len);
-        }
-        result.map_err(map_stream_table_error)?;
-        Ok(())
+        self.reserve_stream_send_after_checkpoint(id, data.len())?
+            .commit(data, fin)
+            .map_err(|err| err.error)
     }
 
     /// Account bytes received on a stream.

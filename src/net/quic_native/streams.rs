@@ -1919,10 +1919,20 @@ impl StreamTable {
         data: Bytes,
         fin: bool,
     ) -> Result<(), StreamTableError> {
+        self.validate_stream_write(id, data.len() as u64)?;
+        self.write_stream_bytes_reserved(id, data, fin);
+        Ok(())
+    }
+
+    /// Check writable state and both credit scopes without admitting any data.
+    pub(crate) fn validate_stream_write(
+        &self,
+        id: StreamId,
+        len: u64,
+    ) -> Result<(), StreamTableError> {
         if id.direction() == StreamDirection::Unidirectional && !id.is_local_for(self.role) {
             return Err(StreamTableError::StreamNotWritable(id));
         }
-        let len = data.len() as u64;
         {
             let stream = self.stream(id)?;
             stream
@@ -1932,11 +1942,20 @@ impl StreamTable {
         self.send_connection_credit
             .can_consume(len)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        Ok(())
+    }
+
+    /// Admit a payload after `validate_stream_write` succeeded for at least its
+    /// length, with exclusive access retained and no intervening state changes.
+    pub(crate) fn write_stream_bytes_reserved(&mut self, id: StreamId, data: Bytes, fin: bool) {
+        let len = data.len() as u64;
         self.send_connection_credit
             .consume(len)
-            .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
-        self.stream_mut(id)?.write_bytes(data, fin)?;
-        Ok(())
+            .expect("reserved connection send capacity");
+        self.stream_mut(id)
+            .expect("reserved send stream exists")
+            .write_bytes(data, fin)
+            .expect("reserved stream send capacity and writable state");
     }
 
     /// Queue a FIN-only STREAM frame for one writable stream.

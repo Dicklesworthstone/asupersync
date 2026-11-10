@@ -59,6 +59,7 @@ use std::task::{Context as TaskContext, Poll};
 
 use super::connection::{
     NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
+    NativeQuicStreamSendPermit,
 };
 use super::streams::{StreamId, StreamReadiness, StreamRole};
 use super::transport::{PacketNumberSpace, QuicConnectionState};
@@ -399,6 +400,22 @@ impl QuicConnection {
         task_cx: &mut TaskContext<'_>,
     ) -> Poll<Result<StreamId, NativeQuicConnectionError>> {
         self.inner.poll_open_local_uni(cx, task_cx)
+    }
+
+    /// Reserve writable stream capacity before handing over a payload.
+    ///
+    /// Checks cancellation and flow control synchronously, retaining exclusive
+    /// access until commit or drop. Commit admits bytes locally without another
+    /// cancellation checkpoint; dropping the permit sends no bytes or FIN.
+    /// On flow-control refusal, drive transport progress and poll send capacity
+    /// before retrying. See [`NativeQuicConnection::reserve_stream_send`].
+    pub fn reserve_stream_send(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        max_bytes: usize,
+    ) -> Result<NativeQuicStreamSendPermit<'_>, NativeQuicConnectionError> {
+        self.inner.reserve_stream_send(cx, stream, max_bytes)
     }
 
     /// Queue reliable, ordered bytes (and an optional FIN) on a control stream.
