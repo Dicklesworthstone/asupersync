@@ -81,32 +81,68 @@ impl UnaryAdmission {
     pub(super) async fn acquire<'a>(&'a self, cx: &Cx) -> Result<UnaryPermit<'a>, Status> {
         // This never waits: calls beyond active + queued consume no waiter,
         // connection, DNS work, or TLS handshake.
-        let total = self
-            .total
-            .try_acquire_checked(cx, 1)
-            .map_err(|error| admission_status(cx, error))?;
-        let mut acquiring = pin!(self.active.acquire_checked(cx, 1));
-        let mut cancelled = pin!(cx.cancelled());
-        let active = poll_fn(|task| match acquiring.as_mut().poll(task) {
-            Poll::Ready(result) => Poll::Ready(result),
-            Poll::Pending => {
-                // Registration and recheck close cancellation during the
-                // first Pending poll. Dropping the wait unregisters it.
-                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
-                    Poll::Ready(Err(CheckedAcquireError::Semaphore(AcquireError::Cancelled)))
-                } else {
-                    Poll::Pending
+        check_cancellation(cx)?;
+        // Request contexts have no task record. Give this exchange a real
+        // accounting owner in that request's runtime, without changing the
+        // caller used for cancellation, deadlines, or transport authority.
+        let (total, registration) = self.total.try_acquire_one_checked_with(
+            cx,
+            || {
+                let registration = cx.request_obligation_owner().map_err(|error| match error {
+                    crate::runtime::state::SpawnError::RegionAtCapacity { .. } => {
+                        Status::resource_exhausted(format!(
+                            "native gRPC unary admission refused: {error}"
+                        ))
+                    }
+                    _ => Status::failed_precondition(format!(
+                        "native gRPC unary admission refused: {error}"
+                    )),
+                })?;
+                let owner = registration
+                    .as_ref()
+                    .map_or(cx, |registration| registration.cx());
+                let token = owner
+                    .try_register_obligation_checked(
+                        crate::record::ObligationKind::SemaphorePermit,
+                        owner.task_id(),
+                    )
+                    .map_err(|error| admission_status(cx, CheckedAcquireError::Admission(error)))?;
+                Ok((registration, token))
+            },
+            |error| admission_status(cx, error),
+        )?;
+        let total_owner = UnaryTotal {
+            _total: total,
+            _registration: registration,
+        };
+        let owner = total_owner
+            ._registration
+            .as_ref()
+            .map_or(cx, |registration| registration.cx());
+        let active = {
+            let mut acquiring = pin!(self.active.acquire_checked_for(cx, owner, 1));
+            let mut cancelled = pin!(cx.cancelled());
+            poll_fn(|task| match acquiring.as_mut().poll(task) {
+                Poll::Ready(result) => Poll::Ready(result),
+                Poll::Pending => {
+                    // Registration and recheck close cancellation during the
+                    // first Pending poll. Dropping the wait unregisters it.
+                    if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                        Poll::Ready(Err(CheckedAcquireError::Semaphore(AcquireError::Cancelled)))
+                    } else {
+                        Poll::Pending
+                    }
                 }
-            }
-        })
-        .await
-        .map_err(|error| admission_status(cx, error))?;
+            })
+            .await
+            .map_err(|error| admission_status(cx, error))?
+        };
         // Cancellation can race capacity delivery. Do not start a transport
         // for a caller that was cancelled while its waiter was being granted.
         check_cancellation(cx)?;
         Ok(UnaryPermit {
             _active: active,
-            _total: total,
+            _total_owner: total_owner,
         })
     }
 }
@@ -138,7 +174,13 @@ fn admission_status(cx: &Cx, error: CheckedAcquireError) -> Status {
 /// caller cannot occupy a queue slot still owned by a retiring exchange.
 pub(super) struct UnaryPermit<'a> {
     _active: SemaphorePermit<'a>,
+    _total_owner: UnaryTotal<'a>,
+}
+
+struct UnaryTotal<'a> {
     _total: SemaphorePermit<'a>,
+    // Both permits resolve before their accounting task is retired.
+    _registration: Option<crate::runtime::builder::CallerTaskRegistration>,
 }
 
 /// Field order is intentional: dropping or timing out a call destroys its

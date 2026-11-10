@@ -6,9 +6,8 @@ use super::{
 };
 use crate::cx::{ChildRegionError, Cx};
 use crate::distributed::remote_owned::{
-    RemoteLeaseSettlement, RemoteRunClose, RemoteRunConfig, RemoteRunHandle,
-    RemoteRunHandleError, RemoteRunReport, RemoteRunTaskError, RemoteRunTrigger,
-    prepare_run, spawn_remote_owned,
+    RemoteLeaseSettlement, RemoteRunClose, RemoteRunConfig, RemoteRunHandle, RemoteRunHandleError,
+    RemoteRunReport, RemoteRunTaskError, RemoteRunTrigger, prepare_run, spawn_remote_owned,
 };
 use crate::remote::{ComputationName, NodeId, RemoteOutcome, RemoteTaskId};
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -43,7 +42,7 @@ pub enum TypedRemoteRunError {
 // Only the already-retired report crosses this adapter. It carries no remote
 // authority, task owner or encoded input, and never changes lifecycle receipts.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
-pub(crate) struct TypedRemoteReportDecoder<C: TypedRemoteComputation> {
+pub struct TypedRemoteReportDecoder<C: TypedRemoteComputation> {
     signature: Signature,
     limits: TypedRemoteLimits,
     marker: PhantomData<fn() -> C>,
@@ -201,9 +200,9 @@ impl<C: TypedRemoteComputation> TypedRemoteRunHandle<C> {
     pub fn try_join(
         &mut self,
     ) -> Result<Option<TypedRemoteRunReport<C::Output>>, RemoteRunHandleError> {
-        self.inner
-            .try_join()
-            .map(|report| report.map(|report| decode_report::<C>(self.signature, self.limits, report)))
+        self.inner.try_join().map(|report| {
+            report.map(|report| decode_report::<C>(self.signature, self.limits, report))
+        })
     }
 
     /// Poll without surrendering the owner when observation stops.
@@ -244,7 +243,9 @@ impl<C: TypedRemoteComputation> PreparedTypedRemoteCall<C> {
     // Node admission checks the encoded length before taking these parts. Give
     // its raw capacity check a compact allocation, not the codec's spare room.
     #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
-    pub(crate) fn into_owned_parts(self) -> (crate::remote::RemoteInput, TypedRemoteReportDecoder<C>) {
+    pub(crate) fn into_owned_parts(
+        self,
+    ) -> (crate::remote::RemoteInput, TypedRemoteReportDecoder<C>) {
         let input = self.input.into_data().into_boxed_slice().into_vec();
         (
             crate::remote::RemoteInput::new(input),
@@ -338,13 +339,8 @@ impl<C: TypedRemoteComputation> PreparedTypedRemoteCall<C> {
         node: NodeId,
         config: RemoteRunConfig,
     ) -> Result<TypedRemoteRunHandle<C>, TypedRemoteRunError> {
-        let inner = spawn_remote_owned(
-            cx,
-            node,
-            ComputationName::new(C::NAME),
-            self.input,
-            config,
-        )?;
+        let inner =
+            spawn_remote_owned(cx, node, ComputationName::new(C::NAME), self.input, config)?;
         Ok(TypedRemoteRunHandle {
             inner,
             signature: self.signature,

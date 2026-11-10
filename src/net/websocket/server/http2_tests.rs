@@ -78,8 +78,7 @@ fn configuration(tunnel_limit: Option<u64>) -> Http2StreamingListenerConfig {
         .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
         .max_body_size(8)
         .drain_timeout(Duration::from_secs(2))
-        .hard_drain_timeout(Duration::from_secs(5))
-        .flow_control_progress_timeout(WATCHDOG);
+        .hard_drain_timeout(Duration::from_secs(5));
     if let Some(limit) = tunnel_limit {
         config = config.with_extended_connect(NonZeroU64::new(limit).unwrap());
     }
@@ -108,7 +107,8 @@ async fn exercise<H, HFut, F, Fut>(
     let listener =
         Http2Listener::bind_streaming_produced_with_config("127.0.0.1:0", handler, config)
             .await
-            .unwrap();
+            .unwrap()
+            .flow_control_progress_timeout(WATCHDOG);
     let address = listener.local_addr().unwrap();
     let manager = listener.connection_manager().clone();
     let in_flight = listener.in_flight_requests();
@@ -132,7 +132,7 @@ async fn exercise<H, HFut, F, Fut>(
         )
         .await,
     );
-    if !manager.is_draining() {
+    if !manager.shutdown_signal().is_shutting_down() {
         assert!(manager.begin_drain(Duration::from_secs(2)));
     }
     let stats = service.join(&owner).await.unwrap().unwrap();
@@ -492,10 +492,16 @@ async fn wait_in_flight(in_flight: &AtomicUsize, expected: usize) {
 }
 
 async fn wait_retired(request: &Cx, in_flight: &AtomicUsize) {
-    let diagnostics = Runtime::current_handle().unwrap().diagnostics().unwrap();
+    // `Diagnostics` is not `Send` (it can own an `Arc<RuntimeState>`, and a
+    // region's finalizers are `Send` without `Sync`), so it must not live
+    // across this await. Open it for each poll from the worker's runtime
+    // handle instead; the spawned workflow that awaits this must stay `Send`.
     poll_fn(|task| {
         if in_flight.load(Ordering::SeqCst) == 0
-            && diagnostics
+            && Runtime::current_handle()
+                .unwrap()
+                .diagnostics()
+                .unwrap()
                 .explain_region_open(request.region_id())
                 .region_state
                 .is_none()

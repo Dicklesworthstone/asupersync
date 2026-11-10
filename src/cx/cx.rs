@@ -219,6 +219,8 @@ struct CxHandles {
     obligation_admission: Option<Arc<crate::record::region::ObligationAdmissionHandle>>,
     /// Explicit provenance survives intentionally stripped gateway handles.
     runtime_obligation_context: bool,
+    /// Weak, request-only provenance for registering an external caller.
+    request_runtime: Option<crate::runtime::builder::RequestRuntime>,
     /// Pending obligation-post counter for THIS Cx's region.
     ///
     /// Same shape and role as `pending_spawns`: a live token holds one
@@ -379,8 +381,9 @@ impl std::task::Wake for BudgetDeadlineWake {
             {
                 return;
             }
-            let reason = CancelReason::with_origin(CancelKind::Deadline, guard.region, self.deadline)
-                .with_task(guard.task);
+            let reason =
+                CancelReason::with_origin(CancelKind::Deadline, guard.region, self.deadline)
+                    .with_task(guard.task);
             guard.set_cancel_requested(true);
             if let Some(existing) = guard.cancel_reason.as_mut() {
                 existing.strengthen(&reason);
@@ -1243,6 +1246,7 @@ impl<Caps> Cx<Caps> {
                 obligation_gateway: None,
                 obligation_admission: None,
                 runtime_obligation_context: false,
+                request_runtime: None,
                 pending_obligation_posts: None,
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
@@ -1382,6 +1386,7 @@ impl<Caps> Cx<Caps> {
                 obligation_gateway: None,
                 obligation_admission: None,
                 runtime_obligation_context: false,
+                request_runtime: None,
                 pending_obligation_posts: None,
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
@@ -1775,6 +1780,32 @@ impl<Caps> Cx<Caps> {
         handles.pending_obligation_posts = pending_posts;
         handles.runtime_obligation_context = true;
         self
+    }
+
+    #[must_use]
+    pub(crate) fn with_request_runtime(
+        mut self,
+        runtime: crate::runtime::builder::RequestRuntime,
+    ) -> Self {
+        Arc::make_mut(&mut self.handles).request_runtime = Some(runtime);
+        self
+    }
+
+    pub(crate) fn request_obligation_owner(
+        &self,
+    ) -> Result<
+        Option<crate::runtime::builder::CallerTaskRegistration>,
+        crate::runtime::state::SpawnError,
+    > {
+        if self.handles.obligation_gateway.is_some() || self.handles.obligation_admission.is_some()
+        {
+            return Ok(None);
+        }
+        self.handles
+            .request_runtime
+            .as_ref()
+            .map(|runtime| runtime.register(&self.retype()))
+            .transpose()
     }
 
     #[must_use]
@@ -4734,9 +4765,10 @@ impl<Caps> Cx<Caps> {
             budget: self
                 .inherited_budget()
                 .meet(spec.budget.unwrap_or(Budget::INFINITE)),
-            capability_budget: self
-                .capability_budget()
-                .meet(spec.capability_budget.unwrap_or(CapabilityBudget::UNSPECIFIED)),
+            capability_budget: self.capability_budget().meet(
+                spec.capability_budget
+                    .unwrap_or(CapabilityBudget::UNSPECIFIED),
+            ),
             requirements: spec.requirements,
             priority: spec.priority,
             principal_task_id,
@@ -5131,7 +5163,10 @@ fn collect_spawn_batch<I>(factories: I) -> Result<Vec<I::Item>, SpawnBatchError>
 where
     I: IntoIterator,
 {
-    let factories: Vec<_> = factories.into_iter().take(MAX_SPAWN_BATCH_SIZE + 1).collect();
+    let factories: Vec<_> = factories
+        .into_iter()
+        .take(MAX_SPAWN_BATCH_SIZE + 1)
+        .collect();
     if factories.len() > MAX_SPAWN_BATCH_SIZE {
         return Err(SpawnBatchError::TooManyTasks {
             limit: MAX_SPAWN_BATCH_SIZE,
@@ -5790,14 +5825,17 @@ where
         F: FnOnce(Cx<Caps>) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let pool = self.blocking_pool_handle()
+        let pool = self
+            .blocking_pool_handle()
             .ok_or(crate::runtime::SpawnError::RuntimeUnavailable)?;
         let state = crate::runtime::spawn_blocking::DrainedBlockingState::new();
         let publication = Arc::clone(&state);
         let task = self.spawn(move |child| {
             crate::runtime::spawn_blocking::drive_drained_blocking(child, pool, f, publication)
         })?;
-        Ok(crate::runtime::spawn_blocking::DrainedBlockingHandle::new(task, state))
+        Ok(crate::runtime::spawn_blocking::DrainedBlockingHandle::new(
+            task, state,
+        ))
     }
 
     /// Scope-targeting counterpart of [`Self::spawn_blocking_drained`].
@@ -5816,14 +5854,17 @@ where
         F: FnOnce(Cx<Caps>) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let pool = self.blocking_pool_handle()
+        let pool = self
+            .blocking_pool_handle()
             .ok_or(crate::runtime::SpawnError::RuntimeUnavailable)?;
         let state = crate::runtime::spawn_blocking::DrainedBlockingState::new();
         let publication = Arc::clone(&state);
         let task = self.spawn_in(scope, move |child| {
             crate::runtime::spawn_blocking::drive_drained_blocking(child, pool, f, publication)
         })?;
-        Ok(crate::runtime::spawn_blocking::DrainedBlockingHandle::new(task, state))
+        Ok(crate::runtime::spawn_blocking::DrainedBlockingHandle::new(
+            task, state,
+        ))
     }
 
     /// Spawns a `!Send` task into **this Cx's own region**, pinned to the
@@ -6513,7 +6554,6 @@ where
 
         (request, handle)
     }
-
 }
 
 impl<Caps> Cx<Caps> {
@@ -6539,7 +6579,6 @@ impl<Caps> Cx<Caps> {
             None
         }
     }
-
 }
 
 impl<Caps> Cx<Caps>

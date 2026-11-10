@@ -1754,6 +1754,37 @@ mod fixed_window_tests {
     }
 
     #[test]
+    fn fixed_wait_metrics_accumulate_concurrently_and_saturate() {
+        let limiter = fixed(1, Duration::from_secs(1));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let limiter = &limiter;
+                scope.spawn(move || {
+                    for _ in 0..1_000 {
+                        limiter.record_wait(Duration::from_millis(2));
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            limiter.metrics().total_wait_time,
+            Duration::from_millis(16_000)
+        );
+        assert_eq!(limiter.metrics().max_wait_time, Duration::from_millis(2));
+
+        limiter
+            .total_wait_time_ms
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        limiter.record_wait(Duration::from_millis(2));
+        limiter.record_wait(Duration::from_millis(1));
+        assert_eq!(
+            limiter.metrics().total_wait_time,
+            Duration::from_millis(u64::MAX)
+        );
+        assert_eq!(limiter.metrics().max_wait_time, Duration::from_millis(2));
+    }
+
+    #[test]
     fn fixed_window_weighted_quota_resets_only_at_aligned_boundaries() {
         let limiter = fixed(5, Duration::from_millis(100));
         assert!(limiter.try_acquire(3, Time::from_millis(37)));

@@ -6179,16 +6179,39 @@ struct RuntimeInner {
     browser_pump: std::sync::OnceLock<Arc<BrowserWorkerPump>>,
 }
 
+/// Weak provenance carried only by externally constructed request contexts.
+#[derive(Clone)]
+pub(crate) struct RequestRuntime(std::sync::Weak<RuntimeInner>);
+
+impl std::fmt::Debug for RequestRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RequestRuntime")
+    }
+}
+
+impl RequestRuntime {
+    pub(crate) fn register(
+        &self,
+        parent: &crate::cx::Cx,
+    ) -> Result<CallerTaskRegistration, SpawnError> {
+        let inner = self.0.upgrade().ok_or(SpawnError::RuntimeUnavailable)?;
+        CallerTaskRegistration::new(&inner, parent)
+    }
+}
+
 /// A real task record for a future polled outside the scheduler. The future
-/// itself stays on the block_on caller's stack; only its ownership record is
-/// shared with workers. No ready entry or stored future is installed, so a
-/// cancellation wake cannot cause a worker to poll the caller's future.
-struct CallerTaskRegistration {
+/// itself stays on its caller's stack; only its ownership record is shared
+/// with workers. No ready entry or stored future is installed.
+pub(crate) struct CallerTaskRegistration {
     inner: Arc<RuntimeInner>,
     cx: crate::cx::Cx,
 }
 
 impl CallerTaskRegistration {
+    pub(crate) fn cx(&self) -> &crate::cx::Cx {
+        &self.cx
+    }
+
     fn new(inner: &Arc<RuntimeInner>, parent: &crate::cx::Cx) -> Result<Self, SpawnError> {
         let spawn_guard = inner.spawn_liveness_guard()?;
         let dispatch_table = inner.scheduler.dispatch_task_table();
@@ -8062,7 +8085,8 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
     .with_blocking_pool_handle(blocking_pool)
     .with_logical_clock(logical_clock)
     .with_spawn_gateway(spawn_gateway)
-    .with_pending_spawn_counter(pending_spawns);
+    .with_pending_spawn_counter(pending_spawns)
+    .with_request_runtime(RequestRuntime(Arc::downgrade(inner)));
     // While resource sampling runs, the block_on body sees its pressure too.
     let request_cx = match task_pressure {
         Some(pressure) => request_cx.with_pressure(pressure),

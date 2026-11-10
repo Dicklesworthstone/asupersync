@@ -739,13 +739,14 @@ where
         let mut transport_flushed = false;
         for _ in 0..POLL_STEPS {
             let conn = self.conn.as_mut().expect("live tunnel");
-            let mut progress = false;
-            if self.credit_due != 0 {
+            let mut progress = if self.credit_due != 0 {
                 conn.connection
                     .release_stream_receive_capacity(self.stream_id, self.credit_due)?;
                 self.credit_due = 0;
-                progress = true;
-            }
+                true
+            } else {
+                false
+            };
             match Pin::new(&mut conn.wire).poll_next(task) {
                 Poll::Ready(Some(Ok(frame))) => {
                     progress = true;

@@ -4477,16 +4477,26 @@ mod tests {
                 if thread_stopped.load(std::sync::atomic::Ordering::Acquire) {
                     return;
                 }
-                stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
-                stream.set_write_timeout(Some(Duration::from_secs(60))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(60)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(60)))
+                    .unwrap();
                 handler(&listener, &mut stream);
             });
-            Self { addr, stopped, socket, thread: Some(thread) }
+            Self {
+                addr,
+                stopped,
+                socket,
+                thread: Some(thread),
+            }
         }
 
         fn options(&self, database: Option<&str>) -> MySqlConnectOptions {
             let mut options = MySqlConnectOptions::parse(&format!(
-                "mysql://user@127.0.0.1:{}/initial_db", self.addr.port()
+                "mysql://user@127.0.0.1:{}/initial_db",
+                self.addr.port()
             ))
             .expect("reset test options");
             options.database = database.map(str::to_string);
@@ -4494,7 +4504,11 @@ mod tests {
         }
 
         fn finish(mut self) {
-            self.thread.take().expect("owned peer thread").join().expect("reset peer assertions");
+            self.thread
+                .take()
+                .expect("owned peer thread")
+                .join()
+                .expect("reset peer assertions");
         }
     }
 
@@ -4503,7 +4517,8 @@ mod tests {
             let Some(thread) = self.thread.take() else {
                 return;
             };
-            self.stopped.store(true, std::sync::atomic::Ordering::Release);
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::Release);
             if let Some(socket) = self.socket.lock().expect("peer socket lock").as_ref() {
                 let _ = socket.shutdown(std::net::Shutdown::Both);
             }
@@ -4588,7 +4603,10 @@ mod tests {
 
     fn pool_reset_peer_command(peer: &mut impl Read, command: u8, body: &[u8]) {
         let (sequence, packet) = read_native_kat_peer_packet(peer);
-        assert_eq!(sequence, 0, "each reset/user command starts a fresh exchange");
+        assert_eq!(
+            sequence, 0,
+            "each reset/user command starts a fresh exchange"
+        );
         assert_eq!(packet.first(), Some(&command));
         assert_eq!(&packet[1..], body, "exact reset/user command body");
     }
@@ -4597,8 +4615,11 @@ mod tests {
         let mut byte = [0_u8; 1];
         match peer.read(&mut byte) {
             Ok(0) => {}
-            Err(error) if matches!(error.kind(),
-                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) => {}
             other => panic!("connection must close without an extra command: {other:?}"),
         }
     }
@@ -4606,7 +4627,11 @@ mod tests {
     fn pool_reset_peer_row(peer: &mut std::net::TcpStream, values: &[Option<&str>]) {
         write_response_packet(peer, 1, vec![values.len() as u8]);
         for index in 0..values.len() {
-            write_response_packet(peer, index as u8 + 2, column_definition_payload(&format!("v{index}")));
+            write_response_packet(
+                peer,
+                index as u8 + 2,
+                column_definition_payload(&format!("v{index}")),
+            );
         }
         let sequence = values.len() as u8 + 2;
         write_response_packet(peer, sequence, eof_packet_payload(2));
@@ -4630,16 +4655,27 @@ mod tests {
             | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
             | capability::CLIENT_TRANSACTIONS
             | capability::CLIENT_CONNECT_WITH_DB;
-        peer.write_all(&handshake_packet_bytes(capabilities)).expect("server greeting");
+        peer.write_all(&handshake_packet_bytes(capabilities))
+            .expect("server greeting");
         let (sequence, response) = read_native_kat_peer_packet(peer);
         assert_eq!(sequence, 1, "real HandshakeResponse41");
         assert!(response.ends_with(b"caching_sha2_password\0"));
         write_response_packet(peer, 2, ok_packet_payload(0, 2));
         if baseline {
-            pool_reset_peer_command(peer, command::COM_QUERY, POOL_SESSION_BASELINE_SQL.as_bytes());
-            pool_reset_peer_row(peer, &[
-                Some("utf8mb4"), Some("utf8mb4"), Some("utf8mb4"), Some("utf8mb4_bin"),
-            ]);
+            pool_reset_peer_command(
+                peer,
+                command::COM_QUERY,
+                POOL_SESSION_BASELINE_SQL.as_bytes(),
+            );
+            pool_reset_peer_row(
+                peer,
+                &[
+                    Some("utf8mb4"),
+                    Some("utf8mb4"),
+                    Some("utf8mb4"),
+                    Some("utf8mb4_bin"),
+                ],
+            );
         }
     }
 
@@ -4684,8 +4720,13 @@ mod tests {
                 | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
                 | capability::CLIENT_TRANSACTIONS
                 | capability::CLIENT_CONNECT_WITH_DB
-                | if offers_deprecate_eof { capability::CLIENT_DEPRECATE_EOF } else { 0 };
-            peer.write_all(&handshake_packet_bytes(capabilities)).unwrap();
+                | if offers_deprecate_eof {
+                    capability::CLIENT_DEPRECATE_EOF
+                } else {
+                    0
+                };
+            peer.write_all(&handshake_packet_bytes(capabilities))
+                .unwrap();
             let (sequence, response) = read_native_kat_peer_packet(peer);
             assert_eq!(sequence, 1);
             assert!(response.ends_with(b"caching_sha2_password\0"));
@@ -4710,14 +4751,22 @@ mod tests {
             response.extend_from_slice(&id.to_le_bytes());
             response.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0]); // one column and parameter
             write_response_packet(peer, 1, response);
-            write_response_packet(peer, 2, column("tenant", column_type::MYSQL_TYPE_LONG, 0x20));
+            write_response_packet(
+                peer,
+                2,
+                column("tenant", column_type::MYSQL_TYPE_LONG, 0x20),
+            );
             let mut sequence = 3;
             if !deprecate_eof {
                 write_response_packet(peer, sequence, eof_packet_payload(2));
                 sequence += 1;
             }
             // Deliberately stale relative to COM_STMT_EXECUTE's metadata.
-            write_response_packet(peer, sequence, column("prepare_only", column_type::MYSQL_TYPE_VAR_STRING, 0));
+            write_response_packet(
+                peer,
+                sequence,
+                column("prepare_only", column_type::MYSQL_TYPE_VAR_STRING, 0),
+            );
             if !deprecate_eof {
                 write_response_packet(peer, sequence + 1, eof_packet_payload(2));
             }
@@ -4757,7 +4806,12 @@ mod tests {
             write_response_packet(peer, sequence, packet);
         }
 
-        fn error_then_eof(peer: &mut std::net::TcpStream, sequence: u8, packet: &[u8], eof_sequence: u8) {
+        fn error_then_eof(
+            peer: &mut std::net::TcpStream,
+            sequence: u8,
+            packet: &[u8],
+            eof_sequence: u8,
+        ) {
             // One write avoids racing the client's immediate socket shutdown
             // between the malformed packet and the deliberately queued EOF.
             let mut wire = Vec::new();
@@ -5312,7 +5366,13 @@ mod tests {
                         assert_eq!(cursor.state, MySqlCursorState::Failed);
                         assert!(cursor.io_in_progress);
                         assert!(cursor.connection.inner.closed);
-                        assert!(cursor.connection.inner.query_in_flight.load(Ordering::Acquire));
+                        assert!(
+                            cursor
+                                .connection
+                                .inner
+                                .query_in_flight
+                                .load(Ordering::Acquire)
+                        );
                         assert!(matches!(
                             cursor.next(&cx).await,
                             Outcome::Err(MySqlError::ConnectionClosed)
@@ -5439,24 +5499,31 @@ mod tests {
                         authenticate(peer, offers_deprecate_eof);
                         prepare(peer, 7, deprecate_eof);
                         execute(peer, 7);
-                        let sequence = header(peer, column_type::MYSQL_TYPE_LONGLONG, deprecate_eof);
-                        rows_allowed.recv_timeout(Duration::from_secs(30)).expect("stream returned before any row");
+                        let sequence =
+                            header(peer, column_type::MYSQL_TYPE_LONGLONG, deprecate_eof);
+                        rows_allowed
+                            .recv_timeout(Duration::from_secs(30))
+                            .expect("stream returned before any row");
                         write_response_packet(peer, sequence, integer_row(u64::MAX));
-                        next_allowed.recv_timeout(Duration::from_secs(30)).expect("first row returned without collecting the rest");
+                        next_allowed
+                            .recv_timeout(Duration::from_secs(30))
+                            .expect("first row returned without collecting the rest");
                         write_response_packet(peer, sequence + 1, vec![0, 4]); // NULL at bitmap bit 2
                         end(peer, sequence + 2, deprecate_eof);
 
                         // The Vec-returning API remains compatible on the same
                         // statement and physical connection after streaming.
                         execute(peer, 7);
-                        let sequence = header(peer, column_type::MYSQL_TYPE_LONGLONG, deprecate_eof);
+                        let sequence =
+                            header(peer, column_type::MYSQL_TYPE_LONGLONG, deprecate_eof);
                         write_response_packet(peer, sequence, integer_row(7));
                         end(peer, sequence + 1, deprecate_eof);
 
                         // The convenience path must hit the prepared cache,
                         // bind parameters again, and accept a zero-row EOF.
                         execute(peer, 7);
-                        let sequence = header(peer, column_type::MYSQL_TYPE_LONGLONG, deprecate_eof);
+                        let sequence =
+                            header(peer, column_type::MYSQL_TYPE_LONGLONG, deprecate_eof);
                         end(peer, sequence, deprecate_eof);
                         finish_clean(peer);
                     });
@@ -5465,36 +5532,69 @@ mod tests {
                     runtime.block_on(runtime.handle().spawn(async move {
                         let cx = Cx::current().unwrap();
                         crate::time::timeout(cx.now(), Duration::from_secs(30), async {
-                            let mut connection = MySqlConnection::connect_with_options(&cx, options).await.unwrap();
+                            let mut connection =
+                                MySqlConnection::connect_with_options(&cx, options)
+                                    .await
+                                    .unwrap();
                             let statement = connection.prepare(&cx, SQL).await.unwrap();
                             assert_eq!(statement.columns()[0].name, "prepare_only");
                             connection.set_max_result_rows(1);
-                            let mut stream = connection.query_stream_prepared(&cx, &statement, &[&42_u32]).await.unwrap();
+                            let mut stream = connection
+                                .query_stream_prepared(&cx, &statement, &[&42_u32])
+                                .await
+                                .unwrap();
                             start_rows.send(()).unwrap();
                             let first = stream.next(&cx).await.unwrap().unwrap();
                             assert_eq!(first.columns()[0].name, "value");
-                            assert_eq!(first.columns()[0].column_type, column_type::MYSQL_TYPE_LONGLONG);
-                            assert_eq!(first.get("value").unwrap(), &MySqlValue::Text(u64::MAX.to_string()));
+                            assert_eq!(
+                                first.columns()[0].column_type,
+                                column_type::MYSQL_TYPE_LONGLONG
+                            );
+                            assert_eq!(
+                                first.get("value").unwrap(),
+                                &MySqlValue::Text(u64::MAX.to_string())
+                            );
                             assert_eq!(stream.row_count(), 1);
                             next_row.send(()).unwrap();
-                            assert!(stream.next(&cx).await.unwrap().unwrap().get_idx(0).unwrap().is_null());
-                            assert_eq!(stream.row_count(), 2, "streaming exceeds the collecting row-count cap");
+                            assert!(
+                                stream
+                                    .next(&cx)
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                                    .get_idx(0)
+                                    .unwrap()
+                                    .is_null()
+                            );
+                            assert_eq!(
+                                stream.row_count(),
+                                2,
+                                "streaming exceeds the collecting row-count cap"
+                            );
                             assert!(stream.next(&cx).await.unwrap().is_none());
                             assert!(stream.next(&cx).await.unwrap().is_none());
                             drop(stream);
                             assert!(!connection.inner.closed);
                             assert!(!connection.inner.query_in_flight.load(Ordering::Acquire));
-                            let rows = connection.query_prepared(&cx, &statement, &[&42_u32]).await.unwrap();
+                            let rows = connection
+                                .query_prepared(&cx, &statement, &[&42_u32])
+                                .await
+                                .unwrap();
                             assert_eq!(rows.len(), 1);
                             assert_eq!(rows[0].get_idx(0).unwrap().as_i64(), Some(7));
-                            let mut empty = connection.query_stream_params(&cx, SQL, &[&42_u32]).await.unwrap();
+                            let mut empty = connection
+                                .query_stream_params(&cx, SQL, &[&42_u32])
+                                .await
+                                .unwrap();
                             assert!(empty.next(&cx).await.unwrap().is_none());
                             assert_eq!(empty.row_count(), 0);
                             drop(empty);
                             assert_eq!(connection.prepared_cache_stats().hits, 1);
                             assert!(matches!(connection.ping(&cx).await, Outcome::Ok(())));
                             connection.close().await.unwrap();
-                        }).await.expect("bounded prepared-stream journey");
+                        })
+                        .await
+                        .expect("bounded prepared-stream journey");
                     }));
                     peer.finish();
                     assert_pool_reset_drained(&runtime);
@@ -5504,26 +5604,54 @@ mod tests {
 
         #[test]
         fn prepared_stream_binary_decoder_distinguishes_rows_and_both_terminators() {
-            let columns: Vec<_> = (0..7).map(|index| test_var_string_column(&format!("v{index}"))).collect();
+            let columns: Vec<_> = (0..7)
+                .map(|index| test_var_string_column(&format!("v{index}")))
+                .collect();
             // Column 0 is bit 2; column 6 crosses into the next bitmap byte.
             let mut packet = vec![0, 4, 1];
             for _ in 1..6 {
                 packet.extend_from_slice(&[1, b'x']);
             }
             for deprecate_eof in [false, true] {
-                let values = MySqlConnection::parse_binary_row_or_terminator(&packet, &columns, deprecate_eof).unwrap().unwrap();
+                let values = MySqlConnection::parse_binary_row_or_terminator(
+                    &packet,
+                    &columns,
+                    deprecate_eof,
+                )
+                .unwrap()
+                .unwrap();
                 assert_eq!(values.len(), 7);
                 assert!(values[0].is_null());
                 assert!(values[6].is_null());
                 assert!(values[1..6].iter().all(|value| value.as_str() == Some("x")));
                 let legacy = eof_packet_payload(2);
-                assert!(MySqlConnection::parse_binary_row_or_terminator(&legacy, &columns, deprecate_eof).unwrap().is_none());
-                assert_eq!(MySqlConnection::parse_result_set_terminator_status_flags(&legacy).unwrap(), 2);
+                assert!(
+                    MySqlConnection::parse_binary_row_or_terminator(
+                        &legacy,
+                        &columns,
+                        deprecate_eof
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert_eq!(
+                    MySqlConnection::parse_result_set_terminator_status_flags(&legacy).unwrap(),
+                    2
+                );
             }
             let modern = deprecate_eof_ok_packet_payload(2, b"done");
-            assert!(MySqlConnection::parse_binary_row_or_terminator(&modern, &columns, true).unwrap().is_none());
-            assert_eq!(MySqlConnection::parse_result_set_terminator_status_flags(&modern).unwrap(), 2);
-            assert!(MySqlConnection::parse_binary_row_or_terminator(&modern, &columns, false).is_err());
+            assert!(
+                MySqlConnection::parse_binary_row_or_terminator(&modern, &columns, true)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                MySqlConnection::parse_result_set_terminator_status_flags(&modern).unwrap(),
+                2
+            );
+            assert!(
+                MySqlConnection::parse_binary_row_or_terminator(&modern, &columns, false).is_err()
+            );
             assert!(MySqlConnection::parse_result_set_terminator_status_flags(&[0xfe, 0]).is_err());
         }
 
@@ -5540,9 +5668,14 @@ mod tests {
         #[test]
         fn prepared_stream_native_errors_remain_terminal() {
             for workers in [1, 2] {
-                for terminal in [Terminal::ServerError, Terminal::ReservedNullBits,
-                    Terminal::TruncatedEof, Terminal::OversizedValue,
-                    Terminal::EmptyPacket, Terminal::UnsolicitedError] {
+                for terminal in [
+                    Terminal::ServerError,
+                    Terminal::ReservedNullBits,
+                    Terminal::TruncatedEof,
+                    Terminal::OversizedValue,
+                    Terminal::EmptyPacket,
+                    Terminal::UnsolicitedError,
+                ] {
                     let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
                         authenticate(peer, false);
                         prepare(peer, 7, false);
@@ -5555,13 +5688,21 @@ mod tests {
                         let sequence = header(peer, kind, false);
                         write_response_packet(peer, sequence, vec![0, 4]);
                         let packet = match terminal {
-                            Terminal::ServerError | Terminal::UnsolicitedError => error_packet_payload(1317, "70100", "interrupted"),
+                            Terminal::ServerError | Terminal::UnsolicitedError => {
+                                error_packet_payload(1317, "70100", "interrupted")
+                            }
                             Terminal::ReservedNullBits => vec![0, 3],
                             Terminal::TruncatedEof => vec![0xfe, 0],
-                            Terminal::OversizedValue => vec![0, 0, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                            Terminal::OversizedValue => {
+                                vec![0, 0, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+                            }
                             Terminal::EmptyPacket => vec![],
                         };
-                        let error_sequence = if matches!(terminal, Terminal::UnsolicitedError) { 0 } else { sequence + 1 };
+                        let error_sequence = if matches!(terminal, Terminal::UnsolicitedError) {
+                            0
+                        } else {
+                            sequence + 1
+                        };
                         if matches!(terminal, Terminal::ServerError) {
                             write_response_packet(peer, error_sequence, packet);
                             finish_clean(peer);
@@ -5622,10 +5763,15 @@ mod tests {
         #[test]
         fn prepared_stream_native_startup_enforces_terminal_and_column_limits() {
             for workers in [1, 2] {
-                for response in [FirstResponse::Ok, FirstResponse::ServerError,
-                    FirstResponse::ShortOk, FirstResponse::ZeroColumns,
-                    FirstResponse::TrailingColumnCount, FirstResponse::TooManyColumns,
-                    FirstResponse::Empty] {
+                for response in [
+                    FirstResponse::Ok,
+                    FirstResponse::ServerError,
+                    FirstResponse::ShortOk,
+                    FirstResponse::ZeroColumns,
+                    FirstResponse::TrailingColumnCount,
+                    FirstResponse::TooManyColumns,
+                    FirstResponse::Empty,
+                ] {
                     let clean = matches!(response, FirstResponse::Ok | FirstResponse::ServerError);
                     let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
                         authenticate(peer, false);
@@ -5633,7 +5779,9 @@ mod tests {
                         execute(peer, 7);
                         let packet = match response {
                             FirstResponse::Ok => ok_packet_payload(3, 2),
-                            FirstResponse::ServerError => error_packet_payload(1146, "42S02", "table missing"),
+                            FirstResponse::ServerError => {
+                                error_packet_payload(1146, "42S02", "table missing")
+                            }
                             FirstResponse::ShortOk => vec![0],
                             FirstResponse::ZeroColumns => vec![0xfc, 0, 0],
                             FirstResponse::TrailingColumnCount => vec![1, 0],
@@ -5652,7 +5800,10 @@ mod tests {
                     runtime.block_on(runtime.handle().spawn(async move {
                         let cx = Cx::current().unwrap();
                         crate::time::timeout(cx.now(), Duration::from_secs(30), async {
-                            let mut connection = MySqlConnection::connect_with_options(&cx, options).await.unwrap();
+                            let mut connection =
+                                MySqlConnection::connect_with_options(&cx, options)
+                                    .await
+                                    .unwrap();
                             match connection.query_stream_params(&cx, SQL, &[&42_u32]).await {
                                 Outcome::Ok(mut stream) => {
                                     assert!(matches!(response, FirstResponse::Ok), "{response:?}");
@@ -5665,21 +5816,37 @@ mod tests {
                                 }
                                 Outcome::Err(error) => {
                                     assert!(!clean, "{response:?}: {error:?}");
-                                    assert!(matches!(error, MySqlError::Protocol(_) | MySqlError::InvalidPacket(_)), "{response:?}: {error:?}");
+                                    assert!(
+                                        matches!(
+                                            error,
+                                            MySqlError::Protocol(_) | MySqlError::InvalidPacket(_)
+                                        ),
+                                        "{response:?}: {error:?}"
+                                    );
                                 }
-                                Outcome::Cancelled(reason) => panic!("unexpected cancellation: {reason:?}"),
+                                Outcome::Cancelled(reason) => {
+                                    panic!("unexpected cancellation: {reason:?}")
+                                }
                                 Outcome::Panicked(payload) => panic!("unexpected panic: {payload}"),
                             }
                             assert_eq!(connection.inner.closed, !clean);
-                            assert_eq!(connection.inner.query_in_flight.load(Ordering::Acquire), !clean);
+                            assert_eq!(
+                                connection.inner.query_in_flight.load(Ordering::Acquire),
+                                !clean
+                            );
                             if clean {
                                 assert!(matches!(connection.ping(&cx).await, Outcome::Ok(())));
                                 connection.close().await.unwrap();
                             } else {
-                                assert!(matches!(connection.ping(&cx).await, Outcome::Err(MySqlError::ConnectionClosed)));
+                                assert!(matches!(
+                                    connection.ping(&cx).await,
+                                    Outcome::Err(MySqlError::ConnectionClosed)
+                                ));
                             }
                             drop(connection);
-                        }).await.expect("bounded first-response journey");
+                        })
+                        .await
+                        .expect("bounded first-response journey");
                     }));
                     peer.finish();
                     assert_pool_reset_drained(&runtime);
@@ -5829,7 +5996,11 @@ mod tests {
                 pool_reset_peer_restore(peer);
                 pool_reset_peer_command(peer, command::COM_STMT_PREPARE, b"SELECT 42");
                 write_response_packet(peer, 1, prepare_ok_payload(12));
-                pool_reset_peer_command(peer, command::COM_QUERY, b"SET SESSION max_execution_time = 77");
+                pool_reset_peer_command(
+                    peer,
+                    command::COM_QUERY,
+                    b"SET SESSION max_execution_time = 77",
+                );
                 write_response_packet(peer, 1, ok_packet_payload(0, 2));
                 pool_reset_peer_command(peer, command::COM_QUERY, b"SELECT 42");
                 pool_reset_peer_row(peer, &[Some("42")]);
@@ -5887,24 +6058,46 @@ mod tests {
 
     #[test]
     fn k3y26t_pool_reset_baseline_accepts_only_bounded_charset_names() {
-        let baseline = |values: Vec<MySqlValue>| vec![MySqlRow {
-            columns: Arc::new((0..values.len()).map(|index| test_var_string_column(&format!("v{index}"))).collect()),
-            column_indices: Arc::new(BTreeMap::new()),
-            values,
-        }];
-        let names = || vec![
-            MySqlValue::Text("utf8mb4".to_string()),
-            MySqlValue::Bytes(b"utf8mb4".to_vec()),
-            MySqlValue::Null,
-            MySqlValue::Text("utf8mb4_0900_ai_ci".to_string()),
-        ];
+        let baseline = |values: Vec<MySqlValue>| {
+            vec![MySqlRow {
+                columns: Arc::new(
+                    (0..values.len())
+                        .map(|index| test_var_string_column(&format!("v{index}")))
+                        .collect(),
+                ),
+                column_indices: Arc::new(BTreeMap::new()),
+                values,
+            }]
+        };
+        let names = || {
+            vec![
+                MySqlValue::Text("utf8mb4".to_string()),
+                MySqlValue::Bytes(b"utf8mb4".to_vec()),
+                MySqlValue::Null,
+                MySqlValue::Text("utf8mb4_0900_ai_ci".to_string()),
+            ]
+        };
         let reset = MySqlPoolReset::from_rows(&baseline(names()), true).unwrap();
         assert!(reset.restore_sql.contains("character_set_results = NULL"));
-        assert!(reset.restore_sql.contains("collation_connection = 'utf8mb4_0900_ai_ci'"));
-        for bad in ["", "utf8mb4'; SET @leak=1; --", "utf8mb4\\", "utf8mb4\n", "café", &"x".repeat(65)] {
+        assert!(
+            reset
+                .restore_sql
+                .contains("collation_connection = 'utf8mb4_0900_ai_ci'")
+        );
+        for bad in [
+            "",
+            "utf8mb4'; SET @leak=1; --",
+            "utf8mb4\\",
+            "utf8mb4\n",
+            "café",
+            &"x".repeat(65),
+        ] {
             let mut values = names();
             values[0] = MySqlValue::Text(bad.to_string());
-            assert!(MySqlPoolReset::from_rows(&baseline(values), true).is_err(), "{bad:?}");
+            assert!(
+                MySqlPoolReset::from_rows(&baseline(values), true).is_err(),
+                "{bad:?}"
+            );
         }
         let mut values = names();
         values[0] = MySqlValue::Null;
@@ -5940,14 +6133,19 @@ mod tests {
                     pool_reset_peer_auth(peer, true);
                     pool_reset_peer_command(peer, command::COM_RESET_CONNECTION, &[]);
                     write_response_packet(peer, 1, ok_packet_payload(0, 2));
-                    pool_reset_peer_command(peer, command::COM_QUERY, POOL_RESET_RESTORE_SQL.as_bytes());
+                    pool_reset_peer_command(
+                        peer,
+                        command::COM_QUERY,
+                        POOL_RESET_RESTORE_SQL.as_bytes(),
+                    );
                     write_response_packet(peer, 1, ok_packet_payload(0, 2));
                     pool_reset_peer_command(peer, command::COM_INIT_DB, b"initial`db");
                     // Withhold the final database OK. Repoll the real socket
                     // read so the parent observes Pending at this exact step.
                     peer_final_command.store(true, Ordering::Release);
                     let wake = peer_reset_waker.lock().unwrap().clone();
-                    wake.expect("reset future registered before its writes").wake();
+                    wake.expect("reset future registered before its writes")
+                        .wake();
                     if matches!(finish, PoolResetFinish::Complete) {
                         pool_reset_peer_command(peer, command::COM_PING, &[]);
                         write_response_packet(peer, 1, ok_packet_payload(0, 2));
@@ -5970,59 +6168,80 @@ mod tests {
                     crate::time::timeout(cx.now(), Duration::from_secs(60), async {
                         let pool = Arc::new(crate::database::pool::AsyncDbPool::new(
                             MySqlConnectionManager::new(options).reset_session_on_return(true),
-                            crate::database::pool::DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+                            crate::database::pool::DbPoolConfig::with_max_size(1)
+                                .validate_on_checkout(false),
                         ));
                         let (pending_tx, mut pending_rx) = crate::channel::oneshot::channel();
                         let drop_requested = Arc::new(AtomicBool::new(false));
                         let child_drop_requested = Arc::clone(&drop_requested);
                         let child_waker = Arc::clone(&reset_waker);
                         let child_pool = Arc::clone(&pool);
-                        let mut returning = cx.spawn(move |child_cx| async move {
-                            let guard = child_pool.get(&child_cx).await.expect("returning borrower");
-                            let mut reset = Box::pin(guard.reset_and_return(&child_cx));
-                            let mut pending_tx = Some(pending_tx);
-                            let completed = std::future::poll_fn(|task_cx| {
-                                *child_waker.lock().unwrap() = Some(task_cx.waker().clone());
-                                if child_drop_requested.load(Ordering::Acquire) {
-                                    return Poll::Ready(false);
-                                }
-                                match reset.as_mut().poll(task_cx) {
-                                    Poll::Ready(()) => Poll::Ready(true),
-                                    Poll::Pending => {
-                                        if final_command.load(Ordering::Acquire)
-                                            && let Some(sender) = pending_tx.take()
-                                        {
-                                            sender.send_blocking(()).expect("report final read Pending");
-                                        }
-                                        Poll::Pending
+                        let mut returning = cx
+                            .spawn(move |child_cx| async move {
+                                let guard =
+                                    child_pool.get(&child_cx).await.expect("returning borrower");
+                                let mut reset = Box::pin(guard.reset_and_return(&child_cx));
+                                let mut pending_tx = Some(pending_tx);
+                                let completed = std::future::poll_fn(|task_cx| {
+                                    *child_waker.lock().unwrap() = Some(task_cx.waker().clone());
+                                    if child_drop_requested.load(Ordering::Acquire) {
+                                        return Poll::Ready(false);
                                     }
-                                }
-                            }).await;
-                            drop(reset);
-                            (completed, child_cx.is_cancel_requested())
-                        }).expect("spawn returning borrower");
+                                    match reset.as_mut().poll(task_cx) {
+                                        Poll::Ready(()) => Poll::Ready(true),
+                                        Poll::Pending => {
+                                            if final_command.load(Ordering::Acquire)
+                                                && let Some(sender) = pending_tx.take()
+                                            {
+                                                sender
+                                                    .send_blocking(())
+                                                    .expect("report final read Pending");
+                                            }
+                                            Poll::Pending
+                                        }
+                                    }
+                                })
+                                .await;
+                                drop(reset);
+                                (completed, child_cx.is_cancel_requested())
+                            })
+                            .expect("spawn returning borrower");
 
-                        pending_rx.recv(&cx).await.expect("final reset response is actually Pending");
+                        pending_rx
+                            .recv(&cx)
+                            .await
+                            .expect("final reset response is actually Pending");
                         assert!(returning.try_join().expect("live return task").is_none());
                         let stats = pool.stats();
                         assert_eq!((stats.total, stats.active, stats.idle), (1, 1, 0));
                         let mut contender = Box::pin(pool.get(&cx));
                         std::future::poll_fn(|task_cx| {
-                            assert!(contender.as_mut().poll(task_cx).is_pending(), "pool cannot lend the resetting socket");
+                            assert!(
+                                contender.as_mut().poll(task_cx).is_pending(),
+                                "pool cannot lend the resetting socket"
+                            );
                             Poll::Ready(())
-                        }).await;
+                        })
+                        .await;
                         assert_eq!(pool.stats().pending_waiters, 1);
                         drop(contender);
                         assert_eq!(pool.stats().pending_waiters, 0);
 
                         match finish {
                             PoolResetFinish::Complete => {
-                                let mut socket = reply_socket.lock().unwrap().as_ref().unwrap()
-                                    .try_clone().expect("owned final-response socket");
+                                let mut socket = reply_socket
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .unwrap()
+                                    .try_clone()
+                                    .expect("owned final-response socket");
                                 write_response_packet(&mut socket, 1, ok_packet_payload(0, 2));
                             }
                             PoolResetFinish::Cancel => {
-                                returning.abort_with_reason(CancelReason::user("cancel final MySQL reset reply"));
+                                returning.abort_with_reason(CancelReason::user(
+                                    "cancel final MySQL reset reply",
+                                ));
                             }
                             PoolResetFinish::Drop => {
                                 drop_requested.store(true, Ordering::Release);
@@ -6034,16 +6253,23 @@ mod tests {
                                 // only the clock is controlled. Advance after
                                 // final-OK Pending, without cancelling any Cx.
                                 assert!(!cx.is_cancel_requested());
-                                clock.as_ref().unwrap().advance_to(crate::types::Time::from_secs(31));
+                                clock
+                                    .as_ref()
+                                    .unwrap()
+                                    .advance_to(crate::types::Time::from_secs(31));
                                 let _ = timer.as_ref().unwrap().process_timers();
                             }
                         }
                         let result = returning.join(&cx).await;
                         match finish {
                             PoolResetFinish::Complete => {
-                                assert!(matches!(result, Ok((true, false))), "{finish:?}: {result:?}");
+                                assert!(
+                                    matches!(result, Ok((true, false))),
+                                    "{finish:?}: {result:?}"
+                                );
                                 assert_eq!(pool.stats().idle, 1);
-                                let mut guard = pool.get(&cx).await.expect("completed reset is reusable");
+                                let mut guard =
+                                    pool.get(&cx).await.expect("completed reset is reusable");
                                 assert!(!guard.pool_reset.as_ref().unwrap().pending);
                                 assert!(matches!(guard.ping(&cx).await, Outcome::Ok(())));
                                 drop(guard);
@@ -6051,17 +6277,26 @@ mod tests {
                             PoolResetFinish::Cancel => {
                                 // Cancellation is acknowledged inside the reset
                                 // read; the real spawn wrapper retains completion.
-                                assert!(matches!(result, Ok((true, true))), "{finish:?}: {result:?}");
+                                assert!(
+                                    matches!(result, Ok((true, true))),
+                                    "{finish:?}: {result:?}"
+                                );
                                 assert_eq!(pool.stats().total_discards, 1);
                                 assert_eq!(pool.stats().total, 0);
                             }
                             PoolResetFinish::Drop => {
-                                assert!(matches!(result, Ok((false, false))), "{finish:?}: {result:?}");
+                                assert!(
+                                    matches!(result, Ok((false, false))),
+                                    "{finish:?}: {result:?}"
+                                );
                                 assert_eq!(pool.stats().total_discards, 1);
                                 assert_eq!(pool.stats().total, 0);
                             }
                             PoolResetFinish::Timeout => {
-                                assert!(matches!(result, Ok((true, false))), "{finish:?}: {result:?}");
+                                assert!(
+                                    matches!(result, Ok((true, false))),
+                                    "{finish:?}: {result:?}"
+                                );
                                 assert!(!cx.is_cancel_requested());
                                 assert_eq!(pool.stats().total_discards, 1);
                                 assert_eq!(pool.stats().total, 0);
@@ -6071,7 +6306,9 @@ mod tests {
                         assert_eq!(pool.stats().total, 0);
                         assert_eq!(pool.stats().active, 0);
                         assert_eq!(pool.stats().pending_waiters, 0);
-                    }).await.expect("bounded native reset ownership journey");
+                    })
+                    .await
+                    .expect("bounded native reset ownership journey");
                 }));
                 peer.finish();
                 assert_pool_reset_drained(&runtime);
@@ -6084,7 +6321,11 @@ mod tests {
         // Every reply shape is consumed by the real packet parser. No later
         // borrower PING may reach the wire after one of these failures.
         let failures = [
-            (0, error_packet_payload(1047, "08S01", "unknown command"), Some(1047)),
+            (
+                0,
+                error_packet_payload(1047, "08S01", "unknown command"),
+                Some(1047),
+            ),
             (0, vec![0x00], None),
             (0, vec![0xFF], None),
             (0, vec![0xFE, 0, 0, 2, 0], None),
@@ -6094,9 +6335,17 @@ mod tests {
             (0, vec![0x00, 0, 1, 2, 0, 0, 0], None),
             (0, ok_packet_payload(0, 0x000A), None),
             (0, ok_packet_payload(0, 0x0003), None),
-            (1, error_packet_payload(1115, "42000", "unknown charset"), Some(1115)),
+            (
+                1,
+                error_packet_payload(1115, "42000", "unknown charset"),
+                Some(1115),
+            ),
             (1, vec![0x00, 0], None),
-            (2, error_packet_payload(1049, "42000", "unknown database"), Some(1049)),
+            (
+                2,
+                error_packet_payload(1049, "42000", "unknown database"),
+                Some(1049),
+            ),
             (2, ok_packet_payload(0, 0), None),
         ];
         for workers in [1, 2] {
@@ -6124,27 +6373,42 @@ mod tests {
                     crate::time::timeout(cx.now(), Duration::from_secs(30), async {
                         let pool = crate::database::pool::AsyncDbPool::new(
                             MySqlConnectionManager::new(options).reset_session_on_return(true),
-                            crate::database::pool::DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+                            crate::database::pool::DbPoolConfig::with_max_size(1)
+                                .validate_on_checkout(false),
                         );
                         drop(pool.get(&cx).await.expect("original borrower"));
                         let mut guard = pool.get(&cx).await.expect("deferred reset borrower");
                         let failure = guard.ping(&cx).await;
                         match (failure, server_code) {
-                            (Outcome::Err(MySqlError::Server { code, .. }), Some(expected)) => assert_eq!(code, expected),
+                            (Outcome::Err(MySqlError::Server { code, .. }), Some(expected)) => {
+                                assert_eq!(code, expected)
+                            }
                             (Outcome::Err(_), None) => {}
-                            (other, expected) => panic!("reset stage {stage}: expected error {expected:?}, got {other:?}"),
+                            (other, expected) => panic!(
+                                "reset stage {stage}: expected error {expected:?}, got {other:?}"
+                            ),
                         }
                         assert!(guard.inner.closed);
                         assert!(guard.pool_reset.as_ref().unwrap().pending);
-                        assert!(!guard.inner.query_in_flight.load(std::sync::atomic::Ordering::Acquire));
-                        assert!(matches!(guard.ping(&cx).await, Outcome::Err(MySqlError::ConnectionClosed)));
+                        assert!(
+                            !guard
+                                .inner
+                                .query_in_flight
+                                .load(std::sync::atomic::Ordering::Acquire)
+                        );
+                        assert!(matches!(
+                            guard.ping(&cx).await,
+                            Outcome::Err(MySqlError::ConnectionClosed)
+                        ));
                         drop(guard);
                         let stats = pool.stats();
                         assert_eq!((stats.total, stats.active, stats.idle), (0, 0, 0));
                         assert_eq!(stats.total_discards, 1);
                         assert_eq!(stats.pending_waiters, 0);
                         pool.close();
-                    }).await.expect("bounded failed-reset journey");
+                    })
+                    .await
+                    .expect("bounded failed-reset journey");
                 }));
                 peer.finish();
                 assert_pool_reset_drained(&runtime);
@@ -6170,10 +6434,14 @@ mod tests {
                     let cx = Cx::current().expect("native reset Cx");
                     crate::time::timeout(cx.now(), Duration::from_secs(30), async {
                         let manager = MySqlConnectionManager::new(options);
-                        assert!(!manager.reset_session_on_return, "legacy default stays opt-out");
+                        assert!(
+                            !manager.reset_session_on_return,
+                            "legacy default stays opt-out"
+                        );
                         let pool = crate::database::pool::AsyncDbPool::new(
                             manager.reset_session_on_return(reset_enabled),
-                            crate::database::pool::DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+                            crate::database::pool::DbPoolConfig::with_max_size(1)
+                                .validate_on_checkout(false),
                         );
                         let mut first = pool.get(&cx).await.expect("original borrower");
                         first.set_statement_timeout_override(Some(Duration::from_millis(500)));
@@ -6183,7 +6451,10 @@ mod tests {
                             assert_eq!(pool.stats().total_discards, 1);
                         } else {
                             let mut second = pool.get(&cx).await.expect("legacy reuse");
-                            assert_eq!(second.statement_timeout_override(), Some(Duration::from_millis(500)));
+                            assert_eq!(
+                                second.statement_timeout_override(),
+                                Some(Duration::from_millis(500))
+                            );
                             assert!(matches!(second.ping(&cx).await, Outcome::Ok(())));
                             drop(second);
                             assert_eq!(pool.stats().idle, 1);
@@ -6191,7 +6462,9 @@ mod tests {
                         pool.close();
                         assert_eq!(pool.stats().total, 0);
                         assert_eq!(pool.stats().active, 0);
-                    }).await.expect("bounded legacy/no-database journey");
+                    })
+                    .await
+                    .expect("bounded legacy/no-database journey");
                 }));
                 peer.finish();
                 assert_pool_reset_drained(&runtime);
@@ -6206,11 +6479,20 @@ mod tests {
         for workers in [1, 2] {
             let peer = PoolResetPeer::start(|peer| {
                 pool_reset_peer_auth(peer, false);
-                pool_reset_peer_command(peer, command::COM_QUERY, POOL_SESSION_BASELINE_SQL.as_bytes());
-                pool_reset_peer_row(peer, &[
-                    Some("utf8mb4'; SET @leak=1; --"), Some("utf8mb4"),
-                    Some("utf8mb4"), Some("utf8mb4_bin"),
-                ]);
+                pool_reset_peer_command(
+                    peer,
+                    command::COM_QUERY,
+                    POOL_SESSION_BASELINE_SQL.as_bytes(),
+                );
+                pool_reset_peer_row(
+                    peer,
+                    &[
+                        Some("utf8mb4'; SET @leak=1; --"),
+                        Some("utf8mb4"),
+                        Some("utf8mb4"),
+                        Some("utf8mb4_bin"),
+                    ],
+                );
                 pool_reset_peer_eof(peer);
             });
             let options = peer.options(Some("initial`db"));
@@ -6218,9 +6500,10 @@ mod tests {
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("native reset Cx");
                 let manager = MySqlConnectionManager::new(options).reset_session_on_return(true);
-                let result = crate::time::timeout(
-                    cx.now(), Duration::from_secs(30), manager.connect(&cx)
-                ).await.expect("bounded invalid baseline query");
+                let result =
+                    crate::time::timeout(cx.now(), Duration::from_secs(30), manager.connect(&cx))
+                        .await
+                        .expect("bounded invalid baseline query");
                 assert!(matches!(result,
                     Outcome::Err(MySqlError::Protocol(message))
                     if message.contains("invalid charset or collation")
@@ -7799,8 +8082,7 @@ mod tests {
                 let caller_clock =
                     Arc::new(VirtualClock::starting_at(Time::from_secs(caller_epoch)));
                 let caller_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&caller_clock));
-                let owner_clock =
-                    Arc::new(VirtualClock::starting_at(Time::from_secs(owner_epoch)));
+                let owner_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(owner_epoch)));
                 let owner_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&owner_clock));
                 let make_cx = |task, timer, deadline| {
                     Cx::new_with_drivers(
@@ -7846,7 +8128,9 @@ mod tests {
                 let mut task_cx = Context::from_waker(&waker);
                 owner.masked(|| {
                     assert!(operation.as_mut().poll(&mut task_cx).is_pending());
-                    parked_rx.try_recv().expect("the transport returned Pending");
+                    parked_rx
+                        .try_recv()
+                        .expect("the transport returned Pending");
                     assert_eq!(caller_timer.pending_count(), 1, "caller timer is armed");
                     assert_eq!(owner_timer.pending_count(), 1, "owner timer is armed");
 
@@ -7960,7 +8244,7 @@ mod tests {
             let deadline = epoch + Duration::from_millis(100);
             let clock = Arc::new(VirtualClock::starting_at(epoch));
             let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
-            let full = Cx::new_with_drivers(
+            let full: Cx = Cx::new_with_drivers(
                 RegionId::new_for_test(0, 1),
                 TaskId::new_for_test(1, 0),
                 Budget::INFINITE.with_deadline(deadline),
@@ -7990,7 +8274,11 @@ mod tests {
             let mut task_cx = Context::from_waker(&waker);
             assert!(operation.as_mut().poll(&mut task_cx).is_pending());
             assert_eq!(timer.next_deadline(), Some(deadline));
-            assert_eq!(timer.pending_count(), 1, "the checkpoint clock owns the wake");
+            assert_eq!(
+                timer.pending_count(),
+                1,
+                "the checkpoint clock owns the wake"
+            );
             clock.advance_to(deadline);
             assert_eq!(timer.process_timers(), 1);
             assert!(wakes.0.load(Ordering::SeqCst) > 0);
@@ -7999,9 +8287,18 @@ mod tests {
                 Poll::Ready(Err(MySqlError::Cancelled(reason)))
                     if reason.kind == CancelKind::Deadline
             ));
-            assert!(restricted.timer_driver().is_none(), "TIME remains restricted");
+            assert!(
+                restricted.timer_driver().is_none(),
+                "TIME remains restricted"
+            );
             assert!(timer.is_empty());
-            assert!(restricted.inner.read().cancel_waker_registrations.is_empty());
+            assert!(
+                restricted
+                    .inner
+                    .read()
+                    .cancel_waker_registrations
+                    .is_empty()
+            );
             eprintln!(
                 "event=mysql_restricted_deadline explicit_caller={explicit_caller} \
                  checkpoint_clock_used=true time_capability_granted=false outcome=CancelledDeadline"
@@ -8049,12 +8346,10 @@ mod tests {
             let _current = Cx::set_current(Some(owner.clone()));
             let mut stream = NeverReadyStream;
             let mut buf = [0_u8; 8];
-            let mut operation = Box::pin(read_exact_from(
-                Some(&caller),
-                &mut stream,
-                &mut buf,
-            ));
-            let result = operation.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            let mut operation = Box::pin(read_exact_from(Some(&caller), &mut stream, &mut buf));
+            let result = operation
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()));
             if expired {
                 assert!(matches!(
                     result,
@@ -8144,14 +8439,13 @@ mod tests {
                                     .await
                                     .map(|_| ())
                             } else {
-                                let mut connection = match MySqlConnection::connect_with_options(
-                                    &owner, options,
-                                )
-                                .await
-                                {
-                                    Outcome::Ok(connection) => connection,
-                                    outcome => return outcome.map(|_| ()),
-                                };
+                                let mut connection =
+                                    match MySqlConnection::connect_with_options(&owner, options)
+                                        .await
+                                    {
+                                        Outcome::Ok(connection) => connection,
+                                        outcome => return outcome.map(|_| ()),
+                                    };
                                 connection.ping(&task_caller).await
                             }
                         };
@@ -8241,7 +8535,8 @@ mod tests {
                         | capability::CLIENT_PLUGIN_AUTH
                         | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
                         | capability::CLIENT_TRANSACTIONS;
-                    peer.write_all(&handshake_packet_bytes(capabilities)).unwrap();
+                    peer.write_all(&handshake_packet_bytes(capabilities))
+                        .unwrap();
                     let (sequence, response) = read_native_kat_peer_packet(peer);
                     assert_eq!(sequence, 1, "the client completed its handshake response");
                     assert!(response.ends_with(b"caching_sha2_password\0"));
@@ -9045,7 +9340,11 @@ mod tests {
             authenticate_with_id(peer, offered_multi, 1);
         }
 
-        fn authenticate_with_id(peer: &mut std::net::TcpStream, offered_multi: u32, connection_id: u32) {
+        fn authenticate_with_id(
+            peer: &mut std::net::TcpStream,
+            offered_multi: u32,
+            connection_id: u32,
+        ) {
             let capabilities = capability::CLIENT_PROTOCOL_41
                 | capability::CLIENT_SECURE_CONNECTION
                 | capability::CLIENT_PLUGIN_AUTH
@@ -9054,7 +9353,8 @@ mod tests {
                 | capability::CLIENT_CONNECT_WITH_DB
                 | capability::CLIENT_DEPRECATE_EOF
                 | offered_multi;
-            peer.write_all(&handshake_packet_bytes_with_id(capabilities, connection_id)).unwrap();
+            peer.write_all(&handshake_packet_bytes_with_id(capabilities, connection_id))
+                .unwrap();
             let (sequence, response) = read_native_kat_peer_packet(peer);
             assert_eq!(sequence, 1);
             let flags = u32::from_le_bytes(response[..4].try_into().unwrap());
@@ -9066,21 +9366,39 @@ mod tests {
         }
 
         fn pool_baseline(peer: &mut std::net::TcpStream) {
-            pool_reset_peer_command(peer, command::COM_QUERY, POOL_SESSION_BASELINE_SQL.as_bytes());
-            pool_reset_peer_row(peer, &[
-                Some("utf8mb4"), Some("utf8mb4"), Some("utf8mb4"), Some("utf8mb4_bin"),
-            ]);
+            pool_reset_peer_command(
+                peer,
+                command::COM_QUERY,
+                POOL_SESSION_BASELINE_SQL.as_bytes(),
+            );
+            pool_reset_peer_row(
+                peer,
+                &[
+                    Some("utf8mb4"),
+                    Some("utf8mb4"),
+                    Some("utf8mb4"),
+                    Some("utf8mb4_bin"),
+                ],
+            );
         }
 
         fn prepare_call(peer: &mut std::net::TcpStream, statement_id: u32) {
             pool_reset_peer_command(peer, command::COM_STMT_PREPARE, CALL.as_bytes());
             let mut prepared = prepare_ok_payload(statement_id);
             prepared[7..9].copy_from_slice(&1_u16.to_le_bytes());
-            respond(peer, vec![prepared, integer_column("tenant"), eof_packet_payload(AUTOCOMMIT)]);
+            respond(
+                peer,
+                vec![
+                    prepared,
+                    integer_column("tenant"),
+                    eof_packet_payload(AUTOCOMMIT),
+                ],
+            );
         }
 
         fn integer_column(name: &str) -> Vec<u8> {
-            let mut column = column_definition_payload_with_type(name, column_type::MYSQL_TYPE_LONG);
+            let mut column =
+                column_definition_payload_with_type(name, column_type::MYSQL_TYPE_LONG);
             column.extend_from_slice(&[0, 0]);
             column
         }
@@ -9132,29 +9450,38 @@ mod tests {
                 let peer = PoolResetPeer::start(|peer| {
                     authenticate(peer, MULTI);
                     pool_reset_peer_command(peer, command::COM_QUERY, b"CALL mixed_results()");
-                    respond(peer, vec![
-                        ok_packet_payload(3, AUTOCOMMIT | MORE),
-                        vec![1],
-                        integer_column("value"),
-                        eof_packet_payload(AUTOCOMMIT | MORE),
-                        text_row("42"),
-                        eof_packet_payload(AUTOCOMMIT | MORE),
-                        vec![1],
-                        integer_column("empty"),
-                        eof_packet_payload(AUTOCOMMIT | MORE),
-                        eof_packet_payload(AUTOCOMMIT | MORE),
-                        ok_packet_payload(7, AUTOCOMMIT),
-                    ]);
+                    respond(
+                        peer,
+                        vec![
+                            ok_packet_payload(3, AUTOCOMMIT | MORE),
+                            vec![1],
+                            integer_column("value"),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            text_row("42"),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            vec![1],
+                            integer_column("empty"),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            ok_packet_payload(7, AUTOCOMMIT),
+                        ],
+                    );
                     finish_clean(peer);
                 });
                 let options = peer.options(None);
                 native_journey(workers, async move {
                     let cx = Cx::current().unwrap();
                     let mut connection = MySqlMultiResultConnection::connect_with_options(
-                        &cx, options, MySqlMultiResultLimits::default(),
-                    ).await.unwrap();
-                    let results = connection.query_static_sql(&cx, "CALL mixed_results()")
-                        .await.unwrap();
+                        &cx,
+                        options,
+                        MySqlMultiResultLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+                    let results = connection
+                        .query_static_sql(&cx, "CALL mixed_results()")
+                        .await
+                        .unwrap();
                     assert_eq!(results.len(), 4);
                     assert_eq!(results[0].command_result().unwrap().affected_rows, 3);
                     assert_eq!(results[1].rows()[0].get_i32("value").unwrap(), 42);
@@ -9186,45 +9513,76 @@ mod tests {
                     pool_reset_peer_command(peer, command::COM_STMT_PREPARE, CALL.as_bytes());
                     let mut prepared = prepare_ok_payload(73);
                     prepared[7..9].copy_from_slice(&1_u16.to_le_bytes());
-                    respond(peer, vec![prepared, integer_column("tenant"), eof_packet_payload(AUTOCOMMIT)]);
+                    respond(
+                        peer,
+                        vec![
+                            prepared,
+                            integer_column("tenant"),
+                            eof_packet_payload(AUTOCOMMIT),
+                        ],
+                    );
                     expect_prepared_execute(peer, 73);
-                    respond(peer, vec![
-                        vec![1], integer_column("value"),
-                        eof_packet_payload(AUTOCOMMIT | MORE), binary_row(51),
-                        eof_packet_payload(AUTOCOMMIT | MORE),
-                        vec![1], integer_column("output"),
-                        eof_packet_payload(AUTOCOMMIT | MORE | OUT_PARAMS), binary_row(9),
-                        // MySQL clears MORE/OUT on this EOF. The preceding
-                        // OUT metadata still requires consuming the CALL OK.
-                        eof_packet_payload(AUTOCOMMIT),
-                        ok_packet_payload(3, AUTOCOMMIT),
-                    ]);
+                    respond(
+                        peer,
+                        vec![
+                            vec![1],
+                            integer_column("value"),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            binary_row(51),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            vec![1],
+                            integer_column("output"),
+                            eof_packet_payload(AUTOCOMMIT | MORE | OUT_PARAMS),
+                            binary_row(9),
+                            // MySQL clears MORE/OUT on this EOF. The preceding
+                            // OUT metadata still requires consuming the CALL OK.
+                            eof_packet_payload(AUTOCOMMIT),
+                            ok_packet_payload(3, AUTOCOMMIT),
+                        ],
+                    );
                     // query_params must reuse the existing statement and bind
                     // again; the terminal prepared ERR must also allow reuse.
                     expect_prepared_execute(peer, 73);
-                    write_response_packet(peer, 1, error_packet_payload(1644, "45000", "procedure refused"));
+                    write_response_packet(
+                        peer,
+                        1,
+                        error_packet_payload(1644, "45000", "procedure refused"),
+                    );
                     finish_clean(peer);
                 });
                 let options = peer.options(None);
                 native_journey(workers, async move {
                     let cx = Cx::current().unwrap();
                     let mut connection = MySqlMultiResultConnection::connect_with_options(
-                        &cx, options, MySqlMultiResultLimits::default(),
-                    ).await.unwrap();
+                        &cx,
+                        options,
+                        MySqlMultiResultLimits::default(),
+                    )
+                    .await
+                    .unwrap();
                     let statement = connection.prepare(&cx, CALL).await.unwrap();
                     let mut unrelated = statement.clone();
                     unrelated.owner_connection_id = 99;
-                    assert!(matches!(connection.query_prepared(&cx, &unrelated, &[&42_u32]).await,
-                        Outcome::Err(MySqlError::InvalidParameter(_))));
+                    assert!(matches!(
+                        connection.query_prepared(&cx, &unrelated, &[&42_u32]).await,
+                        Outcome::Err(MySqlError::InvalidParameter(_))
+                    ));
                     let mut stale = statement.clone();
                     stale.owner_prepared_statement_epoch += 1;
-                    assert!(matches!(connection.query_prepared(&cx, &stale, &[&42_u32]).await,
-                        Outcome::Err(MySqlError::InvalidParameter(_))));
-                    assert!(matches!(connection.query_prepared(&cx, &statement, &[]).await,
-                        Outcome::Err(MySqlError::InvalidParameter(_))));
+                    assert!(matches!(
+                        connection.query_prepared(&cx, &stale, &[&42_u32]).await,
+                        Outcome::Err(MySqlError::InvalidParameter(_))
+                    ));
+                    assert!(matches!(
+                        connection.query_prepared(&cx, &statement, &[]).await,
+                        Outcome::Err(MySqlError::InvalidParameter(_))
+                    ));
                     assert!(!connection.is_closed(), "admission errors occur before I/O");
 
-                    let results = connection.query_prepared(&cx, &statement, &[&42_u32]).await.unwrap();
+                    let results = connection
+                        .query_prepared(&cx, &statement, &[&42_u32])
+                        .await
+                        .unwrap();
                     assert_eq!(results.len(), 3);
                     assert_eq!(results[0].rows()[0].get_i32("value").unwrap(), 51);
                     assert!(!results[0].is_output_parameters());
@@ -9232,8 +9590,10 @@ mod tests {
                     assert!(results[1].is_output_parameters());
                     assert_eq!(results[1].status_flags(), AUTOCOMMIT);
                     assert_eq!(results[2].command_result().unwrap().affected_rows, 3);
-                    assert!(matches!(connection.query_params(&cx, CALL, &[&42_u32]).await,
-                        Outcome::Err(MySqlError::Server { code: 1644, .. })));
+                    assert!(matches!(
+                        connection.query_params(&cx, CALL, &[&42_u32]).await,
+                        Outcome::Err(MySqlError::Server { code: 1644, .. })
+                    ));
                     assert_reusable(connection, &cx).await;
                 });
                 peer.finish();
@@ -9245,20 +9605,31 @@ mod tests {
             let peer = PoolResetPeer::start(|peer| {
                 authenticate(peer, MULTI);
                 pool_reset_peer_command(peer, command::COM_QUERY, b"CALL partial_then_error()");
-                respond(peer, vec![
-                    ok_packet_payload(5, AUTOCOMMIT | MORE),
-                    error_packet_payload(1644, "45000", "no second result"),
-                ]);
+                respond(
+                    peer,
+                    vec![
+                        ok_packet_payload(5, AUTOCOMMIT | MORE),
+                        error_packet_payload(1644, "45000", "no second result"),
+                    ],
+                );
                 finish_clean(peer);
             });
             let options = peer.options(None);
             native_journey(1, async move {
                 let cx = Cx::current().unwrap();
                 let mut connection = MySqlMultiResultConnection::connect_with_options(
-                    &cx, options, MySqlMultiResultLimits::default(),
-                ).await.unwrap();
-                assert!(matches!(connection.query_trusted_sql(&cx, "CALL partial_then_error()").await,
-                    Outcome::Err(MySqlError::Server { code: 1644, .. })));
+                    &cx,
+                    options,
+                    MySqlMultiResultLimits::default(),
+                )
+                .await
+                .unwrap();
+                assert!(matches!(
+                    connection
+                        .query_trusted_sql(&cx, "CALL partial_then_error()")
+                        .await,
+                    Outcome::Err(MySqlError::Server { code: 1644, .. })
+                ));
                 assert_reusable(connection, &cx).await;
             });
             peer.finish();
@@ -9266,7 +9637,11 @@ mod tests {
 
         #[test]
         fn multi_result_native_requires_both_result_capabilities() {
-            for offered in [0, capability::CLIENT_MULTI_RESULTS, capability::CLIENT_PS_MULTI_RESULTS] {
+            for offered in [
+                0,
+                capability::CLIENT_MULTI_RESULTS,
+                capability::CLIENT_PS_MULTI_RESULTS,
+            ] {
                 let peer = PoolResetPeer::start(move |peer| {
                     authenticate(peer, offered);
                     pool_reset_peer_eof(peer);
@@ -9287,13 +9662,27 @@ mod tests {
         }
 
         #[derive(Clone, Copy, Debug)]
-        enum LimitCase { Sets, AggregateRows, PerSetRows, WireBytes, DecodedBytes, Malformed, Setup }
+        enum LimitCase {
+            Sets,
+            AggregateRows,
+            PerSetRows,
+            WireBytes,
+            DecodedBytes,
+            Malformed,
+            Setup,
+        }
 
         #[test]
         fn multi_result_limits_and_malformed_responses_close_before_reuse() {
-            for case in [LimitCase::Sets, LimitCase::AggregateRows, LimitCase::PerSetRows,
-                LimitCase::WireBytes, LimitCase::DecodedBytes, LimitCase::Malformed, LimitCase::Setup]
-            {
+            for case in [
+                LimitCase::Sets,
+                LimitCase::AggregateRows,
+                LimitCase::PerSetRows,
+                LimitCase::WireBytes,
+                LimitCase::DecodedBytes,
+                LimitCase::Malformed,
+                LimitCase::Setup,
+            ] {
                 let (mut inner, listener) = make_server_backed_connection(0);
                 inner.inner.capabilities = MULTI;
                 if matches!(case, LimitCase::PerSetRows) {
@@ -9312,7 +9701,8 @@ mod tests {
                     LimitCase::Setup => (10, 10, 1 << 20, "additional results"),
                 };
                 let limits = MySqlMultiResultLimits::new(sets, rows, bytes).unwrap();
-                let mut connection = MySqlMultiResultConnection::from_connection_for_test(inner, limits);
+                let mut connection =
+                    MySqlMultiResultConnection::from_connection_for_test(inner, limits);
                 let server = std::thread::spawn(move || {
                     let (mut peer, _) = listener.accept().unwrap();
                     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -9324,17 +9714,36 @@ mod tests {
                     }
                     match case {
                         LimitCase::Sets | LimitCase::Setup => {
-                            write_response_packet(&mut peer, 1, ok_packet_payload(0, AUTOCOMMIT | MORE));
+                            write_response_packet(
+                                &mut peer,
+                                1,
+                                ok_packet_payload(0, AUTOCOMMIT | MORE),
+                            );
                         }
-                        LimitCase::AggregateRows => respond(&mut peer, vec![
-                            vec![1], integer_column("a"), eof_packet_payload(AUTOCOMMIT),
-                            text_row("1"), eof_packet_payload(AUTOCOMMIT | MORE),
-                            vec![1], integer_column("b"), eof_packet_payload(AUTOCOMMIT), text_row("2"),
-                        ]),
-                        LimitCase::PerSetRows => respond(&mut peer, vec![
-                            vec![1], integer_column("a"), eof_packet_payload(AUTOCOMMIT),
-                            text_row("1"), text_row("2"),
-                        ]),
+                        LimitCase::AggregateRows => respond(
+                            &mut peer,
+                            vec![
+                                vec![1],
+                                integer_column("a"),
+                                eof_packet_payload(AUTOCOMMIT),
+                                text_row("1"),
+                                eof_packet_payload(AUTOCOMMIT | MORE),
+                                vec![1],
+                                integer_column("b"),
+                                eof_packet_payload(AUTOCOMMIT),
+                                text_row("2"),
+                            ],
+                        ),
+                        LimitCase::PerSetRows => respond(
+                            &mut peer,
+                            vec![
+                                vec![1],
+                                integer_column("a"),
+                                eof_packet_payload(AUTOCOMMIT),
+                                text_row("1"),
+                                text_row("2"),
+                            ],
+                        ),
                         LimitCase::WireBytes => {
                             // Declared one-MiB payload is never sent: refusal
                             // must occur immediately after its four-byte header.
@@ -9345,9 +9754,10 @@ mod tests {
                             // exceeds the budget, before any definitions arrive.
                             write_response_packet(&mut peer, 1, vec![0xfc, 0, 0x40]);
                         }
-                        LimitCase::Malformed => respond(&mut peer, vec![
-                            ok_packet_payload(0, AUTOCOMMIT | MORE), vec![0xff, 0],
-                        ]),
+                        LimitCase::Malformed => respond(
+                            &mut peer,
+                            vec![ok_packet_payload(0, AUTOCOMMIT | MORE), vec![0xff, 0]],
+                        ),
                     }
                     pool_reset_peer_eof(&mut peer);
                 });
@@ -9355,17 +9765,28 @@ mod tests {
                     let cx = Cx::current().unwrap();
                     let outcome = connection.query_trusted_sql(&cx, "CALL too_many()").await;
                     match outcome {
-                        Outcome::Err(MySqlError::Protocol(message) | MySqlError::InvalidPacket(message)) => {
-                            assert!(message.to_ascii_lowercase().contains(expected), "{case:?}: {message}");
+                        Outcome::Err(
+                            MySqlError::Protocol(message) | MySqlError::InvalidPacket(message),
+                        ) => {
+                            assert!(
+                                message.to_ascii_lowercase().contains(expected),
+                                "{case:?}: {message}"
+                            );
                         }
-                        other => panic!("{case:?}: expected bounded protocol rejection, got {other:?}"),
+                        other => {
+                            panic!("{case:?}: expected bounded protocol rejection, got {other:?}")
+                        }
                     }
                     assert!(connection.is_closed(), "{case:?}");
-                    assert!(matches!(connection.query_trusted_sql(&cx, "DO 1").await,
-                        Outcome::Err(MySqlError::ConnectionClosed)));
+                    assert!(matches!(
+                        connection.query_trusted_sql(&cx, "DO 1").await,
+                        Outcome::Err(MySqlError::ConnectionClosed)
+                    ));
                     connection.close().await.unwrap();
                 });
-                server.join().expect("limit peer observed transport closure");
+                server
+                    .join()
+                    .expect("limit peer observed transport closure");
             }
         }
 
@@ -9376,13 +9797,18 @@ mod tests {
                 match listener.accept() {
                     Ok((peer, _)) => break peer,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(std::time::Instant::now() < deadline, "separate KILL connection");
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "separate KILL connection"
+                        );
                         std::thread::park_timeout(Duration::from_millis(1));
                     }
                     Err(error) => panic!("accept KILL: {error}"),
                 }
             };
-            killer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            killer
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             pool_reset_peer_auth(&mut killer, false);
             pool_reset_peer_command(&mut killer, command::COM_QUERY, b"KILL QUERY 1");
             observed.store(true, Ordering::Release);
@@ -9411,31 +9837,45 @@ mod tests {
                 native_journey(workers, async move {
                     let cx = Cx::current().unwrap();
                     let mut connection = MySqlMultiResultConnection::connect_with_options(
-                        &cx, options, MySqlMultiResultLimits::default(),
-                    ).await.unwrap();
+                        &cx,
+                        options,
+                        MySqlMultiResultLimits::default(),
+                    )
+                    .await
+                    .unwrap();
                     let caller = Cx::for_testing();
                     let reason = CancelReason::user("cancel remaining procedure results")
                         .with_cause(CancelReason::shutdown());
-                    let mut pending = Box::pin(connection.query_trusted_sql(&caller, "CALL pending_results()"));
+                    let mut pending =
+                        Box::pin(connection.query_trusted_sql(&caller, "CALL pending_results()"));
                     let mut first = Box::pin(first_result.notified());
                     std::future::poll_fn(|task_cx| {
                         assert!(pending.as_mut().poll(task_cx).is_pending());
                         first.as_mut().poll(task_cx)
-                    }).await;
+                    })
+                    .await;
                     // The peer has written the complete first result. Poll
                     // again to consume it and witness the next real read parked.
                     std::future::poll_fn(|task_cx| {
                         assert!(pending.as_mut().poll(task_cx).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     let mut sibling = cx.spawn(|_| async { 17_u8 }).unwrap();
                     assert_eq!(sibling.join(&cx).await.unwrap(), 17);
                     caller.cancel_with_reason(reason.clone());
-                    assert!(matches!(pending.await, Outcome::Cancelled(actual) if actual == reason));
-                    assert!(killed.load(Ordering::Acquire), "KILL reached the peer before return");
+                    assert!(
+                        matches!(pending.await, Outcome::Cancelled(actual) if actual == reason)
+                    );
+                    assert!(
+                        killed.load(Ordering::Acquire),
+                        "KILL reached the peer before return"
+                    );
                     assert!(connection.is_closed());
-                    assert!(matches!(connection.query_trusted_sql(&cx, "DO 1").await,
-                        Outcome::Err(MySqlError::ConnectionClosed)));
+                    assert!(matches!(
+                        connection.query_trusted_sql(&cx, "DO 1").await,
+                        Outcome::Err(MySqlError::ConnectionClosed)
+                    ));
                     connection.close().await.unwrap();
                 });
                 peer.finish();
@@ -9450,37 +9890,48 @@ mod tests {
                 let first_result = Arc::new(crate::sync::Notify::new());
                 let peer_first = Arc::clone(&first_result);
                 let mut connection = MySqlMultiResultConnection::from_connection_for_test(
-                    inner, MySqlMultiResultLimits::default(),
+                    inner,
+                    MySqlMultiResultLimits::default(),
                 );
                 let server = std::thread::spawn(move || {
                     let (mut peer, _) = listener.accept().unwrap();
                     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                    assert_eq!(command_sql(&read_client_command(&mut peer)), "CALL abandoned_results()");
+                    assert_eq!(
+                        command_sql(&read_client_command(&mut peer)),
+                        "CALL abandoned_results()"
+                    );
                     write_response_packet(&mut peer, 1, ok_packet_payload(0, AUTOCOMMIT | MORE));
                     peer_first.notify_one();
                     pool_reset_peer_eof(&mut peer);
                 });
                 native_journey(workers, async move {
                     let cx = Cx::current().unwrap();
-                    let mut pending = Box::pin(connection.query_trusted_sql(&cx, "CALL abandoned_results()"));
+                    let mut pending =
+                        Box::pin(connection.query_trusted_sql(&cx, "CALL abandoned_results()"));
                     let mut first = Box::pin(first_result.notified());
                     std::future::poll_fn(|task_cx| {
                         assert!(pending.as_mut().poll(task_cx).is_pending());
                         first.as_mut().poll(task_cx)
-                    }).await;
+                    })
+                    .await;
                     std::future::poll_fn(|task_cx| {
                         assert!(pending.as_mut().poll(task_cx).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     drop(pending);
                     assert!(connection.is_closed());
-                    assert!(matches!(connection.query_trusted_sql(&cx, "DO 1").await,
-                        Outcome::Err(MySqlError::ConnectionClosed)));
+                    assert!(matches!(
+                        connection.query_trusted_sql(&cx, "DO 1").await,
+                        Outcome::Err(MySqlError::ConnectionClosed)
+                    ));
                     // This fixture has no stored reconnect options. Drop must
                     // still close the poisoned transport through the fallback.
                     drop(connection);
                 });
-                server.join().expect("abandoned connection closed without another command");
+                server
+                    .join()
+                    .expect("abandoned connection closed without another command");
             }
         }
 
@@ -9513,10 +9964,16 @@ mod tests {
                     authenticate(peer, MULTI);
                     let packets = vec![
                         ok_packet_payload(3, AUTOCOMMIT | MORE),
-                        vec![1], integer_column("value"), eof_packet_payload(AUTOCOMMIT | MORE),
-                        text_row("42"), eof_packet_payload(AUTOCOMMIT | MORE),
-                        vec![1], integer_column("empty"), eof_packet_payload(AUTOCOMMIT | MORE),
-                        eof_packet_payload(AUTOCOMMIT | MORE), ok_packet_payload(7, AUTOCOMMIT),
+                        vec![1],
+                        integer_column("value"),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        text_row("42"),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        vec![1],
+                        integer_column("empty"),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        ok_packet_payload(7, AUTOCOMMIT),
                     ];
                     pool_reset_peer_command(peer, command::COM_QUERY, b"CALL mixed_results()");
                     respond(peer, packets.clone());
@@ -9524,7 +9981,9 @@ mod tests {
                     respond(peer, packets[..5].to_vec());
                     // Neither this row set's EOF nor the remaining results
                     // exist on the wire until the caller observes its row.
-                    wait_for_row.recv_timeout(Duration::from_secs(5)).expect("early row observed");
+                    wait_for_row
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("early row observed");
                     for (index, payload) in packets.into_iter().enumerate().skip(5) {
                         write_response_packet(peer, (index + 1) as u8, payload);
                     }
@@ -9534,13 +9993,24 @@ mod tests {
                 native_journey(workers, async move {
                     let cx = Cx::current().unwrap();
                     let mut connection = MySqlMultiResultConnection::connect_with_options(
-                        &cx, options, MySqlMultiResultLimits::default(),
-                    ).await.unwrap();
-                    let collected = connection.query_trusted_sql(&cx, "CALL mixed_results()")
-                        .await.unwrap();
-                    let mut stream = connection.query_stream_static_sql(
-                        &cx, "CALL mixed_results()", MySqlMultiResultStreamConfig::default(),
-                    ).await.unwrap();
+                        &cx,
+                        options,
+                        MySqlMultiResultLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+                    let collected = connection
+                        .query_trusted_sql(&cx, "CALL mixed_results()")
+                        .await
+                        .unwrap();
+                    let mut stream = connection
+                        .query_stream_static_sql(
+                            &cx,
+                            "CALL mixed_results()",
+                            MySqlMultiResultStreamConfig::default(),
+                        )
+                        .await
+                        .unwrap();
                     let first = completion_event(stream.next(&cx).await.unwrap());
                     assert_eq!(first.index(), 0);
                     assert_eq!(first.command_result(), collected[0].command_result());
@@ -9551,7 +10021,10 @@ mod tests {
                     assert_eq!(columns.columns()[0].name, collected[1].columns()[0].name);
                     assert!(!columns.is_output_parameters());
                     let row = row_event(stream.next(&cx).await.unwrap());
-                    assert_eq!(row.get_i32("value").unwrap(), collected[1].rows()[0].get_i32("value").unwrap());
+                    assert_eq!(
+                        row.get_i32("value").unwrap(),
+                        collected[1].rows()[0].get_i32("value").unwrap()
+                    );
                     row_seen.send(()).unwrap();
                     let rows_done = completion_event(stream.next(&cx).await.unwrap());
                     assert_eq!(rows_done.index(), 1);
@@ -9585,29 +10058,61 @@ mod tests {
                     pool_reset_peer_command(peer, command::COM_STMT_PREPARE, CALL.as_bytes());
                     let mut prepared = prepare_ok_payload(73);
                     prepared[7..9].copy_from_slice(&1_u16.to_le_bytes());
-                    respond(peer, vec![prepared, integer_column("tenant"), eof_packet_payload(AUTOCOMMIT)]);
+                    respond(
+                        peer,
+                        vec![
+                            prepared,
+                            integer_column("tenant"),
+                            eof_packet_payload(AUTOCOMMIT),
+                        ],
+                    );
                     expect_prepared_execute(peer, 73);
-                    respond(peer, vec![
-                        vec![1], integer_column("output"), eof_packet_payload(AUTOCOMMIT | MORE | OUT_PARAMS),
-                        binary_row(9), eof_packet_payload(AUTOCOMMIT), ok_packet_payload(3, AUTOCOMMIT),
-                    ]);
+                    respond(
+                        peer,
+                        vec![
+                            vec![1],
+                            integer_column("output"),
+                            eof_packet_payload(AUTOCOMMIT | MORE | OUT_PARAMS),
+                            binary_row(9),
+                            eof_packet_payload(AUTOCOMMIT),
+                            ok_packet_payload(3, AUTOCOMMIT),
+                        ],
+                    );
                     finish_clean(peer);
                 });
                 let options = peer.options(None);
                 native_journey(workers, async move {
                     let cx = Cx::current().unwrap();
                     let mut connection = MySqlMultiResultConnection::connect_with_options(
-                        &cx, options, MySqlMultiResultLimits::default(),
-                    ).await.unwrap();
-                    let mut stream = connection.query_stream_params(
-                        &cx, CALL, &[&42_u32], MySqlMultiResultStreamConfig::default(),
-                    ).await.unwrap();
+                        &cx,
+                        options,
+                        MySqlMultiResultLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+                    let mut stream = connection
+                        .query_stream_params(
+                            &cx,
+                            CALL,
+                            &[&42_u32],
+                            MySqlMultiResultStreamConfig::default(),
+                        )
+                        .await
+                        .unwrap();
                     let columns = columns_event(stream.next(&cx).await.unwrap());
                     assert!(columns.is_output_parameters());
-                    assert_eq!(row_event(stream.next(&cx).await.unwrap()).get_i32("output").unwrap(), 9);
+                    assert_eq!(
+                        row_event(stream.next(&cx).await.unwrap())
+                            .get_i32("output")
+                            .unwrap(),
+                        9
+                    );
                     let output = completion_event(stream.next(&cx).await.unwrap());
                     assert!(output.is_output_parameters());
-                    assert!(output.has_more_results(), "metadata requires the trailing CALL OK");
+                    assert!(
+                        output.has_more_results(),
+                        "metadata requires the trailing CALL OK"
+                    );
                     assert_eq!(output.status_flags(), AUTOCOMMIT);
                     assert_eq!(output.row_count(), 1);
                     let done = completion_event(stream.next(&cx).await.unwrap());
@@ -9627,25 +10132,50 @@ mod tests {
                 let peer = PoolResetPeer::start(|peer| {
                     authenticate(peer, MULTI);
                     pool_reset_peer_command(peer, command::COM_QUERY, b"CALL drain_results()");
-                    respond(peer, vec![
-                        vec![1], integer_column("value"), eof_packet_payload(AUTOCOMMIT | MORE),
-                        text_row("1"), text_row("2"), eof_packet_payload(AUTOCOMMIT | MORE),
-                        vec![1], integer_column("later"), eof_packet_payload(AUTOCOMMIT | MORE),
-                        text_row("3"), eof_packet_payload(AUTOCOMMIT | MORE), ok_packet_payload(4, AUTOCOMMIT),
-                    ]);
+                    respond(
+                        peer,
+                        vec![
+                            vec![1],
+                            integer_column("value"),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            text_row("1"),
+                            text_row("2"),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            vec![1],
+                            integer_column("later"),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            text_row("3"),
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            ok_packet_payload(4, AUTOCOMMIT),
+                        ],
+                    );
                     finish_clean(peer);
                 });
                 let options = peer.options(None);
                 native_journey(workers, async move {
                     let cx = Cx::current().unwrap();
                     let mut connection = MySqlMultiResultConnection::connect_with_options(
-                        &cx, options, MySqlMultiResultLimits::default(),
-                    ).await.unwrap();
-                    let mut stream = connection.query_stream_trusted_sql(
-                        &cx, "CALL drain_results()", MySqlMultiResultStreamConfig::default(),
-                    ).await.unwrap();
+                        &cx,
+                        options,
+                        MySqlMultiResultLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+                    let mut stream = connection
+                        .query_stream_trusted_sql(
+                            &cx,
+                            "CALL drain_results()",
+                            MySqlMultiResultStreamConfig::default(),
+                        )
+                        .await
+                        .unwrap();
                     columns_event(stream.next(&cx).await.unwrap());
-                    assert_eq!(row_event(stream.next(&cx).await.unwrap()).get_i32("value").unwrap(), 1);
+                    assert_eq!(
+                        row_event(stream.next(&cx).await.unwrap())
+                            .get_i32("value")
+                            .unwrap(),
+                        1
+                    );
                     stream.finish(&cx, Duration::from_secs(5)).await.unwrap();
                     assert_reusable(connection, &cx).await;
                 });
@@ -9658,27 +10188,44 @@ mod tests {
             let peer = PoolResetPeer::start(|peer| {
                 authenticate(peer, MULTI);
                 pool_reset_peer_command(peer, command::COM_QUERY, b"CALL partial_then_error()");
-                respond(peer, vec![
-                    vec![1], integer_column("value"), eof_packet_payload(AUTOCOMMIT | MORE),
-                    text_row("5"), eof_packet_payload(AUTOCOMMIT | MORE),
-                    error_packet_payload(1644, "45000", "no second result"),
-                ]);
+                respond(
+                    peer,
+                    vec![
+                        vec![1],
+                        integer_column("value"),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        text_row("5"),
+                        eof_packet_payload(AUTOCOMMIT | MORE),
+                        error_packet_payload(1644, "45000", "no second result"),
+                    ],
+                );
                 finish_clean(peer);
             });
             let options = peer.options(None);
             native_journey(1, async move {
                 let cx = Cx::current().unwrap();
                 let mut connection = MySqlMultiResultConnection::connect_with_options(
-                    &cx, options, MySqlMultiResultLimits::default(),
-                ).await.unwrap();
-                let mut stream = connection.query_stream_trusted_sql(
-                    &cx, "CALL partial_then_error()", MySqlMultiResultStreamConfig::default(),
-                ).await.unwrap();
+                    &cx,
+                    options,
+                    MySqlMultiResultLimits::default(),
+                )
+                .await
+                .unwrap();
+                let mut stream = connection
+                    .query_stream_trusted_sql(
+                        &cx,
+                        "CALL partial_then_error()",
+                        MySqlMultiResultStreamConfig::default(),
+                    )
+                    .await
+                    .unwrap();
                 columns_event(stream.next(&cx).await.unwrap());
                 let row = row_event(stream.next(&cx).await.unwrap());
                 assert!(completion_event(stream.next(&cx).await.unwrap()).has_more_results());
-                assert!(matches!(stream.next(&cx).await,
-                    Outcome::Err(MySqlError::Server { code: 1644, .. })));
+                assert!(matches!(
+                    stream.next(&cx).await,
+                    Outcome::Err(MySqlError::Server { code: 1644, .. })
+                ));
                 assert_eq!(row.get_i32("value").unwrap(), 5);
                 assert!(stream.next(&cx).await.unwrap().is_none());
                 drop(stream);
@@ -9688,7 +10235,15 @@ mod tests {
         }
 
         #[derive(Clone, Copy, Debug)]
-        enum StreamLimitCase { Exact, Packet, Metadata, Row, AggregateBytes, AggregateRows, ResultSets }
+        enum StreamLimitCase {
+            Exact,
+            Packet,
+            Metadata,
+            Row,
+            AggregateBytes,
+            AggregateRows,
+            ResultSets,
+        }
 
         #[test]
         fn multi_result_stream_native_exact_caps_and_aggregate_limits() {
@@ -9697,44 +10252,67 @@ mod tests {
             let metadata_bytes = std::mem::size_of::<MySqlColumn>() + 64 + 2 * column.len();
             // The single integer value has no separate heap allocation.
             let row_bytes = std::mem::size_of::<MySqlValue>() + 4 * std::mem::size_of::<MySqlRow>();
-            let aggregate_bytes = 2 * (4 * std::mem::size_of::<MySqlResultSet>() + 64)
-                + metadata_bytes + row_bytes;
-            for case in [StreamLimitCase::Exact, StreamLimitCase::Packet, StreamLimitCase::Metadata,
-                StreamLimitCase::Row, StreamLimitCase::AggregateBytes, StreamLimitCase::AggregateRows,
-                StreamLimitCase::ResultSets]
-            {
+            let aggregate_bytes =
+                2 * (4 * std::mem::size_of::<MySqlResultSet>() + 64) + metadata_bytes + row_bytes;
+            for case in [
+                StreamLimitCase::Exact,
+                StreamLimitCase::Packet,
+                StreamLimitCase::Metadata,
+                StreamLimitCase::Row,
+                StreamLimitCase::AggregateBytes,
+                StreamLimitCase::AggregateRows,
+                StreamLimitCase::ResultSets,
+            ] {
                 let config = MySqlMultiResultStreamConfig::new(
                     packet_bytes - usize::from(matches!(case, StreamLimitCase::Packet)),
                     metadata_bytes - usize::from(matches!(case, StreamLimitCase::Metadata)),
                     row_bytes - usize::from(matches!(case, StreamLimitCase::Row)),
-                ).unwrap();
+                )
+                .unwrap();
                 let limits = MySqlMultiResultLimits::new(
-                    if matches!(case, StreamLimitCase::ResultSets) { 1 } else { 2 },
+                    if matches!(case, StreamLimitCase::ResultSets) {
+                        1
+                    } else {
+                        2
+                    },
                     1,
                     aggregate_bytes - usize::from(matches!(case, StreamLimitCase::AggregateBytes)),
-                ).unwrap();
+                )
+                .unwrap();
                 let (mut inner, listener) = make_server_backed_connection(0);
                 inner.inner.capabilities = MULTI;
-                let mut connection = MySqlMultiResultConnection::from_connection_for_test(inner, limits);
+                let mut connection =
+                    MySqlMultiResultConnection::from_connection_for_test(inner, limits);
                 let server_column = column.clone();
                 let server = std::thread::spawn(move || {
                     let (mut peer, _) = listener.accept().unwrap();
                     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                    pool_reset_peer_command(&mut peer, command::COM_QUERY, b"CALL capped_results()");
+                    pool_reset_peer_command(
+                        &mut peer,
+                        command::COM_QUERY,
+                        b"CALL capped_results()",
+                    );
                     if matches!(case, StreamLimitCase::Packet) {
                         write_response_packet(&mut peer, 1, vec![1]);
                         let length = u32::try_from(server_column.len()).unwrap().to_le_bytes();
                         // One byte above the configured packet cap. No
                         // payload follows; rejection must happen at admission.
-                        peer.write_all(&[length[0], length[1], length[2], 2]).unwrap();
+                        peer.write_all(&[length[0], length[1], length[2], 2])
+                            .unwrap();
                     } else {
                         let mut packets = vec![
-                            vec![1], server_column, eof_packet_payload(AUTOCOMMIT | MORE), text_row("42"),
+                            vec![1],
+                            server_column,
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            text_row("42"),
                         ];
                         if matches!(case, StreamLimitCase::AggregateRows) {
                             packets.push(text_row("43"));
                         }
-                        packets.extend([eof_packet_payload(AUTOCOMMIT | MORE), ok_packet_payload(0, AUTOCOMMIT)]);
+                        packets.extend([
+                            eof_packet_payload(AUTOCOMMIT | MORE),
+                            ok_packet_payload(0, AUTOCOMMIT),
+                        ]);
                         respond(&mut peer, packets);
                     }
                     if matches!(case, StreamLimitCase::Exact) {
@@ -9745,9 +10323,10 @@ mod tests {
                 });
                 native_journey(1, async move {
                     let cx = Cx::current().unwrap();
-                    let mut stream = connection.query_stream_trusted_sql(
-                        &cx, "CALL capped_results()", config,
-                    ).await.unwrap();
+                    let mut stream = connection
+                        .query_stream_trusted_sql(&cx, "CALL capped_results()", config)
+                        .await
+                        .unwrap();
                     let mut row_count = 0;
                     let mut completions = 0;
                     let error = loop {
@@ -9756,7 +10335,9 @@ mod tests {
                                 assert_eq!(row.get_i32("value").unwrap(), 42);
                                 row_count += 1;
                             }
-                            Outcome::Ok(Some(MySqlMultiResultEvent::Complete(_))) => completions += 1,
+                            Outcome::Ok(Some(MySqlMultiResultEvent::Complete(_))) => {
+                                completions += 1
+                            }
                             Outcome::Ok(Some(MySqlMultiResultEvent::Columns(_))) => {}
                             Outcome::Ok(None) => break None,
                             Outcome::Err(error) => break Some(error),
@@ -9765,7 +10346,10 @@ mod tests {
                     };
                     drop(stream);
                     if matches!(case, StreamLimitCase::Exact) {
-                        assert!(error.is_none(), "exact limits admit the response: {error:?}");
+                        assert!(
+                            error.is_none(),
+                            "exact limits admit the response: {error:?}"
+                        );
                         assert_eq!(row_count, 1);
                         assert_eq!(completions, 2);
                         assert_reusable(connection, &cx).await;
@@ -9779,11 +10363,15 @@ mod tests {
                             StreamLimitCase::ResultSets => "result-set limit",
                             StreamLimitCase::Exact => unreachable!(),
                         };
-                        assert!(matches!(error, Some(MySqlError::Protocol(ref message)) if message.contains(expected)),
-                            "{case:?}: {error:?}");
+                        assert!(
+                            matches!(error, Some(MySqlError::Protocol(ref message)) if message.contains(expected)),
+                            "{case:?}: {error:?}"
+                        );
                         assert!(connection.is_closed());
-                        assert!(matches!(connection.query_trusted_sql(&cx, "DO 1").await,
-                            Outcome::Err(MySqlError::ConnectionClosed)));
+                        assert!(matches!(
+                            connection.query_trusted_sql(&cx, "DO 1").await,
+                            Outcome::Err(MySqlError::ConnectionClosed)
+                        ));
                         connection.close().await.unwrap();
                     }
                 });
@@ -9801,56 +10389,83 @@ mod tests {
                     let (mut inner, listener) = make_server_backed_connection(0);
                     inner.inner.capabilities = MULTI;
                     let mut connection = MySqlMultiResultConnection::from_connection_for_test(
-                        inner, MySqlMultiResultLimits::default(),
+                        inner,
+                        MySqlMultiResultLimits::default(),
                     );
                     let prefix_written = Arc::new(crate::sync::Notify::new());
                     let peer_prefix = Arc::clone(&prefix_written);
                     let server = std::thread::spawn(move || {
                         let (mut peer, _) = listener.accept().unwrap();
                         peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                        pool_reset_peer_command(&mut peer, command::COM_QUERY, b"CALL partial_packet()");
-                        respond(&mut peer, vec![
-                            vec![1], integer_column("value"), eof_packet_payload(AUTOCOMMIT | MORE),
-                        ]);
+                        pool_reset_peer_command(
+                            &mut peer,
+                            command::COM_QUERY,
+                            b"CALL partial_packet()",
+                        );
+                        respond(
+                            &mut peer,
+                            vec![
+                                vec![1],
+                                integer_column("value"),
+                                eof_packet_payload(AUTOCOMMIT | MORE),
+                            ],
+                        );
                         peer.write_all(&[2, 0]).unwrap();
                         peer_prefix.notify_one();
                         pool_reset_peer_eof(&mut peer);
                     });
                     native_journey(workers, async move {
                         let cx = Cx::current().unwrap();
-                        let mut stream = connection.query_stream_trusted_sql(
-                            &cx, "CALL partial_packet()", MySqlMultiResultStreamConfig::default(),
-                        ).await.unwrap();
+                        let mut stream = connection
+                            .query_stream_trusted_sql(
+                                &cx,
+                                "CALL partial_packet()",
+                                MySqlMultiResultStreamConfig::default(),
+                            )
+                            .await
+                            .unwrap();
                         columns_event(stream.next(&cx).await.unwrap());
                         let mut pending = Box::pin(stream.next(&cx));
                         let mut prefix = Box::pin(prefix_written.notified());
                         std::future::poll_fn(|task_cx| {
                             assert!(pending.as_mut().poll(task_cx).is_pending());
                             prefix.as_mut().poll(task_cx)
-                        }).await;
+                        })
+                        .await;
                         std::future::poll_fn(|task_cx| {
                             assert!(pending.as_mut().poll(task_cx).is_pending());
                             Poll::Ready(())
-                        }).await;
+                        })
+                        .await;
                         drop(pending);
                         if retry {
-                            assert!(matches!(stream.next(&cx).await,
-                                Outcome::Err(MySqlError::ConnectionClosed)));
+                            assert!(matches!(
+                                stream.next(&cx).await,
+                                Outcome::Err(MySqlError::ConnectionClosed)
+                            ));
                             assert!(stream.next(&cx).await.unwrap().is_none());
                         }
                         drop(stream);
                         assert!(connection.is_closed());
-                        assert!(matches!(connection.query_trusted_sql(&cx, "DO 1").await,
-                            Outcome::Err(MySqlError::ConnectionClosed)));
+                        assert!(matches!(
+                            connection.query_trusted_sql(&cx, "DO 1").await,
+                            Outcome::Err(MySqlError::ConnectionClosed)
+                        ));
                         drop(connection);
                     });
-                    server.join().expect("partial read never accepted a new command");
+                    server
+                        .join()
+                        .expect("partial read never accepted a new command");
                 }
             }
         }
 
         #[derive(Clone, Copy, Debug)]
-        enum StreamStop { Cancel, Abort, Deadline }
+        enum StreamStop {
+            Cancel,
+            Abort,
+            Deadline,
+        }
 
         #[test]
         fn multi_result_stream_native_cancel_abort_and_drain_deadline_finish_wire_cleanup() {
@@ -9861,9 +10476,15 @@ mod tests {
                     let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
                         authenticate(peer, MULTI);
                         pool_reset_peer_command(peer, command::COM_QUERY, b"CALL pending_rows()");
-                        respond(peer, vec![
-                            vec![1], integer_column("value"), eof_packet_payload(AUTOCOMMIT | MORE), text_row("1"),
-                        ]);
+                        respond(
+                            peer,
+                            vec![
+                                vec![1],
+                                integer_column("value"),
+                                eof_packet_payload(AUTOCOMMIT | MORE),
+                                text_row("1"),
+                            ],
+                        );
                         finish_kill(listener, &peer_killed);
                         pool_reset_peer_eof(peer);
                     });
@@ -9871,13 +10492,27 @@ mod tests {
                     native_journey(workers, async move {
                         let cx = Cx::current().unwrap();
                         let mut connection = MySqlMultiResultConnection::connect_with_options(
-                            &cx, options, MySqlMultiResultLimits::default(),
-                        ).await.unwrap();
-                        let mut stream = connection.query_stream_trusted_sql(
-                            &cx, "CALL pending_rows()", MySqlMultiResultStreamConfig::default(),
-                        ).await.unwrap();
+                            &cx,
+                            options,
+                            MySqlMultiResultLimits::default(),
+                        )
+                        .await
+                        .unwrap();
+                        let mut stream = connection
+                            .query_stream_trusted_sql(
+                                &cx,
+                                "CALL pending_rows()",
+                                MySqlMultiResultStreamConfig::default(),
+                            )
+                            .await
+                            .unwrap();
                         columns_event(stream.next(&cx).await.unwrap());
-                        assert_eq!(row_event(stream.next(&cx).await.unwrap()).get_i32("value").unwrap(), 1);
+                        assert_eq!(
+                            row_event(stream.next(&cx).await.unwrap())
+                                .get_i32("value")
+                                .unwrap(),
+                            1
+                        );
                         match stop {
                             StreamStop::Cancel => {
                                 let caller = Cx::for_testing();
@@ -9887,11 +10522,14 @@ mod tests {
                                 std::future::poll_fn(|task_cx| {
                                     assert!(pending.as_mut().poll(task_cx).is_pending());
                                     Poll::Ready(())
-                                }).await;
+                                })
+                                .await;
                                 let mut sibling = cx.spawn(|_| async { 17_u8 }).unwrap();
                                 assert_eq!(sibling.join(&cx).await.unwrap(), 17);
                                 caller.cancel_with_reason(reason.clone());
-                                assert!(matches!(pending.await, Outcome::Cancelled(actual) if actual == reason));
+                                assert!(
+                                    matches!(pending.await, Outcome::Cancelled(actual) if actual == reason)
+                                );
                                 drop(stream);
                             }
                             StreamStop::Abort => stream.abort(&cx).await,
@@ -9900,10 +10538,15 @@ mod tests {
                                     Outcome::Err(MySqlError::Io(error)) if error.kind() == io::ErrorKind::TimedOut));
                             }
                         }
-                        assert!(killed.load(Ordering::Acquire), "{stop:?}: KILL completed before return");
+                        assert!(
+                            killed.load(Ordering::Acquire),
+                            "{stop:?}: KILL completed before return"
+                        );
                         assert!(connection.is_closed());
-                        assert!(matches!(connection.query_trusted_sql(&cx, "DO 1").await,
-                            Outcome::Err(MySqlError::ConnectionClosed)));
+                        assert!(matches!(
+                            connection.query_trusted_sql(&cx, "DO 1").await,
+                            Outcome::Err(MySqlError::ConnectionClosed)
+                        ));
                         connection.close().await.unwrap();
                     });
                     peer.finish();
@@ -9923,10 +10566,15 @@ mod tests {
                 // Queue the entire response, including its final status, in
                 // one write before the caller starts discarding ready rows.
                 let mut packets = vec![
-                    vec![1], integer_column("value"), eof_packet_payload(AUTOCOMMIT | MORE),
+                    vec![1],
+                    integer_column("value"),
+                    eof_packet_payload(AUTOCOMMIT | MORE),
                 ];
                 packets.extend((0..128).map(|_| text_row("1")));
-                packets.extend([eof_packet_payload(AUTOCOMMIT | MORE), ok_packet_payload(0, AUTOCOMMIT)]);
+                packets.extend([
+                    eof_packet_payload(AUTOCOMMIT | MORE),
+                    ok_packet_payload(0, AUTOCOMMIT),
+                ]);
                 respond(peer, packets);
                 peer_sent.notify_one();
                 finish_kill(listener, &peer_killed);
@@ -9938,23 +10586,36 @@ mod tests {
             native_journey(1, async move {
                 let cx = Cx::current().unwrap();
                 let mut connection = MySqlMultiResultConnection::connect_with_options(
-                    &cx, options, MySqlMultiResultLimits::default(),
-                ).await.unwrap();
-                let mut stream = connection.query_stream_trusted_sql(
-                    &cx, "CALL ready_rows()", MySqlMultiResultStreamConfig::default(),
-                ).await.unwrap();
+                    &cx,
+                    options,
+                    MySqlMultiResultLimits::default(),
+                )
+                .await
+                .unwrap();
+                let mut stream = connection
+                    .query_stream_trusted_sql(
+                        &cx,
+                        "CALL ready_rows()",
+                        MySqlMultiResultStreamConfig::default(),
+                    )
+                    .await
+                    .unwrap();
                 columns_event(stream.next(&cx).await.unwrap());
                 sent.notified().await;
                 let caller = Cx::for_testing();
                 let sibling_caller = caller.clone();
                 let reason = CancelReason::user("queued sibling stops a ready drain");
                 let sibling_reason = reason.clone();
-                let mut sibling = cx.spawn(move |_| async move {
-                    sibling_caller.cancel_with_reason(sibling_reason);
-                    17_u8
-                }).unwrap();
-                assert!(matches!(stream.finish(&caller, Duration::from_secs(5)).await,
-                    Outcome::Cancelled(actual) if actual == reason));
+                let mut sibling = cx
+                    .spawn(move |_| async move {
+                        sibling_caller.cancel_with_reason(sibling_reason);
+                        17_u8
+                    })
+                    .unwrap();
+                assert!(
+                    matches!(stream.finish(&caller, Duration::from_secs(5)).await,
+                    Outcome::Cancelled(actual) if actual == reason)
+                );
                 assert_eq!(sibling.join(&cx).await.unwrap(), 17);
                 assert!(killed.load(Ordering::Acquire));
                 assert!(connection.is_closed());
@@ -9996,20 +10657,29 @@ mod tests {
                     assert_eq!(manager.options().database.as_deref(), Some("initial`db"));
                     assert_eq!(manager.limits(), limits);
                     let pool = AsyncDbPool::new(
-                        manager, DbPoolConfig::with_max_size(1).validate_on_checkout(validate),
+                        manager,
+                        DbPoolConfig::with_max_size(1).validate_on_checkout(validate),
                     );
                     let mut first = pool.get_outcome(&cx).await.unwrap();
                     assert_eq!(first.limits(), limits);
-                    first.query_trusted_sql(&cx, "SET @tenant = 41").await.unwrap();
+                    first
+                        .query_trusted_sql(&cx, "SET @tenant = 41")
+                        .await
+                        .unwrap();
                     let stale = first.prepare(&cx, "SELECT 42").await.unwrap();
                     drop(first);
                     assert_eq!(pool.stats().idle, 1);
 
                     let mut second = pool.get_outcome(&cx).await.unwrap();
                     assert_eq!(second.limits(), limits);
-                    let stream = second.query_stream_trusted_sql(
-                        &cx, "/* tenant */ USE next_db", MySqlMultiResultStreamConfig::default(),
-                    ).await.unwrap();
+                    let stream = second
+                        .query_stream_trusted_sql(
+                            &cx,
+                            "/* tenant */ USE next_db",
+                            MySqlMultiResultStreamConfig::default(),
+                        )
+                        .await
+                        .unwrap();
                     stream.finish(&cx, Duration::from_secs(5)).await.unwrap();
                     assert!(matches!(second.query_prepared(&cx, &stale, &[]).await,
                         Outcome::Err(MySqlError::InvalidParameter(message))
@@ -10021,9 +10691,20 @@ mod tests {
                     let results = third.query_trusted_sql(&cx, "DO 1").await.unwrap();
                     assert_eq!(results[0].command_result().unwrap().affected_rows, 9);
                     drop(third);
-                    assert_eq!(pool.stats().total_creates, 1, "same authenticated physical session");
+                    assert_eq!(
+                        pool.stats().total_creates,
+                        1,
+                        "same authenticated physical session"
+                    );
                     pool.close();
-                    assert_eq!((pool.stats().total, pool.stats().active, pool.stats().pending_waiters), (0, 0, 0));
+                    assert_eq!(
+                        (
+                            pool.stats().total,
+                            pool.stats().active,
+                            pool.stats().pending_waiters
+                        ),
+                        (0, 0, 0)
+                    );
                 });
                 peer.finish();
             }
@@ -10035,7 +10716,9 @@ mod tests {
                 for reset in [false, true] {
                     let peer = PoolResetPeer::start(move |peer| {
                         authenticate(peer, MULTI);
-                        if reset { pool_baseline(peer); }
+                        if reset {
+                            pool_baseline(peer);
+                        }
                         prepare_call(peer, 73);
                         expect_prepared_execute(peer, 73);
                         write_response_packet(peer, 1, ok_packet_payload(3, AUTOCOMMIT));
@@ -10044,19 +10727,29 @@ mod tests {
                             prepare_call(peer, 74);
                         }
                         expect_prepared_execute(peer, if reset { 74 } else { 73 });
-                        respond(peer, vec![
-                            vec![1], integer_column("value"), eof_packet_payload(AUTOCOMMIT | MORE),
-                            binary_row(51), eof_packet_payload(AUTOCOMMIT | MORE), ok_packet_payload(4, AUTOCOMMIT),
-                        ]);
+                        respond(
+                            peer,
+                            vec![
+                                vec![1],
+                                integer_column("value"),
+                                eof_packet_payload(AUTOCOMMIT | MORE),
+                                binary_row(51),
+                                eof_packet_payload(AUTOCOMMIT | MORE),
+                                ok_packet_payload(4, AUTOCOMMIT),
+                            ],
+                        );
                         pool_reset_peer_eof(peer);
                     });
                     let options = peer.options(Some("initial`db"));
                     native_journey(workers, async move {
                         let cx = Cx::current().unwrap();
                         let mut manager = MySqlMultiResultConnectionManager::new(options);
-                        if reset { manager = manager.reset_session_on_return(true); }
+                        if reset {
+                            manager = manager.reset_session_on_return(true);
+                        }
                         let pool = AsyncDbPool::new(
-                            manager, DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+                            manager,
+                            DbPoolConfig::with_max_size(1).validate_on_checkout(false),
                         );
                         let mut first = pool.get_outcome(&cx).await.unwrap();
                         let stale = first.prepare(&cx, CALL).await.unwrap();
@@ -10074,12 +10767,26 @@ mod tests {
                         assert!(!second.is_closed());
                         let fresh = second.prepare(&cx, CALL).await.unwrap();
                         assert_eq!(fresh.statement_id, if reset { 74 } else { 73 });
-                        assert_ne!(fresh.owner_prepared_statement_epoch, stale.owner_prepared_statement_epoch);
-                        let mut stream = second.query_stream_prepared(
-                            &cx, &fresh, &[&42_u32], MySqlMultiResultStreamConfig::default(),
-                        ).await.unwrap();
+                        assert_ne!(
+                            fresh.owner_prepared_statement_epoch,
+                            stale.owner_prepared_statement_epoch
+                        );
+                        let mut stream = second
+                            .query_stream_prepared(
+                                &cx,
+                                &fresh,
+                                &[&42_u32],
+                                MySqlMultiResultStreamConfig::default(),
+                            )
+                            .await
+                            .unwrap();
                         columns_event(stream.next(&cx).await.unwrap());
-                        assert_eq!(row_event(stream.next(&cx).await.unwrap()).get_i32("value").unwrap(), 51);
+                        assert_eq!(
+                            row_event(stream.next(&cx).await.unwrap())
+                                .get_i32("value")
+                                .unwrap(),
+                            51
+                        );
                         stream.finish(&cx, Duration::from_secs(5)).await.unwrap();
                         drop(second);
                         assert_eq!(pool.stats().total_creates, 1);
@@ -10093,14 +10800,22 @@ mod tests {
         }
 
         #[derive(Clone, Copy, Debug)]
-        enum PoolProcedureEnd { Abandoned, Cancelled, TransactionOpen, AutocommitChanged }
+        enum PoolProcedureEnd {
+            Abandoned,
+            Cancelled,
+            TransactionOpen,
+            AutocommitChanged,
+        }
 
         #[test]
         fn multi_result_pool_native_discards_incomplete_sessions_and_reuses_terminal_errors() {
             for workers in [1, 2] {
-                for end in [PoolProcedureEnd::Abandoned, PoolProcedureEnd::Cancelled,
-                    PoolProcedureEnd::TransactionOpen, PoolProcedureEnd::AutocommitChanged]
-                {
+                for end in [
+                    PoolProcedureEnd::Abandoned,
+                    PoolProcedureEnd::Cancelled,
+                    PoolProcedureEnd::TransactionOpen,
+                    PoolProcedureEnd::AutocommitChanged,
+                ] {
                     let prefix_written = Arc::new(crate::sync::Notify::new());
                     let peer_prefix = Arc::clone(&prefix_written);
                     let killed = Arc::new(AtomicBool::new(false));
@@ -10110,15 +10825,25 @@ mod tests {
                         // transport-close fallback without relying on shared
                         // best-effort KILL-thread admission. Cancellation below
                         // separately witnesses a real KILL for server ID one.
-                        let id = if matches!(end, PoolProcedureEnd::Abandoned) { 0 } else { 1 };
+                        let id = if matches!(end, PoolProcedureEnd::Abandoned) {
+                            0
+                        } else {
+                            1
+                        };
                         authenticate_with_id(peer, MULTI, id);
                         pool_baseline(peer);
                         pool_reset_peer_command(peer, command::COM_QUERY, b"CALL dirty_results()");
                         match end {
                             PoolProcedureEnd::Abandoned | PoolProcedureEnd::Cancelled => {
-                                respond(peer, vec![
-                                    vec![1], integer_column("value"), eof_packet_payload(AUTOCOMMIT | MORE), text_row("1"),
-                                ]);
+                                respond(
+                                    peer,
+                                    vec![
+                                        vec![1],
+                                        integer_column("value"),
+                                        eof_packet_payload(AUTOCOMMIT | MORE),
+                                        text_row("1"),
+                                    ],
+                                );
                                 peer.write_all(&[2, 0]).unwrap();
                                 peer_prefix.notify_one();
                                 if matches!(end, PoolProcedureEnd::Cancelled) {
@@ -10127,7 +10852,11 @@ mod tests {
                                 }
                             }
                             PoolProcedureEnd::TransactionOpen => {
-                                write_response_packet(peer, 1, ok_packet_payload(0, AUTOCOMMIT | 1));
+                                write_response_packet(
+                                    peer,
+                                    1,
+                                    ok_packet_payload(0, AUTOCOMMIT | 1),
+                                );
                             }
                             PoolProcedureEnd::AutocommitChanged => {
                                 write_response_packet(peer, 1, ok_packet_payload(0, 0));
@@ -10137,14 +10866,26 @@ mod tests {
                         // be sent on this unfinished/dirty physical session.
                         pool_reset_peer_eof(peer);
                         let (mut recovered, _) = listener.accept().unwrap();
-                        recovered.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                        recovered.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+                        recovered
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
+                        recovered
+                            .set_write_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
                         authenticate(&mut recovered, MULTI);
                         pool_baseline(&mut recovered);
                         pool_reset_peer_command(&mut recovered, command::COM_QUERY, b"DO 1");
                         write_response_packet(&mut recovered, 1, ok_packet_payload(9, AUTOCOMMIT));
-                        pool_reset_peer_command(&mut recovered, command::COM_QUERY, b"CALL refused()");
-                        write_response_packet(&mut recovered, 1, error_packet_payload(1644, "45000", "refused"));
+                        pool_reset_peer_command(
+                            &mut recovered,
+                            command::COM_QUERY,
+                            b"CALL refused()",
+                        );
+                        write_response_packet(
+                            &mut recovered,
+                            1,
+                            error_packet_payload(1644, "45000", "refused"),
+                        );
                         pool_reset_peer_restore(&mut recovered);
                         pool_reset_peer_command(&mut recovered, command::COM_QUERY, b"DO 1");
                         write_response_packet(&mut recovered, 1, ok_packet_payload(9, AUTOCOMMIT));
@@ -10154,27 +10895,45 @@ mod tests {
                     native_journey(workers, async move {
                         let cx = Cx::current().unwrap();
                         let pool = AsyncDbPool::new(
-                            MySqlMultiResultConnectionManager::new(options).reset_session_on_return(true),
+                            MySqlMultiResultConnectionManager::new(options)
+                                .reset_session_on_return(true),
                             DbPoolConfig::with_max_size(1).validate_on_checkout(false),
                         );
                         let mut first = pool.get_outcome(&cx).await.unwrap();
-                        if matches!(end, PoolProcedureEnd::Abandoned | PoolProcedureEnd::Cancelled) {
+                        if matches!(
+                            end,
+                            PoolProcedureEnd::Abandoned | PoolProcedureEnd::Cancelled
+                        ) {
                             let caller = Cx::for_testing();
-                            let mut stream = first.query_stream_trusted_sql(
-                                &cx, "CALL dirty_results()", MySqlMultiResultStreamConfig::default(),
-                            ).await.unwrap();
+                            let mut stream = first
+                                .query_stream_trusted_sql(
+                                    &cx,
+                                    "CALL dirty_results()",
+                                    MySqlMultiResultStreamConfig::default(),
+                                )
+                                .await
+                                .unwrap();
                             columns_event(stream.next(&cx).await.unwrap());
-                            assert_eq!(row_event(stream.next(&cx).await.unwrap()).get_i32("value").unwrap(), 1);
+                            assert_eq!(
+                                row_event(stream.next(&cx).await.unwrap())
+                                    .get_i32("value")
+                                    .unwrap(),
+                                1
+                            );
                             prefix_written.notified().await;
                             let mut next = Box::pin(stream.next(&caller));
                             std::future::poll_fn(|task_cx| {
                                 assert!(next.as_mut().poll(task_cx).is_pending());
                                 Poll::Ready(())
-                            }).await;
+                            })
+                            .await;
                             if matches!(end, PoolProcedureEnd::Cancelled) {
-                                let reason = CancelReason::user("cancel pooled procedure").with_cause(CancelReason::shutdown());
+                                let reason = CancelReason::user("cancel pooled procedure")
+                                    .with_cause(CancelReason::shutdown());
                                 caller.cancel_with_reason(reason.clone());
-                                assert!(matches!(next.await, Outcome::Cancelled(actual) if actual == reason));
+                                assert!(
+                                    matches!(next.await, Outcome::Cancelled(actual) if actual == reason)
+                                );
                                 assert!(killed.load(Ordering::Acquire));
                             } else {
                                 drop(next);
@@ -10182,25 +10941,44 @@ mod tests {
                             drop(stream);
                             assert!(first.is_closed());
                         } else {
-                            first.query_trusted_sql(&cx, "CALL dirty_results()").await.unwrap();
+                            first
+                                .query_trusted_sql(&cx, "CALL dirty_results()")
+                                .await
+                                .unwrap();
                         }
                         drop(first);
-                        assert_eq!((pool.stats().total, pool.stats().active, pool.stats().idle), (0, 0, 0));
+                        assert_eq!(
+                            (pool.stats().total, pool.stats().active, pool.stats().idle),
+                            (0, 0, 0)
+                        );
                         assert_eq!(pool.stats().total_discards, 1);
 
                         let mut second = pool.get_outcome(&cx).await.unwrap();
                         second.query_trusted_sql(&cx, "DO 1").await.unwrap();
-                        assert!(matches!(second.query_trusted_sql(&cx, "CALL refused()").await,
-                            Outcome::Err(MySqlError::Server { code: 1644, .. })));
+                        assert!(matches!(
+                            second.query_trusted_sql(&cx, "CALL refused()").await,
+                            Outcome::Err(MySqlError::Server { code: 1644, .. })
+                        ));
                         assert!(!second.is_closed(), "terminal ERR completed its exchange");
                         drop(second);
                         assert_eq!(pool.stats().idle, 1);
                         let mut third = pool.get_outcome(&cx).await.unwrap();
                         third.query_trusted_sql(&cx, "DO 1").await.unwrap();
                         drop(third);
-                        assert_eq!(pool.stats().total_creates, 2, "terminal ERR reused the replacement session");
+                        assert_eq!(
+                            pool.stats().total_creates,
+                            2,
+                            "terminal ERR reused the replacement session"
+                        );
                         pool.close();
-                        assert_eq!((pool.stats().total, pool.stats().active, pool.stats().pending_waiters), (0, 0, 0));
+                        assert_eq!(
+                            (
+                                pool.stats().total,
+                                pool.stats().active,
+                                pool.stats().pending_waiters
+                            ),
+                            (0, 0, 0)
+                        );
                     });
                     peer.finish();
                 }
@@ -10220,7 +10998,8 @@ mod tests {
                 native_journey(workers, async move {
                     let cx = Cx::current().unwrap();
                     let pool = AsyncDbPool::new(
-                        MySqlMultiResultConnectionManager::new(options), DbPoolConfig::with_max_size(1),
+                        MySqlMultiResultConnectionManager::new(options),
+                        DbPoolConfig::with_max_size(1),
                     );
                     let mut active = pool.get_outcome(&cx).await.unwrap();
                     let caller = Cx::for_testing();
@@ -10228,39 +11007,57 @@ mod tests {
                     std::future::poll_fn(|task_cx| {
                         assert!(cancelled_waiter.as_mut().poll(task_cx).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     assert_eq!(pool.stats().pending_waiters, 1);
                     let reason = CancelReason::user("cancel waiting procedure request");
                     caller.cancel_with_reason(reason.clone());
-                    assert!(matches!(cancelled_waiter.await, Outcome::Cancelled(actual) if actual == reason));
+                    assert!(
+                        matches!(cancelled_waiter.await, Outcome::Cancelled(actual) if actual == reason)
+                    );
                     assert_eq!(pool.stats().pending_waiters, 0);
 
                     let mut closing_waiter = Box::pin(pool.get_outcome(&cx));
                     std::future::poll_fn(|task_cx| {
                         assert!(closing_waiter.as_mut().poll(task_cx).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     pool.close();
-                    assert!(matches!(closing_waiter.await, Outcome::Err(DbPoolError::Closed)));
+                    assert!(matches!(
+                        closing_waiter.await,
+                        Outcome::Err(DbPoolError::Closed)
+                    ));
                     assert_eq!((pool.stats().active, pool.stats().pending_waiters), (1, 0));
                     // Closing the pool stops admission; it does not revoke an
                     // active borrow or substitute a second connection for it.
                     let result = active.query_trusted_sql(&cx, "DO 1").await.unwrap();
                     assert_eq!(result[0].command_result().unwrap().affected_rows, 9);
                     drop(active);
-                    assert_eq!((pool.stats().total, pool.stats().active, pool.stats().idle), (0, 0, 0));
+                    assert_eq!(
+                        (pool.stats().total, pool.stats().active, pool.stats().idle),
+                        (0, 0, 0)
+                    );
                 });
                 peer.finish();
             }
         }
 
         #[derive(Clone, Copy, Debug)]
-        enum PoolResetEntry { Text, Prepared, Return }
+        enum PoolResetEntry {
+            Text,
+            Prepared,
+            Return,
+        }
 
         #[test]
         fn multi_result_pool_native_pending_reset_owns_capacity_and_discards_on_cancel_or_drop() {
             for workers in [1, 2] {
-                for entry in [PoolResetEntry::Text, PoolResetEntry::Prepared, PoolResetEntry::Return] {
+                for entry in [
+                    PoolResetEntry::Text,
+                    PoolResetEntry::Prepared,
+                    PoolResetEntry::Return,
+                ] {
                     for cancel in [false, true] {
                         let final_command = Arc::new(AtomicBool::new(false));
                         let reset_waker = Arc::new(std::sync::Mutex::new(None::<Waker>));
@@ -10269,10 +11066,16 @@ mod tests {
                         let peer = PoolResetPeer::start_with_listener(move |listener, peer| {
                             authenticate(peer, MULTI);
                             pool_baseline(peer);
-                            if matches!(entry, PoolResetEntry::Prepared) { prepare_call(peer, 73); }
+                            if matches!(entry, PoolResetEntry::Prepared) {
+                                prepare_call(peer, 73);
+                            }
                             pool_reset_peer_command(peer, command::COM_RESET_CONNECTION, &[]);
                             write_response_packet(peer, 1, ok_packet_payload(0, AUTOCOMMIT));
-                            pool_reset_peer_command(peer, command::COM_QUERY, POOL_RESET_RESTORE_SQL.as_bytes());
+                            pool_reset_peer_command(
+                                peer,
+                                command::COM_QUERY,
+                                POOL_RESET_RESTORE_SQL.as_bytes(),
+                            );
                             write_response_packet(peer, 1, ok_packet_payload(0, AUTOCOMMIT));
                             pool_reset_peer_command(peer, command::COM_INIT_DB, b"initial`db");
                             // Hold the final reset OK: no user command has
@@ -10280,42 +11083,65 @@ mod tests {
                             // connection while its framing remains uncertain.
                             peer_final_command.store(true, Ordering::Release);
                             let wake = peer_reset_waker.lock().unwrap().clone();
-                            wake.expect("reset poll registered before command writes").wake();
+                            wake.expect("reset poll registered before command writes")
+                                .wake();
                             pool_reset_peer_eof(peer);
 
                             let (mut replacement, _) = listener.accept().unwrap();
-                            replacement.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                            replacement.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+                            replacement
+                                .set_read_timeout(Some(Duration::from_secs(5)))
+                                .unwrap();
+                            replacement
+                                .set_write_timeout(Some(Duration::from_secs(5)))
+                                .unwrap();
                             // A reset failure must not start a KILL connection.
                             // The next accepted socket is a fresh pooled
                             // session and must negotiate the multi profile.
                             authenticate(&mut replacement, MULTI);
                             pool_baseline(&mut replacement);
                             pool_reset_peer_command(&mut replacement, command::COM_QUERY, b"DO 1");
-                            write_response_packet(&mut replacement, 1, ok_packet_payload(9, AUTOCOMMIT));
+                            write_response_packet(
+                                &mut replacement,
+                                1,
+                                ok_packet_payload(9, AUTOCOMMIT),
+                            );
                             pool_reset_peer_eof(&mut replacement);
                         });
                         let options = peer.options(Some("initial`db"));
                         native_journey(workers, async move {
                             let cx = Cx::current().unwrap();
                             let pool = AsyncDbPool::new(
-                                MySqlMultiResultConnectionManager::new(options).reset_session_on_return(true),
+                                MySqlMultiResultConnectionManager::new(options)
+                                    .reset_session_on_return(true),
                                 DbPoolConfig::with_max_size(1).validate_on_checkout(false),
                             );
                             let mut first = pool.get_outcome(&cx).await.unwrap();
                             let statement = if matches!(entry, PoolResetEntry::Prepared) {
                                 Some(first.prepare(&cx, CALL).await.unwrap())
-                            } else { None };
+                            } else {
+                                None
+                            };
                             drop(first);
                             let mut held = Some(pool.get_outcome(&cx).await.unwrap());
                             let caller = Cx::for_testing();
                             let mut reset = Box::pin(async {
                                 match entry {
-                                    PoolResetEntry::Text => held.as_mut().unwrap()
-                                        .query_trusted_sql(&caller, "DO 2").await.map(|_| ()),
-                                    PoolResetEntry::Prepared => held.as_mut().unwrap()
-                                        .query_prepared(&caller, statement.as_ref().unwrap(), &[&42_u32])
-                                        .await.map(|_| ()),
+                                    PoolResetEntry::Text => held
+                                        .as_mut()
+                                        .unwrap()
+                                        .query_trusted_sql(&caller, "DO 2")
+                                        .await
+                                        .map(|_| ()),
+                                    PoolResetEntry::Prepared => held
+                                        .as_mut()
+                                        .unwrap()
+                                        .query_prepared(
+                                            &caller,
+                                            statement.as_ref().unwrap(),
+                                            &[&42_u32],
+                                        )
+                                        .await
+                                        .map(|_| ()),
                                     PoolResetEntry::Return => {
                                         held.take().unwrap().reset_and_return(&caller).await;
                                         Outcome::Ok(())
@@ -10324,15 +11150,27 @@ mod tests {
                             });
                             std::future::poll_fn(|task_cx| {
                                 *reset_waker.lock().unwrap() = Some(task_cx.waker().clone());
-                                assert!(reset.as_mut().poll(task_cx).is_pending(), "{entry:?}: final reset reply is withheld");
-                                if final_command.load(Ordering::Acquire) { Poll::Ready(()) } else { Poll::Pending }
-                            }).await;
-                            assert_eq!((pool.stats().total, pool.stats().active, pool.stats().idle), (1, 1, 0));
+                                assert!(
+                                    reset.as_mut().poll(task_cx).is_pending(),
+                                    "{entry:?}: final reset reply is withheld"
+                                );
+                                if final_command.load(Ordering::Acquire) {
+                                    Poll::Ready(())
+                                } else {
+                                    Poll::Pending
+                                }
+                            })
+                            .await;
+                            assert_eq!(
+                                (pool.stats().total, pool.stats().active, pool.stats().idle),
+                                (1, 1, 0)
+                            );
                             let mut contender = Box::pin(pool.get_outcome(&cx));
                             std::future::poll_fn(|task_cx| {
                                 assert!(contender.as_mut().poll(task_cx).is_pending());
                                 Poll::Ready(())
-                            }).await;
+                            })
+                            .await;
                             assert_eq!(pool.stats().pending_waiters, 1);
                             drop(contender);
                             assert_eq!(pool.stats().pending_waiters, 0);
@@ -10345,14 +11183,21 @@ mod tests {
                                 if matches!(entry, PoolResetEntry::Return) {
                                     assert!(matches!(outcome, Outcome::Ok(())));
                                 } else {
-                                    assert!(matches!(outcome, Outcome::Cancelled(actual) if actual == reason));
+                                    assert!(
+                                        matches!(outcome, Outcome::Cancelled(actual) if actual == reason)
+                                    );
                                 }
                             } else {
                                 drop(reset);
                             }
-                            if let Some(connection) = held.as_ref() { assert!(connection.is_closed()); }
+                            if let Some(connection) = held.as_ref() {
+                                assert!(connection.is_closed());
+                            }
                             drop(held);
-                            assert_eq!((pool.stats().total, pool.stats().active, pool.stats().idle), (0, 0, 0));
+                            assert_eq!(
+                                (pool.stats().total, pool.stats().active, pool.stats().idle),
+                                (0, 0, 0)
+                            );
                             assert_eq!(pool.stats().total_discards, 1);
                             let mut replacement = pool.get_outcome(&cx).await.unwrap();
                             let result = replacement.query_trusted_sql(&cx, "DO 1").await.unwrap();
@@ -10360,7 +11205,14 @@ mod tests {
                             drop(replacement);
                             assert_eq!(pool.stats().total_creates, 2);
                             pool.close();
-                            assert_eq!((pool.stats().total, pool.stats().active, pool.stats().pending_waiters), (0, 0, 0));
+                            assert_eq!(
+                                (
+                                    pool.stats().total,
+                                    pool.stats().active,
+                                    pool.stats().pending_waiters
+                                ),
+                                (0, 0, 0)
+                            );
                         });
                         peer.finish();
                     }
@@ -10380,14 +11232,23 @@ mod tests {
 
             fn trusted_connector() -> TlsConnector {
                 let mut roots = rustls::RootCertStore::empty();
-                roots.add(CertificateDer::from_pem_slice(CERT).unwrap()).unwrap();
-                TlsConnector::new(rustls::ClientConfig::builder()
-                    .with_root_certificates(roots).with_no_client_auth())
+                roots
+                    .add(CertificateDer::from_pem_slice(CERT).unwrap())
+                    .unwrap();
+                TlsConnector::new(
+                    rustls::ClientConfig::builder()
+                        .with_root_certificates(roots)
+                        .with_no_client_auth(),
+                )
             }
 
             fn authenticate_tls(mut socket: std::net::TcpStream, multi: u32) -> Peer {
-                socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let capabilities = capability::CLIENT_PROTOCOL_41
                     | capability::CLIENT_SECURE_CONNECTION
                     | capability::CLIENT_PLUGIN_AUTH
@@ -10396,7 +11257,9 @@ mod tests {
                     | capability::CLIENT_CONNECT_WITH_DB
                     | capability::CLIENT_SSL
                     | multi;
-                socket.write_all(&handshake_packet_bytes(capabilities)).unwrap();
+                socket
+                    .write_all(&handshake_packet_bytes(capabilities))
+                    .unwrap();
                 let (sequence, request) = read_native_kat_peer_packet(&mut socket);
                 assert_eq!(sequence, 1);
                 assert_eq!(request.len(), 32, "only SSLRequest precedes TLS");
@@ -10405,11 +11268,16 @@ mod tests {
                 assert_eq!(flags & MULTI, multi);
                 assert_eq!(flags & capability::CLIENT_MULTI_STATEMENTS, 0);
                 assert_eq!(flags & capability::CLIENT_LOCAL_FILES, 0);
-                let config = rustls::ServerConfig::builder().with_no_client_auth()
-                    .with_single_cert(vec![CertificateDer::from_pem_slice(CERT).unwrap()],
-                        PrivateKeyDer::from_pem_slice(KEY).unwrap()).unwrap();
+                let config = rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![CertificateDer::from_pem_slice(CERT).unwrap()],
+                        PrivateKeyDer::from_pem_slice(KEY).unwrap(),
+                    )
+                    .unwrap();
                 let mut tls = rustls::StreamOwned::new(
-                    rustls::ServerConnection::new(Arc::new(config)).unwrap(), socket,
+                    rustls::ServerConnection::new(Arc::new(config)).unwrap(),
+                    socket,
                 );
                 let (sequence, response) = read_native_kat_peer_packet(&mut tls);
                 assert_eq!(sequence, 2);
@@ -10423,8 +11291,13 @@ mod tests {
                 let mut byte = [0];
                 match tls.read(&mut byte) {
                     Ok(0) => {}
-                    Err(error) if matches!(error.kind(), std::io::ErrorKind::UnexpectedEof
-                        | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::UnexpectedEof
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        ) => {}
                     other => panic!("TLS session must close without another command: {other:?}"),
                 }
             }
@@ -10439,10 +11312,18 @@ mod tests {
                         let peer_killed = Arc::clone(&killed);
                         let peer = PoolResetPeer::start_with_listener(move |listener, socket| {
                             let mut original = authenticate_tls(socket.try_clone().unwrap(), MULTI);
-                            pool_reset_peer_command(&mut original, command::COM_QUERY, b"CALL tls_pending()");
+                            pool_reset_peer_command(
+                                &mut original,
+                                command::COM_QUERY,
+                                b"CALL tls_pending()",
+                            );
                             write_response_packet(&mut original, 1, vec![1]);
                             write_response_packet(&mut original, 2, integer_column("value"));
-                            write_response_packet(&mut original, 3, eof_packet_payload(AUTOCOMMIT | MORE));
+                            write_response_packet(
+                                &mut original,
+                                3,
+                                eof_packet_payload(AUTOCOMMIT | MORE),
+                            );
                             write_response_packet(&mut original, 4, text_row("7"));
                             original.write_all(&[2, 0]).unwrap();
                             original.flush().unwrap();
@@ -10451,16 +11332,25 @@ mod tests {
                             // The cleanup socket uses the same custom root
                             // trust, but keeps ordinary single-result flags.
                             let mut killer = authenticate_tls(listener.accept().unwrap().0, 0);
-                            pool_reset_peer_command(&mut killer, command::COM_QUERY, b"KILL QUERY 1");
+                            pool_reset_peer_command(
+                                &mut killer,
+                                command::COM_QUERY,
+                                b"KILL QUERY 1",
+                            );
                             peer_killed.store(true, Ordering::Release);
                             write_response_packet(&mut killer, 1, ok_packet_payload(0, AUTOCOMMIT));
                             eof(&mut killer);
                             eof(&mut original);
 
-                            let mut replacement = authenticate_tls(listener.accept().unwrap().0, MULTI);
+                            let mut replacement =
+                                authenticate_tls(listener.accept().unwrap().0, MULTI);
                             for sql in [b"DO 1", b"DO 2"] {
                                 pool_reset_peer_command(&mut replacement, command::COM_QUERY, sql);
-                                write_response_packet(&mut replacement, 1, ok_packet_payload(9, AUTOCOMMIT));
+                                write_response_packet(
+                                    &mut replacement,
+                                    1,
+                                    ok_packet_payload(9, AUTOCOMMIT),
+                                );
                             }
                             eof(&mut replacement);
                         });
@@ -10475,26 +11365,42 @@ mod tests {
                                 DbPoolConfig::with_max_size(1),
                             );
                             let mut first = pool.get_outcome(&cx).await.unwrap();
-                            let mut stream = first.query_stream_trusted_sql(
-                                &cx, "CALL tls_pending()", MySqlMultiResultStreamConfig::default(),
-                            ).await.unwrap();
+                            let mut stream = first
+                                .query_stream_trusted_sql(
+                                    &cx,
+                                    "CALL tls_pending()",
+                                    MySqlMultiResultStreamConfig::default(),
+                                )
+                                .await
+                                .unwrap();
                             columns_event(stream.next(&cx).await.unwrap());
-                            assert_eq!(row_event(stream.next(&cx).await.unwrap()).get_i32("value").unwrap(), 7);
+                            assert_eq!(
+                                row_event(stream.next(&cx).await.unwrap())
+                                    .get_i32("value")
+                                    .unwrap(),
+                                7
+                            );
                             prefix.notified().await;
                             let caller = Cx::for_testing();
                             let mut next = Box::pin(stream.next(&caller));
                             std::future::poll_fn(|task_cx| {
                                 assert!(next.as_mut().poll(task_cx).is_pending());
                                 Poll::Ready(())
-                            }).await;
+                            })
+                            .await;
                             let reason = CancelReason::user("cancel pooled TLS procedure");
                             caller.cancel_with_reason(reason.clone());
-                            assert!(matches!(next.await, Outcome::Cancelled(actual) if actual == reason));
+                            assert!(
+                                matches!(next.await, Outcome::Cancelled(actual) if actual == reason)
+                            );
                             assert!(killed.load(Ordering::Acquire));
                             drop(stream);
                             assert!(first.is_closed());
                             drop(first);
-                            assert_eq!((pool.stats().total, pool.stats().active, pool.stats().idle), (0, 0, 0));
+                            assert_eq!(
+                                (pool.stats().total, pool.stats().active, pool.stats().idle),
+                                (0, 0, 0)
+                            );
                             for sql in ["DO 1", "DO 2"] {
                                 let mut connection = pool.get_outcome(&cx).await.unwrap();
                                 let result = connection.query_trusted_sql(&cx, sql).await.unwrap();
@@ -10504,7 +11410,14 @@ mod tests {
                             assert_eq!(pool.stats().total_creates, 2);
                             assert_eq!(pool.stats().total_discards, 1);
                             pool.close();
-                            assert_eq!((pool.stats().total, pool.stats().active, pool.stats().pending_waiters), (0, 0, 0));
+                            assert_eq!(
+                                (
+                                    pool.stats().total,
+                                    pool.stats().active,
+                                    pool.stats().pending_waiters
+                                ),
+                                (0, 0, 0)
+                            );
                         });
                         peer.finish();
                     }
@@ -10516,8 +11429,10 @@ mod tests {
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 listener.set_nonblocking(true).unwrap();
                 let options = MySqlConnectOptions::parse(&format!(
-                    "mysql://user@{}/db?ssl-mode=disabled", listener.local_addr().unwrap(),
-                )).unwrap();
+                    "mysql://user@{}/db?ssl-mode=disabled",
+                    listener.local_addr().unwrap(),
+                ))
+                .unwrap();
                 native_journey(1, async move {
                     let cx = Cx::current().unwrap();
                     let manager = MySqlMultiResultConnectionManager::new(options)
@@ -10526,7 +11441,9 @@ mod tests {
                         Outcome::Err(MySqlError::InvalidParameter(message))
                         if message.contains("requires ssl-mode")));
                 });
-                assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+                assert!(
+                    matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+                );
             }
         }
     }

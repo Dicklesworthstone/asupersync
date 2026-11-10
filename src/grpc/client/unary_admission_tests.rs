@@ -68,9 +68,11 @@ async fn channel(listener: &TcpListener, queued: usize, reuse: usize) -> Channel
 async fn call(channel: Channel, body: &'static [u8], timeout: Option<Duration>) -> CallResult {
     let mut request = Request::new(Bytes::from_static(body));
     if let Some(timeout) = timeout {
-        assert!(request
-            .metadata_mut()
-            .insert("grpc-timeout", encode_grpc_timeout(timeout)));
+        assert!(
+            request
+                .metadata_mut()
+                .insert("grpc-timeout", encode_grpc_timeout(timeout))
+        );
     }
     GrpcClient::new(channel)
         .unary("/test.Admission/Echo", request)
@@ -81,7 +83,11 @@ fn pressure(channel: &Channel) -> (usize, usize, usize) {
     let admission = channel.unary_admission.as_ref().expect("admission enabled");
     let active = admission.active.telemetry_snapshot(1);
     let total = admission.total.telemetry_snapshot(2);
-    (active.occupied_units, active.waiter_count, total.available_units)
+    (
+        active.occupied_units,
+        active.waiter_count,
+        total.available_units,
+    )
 }
 
 fn registrations(cx: &Cx) -> usize {
@@ -140,8 +146,7 @@ fn peer(listener: &TcpListener, calls: usize) -> (Vec<PeerStep>, std::thread::Jo
             match listener.accept() {
                 Ok((socket, _)) => break socket,
                 Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && Instant::now() < until =>
+                    if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until =>
                 {
                     // Only bounds the fixture's nonblocking accept loop;
                     // correctness is synchronized by request/Pending witnesses.
@@ -195,7 +200,10 @@ fn peer(listener: &TcpListener, calls: usize) -> (Vec<PeerStep>, std::thread::Jo
                         data,
                         end_stream,
                     }) => {
-                        bodies.entry(stream_id).or_default().extend_from_slice(&data);
+                        bodies
+                            .entry(stream_id)
+                            .or_default()
+                            .extend_from_slice(&data);
                         (stream_id, end_stream)
                     }
                     _ => continue,
@@ -259,9 +267,7 @@ impl<F: Future> Future for ParkWitness<F> {
                 next: task.waker().clone(),
                 probe: Arc::clone(probe),
             }));
-            this.future
-                .as_mut()
-                .poll(&mut Context::from_waker(&waker))
+            this.future.as_mut().poll(&mut Context::from_waker(&waker))
         } else {
             this.future.as_mut().poll(task)
         };
@@ -397,12 +403,200 @@ fn unary_admission_zero_queue_refuses_without_changing_active_capacity() {
         .err()
         .expect("the third exchange is rejected");
     assert_eq!(status.code(), Code::ResourceExhausted);
-    assert_eq!(status.message(), "native gRPC unary admission queue is full");
+    assert_eq!(
+        status.message(),
+        "native gRPC unary admission queue is full"
+    );
     assert_eq!(admission.active.telemetry_snapshot(0).waiter_count, 0);
     drop(first);
     let recovered = futures_lite::future::block_on(admission.acquire(&cx)).unwrap();
     drop((second, recovered));
     assert_eq!(admission.total.telemetry_snapshot(0).available_units, 2);
+}
+
+#[test]
+fn request_unary_admission_tracks_credits_and_restores_cancelled_queue() {
+    use crate::record::ObligationKind;
+    use crate::types::Budget;
+
+    let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+    let first = runtime.request_cx_with_budget(Budget::INFINITE);
+    let queued = runtime.request_cx_with_budget(Budget::INFINITE);
+    let successor = runtime.request_cx_with_budget(Budget::INFINITE);
+    let admission = UnaryAdmission::new(limits(1, 1));
+    let held = futures_lite::future::block_on(admission.acquire(&first)).unwrap();
+    let owner = held
+        ._total_owner
+        ._registration
+        .as_ref()
+        .expect("registered request owner")
+        .cx();
+    let token = owner
+        .try_register_obligation_checked(ObligationKind::Lease, owner.task_id())
+        .unwrap()
+        .expect("request owner mints runtime-tracked credits");
+    assert!(token.commit());
+
+    let mut waiting = Box::pin(admission.acquire(&queued));
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert_eq!(admission.active.telemetry_snapshot(0).waiter_count, 1);
+    assert_eq!(admission.total.telemetry_snapshot(0).available_units, 0);
+    let refused = futures_lite::future::block_on(admission.acquire(&successor))
+        .err()
+        .unwrap();
+    assert_eq!(refused.code(), Code::ResourceExhausted);
+    queued.cancel_with(CancelKind::User, Some("cancel queued request"));
+    let cancelled = futures_lite::future::block_on(waiting).err().unwrap();
+    assert_eq!(cancelled.code(), Code::Cancelled);
+    assert_eq!(admission.active.telemetry_snapshot(0).waiter_count, 0);
+    assert_eq!(admission.total.telemetry_snapshot(0).available_units, 1);
+    let abandoned_owner = runtime.request_cx_with_budget(Budget::INFINITE);
+    let mut abandoned = Box::pin(admission.acquire(&abandoned_owner));
+    assert!(
+        abandoned
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert_eq!(admission.active.telemetry_snapshot(0).waiter_count, 1);
+    drop(abandoned);
+    assert_eq!(admission.active.telemetry_snapshot(0).waiter_count, 0);
+    assert_eq!(admission.total.telemetry_snapshot(0).available_units, 1);
+    drop(held);
+    let recovered = futures_lite::future::block_on(admission.acquire(&successor)).unwrap();
+    drop(recovered);
+    assert_eq!(admission.active.telemetry_snapshot(0).available_units, 1);
+    assert_eq!(admission.total.telemetry_snapshot(0).available_units, 2);
+    assert!(runtime.shutdown_timeout(WATCHDOG));
+}
+
+#[test]
+fn request_unary_admission_enforces_runtime_obligation_quota() {
+    use crate::runtime::RegionLimits;
+    use crate::types::Budget;
+
+    for limit in [1, 2] {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .root_region_limits(RegionLimits {
+                max_obligations: Some(limit),
+                ..RegionLimits::UNLIMITED
+            })
+            .build()
+            .unwrap();
+        let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+        let admission = UnaryAdmission::new(limits(1, 0));
+        let result = futures_lite::future::block_on(admission.acquire(&owner));
+        if limit == 1 {
+            assert_eq!(result.err().unwrap().code(), Code::ResourceExhausted);
+        } else {
+            drop(result.unwrap());
+        }
+        assert_eq!(admission.active.telemetry_snapshot(0).available_units, 1);
+        assert_eq!(admission.total.telemetry_snapshot(0).available_units, 1);
+        assert!(runtime.shutdown_timeout(WATCHDOG));
+    }
+}
+
+#[test]
+fn request_owner_factory_panic_rolls_back_capacity() {
+    let cx = Cx::for_testing();
+    let semaphore = Semaphore::new(1);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(SemaphorePermit<'_>, ()), CheckedAcquireError> = semaphore
+            .try_acquire_one_checked_with(
+                &cx,
+                || {
+                    // The factory must run outside the semaphore lock.
+                    assert_eq!(semaphore.telemetry_snapshot(0).available_units, 0);
+                    panic!("injected owner admission panic");
+                },
+                |error| error,
+            );
+    }));
+    assert!(outcome.is_err());
+    assert_eq!(semaphore.telemetry_snapshot(0).available_units, 1);
+    let result: Result<(SemaphorePermit<'_>, ()), CheckedAcquireError> =
+        semaphore.try_acquire_one_checked_with(&cx, || Ok(((), None)), |error| error);
+    let (permit, ()) = result.unwrap();
+    drop(permit);
+    assert_eq!(semaphore.telemetry_snapshot(0).available_units, 1);
+}
+
+#[test]
+fn request_overflow_is_refused_before_accounting_task_quota() {
+    use crate::runtime::RegionLimits;
+    use crate::types::Budget;
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .root_region_limits(RegionLimits {
+            max_tasks: Some(1),
+            ..RegionLimits::UNLIMITED
+        })
+        .build()
+        .unwrap();
+    let first = runtime.request_cx_with_budget(Budget::INFINITE);
+    let second = runtime.request_cx_with_budget(Budget::INFINITE);
+    let admission = UnaryAdmission::new(limits(1, 0));
+    let held = futures_lite::future::block_on(admission.acquire(&first)).unwrap();
+    let error = futures_lite::future::block_on(admission.acquire(&second))
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(error.message(), "native gRPC unary admission queue is full");
+    drop(held);
+    let recovered = futures_lite::future::block_on(admission.acquire(&second)).unwrap();
+    drop(recovered);
+    assert!(runtime.shutdown_timeout(WATCHDOG));
+}
+
+#[test]
+fn unary_admission_rejects_retired_registered_holder_without_spending_capacity() {
+    let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+    let admission = UnaryAdmission::new(limits(1, 1));
+    let retired = runtime.block_on(async {
+        let live = Cx::current().unwrap();
+        let unbound = live.clone().with_obligation_gateway(None, None);
+        let error = futures_lite::future::block_on(admission.acquire(&unbound))
+            .err()
+            .unwrap();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        let permit = futures_lite::future::block_on(admission.acquire(&live)).unwrap();
+        drop(permit);
+        live
+    });
+    let unbound = retired.clone().with_obligation_gateway(None, None);
+    for stale in [&retired, &unbound] {
+        let error = futures_lite::future::block_on(admission.acquire(stale))
+            .err()
+            .unwrap();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert_eq!(admission.active.telemetry_snapshot(0).available_units, 1);
+        assert_eq!(admission.total.telemetry_snapshot(0).available_units, 2);
+    }
+    let live = runtime.request_cx_with_budget(crate::types::Budget::INFINITE);
+    let permit = futures_lite::future::block_on(admission.acquire(&live)).unwrap();
+    drop(permit);
+    assert!(runtime.shutdown_timeout(WATCHDOG));
+}
+
+#[test]
+fn request_unary_admission_rejects_expired_runtime() {
+    let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+    let request = runtime.request_cx_with_budget(crate::types::Budget::INFINITE);
+    assert!(runtime.shutdown_timeout(WATCHDOG));
+    let admission = UnaryAdmission::new(limits(1, 0));
+    let error = futures_lite::future::block_on(admission.acquire(&request))
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert_eq!(admission.total.telemetry_snapshot(0).available_units, 1);
 }
 
 #[test]
@@ -426,8 +620,7 @@ fn native_unary_admission_shares_fifo_capacity_and_reuses_the_connection() {
             assert_eq!(&first_seen.body[5..], b"first");
             assert_eq!(pressure(&channel), (1, 0, 2));
 
-            let (mut second, mut second_parked) =
-                queued_call(&cx, clone, b"second", None, None);
+            let (mut second, mut second_parked) = queued_call(&cx, clone, b"second", None, None);
             within(second_parked.recv(&cx)).await.unwrap();
             assert_eq!(pressure(&channel), (1, 1, 1));
             let (mut third, mut third_parked) =
@@ -439,7 +632,10 @@ fn native_unary_admission_shares_fifo_capacity_and_reuses_the_connection() {
                 .await
                 .unwrap_err();
             assert_eq!(refused.code(), Code::ResourceExhausted);
-            assert_eq!(refused.message(), "native gRPC unary admission queue is full");
+            assert_eq!(
+                refused.message(),
+                "native gRPC unary admission queue is full"
+            );
             assert_eq!(pressure(&channel), (1, 2, 0));
             assert_no_extra_connection(&listener);
 
@@ -488,7 +684,11 @@ fn native_unary_admission_cancellation_deadline_and_abandonment_restore_the_queu
             assert_eq!(pressure(&channel), (1, 0, 1));
 
             for (kind, code, message) in [
-                (CancelKind::User, Code::Cancelled, "native gRPC caller cancelled"),
+                (
+                    CancelKind::User,
+                    Code::Cancelled,
+                    "native gRPC caller cancelled",
+                ),
                 (
                     CancelKind::Deadline,
                     Code::DeadlineExceeded,
@@ -509,10 +709,7 @@ fn native_unary_admission_cancellation_deadline_and_abandonment_restore_the_queu
                 // Publish directly to the parked Cx. No capacity release,
                 // self-wake or timer may be needed to deliver cancellation.
                 owner.cancel_with(kind, Some("cancel a queued unary exchange"));
-                let status = within(cancelled.join(&cx))
-                    .await
-                    .unwrap()
-                    .unwrap_err();
+                let status = within(cancelled.join(&cx)).await.unwrap().unwrap_err();
                 assert_eq!(status.code(), code);
                 assert_eq!(status.message(), message);
                 assert_eq!(pressure(&channel), (1, 0, 1));
@@ -569,7 +766,11 @@ fn native_unary_admission_cancellation_deadline_and_abandonment_restore_the_queu
                 &Bytes::from_static(b"held")
             );
             assert_eq!(
-                within(recovered.join(&cx)).await.unwrap().unwrap().get_ref(),
+                within(recovered.join(&cx))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_ref(),
                 &Bytes::from_static(b"recovered")
             );
             assert_eq!(pressure(&channel), (0, 0, 2));

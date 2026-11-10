@@ -479,8 +479,20 @@ impl Semaphore {
         cx: &'b Cx<Caps>,
         count: usize,
     ) -> CheckedAcquireFuture<'a, 'b, Caps> {
+        self.acquire_checked_for(cx, cx, count)
+    }
+
+    /// Keep cancellation and budget on the caller while another registered
+    /// task owns the runtime obligation. Both must belong to the same region.
+    pub(crate) fn acquire_checked_for<'a, 'b, Caps>(
+        &'a self,
+        cx: &'b Cx<Caps>,
+        owner: &'b Cx<Caps>,
+        count: usize,
+    ) -> CheckedAcquireFuture<'a, 'b, Caps> {
         CheckedAcquireFuture {
             inner: self.acquire(cx, count),
+            obligation_cx: owner,
         }
     }
 
@@ -502,6 +514,15 @@ impl Semaphore {
         cx: &Cx<Caps>,
         count: usize,
     ) -> Result<SemaphorePermit<'_>, CheckedAcquireError> {
+        self.try_acquire_checked_for(cx, cx, count)
+    }
+
+    pub(crate) fn try_acquire_checked_for<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        owner: &Cx<Caps>,
+        count: usize,
+    ) -> Result<SemaphorePermit<'_>, CheckedAcquireError> {
         if count == 0 {
             return Ok(SemaphorePermit {
                 semaphore: self,
@@ -512,6 +533,11 @@ impl Semaphore {
             });
         }
         cx.checkpoint().map_err(|_| AcquireError::Cancelled)?;
+        if owner.region_id() != cx.region_id() {
+            return Err(CheckedAcquireError::Admission(
+                crate::runtime::obligation_mailbox::ObligationAdmissionError::HolderMismatch,
+            ));
+        }
         let mut rollback = AcquisitionRollbackGuard::new(self, count);
         rollback.notify_on_rollback = true;
         let mut state = self.state.lock();
@@ -532,12 +558,57 @@ impl Semaphore {
 
         // Arm capacity rollback before arbitrary notifier callbacks, and admit
         // before minting the graded token so refusal cannot trip its drop bomb.
-        rollback.runtime_obligation = cx.try_register_obligation_checked(
+        rollback.runtime_obligation = owner.try_register_obligation_checked(
             crate::record::ObligationKind::SemaphorePermit,
-            cx.task_id(),
+            owner.task_id(),
         )?;
         rollback.obligation = reserve_permit_obligation(cx.region_id());
         Ok(rollback.into_borrowed_permit())
+    }
+
+    /// Reserve one unit before creating its accounting owner. No permit is
+    /// returned unless checked obligation admission succeeds. The rollback
+    /// guard settles before the owner retires on error or unwind.
+    pub(crate) fn try_acquire_one_checked_with<Caps, T, E>(
+        &self,
+        cx: &Cx<Caps>,
+        admit: impl FnOnce() -> Result<
+            (
+                T,
+                Option<crate::runtime::obligation_mailbox::ObligationToken>,
+            ),
+            E,
+        >,
+        map_error: impl Fn(CheckedAcquireError) -> E,
+    ) -> Result<(SemaphorePermit<'_>, T), E> {
+        cx.checkpoint()
+            .map_err(|_| map_error(AcquireError::Cancelled.into()))?;
+        let owner;
+        let mut rollback = AcquisitionRollbackGuard::new(self, 1);
+        rollback.notify_on_rollback = true;
+        let mut state = self.state.lock();
+        if state.closed {
+            drop(state);
+            return Err(map_error(AcquireError::Closed.into()));
+        }
+        if state.waiter_head.is_some() || state.permits < 1 {
+            drop(state);
+            return Err(map_error(TryAcquireError.into()));
+        }
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
+        }
+        state.permits -= 1;
+        self.permits_shadow.store(state.permits, Ordering::Relaxed);
+        rollback.arm();
+        rollback.record_lock_acquire();
+        drop(state);
+
+        let (admitted_owner, token) = admit()?;
+        owner = admitted_owner;
+        rollback.runtime_obligation = token;
+        rollback.obligation = reserve_permit_obligation(cx.region_id());
+        Ok((rollback.into_borrowed_permit(), owner))
     }
 
     /// Checked nonblocking all-or-nothing acquisition of `count` units.
@@ -995,18 +1066,26 @@ impl<'a, Caps> AcquireFuture<'a, '_, Caps> {
 /// Uses the existing FIFO waiter and cancellation path with checked admission.
 pub struct CheckedAcquireFuture<'a, 'b, Caps = crate::cx::cap::All> {
     inner: AcquireFuture<'a, 'b, Caps>,
+    obligation_cx: &'b Cx<Caps>,
 }
 
 impl<'a, Caps> Future for CheckedAcquireFuture<'a, '_, Caps> {
     type Output = Result<SemaphorePermit<'a>, CheckedAcquireError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let owner = self.obligation_cx;
         self.inner.poll_with_registration(context, |cx| {
-            cx.try_register_obligation_checked(
-                crate::record::ObligationKind::SemaphorePermit,
-                cx.task_id(),
-            )
-            .map_err(CheckedAcquireError::Admission)
+            if owner.region_id() != cx.region_id() {
+                return Err(CheckedAcquireError::Admission(
+                    crate::runtime::obligation_mailbox::ObligationAdmissionError::HolderMismatch,
+                ));
+            }
+            owner
+                .try_register_obligation_checked(
+                    crate::record::ObligationKind::SemaphorePermit,
+                    owner.task_id(),
+                )
+                .map_err(CheckedAcquireError::Admission)
         })
     }
 }

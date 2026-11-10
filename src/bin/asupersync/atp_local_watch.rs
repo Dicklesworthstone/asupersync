@@ -122,7 +122,7 @@ mod native {
     use asupersync::channel::oneshot;
     use asupersync::cli::Outputtable;
     use asupersync::cx::Cx;
-    use asupersync::fs::ScopedFsError;
+    use asupersync::fs::scoped::ScopedFsError;
     use asupersync::runtime::{JoinError, RootDrainOutcome, RuntimeBuilder};
     use asupersync::time::SleepError;
     use asupersync::types::CancelKind;

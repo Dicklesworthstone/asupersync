@@ -114,8 +114,7 @@ fn configuration() -> Http2StreamingListenerConfig {
         // A tunnel must use its explicit policy rather than this ordinary-body cap.
         .max_body_size(8)
         .drain_timeout(Duration::from_secs(2))
-        .hard_drain_timeout(Duration::from_secs(5))
-        .flow_control_progress_timeout(WATCHDOG);
+        .hard_drain_timeout(Duration::from_secs(5));
     config
 }
 
@@ -141,7 +140,8 @@ where
     let listener =
         Http2Listener::bind_streaming_produced_with_config("127.0.0.1:0", handler, configuration())
             .await
-            .unwrap();
+            .unwrap()
+            .flow_control_progress_timeout(WATCHDOG);
     let listener = match mode {
         ListenerMode::Plain => listener,
         #[cfg(feature = "tls")]
@@ -167,7 +167,7 @@ where
         },
     )
     .await;
-    if !manager.is_draining() {
+    if !manager.shutdown_signal().is_shutting_down() {
         assert!(manager.begin_drain(Duration::from_secs(2)));
     }
     let stats = service.join(&driver).await.unwrap().unwrap();
@@ -219,10 +219,16 @@ fn assert_request(request: &StreamingServerRequest, scheme: &str, path: &str) ->
 }
 
 async fn wait_retired(request: &Cx, in_flight: &AtomicUsize) {
-    let diagnostics = Runtime::current_handle().unwrap().diagnostics().unwrap();
+    // `Diagnostics` is not `Send` (it can own an `Arc<RuntimeState>`, and a
+    // region's finalizers are `Send` without `Sync`), so it must not live
+    // across this await. Open it for each poll from the worker's runtime
+    // handle instead; the spawned workflow that awaits this must stay `Send`.
     poll_fn(|task| {
         if in_flight.load(Ordering::SeqCst) == 0
-            && diagnostics
+            && Runtime::current_handle()
+                .unwrap()
+                .diagnostics()
+                .unwrap()
                 .explain_region_open(request.region_id())
                 .region_state
                 .is_none()

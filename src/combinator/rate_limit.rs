@@ -1620,11 +1620,18 @@ impl fmt::Debug for FixedWindowRateLimiter {
 impl FixedWindowRateLimiter {
     fn record_wait(&self, waited: Duration) {
         let millis = duration_to_millis_saturating(waited);
-        let _ = self.total_wait_time_ms.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |total| Some(total.saturating_add(millis)),
-        );
+        let mut total = self.total_wait_time_ms.load(Ordering::Relaxed);
+        loop {
+            match self.total_wait_time_ms.compare_exchange_weak(
+                total,
+                total.saturating_add(millis),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => total = observed,
+            }
+        }
         self.max_wait_time_ms.fetch_max(millis, Ordering::Relaxed);
     }
 
