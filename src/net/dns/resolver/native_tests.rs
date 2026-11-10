@@ -565,6 +565,158 @@ fn v4() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7))
 }
 
+fn cname_reply(
+    query: &[u8],
+    name: &str,
+    kind: u16,
+    bundled: bool,
+    alias_ttl: u32,
+) -> Option<Vec<u8>> {
+    if name != "alias.example" {
+        return if !bundled && name == "target.example" {
+            standard_reply(query, name, kind)
+        } else {
+            Some(answer(query, 0x8183, None))
+        };
+    }
+    let mut packet = answer(query, 0x8180, None);
+    let mut append = |owner: &str, record_type: u16, ttl: u32, data: &[u8]| {
+        packet.extend_from_slice(&name_wire(owner));
+        packet.extend_from_slice(&record_type.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&ttl.to_be_bytes());
+        packet.extend_from_slice(&u16::try_from(data.len()).unwrap().to_be_bytes());
+        packet.extend_from_slice(data);
+    };
+    // Deliberately put the terminal record before the aliases. A complete
+    // answer must not depend on record order or a second nameserver roundtrip.
+    if bundled {
+        let data = match kind {
+            1 => vec![192, 0, 2, 7],
+            28 => Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 7).octets().to_vec(),
+            _ => panic!("unexpected address query type {kind}"),
+        };
+        append("target.example", kind, 45, &data);
+    }
+    append("middle.example", 5, alias_ttl, &name_wire("target.example"));
+    append("alias.example", 5, 60, &name_wire("middle.example"));
+    let count = if bundled { 3u16 } else { 2u16 };
+    packet[6..8].copy_from_slice(&count.to_be_bytes());
+    Some(packet)
+}
+
+fn assert_cname_lookup(bundled: bool) {
+    for workers in [1, 2] {
+        for native in [false, true] {
+            for alias_ttl in [0, 7] {
+                let peer = Peer::serve(move |query, name, kind| {
+                    cname_reply(query, name, kind, bundled, alias_ttl)
+                });
+                let resolver = Resolver::with_config(ResolverConfig {
+                    nameservers: vec![peer.address],
+                    cache_config: CacheConfig {
+                        min_ttl: Duration::ZERO,
+                        ..CacheConfig::default()
+                    },
+                    timeout: Duration::from_secs(3),
+                    retries: 0,
+                    ..ResolverConfig::default()
+                });
+                let runtime = runtime(workers);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let initial_wakers = cancel_waker_tokens(&cx);
+                    for _ in 0..2 {
+                        let found = if native {
+                            resolver.lookup_ip_native(&cx, "alias.example").await
+                        } else {
+                            resolver.lookup_ip("alias.example").await
+                        }
+                        .unwrap();
+                        assert_eq!(found.addresses(), &[v6(), v4()]);
+                        assert_eq!(found.ttl(), Duration::from_secs(u64::from(alias_ttl)));
+                        assert_eq!(cancel_waker_tokens(&cx), initial_wakers);
+                    }
+                });
+                let mut expected = Vec::new();
+                // Zero-TTL aliases must not populate the shared cache. With a
+                // positive TTL, the second public lookup uses the first result.
+                let expected_lookups = if alias_ttl == 0 { 2 } else { 1 };
+                for _ in 0..expected_lookups {
+                    expected.extend([
+                        ("alias.example".to_owned(), 1),
+                        ("alias.example".to_owned(), 28),
+                    ]);
+                    if !bundled {
+                        expected.extend([
+                            ("target.example".to_owned(), 1),
+                            ("target.example".to_owned(), 28),
+                        ]);
+                    }
+                }
+                expected.sort();
+                assert_eq!(
+                    peer.seen(),
+                    expected,
+                    "workers={workers} native={native} bundled={bundled} ttl={alias_ttl}"
+                );
+                peer.finish();
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+    }
+}
+
+#[test]
+fn cname_bundled_public_lookups_reuse_the_complete_answer() {
+    assert_cname_lookup(true);
+}
+
+#[test]
+fn cname_followup_public_lookups_retain_alias_ttl_and_skip_intermediate_queries() {
+    assert_cname_lookup(false);
+}
+
+#[test]
+fn cname_invalid_answer_does_not_block_later_nameservers() {
+    for native in [false, true] {
+        let invalid = Peer::serve(|query, name, _kind| {
+            Some(answer(query, 0x8180, Some((5, 30, &name_wire(name)))))
+        });
+        let healthy = Peer::serve(standard_reply);
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![invalid.address, healthy.address],
+            cache_enabled: false,
+            timeout: Duration::from_secs(3),
+            retries: 0,
+            ..ResolverConfig::default()
+        });
+        let runtime = runtime(2);
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let initial_wakers = cancel_waker_tokens(&cx);
+            let found = if native {
+                resolver.lookup_ip_native(&cx, "alias.example").await
+            } else {
+                resolver.lookup_ip("alias.example").await
+            }
+            .unwrap();
+            assert_eq!(found.addresses(), &[v6(), v4()]);
+            assert_eq!(found.ttl(), Duration::from_secs(45));
+            assert_eq!(cancel_waker_tokens(&cx), initial_wakers);
+        });
+        let expected = vec![
+            ("alias.example".to_owned(), 1),
+            ("alias.example".to_owned(), 28),
+        ];
+        assert_eq!(invalid.seen(), expected);
+        assert_eq!(healthy.seen(), expected);
+        invalid.finish();
+        healthy.finish();
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
 /// After a forbidden-pool run: no blocking thread was started and no blocking work was queued.
 fn assert_pool_idle(runtime: &Runtime) {
     let pool = runtime

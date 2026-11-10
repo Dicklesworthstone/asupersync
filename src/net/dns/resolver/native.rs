@@ -46,8 +46,11 @@ impl Resolver {
     /// A truncated UDP response is retried over TCP within its remaining attempt
     /// budget. Results use this resolver's existing positive/negative IP cache;
     /// a partial family failure has TTL zero and cannot hide the missing family
-    /// in that cache. Record-specific native methods do not cache, matching
-    /// their existing counterparts.
+    /// in that cache. Bundled CNAME chains are resolved without redundant
+    /// queries, and every traversed alias bounds the returned TTL and counts
+    /// toward the same eight-hop limit, including aliases from earlier replies.
+    /// Record-specific native methods do not cache, matching their existing
+    /// counterparts.
     ///
     /// `cx` must retain native I/O authority. Every polling task must also permit
     /// I/O; the explicit owner, original polling task, and subsequent polling
@@ -186,7 +189,8 @@ impl Resolver {
     ) -> Result<Vec<DnsAnswer>, DnsError> {
         let mut current = name.to_owned();
         let mut alias_ttl: Option<Duration> = None;
-        for depth in 0..=8 {
+        let mut cname_depth = 0;
+        loop {
             let mut last_error = None;
             let mut no_records = false;
             let mut alias = None;
@@ -216,8 +220,13 @@ impl Resolver {
                         .await;
                     match response {
                         Ok(response) => match response.rcode {
-                            0 => match select_records_for_query(&current, kind, &response.answers) {
-                                QuerySelection::Records(mut records) => {
+                            0 => match select_records_for_query(
+                                &current,
+                                kind,
+                                &response.answers,
+                                cname_depth,
+                            ) {
+                                Ok(QuerySelection::Records(mut records)) => {
                                     if let Some(ttl) = alias_ttl {
                                         for record in &mut records {
                                             record.ttl = record.ttl.min(ttl);
@@ -225,20 +234,17 @@ impl Resolver {
                                     }
                                     return Ok(records);
                                 }
-                                QuerySelection::Alias(target) => {
+                                Ok(QuerySelection::Alias { target, ttl, hops }) => {
                                     if alias.is_none() {
-                                        let ttl = response.answers.iter().filter(|answer| {
-                                            canonical_dns_name(&answer.name) == canonical_dns_name(&current)
-                                                && matches!(&answer.data, DnsRecordData::Cname(found) if found == &target)
-                                        }).map(|answer| answer.ttl).min().unwrap_or(Duration::ZERO);
-                                        alias = Some((target, ttl));
+                                        alias = Some((target, ttl, hops));
                                     }
                                     answered[index] = true;
                                 }
-                                QuerySelection::NoRecords => {
+                                Ok(QuerySelection::NoRecords) => {
                                     no_records = true;
                                     answered[index] = true;
                                 }
+                                Err(error) => last_error = Some(error),
                             },
                             3 => {
                                 no_records = true;
@@ -260,11 +266,9 @@ impl Resolver {
                     break;
                 }
             }
-            if let Some((target, ttl)) = alias {
-                if depth == 8 {
-                    return Err(DnsError::ServerError("DNS CNAME chain exceeded recursion limit".into()));
-                }
+            if let Some((target, ttl, hops)) = alias {
                 current = target;
+                cname_depth += hops;
                 alias_ttl = Some(alias_ttl.map_or(ttl, |previous| previous.min(ttl)));
             } else if no_records {
                 return Err(DnsError::NoRecords(name.to_owned()));
@@ -272,7 +276,6 @@ impl Resolver {
                 return Err(last_error.unwrap_or(DnsError::Timeout));
             }
         }
-        unreachable!("the bounded CNAME loop returns at its last depth")
     }
 }
 

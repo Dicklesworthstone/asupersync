@@ -23,6 +23,123 @@
         crate::test_phase!(name);
     }
 
+    #[test]
+    fn cname_selection_consumes_bundled_records_and_bounds_their_ttl() {
+        let cases = [
+            (DnsQueryType::A, DnsRecordData::A(Ipv4Addr::LOCALHOST)),
+            (DnsQueryType::Aaaa, DnsRecordData::Aaaa(Ipv6Addr::LOCALHOST)),
+            (
+                DnsQueryType::Mx,
+                DnsRecordData::Mx {
+                    preference: 10,
+                    exchange: "mail.example".into(),
+                },
+            ),
+            (DnsQueryType::Txt, DnsRecordData::Txt("verified".into())),
+            (
+                DnsQueryType::Srv,
+                DnsRecordData::Srv {
+                    priority: 1,
+                    weight: 2,
+                    port: 443,
+                    target: "service.example".into(),
+                },
+            ),
+        ];
+        for (kind, data) in cases {
+            // Answer order is arbitrary. Only the terminal owner reached by
+            // this query's aliases may supply the requested records.
+            let answers = [
+                DnsAnswer {
+                    name: "unrelated.example".into(),
+                    ttl: Duration::from_secs(1),
+                    data: data.clone(),
+                },
+                DnsAnswer {
+                    name: "target.example".into(),
+                    ttl: Duration::from_secs(300),
+                    data,
+                },
+                DnsAnswer {
+                    name: "Middle.Example".into(),
+                    ttl: Duration::from_secs(7),
+                    data: DnsRecordData::Cname("TARGET.example.".into()),
+                },
+                DnsAnswer {
+                    name: "alias.example".into(),
+                    ttl: Duration::from_secs(60),
+                    data: DnsRecordData::Cname("middle.example".into()),
+                },
+            ];
+            let selected = select_records_for_query("ALIAS.example.", kind, &answers, 0).unwrap();
+            let QuerySelection::Records(records) = selected else {
+                panic!("bundled {kind:?} records were not returned: {selected:?}");
+            };
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].name, "target.example");
+            assert_eq!(records[0].ttl, Duration::from_secs(7));
+        }
+    }
+
+    #[test]
+    fn cname_selection_retains_zero_ttl_and_depth_for_a_followup_query() {
+        let answers = [
+            DnsAnswer {
+                name: "alias.example".into(),
+                ttl: Duration::from_secs(60),
+                data: DnsRecordData::Cname("middle.example".into()),
+            },
+            DnsAnswer {
+                name: "middle.example".into(),
+                ttl: Duration::ZERO,
+                data: DnsRecordData::Cname("missing.example".into()),
+            },
+        ];
+        let selected =
+            select_records_for_query("alias.example", DnsQueryType::A, &answers, 6).unwrap();
+        assert!(matches!(selected, QuerySelection::Alias { target, ttl, hops: 2 }
+            if target == "missing.example" && ttl.is_zero()));
+        assert!(matches!(
+            select_records_for_query("alias.example", DnsQueryType::A, &answers, 7),
+            Err(DnsError::ServerError(message)) if message.contains("recursion limit")
+        ));
+    }
+
+    #[test]
+    fn cname_selection_rejects_cycles_and_enforces_the_complete_chain_limit() {
+        let cycle = [DnsAnswer {
+            name: "alias.example".into(),
+            ttl: Duration::from_secs(30),
+            data: DnsRecordData::Cname("ALIAS.example.".into()),
+        }];
+        assert!(matches!(
+            select_records_for_query("alias.example", DnsQueryType::A, &cycle, 0),
+            Err(DnsError::ServerError(message)) if message.contains("loop")
+        ));
+        for hops in [8, 9] {
+            let mut answers: Vec<_> = (0..hops)
+                .map(|index| DnsAnswer {
+                    name: format!("alias{index}.example"),
+                    ttl: Duration::from_secs(30),
+                    data: DnsRecordData::Cname(format!("alias{}.example", index + 1)),
+                })
+                .collect();
+            answers.push(DnsAnswer {
+                name: format!("alias{hops}.example"),
+                ttl: Duration::from_secs(60),
+                data: DnsRecordData::A(Ipv4Addr::LOCALHOST),
+            });
+            let selected = select_records_for_query("alias0.example", DnsQueryType::A, &answers, 0);
+            if hops == 8 {
+                assert!(matches!(selected, Ok(QuerySelection::Records(records))
+                    if records.len() == 1 && records[0].ttl == Duration::from_secs(30)));
+            } else {
+                assert!(matches!(selected, Err(DnsError::ServerError(message))
+                    if message.contains("recursion limit")));
+            }
+        }
+    }
+
     enum DnsNameGoldenCase {
         SingleLabel,
         MultiLabel,

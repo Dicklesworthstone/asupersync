@@ -973,7 +973,11 @@ struct ParsedDnsResponse {
 #[derive(Debug)]
 enum QuerySelection {
     Records(Vec<DnsAnswer>),
-    Alias(String),
+    Alias {
+        target: String,
+        ttl: Duration,
+        hops: usize,
+    },
     NoRecords,
 }
 
@@ -1597,33 +1601,78 @@ fn select_records_for_query(
     query_name: &str,
     query_type: DnsQueryType,
     answers: &[DnsAnswer],
-) -> QuerySelection {
-    let wanted_name = canonical_dns_name(query_name);
-    let mut matches = Vec::new();
-    let mut alias = None;
+    cname_depth: usize,
+) -> Result<QuerySelection, DnsError> {
+    let mut wanted_name = canonical_dns_name(query_name);
+    let mut visited = Vec::new();
+    let mut alias_ttl: Option<Duration> = None;
+    let mut hops = 0;
 
-    for answer in answers {
-        if canonical_dns_name(&answer.name) != wanted_name {
-            continue;
+    loop {
+        if visited.contains(&wanted_name) {
+            return Err(DnsError::ServerError(
+                "DNS CNAME chain contains a loop".to_string(),
+            ));
+        }
+        visited.push(wanted_name.clone());
+        let mut matches = Vec::new();
+        let mut alias: Option<(String, Duration)> = None;
+
+        for answer in answers {
+            if canonical_dns_name(&answer.name) != wanted_name {
+                continue;
+            }
+
+            match (&answer.data, query_type) {
+                (DnsRecordData::A(_), DnsQueryType::A)
+                | (DnsRecordData::Aaaa(_), DnsQueryType::Aaaa)
+                | (DnsRecordData::Mx { .. }, DnsQueryType::Mx)
+                | (DnsRecordData::Txt(_), DnsQueryType::Txt)
+                | (DnsRecordData::Srv { .. }, DnsQueryType::Srv) => {
+                    let mut record = answer.clone();
+                    if let Some(ttl) = alias_ttl {
+                        record.ttl = record.ttl.min(ttl);
+                    }
+                    matches.push(record);
+                }
+                (DnsRecordData::Cname(target), _) => {
+                    let target = canonical_dns_name(target);
+                    if let Some((selected, ttl)) = &mut alias {
+                        if *selected == target {
+                            *ttl = (*ttl).min(answer.ttl);
+                        }
+                    } else {
+                        alias = Some((target, answer.ttl));
+                    }
+                }
+                _ => {}
+            }
         }
 
-        match (&answer.data, query_type) {
-            (DnsRecordData::A(_), DnsQueryType::A)
-            | (DnsRecordData::Aaaa(_), DnsQueryType::Aaaa)
-            | (DnsRecordData::Mx { .. }, DnsQueryType::Mx)
-            | (DnsRecordData::Txt(_), DnsQueryType::Txt)
-            | (DnsRecordData::Srv { .. }, DnsQueryType::Srv) => matches.push(answer.clone()),
-            (DnsRecordData::Cname(target), _) if alias.is_none() => alias = Some(target.clone()),
-            _ => {}
+        if !matches.is_empty() {
+            return Ok(QuerySelection::Records(matches));
         }
-    }
-
-    if !matches.is_empty() {
-        QuerySelection::Records(matches)
-    } else if let Some(alias) = alias {
-        QuerySelection::Alias(alias)
-    } else {
-        QuerySelection::NoRecords
+        let Some((target, ttl)) = alias else {
+            return Ok(match alias_ttl {
+                Some(ttl) => QuerySelection::Alias {
+                    target: wanted_name,
+                    ttl,
+                    hops,
+                },
+                None => QuerySelection::NoRecords,
+            });
+        };
+        // The limit covers the entire resolution, including aliases consumed
+        // from earlier replies. Packing a long chain into one answer must not
+        // bypass the same bound enforced across separate DNS queries.
+        if cname_depth.saturating_add(hops) >= 8 {
+            return Err(DnsError::ServerError(
+                "DNS CNAME chain exceeded recursion limit".to_string(),
+            ));
+        }
+        alias_ttl = Some(alias_ttl.map_or(ttl, |previous| previous.min(ttl)));
+        hops += 1;
+        wanted_name = target;
     }
 }
 
@@ -1868,18 +1917,24 @@ impl Resolver {
 
                 match query_nameserver(nameserver, &query, query_id, query_timeout) {
                     Ok(response) => match response.rcode {
-                        0 => match select_records_for_query(name, query_type, &response.answers) {
-                            QuerySelection::Records(records) => return Ok(records),
-                            QuerySelection::Alias(alias) => {
+                        0 => match select_records_for_query(
+                            name,
+                            query_type,
+                            &response.answers,
+                            cname_depth,
+                        ) {
+                            Ok(QuerySelection::Records(records)) => return Ok(records),
+                            Ok(QuerySelection::Alias { target, ttl, hops }) => {
                                 if deferred_alias.is_none() {
-                                    deferred_alias = Some(alias);
+                                    deferred_alias = Some((target, ttl, hops));
                                 }
                                 answered[index] = true;
                             }
-                            QuerySelection::NoRecords => {
+                            Ok(QuerySelection::NoRecords) => {
                                 saw_no_records = true;
                                 answered[index] = true;
                             }
+                            Err(error) => last_error = Some(error),
                         },
                         3 => {
                             saw_no_records = true;
@@ -1904,15 +1959,19 @@ impl Resolver {
             }
         }
 
-        if let Some(alias) = deferred_alias {
-            return Self::query_records_inner_sync(
+        if let Some((alias, ttl, hops)) = deferred_alias {
+            let mut records = Self::query_records_inner_sync(
                 &alias,
                 query_type,
                 nameservers,
                 retries,
                 context,
-                cname_depth + 1,
-            );
+                cname_depth + hops,
+            )?;
+            for record in &mut records {
+                record.ttl = record.ttl.min(ttl);
+            }
+            return Ok(records);
         }
         if saw_no_records {
             return Err(DnsError::NoRecords(name.to_string()));
