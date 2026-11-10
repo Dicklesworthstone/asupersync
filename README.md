@@ -1006,6 +1006,38 @@ impl Cx {
 }
 ```
 
+### UtcTimestamp — Checked Calendar Instants
+
+`asupersync::time::UtcTimestamp` provides nanosecond-precision UTC instants,
+checked Gregorian calendar conversion, signed Unix timestamps, and checked
+`SystemTime` conversion. Its supported range is years `0000..=9999`, with
+astronomical year zero and no leap seconds. Duration arithmetic returns an
+explicit failure when it would leave this range.
+
+```rust
+use asupersync::time::{UtcClock, UtcTimestamp};
+use std::time::Duration;
+
+let before_epoch = UtcTimestamp::from_unix_nanos(-1).unwrap();
+assert_eq!(before_epoch.to_rfc3339(), "1969-12-31T23:59:59.999999999Z");
+assert_eq!(before_epoch.unix_millis(), -1); // Floor, including before the epoch.
+assert_eq!(
+    before_epoch.checked_add(Duration::from_nanos(1)),
+    Some(UtcTimestamp::UNIX_EPOCH),
+);
+
+// Supply the calendar clock explicitly, including in deterministic tests.
+let clock = || Ok(UtcTimestamp::UNIX_EPOCH);
+assert_eq!(clock.now().unwrap().calendar().year, 1970);
+```
+
+`UtcCalendar` validates month lengths, leap years, time-of-day components, and
+nanoseconds when passed to `UtcTimestamp::from_calendar`. Calendar time remains
+separate from the runtime's scheduling clock (`types::Time`). Existing public
+`chrono` fields retain their types and serialized formats; the existing
+`format_unix_nanos_rfc3339` and HTTP-date helpers use this checked core while
+preserving their output bytes.
+
 ---
 
 ## Architecture
