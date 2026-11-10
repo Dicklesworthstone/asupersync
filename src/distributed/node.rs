@@ -44,6 +44,12 @@ pub use outbound::{
 };
 use outbound::Outbound;
 
+mod symbols;
+pub use symbols::{
+    NativeDistributedSymbolConfig, NativeDistributedSymbolError, NativeDistributedSymbolReport,
+    NativeDistributedSymbolRoute, NativeDistributedSymbolTransport,
+};
+
 /// A concrete task owned by the node's child region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeDistributedComponent {

@@ -81,6 +81,8 @@ pub use node::{
     NativeDistributedRemoteResult, NativeDistributedTypedRemoteError,
     NativeDistributedTypedRemoteHandle, NativeDistributedTypedRemoteReport,
     NativeDistributedTypedRemoteResult, NativeListenerResult, NativeMembershipResult,
+    NativeDistributedSymbolConfig, NativeDistributedSymbolError, NativeDistributedSymbolReport,
+    NativeDistributedSymbolRoute, NativeDistributedSymbolTransport,
 };
 pub use recovery::{
     CollectedSymbol, CollectionConsistency, CollectionMetrics, RecoveryCollector, RecoveryConfig,

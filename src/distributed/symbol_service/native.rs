@@ -92,6 +92,13 @@ impl fmt::Debug for RemoteSymbolTransport {
 }
 
 impl RemoteSymbolTransport {
+    // Only the structured node adapter may replace the owner: it has already
+    // admitted a checked membership lease and a real child task. Routes,
+    // credentials, codec limits and clone-shared admission remain unchanged.
+    pub(crate) fn for_owner(&self, cx: Cx) -> Self {
+        Self { cx, ..self.clone() }
+    }
+
     /// Bind explicitly authorized replica clients and a V1 registry hello to an owner.
     /// Route labels must be unique, nonempty, and at most 255 bytes; no I/O occurs.
     pub fn new(
@@ -237,7 +244,7 @@ impl RemoteSymbolTransport {
         }).await
     }
 
-    async fn send(&self, replica: &str, symbols: Vec<AuthenticatedSymbol>) -> Result<ReplicaAck, RemoteSymbolError> {
+    pub(crate) async fn send(&self, replica: &str, symbols: Vec<AuthenticatedSymbol>) -> Result<ReplicaAck, RemoteSymbolError> {
         // Check authority/cancellation before sorting, hashing, or making an input copy.
         if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
         if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }

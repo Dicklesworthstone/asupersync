@@ -69,6 +69,9 @@ mod typed;
 #[path = "distributed_node_native/discovery.rs"]
 mod discovery;
 
+#[path = "distributed_node_native/symbols.rs"]
+mod symbols;
+
 struct EchoRequest;
 struct EchoResponse;
 impl HasSchema for EchoRequest {
