@@ -50,6 +50,7 @@ impl ResponseHead {
         let mut message = None;
         let mut details = None;
         let mut metadata = Metadata::new();
+        let mut retained = 0usize;
         for Header { name, value } in headers {
             match name.as_str() {
                 ":status" if first => {
@@ -110,14 +111,20 @@ impl ResponseHead {
                 _ => {
                     if name.ends_with("-bin") {
                         // Intermediaries may comma-join binary metadata. Preserve
-                        // every value, including an explicitly empty value.
+                        // every value, including an explicitly empty value. Each
+                        // becomes an owned entry, so bound the repeated name and
+                        // entry overhead before cloning or decoding the value.
                         for value in value.split(',') {
+                            charge_metadata(&mut retained, &name, value, self.limit)?;
                             if !metadata.insert_bin(name.clone(), decode_binary(value.trim())?) {
                                 return Err(Status::internal("invalid binary response metadata"));
                             }
                         }
-                    } else if !metadata.insert(name, value) {
-                        return Err(Status::internal("invalid response metadata"));
+                    } else {
+                        charge_metadata(&mut retained, &name, &value, self.limit)?;
+                        if !metadata.insert(name, value) {
+                            return Err(Status::internal("invalid response metadata"));
+                        }
                     }
                 }
             }
@@ -187,6 +194,15 @@ impl ResponseHead {
         }
         Ok(())
     }
+}
+
+fn charge_metadata(total: &mut usize, name: &str, value: &str, limit: usize) -> Result<(), Status> {
+    *total = total.checked_add(name.len())
+        .and_then(|n| n.checked_add(value.len()))
+        .and_then(|n| n.checked_add(32))
+        .filter(|n| *n <= limit)
+        .ok_or_else(|| Status::resource_exhausted("expanded gRPC metadata exceeds its byte limit"))?;
+    Ok(())
 }
 
 fn valid_content_type(value: &str) -> bool {

@@ -142,6 +142,67 @@ fn native_client_preserves_fragmented_messages_metadata_and_error_then_fuses() {
 }
 
 #[test]
+fn native_client_rejects_joined_binary_metadata_expansion_in_every_header_phase() {
+    let joined = ",".repeat(19);
+    for phase in ["initial", "trailers", "trailers-only"] {
+        let mut bytes = frame(4, 0, &[]);
+        let mut fields = Vec::new();
+        if phase == "trailers" {
+            bytes.extend(headers(&[
+                (":status", "200"), ("content-type", "application/grpc"),
+                ("x-initial", "accepted"),
+            ], false));
+        } else {
+            fields.extend([ (":status", "200"), ("content-type", "application/grpc") ]);
+        }
+        if phase != "initial" {
+            fields.push(("grpc-status", "0"));
+        }
+        fields.push(("x-proof-bin", joined.as_str()));
+        bytes.extend(headers(&fields, phase != "initial"));
+        let (io, probe) = fixture(bytes, 2, false);
+        let mut stream = NativeServerStream::new(
+            &Cx::for_testing(), io, "localhost", "/test.Service/Watch",
+            Request::new(Bytes::new()), IdentityCodec,
+            NativeStreamConfig { max_metadata_bytes: 512, ..NativeStreamConfig::default() },
+        ).unwrap();
+
+        if phase == "trailers" {
+            assert!(run(stream.headers()).unwrap().get("x-initial").is_some());
+        } else {
+            assert_eq!(run(stream.headers()).unwrap_err().code(), Code::ResourceExhausted);
+        }
+        assert_eq!(run(stream.message()).unwrap_err().code(), Code::ResourceExhausted);
+        assert!(run(stream.message()).unwrap().is_none());
+        assert_eq!(stream.status().unwrap().code(), Code::ResourceExhausted);
+        assert!(stream.trailers().is_none(), "a refused block must not publish metadata");
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn native_duplex_rejects_expanded_binary_metadata_while_uploading() {
+    let joined = ",".repeat(19);
+    let mut bytes = frame(4, 0, &[]);
+    bytes.extend(headers(&[
+        (":status", "200"), ("content-type", "application/grpc"),
+        ("x-proof-bin", joined.as_str()),
+    ], false));
+    let (io, probe) = fixture(bytes, 4096, false);
+    let mut stream = NativeDuplexStream::new(
+        &Cx::for_testing(), io, "localhost", "/test.Upload/Collect", Request::new(()),
+        IdentityCodec,
+        NativeStreamConfig { max_metadata_bytes: 512, ..NativeStreamConfig::default() },
+    ).unwrap();
+
+    assert_eq!(run(stream.next_event()).unwrap_err().code(), Code::ResourceExhausted);
+    assert!(run(stream.next_event()).unwrap().is_none());
+    assert_eq!(stream.status().unwrap().code(), Code::ResourceExhausted);
+    assert!(stream.initial_metadata().is_none());
+    assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn interrupted_message_wait_retains_partial_data_and_sends_request_once() {
     let mut bytes = start();
     let wire = message(b"resumed");

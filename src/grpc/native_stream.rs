@@ -117,6 +117,8 @@ pub struct NativeStreamConfig {
     /// Maximum inbound message, on the wire and after decompression.
     pub max_recv_message_size: usize,
     /// Per-header-block name/value bytes plus 32 bytes per field (H2 accounting).
+    /// Incoming comma-joined binary metadata also charges this limit for each
+    /// retained entry, including the repeated name and per-entry overhead.
     /// Also applied to the complete outbound request header block.
     pub max_metadata_bytes: usize,
     /// Whole-call timeout, tightened by request metadata and the explicit Cx.

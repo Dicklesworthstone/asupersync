@@ -69,6 +69,61 @@
     }
 
     #[test]
+    fn joined_binary_metadata_charges_each_retained_entry_and_ascii_metadata() {
+        let name = "x-proof-bin";
+        let joined = ",,,,,,,";
+        let retained = (name.len() + 32) * 8 + "x-text".len() + "v".len() + 32;
+        for terminal in [false, true] {
+            for binary_first in [false, true] {
+                let mut headers = head();
+                let mut custom = vec![Header::new(name, joined), Header::new("x-text", "v")];
+                if !binary_first {
+                    custom.reverse();
+                }
+                headers.extend(custom);
+                if terminal {
+                    headers.push(Header::new("grpc-status", "0"));
+                }
+                let wire: usize = headers.iter()
+                    .map(|header| header.name.len() + header.value.len() + 32)
+                    .sum();
+                assert!(wire < retained - 1, "the joined wire field fits both limits");
+
+                let mut exact = ResponseHead::new(retained, false);
+                exact.headers(headers.clone(), terminal).unwrap();
+                let metadata = if terminal { exact.trailers } else { exact.initial }.unwrap();
+                assert_eq!(metadata.len(), 9, "empty binary values remain distinct entries");
+
+                let mut limited = ResponseHead::new(retained - 1, false);
+                let error = limited.headers(headers, terminal).unwrap_err();
+                assert_eq!(error.code(), Code::ResourceExhausted);
+                assert!(limited.initial.is_none());
+                assert!(limited.trailers.is_none());
+                assert!(limited.terminal.is_none());
+                assert!(!limited.ended, "a refused block must not publish partial state");
+            }
+        }
+    }
+
+    #[test]
+    fn trailing_metadata_expansion_preserves_the_accepted_initial_head() {
+        let mut state = ResponseHead::new(512, false);
+        let mut initial = head();
+        initial.push(Header::new("x-initial", "accepted"));
+        state.headers(initial, false).unwrap();
+
+        let error = state.headers(vec![
+            Header::new("grpc-status", "0"),
+            Header::new("x-proof-bin", ",".repeat(19)),
+        ], true).unwrap_err();
+        assert_eq!(error.code(), Code::ResourceExhausted);
+        assert_eq!(state.initial.as_ref().unwrap().len(), 1);
+        assert!(state.trailers.is_none());
+        assert!(state.terminal.is_none());
+        assert!(!state.ended);
+    }
+
+    #[test]
     fn http_fallback_applies_only_when_grpc_status_is_missing() {
         for (http, code) in [(401, Code::Unauthenticated), (404, Code::Unimplemented), (503, Code::Unavailable), (200, Code::Unknown)] {
             assert_eq!(http_fallback(http).code(), code);
