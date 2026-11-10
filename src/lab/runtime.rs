@@ -1425,6 +1425,12 @@ struct ExactScheduleControl {
     decisions: Vec<ExactScheduleDecision>,
     limits: ExactScheduleLimits,
     stopped: Option<ExactScheduleTermination>,
+    /// Dead full-generation heap entries removed by exact cancel dispatches.
+    /// They still count against future physical selection-window admission.
+    discarded_cancel_copies: usize,
+    /// A promoted task must retire on its selected poll; otherwise removed
+    /// copies could regain scheduling authority when that same task wakes.
+    require_terminal: Option<TaskId>,
 }
 
 enum LabDispatchMode<'a> {
@@ -2761,6 +2767,8 @@ impl LabRuntime {
             decisions: Vec::new(),
             limits,
             stopped: None,
+            discarded_cancel_copies: 0,
+            require_terminal: None,
         };
         let mut work_units = 0u64;
         let admission = self
@@ -2821,6 +2829,13 @@ impl LabRuntime {
                 };
                 if let Some(reason) = control.stopped.take() {
                     break reason;
+                }
+                if let Some(task) = control.require_terminal.take()
+                    && self.state.task(task).is_some_and(|record| !record.state.is_terminal())
+                {
+                    break ExactScheduleTermination::Unsupported {
+                        reason: "promoted cancel dispatch did not retire its task",
+                    };
                 }
                 if !dispatched {
                     if pumped {
@@ -4864,7 +4879,25 @@ impl LabRuntime {
                     };
                     let dispatch = enabled[selected];
                     let task_id = compact_task_id(dispatch.task);
+                    let discarded = match sched.exact_exploration_copy_admission(
+                        task_id,
+                        control.discarded_cancel_copies,
+                        control.limits.max_inventory_entries,
+                    ) {
+                        Ok(discarded) => discarded,
+                        Err(reason) => {
+                            control.stopped =
+                                Some(ExactScheduleTermination::Unsupported { reason });
+                            return Ok(false);
+                        }
+                    };
                     sched.take_forced(task_id, 0, dispatch.lane, now, index)?;
+                    // The admitted physical-window bound above leaves enough
+                    // headroom for every removed copy of the selected task.
+                    control.discarded_cancel_copies += discarded;
+                    if discarded != 0 {
+                        control.require_terminal = Some(task_id);
+                    }
                     control
                         .decisions
                         .push(ExactScheduleDecision { enabled, selected });
@@ -6894,6 +6927,20 @@ impl LabScheduler {
         }
 
         None
+    }
+
+    fn exact_exploration_copy_admission(
+        &self,
+        task: TaskId,
+        discarded: usize,
+        max_entries: usize,
+    ) -> Result<usize, &'static str> {
+        let worker = &self.workers[0];
+        let copies = worker.exact_exploration_discarded_copies(task);
+        if copies != 0 || discarded != 0 {
+            worker.validate_exact_exploration_copy_bound(discarded, max_entries)?;
+        }
+        Ok(copies)
     }
 
     fn exact_exploration_choices(

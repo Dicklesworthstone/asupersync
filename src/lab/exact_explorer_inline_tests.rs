@@ -415,6 +415,151 @@ fn exact_explorer_executes_all_six_orders_and_replays_each_receipt() {
 }
 
 #[test]
+fn exact_explorer_enumerates_queued_cancellation_orders_and_replays_them() {
+    fn setup(
+        runtime: &mut LabRuntime,
+        observed: Arc<Mutex<Vec<u8>>>,
+    ) -> Vec<crate::runtime::TaskHandle<()>> {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let mut handles = Vec::new();
+        for label in 0..2 {
+            let observed = Arc::clone(&observed);
+            let (task, handle) = runtime.state.create_task(region, Budget::INFINITE, async move {
+                let cx = crate::Cx::current().expect("lab task context");
+                assert!(cx.is_cancel_requested(), "the real cancellation command must arrive before polling");
+                assert!(cx.checkpoint().is_err());
+                observed.lock().push(label);
+            }).unwrap();
+            runtime.scheduler.lock().schedule(task, 0);
+            handles.push(handle);
+        }
+        assert_eq!(runtime.state.live_task_count(), 2);
+        assert!(!runtime.scheduler.lock().is_empty());
+        assert!(handles.iter().all(|handle| !handle.is_finished()));
+        for handle in &handles {
+            // Real handle commands promote already-queued tasks, retaining
+            // their ready entries. Repeated requests must stay idempotent.
+            handle.abort();
+            handle.abort();
+        }
+        handles
+    }
+
+    fn assert_cancelled(handles: &mut [crate::runtime::TaskHandle<()>]) {
+        for handle in handles {
+            assert!(handle.is_finished());
+            assert!(matches!(
+                handle.try_join(),
+                Err(crate::runtime::JoinError::Cancelled(reason))
+                    if reason.kind == crate::types::CancelKind::User
+            ));
+        }
+    }
+
+    let config = LabConfig::new(91);
+    let observations = RefCell::new(Vec::new());
+    let handles = RefCell::new(Vec::new());
+    let report = ExactScheduleExplorer::new(config.clone(), limits()).explore(|runtime| {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        handles.borrow_mut().push(setup(runtime, Arc::clone(&observed)));
+        observations.borrow_mut().push(observed);
+    }).unwrap();
+    assert_eq!(report.termination, ExactScheduleSearchTermination::SearchExhausted);
+    assert_eq!(report.completed_schedules(), 2);
+    let orders: BTreeSet<_> = observations.borrow().iter().map(|order| order.lock().clone()).collect();
+    assert_eq!(orders, BTreeSet::from([vec![0, 1], vec![1, 0]]));
+
+    for (run, original) in report.runs.iter().zip(observations.borrow().iter()) {
+        assert!(run.lab.lab_test_passed(), "cancellation must retire without oracle or invariant failures");
+        assert_eq!(run.execution.decisions().len(), 2);
+        assert!(run.execution.decisions().iter().all(|decision| {
+            decision.selected().lane() == crate::runtime::scheduler::DispatchLane::Cancel
+        }));
+        let schedule = run.schedule.as_ref().expect("complete cancellation receipt");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = LabRuntime::new_with_task_causality(config.clone());
+        let mut replay_handles = setup(&mut runtime, Arc::clone(&observed));
+        let replay = runtime.run_forced_schedule(schedule, ForcedScheduleLimits::new(64, 256))
+            .expect("cancel-lane alternatives must replay through ordinary exact dispatch");
+        assert!(replay.quiescent);
+        assert_eq!(replay.schedule_hash, schedule.terminal_schedule_hash());
+        assert_eq!(*observed.lock(), *original.lock());
+        assert_eq!(runtime.state.live_task_count(), 0);
+        assert_cancelled(&mut replay_handles);
+    }
+    for handles in handles.borrow_mut().iter_mut() {
+        assert_cancelled(handles);
+    }
+}
+
+#[test]
+fn exact_explorer_refuses_a_promoted_task_that_keeps_running() {
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let report = ExactScheduleExplorer::new(LabConfig::new(92), limits()).explore(|runtime| {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let polls = Arc::clone(&polls);
+        let (task, handle) = runtime.state.create_task(region, Budget::INFINITE,
+            std::future::poll_fn(move |_| {
+                let cx = crate::Cx::current().expect("lab task context");
+                assert!(cx.checkpoint().is_err());
+                polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Poll::<()>::Pending
+            }),
+        ).unwrap();
+        runtime.scheduler.lock().schedule(task, 0);
+        handle.abort();
+    }).unwrap();
+    assert_eq!(report.termination, ExactScheduleSearchTermination::IncompleteRun);
+    assert_eq!(report.runs.len(), 1);
+    let run = &report.runs[0];
+    assert_eq!(run.termination, ExactScheduleTermination::Unsupported {
+        reason: "promoted cancel dispatch did not retire its task",
+    });
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(run.execution.decisions().len(), 1);
+    assert!(!run.lab.quiescent);
+    assert!(run.schedule.is_none(), "partial cancellation cleanup cannot authorize replay completion");
+}
+
+#[test]
+fn exact_explorer_retains_cancel_copy_cost_before_polling_newly_enqueued_work() {
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let report = ExactScheduleExplorer::new(LabConfig::new(93), limits()).explore(|runtime| {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let mut waiting = Vec::new();
+        // The default lab scheduler has a 256-entry physical tie window. These
+        // tasks remain unscheduled until the cancelled task publishes them.
+        for _ in 0..256 {
+            let polls = Arc::clone(&polls);
+            let (task, _handle) = runtime.state.create_task(region, Budget::INFINITE, async move {
+                polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }).unwrap();
+            waiting.push(task);
+        }
+        let scheduler = Arc::clone(&runtime.scheduler);
+        let (task, handle) = runtime.state.create_task(region, Budget::INFINITE, async move {
+            assert!(crate::Cx::current().unwrap().checkpoint().is_err());
+            let mut scheduler = scheduler.lock();
+            for task in waiting {
+                scheduler.schedule(task, 0);
+            }
+        }).unwrap();
+        runtime.scheduler.lock().schedule(task, 0);
+        handle.abort();
+    }).unwrap();
+    assert_eq!(report.termination, ExactScheduleSearchTermination::IncompleteRun);
+    assert_eq!(report.runs.len(), 1);
+    let run = &report.runs[0];
+    assert_eq!(run.termination, ExactScheduleTermination::Unsupported {
+        reason: "cancel-copy inventory exceeds the legacy selection window",
+    });
+    assert_eq!(run.execution.decisions().len(), 1, "reject before any newly enqueued task is polled");
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!run.lab.quiescent);
+    assert!(run.schedule.is_none());
+}
+
+#[test]
 fn exact_explorer_exposes_lost_updates_across_real_poll_boundaries() {
     let explorer = ExactScheduleExplorer::new(LabConfig::new(77), limits());
     let outcomes = RefCell::new(Vec::new());

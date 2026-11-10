@@ -6,8 +6,12 @@
 //!
 //! The admitted model is one virtual worker without chaos. Choices preserve
 //! the scheduler's lane, priority, deadline, and cancellation-streak policy.
-//! Lazy queue entries and tie groups exceeding the scheduler's selection
-//! window are reported as unsupported, never silently normalized. Time pumps
+//! Lazy cancel promotions and repeated cancel entries are supported when the
+//! cancel lane owns the next turn and the selected poll retires that task.
+//! Discarded copies remain charged against later physical selection windows
+//! and inventory limits. Pending cleanup, stale entries, promotions across a
+//! streak-limited non-cancel turn, and oversized frontiers remain unsupported.
+//! Time pumps
 //! must lead directly to a dispatch or terminal quiescence so complete receipts
 //! remain representable by the existing forced-schedule replay format.
 //!

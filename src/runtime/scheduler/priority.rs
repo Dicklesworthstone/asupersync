@@ -1182,23 +1182,56 @@ impl Scheduler {
         self.scheduled.clear();
     }
 
-    /// Enumerates the complete next eligible tie group without mutating queues.
-    ///
-    /// Exact exploration deliberately rejects lazy entries and oversized tie
-    /// groups: removing tombstones or widening the normal RNG selection window
-    /// would silently change the scheduler's policy.
-    pub(crate) fn exact_exploration_choices(
-        &self,
-        now: Time,
-        cancel_first: bool,
-        max_entries: usize,
-    ) -> Result<Vec<(TaskId, DispatchLane)>, &'static str> {
-        let entries = self
+    fn exact_exploration_entry_count(&self) -> usize {
+        self
             .cancel_lane
             .len()
             .saturating_add(self.timed_lane.len())
-            .saturating_add(self.ready_lane.len());
+            .saturating_add(self.ready_lane.len())
+    }
+
+    /// Copies that exact dispatch removes in addition to the chosen entry.
+    pub(crate) fn exact_exploration_discarded_copies(&self, task: TaskId) -> usize {
+        let entries = self.cancel_lane.iter().filter(|entry| entry.task == task).count()
+            + self.timed_lane.iter().filter(|entry| entry.task == task).count()
+            + self.ready_lane.iter().filter(|entry| entry.task == task).count();
+        entries.saturating_sub(1)
+    }
+
+    /// Preserves a conservative upper bound on the ordinary selector's heaps.
+    ///
+    /// Exact dispatch removes promotion copies that an ordinary pop may leave
+    /// behind. The explorer only admits that removal when the task retires on
+    /// this poll, so those full-generation entries can never become live again.
+    /// Count every discarded copy against every subsequent frontier. Bounding
+    /// the whole inventory by the smaller physical window guarantees that no
+    /// priority/deadline tie group was widened by the earlier removal, even if
+    /// a completed task enqueued fresh work. Normal stale-entry skipping changes
+    /// neither the eligible live priorities nor the cancel streak.
+    pub(crate) fn validate_exact_exploration_copy_bound(
+        &self,
+        discarded: usize,
+        max_entries: usize,
+    ) -> Result<(), &'static str> {
+        let entries = self.exact_exploration_entry_count()
+            .checked_add(discarded)
+            .ok_or("discarded cancel copies exceed the inventory bound")?;
         if entries > max_entries {
+            return Err("discarded cancel copies exceed the inventory bound");
+        }
+        let window = self.scratch_entries.capacity().min(self.scratch_timed.capacity()).max(1);
+        if entries > window {
+            return Err("cancel-copy inventory exceeds the legacy selection window");
+        }
+        Ok(())
+    }
+
+    /// Validates physical membership and reports whether cancel copies exist.
+    fn validate_exact_exploration_inventory(
+        &self,
+        max_entries: usize,
+    ) -> Result<bool, &'static str> {
+        if self.exact_exploration_entry_count() > max_entries {
             return Err("scheduler inventory exceeds its entry budget");
         }
         let mut tasks: Vec<_> = self
@@ -1209,13 +1242,47 @@ impl Scheduler {
             .chain(self.ready_lane.iter().map(|entry| entry.task))
             .collect();
         tasks.sort_unstable();
+        let has_promotions = tasks.windows(2).any(|pair| pair[0] == pair[1]);
+        tasks.dedup();
         if tasks.len() != self.scheduled.len()
-            || tasks.windows(2).any(|pair| pair[0] == pair[1])
             || tasks.iter().any(|task| !self.scheduled.contains(*task))
         {
-            return Err("lazy or inconsistent scheduler entries are unsupported");
+            return Err("stale or inconsistent scheduler entries are unsupported");
         }
+        if has_promotions {
+            // Lazy promotion only adds cancel entries. Two ordinary entries
+            // for one task have no such authority and must not be normalized.
+            let mut ordinary: Vec<_> = self
+                .timed_lane
+                .iter()
+                .map(|entry| entry.task)
+                .chain(self.ready_lane.iter().map(|entry| entry.task))
+                .collect();
+            ordinary.sort_unstable();
+            if ordinary.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err("duplicate non-cancel scheduler entries are unsupported");
+            }
+        }
+        Ok(has_promotions)
+    }
 
+    /// Enumerates the complete next eligible tie group without mutating queues.
+    ///
+    /// Cancel promotion may leave a task in its old lane, or insert several
+    /// cancel entries. Those copies are admitted only when the next frontier
+    /// is the cancel lane: every physical tie entry participates in the normal
+    /// selector before equivalent task choices are deduplicated. The caller
+    /// must additionally enforce the terminal-poll and discarded-copy bounds.
+    /// Stale entries,
+    /// ambiguous non-cancel frontiers and oversized physical tie groups remain
+    /// unsupported rather than silently changing the scheduler's policy.
+    pub(crate) fn exact_exploration_choices(
+        &self,
+        now: Time,
+        cancel_first: bool,
+        max_entries: usize,
+    ) -> Result<Vec<(TaskId, DispatchLane)>, &'static str> {
+        let has_promotions = self.validate_exact_exploration_inventory(max_entries)?;
         let lane = if cancel_first && !self.cancel_lane.is_empty() {
             DispatchLane::Cancel
         } else if self
@@ -1231,6 +1298,12 @@ impl Scheduler {
         } else {
             return Ok(Vec::new());
         };
+        if has_promotions && lane != DispatchLane::Cancel {
+            // The ordinary streak-limited selector may claim a promoted task
+            // from its old lane. Exact replay resolves its authoritative lane
+            // as Cancel, so that state cannot yet be represented faithfully.
+            return Err("cancel promotions in a non-cancel frontier are unsupported");
+        }
         let (mut choices, window): (Vec<_>, _) = match lane {
             DispatchLane::Cancel | DispatchLane::Ready => {
                 let heap = if lane == DispatchLane::Cancel {
@@ -1264,6 +1337,9 @@ impl Scheduler {
             return Err("scheduler tie group exceeds the legacy selection window");
         }
         choices.sort_unstable_by_key(|(task, _)| *task);
+        // Check the physical frontier above before folding repeated cancel
+        // entries; otherwise duplicates could hide a selection-window overflow.
+        choices.dedup();
         Ok(choices)
     }
 
