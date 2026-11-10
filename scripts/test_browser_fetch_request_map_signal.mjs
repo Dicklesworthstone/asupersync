@@ -80,6 +80,142 @@ test("idle parent abort needs no output demand", async t => {
   parent.abort(); await turn(); assert.equal(f.calls.owner, 1); assert.equal(f.calls.input, 0);
   assert.equal((await h.closed).outcome, "cancelled");
 });
+for (const name of names) {
+  test(`${name}: ready skipped inputs yield to host cancellation before EOF`, async t => {
+    const yielding = await load({ setTimeout, clearTimeout });
+    const f = fixture(t, { count: 1024 }), parent = new AbortController();
+    const skipped = name.toLowerCase().includes("flat") ? [] : null;
+    const h = f.start(name, () => name.startsWith("try") ? ok(skipped) : skipped,
+      { concurrency: 4, signal: parent.signal }, yielding);
+    const abort = setTimeout(() => parent.abort(), 0);
+    t.after(() => clearTimeout(abort));
+    const { next } = f.read(h);
+    assert.equal((await h.closed).outcome, "cancelled");
+    await assert.rejects(next);
+    assert.ok(f.calls.mapped.length > 0 && f.calls.mapped.length < 1024);
+    assert.equal(f.calls.owner, 1); assert.equal(f.calls.native, 1);
+    assert.equal(f.input.locked, false);
+  });
+}
+for (const name of ["mapFetchRequests", "flatMapFetchRequests"]) {
+  test(`${name}: eager output demand cannot reset the host cancellation budget`, { timeout: 5000 }, async t => {
+    const yielding = await load({ setTimeout, clearTimeout }), expanded = name === "flatMapFetchRequests";
+    const f = fixture(t, { count: expanded ? 1 : 1024 }), parent = new AbortController();
+    const h = f.start(name, (_value, index) => expanded
+      ? Array.from({ length: 1024 }, () => ({ url: "expanded" })) : { url: String(index) },
+    { maxRequestsPerInput: 1024, signal: parent.signal }, yielding);
+    const abort = setTimeout(() => parent.abort(), 0); t.after(() => clearTimeout(abort));
+    const { r, next } = f.read(h); let delivered = 0;
+    const consume = (async () => {
+      let item = await next;
+      while (!item.done) { delivered++; item = await r.read(); }
+    })();
+    void consume.catch(() => {});
+    assert.equal((await h.closed).outcome, "cancelled"); await assert.rejects(consume);
+    assert.ok(delivered > 0 && delivered < 1024);
+    assert.equal(f.calls.owner, 1); assert.equal(f.calls.native, 1);
+    assert.equal(f.input.locked, false);
+  });
+}
+test("ready mapping resumes through bounded host timers and retires every timer at EOF", { timeout: 5000 }, async t => {
+  const live = new Set(); let scheduled = 0, peak = 0;
+  const yielding = await load({
+    setTimeout(callback, delay) {
+      const token = setTimeout(() => { live.delete(token); callback(); }, delay);
+      live.add(token); scheduled++; peak = Math.max(peak, live.size); return token;
+    },
+    clearTimeout(token) { live.delete(token); clearTimeout(token); },
+  });
+  const f = fixture(t, { count: 512 });
+  const h = f.start("mapFetchRequests", () => null, { concurrency: 4 }, yielding);
+  assert.equal((await f.read(h).next).done, true);
+  assert.equal((await h.closed).outcome, "ok");
+  assert.ok(scheduled > 1); assert.equal(peak, 1); assert.equal(live.size, 0);
+  assert.equal(f.calls.mapped.length, 512); assert.equal(f.calls.owner, 0); assert.equal(f.calls.native, 0);
+  assert.equal(f.input.locked, false);
+});
+for (const mode of ["parent", "caller"]) {
+  test(`${mode} cancellation clears a parked host timer and joins producer retirement`, { timeout: 5000 }, async t => {
+    const scheduled = deferred(), live = new Set(); let cleared = 0;
+    const paused = await load({
+      setTimeout(callback) { const token = { callback }; live.add(token); scheduled.resolve(token); return token; },
+      clearTimeout(token) { assert.equal(live.delete(token), true); cleared++; },
+    });
+    const native = deferred(), owner = deferred(), parent = new AbortController();
+    const f = fixture(t, { count: 1024, native, owner, holdTerminal: true });
+    const h = f.start("mapFetchRequests", () => null, { signal: parent.signal }, paused);
+    const { next } = f.read(h), token = await scheduled.promise, mapped = f.calls.mapped.length;
+    assert.ok(mapped > 0 && mapped < 1024); assert.equal(live.size, 1);
+    const stopping = mode === "caller" ? h.cancel("cancel parked host turn") : (parent.abort(), h.closed);
+    assert.equal(cleared, 1); assert.equal(live.size, 0); await pending(h.closed);
+    assert.equal(f.calls.owner, 1); assert.equal(f.calls.native, 1);
+    native.resolve(); owner.resolve(); await pending(h.closed);
+    f.terminal.resolve(cancelled()); assert.equal((await stopping).outcome, "cancelled"); await assert.rejects(next);
+    assert.equal(f.input.locked, false);
+    token.callback(); await turn(); assert.equal(f.calls.mapped.length, mapped);
+  });
+}
+test("producer failure while yielding clears the host timer and preserves its failure", { timeout: 5000 }, async t => {
+  const scheduled = deferred(); let cleared = 0;
+  const paused = await load({
+    setTimeout(callback) { scheduled.resolve(callback); return 1; },
+    clearTimeout() { cleared++; },
+  });
+  const f = fixture(t, { count: 1024, holdTerminal: true });
+  const h = f.start("mapFetchRequests", () => null, {}, paused), { next } = f.read(h);
+  const callback = await scheduled.promise, mapped = f.calls.mapped.length;
+  f.terminal.resolve(err("producer failed during host yield"));
+  const receipt = await h.closed; assert.equal(receipt.outcome, "err");
+  assert.equal(receipt.failure.message, "producer failed during host yield"); await assert.rejects(next);
+  assert.equal(cleared, 1); assert.equal(f.calls.owner, 1); assert.equal(f.calls.native, 1);
+  assert.equal(f.input.locked, false);
+  callback(); await turn(); assert.equal(f.calls.mapped.length, mapped);
+});
+test("host scheduling refusal settles owned cleanup without admitting more inputs", { timeout: 5000 }, async t => {
+  const refused = await load({
+    setTimeout() { throw new Error("host scheduling refused"); },
+    clearTimeout() { assert.fail("no timer was admitted"); },
+  });
+  const f = fixture(t, { count: 1024 });
+  const h = f.start("mapFetchRequests", () => null, {}, refused), { next } = f.read(h);
+  const receipt = await h.closed; assert.equal(receipt.outcome, "err");
+  assert.equal(receipt.failure.code, "compatibility_rejected");
+  assert.equal(receipt.failure.message, "request mapping host scheduling failed"); await assert.rejects(next);
+  assert.ok(f.calls.mapped.length > 0 && f.calls.mapped.length < 1024);
+  assert.equal(f.calls.owner, 1); assert.equal(f.calls.native, 1); assert.equal(f.input.locked, false);
+});
+test("host timer cleanup refusal cannot strand a cancelled pull or revive input", { timeout: 5000 }, async t => {
+  const scheduled = deferred(); let cleared = 0;
+  const paused = await load({
+    setTimeout(callback) { scheduled.resolve(callback); return 1; },
+    clearTimeout() { cleared++; throw new Error("host cleanup refused"); },
+  });
+  const parent = new AbortController(), f = fixture(t, { count: 1024 });
+  const h = f.start("mapFetchRequests", () => null, { signal: parent.signal }, paused), { next } = f.read(h);
+  const callback = await scheduled.promise, mapped = f.calls.mapped.length; parent.abort();
+  const receipt = await h.closed; assert.equal(receipt.outcome, "cancelled"); await assert.rejects(next);
+  assert.equal(receipt.cancellation.message, "request mapping cancelled by signal");
+  assert.equal(cleared, 1); assert.equal(f.calls.owner, 1); assert.equal(f.calls.native, 1);
+  assert.equal(f.input.locked, false);
+  callback(); await turn(); assert.equal(f.calls.mapped.length, mapped);
+});
+test("abort during host scheduling retires the returned timer before publishing cancellation", { timeout: 5000 }, async t => {
+  const parent = new AbortController(); let cleared = 0;
+  const reentrant = await load({
+    setTimeout() { parent.abort(); return 1; },
+    clearTimeout(token) { assert.equal(token, 1); cleared++; },
+  });
+  const f = fixture(t, { count: 1024 });
+  const h = f.start("mapFetchRequests", () => null, { signal: parent.signal }, reentrant), { next } = f.read(h);
+  assert.equal((await h.closed).outcome, "cancelled"); await assert.rejects(next);
+  assert.equal(cleared, 1); assert.equal(f.calls.owner, 1); assert.equal(f.calls.native, 1);
+  assert.ok(f.calls.mapped.length > 0 && f.calls.mapped.length < 1024); assert.equal(f.input.locked, false);
+});
+test("timer-free embedders preserve ready-input mapping", async t => {
+  const f = fixture(t, { count: 256 }), h = f.start("mapFetchRequests", () => null, {});
+  assert.equal((await f.read(h).next).done, true); assert.equal((await h.closed).outcome, "ok");
+  assert.equal(f.calls.mapped.length, 256); assert.equal(f.input.locked, false);
+});
 test("parent abort retires a never-producing native input", async t => {
   const f = fixture(t, { park: true }), parent = new AbortController();
   const h = f.start("mapFetchRequests", () => assert.fail("no input"), { signal: parent.signal, concurrency: 4 }); const { next } = f.read(h);

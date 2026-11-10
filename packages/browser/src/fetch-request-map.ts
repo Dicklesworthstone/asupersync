@@ -95,6 +95,12 @@ const ABORTED = SIGNAL && Object.getOwnPropertyDescriptor(SIGNAL.prototype, "abo
 const EVENT_TARGET = typeof EventTarget === "undefined" ? undefined : EventTarget;
 const ADD_LISTENER = EVENT_TARGET?.prototype.addEventListener;
 const REMOVE_LISTENER = EVENT_TARGET?.prototype.removeEventListener;
+const SCHEDULE = typeof setTimeout === "function" ? setTimeout : undefined;
+const UNSCHEDULE = typeof clearTimeout === "function" ? clearTimeout : undefined;
+// Reader/mapper promises can stay ready indefinitely. Keep the work budget
+// across output pulls as well, so eager consumers cannot starve host signals.
+const HOST_TURN_STEPS = 128;
+type HostTurn = { timer: ReturnType<typeof setTimeout> | undefined; resume(): void };
 
 /**
  * Map records to request descriptors (null skips a record), in input order.
@@ -116,7 +122,9 @@ const REMOVE_LISTENER = EVENT_TARGET?.prototype.removeEventListener;
  * Source ownership transfers only on successful setup. A raw stream has no
  * independent producer join; use an owned source to cover hidden producer work.
  * Mapper/source promises must cooperate and must not await this owner's own
- * closed/cancel barrier. No timer, runtime task or additional authority is added.
+ * closed/cancel barrier. Ready-input work periodically yields through one owned
+ * host timer when a timer pair is available; cancellation retires that wait.
+ * No runtime task or additional network authority is added.
  * Request descriptors are forwarded by identity without probing their bodies;
  * downstream scope admission remains responsible for request validation. Discarded
  * records and unadmitted upload bodies remain the mapper/producer's responsibility.
@@ -223,6 +231,8 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
   let active: Promise<void> | undefined;
   let retirement: Promise<void> | undefined;
   let finalizing = false, index = 0, consumerCancelled = false;
+  let workSteps = 0;
+  let hostTurn: HostTurn | undefined;
   // A slot is reserved BEFORE its input read, and released only after all of
   // its descriptors have been accepted by output pulls. A slow early mapper
   // cannot accumulate an unbounded reorder buffer behind it.
@@ -247,6 +257,41 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
 
   function note(outcome: Failure): void {
     if (!stopped || severity(outcome) > severity(stopped)) stopped = outcome;
+  }
+  function clearHostTurn(): void {
+    const wait = hostTurn;
+    hostTurn = undefined;
+    if (!wait) return;
+    try {
+      if (wait.timer !== undefined) Reflect.apply(UNSCHEDULE!, globalThis, [wait.timer]);
+    } catch { note(fail("request mapping host scheduling cleanup failed", "compatibility_rejected")); }
+    finally {
+      // A cleared callback cannot resume the active pull. Release its wait
+      // after the stop fence so the finalizer can join without reading ahead.
+      wait.resume();
+    }
+  }
+  function yieldToHost(): Promise<void> | undefined {
+    workSteps = 0;
+    // Minimal timer-free embedders retain their existing scheduling behavior.
+    if (!SCHEDULE || !UNSCHEDULE) return undefined;
+    return new Promise<void>(resolve => {
+      const wait: HostTurn = { timer: undefined, resume: resolve };
+      hostTurn = wait;
+      try {
+        const timer = Reflect.apply(SCHEDULE, globalThis, [() => {
+          if (hostTurn !== wait) return;
+          hostTurn = undefined;
+          resolve();
+        }, 0]) as ReturnType<typeof setTimeout>;
+        if (hostTurn === wait) wait.timer = timer;
+        else Reflect.apply(UNSCHEDULE, globalThis, [timer]);
+      } catch {
+        if (hostTurn === wait) hostTurn = undefined;
+        void stop(fail("request mapping host scheduling failed", "compatibility_rejected"));
+        resolve();
+      }
+    });
   }
   function error(outcome: Failure): Error {
     const result = Object.defineProperty(new Error("owned request mapping stopped"), "cause", { value: outcome });
@@ -291,6 +336,7 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     if (ended) return completion.promise;
     note(outcome);
     ending = true; // Fence before any mapper/producer callback can re-enter.
+    clearHostTurn();
     for (const slot of slots) slot.requests = undefined;
     slots.length = 0;
     notify();
@@ -392,6 +438,10 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     active = done.promise; // Install before invoking even a synchronous mapper.
     void (async () => {
       while (!ending && !ended) {
+        if (workSteps >= HOST_TURN_STEPS) {
+          await yieldToHost();
+          if (ending || ended) return;
+        }
         const waiting = changed.promise;
         const slot = slots[0];
         if (slot?.requests) {
@@ -399,11 +449,12 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
           const request = slot.requests[slot.next];
           slot.requests[slot.next++] = undefined as unknown as BrowserFetchOptions;
           if (slot.next === slot.requests.length) slots.shift();
+          workSteps++;
           controller.enqueue(request);
           return;
         }
         if (inputEof && !slots.length) { ending = true; finalize(); return; }
-        if (!inputEof && !reading && slots.length < concurrency) readSlot();
+        if (!inputEof && !reading && slots.length < concurrency) { workSteps++; readSlot(); }
         // Do not await the next input directly: a parked source read must not
         // hide a completed earlier mapping result. Either can wake this driver.
         await waiting;
