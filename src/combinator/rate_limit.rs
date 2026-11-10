@@ -96,7 +96,8 @@ pub enum WaitStrategy {
 ///
 /// [`RateLimiter`] implements only [`TokenBucket`](Self::TokenBucket) and
 /// runs a token bucket for the other variants too. For a sliding window use
-/// [`SlidingWindowRateLimiter`], whose window is the policy's `period`.
+/// [`SlidingWindowRateLimiter`], whose window is the policy's `period`, or
+/// [`FixedWindowRateLimiter`] for epoch-aligned fixed windows.
 #[derive(Clone, Debug, Default)]
 pub enum RateLimitAlgorithm {
     /// Classic token bucket.
@@ -111,7 +112,7 @@ pub enum RateLimitAlgorithm {
     },
 
     /// Fixed window (simpler, allows bursts at boundaries). Not implemented
-    /// by [`RateLimiter`]; see the type docs.
+    /// by [`RateLimiter`]; use [`FixedWindowRateLimiter`] explicitly.
     FixedWindow,
 }
 
@@ -1280,6 +1281,244 @@ impl SlidingWindowRateLimiter {
 impl fmt::Debug for SlidingWindowRateLimiter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SlidingWindowRateLimiter")
+            .field("name", &self.policy.name)
+            .field("rate", &self.policy.rate)
+            .field("period", &self.policy.period)
+            .finish_non_exhaustive()
+    }
+}
+
+// =========================================================================
+// Fixed Window Implementation
+// =========================================================================
+
+/// Weighted admission in fixed windows aligned to [`Time::ZERO`].
+///
+/// Each window admits at most `policy.rate` cost units. Its duration is
+/// `policy.period`, rounded up to whole milliseconds, as for the other rate
+/// limiters. `burst` and `algorithm` do not change this type's behavior. A zero
+/// period provides one nonrefilling quota; a zero rate admits only zero-cost
+/// work. Fixed windows permit a full quota on each side of a boundary; use
+/// [`SlidingWindowRateLimiter`] when that boundary burst is undesirable.
+///
+/// Time is supplied explicitly. All callers must share a clock domain;
+/// backwards observations never reopen an earlier window or replenish quota.
+/// Refundable permits are tied to their original window and reset generation,
+/// so dropping an old permit cannot enlarge a newer window's allowance.
+pub struct FixedWindowRateLimiter {
+    policy: RateLimitPolicy,
+    state: Mutex<FixedWindowState>,
+    total_allowed: AtomicU64,
+    total_rejected: AtomicU64,
+}
+
+struct FixedWindowState {
+    start_millis: u64,
+    observed_millis: u64,
+    used: u32,
+    // None permanently disables refunds after generation exhaustion, rather
+    // than wrapping and allowing an ancient permit to alias a later window.
+    generation: Option<u64>,
+}
+
+impl FixedWindowState {
+    fn next_generation(&mut self) {
+        self.generation = self.generation.and_then(|value| value.checked_add(1));
+    }
+
+    fn observe(&mut self, now: Time, period_millis: u64) {
+        self.observed_millis = self.observed_millis.max(now.as_millis());
+        if period_millis != 0 {
+            let start = self.observed_millis / period_millis * period_millis;
+            if start > self.start_millis {
+                self.start_millis = start;
+                self.used = 0;
+                self.next_generation();
+            }
+        }
+    }
+
+    fn next_window(&self, period_millis: u64) -> Option<Time> {
+        if period_millis == 0 {
+            return None;
+        }
+        let millis = u128::from(self.start_millis) + u128::from(period_millis);
+        u64::try_from(millis * 1_000_000)
+            .ok()
+            .map(Time::from_nanos)
+    }
+}
+
+/// Refundable quota owned in one fixed window.
+///
+/// Drop returns the reserved cost only while that same window and reset
+/// generation remain current. [`Self::commit`] consumes the reservation.
+/// Holding a permit across a boundary does not transfer its quota into the
+/// next window. Admissions, including subsequently refunded ones, remain in
+/// the limiter's cumulative `total_allowed` metric.
+#[must_use = "dropping the permit refunds its cost in the original window"]
+pub struct FixedWindowRateLimitPermit<'a> {
+    limiter: &'a FixedWindowRateLimiter,
+    cost: u32,
+    generation: Option<u64>,
+    refund: bool,
+}
+
+impl FixedWindowRateLimitPermit<'_> {
+    /// Consume the quota reservation for the protected operation.
+    pub fn commit(mut self) {
+        self.refund = false;
+    }
+}
+
+impl Drop for FixedWindowRateLimitPermit<'_> {
+    fn drop(&mut self) {
+        if self.refund && self.cost != 0 && self.generation.is_some() {
+            let mut state = self.limiter.state.lock();
+            if state.generation == self.generation {
+                state.used = state.used.saturating_sub(self.cost);
+            }
+        }
+    }
+}
+
+impl FixedWindowRateLimiter {
+    /// Create a limiter without reading a clock or allocating from its quota.
+    #[must_use]
+    pub fn new(policy: RateLimitPolicy) -> Self {
+        Self {
+            policy,
+            state: Mutex::new(FixedWindowState {
+                start_millis: 0,
+                observed_millis: 0,
+                used: 0,
+                generation: Some(0),
+            }),
+            total_allowed: AtomicU64::new(0),
+            total_rejected: AtomicU64::new(0),
+        }
+    }
+
+    /// Get the policy name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.policy.name
+    }
+
+    /// Inspect the immutable policy; this type uses `rate` and `period`.
+    #[must_use]
+    pub fn policy(&self) -> &RateLimitPolicy {
+        &self.policy
+    }
+
+    /// Immediately consume weighted quota if the current window has room.
+    #[must_use]
+    pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
+        if let Ok(permit) = self.acquire_permit(cost, now) {
+            permit.commit();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Immediately consume the policy's default cost.
+    #[must_use]
+    pub fn try_acquire_default(&self, now: Time) -> bool {
+        self.try_acquire(self.policy.default_cost, now)
+    }
+
+    /// Reserve refundable quota without waiting.
+    ///
+    /// An immediate refusal returns [`RateLimitError::RateLimitExceeded`],
+    /// independently of `wait_strategy`. Quota is not partially reserved.
+    pub fn acquire_permit(
+        &self,
+        cost: u32,
+        now: Time,
+    ) -> Result<FixedWindowRateLimitPermit<'_>, RateLimitError<()>> {
+        let mut state = self.state.lock();
+        state.observe(now, period_to_millis_ceil(self.policy.period));
+        if cost > self.policy.rate.saturating_sub(state.used) {
+            drop(state);
+            self.total_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(RateLimitError::RateLimitExceeded);
+        }
+        state.used += cost;
+        let generation = state.generation;
+        drop(state);
+        self.total_allowed.fetch_add(1, Ordering::Relaxed);
+        Ok(FixedWindowRateLimitPermit {
+            limiter: self,
+            cost,
+            generation,
+            refund: true,
+        })
+    }
+
+    /// Unreserved quota at the last explicit time observation.
+    #[must_use]
+    pub fn available_tokens(&self) -> u32 {
+        self.policy.rate.saturating_sub(self.state.lock().used)
+    }
+
+    /// Time until this cost can fit, measured from the supplied time.
+    ///
+    /// A cost above the full quota, a depleted zero-period quota, or a next
+    /// window outside [`Time`]'s representable range returns `Duration::MAX`.
+    /// Backwards time includes the distance back to the current window, rather
+    /// than advertising an earlier replenishment. This is an estimate: other
+    /// admissions may consume the quota before the caller retries.
+    #[must_use]
+    pub fn time_until_available(&self, cost: u32, now: Time) -> Duration {
+        let period = period_to_millis_ceil(self.policy.period);
+        let mut state = self.state.lock();
+        state.observe(now, period);
+        let available = self.policy.rate.saturating_sub(state.used);
+        let next_window = state.next_window(period);
+        drop(state);
+        if cost > self.policy.rate {
+            return Duration::MAX;
+        }
+        if cost <= available {
+            return Duration::ZERO;
+        }
+        next_window.map_or(Duration::MAX, |next| {
+            Duration::from_nanos(next.as_nanos().saturating_sub(now.as_nanos()))
+        })
+    }
+
+    /// Alias for [`Self::time_until_available`].
+    #[must_use]
+    pub fn retry_after(&self, cost: u32, now: Time) -> Duration {
+        self.time_until_available(cost, now)
+    }
+
+    /// Snapshot quota and cumulative admission counters without reading time.
+    #[must_use]
+    pub fn metrics(&self) -> RateLimitMetrics {
+        RateLimitMetrics {
+            available_tokens: self.available_tokens(),
+            total_allowed: self.total_allowed.load(Ordering::Relaxed),
+            total_rejected: self.total_rejected.load(Ordering::Relaxed),
+            ..RateLimitMetrics::default()
+        }
+    }
+
+    /// Restore the current window's quota without rewinding its clock.
+    ///
+    /// Outstanding permits remain valid for their owners, but their eventual
+    /// drops cannot refund quota into this new reset generation.
+    pub fn reset(&self) {
+        let mut state = self.state.lock();
+        state.used = 0;
+        state.next_generation();
+    }
+}
+
+impl fmt::Debug for FixedWindowRateLimiter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FixedWindowRateLimiter")
             .field("name", &self.policy.name)
             .field("rate", &self.policy.rate)
             .field("period", &self.policy.period)

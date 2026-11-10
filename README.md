@@ -1701,10 +1701,19 @@ Beyond `join`, `race`, and `timeout`, the combinator library includes patterns f
 | **map_reduce** | `Scope::map_reduce` (`src/cx/scope.rs`) + `src/combinator/map_reduce.rs` | Spawns bounded scoped map tasks and reduces in input order, with separate limits for concurrency and retained work |
 | **circuit_breaker** | `src/combinator/circuit_breaker.rs` | Failure detection, open/half-open/closed states |
 | **bulkhead** | `src/combinator/bulkhead.rs` | Concurrency isolation (bounded parallelism) |
-| **rate_limit** | `src/combinator/rate_limit.rs` | Token bucket throughput control |
+| **rate_limit** | `src/combinator/rate_limit.rs` | Token-bucket, sliding-window, and fixed-window throughput quotas with weighted admission |
 | **bracket** | `src/combinator/bracket.rs` | Acquire/use/release with guaranteed cleanup |
 | **retry** | `src/combinator/retry.rs` | Exponential backoff, budget-aware |
 | **scoped retry** | `Cx::retry_scoped` / `Cx::retry_scoped_with_budget` (`src/cx/scoped_retry.rs`) | Drain each attempt's entire private subtree before retrying; optionally share a retry budget across operations |
+
+`FixedWindowRateLimiter` enforces `RateLimitPolicy::rate` units in each
+`period` aligned to the explicit clock's epoch. Unused quota does not carry
+forward, and weighted requests consume their full cost atomically. Its permits
+refund uncommitted quota on drop only within their original window and reset
+generation. All callers must use the same clock domain; backward observations
+cannot reopen an older window. The existing `RateLimiter` remains a token
+bucket regardless of the policy's legacy `algorithm` field: choose the explicit
+limiter type for the intended quota semantics.
 
 `Cx::first_ok_scoped` and `Cx::quorum_scoped` preserve the caller's typed
 spawn capabilities without requiring a timer. Their reports separate selection

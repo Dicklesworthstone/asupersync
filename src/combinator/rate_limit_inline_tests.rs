@@ -1740,6 +1740,188 @@ mod queued_acquisition_ownership {
     }
 }
 
+mod fixed_window_tests {
+    use super::*;
+
+    fn fixed(rate: u32, period: Duration) -> FixedWindowRateLimiter {
+        FixedWindowRateLimiter::new(RateLimitPolicy {
+            rate,
+            period,
+            burst: 0,
+            algorithm: RateLimitAlgorithm::FixedWindow,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn fixed_window_weighted_quota_resets_only_at_aligned_boundaries() {
+        let limiter = fixed(5, Duration::from_millis(100));
+        assert!(limiter.try_acquire(3, Time::from_millis(37)));
+        assert!(limiter.try_acquire(2, Time::from_millis(99)));
+        assert!(!limiter.try_acquire(1, Time::from_nanos(99_999_999)));
+        assert_eq!(
+            limiter.retry_after(1, Time::from_nanos(99_500_000)),
+            Duration::from_micros(500)
+        );
+        assert!(limiter.try_acquire(5, Time::from_millis(100)));
+        assert!(!limiter.try_acquire(1, Time::from_millis(199)));
+        assert!(limiter.try_acquire(5, Time::from_millis(500)));
+        assert_eq!(limiter.available_tokens(), 0);
+        assert_eq!(limiter.metrics().total_allowed, 4);
+        assert_eq!(limiter.metrics().total_rejected, 2);
+    }
+
+    #[test]
+    fn fixed_window_backwards_time_cannot_reopen_old_quota() {
+        let limiter = fixed(2, Duration::from_millis(100));
+        assert!(limiter.try_acquire(2, Time::from_millis(150)));
+        assert!(!limiter.try_acquire(1, Time::ZERO));
+        assert_eq!(
+            limiter.retry_after(1, Time::from_millis(50)),
+            Duration::from_millis(150)
+        );
+        assert!(limiter.try_acquire(2, Time::from_millis(200)));
+        assert!(!limiter.try_acquire(1, Time::from_millis(100)));
+        assert_eq!(limiter.available_tokens(), 0);
+    }
+
+    #[test]
+    fn fixed_window_rounds_fractional_periods_up() {
+        for (period, boundary) in [
+            (Duration::from_micros(100), 1),
+            (Duration::from_micros(1_900), 2),
+        ] {
+            let limiter = fixed(1, period);
+            assert!(limiter.try_acquire(1, Time::ZERO));
+            assert!(!limiter.try_acquire(1, Time::from_nanos(boundary * 1_000_000 - 1)));
+            assert!(limiter.try_acquire(1, Time::from_millis(boundary)));
+        }
+    }
+
+    #[test]
+    fn fixed_window_zero_period_and_impossible_costs_fail_closed() {
+        let limiter = fixed(3, Duration::ZERO);
+        assert!(limiter.try_acquire(3, Time::ZERO));
+        assert!(!limiter.try_acquire(1, Time::MAX));
+        assert_eq!(limiter.retry_after(1, Time::MAX), Duration::MAX);
+        assert!(limiter.try_acquire(0, Time::MAX));
+        limiter.reset();
+        assert_eq!(limiter.available_tokens(), 3);
+        assert_eq!(limiter.retry_after(4, Time::MAX), Duration::MAX);
+        assert!(!limiter.try_acquire(4, Time::MAX));
+        assert_eq!(limiter.available_tokens(), 3);
+
+        let empty = fixed(0, Duration::from_millis(1));
+        assert!(empty.try_acquire(0, Time::MAX));
+        assert!(!empty.try_acquire(1, Time::MAX));
+        assert_eq!(empty.retry_after(1, Time::ZERO), Duration::MAX);
+    }
+
+    #[test]
+    fn fixed_window_refunds_only_the_original_generation() {
+        let limiter = fixed(5, Duration::from_millis(100));
+        let current = limiter.acquire_permit(3, Time::ZERO).unwrap();
+        assert_eq!(limiter.available_tokens(), 2);
+        drop(current);
+        assert_eq!(limiter.available_tokens(), 5);
+
+        let old = limiter.acquire_permit(5, Time::ZERO).unwrap();
+        assert!(limiter.try_acquire(5, Time::from_millis(100)));
+        drop(old);
+        assert_eq!(limiter.available_tokens(), 0);
+
+        let before_reset = limiter.acquire_permit(5, Time::from_millis(200)).unwrap();
+        limiter.reset();
+        assert!(limiter.try_acquire(5, Time::from_millis(200)));
+        drop(before_reset);
+        assert_eq!(limiter.available_tokens(), 0);
+        assert!(!limiter.try_acquire(1, Time::ZERO));
+    }
+
+    #[test]
+    fn fixed_window_commit_and_unwind_keep_quota_consistent() {
+        let limiter = fixed(2, Duration::from_secs(1));
+        limiter.acquire_permit(1, Time::ZERO).unwrap().commit();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _permit = limiter.acquire_permit(1, Time::ZERO).unwrap();
+            assert_eq!(limiter.available_tokens(), 0);
+            panic!("protected operation failed");
+        }));
+        assert!(result.is_err());
+        assert_eq!(limiter.available_tokens(), 1);
+        assert_eq!(limiter.metrics().total_allowed, 2);
+    }
+
+    #[test]
+    fn fixed_window_extreme_arithmetic_never_wraps_into_credit() {
+        let limiter = fixed(u32::MAX, Duration::MAX);
+        assert!(limiter.try_acquire(u32::MAX - 1, Time::ZERO));
+        assert!(!limiter.try_acquire(2, Time::ZERO));
+        assert!(limiter.try_acquire(1, Time::MAX));
+        assert_eq!(limiter.retry_after(1, Time::MAX), Duration::MAX);
+
+        let terminal = fixed(1, Duration::from_millis(1));
+        assert!(terminal.try_acquire(1, Time::MAX));
+        for _ in 0..3 {
+            assert!(!terminal.try_acquire(1, Time::MAX));
+            assert_eq!(terminal.retry_after(1, Time::MAX), Duration::MAX);
+        }
+    }
+
+    #[test]
+    fn fixed_window_generation_exhaustion_never_aliases_old_permits() {
+        let limiter = fixed(2, Duration::ZERO);
+        limiter.state.lock().generation = Some(u64::MAX);
+        let old = limiter.acquire_permit(2, Time::ZERO).unwrap();
+        limiter.reset();
+        assert!(limiter.try_acquire(2, Time::ZERO));
+        drop(old);
+        assert_eq!(limiter.available_tokens(), 0);
+        limiter.reset();
+        let exhausted = limiter.acquire_permit(2, Time::ZERO).unwrap();
+        drop(exhausted);
+        assert_eq!(limiter.available_tokens(), 0);
+    }
+
+    #[test]
+    fn fixed_window_default_cost_and_policy_are_explicit() {
+        let limiter = FixedWindowRateLimiter::new(RateLimitPolicy {
+            name: "fixed-api".into(),
+            rate: 4,
+            burst: 0,
+            default_cost: 3,
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            ..Default::default()
+        });
+        assert_eq!(limiter.name(), "fixed-api");
+        assert_eq!(limiter.policy().default_cost, 3);
+        assert!(limiter.try_acquire_default(Time::ZERO));
+        assert!(!limiter.try_acquire_default(Time::ZERO));
+        assert_eq!(limiter.metrics().available_tokens, 1);
+        assert!(format!("{limiter:?}").contains("fixed-api"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fixed_window_concurrent_admission_never_oversubscribes() {
+        let limiter = Arc::new(fixed(23, Duration::from_secs(1)));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8).map(|_| {
+            let limiter = Arc::clone(&limiter);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                (0..20).filter(|_| limiter.try_acquire(1, Time::ZERO)).count()
+            })
+        }).collect();
+        let admitted: usize = workers.into_iter().map(|worker| worker.join().unwrap()).sum();
+        assert_eq!(admitted, 23);
+        assert_eq!(limiter.available_tokens(), 0);
+        assert_eq!(limiter.metrics().total_allowed, 23);
+        assert_eq!(limiter.metrics().total_rejected, 137);
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod async_admission_tests {
     use super::*;

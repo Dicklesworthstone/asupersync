@@ -20,7 +20,7 @@
 //! - [`stream_send`]: Backpressured concurrent mapping into bounded channels
 //! - [`circuit_breaker`]: Failure detection and prevention
 //! - [`bulkhead`]: Resource isolation and concurrency limiting
-//! - [`rate_limit`]: Throughput control with token bucket algorithm
+//! - [`rate_limit`]: Token-bucket, sliding-window, and fixed-window throughput control
 //!
 //! # Structured fan-out, join, and race
 //!
@@ -174,8 +174,9 @@ pub use race::{
     race_all_to_result, race2_outcomes, race2_to_result,
 };
 pub use rate_limit::{
-    RateLimitAcquireError, RateLimitAlgorithm, RateLimitError, RateLimitMetrics, RateLimitPolicy,
-    RateLimitPolicyBuilder, RateLimiter, RateLimiterRegistry, SlidingWindowRateLimiter, WaitStrategy,
+    FixedWindowRateLimitPermit, FixedWindowRateLimiter, RateLimitAcquireError, RateLimitAlgorithm,
+    RateLimitError, RateLimitMetrics, RateLimitPolicy, RateLimitPolicyBuilder, RateLimiter,
+    RateLimiterRegistry, SlidingWindowRateLimiter, WaitStrategy,
 };
 pub use retry::{
     AlwaysRetry, NeverRetry, RateLimitedRetryPolicy, Retry, RetryBudget, RetryError, RetryFailure,
