@@ -373,6 +373,28 @@ impl<Caps> ChildRegion<Caps> {
             .map_err(ChildRegionError::Create)
     }
 
+    /// Enroll asynchronous cleanup before exposing a region-owned body.
+    /// Admission is acknowledged without observing the caller's cancellation;
+    /// rejected futures remain owned by the mailbox until post-lock retirement.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub(crate) async fn finalize_async<F>(&self, finalizer: F) -> Result<(), ChildRegionError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (complete, mut completed) = crate::channel::oneshot::channel();
+        let request = crate::runtime::spawn_mailbox::RegisterRegionFinalizer::new_async(
+            self.region_id,
+            finalizer,
+            complete,
+        );
+        self.enqueue(RegionCommand::RegisterFinalizer(request))?;
+        completed
+            .recv_uninterruptible()
+            .await
+            .map_err(|_| ChildRegionError::RuntimeUnavailable)?
+            .map_err(ChildRegionError::Create)
+    }
+
     fn enqueue(&self, command: RegionCommand) -> Result<(), ChildRegionError> {
         let gateway = self
             .gateway

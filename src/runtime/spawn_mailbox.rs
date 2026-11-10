@@ -1648,7 +1648,7 @@ impl RegionLiveTasksQuery {
 /// outside the native runtime state lock.
 pub(crate) struct RegisterRegionFinalizer {
     region_id: RegionId,
-    finalizer: Option<Box<dyn FnOnce() + Send + 'static>>,
+    finalizer: Option<crate::record::Finalizer>,
     completion: Option<
         crate::channel::oneshot::Sender<
             Result<(), crate::runtime::region_table::RegionCreateError>,
@@ -1676,7 +1676,23 @@ impl RegisterRegionFinalizer {
     ) -> Self {
         Self {
             region_id,
-            finalizer: Some(Box::new(finalizer)),
+            finalizer: Some(crate::record::Finalizer::Sync(Box::new(finalizer))),
+            completion: Some(completion),
+            outcome: None,
+        }
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub(crate) fn new_async(
+        region_id: RegionId,
+        finalizer: impl Future<Output = ()> + Send + 'static,
+        completion: crate::channel::oneshot::Sender<
+            Result<(), crate::runtime::region_table::RegionCreateError>,
+        >,
+    ) -> Self {
+        Self {
+            region_id,
+            finalizer: Some(crate::record::Finalizer::Async(Box::pin(finalizer))),
             completion: Some(completion),
             outcome: None,
         }
@@ -1698,10 +1714,15 @@ impl RegisterRegionFinalizer {
             Err(error)
         } else {
             let finalizer = self.finalizer.take().expect("unapplied region finalizer");
-            assert!(
-                state.register_sync_finalizer(self.region_id, finalizer),
-                "finalizer admission changed under the runtime state lock"
-            );
+            let registered = match finalizer {
+                crate::record::Finalizer::Sync(finalizer) => {
+                    state.register_sync_finalizer(self.region_id, finalizer)
+                }
+                crate::record::Finalizer::Async(finalizer) => {
+                    state.register_async_finalizer(self.region_id, finalizer)
+                }
+            };
+            assert!(registered, "finalizer admission changed under the runtime state lock");
             Ok(())
         });
         self

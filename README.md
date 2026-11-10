@@ -1446,6 +1446,16 @@ or establish general WAN reliability.
 | Configured application service | `src/remote.rs` | `RemoteComputationServiceBootstrap` consumes a caller registry, validates strict schema-v2 exposure/TLS/SPKI/grants before bind, then returns the existing structured service plus deterministic full-registry identity |
 | Static service process | `asupersync --config ... remote serve` | Unix `remote-service` feature; strict TOML, mutual TLS, certificate-bound grants, flushed readiness/terminal records, SIGINT/SIGTERM drain, and second-signal force-close |
 
+Listener-owned V2/V3 requests retain their idempotency reservation when a
+connection is cancelled or dropped. A region finalizer waits for the handler's
+native result and owned descendant cleanup before settling an abandoned
+request; retries remain in flight during that cleanup. Terminal retention
+starts afterward, using the original owner's clock. Normal publication and
+abandoned-exchange cleanup carry the same reservation identity, so delayed
+cleanup cannot overwrite a later reuse of the key and task ID. Abandoned
+results obey the same wire-size limit as delivered results, and per-peer
+execution credit stays held through native task retirement.
+
 The transport surface is deliberately separated from protocol state machines,
 so message semantics can be tested independently of network backend details.
 The authenticated service JSON envelopes are strict for protocol V1, V2, and

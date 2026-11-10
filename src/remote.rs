@@ -3542,6 +3542,8 @@ struct CachedExecutionRejection {
 struct RemoteServicePeerIdempotency {
     store: IdempotencyStore,
     execution_rejections: DetHashMap<IdempotencyKey, CachedExecutionRejection>,
+    // A peer may reuse both its key and task ID after terminal retention.
+    reservations: DetHashMap<IdempotencyKey, Arc<()>>,
 }
 
 #[cfg(feature = "tls")]
@@ -3550,6 +3552,7 @@ impl RemoteServicePeerIdempotency {
         Self {
             store: IdempotencyStore::new(retention),
             execution_rejections: DetHashMap::default(),
+            reservations: DetHashMap::default(),
         }
     }
 
@@ -3645,9 +3648,10 @@ impl RemoteServiceIdempotencyInner {
 }
 
 #[cfg(feature = "tls")]
+#[derive(Clone)]
 struct RemoteServiceIdempotency {
-    inner: Mutex<RemoteServiceIdempotencyInner>,
-    expiry_changed: crate::sync::Notify,
+    inner: Arc<Mutex<RemoteServiceIdempotencyInner>>,
+    expiry_changed: Arc<crate::sync::Notify>,
     retention: Duration,
     max_records_per_peer: usize,
 }
@@ -3674,11 +3678,11 @@ enum RemoteServiceIdempotencyAdmission {
 impl RemoteServiceIdempotency {
     fn new(retention: Duration, max_records_per_peer: usize) -> Self {
         Self {
-            inner: Mutex::new(RemoteServiceIdempotencyInner {
+            inner: Arc::new(Mutex::new(RemoteServiceIdempotencyInner {
                 peers: BTreeMap::new(),
                 expiries: BTreeSet::new(),
-            }),
-            expiry_changed: crate::sync::Notify::new(),
+            })),
+            expiry_changed: Arc::new(crate::sync::Notify::new()),
             retention,
             max_records_per_peer,
         }
@@ -3712,7 +3716,10 @@ impl RemoteServiceIdempotency {
             .store
             .check_and_record(key, remote_task_id, fingerprint, now)
         {
-            DedupDecision::New => RemoteServiceIdempotencyAdmission::Execute,
+            DedupDecision::New => {
+                peer_state.reservations.insert(key, Arc::new(()));
+                RemoteServiceIdempotencyAdmission::Execute
+            }
             DedupDecision::Conflict => RemoteServiceIdempotencyAdmission::Conflict,
             DedupDecision::Duplicate(record) => {
                 let Some(outcome) = record.outcome else {
@@ -3739,21 +3746,16 @@ impl RemoteServiceIdempotency {
         outcome: RemoteOutcome,
         now: Time,
     ) -> bool {
-        let mut inner = self.inner.lock();
-        let Some(peer_state) = inner.peers.get_mut(peer) else {
-            return false;
-        };
-        let previous_expiry = peer_state.key_expiry(&key);
-        let completed = peer_state
-            .store
-            .complete(&key, canonical_task_id, outcome, now);
-        let next_expiry = peer_state.key_expiry(&key);
-        let notify = completed && inner.record_expiry(peer, key, previous_expiry, next_expiry);
-        drop(inner);
-        if notify {
-            self.expiry_changed.notify_one();
-        }
-        completed
+        self.complete_terminal(
+            RemoteServiceTerminalCommit::Outcome {
+                peer: peer.clone(),
+                key,
+                canonical_task_id,
+                outcome,
+            },
+            now,
+            None,
+        )
     }
 
     fn complete_execution_rejection(
@@ -3764,18 +3766,71 @@ impl RemoteServiceIdempotency {
         diagnostic: String,
         now: Time,
     ) -> bool {
+        self.complete_terminal(
+            RemoteServiceTerminalCommit::ExecutionRejection {
+                peer: peer.clone(),
+                key,
+                canonical_task_id,
+                diagnostic,
+            },
+            now,
+            None,
+        )
+    }
+
+    fn complete_terminal(
+        &self,
+        commit: RemoteServiceTerminalCommit,
+        now: Time,
+        reservation: Option<&Arc<()>>,
+    ) -> bool {
+        let (peer, key, canonical_task_id, outcome, rejection) = match commit {
+            RemoteServiceTerminalCommit::Outcome {
+                peer,
+                key,
+                canonical_task_id,
+                outcome,
+            } => (peer, key, canonical_task_id, outcome, None),
+            RemoteServiceTerminalCommit::ExecutionRejection {
+                peer,
+                key,
+                canonical_task_id,
+                diagnostic,
+            } => (
+                peer,
+                key,
+                canonical_task_id,
+                RemoteOutcome::Failed(diagnostic.clone()),
+                Some(diagnostic),
+            ),
+            RemoteServiceTerminalCommit::Reserved { commit, guard } => {
+                let completed = self.complete_terminal(*commit, now, Some(&guard.generation));
+                drop(guard);
+                return completed;
+            }
+        };
         let mut inner = self.inner.lock();
-        let Some(peer_state) = inner.peers.get_mut(peer) else {
+        let Some(peer_state) = inner.peers.get_mut(&peer) else {
             return false;
         };
+        // Fence both normal publication and abandoned-exchange cleanup. A
+        // delayed guard cannot overwrite a completed or re-admitted request.
+        if let Some(reservation) = reservation
+            && !peer_state
+                .reservations
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, reservation))
+        {
+            return false;
+        }
         let previous_expiry = peer_state.key_expiry(&key);
-        let completed = peer_state.store.complete(
-            &key,
-            canonical_task_id,
-            RemoteOutcome::Failed(diagnostic.clone()),
-            now,
-        );
+        let completed = peer_state
+            .store
+            .complete(&key, canonical_task_id, outcome, now);
         if completed {
+            peer_state.reservations.remove(&key);
+        }
+        if completed && let Some(diagnostic) = rejection {
             peer_state.execution_rejections.insert(
                 key,
                 CachedExecutionRejection {
@@ -3786,12 +3841,46 @@ impl RemoteServiceIdempotency {
             );
         }
         let next_expiry = peer_state.key_expiry(&key);
-        let notify = completed && inner.record_expiry(peer, key, previous_expiry, next_expiry);
+        let notify = completed && inner.record_expiry(&peer, key, previous_expiry, next_expiry);
         drop(inner);
         if notify {
             self.expiry_changed.notify_one();
         }
         completed
+    }
+
+    fn protect_in_flight(
+        &self,
+        cx: &Cx,
+        peer: &NodeId,
+        request: &SpawnRequest,
+        max_frame_bytes: usize,
+        session_envelope: bool,
+    ) -> Arc<RemoteServiceReservation> {
+        let generation = Arc::clone(
+            &self.inner.lock().peers[peer].reservations[&request.idempotency_key],
+        );
+        Arc::new(RemoteServiceReservation {
+            state: self.clone(),
+            peer: peer.clone(),
+            key: request.idempotency_key,
+            canonical_task_id: request.remote_task_id,
+            generation,
+            clock: cx.timer_driver(),
+            max_frame_bytes,
+            session_envelope,
+            task: Mutex::new(RemoteServiceRetainedTask::Unstarted),
+            task_changed: crate::sync::Notify::new(),
+        })
+    }
+
+    fn reservation_is_current(&self, peer: &NodeId, key: IdempotencyKey, generation: &Arc<()>) -> bool {
+        self.inner
+            .lock()
+            .peers
+            .get(peer)
+            .and_then(|peer| peer.reservations.get(&key))
+            .is_some_and(|current| Arc::ptr_eq(current, generation))
     }
 
     /// Runs inside the listener's accept wait, using one retained timer and no
@@ -3823,6 +3912,221 @@ impl RemoteServiceIdempotency {
                 }
             })
             .await;
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+type RemoteServiceTaskHandle =
+    crate::runtime::TaskHandle<Result<RemoteOutcome, RemoteComputationDispatchError>>;
+
+#[cfg(feature = "tls")]
+type RemoteServiceJoined =
+    Result<Result<RemoteOutcome, RemoteComputationDispatchError>, crate::runtime::JoinError>;
+
+#[cfg(feature = "tls")]
+enum RemoteServiceRetainedTask {
+    Unstarted,
+    #[cfg(not(target_arch = "wasm32"))]
+    Starting,
+    #[cfg(not(target_arch = "wasm32"))]
+    ExchangeOwned,
+    #[cfg(not(target_arch = "wasm32"))]
+    Transferred(RemoteServiceTaskHandle),
+    #[cfg(not(target_arch = "wasm32"))]
+    Joining,
+    Terminal(RemoteServiceJoined),
+}
+
+/// The exchange and a child finalizer share this reservation. An abandoned
+/// exchange begins terminal retention only on their last drop; transport loss
+/// must not allow duplicate execution while the original descendants still run.
+#[cfg(feature = "tls")]
+struct RemoteServiceReservation {
+    state: RemoteServiceIdempotency,
+    peer: NodeId,
+    key: IdempotencyKey,
+    canonical_task_id: RemoteTaskId,
+    generation: Arc<()>,
+    clock: Option<crate::time::TimerDriverHandle>,
+    max_frame_bytes: usize,
+    session_envelope: bool,
+    task: Mutex<RemoteServiceRetainedTask>,
+    task_changed: crate::sync::Notify,
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServiceReservation {
+    fn set_task(&self, task: RemoteServiceRetainedTask) {
+        // A transferred handle can own user wakers. Retire the previous value
+        // and wake the finalizer only after releasing the bookkeeping lock.
+        let previous = std::mem::replace(&mut *self.task.lock(), task);
+        drop(previous);
+        self.task_changed.notify_one();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn starting(&self) {
+        self.set_task(RemoteServiceRetainedTask::Starting);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_refused(&self) {
+        self.set_task(RemoteServiceRetainedTask::Unstarted);
+    }
+
+    /// The exchange either already observed the exact native result or hands
+    /// over its unconsumed handle before awaiting child close. There is one
+    /// join owner at a time; no polling or user waker callback holds our lock.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn finish_task(&self) {
+        loop {
+            let changed = self.task_changed.notified();
+            let transferred = {
+                let mut slot = self.task.lock();
+                match &*slot {
+                    RemoteServiceRetainedTask::Unstarted
+                    | RemoteServiceRetainedTask::Terminal(_) => return,
+                    RemoteServiceRetainedTask::Transferred(_) => {
+                        match std::mem::replace(&mut *slot, RemoteServiceRetainedTask::Joining) {
+                            RemoteServiceRetainedTask::Transferred(task) => Some(task),
+                            _ => unreachable!("the transferred handle is held under its slot lock"),
+                        }
+                    }
+                    RemoteServiceRetainedTask::Starting
+                    | RemoteServiceRetainedTask::ExchangeOwned
+                    | RemoteServiceRetainedTask::Joining => None,
+                }
+            };
+            if let Some(mut task) = transferred {
+                // The handler's post-lock retirement opens its barrier
+                // independently of this finalizer, even on one worker.
+                let joined = std::future::poll_fn(|cx| task.poll_join(cx)).await;
+                self.set_task(RemoteServiceRetainedTask::Terminal(joined));
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+/// Keeps the native join handle exclusively with the exchange until completion
+/// or abandonment. Drop transfers it to the already-enrolled async finalizer.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+struct RemoteServicePendingTask {
+    task: Option<RemoteServiceTaskHandle>,
+    reservation: Option<Arc<RemoteServiceReservation>>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteServicePendingTask {
+    fn new(task: RemoteServiceTaskHandle, reservation: Option<&Arc<RemoteServiceReservation>>) -> Self {
+        if let Some(reservation) = reservation {
+            reservation.set_task(RemoteServiceRetainedTask::ExchangeOwned);
+        }
+        Self {
+            task: Some(task),
+            reservation: reservation.cloned(),
+        }
+    }
+
+    fn poll_join(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<RemoteServiceJoined> {
+        let Some(task) = self.task.as_mut() else {
+            return std::task::Poll::Ready(Err(crate::runtime::JoinError::PolledAfterCompletion));
+        };
+        match task.poll_join(cx) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(joined) => {
+                if let Some(reservation) = &self.reservation {
+                    reservation.set_task(RemoteServiceRetainedTask::Terminal(joined.clone()));
+                }
+                drop(self.task.take());
+                std::task::Poll::Ready(joined)
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl Drop for RemoteServicePendingTask {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take()
+            && let Some(reservation) = &self.reservation
+        {
+            reservation.set_task(RemoteServiceRetainedTask::Transferred(task));
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl Drop for RemoteServiceReservation {
+    fn drop(&mut self) {
+        if !self.state.reservation_is_current(&self.peer, self.key, &self.generation) {
+            return;
+        }
+        let slot = std::mem::replace(self.task.get_mut(), RemoteServiceRetainedTask::Unstarted);
+        let published = match slot {
+            RemoteServiceRetainedTask::Terminal(joined) => Some(joined),
+            // A forcibly abandoned finalizer may not have consumed a transferred
+            // result. Recover it if already published; never poll or block here.
+            #[cfg(not(target_arch = "wasm32"))]
+            RemoteServiceRetainedTask::Transferred(mut task) => match task.try_join() {
+                Ok(Some(result)) => Some(Ok(result)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            },
+            _ => None,
+        };
+        let terminal = published.map(remote_service_joined_outcome).unwrap_or_else(|| {
+            Err(RemoteComputationDispatchError::Execution(
+                RemoteError::TransportError(
+                    "remote computation exchange ended before terminal publication".to_owned(),
+                ),
+            ))
+        });
+        let (response, commit) = match terminal {
+            Ok(outcome) => (
+                RemoteServiceWireResponse::Outcome {
+                    remote_task_id: self.canonical_task_id.raw(),
+                    outcome: outcome.clone().into(),
+                },
+                RemoteServiceTerminalCommit::Outcome {
+                    peer: self.peer.clone(),
+                    key: self.key,
+                    canonical_task_id: self.canonical_task_id,
+                    outcome,
+                },
+            ),
+            Err(error) => {
+                let diagnostic = error.to_string();
+                (
+                    RemoteServiceWireResponse::Rejected {
+                        remote_task_id: self.canonical_task_id.raw(),
+                        code: RemoteServiceRejectionCode::ExecutionFailed,
+                        diagnostic: diagnostic.clone(),
+                    },
+                    RemoteServiceTerminalCommit::ExecutionRejection {
+                        peer: self.peer.clone(),
+                        key: self.key,
+                        canonical_task_id: self.canonical_task_id,
+                        diagnostic,
+                    },
+                )
+            }
+        };
+        // Abandoned and delivered results obey the same bounded-cache policy.
+        let (_, commit, _) = remote_service_prepare_terminal_encoding(
+            response,
+            Some(commit),
+            self.max_frame_bytes,
+            self.session_envelope,
+        );
+        let now = self.clock.as_ref().map_or_else(
+            crate::time::raw_wall_now,
+            crate::time::TimerDriverHandle::now,
+        );
+        if let Some(commit) = commit {
+            let _ = self.state.complete_terminal(commit, now, Some(&self.generation));
         }
     }
 }
@@ -4467,6 +4771,10 @@ enum RemoteServiceTerminalCommit {
         canonical_task_id: RemoteTaskId,
         diagnostic: String,
     },
+    Reserved {
+        commit: Box<Self>,
+        guard: Arc<RemoteServiceReservation>,
+    },
 }
 
 #[cfg(feature = "tls")]
@@ -4485,6 +4793,21 @@ impl RemoteServiceTerminalCommit {
                 canonical_task_id,
                 diagnostic,
             } => state.complete_execution_rejection(&peer, key, canonical_task_id, diagnostic, now),
+            Self::Reserved { commit, guard } => {
+                let completed = state.complete_terminal(*commit, now, Some(&guard.generation));
+                drop(guard);
+                completed
+            }
+        }
+    }
+
+    fn with_reservation(self, guard: Option<Arc<RemoteServiceReservation>>) -> Self {
+        match guard {
+            Some(guard) => Self::Reserved {
+                commit: Box::new(self),
+                guard,
+            },
+            None => self,
         }
     }
 
@@ -4502,6 +4825,12 @@ impl RemoteServiceTerminalCommit {
                 canonical_task_id,
                 ..
             } => (peer, key, canonical_task_id),
+            Self::Reserved { commit, guard } => {
+                return Self::Reserved {
+                    commit: Box::new(commit.into_encoding_rejection(diagnostic)),
+                    guard,
+                };
+            }
         };
         Self::ExecutionRejection {
             peer,
@@ -4827,6 +5156,7 @@ where
                             idempotency,
                             execution_mode,
                             peer_permit.as_ref(),
+                            limits.max_frame_bytes(),
                         )
                         .await
                     }
@@ -4862,6 +5192,7 @@ async fn remote_service_dispatch_with_idempotency(
     idempotency: Option<&RemoteServiceIdempotency>,
     execution_mode: RemoteServiceExecutionMode,
     peer_permit: Option<&Arc<RemoteServicePeerPermit>>,
+    max_frame_bytes: usize,
 ) -> (
     RemoteServiceWireResponse,
     Option<RemoteServiceTerminalCommit>,
@@ -4968,9 +5299,18 @@ async fn remote_service_dispatch_with_idempotency(
         Some(RemoteServiceIdempotencyAdmission::Execute) | None => {}
     }
 
+    let reservation = should_commit.then(|| {
+        idempotency
+            .expect("V2 admission retains its idempotency state")
+            .protect_in_flight(cx, session.peer_node(), &request, max_frame_bytes, false)
+    });
     let terminal = match execution_mode {
         RemoteServiceExecutionMode::Inline => {
-            computations.dispatch(cx, session, request.clone()).await
+            let terminal = computations.dispatch(cx, session, request.clone()).await;
+            if let Some(reservation) = &reservation {
+                reservation.set_task(RemoteServiceRetainedTask::Terminal(Ok(terminal.clone())));
+            }
+            terminal
         }
         #[cfg(not(target_arch = "wasm32"))]
         RemoteServiceExecutionMode::LeaseBound => {
@@ -4980,11 +5320,12 @@ async fn remote_service_dispatch_with_idempotency(
                 computations,
                 request.clone(),
                 peer_permit,
+                reservation.as_ref(),
             )
             .await
         }
     };
-    match terminal {
+    let (response, commit) = match terminal {
         Ok(outcome) => {
             let response = RemoteServiceWireResponse::Outcome {
                 remote_task_id: remote_task_id.raw(),
@@ -5021,7 +5362,8 @@ async fn remote_service_dispatch_with_idempotency(
             });
             (response, commit)
         }
-    }
+    };
+    (response, commit.map(|commit| commit.with_reservation(reservation)))
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -5185,10 +5527,13 @@ where
         RemoteServiceIdempotencyAdmission::Execute => {}
     }
 
+    let reservation = idempotency.protect_in_flight(
+        cx, session.peer_node(), &request, max_frame_bytes, true,
+    );
     let accepted_at = cx.now();
     let mut expires_at = accepted_at + remote_service_clamp_lease(request.lease);
     let child_spec = remote_service_child_spec(cx.budget(), request.budget);
-    let child = match remote_service_open_child(cx, child_spec, peer_permit).await {
+    let child = match remote_service_open_child(cx, child_spec, peer_permit, Some(&reservation)).await {
         Ok(child) => child,
         Err(error) => {
             let diagnostic =
@@ -5208,7 +5553,7 @@ where
                 cx,
                 framed,
                 response,
-                Some(commit),
+                Some(commit.with_reservation(Some(Arc::clone(&reservation)))),
                 idempotency,
                 max_frame_bytes,
             )
@@ -5226,7 +5571,7 @@ where
         Ok(RemoteServiceV3AcceptedFlush::Expired) => {
             let terminal = remote_service_expire_child(cx, child, child_region_id).await;
             let (response, commit) =
-                remote_service_v3_terminal_response(session, &request, terminal);
+                remote_service_v3_terminal_response(session, &request, terminal, &reservation);
             return remote_service_v3_send_terminal(
                 cx,
                 framed,
@@ -5244,7 +5589,7 @@ where
                 child_region_id,
                 session,
                 &request,
-                idempotency,
+                &reservation,
                 error,
             )
             .await);
@@ -5254,13 +5599,15 @@ where
     let owned_computations = computations.clone();
     let owned_session = session.clone();
     let retained_request = request.clone();
-    let mut task = match child.cx().spawn(move |task_cx| async move {
+    reservation.starting();
+    let task = match child.cx().spawn(move |task_cx| async move {
         owned_computations
             .dispatch(&task_cx, &owned_session, retained_request)
             .await
     }) {
         Ok(task) => task,
         Err(error) => {
+            reservation.spawn_refused();
             let close_result = child.close().await;
             let diagnostic = match close_result {
                 Ok(()) => format!("spawn V3 computation: {error}"),
@@ -5283,7 +5630,7 @@ where
                 cx,
                 framed,
                 response,
-                Some(commit),
+                Some(commit.with_reservation(Some(Arc::clone(&reservation)))),
                 idempotency,
                 max_frame_bytes,
             )
@@ -5291,6 +5638,7 @@ where
         }
     };
 
+    let mut task = RemoteServicePendingTask::new(task, Some(&reservation));
     let mut last_renewal: Option<(u64, Duration)> = None;
     let mut flush_pending = false;
     let terminal = loop {
@@ -5328,9 +5676,11 @@ where
 
         match raced {
             RemoteServiceV3Race::Expired => {
+                drop(task);
                 break remote_service_expire_child(cx, child, child_region_id).await;
             }
             RemoteServiceV3Race::Completed(joined) => {
+                drop(task);
                 // A close failure is a terminal outcome of this request, not
                 // an early exit: returning here would skip the idempotency
                 // commit below and leave the key in flight for the peer's
@@ -5347,6 +5697,7 @@ where
                 flush_pending = false;
             }
             RemoteServiceV3Race::FlushFailed(error) => {
+                drop(task);
                 let error = RemoteComputationServiceError::Transport(error);
                 return Err(remote_service_v3_abort_after_transport(
                     cx,
@@ -5354,12 +5705,13 @@ where
                     child_region_id,
                     session,
                     &request,
-                    idempotency,
+                    &reservation,
                     error,
                 )
                 .await);
             }
             RemoteServiceV3Race::Command(None) => {
+                drop(task);
                 let error = RemoteComputationServiceError::UnexpectedEof;
                 return Err(remote_service_v3_abort_after_transport(
                     cx,
@@ -5367,12 +5719,13 @@ where
                     child_region_id,
                     session,
                     &request,
-                    idempotency,
+                    &reservation,
                     error,
                 )
                 .await);
             }
             RemoteServiceV3Race::Command(Some(Err(error))) => {
+                drop(task);
                 let error = RemoteComputationServiceError::Transport(error);
                 return Err(remote_service_v3_abort_after_transport(
                     cx,
@@ -5380,7 +5733,7 @@ where
                     child_region_id,
                     session,
                     &request,
-                    idempotency,
+                    &reservation,
                     error,
                 )
                 .await);
@@ -5389,6 +5742,7 @@ where
                 let command: RemoteServiceSessionCommand = match serde_json::from_slice(&frame) {
                     Ok(command) => command,
                     Err(error) => {
+                        drop(task);
                         let error = RemoteComputationServiceError::Serialization(error);
                         return Err(remote_service_v3_abort_after_transport(
                             cx,
@@ -5396,7 +5750,7 @@ where
                             child_region_id,
                             session,
                             &request,
-                            idempotency,
+                            &reservation,
                             error,
                         )
                         .await);
@@ -5419,13 +5773,14 @@ where
                     if let Err(error) =
                         remote_service_v3_queue_event(framed, &rejected, max_frame_bytes)
                     {
+                        drop(task);
                         return Err(remote_service_v3_abort_after_transport(
                             cx,
                             child,
                             child_region_id,
                             session,
                             &request,
-                            idempotency,
+                            &reservation,
                             error,
                         )
                         .await);
@@ -5435,6 +5790,7 @@ where
                 }
                 match command {
                     RemoteServiceSessionCommand::Cancel { reason, .. } => {
+                        drop(task);
                         break remote_service_cancel_child(cx, child, child_region_id, reason)
                             .await;
                     }
@@ -5445,6 +5801,7 @@ where
                         ..
                     } => {
                         if remote_service_lease_expired(cx.now(), expires_at) {
+                            drop(task);
                             break remote_service_expire_child(cx, child, child_region_id).await;
                         }
                         let lease = (lease_subsec_nanos < 1_000_000_000)
@@ -5470,13 +5827,14 @@ where
                             if let Err(error) =
                                 remote_service_v3_queue_event(framed, &rejected, max_frame_bytes)
                             {
+                                drop(task);
                                 return Err(remote_service_v3_abort_after_transport(
                                     cx,
                                     child,
                                     child_region_id,
                                     session,
                                     &request,
-                                    idempotency,
+                                    &reservation,
                                     error,
                                 )
                                 .await);
@@ -5498,13 +5856,14 @@ where
                         if let Err(error) =
                             remote_service_v3_queue_event(framed, &renewed, max_frame_bytes)
                         {
+                            drop(task);
                             return Err(remote_service_v3_abort_after_transport(
                                 cx,
                                 child,
                                 child_region_id,
                                 session,
                                 &request,
-                                idempotency,
+                                &reservation,
                                 error,
                             )
                             .await);
@@ -5516,7 +5875,7 @@ where
         }
     };
 
-    let (response, commit) = remote_service_v3_terminal_response(session, &request, terminal);
+    let (response, commit) = remote_service_v3_terminal_response(session, &request, terminal, &reservation);
     remote_service_v3_send_terminal(cx, framed, response, commit, idempotency, max_frame_bytes)
         .await
 }
@@ -5598,12 +5957,13 @@ fn remote_service_v3_terminal_response(
     session: &RemotePeerSession,
     request: &SpawnRequest,
     terminal: Result<RemoteOutcome, RemoteComputationDispatchError>,
+    reservation: &Arc<RemoteServiceReservation>,
 ) -> (
     RemoteServiceWireResponse,
     Option<RemoteServiceTerminalCommit>,
 ) {
     let remote_task_id = request.remote_task_id;
-    match terminal {
+    let (response, commit) = match terminal {
         Ok(outcome) => (
             RemoteServiceWireResponse::Outcome {
                 remote_task_id: remote_task_id.raw(),
@@ -5640,10 +6000,11 @@ fn remote_service_v3_terminal_response(
                 }),
             )
         }
-    }
+    };
+    (response, commit.map(|commit| commit.with_reservation(Some(Arc::clone(reservation)))))
 }
 
-#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[cfg(feature = "tls")]
 fn remote_service_joined_outcome(
     joined: Result<
         Result<RemoteOutcome, RemoteComputationDispatchError>,
@@ -5671,7 +6032,7 @@ async fn remote_service_v3_abort_after_transport(
     child_region_id: RegionId,
     session: &RemotePeerSession,
     request: &SpawnRequest,
-    idempotency: &RemoteServiceIdempotency,
+    reservation: &RemoteServiceReservation,
     source: RemoteComputationServiceError,
 ) -> RemoteComputationServiceError {
     let reason = CancelReason::with_origin(
@@ -5688,7 +6049,11 @@ async fn remote_service_v3_abort_after_transport(
                 canonical_task_id: request.remote_task_id,
                 outcome,
             };
-            if commit.complete(idempotency, remote_service_idempotency_now(cx)) {
+            if reservation.state.complete_terminal(
+                commit,
+                remote_service_idempotency_now(cx),
+                Some(&reservation.generation),
+            ) {
                 source
             } else {
                 RemoteComputationServiceError::IdempotencyStateLost
@@ -5707,6 +6072,7 @@ async fn remote_service_dispatch_with_lease(
     computations: &RemoteComputationRegistry,
     request: SpawnRequest,
     peer_permit: Option<&Arc<RemoteServicePeerPermit>>,
+    reservation: Option<&Arc<RemoteServiceReservation>>,
 ) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
     let accepted_at = cx.now();
     let expires_at = accepted_at + remote_service_clamp_lease(request.lease);
@@ -5715,7 +6081,7 @@ async fn remote_service_dispatch_with_lease(
     // deadline at the same instant let the runtime's proactive deadline
     // (br-asupersync-pev2xi) cancel the task first, so the computation's own
     // reaction to that cancellation was reported instead of the lease expiry.
-    let child = remote_service_open_child(cx, ChildRegionSpec::inherit(), peer_permit)
+    let child = remote_service_open_child(cx, ChildRegionSpec::inherit(), peer_permit, reservation)
         .await
         .map_err(|error| remote_service_execution_lifecycle_error("create child region", error))?;
     let child_region_id = child.region_id();
@@ -5726,13 +6092,19 @@ async fn remote_service_dispatch_with_lease(
 
     let owned_computations = computations.clone();
     let owned_session = session.clone();
-    let mut task = match child.cx().spawn(move |task_cx| async move {
+    if let Some(reservation) = reservation {
+        reservation.starting();
+    }
+    let task = match child.cx().spawn(move |task_cx| async move {
         owned_computations
             .dispatch(&task_cx, &owned_session, request)
             .await
     }) {
         Ok(task) => task,
         Err(error) => {
+            if let Some(reservation) = reservation {
+                reservation.spawn_refused();
+            }
             let close_result = child.close().await;
             let diagnostic = match close_result {
                 Ok(()) => format!("spawn leased computation: {error}"),
@@ -5745,6 +6117,7 @@ async fn remote_service_dispatch_with_lease(
             ));
         }
     };
+    let mut task = RemoteServicePendingTask::new(task, reservation);
     let mut deadline = Box::pin(crate::time::sleep_until(expires_at));
 
     enum LeaseRace<T> {
@@ -5766,6 +6139,9 @@ async fn remote_service_dispatch_with_lease(
         std::task::Poll::Pending
     })
     .await;
+    // The async region finalizer is the only remaining join owner while the
+    // region drains, including the task-retirement publication barrier.
+    drop(task);
 
     match raced {
         LeaseRace::Expired => remote_service_expire_child(cx, child, child_region_id).await,
@@ -5792,13 +6168,15 @@ async fn remote_service_dispatch_with_lease(
 }
 
 /// Enroll retained admission before exposing the computation's child context.
-/// The transport and the last region finalizer jointly own the credit, so a
-/// dropped exchange cannot free capacity while owned cleanup still runs.
+/// LIFO finalization drains user cleanup, awaits native task retirement, then
+/// releases peer credit. A dropped exchange cannot free either reservation
+/// while owned cleanup still runs.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 async fn remote_service_open_child(
     cx: &Cx,
     spec: ChildRegionSpec,
     peer_permit: Option<&Arc<RemoteServicePeerPermit>>,
+    reservation: Option<&Arc<RemoteServiceReservation>>,
 ) -> Result<crate::cx::ChildRegion, ChildRegionError> {
     let child = cx.open_child_region(spec).await?;
     if let Some(permit) = peer_permit
@@ -5806,6 +6184,19 @@ async fn remote_service_open_child(
     {
         child.close().await?;
         return Err(error);
+    }
+    if let Some(reservation) = reservation {
+        let retained = Arc::clone(reservation);
+        if let Err(error) = child
+            .finalize_async(async move {
+                retained.finish_task().await;
+                drop(retained);
+            })
+            .await
+        {
+            child.close().await?;
+            return Err(error);
+        }
     }
     Ok(child)
 }

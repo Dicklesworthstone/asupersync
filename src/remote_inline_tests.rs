@@ -3080,6 +3080,310 @@ peers = []
 
     #[cfg(feature = "tls")]
     #[test]
+    fn remote_service_reservation_fences_delayed_commit_and_drop_after_key_reuse() {
+        let cx = Cx::for_testing();
+        let peer = NodeId::new("reusing-peer");
+        let request = test_spawn_request(&cx, RemoteTaskId::from_raw(900));
+        let state = RemoteServiceIdempotency::new(Duration::from_secs(10), 1);
+        assert!(matches!(
+            state.admit(&peer, &request, Time::from_secs(100)),
+            RemoteServiceIdempotencyAdmission::Execute
+        ));
+        let old = state.protect_in_flight(&cx, &peer, &request, 4096, false);
+        let delayed = RemoteServiceTerminalCommit::Outcome {
+            peer: peer.clone(), key: request.idempotency_key,
+            canonical_task_id: request.remote_task_id,
+            outcome: RemoteOutcome::Success(vec![9]),
+        }.with_reservation(Some(Arc::clone(&old)));
+        assert!(state.complete_outcome(
+            &peer, request.idempotency_key, request.remote_task_id,
+            RemoteOutcome::Success(vec![1]), Time::from_secs(100),
+        ));
+        assert!(matches!(
+            state.admit(&peer, &request, Time::from_secs(110)),
+            RemoteServiceIdempotencyAdmission::Execute
+        ));
+        assert!(!delayed.complete(&state, Time::from_secs(111)),
+            "a reused task ID does not revive the old reservation");
+        drop(old);
+        assert!(matches!(
+            state.admit(&peer, &request, Time::from_secs(112)),
+            RemoteServiceIdempotencyAdmission::InFlight
+        ));
+        assert!(state.complete_outcome(
+            &peer, request.idempotency_key, request.remote_task_id,
+            RemoteOutcome::Success(vec![2]), Time::from_secs(112),
+        ));
+        assert!(matches!(
+            state.admit(&peer, &request, Time::from_secs(113)),
+            RemoteServiceIdempotencyAdmission::CachedOutcome(RemoteOutcome::Success(bytes))
+                if bytes == vec![2]
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn remote_service_abandoned_result_keeps_wire_limit_and_terminal_retention() {
+        let cx = Cx::for_testing();
+        let peer = NodeId::new("large-result-peer");
+        let request = test_spawn_request(&cx, RemoteTaskId::from_raw(901));
+        let state = RemoteServiceIdempotency::new(Duration::from_secs(10), 1);
+        let admitted_at = remote_service_idempotency_now(&cx);
+        assert!(matches!(
+            state.admit(&peer, &request, admitted_at),
+            RemoteServiceIdempotencyAdmission::Execute
+        ));
+        let guard = state.protect_in_flight(&cx, &peer, &request, 512, true);
+        guard.set_task(RemoteServiceRetainedTask::Terminal(Ok(Ok(
+            RemoteOutcome::Success(vec![7; 8192]),
+        ))));
+        drop(guard);
+        assert!(matches!(
+            state.admit(&peer, &request, remote_service_idempotency_now(&cx)),
+            RemoteServiceIdempotencyAdmission::CachedExecutionRejection(message)
+                if message.contains("wire frame limit")
+        ));
+        let mut inner = state.inner.lock();
+        let expiry = inner.peers[&peer].store.entries[&request.idempotency_key]
+            .expires_at.expect("abandonment starts terminal retention");
+        assert!(expiry >= admitted_at + Duration::from_secs(10));
+        assert_eq!(inner.evict_expired(expiry), None);
+        assert!(inner.peers.is_empty(), "quiet abandoned requests are reclaimable");
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn remote_service_native_unstarted_reservation_finalizer_does_not_wait_for_a_task() {
+        for workers in [1, 2] {
+            let runtime = if workers == 1 {
+                crate::runtime::RuntimeBuilder::current_thread().build().unwrap()
+            } else {
+                crate::runtime::RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+            };
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let peer = NodeId::new("unstarted-peer");
+                let request = test_spawn_request(&cx, RemoteTaskId::from_raw(902));
+                let state = RemoteServiceIdempotency::new(Duration::from_secs(10), 1);
+                assert!(matches!(
+                    state.admit(&peer, &request, cx.now()),
+                    RemoteServiceIdempotencyAdmission::Execute
+                ));
+                let guard = state.protect_in_flight(&cx, &peer, &request, 4096, false);
+                let child = remote_service_open_child(
+                    &cx, ChildRegionSpec::inherit(), None, Some(&guard),
+                ).await.unwrap();
+                crate::time::timeout(cx.now(), Duration::from_secs(3), child.close())
+                    .await.expect("no-task close must not await a nonexistent join")
+                    .unwrap();
+                drop(guard);
+                assert!(matches!(
+                    state.admit(&peer, &request, cx.now()),
+                    RemoteServiceIdempotencyAdmission::CachedExecutionRejection(_)
+                ));
+            });
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn remote_service_native_abandoned_exchange_waits_for_descendants_and_preserves_result() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use crate::distributed::{HasSchema, SchemaDescriptor};
+
+        struct Payload;
+        impl HasSchema for Payload {
+            fn schema() -> SchemaDescriptor {
+                SchemaDescriptor::primitive("remote-reservation.native.bytes.v1")
+            }
+        }
+        #[derive(Default)]
+        struct Witness {
+            parked: AtomicBool,
+            handler_parked: AtomicBool,
+            cancelled: AtomicBool,
+            release: AtomicBool,
+            retired: AtomicBool,
+            factories: AtomicUsize,
+            changed: crate::sync::Notify,
+        }
+        struct Release(Arc<Witness>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release.store(true, Ordering::Release);
+                self.0.changed.notify_waiters();
+            }
+        }
+
+        for workers in [1, 2] {
+            for finish_before_abort in [false, true] {
+                let runtime = if workers == 1 {
+                    crate::runtime::RuntimeBuilder::current_thread().build().unwrap()
+                } else {
+                    crate::runtime::RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+                };
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let witness = Arc::new(Witness::default());
+                    let release = Release(Arc::clone(&witness));
+                    let mut registry = RemoteComputationRegistry::new();
+                    let seen = Arc::clone(&witness);
+                    registry.register::<Payload, Payload, _, _>("compute", move |body, _| {
+                        let seen = Arc::clone(&seen);
+                        seen.factories.fetch_add(1, Ordering::SeqCst);
+                        async move {
+                            let descendant = Arc::clone(&seen);
+                            let _task = body.spawn(move |child| async move {
+                                let mut cancel = std::pin::pin!(child.cancelled());
+                                std::future::poll_fn(|task| {
+                                    let poll = cancel.as_mut().poll(task);
+                                    if poll.is_pending() && !descendant.parked.swap(true, Ordering::AcqRel) {
+                                        descendant.changed.notify_waiters();
+                                    }
+                                    poll
+                                }).await;
+                                assert!(child.checkpoint().is_err());
+                                descendant.cancelled.store(true, Ordering::Release);
+                                descendant.changed.notify_waiters();
+                                descendant.changed.wait_until(|| descendant.release.load(Ordering::Acquire)).await;
+                                descendant.retired.store(true, Ordering::Release);
+                                descendant.changed.notify_waiters();
+                            }).unwrap();
+                            seen.changed.wait_until(|| seen.parked.load(Ordering::Acquire)).await;
+                            if !finish_before_abort {
+                                let mut cancel = std::pin::pin!(body.cancelled());
+                                std::future::poll_fn(|task| {
+                                    let poll = cancel.as_mut().poll(task);
+                                    if poll.is_pending() && !seen.handler_parked.swap(true, Ordering::AcqRel) {
+                                        seen.changed.notify_waiters();
+                                    }
+                                    poll
+                                }).await;
+                                assert!(body.checkpoint().is_err());
+                            }
+                            Ok(RemoteOutcome::Success(vec![42]))
+                        }
+                    }).unwrap();
+                    registry.register::<Payload, Payload, _, _>("echo", |_, _| async {
+                        Ok(RemoteOutcome::Success(vec![99]))
+                    }).unwrap();
+                    let peer = NodeId::new("abandoned-peer");
+                    let other_peer = NodeId::new("live-peer");
+                    let mut policy = RemotePeerAdmissionPolicy::new(
+                        RemoteProtocolVersion::V2, registry.schema_registry().clone(),
+                    );
+                    for node in [&peer, &other_peer] {
+                        policy.grant_peer(node.clone(), ["compute", "echo"]).unwrap();
+                    }
+                    let session = policy.admit(&policy.hello_for(peer.clone())).unwrap();
+                    let other_session = policy.admit(&policy.hello_for(other_peer.clone())).unwrap();
+                    let request = test_spawn_request(&cx, RemoteTaskId::from_raw(903));
+                    let state = RemoteServiceIdempotency::new(Duration::from_secs(10), 1);
+                    let connection_state = state.clone();
+                    let connection_request = request.clone();
+                    let connection_registry = registry.clone();
+                    let mut connection = cx.spawn(move |connection_cx| async move {
+                        let shutdown = ShutdownSignal::new();
+                        race_remote_service_termination(&connection_cx, &shutdown, async {
+                            let (response, commit) = remote_service_dispatch_with_idempotency(
+                                &connection_cx, &session, &connection_registry, connection_request,
+                                Some(&connection_state), RemoteServiceExecutionMode::LeaseBound,
+                                None, 4096,
+                            ).await;
+                            if let Some(commit) = commit {
+                                assert!(commit.complete(&connection_state, connection_cx.now()));
+                            }
+                            response
+                        }).await
+                    }).unwrap();
+                    crate::time::timeout(cx.now(), Duration::from_secs(3),
+                        witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire)
+                            && if finish_before_abort {
+                                // Only the dispatcher's close can cancel this
+                                // descendant before the connection abort. It
+                                // closes only after the native join observed
+                                // the published result and retirement barrier.
+                                witness.cancelled.load(Ordering::Acquire)
+                            } else {
+                                witness.handler_parked.load(Ordering::Acquire)
+                            }),
+                    ).await.expect("handler publication or cancellation wait is established");
+                    connection.abort();
+                    let stopped = crate::time::timeout(cx.now(), Duration::from_secs(3), connection.join(&cx))
+                        .await.expect("connection cancellation wakes the parked exchange")
+                        .expect("acknowledged connection cancellation preserves its result");
+                    assert!(stopped.is_none(), "termination drops the exchange before publication");
+                    crate::time::timeout(cx.now(), Duration::from_secs(3),
+                        witness.changed.wait_until(|| witness.cancelled.load(Ordering::Acquire)),
+                    ).await.expect("descendant cancellation is observed");
+                    assert!(!witness.retired.load(Ordering::Acquire));
+                    {
+                        let mut inner = state.inner.lock();
+                        assert_eq!(inner.evict_expired(Time::MAX), None);
+                        let record = &inner.peers[&peer].store.entries[&request.idempotency_key];
+                        assert!(record.outcome.is_none() && record.expires_at.is_none(),
+                            "cleanup owns the key until quiescence");
+                    }
+                    assert!(matches!(
+                        state.admit(&peer, &request, cx.now()),
+                        RemoteServiceIdempotencyAdmission::InFlight
+                    ));
+                    let mut different = request.clone();
+                    different.idempotency_key = IdempotencyKey::from_raw(904);
+                    assert!(matches!(
+                        state.admit(&peer, &different, cx.now()),
+                        RemoteServiceIdempotencyAdmission::Capacity
+                    ));
+                    let mut echo = different;
+                    echo.computation = ComputationName::new("echo");
+                    let (response, commit) = crate::time::timeout(cx.now(), Duration::from_secs(3),
+                        remote_service_dispatch_with_idempotency(
+                            &cx, &other_session, &registry, echo,
+                            Some(&state), RemoteServiceExecutionMode::LeaseBound, None, 4096,
+                        ),
+                    ).await.expect("another peer remains live during cleanup");
+                    assert!(matches!(response, RemoteServiceWireResponse::Outcome {
+                        outcome: RemoteServiceWireOutcome::Success(bytes), ..
+                    } if bytes == vec![99]));
+                    assert!(commit.unwrap().complete(&state, cx.now()));
+                    // Retire the unrelated peer's terminal entry so the next
+                    // expiry notification belongs to the abandoned operation.
+                    // Its still-live key must survive even this maximal sweep.
+                    state.inner.lock().evict_expired(Time::MAX);
+                    assert!(matches!(
+                        state.admit(&peer, &request, cx.now()),
+                        RemoteServiceIdempotencyAdmission::InFlight
+                    ));
+                    let released_at = cx.now();
+                    drop(release);
+                    crate::time::timeout(cx.now(), Duration::from_secs(3), async {
+                        loop {
+                            let changed = state.expiry_changed.notified();
+                            if state.inner.lock().peers[&peer].store.entries[&request.idempotency_key]
+                                .outcome.is_some() { break; }
+                            changed.await;
+                        }
+                    }).await.expect("quiescence settles the abandoned key");
+                    assert!(witness.retired.load(Ordering::Acquire));
+                    assert_eq!(witness.factories.load(Ordering::SeqCst), 1);
+                    assert!(matches!(
+                        state.admit(&peer, &request, cx.now()),
+                        RemoteServiceIdempotencyAdmission::CachedOutcome(RemoteOutcome::Success(bytes))
+                            if bytes == vec![42]
+                    ));
+                    let expiry = state.inner.lock().peers[&peer].store.entries[&request.idempotency_key]
+                        .expires_at.unwrap();
+                    assert!(expiry >= released_at + Duration::from_secs(10),
+                        "retention starts after cleanup, not at connection abort");
+                });
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
     fn remote_service_idempotency_frees_an_idle_peers_expired_records() {
         let cx = Cx::for_testing();
         let retention = Duration::from_secs(10);
