@@ -134,9 +134,9 @@ pub use event_structure::{
 };
 pub use file::{
     CompressionMode, FLAG_CHECKSUMMED, TRACE_CHECKSUM_LEN, TRACE_FILE_VERSION, TRACE_MAGIC,
-    TraceContainerLimits, TraceEventIterator, TraceFileConfig, TraceFileError, TraceFileMigrationReceipt,
-    TraceReader, TraceRecovery, TraceRecoveryStatus, TraceWriter, migrate_trace_file, read_trace,
-    recover_trace_prefix, write_trace,
+    TraceContainerLimits, TraceEventIterator, TraceFileConfig, TraceFileError,
+    TraceFileMigrationReceipt, TraceReader, TraceRecovery, TraceRecoveryStatus, TraceWriter,
+    migrate_trace_file, read_trace, recover_trace_prefix, write_trace,
 };
 pub use filter::{EventCategory, FilterBuilder, FilterableEvent, TraceFilter};
 #[cfg(feature = "test-internals")]
@@ -184,7 +184,7 @@ pub use minimizer::{
 };
 pub use recorder::{
     DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_MEMORY, LimitAction, LimitKind, LimitReached,
-    RecorderConfig, TraceRecorder,
+    RecorderConfig, TraceRecorder, TraceRecording, TraceRecordingError, TraceRecordingStatus,
 };
 pub use recovery::{
     CrashRecovery, CrashRecoveryLimits, CrashRecoveryStop, recover_crashed_trace_prefix,

@@ -79,6 +79,197 @@
         assert_eq!(trace.metadata.seed, 42);
     }
 
+    // br-asupersync-tjr6s9: loss receipts cover actual submitted events, not
+    // merely the number left in a bounded vector.
+    #[test]
+    fn recording_receipt_counts_limit_and_subsequent_rejections() {
+        let config = RecorderConfig::enabled().with_max_events(Some(2));
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+        recorder.record_rng_seed(42);
+        recorder.record_rng_value(10);
+        recorder.record_rng_value(20);
+        recorder.record_rng_value(30);
+
+        let live = recorder.status().expect("enabled recorder");
+        assert_eq!(live.submitted_events(), 4);
+        assert_eq!(live.retained_events(), 2);
+        assert_eq!(live.rejected_events(), 2);
+        assert_eq!(live.dropped_oldest(), 0);
+        assert_eq!(live.first_event_index(), 0);
+        assert_eq!(live.last_limit(), Some(LimitKind::MaxEvents));
+        assert!(live.is_stopped());
+        assert!(!live.is_active());
+        assert!(!live.is_finished());
+        assert!(!live.is_lossless_from_start());
+
+        let recording = recorder.finish_recording().expect("receipt");
+        assert_eq!(recording.trace().events.len(), 2);
+        assert!(recording.status().is_finished());
+        let error = recording.into_replay_trace().expect_err("lost suffix");
+        assert_eq!(error.status().rejected_events(), 2);
+    }
+
+    #[test]
+    fn recording_receipt_reports_evicted_seed_and_retained_suffix() {
+        let config = RecorderConfig::enabled()
+            .with_max_events(Some(2))
+            .on_limit(LimitAction::DropOldest);
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+        recorder.record_rng_seed(42);
+        recorder.record_rng_value(10);
+        recorder.record_rng_value(20);
+
+        let recording = recorder.finish_recording().expect("receipt");
+        assert_eq!(
+            recording.trace().events,
+            vec![
+                ReplayEvent::RngValue { value: 10 },
+                ReplayEvent::RngValue { value: 20 }
+            ]
+        );
+        let status = recording.status();
+        assert_eq!(status.submitted_events(), 3);
+        assert_eq!(status.dropped_oldest(), 1);
+        assert_eq!(status.rejected_events(), 0);
+        assert_eq!(status.first_event_index(), 1);
+        assert!(!status.is_stopped());
+        assert!(recording.into_replay_trace().is_err());
+    }
+
+    #[test]
+    fn recording_receipt_covers_eviction_before_oversized_event_refusal() {
+        let config = RecorderConfig::enabled()
+            .with_max_memory(18)
+            .on_limit(LimitAction::DropOldest);
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+        recorder.record_rng_seed(42);
+        recorder.record_rng_value(10);
+        recorder.record_task_spawned(make_task_id(1, 0), make_region_id(1, 0), 0);
+
+        let recording = recorder.finish_recording().expect("receipt");
+        let status = recording.status();
+        assert_eq!(status.submitted_events(), 3);
+        assert_eq!(status.retained_events(), 0);
+        assert_eq!(status.dropped_oldest(), 2);
+        assert_eq!(status.rejected_events(), 1);
+        assert_eq!(status.last_limit(), Some(LimitKind::MaxMemory));
+        assert!(status.is_stopped());
+        assert!(recording.into_replay_trace().is_err());
+    }
+
+    #[test]
+    fn recording_rotation_preserves_loss_even_through_legacy_take() {
+        let config = RecorderConfig::enabled().with_max_events(Some(1));
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+        recorder.record_rng_seed(42);
+        recorder.record_rng_value(10);
+        assert_eq!(recorder.take().expect("legacy segment").len(), 1);
+
+        recorder.record_rng_seed(42);
+        let recording = recorder.take_recording().expect("second segment");
+        let status = recording.status();
+        assert_eq!(status.first_event_index(), 2);
+        assert_eq!(status.submitted_events(), 3);
+        assert_eq!(status.retained_events(), 1);
+        assert_eq!(status.rejected_events(), 1);
+        assert_eq!(status.last_limit(), Some(LimitKind::MaxEvents));
+        assert!(!status.is_stopped());
+        assert!(recording.into_replay_trace().is_err());
+
+        recorder.record_rng_value(20);
+        let last = recorder.finish_recording().expect("last segment");
+        assert_eq!(last.status().first_event_index(), 3);
+        assert_eq!(last.status().rejected_events(), 1);
+        assert!(last.into_replay_trace().is_err());
+    }
+
+    #[test]
+    fn recording_live_snapshots_and_rotated_suffixes_do_not_authorize_replay() {
+        let mut recorder = TraceRecorder::new(TraceMetadata::new(42));
+        recorder.record_rng_seed(42);
+        let snapshot = recorder.snapshot_recording().expect("snapshot");
+        assert!(snapshot.status().is_active());
+        assert!(snapshot.status().is_lossless_from_start());
+        assert!(snapshot.into_replay_trace().is_err());
+
+        let first = recorder.take_recording().expect("first segment");
+        assert!(first.status().is_finished());
+        assert!(first.into_replay_trace().is_ok());
+        recorder.record_rng_value(10);
+        let suffix = recorder.finish_recording().expect("suffix");
+        assert_eq!(suffix.status().first_event_index(), 1);
+        assert_eq!(suffix.status().dropped_oldest(), 0);
+        assert_eq!(suffix.status().rejected_events(), 0);
+        assert!(suffix.into_replay_trace().is_err());
+    }
+
+    #[test]
+    fn recording_receipt_filters_are_explicit_without_counting_unsubmitted_events() {
+        let config = RecorderConfig::enabled().with_rng(false).with_wakers(false);
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+        recorder.record_rng_seed(42);
+        recorder.record_rng_seed(42);
+        recorder.record_rng_value(10);
+        recorder.record_waker_wake(make_task_id(1, 0));
+        recorder.record_waker_batch_wake(2);
+        recorder.record_time_advanced(Time::ZERO, Time::ZERO);
+
+        let recording = recorder.finish_recording().expect("receipt");
+        assert_eq!(recording.status().submitted_events(), 1);
+        assert!(!recording.status().records_rng());
+        assert!(!recording.status().records_wakers());
+        assert!(recording.into_replay_trace().is_ok());
+
+        let mut disabled = TraceRecorder::disabled();
+        disabled.record_rng_seed(42);
+        assert!(disabled.status().is_none());
+        assert!(disabled.take_recording().is_none());
+        assert!(disabled.snapshot_recording().is_none());
+        assert!(disabled.finish_recording().is_none());
+    }
+
+    #[test]
+    fn recording_receipt_survives_limit_callback_unwind() {
+        let config =
+            RecorderConfig::enabled()
+                .with_max_events(Some(0))
+                .on_limit(LimitAction::Callback(Arc::new(|_| {
+                    panic!("limit callback")
+                })));
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            recorder.record_rng_seed(42);
+        }));
+        assert!(result.is_err());
+        recorder.record_rng_value(10);
+
+        let recording = recorder.finish_recording().expect("receipt after unwind");
+        assert!(recording.status().is_stopped());
+        assert_eq!(recording.status().submitted_events(), 2);
+        assert_eq!(recording.status().rejected_events(), 2);
+        assert_eq!(recording.status().last_limit(), Some(LimitKind::MaxEvents));
+        assert!(recording.into_replay_trace().is_err());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn recording_receipt_survives_fail_policy_unwind() {
+        let config = RecorderConfig::enabled()
+            .with_max_events(Some(0))
+            .on_limit(LimitAction::Fail);
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                recorder.record_rng_seed(42);
+            }))
+            .is_err()
+        );
+        let recording = recorder.finish_recording().expect("receipt after unwind");
+        assert!(recording.status().is_stopped());
+        assert_eq!(recording.status().rejected_events(), 1);
+        assert!(recording.into_replay_trace().is_err());
+    }
+
     #[test]
     fn rng_recording_can_be_disabled() {
         let config = RecorderConfig::enabled().with_rng(false);

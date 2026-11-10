@@ -37,6 +37,7 @@
 //! The replayer detects when actual execution diverges from the recorded trace.
 //! This indicates either a bug in the code or trace corruption.
 
+use crate::trace::recorder::{TraceRecording, TraceRecordingError};
 use crate::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata};
 use serde::Serialize;
 use std::fmt;
@@ -196,6 +197,9 @@ pub struct TraceReplayer {
 
 impl TraceReplayer {
     /// Creates a new replayer from a trace.
+    ///
+    /// A bare trace carries no recorder-loss evidence. Use [`Self::from_recording`]
+    /// when accepting a potentially limited or rotated recording.
     #[must_use]
     pub fn new(trace: ReplayTrace) -> Self {
         Self {
@@ -205,6 +209,18 @@ impl TraceReplayer {
             at_breakpoint: false,
             completed: false,
         }
+    }
+
+    /// Admit a finalized recording with every submitted event retained from origin.
+    ///
+    /// Disabled event categories and uninstrumented sources of nondeterminism
+    /// are outside this retention guarantee, as is workload quiescence.
+    ///
+    /// # Errors
+    /// Refuses active snapshots, recording loss, and rotated suffixes before
+    /// any replay event can be consumed. The error carries the loss counters.
+    pub fn from_recording(recording: TraceRecording) -> Result<Self, TraceRecordingError> {
+        recording.into_replay_trace().map(Self::new)
     }
 
     /// Returns the trace metadata.

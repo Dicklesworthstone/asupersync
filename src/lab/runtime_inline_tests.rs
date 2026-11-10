@@ -322,8 +322,8 @@
 
     #[test]
     fn checkpoint_ack_ready_before_handle_command_reconciles_terminal_cancel() {
-        use std::sync::Barrier;
         use crate::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Barrier;
 
         init_test("checkpoint_ack_ready_before_handle_command_reconciles_terminal_cancel");
         let mut runtime = LabRuntime::new(LabConfig::new(19));
@@ -402,8 +402,8 @@
 
     #[test]
     fn checkpoint_ack_pending_republishes_cancel_lane_before_waker_dispatch() {
-        use std::sync::Barrier;
         use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Barrier;
 
         init_test("checkpoint_ack_pending_republishes_cancel_lane_before_waker_dispatch");
         let mut runtime = LabRuntime::new(LabConfig::new(23));
@@ -5602,6 +5602,76 @@
         }
 
         crate::test_complete!("replay_records_correct_severity_for_cancelled_task");
+    }
+
+    #[test]
+    fn replay_recording_receipt_refuses_a_truncated_real_lab_run() {
+        use crate::trace::{LimitAction, RecorderConfig, TraceReplayer};
+
+        for action in [LimitAction::StopRecording, LimitAction::DropOldest] {
+            let config = LabConfig::new(42)
+                .with_replay_recording(
+                    RecorderConfig::enabled()
+                        .with_max_events(Some(1))
+                        .on_limit(action),
+                )
+                .max_steps(64);
+            let expected_hash = LabConfigSummary::from_config(&config).config_hash();
+            let mut runtime = LabRuntime::new(config);
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            let completed = Arc::new(crate::sync::atomic::AtomicBool::new(false));
+            let observed = Arc::clone(&completed);
+            let (task, _handle) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    futures_lite::future::yield_now().await;
+                    observed.store(true, crate::sync::atomic::Ordering::SeqCst);
+                })
+                .expect("create recorded task");
+            runtime.scheduler.lock().schedule(task, 0);
+            assert!(runtime.run_until_quiescent_with_report().quiescent);
+            assert!(completed.load(crate::sync::atomic::Ordering::SeqCst));
+
+            let recording = runtime.finish_replay_recording().expect("recording");
+            assert!(!runtime.has_replay_recording());
+            assert_eq!(recording.trace().metadata.config_hash, expected_hash);
+            assert_eq!(recording.status().retained_events(), 1);
+            assert!(recording.status().submitted_events() > 1);
+            assert_eq!(
+                recording.status().last_limit(),
+                Some(crate::trace::LimitKind::MaxEvents)
+            );
+            assert!(TraceReplayer::from_recording(recording).is_err());
+        }
+    }
+
+    #[test]
+    fn replay_recording_metadata_identifies_lab_setup_and_receipt_rotation() {
+        let base = LabConfig::new(42).with_default_replay_recording();
+        let configs = [
+            base.clone(),
+            base.clone().entropy_seed(99),
+            base.clone().worker_count(2),
+            base.with_chaos(ChaosConfig::light().with_seed(77)),
+        ];
+        let mut hashes = std::collections::BTreeSet::new();
+        for config in configs {
+            let expected = LabConfigSummary::from_config(&config).config_hash();
+            let mut runtime = LabRuntime::new(config);
+            let recording = runtime.take_replay_recording().expect("first segment");
+            assert_eq!(recording.trace().metadata.config_hash, expected);
+            assert_ne!(expected, 0);
+            assert!(
+                hashes.insert(expected),
+                "changed lab setup must change identity"
+            );
+            assert!(crate::trace::TraceReplayer::from_recording(recording).is_ok());
+
+            let suffix = runtime.finish_replay_recording().expect("rotated segment");
+            assert_eq!(suffix.trace().metadata.config_hash, expected);
+            assert_eq!(suffix.status().first_event_index(), 1);
+            assert!(crate::trace::TraceReplayer::from_recording(suffix).is_err());
+        }
     }
 
     #[test]

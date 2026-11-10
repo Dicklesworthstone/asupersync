@@ -232,6 +232,197 @@ pub mod chaos_kind {
 }
 
 // =============================================================================
+// Recording Retention
+// =============================================================================
+
+/// Retention evidence for the events submitted to one enabled recorder.
+///
+/// Counters cover the recorder's lifetime, including earlier calls to
+/// [`TraceRecorder::take`]. Events excluded by `record_rng` or `record_wakers`,
+/// duplicate seeds, and unchanged time observations are not submissions. This
+/// describes storage loss, not whether every source of nondeterminism was
+/// instrumented or the workload reached quiescence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceRecordingStatus {
+    submitted_events: u64,
+    retained_events: usize,
+    first_event_index: u64,
+    dropped_oldest: u64,
+    rejected_events: u64,
+    stopped: bool,
+    finished: bool,
+    last_limit: Option<LimitKind>,
+    record_rng: bool,
+    record_wakers: bool,
+}
+
+impl TraceRecordingStatus {
+    /// Events submitted since the recorder was created, including rejected ones.
+    #[must_use]
+    pub const fn submitted_events(&self) -> u64 {
+        self.submitted_events
+    }
+
+    /// Events retained in this snapshot or segment.
+    #[must_use]
+    pub const fn retained_events(&self) -> usize {
+        self.retained_events
+    }
+
+    /// Source submission index at which the retained segment starts.
+    ///
+    /// Eviction and rotation advance this offset. A nonzero offset means this
+    /// segment cannot independently replay the recorder's original prefix.
+    #[must_use]
+    pub const fn first_event_index(&self) -> u64 {
+        self.first_event_index
+    }
+
+    /// Events evicted by `DropOldest` across all recording segments.
+    #[must_use]
+    pub const fn dropped_oldest(&self) -> u64 {
+        self.dropped_oldest
+    }
+
+    /// Submissions rejected at a limit or while the recorder was stopped.
+    ///
+    /// This also counts a limit callback or failure policy that unwound before
+    /// the submission could be retained. Rotation does not erase this history.
+    #[must_use]
+    pub const fn rejected_events(&self) -> u64 {
+        self.rejected_events
+    }
+
+    /// Whether a limit stopped this segment from accepting further events.
+    #[must_use]
+    pub const fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// Whether this receipt finalized a segment rather than observing it live.
+    ///
+    /// Finalization does not establish that the recorded workload has ended.
+    #[must_use]
+    pub const fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Whether this is a snapshot of a recorder still accepting events.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        !self.finished && !self.stopped
+    }
+
+    /// Most recent limit encountered, retained across segment rotation.
+    #[must_use]
+    pub const fn last_limit(&self) -> Option<LimitKind> {
+        self.last_limit
+    }
+
+    /// Whether RNG value submissions were enabled. The initial seed is separate.
+    #[must_use]
+    pub const fn records_rng(&self) -> bool {
+        self.record_rng
+    }
+
+    /// Whether waker submissions were enabled.
+    #[must_use]
+    pub const fn records_wakers(&self) -> bool {
+        self.record_wakers
+    }
+
+    /// Whether every submitted event since recorder creation is retained here.
+    ///
+    /// An active snapshot can satisfy this and still be only a run prefix.
+    /// Use [`TraceRecording::into_replay_trace`] to additionally require an
+    /// explicitly finalized segment.
+    #[must_use]
+    pub const fn is_lossless_from_start(&self) -> bool {
+        self.first_event_index == 0 && self.dropped_oldest == 0 && self.rejected_events == 0
+    }
+}
+
+/// A retained trace together with immutable storage-loss evidence.
+///
+/// The existing [`ReplayTrace`] and [`TraceMetadata`] wire representations are
+/// unchanged. Extracting or serializing the bare trace discards this evidence;
+/// keep the receipt when deciding whether a recording can authorize replay.
+#[derive(Debug, Clone)]
+pub struct TraceRecording {
+    trace: ReplayTrace,
+    status: TraceRecordingStatus,
+}
+
+impl TraceRecording {
+    /// Borrow the retained events for analysis, even if the recording lost data.
+    #[must_use]
+    pub fn trace(&self) -> &ReplayTrace {
+        &self.trace
+    }
+
+    /// Storage retention, lifetime loss counters, and recorder policy.
+    #[must_use]
+    pub const fn status(&self) -> TraceRecordingStatus {
+        self.status
+    }
+
+    /// Extract a finalized trace with every submitted event retained from origin.
+    ///
+    /// This proves retention only. Disabled event categories, missing producer
+    /// instrumentation, arbitrary external effects, and workload termination
+    /// remain outside this receipt's scope.
+    ///
+    /// # Errors
+    /// Refuses live snapshots, evicted or rejected events, and rotated suffixes.
+    pub fn into_replay_trace(self) -> Result<ReplayTrace, TraceRecordingError> {
+        if !self.status.finished || !self.status.is_lossless_from_start() {
+            return Err(TraceRecordingError {
+                status: self.status,
+            });
+        }
+        Ok(self.trace)
+    }
+
+    /// Extract the retained prefix or suffix, explicitly discarding its receipt.
+    ///
+    /// This is useful for partial-trace analysis and legacy consumers. It does
+    /// not authorize lossless replay.
+    #[must_use]
+    pub fn into_retained_trace(self) -> ReplayTrace {
+        self.trace
+    }
+}
+
+/// A recording cannot supply a finalized, lossless trace from its origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceRecordingError {
+    status: TraceRecordingStatus,
+}
+
+impl TraceRecordingError {
+    /// The retention evidence that caused replay admission to fail.
+    #[must_use]
+    pub const fn status(&self) -> TraceRecordingStatus {
+        self.status
+    }
+}
+
+impl fmt::Display for TraceRecordingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "replay recording is incomplete: finished={}, first_event_index={}, dropped_oldest={}, rejected_events={}",
+            self.status.finished,
+            self.status.first_event_index,
+            self.status.dropped_oldest,
+            self.status.rejected_events
+        )
+    }
+}
+
+impl std::error::Error for TraceRecordingError {}
+
+// =============================================================================
 // Trace Recorder
 // =============================================================================
 
@@ -261,6 +452,12 @@ pub struct TraceRecorder {
     stopped: bool,
     /// Estimated bytes for recorded events (metadata excluded).
     estimated_event_bytes: u64,
+    /// Lifetime retention counters, deliberately preserved across rotation.
+    submitted_events: u64,
+    first_event_index: u64,
+    dropped_oldest: u64,
+    rejected_events: u64,
+    last_limit: Option<LimitKind>,
 }
 
 impl TraceRecorder {
@@ -288,6 +485,11 @@ impl TraceRecorder {
             seed_recorded: false,
             stopped: false,
             estimated_event_bytes: 0,
+            submitted_events: 0,
+            first_event_index: 0,
+            dropped_oldest: 0,
+            rejected_events: 0,
+            last_limit: None,
         }
     }
 
@@ -301,6 +503,11 @@ impl TraceRecorder {
             seed_recorded: false,
             stopped: true,
             estimated_event_bytes: 0,
+            submitted_events: 0,
+            first_event_index: 0,
+            dropped_oldest: 0,
+            rejected_events: 0,
+            last_limit: None,
         }
     }
 
@@ -324,8 +531,28 @@ impl TraceRecorder {
         50 + self.estimated_event_bytes as usize
     }
 
-    fn should_record(&self) -> bool {
-        self.events.is_some() && !self.stopped
+    /// Inspect retention without cloning the event buffer.
+    ///
+    /// Returns `None` when recording is disabled. A stopped recorder continues
+    /// reporting subsequent rejected submissions and earlier segments' loss.
+    #[must_use]
+    pub fn status(&self) -> Option<TraceRecordingStatus> {
+        self.events.as_ref().map(|_| self.recording_status(false))
+    }
+
+    fn recording_status(&self, finished: bool) -> TraceRecordingStatus {
+        TraceRecordingStatus {
+            submitted_events: self.submitted_events,
+            retained_events: self.event_count(),
+            first_event_index: self.first_event_index,
+            dropped_oldest: self.dropped_oldest,
+            rejected_events: self.rejected_events,
+            stopped: self.stopped,
+            finished,
+            last_limit: self.last_limit,
+            record_rng: self.config.record_rng,
+            record_wakers: self.config.record_wakers,
+        }
     }
 
     fn resolve_limit_action(&self, info: &LimitReached) -> LimitAction {
@@ -336,6 +563,10 @@ impl TraceRecorder {
     }
 
     fn handle_limit(&mut self, info: &LimitReached) -> bool {
+        // Publish terminal/loss evidence before user callbacks or debug failure
+        // policies can unwind. Only a successful eviction reopens admission.
+        self.stopped = true;
+        self.last_limit = Some(info.kind);
         let mut action = self.resolve_limit_action(info);
         if matches!(action, LimitAction::Callback(_)) {
             action = LimitAction::StopRecording;
@@ -356,6 +587,7 @@ impl TraceRecorder {
             }
             LimitAction::DropOldest => {
                 if self.drop_oldest_event() {
+                    self.stopped = false;
                     true
                 } else {
                     warn!(
@@ -397,6 +629,8 @@ impl TraceRecorder {
             return false;
         }
         let dropped = events.pop_front().expect("events not empty");
+        self.first_event_index = self.first_event_index.saturating_add(1);
+        self.dropped_oldest = self.dropped_oldest.saturating_add(1);
         self.estimated_event_bytes = self
             .estimated_event_bytes
             .saturating_sub(dropped.estimated_size() as u64);
@@ -446,7 +680,15 @@ impl TraceRecorder {
     }
 
     fn record_event(&mut self, event: ReplayEvent) {
-        if !self.should_record() {
+        if self.events.is_none() {
+            return;
+        }
+        self.submitted_events = self.submitted_events.saturating_add(1);
+        // Count the event as rejected until retention succeeds. If a limit
+        // callback panics, the next receipt must still report the missing event.
+        let previous_rejections = self.rejected_events;
+        self.rejected_events = self.rejected_events.saturating_add(1);
+        if self.stopped {
             return;
         }
         let event_size = event.estimated_size() as u64;
@@ -456,6 +698,7 @@ impl TraceRecorder {
         if let Some(ref mut events) = self.events {
             events.push_back(event);
             self.estimated_event_bytes = self.estimated_event_bytes.saturating_add(event_size);
+            self.rejected_events = previous_rejections;
         }
     }
 
@@ -672,6 +915,8 @@ impl TraceRecorder {
     /// Finishes recording and returns the completed trace.
     ///
     /// Returns `None` if recording was disabled.
+    /// This legacy view omits retention evidence. Use [`Self::finish_recording`]
+    /// when the consumer must distinguish loss from an intentionally short run.
     #[must_use]
     pub fn finish(self) -> Option<ReplayTrace> {
         if let (Some(metadata), Some(events)) = (self.metadata, self.events) {
@@ -685,9 +930,22 @@ impl TraceRecorder {
         }
     }
 
+    /// Finalizes the recorder and preserves its retention evidence.
+    ///
+    /// Returns `None` if recording was disabled. The receipt can be passed to
+    /// [`super::replayer::TraceReplayer::from_recording`] for checked admission.
+    #[must_use]
+    pub fn finish_recording(self) -> Option<TraceRecording> {
+        let status = self.recording_status(true);
+        self.finish().map(|trace| TraceRecording { trace, status })
+    }
+
     /// Takes the trace without consuming the recorder.
     ///
     /// This resets the recorder to a new empty trace with the same config.
+    /// This legacy view omits retention evidence; [`Self::take_recording`]
+    /// preserves it. Later segments keep their source offset and lifetime loss
+    /// history even when rotation goes through this legacy method.
     pub fn take(&mut self) -> Option<ReplayTrace> {
         if self.metadata.is_none() || self.events.is_none() {
             return None;
@@ -714,13 +972,25 @@ impl TraceRecorder {
         self.seed_recorded = false;
         self.stopped = false;
         self.estimated_event_bytes = 0;
+        self.first_event_index = self.submitted_events;
 
         Some(trace)
+    }
+
+    /// Finalizes the current segment and begins another without erasing loss.
+    ///
+    /// A later segment carries a nonzero source offset and cannot independently
+    /// authorize replay from the original recorder's start.
+    pub fn take_recording(&mut self) -> Option<TraceRecording> {
+        let status = self.recording_status(true);
+        self.take().map(|trace| TraceRecording { trace, status })
     }
 
     /// Returns a snapshot of the current trace, if recording.
     ///
     /// This clones the events, so it can be expensive for large traces.
+    /// This legacy view omits retention evidence; use
+    /// [`Self::snapshot_recording`] to retain it.
     #[must_use]
     pub fn snapshot(&self) -> Option<ReplayTrace> {
         if let (Some(metadata), Some(events)) = (&self.metadata, &self.events) {
@@ -732,6 +1002,17 @@ impl TraceRecorder {
         } else {
             None
         }
+    }
+
+    /// Snapshots retained events and storage loss without finalizing the recorder.
+    ///
+    /// Even a lossless live snapshot is a prefix. Checked replay admission
+    /// requires [`Self::finish_recording`] or [`Self::take_recording`].
+    #[must_use]
+    pub fn snapshot_recording(&self) -> Option<TraceRecording> {
+        let status = self.recording_status(false);
+        self.snapshot()
+            .map(|trace| TraceRecording { trace, status })
     }
 }
 

@@ -52,6 +52,52 @@
     }
 
     #[test]
+    fn checked_recording_replay_rejects_storage_loss_before_consumption() {
+        use crate::trace::recorder::{LimitAction, RecorderConfig, TraceRecorder};
+
+        for action in [LimitAction::StopRecording, LimitAction::DropOldest] {
+            let config = RecorderConfig::enabled()
+                .with_max_events(Some(1))
+                .on_limit(action);
+            let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+            recorder.record_rng_seed(42);
+            recorder.record_rng_value(10);
+            let recording = recorder.finish_recording().expect("recording");
+            assert_eq!(recording.trace().len(), 1);
+            let error = TraceReplayer::from_recording(recording)
+                .expect_err("a valid-looking single-event trace lost source events");
+            assert_eq!(error.status().submitted_events(), 2);
+            assert_eq!(
+                error.status().dropped_oldest() + error.status().rejected_events(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn checked_recording_replay_accepts_finished_lossless_capture_only() {
+        use crate::trace::recorder::TraceRecorder;
+
+        let mut recorder = TraceRecorder::new(TraceMetadata::new(42).with_config_hash(17));
+        recorder.record_rng_seed(42);
+        recorder.record_rng_value(10);
+        let snapshot = recorder.snapshot_recording().expect("live recording");
+        assert!(TraceReplayer::from_recording(snapshot).is_err());
+
+        let recording = recorder.finish_recording().expect("finished recording");
+        let mut replayer = TraceReplayer::from_recording(recording).expect("lossless capture");
+        assert_eq!(replayer.metadata().config_hash, 17);
+        replayer
+            .verify_and_advance(&ReplayEvent::RngSeed { seed: 42 })
+            .unwrap();
+        replayer
+            .verify_and_advance(&ReplayEvent::RngValue { value: 10 })
+            .unwrap();
+        assert_eq!(replayer.current_index(), 2);
+        assert!(replayer.is_completed());
+    }
+
+    #[test]
     fn step_mode() {
         let events = vec![
             ReplayEvent::RngSeed { seed: 42 },

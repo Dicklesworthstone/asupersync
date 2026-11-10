@@ -30,7 +30,7 @@ use crate::trace::crashpack::{
     FileCrashPackWriter, ReplayCommand, artifact_filename,
 };
 use crate::trace::event::TraceEventKind;
-use crate::trace::recorder::TraceRecorder;
+use crate::trace::recorder::{TraceRecorder, TraceRecording};
 use crate::trace::replay::{
     CompactTaskId, ProductionSchedule, ProjectionError, ProjectionOptions, ReplayEvent,
     ReplayTrace, TraceMetadata,
@@ -2517,7 +2517,9 @@ impl LabRuntime {
 
         // Initialize replay recorder if configured
         let mut replay_recorder = if let Some(ref rec_config) = config.replay_recording {
-            TraceRecorder::with_config(TraceMetadata::new(config.seed), rec_config.clone())
+            let metadata = TraceMetadata::new(config.seed)
+                .with_config_hash(LabConfigSummary::from_config(&config).config_hash());
+            TraceRecorder::with_config(metadata, rec_config.clone())
         } else {
             TraceRecorder::disabled()
         };
@@ -2660,6 +2662,7 @@ impl LabRuntime {
     /// Takes the replay trace, leaving an empty trace in place.
     ///
     /// Returns `None` if recording is disabled.
+    /// Use [`Self::take_replay_recording`] to preserve loss and rotation evidence.
     pub fn take_replay_trace(&mut self) -> Option<ReplayTrace> {
         self.replay_recorder.take()
     }
@@ -2667,10 +2670,30 @@ impl LabRuntime {
     /// Finishes recording and returns the replay trace.
     ///
     /// This consumes the replay recorder. Returns `None` if recording is disabled.
+    /// Use [`Self::finish_replay_recording`] for checked replay consumers.
     pub fn finish_replay_trace(&mut self) -> Option<ReplayTrace> {
         // Take ownership by replacing with a disabled recorder
         let recorder = std::mem::replace(&mut self.replay_recorder, TraceRecorder::disabled());
         recorder.finish()
+    }
+
+    /// Finalizes the current replay segment, retaining loss and source-offset evidence.
+    ///
+    /// Recording continues in a new segment. Only a lossless segment beginning
+    /// at the original recorder's start can authorize checked trace replay.
+    pub fn take_replay_recording(&mut self) -> Option<TraceRecording> {
+        self.replay_recorder.take_recording()
+    }
+
+    /// Stops replay recording and returns its retained trace and loss evidence.
+    ///
+    /// The result is suitable for [`crate::trace::TraceReplayer::from_recording`].
+    /// It covers events actually submitted under the configured recording
+    /// policy, not uninstrumented effects or workload quiescence. The metadata
+    /// carries [`LabConfigSummary::config_hash`] for the original lab setup.
+    pub fn finish_replay_recording(&mut self) -> Option<TraceRecording> {
+        let recorder = std::mem::replace(&mut self.replay_recorder, TraceRecorder::disabled());
+        recorder.finish_recording()
     }
 
     pub(crate) fn exact_schedule_empty_prefix(&self) -> ExactSchedulePrefix {
