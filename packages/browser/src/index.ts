@@ -1058,6 +1058,51 @@ export type BrowserNativeMessageErrorHandler = (
   diagnostics: BrowserNativeMessagingOperationDiagnostics,
 ) => void;
 
+export const BROWSER_MESSAGE_STREAM_ERROR_CODE = "ASUPERSYNC_BROWSER_MESSAGE_STREAM_FAILED";
+export const BROWSER_MESSAGE_STREAM_LIMITS = Object.freeze({
+  defaultQueuedMessages: 64,
+  maxQueuedMessages: 65_536,
+});
+
+export type BrowserMessageStreamFailureReason =
+  | "receiver_in_use"
+  | "legacy_messages_pending"
+  | "message_callback_registered"
+  | "receive_in_progress"
+  | "message_limit_exceeded"
+  | "aborted"
+  | "messageerror"
+  | "cleanup_failed";
+
+export interface BrowserMessageStreamError extends Error {
+  code: typeof BROWSER_MESSAGE_STREAM_ERROR_CODE;
+  reason: BrowserMessageStreamFailureReason;
+}
+
+export interface BrowserMessageStreamOptions {
+  /** SDK queue capacity in messages, from 1 to 65,536. Defaults to 64. */
+  maxQueuedMessages?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Exclusive, FIFO consumption of one browser-native messaging endpoint.
+ * At most one next() may wait at a time. Overflow fails and closes the endpoint;
+ * the count limit does not bound arbitrary payload bytes or the host's queue.
+ * Returning, cancelling, or closing discards queued messages and removes hooks.
+ * These are browser-native messages, not Rust executor tasks or flow control.
+ */
+export interface BrowserMessageStream extends AsyncIterableIterator<unknown> {
+  readonly state: "open" | "closed" | "cancelled" | "errored";
+  readonly queuedMessages: number;
+  readonly maxQueuedMessages: number;
+  /** Resolves on close/return, rejects on abort, overflow, or host failure. */
+  readonly closed: Promise<void>;
+  return(): Promise<IteratorResult<unknown>>;
+  /** Stops delivery, closes the endpoint, and waits for cleanup. */
+  cancel(reason?: string): Promise<void>;
+}
+
 export type BrowserNativeStreamSurface = "readable_stream" | "writable_stream";
 
 export type BrowserNativeStreamSupportClass = "direct_runtime_supported" | "unsupported";
@@ -1211,15 +1256,16 @@ export interface BrowserNativeMessageEventLike {
 
 export interface BrowserNativeMessagePortLike {
   addEventListener?(
-    type: "message" | "messageerror",
+    type: "message" | "messageerror" | "close",
     listener: (event: BrowserNativeMessageEventLike) => void,
   ): void;
   close?(): void;
   onmessage?: ((event: BrowserNativeMessageEventLike) => void) | null;
   onmessageerror?: ((event: BrowserNativeMessageEventLike) => void) | null;
+  onclose?: ((event: BrowserNativeMessageEventLike) => void) | null;
   postMessage(message: unknown, transfer?: Transferable[]): void;
   removeEventListener?(
-    type: "message" | "messageerror",
+    type: "message" | "messageerror" | "close",
     listener: (event: BrowserNativeMessageEventLike) => void,
   ): void;
   start?(): void;
@@ -1829,7 +1875,7 @@ function nativeMessagingStartPort(
 
 function nativeMessagingAddPortListener(
   port: BrowserNativeMessagePortLike,
-  type: "message" | "messageerror",
+  type: "message" | "messageerror" | "close",
   listener: (event: BrowserNativeMessageEventLike) => void,
 ): void {
   if (typeof port.addEventListener === "function") {
@@ -1838,14 +1884,16 @@ function nativeMessagingAddPortListener(
   }
   if (type === "message") {
     port.onmessage = listener;
-  } else {
+  } else if (type === "messageerror") {
     port.onmessageerror = listener;
+  } else {
+    port.onclose = listener;
   }
 }
 
 function nativeMessagingRemovePortListener(
   port: BrowserNativeMessagePortLike,
-  type: "message" | "messageerror",
+  type: "message" | "messageerror" | "close",
   listener: (event: BrowserNativeMessageEventLike) => void,
 ): void {
   if (typeof port.removeEventListener === "function") {
@@ -1858,6 +1906,227 @@ function nativeMessagingRemovePortListener(
   if (type === "messageerror" && port.onmessageerror === listener) {
     port.onmessageerror = null;
   }
+  if (type === "close" && port.onclose === listener) {
+    port.onclose = null;
+  }
+}
+
+function browserMessageStreamError(
+  reason: BrowserMessageStreamFailureReason,
+  message: string,
+): BrowserMessageStreamError {
+  const error = new Error(`${BROWSER_MESSAGE_STREAM_ERROR_CODE}: ${message}`) as BrowserMessageStreamError;
+  error.code = BROWSER_MESSAGE_STREAM_ERROR_CODE;
+  error.reason = reason;
+  if (reason === "aborted") error.name = "AbortError";
+  return error;
+}
+
+function prepareBrowserMessageStreamOptions(options: BrowserMessageStreamOptions): {
+  capacity: number;
+  signal: AbortSignal | undefined;
+} {
+  const capacity = options.maxQueuedMessages ?? BROWSER_MESSAGE_STREAM_LIMITS.defaultQueuedMessages;
+  const signal = options.signal;
+  if (!Number.isSafeInteger(capacity) || capacity < 1
+    || capacity > BROWSER_MESSAGE_STREAM_LIMITS.maxQueuedMessages) {
+    throw new RangeError("Browser message stream capacity must be an integer from 1 to 65,536.");
+  }
+  if (signal !== undefined) {
+    if (typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function"
+      || typeof signal.removeEventListener !== "function") {
+      throw new TypeError("Browser message stream signal must be an AbortSignal.");
+    }
+    if (signal.aborted) throw browserMessageStreamError("aborted", "Message receive was cancelled before admission.");
+  }
+  return { capacity, signal };
+}
+
+class BrowserMessageStreamReceiver implements BrowserMessageStream {
+  readonly closed: Promise<void>;
+  readonly maxQueuedMessages: number;
+  private readonly queue: unknown[] = [];
+  private queueHead = 0;
+  private stateValue: BrowserMessageStream["state"] = "open";
+  private failure: BrowserMessageStreamError | null = null;
+  private cleanupFailure: BrowserMessageStreamError | null = null;
+  private pending: {
+    resolve: (value: IteratorResult<unknown>) => void;
+    reject: (error: unknown) => void;
+  } | null = null;
+  private resolveClosed!: () => void;
+  private rejectClosed!: (error: unknown) => void;
+  private signal: AbortSignal | undefined;
+  private readonly abortListener = (): void => {
+    this.fail("aborted", "Message receive was cancelled by its AbortSignal.");
+  };
+
+  constructor(capacity: number, private readonly closeSource: () => void) {
+    this.maxQueuedMessages = capacity;
+    this.closed = new Promise<void>((resolve, reject) => {
+      this.resolveClosed = resolve;
+      this.rejectClosed = reject;
+    });
+    // A consumer may observe failure through next() alone. The public promise
+    // still rejects when awaited, without an unrelated unhandled rejection.
+    void this.closed.catch(() => {});
+  }
+
+  get state(): BrowserMessageStream["state"] { return this.stateValue; }
+  get queuedMessages(): number { return this.queue.length - this.queueHead; }
+
+  [Symbol.asyncIterator](): BrowserMessageStream { return this; }
+
+  next(): Promise<IteratorResult<unknown>> {
+    if (this.failure) return Promise.reject(this.failure);
+    if (this.stateValue !== "open") return Promise.resolve({ done: true, value: undefined });
+    if (this.pending) return Promise.reject(browserMessageStreamError(
+      "receive_in_progress", "Only one message receive may wait at a time.",
+    ));
+    if (this.queuedMessages !== 0) {
+      const value = this.queue[this.queueHead];
+      this.queue[this.queueHead++] = undefined;
+      if (this.queueHead === this.queue.length) {
+        this.queue.length = 0;
+        this.queueHead = 0;
+      } else if (this.queueHead >= 1024 && this.queueHead * 2 >= this.queue.length) {
+        this.queue.splice(0, this.queueHead);
+        this.queueHead = 0;
+      }
+      return Promise.resolve({ done: false, value });
+    }
+    return new Promise<IteratorResult<unknown>>((resolve, reject) => {
+      this.pending = { resolve, reject };
+    });
+  }
+
+  async return(): Promise<IteratorResult<unknown>> {
+    this.finish(null);
+    if (this.cleanupFailure) throw this.cleanupFailure;
+    return { done: true, value: undefined };
+  }
+
+  async cancel(reason = "cancelled"): Promise<void> {
+    this.fail("aborted", reason);
+    if (this.cleanupFailure) throw this.cleanupFailure;
+  }
+
+  attachSignal(signal: AbortSignal | undefined): void {
+    if (!signal || this.stateValue !== "open") return;
+    this.signal = signal;
+    try {
+      signal.addEventListener("abort", this.abortListener, { once: true });
+      // Covers cancellation between option validation and hook registration.
+      if (signal.aborted) this.abortListener();
+    } catch {
+      this.fail("cleanup_failed", "Could not attach the message receiver cancellation hook.");
+    }
+  }
+
+  push(value: unknown): void {
+    if (this.stateValue !== "open") return;
+    const pending = this.pending;
+    if (pending) {
+      this.pending = null;
+      pending.resolve({ done: false, value });
+      return;
+    }
+    if (this.queuedMessages === this.maxQueuedMessages) {
+      this.fail("message_limit_exceeded", "The SDK message queue exceeded its configured capacity.");
+      return;
+    }
+    this.queue.push(value);
+  }
+
+  sourceClosed(): void { this.finish(null); }
+
+  fail(reason: BrowserMessageStreamFailureReason, message: string): void {
+    this.finish(browserMessageStreamError(reason, message));
+  }
+
+  private finish(failure: BrowserMessageStreamError | null): void {
+    if (this.stateValue !== "open") return;
+    this.stateValue = failure?.reason === "aborted" ? "cancelled" : failure ? "errored" : "closed";
+    this.failure = failure;
+    if (failure?.reason === "cleanup_failed") this.cleanupFailure = failure;
+    this.queue.length = 0;
+    this.queueHead = 0;
+    const pending = this.pending;
+    this.pending = null;
+    const signal = this.signal;
+    this.signal = undefined;
+    // Remove all ownership hooks before resolving user continuations. A close
+    // may synchronously deliver another event; the terminal state fences it.
+    try { signal?.removeEventListener("abort", this.abortListener); }
+    catch { this.cleanupFailure = browserMessageStreamError("cleanup_failed", "Could not remove the message receiver cancellation hook."); }
+    try { this.closeSource(); }
+    catch { this.cleanupFailure ??= browserMessageStreamError("cleanup_failed", "Could not close the message receiver endpoint."); }
+    this.failure ??= this.cleanupFailure;
+    if (this.failure) {
+      if (this.failure.reason !== "aborted") this.stateValue = "errored";
+      pending?.reject(this.failure);
+      this.rejectClosed(this.failure);
+    } else {
+      pending?.resolve({ done: true, value: undefined });
+      this.resolveClosed();
+    }
+  }
+}
+
+function cleanupBrowserMessageEndpoint(operations: readonly (() => void)[]): void {
+  let failed = false;
+  for (const operation of operations) {
+    try { operation(); }
+    catch { failed = true; }
+  }
+  if (failed) throw browserMessageStreamError(
+    "cleanup_failed", "Could not remove every message endpoint hook or close the endpoint.",
+  );
+}
+
+// Raw endpoint aliases must not create a second, unbounded SDK inbox beside an
+// exclusive receiver. Legacy wrappers may coexist until one claims ownership.
+const BROWSER_MESSAGE_WRAPPERS = new WeakMap<object, Set<object>>();
+const BROWSER_MESSAGE_RECEIVER_OWNERS = new WeakMap<object, object>();
+
+function registerBrowserMessageWrapper(endpoint: object, wrapper: object): void {
+  if (BROWSER_MESSAGE_RECEIVER_OWNERS.has(endpoint)) throw browserMessageStreamError(
+    "receiver_in_use", "This native endpoint already belongs to an exclusive SDK message receiver.",
+  );
+  let wrappers = BROWSER_MESSAGE_WRAPPERS.get(endpoint);
+  if (!wrappers) {
+    wrappers = new Set();
+    BROWSER_MESSAGE_WRAPPERS.set(endpoint, wrappers);
+  }
+  wrappers.add(wrapper);
+}
+
+function unregisterBrowserMessageWrapper(endpoint: object, wrapper: object): void {
+  const wrappers = BROWSER_MESSAGE_WRAPPERS.get(endpoint);
+  wrappers?.delete(wrapper);
+  if (wrappers?.size === 0) BROWSER_MESSAGE_WRAPPERS.delete(endpoint);
+  if (BROWSER_MESSAGE_RECEIVER_OWNERS.get(endpoint) === wrapper) {
+    BROWSER_MESSAGE_RECEIVER_OWNERS.delete(endpoint);
+  }
+}
+
+function claimBrowserMessageReceiver(
+  endpoint: BrowserNativeMessagePortLike | BrowserNativeBroadcastChannelLike,
+  wrapper: object,
+): void {
+  if (typeof endpoint.close !== "function") {
+    throw new TypeError("A message stream requires an endpoint with close().");
+  }
+  if (typeof endpoint.addEventListener === "function"
+    && typeof endpoint.removeEventListener !== "function") {
+    throw new TypeError("A message stream requires removeEventListener() when addEventListener() is used.");
+  }
+  const wrappers = BROWSER_MESSAGE_WRAPPERS.get(endpoint);
+  if (BROWSER_MESSAGE_RECEIVER_OWNERS.has(endpoint)
+    || wrappers?.size !== 1 || !wrappers.has(wrapper)) {
+    throw browserMessageStreamError("receiver_in_use", "Another live SDK wrapper owns this native endpoint; detach it before receiving exclusively.");
+  }
+  BROWSER_MESSAGE_RECEIVER_OWNERS.set(endpoint, wrapper);
 }
 
 export class BrowserMessagePort {
@@ -1866,9 +2135,19 @@ export class BrowserMessagePort {
   private readonly messages: unknown[] = [];
   private firstFailure: string | null = null;
   private stateValue: BrowserNativeMessagingState = "open";
+  private receiver: BrowserMessageStreamReceiver | null = null;
+  private receiverCloseAttempted = false;
+
+  private readonly closeListener = (): void => {
+    this.receiver?.sourceClosed();
+  };
 
   private readonly messageListener = (event: BrowserNativeMessageEventLike): void => {
     if (this.stateValue !== "open") {
+      return;
+    }
+    if (this.receiver) {
+      this.receiver.push(event.data);
       return;
     }
     this.messages.push(event.data);
@@ -1883,6 +2162,10 @@ export class BrowserMessagePort {
     }
     this.stateValue = "errored";
     this.firstFailure = "messageerror";
+    if (this.receiver) {
+      this.receiver.fail("messageerror", "The host could not deserialize an incoming message.");
+      return;
+    }
     const diagnostics = nativeMessagingOperationDiagnostics(
       this.support,
       "messageerror",
@@ -1901,9 +2184,27 @@ export class BrowserMessagePort {
     private readonly support: BrowserNativeMessagingSupportDiagnostics,
     options: { start?: boolean } = {},
   ) {
-    nativeMessagingAddPortListener(this.port, "message", this.messageListener);
-    nativeMessagingAddPortListener(this.port, "messageerror", this.messageErrorListener);
-    nativeMessagingStartPort(this.port, options.start);
+    registerBrowserMessageWrapper(this.port, this);
+    try {
+      nativeMessagingAddPortListener(this.port, "message", this.messageListener);
+      nativeMessagingAddPortListener(this.port, "messageerror", this.messageErrorListener);
+      nativeMessagingStartPort(this.port, options.start);
+    } catch (error) {
+      this.stateValue = "errored";
+      this.firstFailure = "initialization_failed";
+      try {
+        cleanupBrowserMessageEndpoint([
+          () => nativeMessagingRemovePortListener(this.port, "message", this.messageListener),
+          () => nativeMessagingRemovePortListener(this.port, "messageerror", this.messageErrorListener),
+        ]);
+      } catch {
+        // Preserve the construction failure after attempting every hook. The
+        // borrowed endpoint may still belong to another legacy wrapper.
+      } finally {
+        unregisterBrowserMessageWrapper(this.port, this);
+      }
+      throw error;
+    }
   }
 
   get state(): BrowserNativeMessagingState {
@@ -1915,6 +2216,7 @@ export class BrowserMessagePort {
   }
 
   onMessage(handler: BrowserNativeMessageHandler): () => void {
+    this.ensureLegacyReceiver();
     this.messageHandlers.add(handler);
     return () => {
       this.messageHandlers.delete(handler);
@@ -1922,6 +2224,7 @@ export class BrowserMessagePort {
   }
 
   onMessageError(handler: BrowserNativeMessageErrorHandler): () => void {
+    this.ensureLegacyReceiver();
     this.errorHandlers.add(handler);
     return () => {
       this.errorHandlers.delete(handler);
@@ -1929,9 +2232,34 @@ export class BrowserMessagePort {
   }
 
   takeMessages(): unknown[] {
+    this.ensureLegacyReceiver();
     const drained = [...this.messages];
     this.messages.length = 0;
     return drained;
+  }
+
+  /** Start this port and transfer receive ownership to a bounded stream that closes it. */
+  receiveStream(options: BrowserMessageStreamOptions = {}): BrowserMessageStream {
+    const prepared = prepareBrowserMessageStreamOptions(options);
+    this.ensureOpen("receiveStream");
+    this.ensureLegacyReceiver();
+    if (this.messageHandlers.size !== 0 || this.errorHandlers.size !== 0) {
+      throw browserMessageStreamError("message_callback_registered", "Unsubscribe legacy message callbacks before acquiring a receiver.");
+    }
+    if (this.messages.length !== 0) {
+      throw browserMessageStreamError("legacy_messages_pending", "Drain legacy messages before acquiring a receiver.");
+    }
+    claimBrowserMessageReceiver(this.port, this);
+    const receiver = new BrowserMessageStreamReceiver(prepared.capacity, () => this.close());
+    this.receiver = receiver;
+    try { nativeMessagingAddPortListener(this.port, "close", this.closeListener); }
+    catch { receiver.fail("cleanup_failed", "Could not attach the message port close hook."); }
+    receiver.attachSignal(prepared.signal);
+    if (receiver.state === "open") {
+      try { nativeMessagingStartPort(this.port, true); }
+      catch { receiver.fail("cleanup_failed", "Could not start the message receiver endpoint."); }
+    }
+    return receiver;
   }
 
   send(message: unknown, transfer: Transferable[] = []): void {
@@ -1940,6 +2268,28 @@ export class BrowserMessagePort {
   }
 
   close(): void {
+    if (this.receiver) {
+      if (this.receiverCloseAttempted) return;
+      this.receiverCloseAttempted = true;
+      if (this.stateValue === "open") this.stateValue = "closed";
+      this.messageHandlers.clear();
+      this.errorHandlers.clear();
+      try {
+        cleanupBrowserMessageEndpoint([
+          () => nativeMessagingRemovePortListener(this.port, "message", this.messageListener),
+          () => nativeMessagingRemovePortListener(this.port, "messageerror", this.messageErrorListener),
+          () => nativeMessagingRemovePortListener(this.port, "close", this.closeListener),
+          () => this.port.close?.(),
+        ]);
+      } catch (error) {
+        this.receiver.fail("cleanup_failed", "Could not close the message receiver endpoint.");
+        throw error;
+      } finally {
+        unregisterBrowserMessageWrapper(this.port, this);
+      }
+      this.receiver.sourceClosed();
+      return;
+    }
     if (this.stateValue === "closed") {
       return;
     }
@@ -1956,16 +2306,25 @@ export class BrowserMessagePort {
     }
     this.stateValue = "aborted";
     this.firstFailure = reason;
+    if (this.receiver) {
+      this.receiver.fail("aborted", reason);
+      return;
+    }
     this.detachListeners();
     this.port.close?.();
   }
 
   detach(): BrowserNativeMessagePortLike {
+    this.ensureLegacyReceiver();
     if (this.stateValue === "open") {
       this.stateValue = "detached";
     }
     this.detachListeners();
     return this.port;
+  }
+
+  private ensureLegacyReceiver(): void {
+    if (this.receiver) throw browserMessageStreamError("receiver_in_use", "This endpoint belongs to its exclusive message stream.");
   }
 
   private ensureOpen(operation: string): void {
@@ -1994,8 +2353,10 @@ export class BrowserMessagePort {
   private detachListeners(): void {
     nativeMessagingRemovePortListener(this.port, "message", this.messageListener);
     nativeMessagingRemovePortListener(this.port, "messageerror", this.messageErrorListener);
+    if (this.receiver) nativeMessagingRemovePortListener(this.port, "close", this.closeListener);
     this.messageHandlers.clear();
     this.errorHandlers.clear();
+    unregisterBrowserMessageWrapper(this.port, this);
   }
 }
 
@@ -2033,9 +2394,15 @@ export class BrowserBroadcastChannel {
   private readonly messages: unknown[] = [];
   private firstFailure: string | null = null;
   private stateValue: BrowserNativeMessagingState = "open";
+  private receiver: BrowserMessageStreamReceiver | null = null;
+  private receiverCloseAttempted = false;
 
   private readonly messageListener = (event: BrowserNativeMessageEventLike): void => {
     if (this.stateValue !== "open") {
+      return;
+    }
+    if (this.receiver) {
+      this.receiver.push(event.data);
       return;
     }
     this.messages.push(event.data);
@@ -2050,6 +2417,10 @@ export class BrowserBroadcastChannel {
     }
     this.stateValue = "errored";
     this.firstFailure = "messageerror";
+    if (this.receiver) {
+      this.receiver.fail("messageerror", "The host could not deserialize an incoming message.");
+      return;
+    }
     const diagnostics = nativeMessagingOperationDiagnostics(
       this.support,
       "messageerror",
@@ -2067,7 +2438,26 @@ export class BrowserBroadcastChannel {
     private readonly channel: BrowserNativeBroadcastChannelLike,
     private readonly support: BrowserNativeMessagingSupportDiagnostics,
   ) {
-    this.attachListeners();
+    registerBrowserMessageWrapper(this.channel, this);
+    try {
+      this.attachListeners();
+    } catch (error) {
+      this.stateValue = "errored";
+      this.firstFailure = "initialization_failed";
+      try {
+        cleanupBrowserMessageEndpoint([
+          () => this.channel.removeEventListener?.("message", this.messageListener),
+          () => this.channel.removeEventListener?.("messageerror", this.messageErrorListener),
+          () => { if (this.channel.onmessage === this.messageListener) this.channel.onmessage = null; },
+          () => { if (this.channel.onmessageerror === this.messageErrorListener) this.channel.onmessageerror = null; },
+        ]);
+      } catch {
+        // Preserve the original failure without closing a borrowed endpoint.
+      } finally {
+        unregisterBrowserMessageWrapper(this.channel, this);
+      }
+      throw error;
+    }
   }
 
   get name(): string {
@@ -2083,6 +2473,7 @@ export class BrowserBroadcastChannel {
   }
 
   onMessage(handler: BrowserNativeMessageHandler): () => void {
+    this.ensureLegacyReceiver();
     this.messageHandlers.add(handler);
     return () => {
       this.messageHandlers.delete(handler);
@@ -2090,6 +2481,7 @@ export class BrowserBroadcastChannel {
   }
 
   onMessageError(handler: BrowserNativeMessageErrorHandler): () => void {
+    this.ensureLegacyReceiver();
     this.errorHandlers.add(handler);
     return () => {
       this.errorHandlers.delete(handler);
@@ -2097,9 +2489,28 @@ export class BrowserBroadcastChannel {
   }
 
   takeMessages(): unknown[] {
+    this.ensureLegacyReceiver();
     const drained = [...this.messages];
     this.messages.length = 0;
     return drained;
+  }
+
+  /** Transfer receive ownership to a bounded stream; the stream closes this channel. */
+  receiveStream(options: BrowserMessageStreamOptions = {}): BrowserMessageStream {
+    const prepared = prepareBrowserMessageStreamOptions(options);
+    this.ensureOpen("receiveStream");
+    this.ensureLegacyReceiver();
+    if (this.messageHandlers.size !== 0 || this.errorHandlers.size !== 0) {
+      throw browserMessageStreamError("message_callback_registered", "Unsubscribe legacy message callbacks before acquiring a receiver.");
+    }
+    if (this.messages.length !== 0) {
+      throw browserMessageStreamError("legacy_messages_pending", "Drain legacy messages before acquiring a receiver.");
+    }
+    claimBrowserMessageReceiver(this.channel, this);
+    const receiver = new BrowserMessageStreamReceiver(prepared.capacity, () => this.close());
+    this.receiver = receiver;
+    receiver.attachSignal(prepared.signal);
+    return receiver;
   }
 
   post(message: unknown): void {
@@ -2108,6 +2519,29 @@ export class BrowserBroadcastChannel {
   }
 
   close(): void {
+    if (this.receiver) {
+      if (this.receiverCloseAttempted) return;
+      this.receiverCloseAttempted = true;
+      if (this.stateValue === "open") this.stateValue = "closed";
+      this.messageHandlers.clear();
+      this.errorHandlers.clear();
+      try {
+        cleanupBrowserMessageEndpoint([
+          () => this.channel.removeEventListener?.("message", this.messageListener),
+          () => this.channel.removeEventListener?.("messageerror", this.messageErrorListener),
+          () => { if (this.channel.onmessage === this.messageListener) this.channel.onmessage = null; },
+          () => { if (this.channel.onmessageerror === this.messageErrorListener) this.channel.onmessageerror = null; },
+          () => this.channel.close(),
+        ]);
+      } catch (error) {
+        this.receiver.fail("cleanup_failed", "Could not close the message receiver endpoint.");
+        throw error;
+      } finally {
+        unregisterBrowserMessageWrapper(this.channel, this);
+      }
+      this.receiver.sourceClosed();
+      return;
+    }
     if (this.stateValue === "closed") {
       return;
     }
@@ -2124,8 +2558,16 @@ export class BrowserBroadcastChannel {
     }
     this.stateValue = "aborted";
     this.firstFailure = reason;
+    if (this.receiver) {
+      this.receiver.fail("aborted", reason);
+      return;
+    }
     this.detachListeners();
     this.channel.close();
+  }
+
+  private ensureLegacyReceiver(): void {
+    if (this.receiver) throw browserMessageStreamError("receiver_in_use", "This endpoint belongs to its exclusive message stream.");
   }
 
   private ensureOpen(operation: string): void {
@@ -2172,6 +2614,7 @@ export class BrowserBroadcastChannel {
     }
     this.messageHandlers.clear();
     this.errorHandlers.clear();
+    unregisterBrowserMessageWrapper(this.channel, this);
   }
 }
 

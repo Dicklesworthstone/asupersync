@@ -644,6 +644,57 @@ raw TCP/UDP/filesystem/process support, cross-origin federation,
 service-worker or shared-worker direct-runtime support, or a public Rust
 `AsyncRead` / `AsyncWrite` browser-core wasm ABI.
 
+#### Bounded asynchronous message reception
+
+`BrowserMessagePort.receiveStream()` and
+`BrowserBroadcastChannel.receiveStream()` transfer reception to one exclusive
+async iterator. This is useful for consumers that process messages at their own
+pace and need a fixed bound on the SDK's retained message count:
+
+```typescript
+const messages = channel.port2.receiveStream({
+  maxQueuedMessages: 64,
+  signal: abortController.signal,
+});
+
+try {
+  for await (const message of messages) {
+    await processMessage(message);
+  }
+} finally {
+  await messages.return();
+}
+```
+
+The default queue limit is 64 messages; accepted limits are integers from 1 to
+65,536. Messages delivered directly to a pending `next()` do not occupy the
+queue. Overflow closes the endpoint and rejects the receiver with reason
+`message_limit_exceeded`. The bound applies to messages retained by the SDK,
+not payload bytes or the browser's internal event queue, and does not provide
+producer backpressure.
+
+An endpoint must have no registered message/error callbacks or undrained legacy
+messages before reception is transferred. While the receiver owns it, legacy
+callback registration, `takeMessages()`, a second receiver, and MessagePort
+detach are rejected. Only one `next()` may be pending. Legacy callback and
+polling behavior remains available on endpoints that have not opted in.
+The SDK also refuses reception while another live helper wraps the same native
+endpoint, and refuses creating another helper while a stream owns it. Callers
+must manage any listeners installed directly on the raw endpoint. Custom
+host-like endpoints must support `close()` and listener removal before they can
+transfer ownership to a stream.
+
+Iterator return (including `break` from `for await`) and endpoint close settle
+pending reception and release listeners. AbortSignal cancellation and
+`cancel()` reject pending reception and the receiver's `closed` promise;
+`messageerror`, overflow, and failed host cleanup also reject with a typed
+`BrowserMessageStreamError`. Its stable code is
+`ASUPERSYNC_BROWSER_MESSAGE_STREAM_FAILED`, with a specific `reason` for each
+failure. `cancel()` waits for cleanup, while `closed` records the terminal
+receive outcome. The maintained native-host regressions are
+`scripts/test_browser_message_streams.mjs`; real Chromium scenarios are in
+`scripts/test_browser_message_streams_chromium.mjs`.
+
 ### Browser Environment Support Matrix
 
 This matrix is the current shipped support posture for the JS/TS packages, not
