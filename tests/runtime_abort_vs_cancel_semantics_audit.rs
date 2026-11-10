@@ -140,7 +140,7 @@ use asupersync::runtime::{JoinError, RuntimeBuilder, RuntimeState, yield_now};
 use asupersync::sync::{
     AcquireError, LockError, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore,
 };
-use asupersync::types::{Budget, CancelKind};
+use asupersync::types::{Budget, CancelKind, CancelReason};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -272,6 +272,163 @@ async fn drive_until_flag(flag: &AtomicBool, budget: Duration) -> bool {
         yield_now().await;
     }
     flag.load(Ordering::Acquire)
+}
+
+// asupersync-f954oj: a blocked pool closure cannot be preempted, but an
+// explicitly cancellable caller wait must finish before that closure does.
+// Both witnesses precede cancellation: the closure owns the only pool worker,
+// and the caller has polled the join to Pending with its wake registration live.
+fn cancellable_join_blocking_scenario(cross_thread: bool) {
+    for workers in [1, 2] {
+        let builder = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::multi_thread().worker_threads(workers)
+        };
+        let runtime = builder.blocking_threads(1, 1).build().unwrap();
+        runtime.block_on(async {
+            let root = Cx::current().expect("native root context");
+            let region = root
+                .open_child_region(asupersync::cx::ChildRegionSpec::inherit())
+                .await
+                .expect("admit the actual child region");
+            let (started, mut start) = oneshot::channel();
+            let (parked, mut park) = oneshot::channel();
+            let (release, wait_release) = std::sync::mpsc::channel();
+            let occupied = Arc::new(AtomicBool::new(false));
+            let worker_occupied = Arc::clone(&occupied);
+            let mut caller = region
+                .cx()
+                .spawn(move |caller_cx| async move {
+                    let mut blocking = caller_cx
+                        .spawn_blocking(move |_blocking_cx| {
+                            worker_occupied.store(true, Ordering::Release);
+                            started.send_blocking(()).unwrap();
+                            let released = wait_release.recv_timeout(Duration::from_secs(10));
+                            worker_occupied.store(false, Ordering::Release);
+                            released.expect("test releases the occupied pool worker");
+                            91_u8
+                        })
+                        .expect("spawn the real pool operation");
+                    let mut joining = Box::pin(blocking.join_cancellable(&caller_cx));
+                    let mut parked = Some(parked);
+                    let result = std::future::poll_fn(|poll_cx| {
+                        let poll = joining.as_mut().poll(poll_cx);
+                        if poll.is_pending()
+                            && let Some(parked) = parked.take()
+                        {
+                            parked.send_blocking(caller_cx.clone()).unwrap();
+                        }
+                        poll
+                    })
+                    .await;
+                    drop(joining);
+                    (result, blocking, caller_cx.cancel_reason())
+                })
+                .expect("spawn the caller inside the child region");
+
+            let owner = asupersync::time::timeout(
+                root.now(),
+                Duration::from_secs(5),
+                async {
+                    start.recv(&root).await.expect("pool closure has started");
+                    park.recv(&root)
+                        .await
+                        .expect("caller join is actually pending")
+                },
+            )
+            .await
+            .expect("both readiness witnesses arrive before cancellation");
+            assert!(occupied.load(Ordering::Acquire));
+            let reason = CancelReason::user("blocking caller cancellation sentinel");
+            if cross_thread {
+                let request = reason.clone();
+                std::thread::spawn(move || owner.cancel_with_reason(request))
+                    .join()
+                    .expect("cross-thread cancellation publisher");
+            } else {
+                region
+                    .cancel(reason.clone())
+                    .expect("cancel the caller's real region");
+            }
+            let (result, mut blocking, observed) = asupersync::time::timeout(
+                root.now(),
+                Duration::from_secs(2),
+                caller.join(&root),
+            )
+            .await
+            .expect("cancellable wait releases the caller while the closure is still blocked")
+            .expect("ordinary spawn preserves the acknowledged cancellation result");
+            assert_eq!(observed, Some(reason.clone()));
+            assert_eq!(result, Err(JoinError::Cancelled(reason.clone())));
+            assert!(
+                occupied.load(Ordering::Acquire),
+                "caller release must precede actual blocking closure completion"
+            );
+            assert!(!blocking.is_finished());
+            assert!(
+                runtime
+                    .task_inspector(Default::default())
+                    .inspect_task(blocking.task_id())
+                    .is_some(),
+                "the unfinished task stays owned by the region after its caller returns"
+            );
+
+            // The original join remains a retirement wait after the interrupted
+            // observation; cancellation has not consumed or fabricated a terminal.
+            let mut retirement = Box::pin(blocking.join(&root));
+            std::future::poll_fn(|poll_cx| {
+                assert!(retirement.as_mut().poll(poll_cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            release.send(()).expect("release the occupied worker");
+            let terminal = asupersync::time::timeout(
+                root.now(),
+                Duration::from_secs(5),
+                retirement,
+            )
+            .await
+            .expect("actual pool retirement completes the resumed join");
+            assert_eq!(terminal, Err(JoinError::Cancelled(reason)));
+            assert!(!occupied.load(Ordering::Acquire));
+            assert!(blocking.is_finished());
+            assert_eq!(blocking.try_join(), Err(JoinError::PolledAfterCompletion));
+            asupersync::time::timeout(root.now(), Duration::from_secs(5), region.close())
+                .await
+                .expect("child region cleanup remains bounded")
+                .expect("the child region reaches actual quiescence");
+            assert!(
+                runtime
+                    .task_inspector(Default::default())
+                    .inspect_task(blocking.task_id())
+                    .is_none(),
+                "resumed join and region close leave no task record"
+            );
+        });
+        let report = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(
+            report.outcome,
+            asupersync::runtime::RootDrainOutcome::Quiescent
+        );
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.live_regions, 0);
+        assert_eq!(report.pending_obligations, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.queued_finalizers, 0);
+        assert!(!report.has_pending_obligation_posts);
+        assert!(runtime.is_quiescent());
+    }
+}
+
+#[test]
+fn cancellable_join_releases_region_cancelled_blocking_caller_before_pool_retirement() {
+    cancellable_join_blocking_scenario(false);
+}
+
+#[test]
+fn cancellable_join_forwards_cross_thread_owner_cancel_to_blocking_task() {
+    cancellable_join_blocking_scenario(true);
 }
 
 /// Waits until `mutex` has exactly `waiters` parked waiters. The bound is

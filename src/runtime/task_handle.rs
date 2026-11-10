@@ -936,6 +936,9 @@ impl<T> TaskHandle<T> {
     /// Waits for the task to complete and returns its result.
     ///
     /// This method yields until the spawned task completes, then returns its output value.
+    /// Caller cancellation does not interrupt this retirement wait. Use
+    /// [`Self::join_cancellable`] to let the caller stop waiting promptly while
+    /// the task remains owned by its region.
     ///
     /// # Errors
     ///
@@ -981,6 +984,42 @@ impl<T> TaskHandle<T> {
             registered: false,
             drop_abort_defused: false,
             drop_reason: None,
+        }
+    }
+
+    /// Wait for retirement or return promptly when the caller is cancelled.
+    ///
+    /// A task result whose retirement barrier is open takes precedence over
+    /// caller cancellation. Otherwise an unmasked cancellation of `cx`
+    /// requests cancellation of the unfinished task and returns
+    /// [`JoinError::Cancelled`] with the caller's reason. The task's eventual
+    /// result is not consumed: after this borrowing wait ends, the same handle
+    /// can be joined again to observe its actual retirement and result.
+    ///
+    /// This is an interruption of the wait, not a cleanup barrier. The task
+    /// stays owned by its original region, and a blocking closure already
+    /// running on the pool is not preempted. Region close and [`Self::join`]
+    /// still wait for that work. A result already published behind a closed
+    /// retirement barrier is preserved without sending a new cancellation.
+    ///
+    /// The wait owns its cancellation wake registration, so cancellation alone
+    /// wakes it even when the task never produces a result. It acknowledges
+    /// cancellation through [`Cx::checkpoint`] and respects cancellation masks.
+    /// Dropping the returned future before completion requests cancellation as
+    /// with [`Self::join`]; it never detaches the task or consumes its result.
+    ///
+    /// # Errors
+    ///
+    /// A retired task reports the same errors as [`Self::join`]. A pending
+    /// wait interrupted by its caller also returns `JoinError::Cancelled`,
+    /// without marking the handle's terminal result consumed. Polling the
+    /// same completed future again returns [`JoinError::PolledAfterCompletion`].
+    #[inline]
+    #[must_use]
+    pub fn join_cancellable<'a>(&'a mut self, cx: &'a Cx) -> CancellableJoinFuture<'a, T> {
+        CancellableJoinFuture {
+            inner: Some(self.join(cx)),
+            cancellation: crate::channel::OwnedCancelRegistration::new(cx.clone()),
         }
     }
 
@@ -1341,6 +1380,77 @@ impl<T> Drop for JoinFuture<'_, T> {
         if self.registered {
             self.barrier.clear_waker();
         }
+    }
+}
+
+/// Borrowing wait returned by [`TaskHandle::join_cancellable`].
+///
+/// Caller cancellation ends this wait while leaving the task's result and
+/// region ownership intact. A later join on the same handle can still wait
+/// for actual retirement. Dropping a pending wait requests task cancellation.
+pub struct CancellableJoinFuture<'a, T> {
+    // Drop the join (and request its cancellation) before retiring any final
+    // caller-waker owner, whose destructor is foreign code and may panic.
+    inner: Option<JoinFuture<'a, T>>,
+    cancellation: crate::channel::OwnedCancelRegistration,
+}
+
+impl<T> CancellableJoinFuture<'_, T> {
+    fn finish(&mut self, result: Result<T, JoinError>) -> std::task::Poll<Result<T, JoinError>> {
+        // Retire only this future's result/barrier waiter. The handle remains
+        // usable, including when cancellation left its terminal unconsumed.
+        drop(self.inner.take());
+        // As on Drop, release the inner join before retiring the caller's
+        // registration. The owned registration retains its final Waker owner
+        // until this future is dropped, after the result has been returned.
+        self.cancellation.clear();
+        std::task::Poll::Ready(result)
+    }
+}
+
+impl<T> std::future::Future for CancellableJoinFuture<'_, T> {
+    type Output = Result<T, JoinError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        ctx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let Some(inner) = this.inner.as_mut() else {
+            return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
+        };
+        // Only a retired terminal wins: the existing join enforces the barrier
+        // before touching the result channel and preserves causal observation.
+        if let std::task::Poll::Ready(result) = std::pin::Pin::new(inner).poll(ctx) {
+            return this.finish(result);
+        }
+
+        this.cancellation.refresh(ctx.waker());
+        let caller = this.cancellation.cx();
+        // Register before rechecking. Waker clone/retirement callbacks can
+        // themselves request cancellation; no task completion is needed to
+        // deliver the caller's wake. Always checkpoint: it also materializes
+        // compatibility fast_cancel publication and budget exhaustion before
+        // applying masking and acknowledgement.
+        let Err(cancelled) = caller.checkpoint() else {
+            return std::task::Poll::Pending;
+        };
+        let reason = cancelled
+            .cancel_reason()
+            .cloned()
+            .or_else(|| caller.cancel_reason())
+            .unwrap_or_else(|| CancelReason::user("join caller cancelled"));
+        let inner = this.inner.as_mut().expect("pending join is still present");
+        // Completion may have arrived during cancellation registration or its
+        // callbacks. Give that retired result the same precedence on this poll.
+        if let std::task::Poll::Ready(result) = std::pin::Pin::new(&mut *inner).poll(ctx) {
+            return this.finish(result);
+        }
+        inner.defuse_drop_abort();
+        if !inner.inner.receiver_finished() {
+            inner.abort_with_reason(reason.clone());
+        }
+        this.finish(Err(JoinError::Cancelled(reason)))
     }
 }
 

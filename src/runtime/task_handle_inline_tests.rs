@@ -9,7 +9,7 @@
     use super::*;
     use crate::cx::cap;
     use crate::test_utils::init_test_logging;
-    use crate::types::CancelKind;
+    use crate::types::{Budget, CancelKind, Time};
     use crate::util::ArenaIndex;
     use serde_json::{Value, json};
     use std::future::Future;
@@ -1139,6 +1139,367 @@
             cancel_reason_is_none
         );
         crate::test_complete!("poll_join_pending_does_not_request_cancellation");
+    }
+
+    #[test]
+    fn cancellable_join_wakes_on_caller_cancel_and_keeps_the_terminal_for_rejoin() {
+        let caller = test_cx();
+        let child = test_cx();
+        let reason = CancelReason::user("caller stopped waiting");
+        let (tx, rx) = task_result_channel::<i32>();
+        let mut handle = TaskHandle::new(
+            TaskId::from_arena(ArenaIndex::new(35, 0)),
+            rx,
+            Arc::downgrade(&child.inner),
+        );
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wakes));
+        let mut poll_cx = Context::from_waker(&waker);
+        let mut joining = Box::pin(handle.join_cancellable(&caller));
+        for _ in 0..3 {
+            assert!(joining.as_mut().poll(&mut poll_cx).is_pending());
+            assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 1);
+        }
+        assert_eq!(wakes.load(Ordering::Acquire), 0);
+        caller.set_cancel_reason(reason.clone());
+        assert!(
+            wakes.load(Ordering::Acquire) > 0,
+            "cancellation alone wakes the wait"
+        );
+        assert_eq!(
+            joining.as_mut().poll(&mut poll_cx),
+            Poll::Ready(Err(JoinError::Cancelled(reason.clone())))
+        );
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+        assert_eq!(child.cancel_reason(), Some(reason));
+        assert_eq!(
+            joining.as_mut().poll(&mut poll_cx),
+            Poll::Ready(Err(JoinError::PolledAfterCompletion))
+        );
+        let wakes_after_return = wakes.load(Ordering::Acquire);
+        drop(joining);
+        assert!(!handle.terminal_consumed_for_test());
+        assert!(!handle.is_finished());
+        publish_terminal_result(tx, Ok(73));
+        assert_eq!(
+            wakes.load(Ordering::Acquire),
+            wakes_after_return,
+            "the completed wait leaves no result waiter behind"
+        );
+        assert_eq!(block_on(handle.join(&caller)), Ok(73));
+        assert_eq!(handle.try_join(), Err(JoinError::PolledAfterCompletion));
+    }
+
+    #[test]
+    fn cancellable_join_retired_results_outrank_precancelled_caller() {
+        for terminal in [
+            Ok(7),
+            Err(JoinError::Panicked(PanicPayload::new("completed panic"))),
+            Err(JoinError::Cancelled(CancelReason::timeout())),
+        ] {
+            let caller = test_cx();
+            let child = test_cx();
+            caller.set_cancel_reason(CancelReason::shutdown());
+            let (tx, rx) = task_result_channel::<i32>();
+            let mut handle = TaskHandle::new(
+                TaskId::from_arena(ArenaIndex::new(35, 1)),
+                rx,
+                Arc::downgrade(&child.inner),
+            );
+            publish_terminal_result(tx, terminal.clone());
+            assert_eq!(block_on(handle.join_cancellable(&caller)), terminal);
+            assert!(!child.is_cancel_requested());
+            assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+            assert_eq!(handle.try_join(), Err(JoinError::PolledAfterCompletion));
+        }
+    }
+
+    #[test]
+    fn cancellable_join_checkpoints_compatibility_fast_cancel_publication() {
+        let caller = test_cx();
+        let child = test_cx();
+        caller.inner.write().fast_cancel = Arc::new(AtomicBool::new(true));
+        assert!(
+            !caller.is_cancel_requested(),
+            "the legacy locked query is still false"
+        );
+        assert!(caller.cancel_reason().is_none());
+        let (tx, rx) = task_result_channel::<i32>();
+        let mut handle = TaskHandle::new(
+            TaskId::from_arena(ArenaIndex::new(35, 8)),
+            rx,
+            Arc::downgrade(&child.inner),
+        );
+        let reason = CancelReason::user("join caller cancelled");
+        let mut joining = Box::pin(handle.join_cancellable(&caller));
+        assert_eq!(
+            joining.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Err(JoinError::Cancelled(reason.clone())))
+        );
+        assert!(caller.is_cancel_requested());
+        assert!(caller.inner.read().cancel_acknowledged);
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+        assert_eq!(child.cancel_reason(), Some(reason));
+        drop(joining);
+        assert!(!handle.terminal_consumed_for_test());
+        publish_terminal_result(tx, Ok(23));
+        assert_eq!(block_on(handle.join(&caller)), Ok(23));
+    }
+
+    #[test]
+    fn cancellable_join_checkpoints_unpublished_budget_exhaustion_with_attribution() {
+        for (budget, kind) in [
+            (
+                Budget::INFINITE.with_deadline(Time::ZERO),
+                CancelKind::Deadline,
+            ),
+            (Budget::INFINITE.with_poll_quota(0), CancelKind::PollQuota),
+            (Budget::INFINITE.with_cost_quota(0), CancelKind::CostBudget),
+        ] {
+            let caller = Cx::for_testing_with_budget(budget);
+            let child = test_cx();
+            assert!(!caller.is_cancel_requested());
+            assert!(caller.cancel_reason().is_none());
+            let (tx, rx) = task_result_channel::<i32>();
+            let mut handle = TaskHandle::new(
+                TaskId::from_arena(ArenaIndex::new(35, 9)),
+                rx,
+                Arc::downgrade(&child.inner),
+            );
+            let mut joining = Box::pin(handle.join_cancellable(&caller));
+            let Poll::Ready(Err(JoinError::Cancelled(reason))) = joining
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            else {
+                panic!("the pending join must acknowledge budget exhaustion on its first poll");
+            };
+            assert_eq!(reason.kind, kind);
+            assert_eq!(reason.origin_region, caller.region_id());
+            assert_eq!(reason.origin_task, Some(caller.task_id()));
+            assert_eq!(caller.cancel_reason(), Some(reason.clone()));
+            assert_eq!(child.cancel_reason(), Some(reason));
+            assert!(caller.inner.read().cancel_acknowledged);
+            assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+            drop(joining);
+            assert!(!handle.terminal_consumed_for_test());
+            publish_terminal_result(tx, Ok(29));
+            assert_eq!(block_on(handle.join(&caller)), Ok(29));
+        }
+    }
+
+    #[test]
+    fn cancellable_join_does_not_consume_or_abort_a_published_unretired_result() {
+        let caller = test_cx();
+        let child = test_cx();
+        let (tx, rx) = task_result_channel::<i32>();
+        let barrier = RetirementBarrier::pending();
+        let mut handle = handle_with_barrier(
+            TaskId::from_arena(ArenaIndex::new(35, 2)),
+            rx,
+            Arc::downgrade(&child.inner),
+            Arc::clone(&barrier),
+        );
+        publish_terminal_result(tx, Ok(41));
+        let reason = CancelReason::user("published before caller cancelled");
+        caller.set_cancel_reason(reason.clone());
+        assert_eq!(
+            block_on(handle.join_cancellable(&caller)),
+            Err(JoinError::Cancelled(reason))
+        );
+        assert!(!child.is_cancel_requested());
+        assert!(!barrier.has_waker());
+        assert!(!handle.terminal_consumed_for_test());
+        assert_eq!(handle.try_join(), Ok(None), "the barrier is still closed");
+        barrier.open_and_wake();
+        assert_eq!(block_on(handle.join_cancellable(&caller)), Ok(41));
+    }
+
+    #[test]
+    fn cancellable_join_drop_cleans_only_its_own_waiters_and_requests_cancel() {
+        let caller = test_cx();
+        let child = test_cx();
+        let (_tx, rx) = task_result_channel::<i32>();
+        let barrier = RetirementBarrier::pending();
+        let mut handle = handle_with_barrier(
+            TaskId::from_arena(ArenaIndex::new(35, 3)),
+            rx,
+            Arc::downgrade(&child.inner),
+            Arc::clone(&barrier),
+        );
+        let mut other_observer = Box::pin(caller.cancelled());
+        let mut poll_cx = Context::from_waker(Waker::noop());
+        assert!(other_observer.as_mut().poll(&mut poll_cx).is_pending());
+        let mut joining = Box::pin(handle.join_cancellable(&caller));
+        assert!(joining.as_mut().poll(&mut poll_cx).is_pending());
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 2);
+        assert!(barrier.has_waker());
+        drop(joining);
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 1);
+        assert!(!barrier.has_waker());
+        assert_eq!(child.cancel_reason(), Some(CancelReason::user("abort")));
+        assert!(!handle.terminal_consumed_for_test());
+        caller.cancel_fast(CancelKind::User);
+        assert!(other_observer.as_mut().poll(&mut poll_cx).is_ready());
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+    }
+
+    #[test]
+    fn cancellable_join_unpolled_drop_keeps_the_existing_abort_contract() {
+        let caller = test_cx();
+        let child = test_cx();
+        let (_tx, rx) = task_result_channel::<i32>();
+        let mut handle = TaskHandle::new(
+            TaskId::from_arena(ArenaIndex::new(35, 4)),
+            rx,
+            Arc::downgrade(&child.inner),
+        );
+        drop(handle.join_cancellable(&caller));
+        assert_eq!(child.cancel_reason(), Some(CancelReason::user("abort")));
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+        assert!(!handle.terminal_consumed_for_test());
+    }
+
+    #[test]
+    fn cancellable_join_respects_masks_and_unmask_wakes_the_pending_wait() {
+        let caller = test_cx();
+        let child = test_cx();
+        let reason = CancelReason::user("masked caller");
+        let (_tx, rx) = task_result_channel::<i32>();
+        let mut handle = TaskHandle::new(
+            TaskId::from_arena(ArenaIndex::new(35, 5)),
+            rx,
+            Arc::downgrade(&child.inner),
+        );
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wakes));
+        let mut poll_cx = Context::from_waker(&waker);
+        let mut joining = Box::pin(handle.join_cancellable(&caller));
+        caller.set_cancel_reason(reason.clone());
+        caller.masked(|| {
+            assert!(joining.as_mut().poll(&mut poll_cx).is_pending());
+            assert!(!child.is_cancel_requested());
+            wakes.store(0, Ordering::Release);
+        });
+        assert!(
+            wakes.load(Ordering::Acquire) > 0,
+            "unmask must wake the owned registration"
+        );
+        assert_eq!(
+            joining.as_mut().poll(&mut poll_cx),
+            Poll::Ready(Err(JoinError::Cancelled(reason)))
+        );
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+    }
+
+    #[test]
+    fn cancellable_join_refreshes_its_caller_waker_without_duplicate_slots() {
+        let caller = test_cx();
+        let child = test_cx();
+        let (_tx, rx) = task_result_channel::<i32>();
+        let mut handle = TaskHandle::new(
+            TaskId::from_arena(ArenaIndex::new(35, 6)),
+            rx,
+            Arc::downgrade(&child.inner),
+        );
+        let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_waker = counting_waker(Arc::clone(&first));
+        let second_waker = counting_waker(Arc::clone(&second));
+        let mut joining = Box::pin(handle.join_cancellable(&caller));
+        assert!(
+            joining.as_mut()
+                .poll(&mut Context::from_waker(&first_waker))
+                .is_pending()
+        );
+        assert!(
+            joining.as_mut()
+                .poll(&mut Context::from_waker(&second_waker))
+                .is_pending()
+        );
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 1);
+        caller.cancel_fast(CancelKind::User);
+        assert_eq!(first.load(Ordering::Acquire), 0);
+        assert!(second.load(Ordering::Acquire) > 0);
+        assert!(
+            joining.as_mut()
+                .poll(&mut Context::from_waker(&second_waker))
+                .is_ready()
+        );
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+    }
+
+    #[test]
+    fn cancellable_join_rechecks_cancellation_and_terminal_after_waker_retirement() {
+        struct CancelOnWakerRetirement {
+            caller: Cx,
+            reason: CancelReason,
+            terminal: Option<TaskResultSender<i32>>,
+        }
+        // The destructor reenters the same caller context during refresh.
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for CancelOnWakerRetirement {
+            fn wake(self: Arc<Self>) {}
+        }
+        impl Drop for CancelOnWakerRetirement {
+            fn drop(&mut self) {
+                if let Some(sender) = self.terminal.take() {
+                    publish_terminal_result(sender, Ok(17));
+                }
+                self.caller.set_cancel_reason(self.reason.clone());
+            }
+        }
+
+        for completes_during_refresh in [false, true] {
+            let caller = test_cx();
+            let child = test_cx();
+            let reason = CancelReason::user("reentrant caller cancellation");
+            let (tx, rx) = task_result_channel::<i32>();
+            let mut sender = Some(tx);
+            let mut handle = TaskHandle::new(
+                TaskId::from_arena(ArenaIndex::new(35, 7)),
+                rx,
+                Arc::downgrade(&child.inner),
+            );
+            let mut joining = Box::pin(handle.join_cancellable(&caller));
+            {
+                let waker = Waker::from(Arc::new(CancelOnWakerRetirement {
+                    caller: caller.clone(),
+                    reason: reason.clone(),
+                    terminal: if completes_during_refresh {
+                        sender.take()
+                    } else {
+                        None
+                    },
+                }));
+                assert!(
+                    joining.as_mut()
+                        .poll(&mut Context::from_waker(&waker))
+                        .is_pending()
+                );
+            }
+            assert!(!caller.is_cancel_requested());
+            let expected = if completes_during_refresh {
+                Ok(17)
+            } else {
+                Err(JoinError::Cancelled(reason.clone()))
+            };
+            assert_eq!(
+                joining.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(expected),
+                "refresh callbacks are rechecked before parking, and a retired terminal wins"
+            );
+            assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+            drop(joining);
+            if completes_during_refresh {
+                assert!(!child.is_cancel_requested());
+                assert!(handle.terminal_consumed_for_test());
+            } else {
+                assert_eq!(child.cancel_reason(), Some(reason));
+                assert!(!handle.terminal_consumed_for_test());
+                publish_terminal_result(sender.take().unwrap(), Ok(19));
+                assert_eq!(block_on(handle.join(&caller)), Ok(19));
+            }
+        }
     }
 
     fn handle_with_barrier(
