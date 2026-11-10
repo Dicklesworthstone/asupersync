@@ -285,11 +285,11 @@ pub struct ChannelConfig {
     /// Initial stream window size.
     pub initial_stream_window_size: u32,
     /// Keep-alive interval: HTTP/2 PINGs while the stream owner is polled.
-    /// Only `GrpcClient::into_native_server_streaming` and
-    /// `GrpcClient::into_native_duplex` apply it; other calls, unary
-    /// included, send no PINGs.
+    /// Applied by `GrpcClient::into_native_server_streaming`,
+    /// `GrpcClient::into_native_duplex`, and `Channel::server_streaming_on`.
+    /// Unary calls send no PINGs.
     pub keepalive_interval: Option<Duration>,
-    /// Keep-alive timeout, applied by the same two calls as
+    /// Keep-alive timeout, applied by the same calls as
     /// `keepalive_interval`.
     pub keepalive_timeout: Option<Duration>,
     /// Whether to use TLS.
@@ -899,6 +899,39 @@ impl Channel {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn native_keepalive_policy(
+        &self,
+        cx: &crate::cx::Cx,
+    ) -> Result<Option<NativeStreamKeepalive>, Status> {
+        match (self.effective_keepalive_interval(), self.config.keepalive_timeout) {
+            (Some(interval), timeout) => {
+                let policy = NativeStreamKeepalive::new(
+                    interval, timeout.unwrap_or(Duration::from_secs(20)),
+                )?;
+                if cx.timer_driver().is_none() {
+                    return Err(Status::failed_precondition(
+                        "native gRPC keepalive requires an explicit timer",
+                    ));
+                }
+                Ok(Some(if self.progress_aware_keepalive {
+                    policy.with_progress_aware_timeout()
+                } else {
+                    policy
+                }))
+            }
+            (None, Some(_)) => Err(Status::invalid_argument(
+                "native gRPC keepalive timeout requires an interval",
+            )),
+            (None, None) => Ok(None),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn native_keepalive_backoff(&self) -> Option<Arc<KeepaliveBackoff>> {
+        self.keepalive_backoff.clone()
+    }
+
     /// Get the policy used for native hostname connection attempts.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
@@ -1324,31 +1357,7 @@ impl<C: Codec> GrpcClient<C> {
         }
         let config = self.channel.config();
         let deadline = CallDeadline::capture(cx, request.metadata(), config.timeout)?;
-        let keepalive = match (
-            self.channel.effective_keepalive_interval(),
-            config.keepalive_timeout,
-        ) {
-            (Some(interval), timeout) => {
-                let policy = NativeStreamKeepalive::new(
-                    interval, timeout.unwrap_or(Duration::from_secs(20)),
-                )?;
-                let policy = if self.channel.progress_aware_keepalive {
-                    policy.with_progress_aware_timeout()
-                } else {
-                    policy
-                };
-                if cx.timer_driver().is_none() {
-                    return Err(Status::failed_precondition(
-                        "native gRPC keepalive requires an explicit timer",
-                    ));
-                }
-                Some(policy)
-            }
-            (None, Some(_)) => return Err(Status::invalid_argument(
-                "native gRPC keepalive timeout requires an interval",
-            )),
-            (None, None) => None,
-        };
+        let keepalive = self.channel.native_keepalive_policy(cx)?;
         let target = NativeH2Target::from_channel(&self.channel)?;
         #[cfg(not(feature = "tls"))]
         if target.use_tls {

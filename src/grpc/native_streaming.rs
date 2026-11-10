@@ -7,6 +7,7 @@
 
 use super::client::{Channel, ChannelConfig, CompressionEncoding};
 use super::codec::{Codec, FramedCodec};
+use super::native_stream::{Keepalive, KeepaliveBackoff};
 use super::server::{format_grpc_timeout, parse_grpc_timeout};
 use super::status::{Code, GrpcError, Status, TransportErrorKind};
 use super::streaming::{Metadata, MetadataValue, Request, Streaming};
@@ -14,7 +15,7 @@ use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder as _;
 use crate::cx::Cx;
 use crate::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
-use crate::http::h2::{Connection, ConnectionState, ErrorCode, FrameCodec, Header, Settings};
+use crate::http::h2::{Connection, ConnectionState, ErrorCode, Frame, FrameCodec, Header, Settings};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelKind, Time};
@@ -22,6 +23,7 @@ use base64::Engine as _;
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -68,6 +70,9 @@ pub struct NativeServerStream<IO, C: Codec> {
     timer: Option<Sleep>,
     header_deadline: Time,
     header_timer: Option<Sleep>,
+    keepalive: Option<Keepalive>,
+    keepalive_backoff: Option<Arc<KeepaliveBackoff>>,
+    outbound_allows_probe: bool,
     ended: bool,
     terminal: Option<Status>,
     unflushed_events: usize,
@@ -102,8 +107,10 @@ impl Channel {
     /// with their first message, and not the lifetime of an otherwise
     /// unbounded stream. Metadata is supplied directly: this
     /// Channel API does not run a GrpcClient's separately registered interceptors.
-    /// Keepalive configuration is rejected rather than silently ignored; this
-    /// lane does not provide a background heartbeat or connection pool.
+    /// Configured keepalive uses the same demand-driven PING/ACK policy as
+    /// native duplex calls, including optional progress-aware expiry and peer
+    /// backoff. Pending setup and message waits drive probes; an unpolled
+    /// owner sends nothing. No background heartbeat or connection pool is used.
     ///
     /// # Errors
     /// Rejects invalid configuration, paths, reserved metadata and unavailable
@@ -144,6 +151,7 @@ where
         caller_status(cx)?;
         let config = channel.config();
         validate_config(config)?;
+        let keepalive_policy = channel.native_keepalive_policy(cx)?;
         validate_path(path)?;
         let (scheme, authority) = authority(channel.uri())?;
         let scheme = if config.use_tls { "https" } else { scheme };
@@ -200,6 +208,9 @@ where
             timer: deadline.map(|at| Sleep::with_timer_driver(at, clock.clone())),
             header_timer: Some(Sleep::with_timer_driver(header_deadline, clock.clone())),
             header_deadline,
+            keepalive: keepalive_policy.map(|policy| Keepalive::new(policy, clock.clone())),
+            keepalive_backoff: channel.native_keepalive_backoff(),
+            outbound_allows_probe: false,
             clock,
             deadline,
             ended: false,
@@ -253,6 +264,8 @@ where
         self.body = BytesMut::new();
         self.timer = None;
         self.header_timer = None;
+        self.keepalive = None;
+        self.keepalive_backoff = None;
         // Retire queued request bytes and all stream/control state now, rather
         // than retaining them until the caller drops an already-finished owner.
         self.connection = Connection::client(Settings::client());
@@ -289,6 +302,46 @@ where
         Ok(())
     }
 
+    fn check_keepalive(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+        if self.response.ended {
+            self.keepalive = None;
+            return Ok(());
+        }
+        let expired = self.keepalive.as_mut().and_then(|probe| probe.poll(task).err());
+        let Some(error) = expired else { return Ok(()); };
+        let recover_ack = self.keepalive.as_ref().is_some_and(Keepalive::can_recover_ack);
+        if !recover_ack {
+            self.keepalive = None;
+        }
+        // A consumer may pause with a probe outstanding. Terminal trailers
+        // already received by the transport must not become a retryable
+        // liveness error. The progress-aware policy also accepts a matching
+        // ACK from this bounded nonblocking pass. Neither unrelated traffic
+        // nor a full response buffer extends the acknowledgement allowance.
+        for _ in 0..BLOCKED_WRITE_EVENTS {
+            self.check_stop(task)?;
+            if self.response.ended
+                || self.body.len().saturating_add(FRAME_BYTES) > self.max_buffer
+            {
+                break;
+            }
+            match self.poll_received(task) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(status)) => return Err(status),
+                Poll::Pending => break,
+            }
+            if recover_ack && self.keepalive.as_ref().is_some_and(Keepalive::is_idle) {
+                return Ok(());
+            }
+        }
+        if self.response.ended {
+            self.keepalive = None;
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
     fn poll_headers(&mut self, task: &mut Context<'_>) -> Poll<Result<(), Status>> {
         let _ambient = Cx::set_current(Some(self.owner.clone()));
         let result = self.poll_progress(task, true);
@@ -318,7 +371,20 @@ where
             }
             self.outbound.clear();
             self.written = 0;
-            if let Some(frame) = self.connection.next_frame() {
+            // A probe follows the initial SETTINGS and can only enter at a
+            // complete frame boundary outside a HEADERS/CONTINUATION block.
+            let probe = if self.outbound_allows_probe {
+                self.keepalive.as_mut().and_then(|probe| probe.take_probe(task))
+            } else {
+                None
+            };
+            if let Some(frame) = probe.or_else(|| self.connection.next_frame()) {
+                match &frame {
+                    Frame::Settings(settings) if !settings.ack => self.outbound_allows_probe = true,
+                    Frame::Headers(headers) => self.outbound_allows_probe = headers.end_headers,
+                    Frame::Continuation(continuation) => self.outbound_allows_probe = continuation.end_headers,
+                    _ => {}
+                }
                 frame.encode(&mut self.outbound)
                     .map_err(|_| Status::internal("cannot encode outbound HTTP/2 frame"))?;
             } else {
@@ -332,7 +398,11 @@ where
     fn poll_progress(&mut self, task: &mut Context<'_>, headers_only: bool) -> Poll<Result<(), Status>> {
         for _ in 0..POLL_STEPS {
             self.check_stop(task)?;
-            if headers_only && self.response.headers_received {
+            self.check_keepalive(task)?;
+            // Expiry recovery may have consumed terminal trailers. Return
+            // them before an unrelated control write or transport EOF can
+            // delay or replace the completed call's gRPC status.
+            if self.response.ended || (headers_only && self.response.headers_received) {
                 return Poll::Ready(Ok(()));
             }
             // Let the caller decode before reading further frames. Incomplete
@@ -347,19 +417,40 @@ where
             if writes_pending && self.unflushed_events >= BLOCKED_WRITE_EVENTS {
                 return Poll::Pending;
             }
-            if let Some(frame) = self.frames.decode(&mut self.inbound)
-                .map_err(|_| Status::internal("invalid HTTP/2 response frame"))?
-            {
-                self.unflushed_events += 1;
-                if let Some(event) = self.connection.process_frame(frame)
-                    .map_err(|_| Status::internal("invalid HTTP/2 response state"))?
-                {
-                    self.observe(event)?;
+            match self.poll_received(task) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(status)) => return Poll::Ready(Err(status)),
+                Poll::Ready(Ok(())) => {
                     if self.response.headers_received && (headers_only || !self.body.is_empty() || self.response.ended) {
                         return Poll::Ready(Ok(()));
                     }
                 }
-                continue;
+            }
+        }
+        task.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    fn poll_received(&mut self, task: &mut Context<'_>) -> Poll<Result<(), Status>> {
+        // This also bounds the expiry-recovery read pass, which intentionally
+        // does not write and must not grow an unbounded control-reply queue.
+        if self.unflushed_events >= BLOCKED_WRITE_EVENTS {
+            return Poll::Pending;
+        }
+        for _ in 0..POLL_STEPS {
+            if let Some(frame) = self.frames.decode(&mut self.inbound)
+                .map_err(|_| Status::internal("invalid HTTP/2 response frame"))?
+            {
+                self.unflushed_events += 1;
+                if let Some(probe) = &mut self.keepalive {
+                    probe.observe(&frame)?;
+                }
+                if let Some(event) = self.connection.process_frame(frame)
+                    .map_err(|_| Status::internal("invalid HTTP/2 response state"))?
+                {
+                    self.observe(event)?;
+                }
+                return Poll::Ready(Ok(()));
             }
             let mut chunk = [0_u8; 8192];
             let mut read = ReadBuf::new(&mut chunk);
@@ -397,10 +488,23 @@ where
             ReceivedFrame::Reset { stream_id, error_code } if stream_id == self.stream_id => {
                 Err(Status::from_h2_rst_stream_code(error_code))
             }
-            ReceivedFrame::GoAway { last_stream_id, error_code, .. }
-                if last_stream_id < self.stream_id || error_code != ErrorCode::NoError => {
-                    Err(Status::unavailable("HTTP/2 GOAWAY rejected this gRPC call"))
+            ReceivedFrame::GoAway { last_stream_id, error_code, debug_data } => {
+                if error_code == ErrorCode::EnhanceYourCalm
+                    && debug_data.as_ref() == b"too_many_pings"
+                    && let Some(backoff) = self.keepalive_backoff.take()
+                {
+                    let (previous, next) = backoff.back_off();
+                    self.owner.trace_with_fields("grpc.keepalive_backoff", &[
+                        ("previous_interval_ns", &previous.as_nanos().to_string()),
+                        ("next_interval_ns", &next.as_nanos().to_string()),
+                    ]);
                 }
+                if last_stream_id < self.stream_id || error_code != ErrorCode::NoError {
+                    Err(Status::unavailable("HTTP/2 GOAWAY rejected this gRPC call"))
+                } else {
+                    Ok(())
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -420,6 +524,7 @@ where
         for _ in 0..POLL_STEPS {
             let result = (|| {
                 this.check_stop(task)?;
+                this.check_keepalive(task)?;
                 match this.codec.decode_message_with_negotiated_encoding(&mut this.body, this.response.encoding.as_deref())
                     .map_err(GrpcError::into_status)?
                 {
@@ -616,9 +721,6 @@ fn io_status(error: std::io::Error) -> Status {
 }
 
 fn validate_config(config: &ChannelConfig) -> Result<(), Status> {
-    if config.keepalive_interval.is_some() || config.keepalive_timeout.is_some() {
-        return Err(Status::unimplemented("native gRPC stream keepalive is not configured by this lane"));
-    }
     if config.connect_timeout.is_zero() || config.initial_stream_window_size == 0
         || config.initial_stream_window_size > 0x7fff_ffff
         || !(65_535..=0x7fff_ffff).contains(&config.initial_connection_window_size)

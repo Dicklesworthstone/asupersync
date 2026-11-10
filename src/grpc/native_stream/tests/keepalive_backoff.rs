@@ -253,7 +253,7 @@ where
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Shape { Server, Duplex, LegacyServer, LegacyBidi }
+enum Shape { Server, SuppliedServer, Duplex, LegacyServer, LegacyBidi }
 
 fn native_rejections(shape: Shape, enabled: bool, code: ErrorCode, reason: &'static [u8]) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -282,7 +282,7 @@ fn native_rejections(shape: Shape, enabled: bool, code: ErrorCode, reason: &'sta
                 }
             }
             assert!(saw_ping, "peer must observe an actual keepalive probe");
-            if matches!(shape, Shape::Server | Shape::LegacyServer) {
+            if matches!(shape, Shape::Server | Shape::SuppliedServer | Shape::LegacyServer) {
                 assert_eq!(body, message(b"once"));
             } else {
                 assert!(body.is_empty());
@@ -311,6 +311,16 @@ fn native_rejections(shape: Shape, enabled: bool, code: ErrorCode, reason: &'sta
             assert_eq!(cloned.effective_keepalive_interval(), Some(expected));
             let mut client = GrpcClient::new(cloned);
             let error = match shape {
+                Shape::SuppliedServer => {
+                    let io = crate::net::TcpStream::connect(address).await.unwrap();
+                    let mut stream = client.channel().server_streaming_on(
+                        &cx, io, "/test.Service/Watch",
+                        Request::new(Bytes::from_static(b"once")), IdentityCodec,
+                    ).await.unwrap();
+                    let error = stream.message().await.unwrap_err();
+                    assert!(stream.message().await.unwrap().is_none());
+                    error
+                }
                 Shape::Server => {
                     let mut stream = client.into_native_server_streaming(
                         &cx, "/test.Service/Watch", Request::new(Bytes::from_static(b"once")),
@@ -372,7 +382,7 @@ fn native_rejections(shape: Shape, enabled: bool, code: ErrorCode, reason: &'sta
 
 #[test]
 fn native_channel_clones_back_off_across_owned_and_legacy_connections() {
-    for shape in [Shape::Server, Shape::Duplex, Shape::LegacyServer, Shape::LegacyBidi] {
+    for shape in [Shape::Server, Shape::SuppliedServer, Shape::Duplex, Shape::LegacyServer, Shape::LegacyBidi] {
         native_rejections(shape, true, ErrorCode::EnhanceYourCalm, REASON);
     }
 }

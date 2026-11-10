@@ -270,7 +270,7 @@ impl KeepaliveBackoff {
         *self.interval.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn back_off(&self) -> (Duration, Duration) {
+    pub(super) fn back_off(&self) -> (Duration, Duration) {
         let mut interval = self.interval.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = *interval;
         *interval = previous.saturating_mul(2);
@@ -285,7 +285,7 @@ enum ProbeState {
     AwaitingAck([u8; 8]),
 }
 
-struct Keepalive {
+pub(super) struct Keepalive {
     config: NativeStreamKeepalive,
     clock: TimerDriverHandle,
     at: Time,
@@ -295,7 +295,7 @@ struct Keepalive {
 }
 
 impl Keepalive {
-    fn new(config: NativeStreamKeepalive, clock: TimerDriverHandle) -> Self {
+    pub(super) fn new(config: NativeStreamKeepalive, clock: TimerDriverHandle) -> Self {
         let at = clock.now() + config.interval;
         let timer = Box::pin(Sleep::with_timer_driver(at, clock.clone()));
         Self { config, clock, at, timer, sequence: 0, state: ProbeState::Idle }
@@ -308,7 +308,7 @@ impl Keepalive {
         self.timer = Box::pin(Sleep::with_timer_driver(self.at, self.clock.clone()));
     }
 
-    fn poll(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+    pub(super) fn poll(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
         if self.config.progress_aware && matches!(self.state, ProbeState::Queued(_)) {
             // An owner returning buffered messages need not touch its transport.
             // Its completed idle timer is retired when take_probe admits I/O.
@@ -337,7 +337,7 @@ impl Keepalive {
         }
     }
 
-    fn take_probe(&mut self, task: &mut Context<'_>) -> Option<Frame> {
+    pub(super) fn take_probe(&mut self, task: &mut Context<'_>) -> Option<Frame> {
         if let ProbeState::Queued(data) = self.state {
             self.state = ProbeState::AwaitingAck(data);
             if self.config.progress_aware {
@@ -352,7 +352,7 @@ impl Keepalive {
         }
     }
 
-    fn observe(&mut self, frame: &Frame) -> Result<(), Status> {
+    pub(super) fn observe(&mut self, frame: &Frame) -> Result<(), Status> {
         // Progress-aware expiry belongs to gate's bounded ready-input pass.
         // A transport poll may cross the deadline after gate checked it; do
         // not discard its matching ACK or terminal frame before that pass.
@@ -372,6 +372,14 @@ impl Keepalive {
             ProbeState::Queued(_) | ProbeState::AwaitingAck(_) => {}
         }
         Ok(())
+    }
+
+    pub(super) fn can_recover_ack(&self) -> bool {
+        self.config.progress_aware && matches!(self.state, ProbeState::AwaitingAck(_))
+    }
+
+    pub(super) fn is_idle(&self) -> bool {
+        matches!(self.state, ProbeState::Idle)
     }
 }
 
