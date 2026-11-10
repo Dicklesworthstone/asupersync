@@ -1715,6 +1715,16 @@ cannot reopen an older window. The existing `RateLimiter` remains a token
 bucket regardless of the policy's legacy `algorithm` field: choose the explicit
 limiter type for the intended quota semantics.
 
+`FixedWindowRateLimiter::acquire_async_bounded` adds weighted FIFO waiting
+using the supplied context's timer and cancellation signal. Pass the same
+`max_queued` bound for all callers; retained grants and timeouts count until
+their owners claim or drop them. Synchronous positive-cost requests cannot
+bypass waiting owners. Dropping a waiting future removes its entry and refunds
+an unclaimed grant only in its original window. Queue timeouts, owner deadlines,
+and resets wake parked callers, including when the window cannot replenish.
+Quota is charged at admission, so holding a permit across a boundary does not
+charge the later execution to that new window.
+
 `Cx::first_ok_scoped` and `Cx::quorum_scoped` preserve the caller's typed
 spawn capabilities without requiring a timer. Their reports separate selection
 from task and subtree-cleanup outcomes: a selected success does not certify

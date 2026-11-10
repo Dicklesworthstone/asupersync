@@ -1308,17 +1308,45 @@ impl fmt::Debug for SlidingWindowRateLimiter {
 pub struct FixedWindowRateLimiter {
     policy: RateLimitPolicy,
     state: Mutex<FixedWindowState>,
+    changed: Notify,
     total_allowed: AtomicU64,
     total_rejected: AtomicU64,
+    total_waited: AtomicU64,
+    total_wait_time_ms: AtomicU64,
+    max_wait_time_ms: AtomicU64,
 }
 
 struct FixedWindowState {
     start_millis: u64,
-    observed_millis: u64,
+    observed: Time,
     used: u32,
     // None permanently disables refunds after generation exhaustion, rather
     // than wrapping and allowing an ancient permit to alias a later window.
     generation: Option<u64>,
+    queue: VecDeque<FixedWindowQueueEntry>,
+    next_id: Option<u64>,
+}
+
+struct FixedWindowQueueEntry {
+    id: u64,
+    cost: u32,
+    enqueued_at: Time,
+    deadline: Option<Time>,
+    // An Ok value retains the original grant generation, including the
+    // fail-closed None generation. An outer None is still waiting.
+    result: Option<Result<Option<u64>, RejectionReason>>,
+    waited: Duration,
+}
+
+enum FixedWindowAdmission<'a> {
+    Immediate(FixedWindowRateLimitPermit<'a>),
+    Queued(FixedWindowQueueOwner<'a>),
+}
+
+struct FixedWindowQueueOwner<'a> {
+    limiter: &'a FixedWindowRateLimiter,
+    entry_id: Option<u64>,
+    driver: crate::time::TimerDriverHandle,
 }
 
 impl FixedWindowState {
@@ -1327,9 +1355,9 @@ impl FixedWindowState {
     }
 
     fn observe(&mut self, now: Time, period_millis: u64) {
-        self.observed_millis = self.observed_millis.max(now.as_millis());
+        self.observed = self.observed.max(now);
         if period_millis != 0 {
-            let start = self.observed_millis / period_millis * period_millis;
+            let start = self.observed.as_millis() / period_millis * period_millis;
             if start > self.start_millis {
                 self.start_millis = start;
                 self.used = 0;
@@ -1353,6 +1381,7 @@ impl FixedWindowState {
 ///
 /// Drop returns the reserved cost only while that same window and reset
 /// generation remain current. [`Self::commit`] consumes the reservation.
+/// Quota is charged at admission, not when the protected work later executes.
 /// Holding a permit across a boundary does not transfer its quota into the
 /// next window. Admissions, including subsequently refunded ones, remain in
 /// the limiter's cumulative `total_allowed` metric.
@@ -1373,11 +1402,8 @@ impl FixedWindowRateLimitPermit<'_> {
 
 impl Drop for FixedWindowRateLimitPermit<'_> {
     fn drop(&mut self) {
-        if self.refund && self.cost != 0 && self.generation.is_some() {
-            let mut state = self.limiter.state.lock();
-            if state.generation == self.generation {
-                state.used = state.used.saturating_sub(self.cost);
-            }
+        if self.refund {
+            self.limiter.refund_window(self.cost, self.generation);
         }
     }
 }
@@ -1390,12 +1416,18 @@ impl FixedWindowRateLimiter {
             policy,
             state: Mutex::new(FixedWindowState {
                 start_millis: 0,
-                observed_millis: 0,
+                observed: Time::ZERO,
                 used: 0,
                 generation: Some(0),
+                queue: VecDeque::new(),
+                next_id: Some(0),
             }),
+            changed: Notify::new(),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
+            total_waited: AtomicU64::new(0),
+            total_wait_time_ms: AtomicU64::new(0),
+            max_wait_time_ms: AtomicU64::new(0),
         }
     }
 
@@ -1439,14 +1471,23 @@ impl FixedWindowRateLimiter {
     ) -> Result<FixedWindowRateLimitPermit<'_>, RateLimitError<()>> {
         let mut state = self.state.lock();
         state.observe(now, period_to_millis_ceil(self.policy.period));
-        if cost > self.policy.rate.saturating_sub(state.used) {
+        let changed = self.process_queue_locked(&mut state);
+        if cost > self.policy.rate.saturating_sub(state.used)
+            || (cost != 0 && state.queue.iter().any(|entry| entry.result.is_none()))
+        {
             drop(state);
+            if changed {
+                self.notify_change();
+            }
             self.total_rejected.fetch_add(1, Ordering::Relaxed);
             return Err(RateLimitError::RateLimitExceeded);
         }
         state.used += cost;
         let generation = state.generation;
         drop(state);
+        if changed {
+            self.notify_change();
+        }
         self.total_allowed.fetch_add(1, Ordering::Relaxed);
         Ok(FixedWindowRateLimitPermit {
             limiter: self,
@@ -1467,25 +1508,55 @@ impl FixedWindowRateLimiter {
     /// A cost above the full quota, a depleted zero-period quota, or a next
     /// window outside [`Time`]'s representable range returns `Duration::MAX`.
     /// Backwards time includes the distance back to the current window, rather
-    /// than advertising an earlier replenishment. This is an estimate: other
-    /// admissions may consume the quota before the caller retries.
+    /// than advertising an earlier replenishment. Pending weighted FIFO demand
+    /// is included in window order. This is an estimate: cancellations may make
+    /// quota available sooner, and later admissions may consume it first.
     #[must_use]
     pub fn time_until_available(&self, cost: u32, now: Time) -> Duration {
         let period = period_to_millis_ceil(self.policy.period);
         let mut state = self.state.lock();
         state.observe(now, period);
-        let available = self.policy.rate.saturating_sub(state.used);
-        let next_window = state.next_window(period);
+        let changed = self.process_queue_locked(&mut state);
+        let estimate = if cost > self.policy.rate {
+            Duration::MAX
+        } else if cost == 0 {
+            Duration::ZERO
+        } else {
+            let mut available = self.policy.rate.saturating_sub(state.used);
+            let mut windows = 0_u128;
+            for demand in state
+                .queue
+                .iter()
+                .filter(|entry| entry.result.is_none())
+                .map(|entry| entry.cost)
+                .chain(std::iter::once(cost))
+            {
+                if demand > available {
+                    windows += 1;
+                    available = self.policy.rate;
+                }
+                available -= demand;
+            }
+            if windows == 0 {
+                Duration::ZERO
+            } else if period == 0 {
+                Duration::MAX
+            } else {
+                windows
+                    .checked_mul(u128::from(period))
+                    .and_then(|offset| u128::from(state.start_millis).checked_add(offset))
+                    .and_then(|millis| millis.checked_mul(1_000_000))
+                    .and_then(|nanos| u64::try_from(nanos).ok())
+                    .map_or(Duration::MAX, |nanos| {
+                        Duration::from_nanos(nanos.saturating_sub(now.as_nanos()))
+                    })
+            }
+        };
         drop(state);
-        if cost > self.policy.rate {
-            return Duration::MAX;
+        if changed {
+            self.notify_change();
         }
-        if cost <= available {
-            return Duration::ZERO;
-        }
-        next_window.map_or(Duration::MAX, |next| {
-            Duration::from_nanos(next.as_nanos().saturating_sub(now.as_nanos()))
-        })
+        estimate
     }
 
     /// Alias for [`Self::time_until_available`].
@@ -1494,13 +1565,29 @@ impl FixedWindowRateLimiter {
         self.time_until_available(cost, now)
     }
 
+    /// Retained queue entries, including grants and timeouts not yet claimed.
+    #[must_use]
+    pub fn queued_count(&self) -> usize {
+        self.state.lock().queue.len()
+    }
+
     /// Snapshot quota and cumulative admission counters without reading time.
     #[must_use]
     pub fn metrics(&self) -> RateLimitMetrics {
+        let total_waited = self.total_waited.load(Ordering::Relaxed);
+        let waited_ms = self.total_wait_time_ms.load(Ordering::Relaxed);
         RateLimitMetrics {
             available_tokens: self.available_tokens(),
             total_allowed: self.total_allowed.load(Ordering::Relaxed),
             total_rejected: self.total_rejected.load(Ordering::Relaxed),
+            total_waited,
+            total_wait_time: Duration::from_millis(waited_ms),
+            avg_wait_time: waited_ms
+                .checked_div(total_waited)
+                .map_or(Duration::ZERO, Duration::from_millis),
+            max_wait_time: Duration::from_millis(
+                self.max_wait_time_ms.load(Ordering::Relaxed),
+            ),
             ..RateLimitMetrics::default()
         }
     }
@@ -1508,11 +1595,15 @@ impl FixedWindowRateLimiter {
     /// Restore the current window's quota without rewinding its clock.
     ///
     /// Outstanding permits remain valid for their owners, but their eventual
-    /// drops cannot refund quota into this new reset generation.
+    /// drops cannot refund quota into this new reset generation. Queued owners
+    /// are awakened and return `Admission(RateLimitError::Cancelled)`.
     pub fn reset(&self) {
         let mut state = self.state.lock();
         state.used = 0;
         state.next_generation();
+        state.queue.clear();
+        drop(state);
+        self.notify_change();
     }
 }
 
@@ -1523,6 +1614,357 @@ impl fmt::Debug for FixedWindowRateLimiter {
             .field("rate", &self.policy.rate)
             .field("period", &self.policy.period)
             .finish_non_exhaustive()
+    }
+}
+
+impl FixedWindowRateLimiter {
+    fn record_wait(&self, waited: Duration) {
+        let millis = duration_to_millis_saturating(waited);
+        let _ = self.total_wait_time_ms.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |total| Some(total.saturating_add(millis)),
+        );
+        self.max_wait_time_ms.fetch_max(millis, Ordering::Relaxed);
+    }
+
+    /// Grant only the live FIFO prefix, while letting later owners time out.
+    /// Every granted entry keeps the generation in which quota was consumed.
+    fn process_queue_locked(&self, state: &mut FixedWindowState) -> bool {
+        let now = state.observed;
+        let mut changed = false;
+        let mut blocked = false;
+        for entry in &mut state.queue {
+            if entry.result.is_some() {
+                continue;
+            }
+            let expired = entry.deadline.is_some_and(|deadline| now > deadline);
+            if !expired
+                && !blocked
+                && entry.cost <= self.policy.rate.saturating_sub(state.used)
+            {
+                state.used += entry.cost;
+                entry.result = Some(Ok(state.generation));
+                self.total_allowed.fetch_add(1, Ordering::Relaxed);
+            } else if entry.deadline.is_some_and(|deadline| now >= deadline) {
+                entry.result = Some(Err(RejectionReason::Timeout));
+            } else {
+                blocked = true;
+                continue;
+            }
+            entry.waited =
+                Duration::from_nanos(now.as_nanos().saturating_sub(entry.enqueued_at.as_nanos()));
+            self.record_wait(entry.waited);
+            changed = true;
+        }
+        changed
+    }
+
+    fn refund_window(&self, cost: u32, generation: Option<u64>) {
+        if cost == 0 || generation.is_none() {
+            return;
+        }
+        let mut state = self.state.lock();
+        let refunded = state.generation == generation;
+        if refunded {
+            state.used = state.used.saturating_sub(cost);
+        }
+        drop(state);
+        if refunded {
+            self.notify_change();
+        }
+    }
+
+    // Notification callbacks are external code. Publish after unlocking, and
+    // preserve the quota/queue transition even if a wake callback panics.
+    fn notify_change(&self) {
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| self.changed.notify_waiters()))
+            && let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(payload)))
+        {
+            std::mem::forget(secondary);
+        }
+    }
+
+    fn begin_async_acquire(
+        &self,
+        cost: u32,
+        now: Time,
+        max_queued: usize,
+        driver: crate::time::TimerDriverHandle,
+    ) -> Result<FixedWindowAdmission<'_>, RateLimitError<()>> {
+        let mut state = self.state.lock();
+        state.observe(now, period_to_millis_ceil(self.policy.period));
+        let changed = self.process_queue_locked(&mut state);
+        let admission = (|| {
+            if cost <= self.policy.rate.saturating_sub(state.used)
+                && (cost == 0 || !state.queue.iter().any(|entry| entry.result.is_none()))
+            {
+                state.used += cost;
+                self.total_allowed.fetch_add(1, Ordering::Relaxed);
+                return Ok(FixedWindowAdmission::Immediate(FixedWindowRateLimitPermit {
+                    limiter: self,
+                    cost,
+                    generation: state.generation,
+                    refund: true,
+                }));
+            }
+            if cost > self.policy.rate
+                || matches!(self.policy.wait_strategy, WaitStrategy::Reject)
+                || state.queue.len() >= max_queued
+            {
+                self.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitError::RateLimitExceeded);
+            }
+            let Some(id) = state.next_id else {
+                self.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitError::QueueIdExhausted);
+            };
+            state.next_id = id.checked_add(1);
+            let enqueued_at = state.observed;
+            let deadline = match self.policy.wait_strategy {
+                WaitStrategy::BlockWithTimeout(timeout) => u64::try_from(
+                    u128::from(enqueued_at.as_nanos()) + timeout.as_nanos(),
+                )
+                .ok()
+                .map(Time::from_nanos),
+                WaitStrategy::Block | WaitStrategy::Reject => None,
+            };
+            state.queue.push_back(FixedWindowQueueEntry {
+                id,
+                cost,
+                enqueued_at,
+                deadline,
+                result: None,
+                waited: Duration::ZERO,
+            });
+            self.total_waited.fetch_add(1, Ordering::Relaxed);
+            Ok(FixedWindowAdmission::Queued(FixedWindowQueueOwner {
+                limiter: self,
+                entry_id: Some(id),
+                driver,
+            }))
+        })();
+        drop(state);
+        if changed || matches!(&admission, Ok(FixedWindowAdmission::Queued(_))) {
+            self.notify_change();
+        }
+        admission
+    }
+
+    fn try_existing_permit(&self, cost: u32) -> Option<FixedWindowRateLimitPermit<'_>> {
+        let mut state = self.state.lock();
+        if cost > self.policy.rate.saturating_sub(state.used)
+            || (cost != 0 && state.queue.iter().any(|entry| entry.result.is_none()))
+        {
+            return None;
+        }
+        state.used += cost;
+        let generation = state.generation;
+        drop(state);
+        self.total_allowed.fetch_add(1, Ordering::Relaxed);
+        Some(FixedWindowRateLimitPermit {
+            limiter: self,
+            cost,
+            generation,
+            refund: true,
+        })
+    }
+
+    fn next_async_wake(&self, now: Time) -> Option<Time> {
+        let state = self.state.lock();
+        let head = state.queue.iter().find(|entry| entry.result.is_none())?;
+        let quota = if head.cost <= self.policy.rate.saturating_sub(state.used) {
+            Some(now)
+        } else {
+            state.next_window(period_to_millis_ceil(self.policy.period))
+        };
+        let timeout = state
+            .queue
+            .iter()
+            .filter(|entry| entry.result.is_none())
+            .filter_map(|entry| entry.deadline)
+            .min();
+        quota.into_iter().chain(timeout).min()
+    }
+
+    /// Acquire refundable fixed-window quota using a bounded weighted FIFO.
+    ///
+    /// The supplied context owns cancellation and the timer. All callers must
+    /// use one clock domain. Admission uses `wait_strategy`; `Reject` refuses
+    /// immediately, and `BlockWithTimeout` measures the full queue residence.
+    /// Quota available exactly at the queue deadline can be granted; an entry
+    /// observed after its deadline cannot acquire a late reservation.
+    ///
+    /// Immediate grants require no queue slot. Every retained entry, including
+    /// an unclaimed grant or timeout, counts toward `max_queued`. Use the same
+    /// bound for all callers to enforce a limiter-wide cap. Synchronous positive
+    /// cost acquisitions cannot bypass pending FIFO owners.
+    ///
+    /// Dropping the future removes its queue entry and refunds any unclaimed
+    /// quota only in its original generation. Returned permits refund until
+    /// committed. Reset wakes waiting owners with an admission cancellation.
+    /// A zero-period window parks on refunds, reset, cancellation or its queue
+    /// deadline; no periodic polling is used. Next windows beyond `Time::MAX`
+    /// do not create an already-expired timer.
+    ///
+    /// Without a timer driver, already-available quota may still be claimed,
+    /// but the method never reads an ambient clock or replenishes a window.
+    /// Other attempts return [`RateLimitAcquireError::TimerUnavailable`], except
+    /// a cost above the full quota, which is always refused. Cancellation is
+    /// checked before admission and before returning a permit, and respects
+    /// the context's cancellation mask.
+    pub async fn acquire_async_bounded<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        cost: u32,
+        max_queued: usize,
+    ) -> Result<FixedWindowRateLimitPermit<'_>, RateLimitAcquireError>
+    where
+        Caps: HasTime,
+    {
+        cx.checkpoint()
+            .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+        let Some(driver) = cx.timer_driver() else {
+            if let Some(permit) = self.try_existing_permit(cost) {
+                cx.checkpoint()
+                    .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+                return Ok(permit);
+            }
+            if cost > self.policy.rate {
+                self.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitError::RateLimitExceeded.into());
+            }
+            return Err(RateLimitAcquireError::TimerUnavailable);
+        };
+        let now = driver.now();
+        cx.checkpoint()
+            .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+        let mut owner = match self.begin_async_acquire(cost, now, max_queued, driver.clone())? {
+            FixedWindowAdmission::Immediate(permit) => {
+                cx.checkpoint()
+                    .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+                return Ok(permit);
+            }
+            FixedWindowAdmission::Queued(owner) => owner,
+        };
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+
+        loop {
+            let mut changed = std::pin::pin!(self.changed.notified());
+            changed.as_mut().enable();
+            let now = driver.now();
+            cx.checkpoint()
+                .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+            if let Some(permit) = owner.claim(now)? {
+                cx.checkpoint()
+                    .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+                return Ok(permit);
+            }
+            let queue_wake = self.next_async_wake(now);
+            if queue_wake.is_some_and(|deadline| deadline <= now) {
+                // A refund/admission changed state since claim. The next pass
+                // consumes that transition; unreachable boundaries are None.
+                continue;
+            }
+            let owner_deadline = cx.budget().deadline.filter(|deadline| *deadline > now);
+            let wake_at = match (queue_wake, owner_deadline) {
+                (Some(queue), Some(owner)) => Some(queue.min(owner)),
+                (queue, owner) => queue.or(owner),
+            };
+            let mut timer = std::pin::pin!(
+                wake_at.map(|deadline| crate::time::Sleep::with_timer_driver(deadline, driver.clone()))
+            );
+            poll_fn(|task| {
+                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                    return Poll::Ready(());
+                }
+                if changed.as_mut().poll(task).is_ready() {
+                    return Poll::Ready(());
+                }
+                if let Some(timer) = timer.as_mut().as_pin_mut()
+                    && timer.poll_deadline(task).is_ready()
+                {
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            })
+            .await;
+        }
+    }
+}
+
+impl<'a> FixedWindowQueueOwner<'a> {
+    fn claim(
+        &mut self,
+        now: Time,
+    ) -> Result<Option<FixedWindowRateLimitPermit<'a>>, RateLimitError<()>> {
+        let Some(id) = self.entry_id else {
+            return Err(RateLimitError::Cancelled);
+        };
+        let mut state = self.limiter.state.lock();
+        state.observe(now, period_to_millis_ceil(self.limiter.policy.period));
+        let changed = self.limiter.process_queue_locked(&mut state);
+        let result = if let Some(index) = state.queue.iter().position(|entry| entry.id == id) {
+            match state.queue[index].result {
+                Some(result) => {
+                    let entry = state.queue.remove(index).expect("located fixed-window entry");
+                    self.entry_id = None;
+                    match result {
+                        Ok(generation) => Ok(Some(FixedWindowRateLimitPermit {
+                            limiter: self.limiter,
+                            cost: entry.cost,
+                            generation,
+                            refund: true,
+                        })),
+                        Err(RejectionReason::Timeout) => {
+                            Err(RateLimitError::Timeout { waited: entry.waited })
+                        }
+                    }
+                }
+                None => Ok(None),
+            }
+        } else {
+            self.entry_id = None;
+            Err(RateLimitError::Cancelled)
+        };
+        drop(state);
+        if changed {
+            self.limiter.notify_change();
+        }
+        result
+    }
+}
+
+impl Drop for FixedWindowQueueOwner<'_> {
+    fn drop(&mut self) {
+        let Some(id) = self.entry_id.take() else {
+            return;
+        };
+        // The captured clock is read before locking. A stale last-poll time
+        // must not grant a follower whose queue timeout has already elapsed.
+        let now = self.driver.now();
+        let mut state = self.limiter.state.lock();
+        state.observe(now, period_to_millis_ceil(self.limiter.policy.period));
+        let removed = if let Some(index) = state.queue.iter().position(|entry| entry.id == id) {
+            let entry = state.queue.remove(index).expect("located fixed-window owner");
+            match entry.result {
+                Some(Ok(generation)) if generation.is_some() && generation == state.generation => {
+                    state.used = state.used.saturating_sub(entry.cost);
+                }
+                None => self.limiter.record_wait(Duration::from_nanos(
+                    state.observed.as_nanos().saturating_sub(entry.enqueued_at.as_nanos()),
+                )),
+                Some(Ok(_) | Err(_)) => {}
+            }
+            true
+        } else {
+            false
+        };
+        let changed = self.limiter.process_queue_locked(&mut state);
+        drop(state);
+        if removed || changed {
+            self.limiter.notify_change();
+        }
     }
 }
 
