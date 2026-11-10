@@ -196,6 +196,65 @@ try {
         check(pair.port2.state === "closed" && stream.queuedMessages === 0, "break closes owned endpoint");
       } finally { pair.close(); }
     });
+    await run("owned_scope_close_cancels_pending_receive", async () => {
+      const runtime = sdk.unwrapOutcome(await sdk.createBrowserRuntime());
+      const pair = sdk.createBrowserMessageChannel({ capability });
+      try {
+        const scope = sdk.unwrapOutcome(runtime.enterScope("owned-reception"));
+        const stream = sdk.unwrapOutcome(scope.receiveMessages(pair.port2));
+        const pending = reason(stream.next(), "aborted");
+        const terminal = reason(stream.closed, "aborted");
+        sdk.unwrapOutcome(await scope.closeAsync());
+        await Promise.all([pending, terminal]);
+        check(pair.port2.state === "closed" && stream.queuedMessages === 0, "owner close releases endpoint");
+      } finally {
+        pair.close();
+        sdk.unwrapOutcome(await runtime.closeAsync());
+      }
+    });
+    await run("owned_iteration_break_retires_task", async () => {
+      const runtime = sdk.unwrapOutcome(await sdk.createBrowserRuntime());
+      const pair = sdk.createBrowserMessageChannel({ capability });
+      try {
+        const scope = sdk.unwrapOutcome(runtime.enterScope("owned-iteration"));
+        const stream = sdk.unwrapOutcome(scope.receiveMessages(pair.port2));
+        pair.port1.send("finished");
+        for await (const value of stream) {
+          check(value === "finished", "owned iterator value");
+          break;
+        }
+        await stream.closed;
+        sdk.unwrapOutcome(await scope.closeAsync());
+        check(pair.port2.state === "closed", "owned iterator cleanup");
+      } finally {
+        pair.close();
+        sdk.unwrapOutcome(await runtime.closeAsync());
+      }
+    });
+    await run("owned_runtime_close_drains_descendant_broadcast", async () => {
+      const runtime = sdk.unwrapOutcome(await sdk.createBrowserRuntime());
+      const name = `asupersync-owned-stream-${crypto.randomUUID()}`;
+      const sender = sdk.createBrowserBroadcastChannel(name, { capability });
+      const receiver = sdk.createBrowserBroadcastChannel(name, { capability });
+      let runtimeClosed = false;
+      try {
+        const scope = sdk.unwrapOutcome(runtime.enterScope("parent"));
+        const child = sdk.unwrapOutcome(scope.enterScope("child"));
+        const stream = sdk.unwrapOutcome(child.receiveMessages(receiver));
+        const delivery = stream.next();
+        sender.post("owned-broadcast");
+        check((await delivery).value === "owned-broadcast", "owned broadcast delivery");
+        const pending = reason(stream.next(), "aborted");
+        const terminal = reason(stream.closed, "aborted");
+        sdk.unwrapOutcome(await runtime.closeAsync());
+        runtimeClosed = true;
+        await Promise.all([pending, terminal]);
+        check(receiver.state === "closed", "runtime cleanup reaches descendant endpoint");
+      } finally {
+        sender.close(); receiver.close();
+        if (!runtimeClosed) sdk.unwrapOutcome(await runtime.closeAsync());
+      }
+    });
     return rows;
   });
   console.log(JSON.stringify({
@@ -203,7 +262,7 @@ try {
     evidence: "actual Chromium MessageChannel/BroadcastChannel and SDK source; checked-in browser-core artifacts, no Rust rebuild",
     source_sha256: hashes, results, page_errors: pageErrors,
   }, null, 2));
-  assert.equal(results.length, 7);
+  assert.equal(results.length, 10);
   assert.deepEqual(results.filter((row) => !row.passed), []);
   assert.deepEqual(pageErrors, []);
 } finally {

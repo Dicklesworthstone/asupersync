@@ -1141,17 +1141,26 @@ for (const route of ["task-handle", "cancellation-token"]) {
       toJSON() { return supplied; }
     }
     const task = new ChangingTask(firstRaw);
+    let inspected = false;
     let serialized = false;
-    const version = { major: 1, minor: 0, toJSON() {
-      serialized = true;
-      supplied = calls.issuedTasks[1];
-      return { major: 1, minor: 0 };
-    } };
+    const version = {
+      get major() {
+        inspected = true;
+        supplied = calls.issuedTasks[1];
+        return 1;
+      },
+      minor: 0,
+      toJSON() {
+        serialized = true;
+        throw new Error("the SDK must serialize its captured ABI version");
+      },
+    };
     const result = route === "task-handle"
       ? new sdk.TaskHandle(task).cancel("navigation", "cancel original task", version)
       : new sdk.CancellationToken("navigation", "cancel original task").cancel(task, version);
     unwrap(result);
-    assert.equal(serialized, true);
+    assert.equal(inspected, true);
+    assert.equal(serialized, false);
     assert.equal(calls.cancel[0].task.slot, firstRaw.slot);
     assert.equal(cancellation(await first.closed).kind, "navigation");
     assert.equal(firstBody.readable.locked, false);

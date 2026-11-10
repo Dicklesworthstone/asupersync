@@ -1072,7 +1072,8 @@ export type BrowserMessageStreamFailureReason =
   | "message_limit_exceeded"
   | "aborted"
   | "messageerror"
-  | "cleanup_failed";
+  | "cleanup_failed"
+  | "terminal_publication_failed";
 
 export interface BrowserMessageStreamError extends Error {
   code: typeof BROWSER_MESSAGE_STREAM_ERROR_CODE;
@@ -1895,10 +1896,13 @@ function nativeMessagingRemovePortListener(
   port: BrowserNativeMessagePortLike,
   type: "message" | "messageerror" | "close",
   listener: (event: BrowserNativeMessageEventLike) => void,
+  ownedEventListeners?: boolean,
 ): void {
-  if (typeof port.removeEventListener === "function") {
+  if (ownedEventListeners !== false && typeof port.removeEventListener === "function") {
     port.removeEventListener(type, listener);
-    return;
+    if (ownedEventListeners === undefined) return;
+  } else if (ownedEventListeners === true) {
+    throw new TypeError("The message endpoint lost its required removeEventListener().");
   }
   if (type === "message" && port.onmessage === listener) {
     port.onmessage = null;
@@ -1942,6 +1946,23 @@ function prepareBrowserMessageStreamOptions(options: BrowserMessageStreamOptions
   return { capacity, signal };
 }
 
+type PreparedBrowserMessageStreamOptions = ReturnType<typeof prepareBrowserMessageStreamOptions>;
+type BrowserMessageStreamTerminalHook = (
+  failure: BrowserMessageStreamError | null,
+  cleanupComplete: boolean,
+) => BrowserMessageStreamError | null;
+
+interface BrowserMessageStreamFactory {
+  validate(): void;
+  start(
+    options: PreparedBrowserMessageStreamOptions,
+    terminal?: BrowserMessageStreamTerminalHook,
+    admit?: () => void,
+  ): BrowserMessageStreamReceiver;
+}
+
+const BROWSER_MESSAGE_STREAM_FACTORIES = new WeakMap<object, BrowserMessageStreamFactory>();
+
 class BrowserMessageStreamReceiver implements BrowserMessageStream {
   readonly closed: Promise<void>;
   readonly maxQueuedMessages: number;
@@ -1950,6 +1971,8 @@ class BrowserMessageStreamReceiver implements BrowserMessageStream {
   private stateValue: BrowserMessageStream["state"] = "open";
   private failure: BrowserMessageStreamError | null = null;
   private cleanupFailure: BrowserMessageStreamError | null = null;
+  private cleanupComplete = false;
+  private sourceCleanupFailureReported = false;
   private pending: {
     resolve: (value: IteratorResult<unknown>) => void;
     reject: (error: unknown) => void;
@@ -1961,7 +1984,11 @@ class BrowserMessageStreamReceiver implements BrowserMessageStream {
     this.fail("aborted", "Message receive was cancelled by its AbortSignal.");
   };
 
-  constructor(capacity: number, private readonly closeSource: () => void) {
+  constructor(
+    capacity: number,
+    private readonly closeSource: () => void,
+    private readonly terminal?: BrowserMessageStreamTerminalHook,
+  ) {
     this.maxQueuedMessages = capacity;
     this.closed = new Promise<void>((resolve, reject) => {
       this.resolveClosed = resolve;
@@ -1978,8 +2005,11 @@ class BrowserMessageStreamReceiver implements BrowserMessageStream {
   [Symbol.asyncIterator](): BrowserMessageStream { return this; }
 
   next(): Promise<IteratorResult<unknown>> {
-    if (this.failure) return Promise.reject(this.failure);
-    if (this.stateValue !== "open") return Promise.resolve({ done: true, value: undefined });
+    if (this.stateValue !== "open") {
+      // The state fences reentrant host delivery immediately, but only the
+      // shared receipt can prove cleanup and owned ABI publication completed.
+      return this.closed.then(() => ({ done: true, value: undefined }));
+    }
     if (this.pending) return Promise.reject(browserMessageStreamError(
       "receive_in_progress", "Only one message receive may wait at a time.",
     ));
@@ -2002,12 +2032,14 @@ class BrowserMessageStreamReceiver implements BrowserMessageStream {
 
   async return(): Promise<IteratorResult<unknown>> {
     this.finish(null);
+    await this.closed.catch(() => {});
     if (this.cleanupFailure) throw this.cleanupFailure;
     return { done: true, value: undefined };
   }
 
   async cancel(reason = "cancelled"): Promise<void> {
     this.fail("aborted", reason);
+    await this.closed.catch(() => {});
     if (this.cleanupFailure) throw this.cleanupFailure;
   }
 
@@ -2040,8 +2072,42 @@ class BrowserMessageStreamReceiver implements BrowserMessageStream {
 
   sourceClosed(): void { this.finish(null); }
 
+  closeFromSource(): void {
+    this.finish(null);
+    if (this.cleanupFailure) throw this.cleanupFailure;
+  }
+
+  sourceCleanupFailed(): void {
+    this.sourceCleanupFailureReported = true;
+    this.fail("cleanup_failed", "Could not close the message receiver endpoint.");
+  }
+
+  /** Retry retained cleanup without changing the original terminal receipt. */
+  retryCleanup(): BrowserMessageStreamError | null {
+    if (this.cleanupComplete) return null;
+    this.sourceCleanupFailureReported = false;
+    return this.cleanSource();
+  }
+
   fail(reason: BrowserMessageStreamFailureReason, message: string): void {
     this.finish(browserMessageStreamError(reason, message));
+  }
+
+  private cleanSource(): BrowserMessageStreamError | null {
+    let failure: BrowserMessageStreamError | null = null;
+    try {
+      this.signal?.removeEventListener("abort", this.abortListener);
+      this.signal = undefined;
+    } catch {
+      failure = browserMessageStreamError("cleanup_failed", "Could not remove the message receiver cancellation hook.");
+    }
+    try { this.closeSource(); }
+    catch { failure ??= browserMessageStreamError("cleanup_failed", "Could not close the message receiver endpoint."); }
+    if (this.sourceCleanupFailureReported) {
+      failure ??= browserMessageStreamError("cleanup_failed", "Could not close the message receiver endpoint.");
+    }
+    this.cleanupComplete = failure === null;
+    return failure;
   }
 
   private finish(failure: BrowserMessageStreamError | null): void {
@@ -2053,15 +2119,21 @@ class BrowserMessageStreamReceiver implements BrowserMessageStream {
     this.queueHead = 0;
     const pending = this.pending;
     this.pending = null;
-    const signal = this.signal;
-    this.signal = undefined;
     // Remove all ownership hooks before resolving user continuations. A close
     // may synchronously deliver another event; the terminal state fences it.
-    try { signal?.removeEventListener("abort", this.abortListener); }
-    catch { this.cleanupFailure = browserMessageStreamError("cleanup_failed", "Could not remove the message receiver cancellation hook."); }
-    try { this.closeSource(); }
-    catch { this.cleanupFailure ??= browserMessageStreamError("cleanup_failed", "Could not close the message receiver endpoint."); }
+    const cleanupFailure = this.cleanSource();
+    this.cleanupFailure ??= cleanupFailure;
     this.failure ??= this.cleanupFailure;
+    try {
+      const publicationFailure = this.terminal?.(this.failure, this.cleanupComplete);
+      if (publicationFailure) {
+        this.failure = publicationFailure;
+        this.cleanupFailure = publicationFailure;
+      }
+    } catch {
+      this.failure = browserMessageStreamError("terminal_publication_failed", "Could not publish the owned message receiver terminal outcome.");
+      this.cleanupFailure = this.failure;
+    }
     if (this.failure) {
       if (this.failure.reason !== "aborted") this.stateValue = "errored";
       pending?.reject(this.failure);
@@ -2073,10 +2145,11 @@ class BrowserMessageStreamReceiver implements BrowserMessageStream {
   }
 }
 
-function cleanupBrowserMessageEndpoint(operations: readonly (() => void)[]): void {
+function cleanupBrowserMessageEndpoint(operations: readonly (() => void)[], pending?: Set<number>): void {
   let failed = false;
-  for (const operation of operations) {
-    try { operation(); }
+  for (const [index, operation] of operations.entries()) {
+    if (pending && !pending.has(index)) continue;
+    try { operation(); pending?.delete(index); }
     catch { failed = true; }
   }
   if (failed) throw browserMessageStreamError(
@@ -2110,7 +2183,7 @@ function unregisterBrowserMessageWrapper(endpoint: object, wrapper: object): voi
   }
 }
 
-function claimBrowserMessageReceiver(
+function validateBrowserMessageReceiver(
   endpoint: BrowserNativeMessagePortLike | BrowserNativeBroadcastChannelLike,
   wrapper: object,
 ): void {
@@ -2126,10 +2199,18 @@ function claimBrowserMessageReceiver(
     || wrappers?.size !== 1 || !wrappers.has(wrapper)) {
     throw browserMessageStreamError("receiver_in_use", "Another live SDK wrapper owns this native endpoint; detach it before receiving exclusively.");
   }
+}
+
+function claimBrowserMessageReceiver(
+  endpoint: BrowserNativeMessagePortLike | BrowserNativeBroadcastChannelLike,
+  wrapper: object,
+): void {
+  validateBrowserMessageReceiver(endpoint, wrapper);
   BROWSER_MESSAGE_RECEIVER_OWNERS.set(endpoint, wrapper);
 }
 
 export class BrowserMessagePort {
+  private readonly eventListenersUsed: boolean;
   private readonly messageHandlers = new Set<BrowserNativeMessageHandler>();
   private readonly errorHandlers = new Set<BrowserNativeMessageErrorHandler>();
   private readonly messages: unknown[] = [];
@@ -2137,6 +2218,7 @@ export class BrowserMessagePort {
   private stateValue: BrowserNativeMessagingState = "open";
   private receiver: BrowserMessageStreamReceiver | null = null;
   private receiverCloseAttempted = false;
+  private readonly receiverCleanupPending = new Set([0, 1, 2, 3]);
 
   private readonly closeListener = (): void => {
     this.receiver?.sourceClosed();
@@ -2184,6 +2266,7 @@ export class BrowserMessagePort {
     private readonly support: BrowserNativeMessagingSupportDiagnostics,
     options: { start?: boolean } = {},
   ) {
+    this.eventListenersUsed = typeof this.port.addEventListener === "function";
     registerBrowserMessageWrapper(this.port, this);
     try {
       nativeMessagingAddPortListener(this.port, "message", this.messageListener);
@@ -2205,6 +2288,10 @@ export class BrowserMessagePort {
       }
       throw error;
     }
+    BROWSER_MESSAGE_STREAM_FACTORIES.set(this, {
+      validate: () => this.validateReceiveStream(),
+      start: (prepared, terminal, admit) => this.startReceiver(prepared, terminal, admit),
+    });
   }
 
   get state(): BrowserNativeMessagingState {
@@ -2240,7 +2327,10 @@ export class BrowserMessagePort {
 
   /** Start this port and transfer receive ownership to a bounded stream that closes it. */
   receiveStream(options: BrowserMessageStreamOptions = {}): BrowserMessageStream {
-    const prepared = prepareBrowserMessageStreamOptions(options);
+    return this.startReceiver(prepareBrowserMessageStreamOptions(options));
+  }
+
+  private validateReceiveStream(): void {
     this.ensureOpen("receiveStream");
     this.ensureLegacyReceiver();
     if (this.messageHandlers.size !== 0 || this.errorHandlers.size !== 0) {
@@ -2249,8 +2339,32 @@ export class BrowserMessagePort {
     if (this.messages.length !== 0) {
       throw browserMessageStreamError("legacy_messages_pending", "Drain legacy messages before acquiring a receiver.");
     }
+    if ((typeof this.port.addEventListener === "function") !== this.eventListenersUsed) {
+      throw new TypeError("Message endpoint listener capabilities changed after wrapper construction.");
+    }
+    validateBrowserMessageReceiver(this.port, this);
+  }
+
+  private startReceiver(
+    prepared: PreparedBrowserMessageStreamOptions,
+    terminal?: BrowserMessageStreamTerminalHook,
+    admit?: () => void,
+  ): BrowserMessageStreamReceiver {
+    this.validateReceiveStream();
     claimBrowserMessageReceiver(this.port, this);
-    const receiver = new BrowserMessageStreamReceiver(prepared.capacity, () => this.close());
+    try {
+      admit?.();
+      this.ensureOpen("receiveStream");
+      this.ensureLegacyReceiver();
+      if (BROWSER_MESSAGE_RECEIVER_OWNERS.get(this.port) !== this
+        || this.messageHandlers.size !== 0 || this.errorHandlers.size !== 0 || this.messages.length !== 0) {
+        throw browserMessageStreamError("receiver_in_use", "Message endpoint ownership changed during admission.");
+      }
+    } catch (error) {
+      if (BROWSER_MESSAGE_RECEIVER_OWNERS.get(this.port) === this) BROWSER_MESSAGE_RECEIVER_OWNERS.delete(this.port);
+      throw error;
+    }
+    const receiver = new BrowserMessageStreamReceiver(prepared.capacity, () => this.close(), terminal);
     this.receiver = receiver;
     try { nativeMessagingAddPortListener(this.port, "close", this.closeListener); }
     catch { receiver.fail("cleanup_failed", "Could not attach the message port close hook."); }
@@ -2269,6 +2383,13 @@ export class BrowserMessagePort {
 
   close(): void {
     if (this.receiver) {
+      if (this.receiver.state === "open") {
+        // Establish the receiver's terminal barrier before native cleanup can
+        // call back into return()/next(). finish reenters this method once the
+        // receive state is fenced, and that inner call performs host cleanup.
+        this.receiver.closeFromSource();
+        return;
+      }
       if (this.receiverCloseAttempted) return;
       this.receiverCloseAttempted = true;
       if (this.stateValue === "open") this.stateValue = "closed";
@@ -2276,16 +2397,21 @@ export class BrowserMessagePort {
       this.errorHandlers.clear();
       try {
         cleanupBrowserMessageEndpoint([
-          () => nativeMessagingRemovePortListener(this.port, "message", this.messageListener),
-          () => nativeMessagingRemovePortListener(this.port, "messageerror", this.messageErrorListener),
-          () => nativeMessagingRemovePortListener(this.port, "close", this.closeListener),
-          () => this.port.close?.(),
-        ]);
+          () => nativeMessagingRemovePortListener(this.port, "message", this.messageListener, this.eventListenersUsed),
+          () => nativeMessagingRemovePortListener(this.port, "messageerror", this.messageErrorListener, this.eventListenersUsed),
+          () => nativeMessagingRemovePortListener(this.port, "close", this.closeListener, this.eventListenersUsed),
+          () => {
+            const close = this.port.close;
+            if (typeof close !== "function") throw new TypeError("The message endpoint lost its required close().");
+            close.call(this.port);
+          },
+        ], this.receiverCleanupPending);
       } catch (error) {
-        this.receiver.fail("cleanup_failed", "Could not close the message receiver endpoint.");
+        this.receiver.sourceCleanupFailed();
+        this.receiverCloseAttempted = false;
         throw error;
       } finally {
-        unregisterBrowserMessageWrapper(this.port, this);
+        if (this.receiverCleanupPending.size === 0) unregisterBrowserMessageWrapper(this.port, this);
       }
       this.receiver.sourceClosed();
       return;
@@ -2389,6 +2515,7 @@ export class BrowserMessageChannel {
 }
 
 export class BrowserBroadcastChannel {
+  private readonly eventListenersUsed: boolean;
   private readonly messageHandlers = new Set<BrowserNativeMessageHandler>();
   private readonly errorHandlers = new Set<BrowserNativeMessageErrorHandler>();
   private readonly messages: unknown[] = [];
@@ -2396,6 +2523,7 @@ export class BrowserBroadcastChannel {
   private stateValue: BrowserNativeMessagingState = "open";
   private receiver: BrowserMessageStreamReceiver | null = null;
   private receiverCloseAttempted = false;
+  private readonly receiverCleanupPending = new Set([0, 1, 2, 3, 4]);
 
   private readonly messageListener = (event: BrowserNativeMessageEventLike): void => {
     if (this.stateValue !== "open") {
@@ -2438,6 +2566,7 @@ export class BrowserBroadcastChannel {
     private readonly channel: BrowserNativeBroadcastChannelLike,
     private readonly support: BrowserNativeMessagingSupportDiagnostics,
   ) {
+    this.eventListenersUsed = typeof this.channel.addEventListener === "function";
     registerBrowserMessageWrapper(this.channel, this);
     try {
       this.attachListeners();
@@ -2458,6 +2587,10 @@ export class BrowserBroadcastChannel {
       }
       throw error;
     }
+    BROWSER_MESSAGE_STREAM_FACTORIES.set(this, {
+      validate: () => this.validateReceiveStream(),
+      start: (prepared, terminal, admit) => this.startReceiver(prepared, terminal, admit),
+    });
   }
 
   get name(): string {
@@ -2497,7 +2630,10 @@ export class BrowserBroadcastChannel {
 
   /** Transfer receive ownership to a bounded stream; the stream closes this channel. */
   receiveStream(options: BrowserMessageStreamOptions = {}): BrowserMessageStream {
-    const prepared = prepareBrowserMessageStreamOptions(options);
+    return this.startReceiver(prepareBrowserMessageStreamOptions(options));
+  }
+
+  private validateReceiveStream(): void {
     this.ensureOpen("receiveStream");
     this.ensureLegacyReceiver();
     if (this.messageHandlers.size !== 0 || this.errorHandlers.size !== 0) {
@@ -2506,8 +2642,32 @@ export class BrowserBroadcastChannel {
     if (this.messages.length !== 0) {
       throw browserMessageStreamError("legacy_messages_pending", "Drain legacy messages before acquiring a receiver.");
     }
+    if ((typeof this.channel.addEventListener === "function") !== this.eventListenersUsed) {
+      throw new TypeError("Message endpoint listener capabilities changed after wrapper construction.");
+    }
+    validateBrowserMessageReceiver(this.channel, this);
+  }
+
+  private startReceiver(
+    prepared: PreparedBrowserMessageStreamOptions,
+    terminal?: BrowserMessageStreamTerminalHook,
+    admit?: () => void,
+  ): BrowserMessageStreamReceiver {
+    this.validateReceiveStream();
     claimBrowserMessageReceiver(this.channel, this);
-    const receiver = new BrowserMessageStreamReceiver(prepared.capacity, () => this.close());
+    try {
+      admit?.();
+      this.ensureOpen("receiveStream");
+      this.ensureLegacyReceiver();
+      if (BROWSER_MESSAGE_RECEIVER_OWNERS.get(this.channel) !== this
+        || this.messageHandlers.size !== 0 || this.errorHandlers.size !== 0 || this.messages.length !== 0) {
+        throw browserMessageStreamError("receiver_in_use", "Message endpoint ownership changed during admission.");
+      }
+    } catch (error) {
+      if (BROWSER_MESSAGE_RECEIVER_OWNERS.get(this.channel) === this) BROWSER_MESSAGE_RECEIVER_OWNERS.delete(this.channel);
+      throw error;
+    }
+    const receiver = new BrowserMessageStreamReceiver(prepared.capacity, () => this.close(), terminal);
     this.receiver = receiver;
     receiver.attachSignal(prepared.signal);
     return receiver;
@@ -2520,6 +2680,10 @@ export class BrowserBroadcastChannel {
 
   close(): void {
     if (this.receiver) {
+      if (this.receiver.state === "open") {
+        this.receiver.closeFromSource();
+        return;
+      }
       if (this.receiverCloseAttempted) return;
       this.receiverCloseAttempted = true;
       if (this.stateValue === "open") this.stateValue = "closed";
@@ -2527,17 +2691,18 @@ export class BrowserBroadcastChannel {
       this.errorHandlers.clear();
       try {
         cleanupBrowserMessageEndpoint([
-          () => this.channel.removeEventListener?.("message", this.messageListener),
-          () => this.channel.removeEventListener?.("messageerror", this.messageErrorListener),
+          () => this.removeReceiverListener("message", this.messageListener),
+          () => this.removeReceiverListener("messageerror", this.messageErrorListener),
           () => { if (this.channel.onmessage === this.messageListener) this.channel.onmessage = null; },
           () => { if (this.channel.onmessageerror === this.messageErrorListener) this.channel.onmessageerror = null; },
           () => this.channel.close(),
-        ]);
+        ], this.receiverCleanupPending);
       } catch (error) {
-        this.receiver.fail("cleanup_failed", "Could not close the message receiver endpoint.");
+        this.receiver.sourceCleanupFailed();
+        this.receiverCloseAttempted = false;
         throw error;
       } finally {
-        unregisterBrowserMessageWrapper(this.channel, this);
+        if (this.receiverCleanupPending.size === 0) unregisterBrowserMessageWrapper(this.channel, this);
       }
       this.receiver.sourceClosed();
       return;
@@ -2599,6 +2764,13 @@ export class BrowserBroadcastChannel {
     }
     this.channel.onmessage = this.messageListener;
     this.channel.onmessageerror = this.messageErrorListener;
+  }
+
+  private removeReceiverListener(type: "message" | "messageerror", listener: (event: BrowserNativeMessageEventLike) => void): void {
+    if (!this.eventListenersUsed) return;
+    const remove = this.channel.removeEventListener;
+    if (typeof remove !== "function") throw new TypeError("The message endpoint lost its required removeEventListener().");
+    remove.call(this.channel, type, listener);
   }
 
   private detachListeners(): void {
@@ -5750,18 +5922,238 @@ function lookupWebTransportState(handle: CoreTaskHandle): BrowserWebTransportSta
   return INFLIGHT_WEBTRANSPORTS.get(browserWebTransportStateKey(handle)) ?? null;
 }
 
+function browserOwnerIsClosing(scopeKey: string): boolean {
+  const visited = new Set<string>();
+  let current: string | undefined = scopeKey;
+  while (current !== undefined && !visited.has(current)) {
+    if (FETCH_OWNER_CLOSES.has(current)) return true;
+    visited.add(current);
+    current = REGION_PARENTS.get(current);
+  }
+  return false;
+}
+
+function browserMessageScopeIsTracked(scopeKey: string): boolean {
+  const visited = new Set<string>();
+  let current: string | undefined = scopeKey;
+  while (current !== undefined && !visited.has(current)) {
+    if (current.startsWith("runtime:")) return true;
+    visited.add(current);
+    current = REGION_PARENTS.get(current);
+  }
+  return false;
+}
+
+interface BrowserOwnedMessageStream {
+  readonly scopeKey: string;
+  readonly task: CoreTaskHandle;
+  readonly version: AbiVersion | null;
+  readonly ready: Promise<void>;
+  receiver: BrowserMessageStreamReceiver | null;
+  terminal: BrowserOutcome<WasmValue> | null;
+  receipt: BrowserOutcome<void> | null;
+  cancelKind: string;
+  cancelAdmitted: boolean;
+  cleanupComplete: boolean;
+  publishing: boolean;
+  released: boolean;
+}
+
+const OWNED_BROWSER_MESSAGE_STREAMS = new Map<string, BrowserOwnedMessageStream>();
+class BrowserMessageOwnerClosingError extends Error {}
+
+function messageReceiveAdmissionFailure(error: unknown): BrowserOutcome<never> {
+  try {
+    if (error instanceof BrowserMessageOwnerClosingError) {
+      return OutcomeFactory.err("compatibility_rejected", "transient", "Message receiver owner is closing.");
+    }
+    if (error && typeof error === "object"
+      && "code" in error && error.code === BROWSER_MESSAGE_STREAM_ERROR_CODE
+      && "reason" in error && error.reason === "aborted") {
+      return webTransportCancellationOutcome("message_receive_cancel", "Message receive was cancelled before admission.");
+    }
+  } catch {
+    // Host getters may throw arbitrary proxies or objects whose error fields
+    // also throw. Classification must never strand an already-admitted task.
+  }
+  return OutcomeFactory.err("compatibility_rejected", "permanent", "Message receive admission requires an open, exclusive SDK endpoint, valid options, and a tracked SDK region.");
+}
+
+function messageReceiveTerminal(
+  failure: BrowserMessageStreamError | null,
+  kind: string,
+): BrowserOutcome<WasmValue> {
+  const terminal = failure === null ? OutcomeFactory.ok(undefined)
+    : failure.reason === "aborted"
+      ? webTransportCancellationOutcome(kind, "Owned message receive was cancelled.")
+      : OutcomeFactory.err("internal_failure", "permanent", `Owned message receive failed: ${failure.reason}.`);
+  // The public Error object can be changed by consumers after rejection.
+  // Retries publish this independently copied, immutable domain terminal.
+  return snapshotWebTransportTerminal(terminal);
+}
+
+function publishOwnedBrowserMessageStream(state: BrowserOwnedMessageStream): BrowserOutcome<void> {
+  if (state.released) return OutcomeFactory.ok(undefined);
+  if (state.publishing) return OutcomeFactory.err("compatibility_rejected", "transient", "Message receiver terminal publication is already in progress.");
+  if (!state.cleanupComplete || state.terminal === null) {
+    state.receipt = OutcomeFactory.err("internal_failure", "transient", "Message receiver cleanup has not completed; retry owner closeAsync after the host can release its hooks.");
+    return state.receipt;
+  }
+  state.publishing = true;
+  try {
+    const terminal = state.terminal;
+    if (terminal.outcome === "cancelled" && !state.cancelAdmitted) {
+      const cancelled = taskCancel({
+        task: state.task, kind: terminal.cancellation.kind,
+        message: terminal.cancellation.message ?? undefined,
+      }, state.version);
+      if (cancelled.outcome !== "ok") {
+        state.receipt = snapshotWebTransportTerminal(cancelled) as BrowserOutcome<void>;
+        return state.receipt;
+      }
+      // The ABI refuses a second cancellation after Active -> Cancelling.
+      // Publication retries must only repeat the original taskJoin.
+      state.cancelAdmitted = true;
+    }
+    const receipt = snapshotWebTransportTerminal(taskJoin(state.task, terminal, state.version), true);
+    if (sameWebTransportTerminal(terminal, receipt)) {
+      state.released = true;
+      OWNED_BROWSER_MESSAGE_STREAMS.delete(browserWebTransportStateKey(state.task));
+      state.receipt = OutcomeFactory.ok(undefined);
+    } else {
+      state.receipt = receipt.outcome === "ok"
+        ? OutcomeFactory.err("internal_failure", "transient", "Message receiver terminal publication returned an inconsistent success.")
+        : receipt as BrowserOutcome<void>;
+    }
+  } catch {
+    state.receipt = OutcomeFactory.err("internal_failure", "transient", "Message receiver terminal publication failed; retry owner closeAsync.");
+  } finally {
+    state.publishing = false;
+  }
+  return state.receipt;
+}
+
+function finishOwnedBrowserMessageStream(
+  state: BrowserOwnedMessageStream,
+  failure: BrowserMessageStreamError | null,
+  cleanupComplete: boolean,
+): BrowserMessageStreamError | null {
+  state.terminal ??= messageReceiveTerminal(failure, state.cancelKind);
+  state.cleanupComplete = cleanupComplete;
+  const receipt = publishOwnedBrowserMessageStream(state);
+  return receipt.outcome === "ok" ? null : browserMessageStreamError(
+    cleanupComplete ? "terminal_publication_failed" : "cleanup_failed",
+    cleanupComplete
+      ? "Could not publish the owned message receiver terminal outcome; retry owner closeAsync."
+      : "Message receiver cleanup is incomplete; retry owner closeAsync after the host can release its hooks.",
+  );
+}
+
+function startOwnedBrowserMessageStream(
+  scope: CoreRegionHandle,
+  source: BrowserMessagePort | BrowserBroadcastChannel,
+  options: BrowserMessageStreamOptions,
+  consumerVersion: AbiVersion | null,
+): BrowserOutcome<BrowserMessageStream> {
+  let ownedScope: CoreRegionHandle;
+  let version: AbiVersion | null;
+  let prepared: PreparedBrowserMessageStreamOptions;
+  let factory: BrowserMessageStreamFactory;
+  let scopeKey: string;
+  let admittedState: BrowserOwnedMessageStream | null = null;
+  const assertAdmission = (): void => {
+    const aborted = prepared.signal?.aborted;
+    if (browserOwnerIsClosing(scopeKey) || !browserMessageScopeIsTracked(scopeKey) || admittedState?.released) {
+      throw new BrowserMessageOwnerClosingError("Message receiver owner is closing.");
+    }
+    if (aborted) {
+      throw browserMessageStreamError("aborted", "Message receive was cancelled before admission.");
+    }
+  };
+  try {
+    ownedScope = snapshotRegionHandle(scope);
+    version = snapshotOwnerCloseVersion(consumerVersion);
+    scopeKey = browserWebTransportStateKey(ownedScope);
+    if (!browserMessageScopeIsTracked(scopeKey)) throw new TypeError("Untracked message receiver region.");
+    prepared = prepareBrowserMessageStreamOptions(options);
+    const candidate = BROWSER_MESSAGE_STREAM_FACTORIES.get(source);
+    if (!candidate) throw new TypeError("Expected an SDK messaging endpoint.");
+    factory = candidate;
+    factory.validate();
+    assertAdmission();
+  } catch (error) { return messageReceiveAdmissionFailure(error); }
+
+  const spawned = taskSpawn({ scope: ownedScope, label: "browser-message-receive", cancel_kind: "message_receive_cancel" }, version);
+  if (spawned.outcome !== "ok") return spawned;
+  let ready!: () => void;
+  const state: BrowserOwnedMessageStream = {
+    scopeKey, task: snapshotTaskHandle(spawned.value), version,
+    ready: new Promise<void>((resolve) => { ready = resolve; }),
+    receiver: null, terminal: null, receipt: null, cancelKind: "message_receive_cancel",
+    cancelAdmitted: false, cleanupComplete: false, publishing: false, released: false,
+  };
+  admittedState = state;
+  OWNED_BROWSER_MESSAGE_STREAMS.set(browserWebTransportStateKey(state.task), state);
+  try {
+    assertAdmission();
+    state.receiver = factory.start(prepared,
+      (failure, cleanupComplete) => finishOwnedBrowserMessageStream(state, failure, cleanupComplete),
+      assertAdmission);
+    if (state.released) state.receiver.fail("aborted", "Message receiver owner was closed during activation.");
+    return OutcomeFactory.ok(state.receiver);
+  } catch (error) {
+    // No receiver was activated when preflight loses an admission race. The
+    // borrowed source remains usable, but the already-admitted task must retire.
+    const failure = messageReceiveAdmissionFailure(error);
+    state.terminal = snapshotWebTransportTerminal(failure);
+    state.cleanupComplete = true;
+    const receipt = publishOwnedBrowserMessageStream(state);
+    return receipt.outcome === "ok" ? failure : receipt as BrowserOutcome<BrowserMessageStream>;
+  } finally {
+    ready();
+  }
+}
+
+async function drainOwnedBrowserMessageStreams(ownerKeys: Set<string>, kind: string): Promise<BrowserOutcome<void>> {
+  const pending = [...OWNED_BROWSER_MESSAGE_STREAMS.values()].filter((state) => ownerKeys.has(state.scopeKey));
+  const receipts = await Promise.all(pending.map(async (state): Promise<BrowserOutcome<void>> => {
+    // Host callbacks can begin owner close before factory.start has returned.
+    await state.ready;
+    if (state.released) return OutcomeFactory.ok(undefined);
+    const first = state.terminal === null;
+    if (first) {
+      state.cancelKind = kind;
+      state.receiver?.fail("aborted", "Message receiver owner is closing.");
+    }
+    await state.receiver?.closed.catch(() => {});
+    if (state.released) return OutcomeFactory.ok(undefined);
+    // A refusal belongs to this close attempt. Retry it on the next explicit
+    // closeAsync call rather than hiding it with an immediate duplicate join.
+    if (first && state.receipt !== null) return state.receipt;
+    if (!state.cleanupComplete) {
+      const cleanupFailure = state.receiver?.retryCleanup();
+      if (cleanupFailure) return OutcomeFactory.err("internal_failure", "transient", "Message receiver host cleanup still failed.");
+      state.cleanupComplete = true;
+    }
+    return publishOwnedBrowserMessageStream(state);
+  }));
+  return receipts.find((receipt) => receipt.outcome !== "ok") ?? OutcomeFactory.ok(undefined);
+}
+
+function releaseOwnedBrowserMessageStreams(ownerKeys: Set<string>, kind: string): void {
+  for (const [key, state] of OWNED_BROWSER_MESSAGE_STREAMS) {
+    if (!ownerKeys.has(state.scopeKey)) continue;
+    // Only called after the real ABI owner-close barrier has accepted release.
+    state.released = true;
+    OWNED_BROWSER_MESSAGE_STREAMS.delete(key);
+    state.cancelKind = kind;
+    state.receiver?.fail("aborted", "Message receiver owner was closed.");
+  }
+}
+
 const SDK_FETCHES = createBrowserFetchManager({
   globalObject: defaultGlobalObject,
-  isClosing(scopeKey) {
-    const visited = new Set<string>();
-    let current: string | undefined = scopeKey;
-    while (current !== undefined && !visited.has(current)) {
-      if (FETCH_OWNER_CLOSES.has(current)) return true;
-      visited.add(current);
-      current = REGION_PARENTS.get(current);
-    }
-    return false;
-  },
+  isClosing: browserOwnerIsClosing,
   lookup(scopeKey) {
     const visited = new Set<string>();
     let current: string | undefined = scopeKey;
@@ -6195,6 +6587,7 @@ function closeOwnedWebTransports(ownerKeys: Set<string>, reason?: string): void 
 function cleanupScopeOwnedWebTransports(handle: CoreRegionHandle): void {
   const ownerKeys = deleteOwnedRegionKeys(browserWebTransportStateKey(handle));
   SDK_FETCHES.closeScopes(ownerKeys, "scope_close");
+  releaseOwnedBrowserMessageStreams(ownerKeys, "scope_close");
   closeOwnedWebTransports(ownerKeys, "scope_close");
 }
 
@@ -6203,7 +6596,18 @@ function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
   const ownerKeys = deleteOwnedRegionKeys(rootKey);
   RUNTIME_FETCH_GRANTS.delete(rootKey);
   SDK_FETCHES.closeScopes(ownerKeys, "runtime_close");
+  releaseOwnedBrowserMessageStreams(ownerKeys, "runtime_close");
   closeOwnedWebTransports(ownerKeys, "runtime_close");
+}
+
+async function drainBrowserOwnerResources(ownerKeys: Set<string>, kind: string): Promise<BrowserOutcome<void>> {
+  // Start both cancellations before waiting on either host. Fetch cleanup may
+  // itself depend on a message endpoint reaching its terminal state.
+  const receipts = await Promise.all([
+    SDK_FETCHES.drainScopes(ownerKeys, kind),
+    drainOwnedBrowserMessageStreams(ownerKeys, kind),
+  ]);
+  return receipts.find((receipt) => receipt.outcome !== "ok") ?? OutcomeFactory.ok(undefined);
 }
 
 function closeFetchOwnerAsync(
@@ -6221,12 +6625,12 @@ function closeFetchOwnerAsync(
   FETCH_OWNER_CLOSES.set(ownerKey, attempt);
   void (async () => {
     try {
-      let drained = await SDK_FETCHES.drainScopes(collectOwnedRegionKeys(ownerKey), kind);
+      let drained = await drainBrowserOwnerResources(collectOwnedRegionKeys(ownerKey), kind);
       if (drained.outcome !== "ok") { resolve(drained); return; }
       // An already-admitted task can reenter close while taskSpawn is still
       // returning, before its JS ownership record exists. That stack has now
       // unwound; sweep it before consulting the actual ABI ledger barrier.
-      drained = await SDK_FETCHES.drainScopes(collectOwnedRegionKeys(ownerKey), kind);
+      drained = await drainBrowserOwnerResources(collectOwnedRegionKeys(ownerKey), kind);
       if (drained.outcome !== "ok") { resolve(drained); return; }
       const closed = kind === "runtime_close"
         ? runtimeClose(owner as CoreRuntimeHandle, version)
@@ -6476,7 +6880,7 @@ export class BrowserRuntime {
   }
 
   /**
-   * Cancel and await owned streamed fetches, then close the runtime through
+   * Cancel and await owned streamed fetches and message receivers, then close the runtime through
    * the ABI. Other ABI close restrictions still apply. Failed attempts
    * restore fetch admission; a host that never settles keeps cleanup pending.
    */
@@ -6548,7 +6952,7 @@ export class RegionHandle {
   }
 
   /**
-   * Drain streamed fetches in this scope and its descendants before the ABI
+   * Drain streamed fetches and message receivers in this scope and its descendants before the ABI
    * close. Admission is fenced while draining. ABI close errors propagate
    * unchanged; synchronous close and withScope keep their existing behavior.
    */
@@ -6626,6 +7030,21 @@ export class RegionHandle {
     const laneOutcome = this.runtime?.laneAvailabilityOutcome("issue streamed fetch work");
     if (laneOutcome) return laneOutcome;
     return SDK_FETCHES.start(this.core, options, consumerVersion);
+  }
+
+  /**
+   * Own an exclusive native message receiver through this region's ABI task
+   * ledger. Delivery remains browser-native. closeAsync cancels and drains it
+   * before releasing the owner; failed cleanup/publication can be retried.
+   */
+  receiveMessages(
+    source: BrowserMessagePort | BrowserBroadcastChannel,
+    options: BrowserMessageStreamOptions = {},
+    consumerVersion: AbiVersion | null = this.consumerVersion,
+  ): BrowserOutcome<BrowserMessageStream> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome("receive browser-native messages");
+    if (laneOutcome) return laneOutcome;
+    return startOwnedBrowserMessageStream(this.core, source, options, consumerVersion);
   }
 
   openWebSocket(

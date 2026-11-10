@@ -695,6 +695,45 @@ receive outcome. The maintained native-host regressions are
 `scripts/test_browser_message_streams.mjs`; real Chromium scenarios are in
 `scripts/test_browser_message_streams_chromium.mjs`.
 
+#### Region-owned message reception
+
+`RegionHandle.receiveMessages(source, options)` admits the same bounded receiver
+as an owned task in the region. It returns a `BrowserOutcome<BrowserMessageStream>`
+and requires a `BrowserMessagePort` or `BrowserBroadcastChannel` that is ready
+for exclusive reception:
+
+```typescript
+const scope = unwrapOutcome(runtime.enterScope("notifications"));
+const messages = unwrapOutcome(scope.receiveMessages(channel.port2, {
+  maxQueuedMessages: 64,
+  signal: abortController.signal,
+}));
+
+try {
+  for await (const notification of messages) {
+    await processNotification(notification);
+  }
+} finally {
+  unwrapOutcome(await scope.closeAsync());
+}
+```
+
+Scope `closeAsync()` cancels and drains its own receivers and those in descendant
+scopes. Runtime `closeAsync()` drains receivers throughout the runtime. Closing
+an owner fences new receive admission, settles pending `next()` calls, clears
+queued payloads, and releases endpoint listeners before accepting task
+retirement. Stream `return()` and `closed` also wait for terminal publication.
+Synchronous `close()` retains the existing ABI close rules and cleans owned
+receivers after a successful close.
+
+An unsuccessful host cleanup or task-terminal publication retains the owned
+task for a subsequent `closeAsync()` retry. A publication refusal is reported
+as `terminal_publication_failed`, and retry preserves the original terminal
+outcome. These operations use the existing packaged task ABI; they do not claim
+to dispatch a Rust future through the browser executor. Native-host tests
+against the checked-in generated JS/WASM live in
+`scripts/test_browser_message_regions_wasm.mjs`.
+
 ### Browser Environment Support Matrix
 
 This matrix is the current shipped support posture for the JS/TS packages, not

@@ -1,7 +1,8 @@
 /**
  * Actual SDK receive streams over Node's native MessageChannel/BroadcastChannel.
- * Unrelated generated WASM exports are fail-fast substitutes: this proves the
- * JS/host boundary, not browser-engine or Rust-executor behavior.
+ * Standalone tests reject any ABI call; owned lifecycle fault tests use an
+ * explicit raw-ABI ledger double. This proves the JS/host boundary, not
+ * browser-engine, packaged-WASM, or Rust-executor behavior.
  * node --unhandled-rejections=strict --experimental-vm-modules --test scripts/test_browser_message_streams.mjs
  * Additive follow-up to asupersync-b35gbf.
  */
@@ -22,11 +23,11 @@ const javascript = stripTypeScriptTypes(source, { mode: "transform" });
 console.log(JSON.stringify({
   scenario_id: "browser-message-streams",
   sdk_source_sha256: createHash("sha256").update(source).digest("hex"),
-  evidence_scope: "actual SDK and Node native MessageChannel/BroadcastChannel",
+  evidence_scope: "actual SDK and Node native MessageChannel/BroadcastChannel; explicit raw-ABI double for owned lifecycle faults",
   no_claim: ["browser-engine execution", "Rust executor", "packaged WASM"],
 }));
 
-async function sdk() {
+async function sdk(abi = {}) {
   const context = createContext({
     AbortController, ArrayBuffer, DataView, Uint8Array, URL, TextEncoder, TextDecoder,
     ReadableStream, WritableStream, WebAssembly, Error, TypeError, RangeError,
@@ -51,7 +52,7 @@ async function sdk() {
     "task_join", "task_spawn", "websocket_cancel", "websocket_close", "websocket_open",
     "websocket_recv", "websocket_send"];
   modules.set("./asupersync.js", new SyntheticModule(names, function () {
-    for (const name of names) this.setExport(name, () => { throw new Error(`unexpected ABI call: ${name}`); });
+    for (const name of names) this.setExport(name, abi[name] ?? (() => { throw new Error(`unexpected ABI call: ${name}`); }));
   }, { context }));
   const module = new SourceTextModule(javascript, { context, identifier: sdkPath });
   await module.link((specifier) => {
@@ -103,6 +104,73 @@ function noListeners(port) {
   for (const type of ["message", "messageerror", "close"]) {
     assert.equal(getEventListeners(port, type).length, 0, `${type} hook retired`);
   }
+}
+
+// Fault injection below uses an explicit raw-ABI ledger double. Positive
+// packaged-WASM integration lives in test_browser_message_regions_wasm.mjs.
+async function ownedFixture(t, options = {}) {
+  const calls = { spawn: [], cancel: [], join: [], scopeClose: [] };
+  const tasks = new Map();
+  const unit = '{"outcome":"ok","value":{"kind":"unit"}}';
+  const refusal = (message) => JSON.stringify({ outcome: "err", failure: {
+    code: "compatibility_rejected", recoverability: "transient", message,
+  } });
+  let nextRegion = 1, nextTask = 1;
+  const api = await sdk({
+    abi_version: () => JSON.stringify({ major: 1, minor: 0 }),
+    abi_fingerprint: () => 1n,
+    runtime_create: () => JSON.stringify({ kind: "runtime", slot: 0, generation: 1, owner_token: "17" }),
+    scope_enter: () => JSON.stringify({ kind: "region", slot: nextRegion++, generation: 1, owner_token: "17" }),
+    runtime_close: () => tasks.size === 0 ? unit : refusal("active task"),
+    scope_close: (encoded) => {
+      const handle = JSON.parse(encoded);
+      calls.scopeClose.push(handle);
+      if (options.acceptOwnerClose) {
+        for (const [slot, state] of tasks) if (state.scope === handle.slot) tasks.delete(slot);
+        return unit;
+      }
+      return [...tasks.values()].some((state) => state.scope === handle.slot) ? refusal("active task") : unit;
+    },
+    task_spawn: (encoded) => {
+      const request = JSON.parse(encoded);
+      const handle = { kind: "task", slot: nextTask++, generation: 1, owner_token: "17" };
+      calls.spawn.push(request);
+      tasks.set(handle.slot, { scope: request.scope.slot, phase: "active" });
+      options.afterSpawn?.();
+      return JSON.stringify(handle);
+    },
+    task_cancel: (encoded) => {
+      const request = JSON.parse(encoded);
+      calls.cancel.push(request);
+      if (options.refuseCancel) return refusal("controlled cancellation refusal");
+      const state = tasks.get(request.task.slot);
+      if (!state || state.phase !== "active") return refusal("cancellation was repeated or task was retired");
+      state.phase = "cancelling";
+      return unit;
+    },
+    task_join: (handleJson, outcomeJson) => {
+      const handle = JSON.parse(handleJson), outcome = JSON.parse(outcomeJson);
+      calls.join.push({ handle, outcome });
+      options.onJoin?.();
+      if (options.refuseJoin) return refusal("controlled terminal publication refusal");
+      assert.ok(tasks.delete(handle.slot), "one terminal publication releases one task");
+      return outcomeJson;
+    },
+  });
+  const unwrap = (outcome) => { assert.equal(outcome.outcome, "ok"); return outcome.value; };
+  const runtime = new api.BrowserRuntime(unwrap(api.runtimeCreate()));
+  const scope = unwrap(runtime.enterScope("controlled-message-owner"));
+  const raw = new MessageChannel();
+  const port = api.createBrowserMessagePort(raw.port2, { ...authority, start: false });
+  t.after(async () => {
+    options.refuseCancel = false;
+    options.refuseJoin = false;
+    options.afterSpawn = undefined;
+    options.onJoin = undefined;
+    try { await runtime.closeAsync(); }
+    finally { raw.port1.close(); raw.port2.close(); }
+  });
+  return { api, runtime, scope, raw, port, calls, tasks, unwrap, options };
 }
 
 test("message streams preserve the default legacy callback and polling behavior", async () => {
@@ -523,4 +591,262 @@ test("failed BroadcastChannel construction rolls back hooks without closing the 
     assert.equal((await bounded(next)).value, "still open");
     await receiver.return();
   } finally { raw.addEventListener = add; raw.close(); sender.close(); }
+});
+
+test("owned return retains an ABI-refused terminal for explicit owner-close retry", async (t) => {
+  const f = await ownedFixture(t, { refuseJoin: true });
+  const receiver = f.unwrap(f.scope.receiveMessages(f.port));
+  const next = observe(receiver.next());
+  failed(await bounded(observe(receiver.return())), "terminal_publication_failed");
+  failed(await bounded(next), "terminal_publication_failed");
+  failed(await bounded(observe(receiver.closed)), "terminal_publication_failed");
+  noListeners(f.raw.port2);
+  assert.equal(f.scope.close().outcome, "err", "ABI task remains admitted");
+  assert.equal(f.tasks.size, 1);
+  assert.equal(f.calls.cancel.length, 0, "normal return does not cancel");
+  f.options.refuseJoin = false;
+  f.unwrap(await bounded(f.scope.closeAsync()));
+  assert.equal(f.tasks.size, 0);
+  assert.equal(f.calls.join.length, 2);
+  assert.deepEqual(f.calls.join[0], f.calls.join[1], "retry publishes the original terminal");
+});
+
+test("owned cancellation retry does not repeat accepted ABI cancellation or mutable public errors", async (t) => {
+  const f = await ownedFixture(t, { refuseJoin: true });
+  const receiver = f.unwrap(f.scope.receiveMessages(f.port));
+  const next = observe(receiver.next());
+  assert.equal((await bounded(f.scope.closeAsync())).outcome, "err");
+  const error = failed(await bounded(next), "terminal_publication_failed");
+  error.reason = "messageerror";
+  error.message = "consumer mutation must not become the task result";
+  assert.equal(f.calls.cancel.length, 1);
+  assert.equal(f.calls.join.length, 1);
+  f.options.refuseJoin = false;
+  f.unwrap(await bounded(f.scope.closeAsync()));
+  assert.equal(f.calls.cancel.length, 1, "Cancelling is not Active on retry");
+  assert.equal(f.calls.join.length, 2);
+  assert.deepEqual(f.calls.join[0], f.calls.join[1]);
+  assert.equal(f.calls.join[1].outcome.outcome, "cancelled");
+  assert.equal(f.calls.join[1].outcome.cancellation.kind, "scope_close");
+});
+
+test("owned cancellation refusal closes the native source and retains the task until retry", async (t) => {
+  const f = await ownedFixture(t, { refuseCancel: true });
+  const receiver = f.unwrap(f.scope.receiveMessages(f.port));
+  const next = observe(receiver.next());
+  assert.equal((await bounded(f.scope.closeAsync())).outcome, "err");
+  failed(await bounded(next), "terminal_publication_failed");
+  noListeners(f.raw.port2);
+  assert.equal(f.calls.cancel.length, 1);
+  assert.equal(f.calls.join.length, 0);
+  assert.equal(f.tasks.size, 1);
+  f.options.refuseCancel = false;
+  f.unwrap(await bounded(f.scope.closeAsync()));
+  assert.equal(f.calls.cancel.length, 2);
+  assert.equal(f.calls.join.length, 1);
+  assert.equal(f.tasks.size, 0);
+});
+
+test("owned failed hook cleanup retains credit and retries only incomplete native operations", async (t) => {
+  const f = await ownedFixture(t);
+  const remove = f.raw.port2.removeEventListener.bind(f.raw.port2);
+  const close = f.raw.port2.close.bind(f.raw.port2);
+  let rejectRemoval = true, closes = 0;
+  const removals = [];
+  f.raw.port2.removeEventListener = (type, listener) => {
+    removals.push(type);
+    if (type === "message" && rejectRemoval) throw new Error("controlled hook refusal");
+    remove(type, listener);
+  };
+  f.raw.port2.close = () => { closes++; close(); };
+  const receiver = f.unwrap(f.scope.receiveMessages(f.port));
+  const next = observe(receiver.next());
+  try {
+    assert.equal((await bounded(f.scope.closeAsync())).outcome, "err");
+    failed(await bounded(next), "cleanup_failed");
+    assert.equal(f.calls.cancel.length, 0);
+    assert.equal(f.calls.join.length, 0);
+    assert.equal(f.tasks.size, 1);
+    assert.equal(closes, 1, "all independent native cleanup was attempted");
+    throwsReason(() => f.api.createBrowserMessagePort(f.raw.port2, authority), "receiver_in_use");
+    rejectRemoval = false;
+    f.unwrap(await bounded(f.scope.closeAsync()));
+    assert.equal(f.tasks.size, 0);
+    assert.equal(closes, 1, "successful native close is not repeated");
+    assert.deepEqual(removals, ["message", "messageerror", "close", "message"]);
+    noListeners(f.raw.port2);
+    const aliasAfterRelease = f.api.createBrowserMessagePort(f.raw.port2, authority);
+    aliasAfterRelease.close();
+  } finally { rejectRemoval = false; f.raw.port2.removeEventListener = remove; }
+});
+
+test("owned terminal reads reentered from native cleanup wait for publication refusal", async (t) => {
+  const f = await ownedFixture(t, { refuseJoin: true });
+  const close = f.raw.port2.close.bind(f.raw.port2);
+  let receiver, reenteredNext, reenteredReturn;
+  f.raw.port2.close = () => {
+    reenteredNext = observe(receiver.next());
+    reenteredReturn = observe(receiver.return());
+    close();
+  };
+  receiver = f.unwrap(f.scope.receiveMessages(f.port));
+  failed(await bounded(observe(receiver.return())), "terminal_publication_failed");
+  failed(await bounded(reenteredNext), "terminal_publication_failed");
+  failed(await bounded(reenteredReturn), "terminal_publication_failed");
+  assert.equal(f.calls.join.length, 1);
+  f.options.refuseJoin = false;
+  f.unwrap(await bounded(f.scope.closeAsync()));
+  assert.equal(f.calls.join.length, 2);
+});
+
+test("external source close fences reentrant completion until a late native close failure is known", async (t) => {
+  for (const surface of ["message_port", "broadcast_channel"]) {
+    const f = await ownedFixture(t);
+    const raw = surface === "message_port" ? f.raw.port2
+      : new BroadcastChannel(`asupersync-message-stream-${process.pid}-external-close`);
+    const source = surface === "message_port" ? f.port : new f.api.BrowserBroadcastChannel(
+      raw, f.api.detectBrowserNativeMessagingSupport("broadcast_channel", authority),
+    );
+    const close = raw.close.bind(raw);
+    let rejectClose = true, receiver, reenteredNext, reenteredReturn;
+    raw.close = () => {
+      if (rejectClose) {
+        reenteredNext = observe(receiver.next());
+        reenteredReturn = observe(receiver.return());
+        throw new Error("native close failed after reentrant completion");
+      }
+      close();
+    };
+    receiver = f.unwrap(f.scope.receiveMessages(source));
+    const pending = observe(receiver.next());
+    try {
+      throwsReason(() => source.close(), "cleanup_failed");
+      failed(await bounded(pending), "cleanup_failed");
+      failed(await bounded(reenteredNext), "cleanup_failed");
+      failed(await bounded(reenteredReturn), "cleanup_failed");
+      assert.equal(f.calls.join.length, 0, "failed native cleanup cannot release the task");
+      assert.equal(f.tasks.size, 1);
+      rejectClose = false;
+      f.unwrap(await bounded(f.scope.closeAsync()));
+      assert.equal(f.calls.join.length, 1);
+      assert.equal(f.tasks.size, 0);
+      assert.equal(f.calls.join[0].outcome.outcome, "err");
+    } finally { rejectClose = false; close(); }
+  }
+});
+
+test("owned cleanup retains missing close/removal capabilities until the host restores them", async (t) => {
+  for (const surface of ["message_port", "broadcast_channel"]) {
+    for (const missing of ["close", "removeEventListener"]) {
+      const f = await ownedFixture(t);
+      const raw = surface === "message_port" ? f.raw.port2 : new BroadcastChannel(
+        `asupersync-message-stream-${process.pid}-missing-${missing}`,
+      );
+      const close = raw.close.bind(raw);
+      const original = raw[missing].bind(raw);
+      const source = surface === "message_port" ? f.port : new f.api.BrowserBroadcastChannel(
+        raw, f.api.detectBrowserNativeMessagingSupport("broadcast_channel", authority),
+      );
+      const receiver = f.unwrap(f.scope.receiveMessages(source));
+      raw[missing] = undefined;
+      try {
+        failed(await bounded(observe(receiver.return())), "cleanup_failed");
+        assert.equal(f.calls.join.length, 0);
+        assert.equal(f.tasks.size, 1);
+        raw[missing] = original;
+        f.unwrap(await bounded(f.scope.closeAsync()));
+        assert.equal(f.calls.join.length, 1);
+        assert.equal(f.tasks.size, 0);
+        for (const type of ["message", "messageerror"]) assert.equal(getEventListeners(raw, type).length, 0);
+      } finally { raw[missing] = original; close(); }
+    }
+  }
+});
+
+test("owned admission unwinds a taskSpawn reentrant async close before touching the source", async (t) => {
+  const f = await ownedFixture(t);
+  let closing;
+  f.options.afterSpawn = () => { closing = f.scope.closeAsync(); };
+  const result = f.scope.receiveMessages(f.port);
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.recoverability, "transient");
+  f.unwrap(await bounded(closing));
+  assert.equal(f.tasks.size, 0);
+  assert.equal(f.port.state, "open");
+  assert.equal(getEventListeners(f.raw.port2, "close").length, 0);
+  const receiver = f.port.receiveStream();
+  const next = receiver.next();
+  f.raw.port1.postMessage("still available");
+  assert.equal((await bounded(next)).value, "still available");
+  await receiver.return();
+});
+
+test("accepted synchronous owner close during a native capability getter cannot orphan a receiver", async (t) => {
+  const f = await ownedFixture(t, { acceptOwnerClose: true });
+  const close = f.raw.port2.close.bind(f.raw.port2);
+  let closed = false;
+  Object.defineProperty(f.raw.port2, "close", { configurable: true, get() {
+    if (!closed && f.calls.spawn.length !== 0) {
+      closed = true;
+      f.unwrap(f.scope.close());
+    }
+    return close;
+  } });
+  const result = f.scope.receiveMessages(f.port);
+  assert.equal(result.outcome, "err");
+  assert.equal(closed, true);
+  assert.equal(f.port.state, "open");
+  assert.equal(getEventListeners(f.raw.port2, "close").length, 0);
+  assert.equal(f.calls.join.length, 0, "accepted owner barrier already released the provisional task");
+  const receiver = f.port.receiveStream();
+  await receiver.return();
+});
+
+test("accepted synchronous owner close during native start closes the activated receiver before exposure", async (t) => {
+  const f = await ownedFixture(t, { acceptOwnerClose: true });
+  const start = f.raw.port2.start.bind(f.raw.port2);
+  f.raw.port2.start = () => { f.unwrap(f.scope.close()); start(); };
+  const receiver = f.unwrap(f.scope.receiveMessages(f.port));
+  assert.equal(receiver.state, "cancelled");
+  failed(await bounded(observe(receiver.next())), "aborted");
+  failed(await bounded(observe(receiver.closed)), "aborted");
+  noListeners(f.raw.port2);
+  assert.equal(f.tasks.size, 0);
+  assert.equal(f.calls.join.length, 0);
+});
+
+test("untracked core-created regions refuse native receive ownership before task admission", async (t) => {
+  const f = await ownedFixture(t);
+  const core = f.unwrap(f.api.scopeEnter({ parent: f.runtime.core }));
+  const untracked = new f.api.RegionHandle(core);
+  assert.equal(untracked.receiveMessages(f.port).outcome, "err");
+  const nested = f.unwrap(untracked.enterScope("still-untracked-from-runtime"));
+  assert.equal(nested.receiveMessages(f.port).outcome, "err");
+  assert.equal(f.calls.spawn.length, 0);
+  assert.equal(f.port.state, "open");
+  const receiver = f.port.receiveStream();
+  await receiver.return();
+});
+
+test("host-thrown objects with hostile error accessors cannot strand an admitted receiver task", async (t) => {
+  for (const kind of ["accessor", "proxy"]) {
+    const f = await ownedFixture(t);
+    const close = f.raw.port2.close.bind(f.raw.port2);
+    const poison = kind === "accessor"
+      ? Object.defineProperty({}, "code", { get() { throw new Error("error code getter failed"); } })
+      : new Proxy({}, { has() { throw new Error("error property trap failed"); } });
+    let thrown = false;
+    Object.defineProperty(f.raw.port2, "close", { configurable: true, get() {
+      if (!thrown && f.calls.spawn.length !== 0) { thrown = true; throw poison; }
+      return close;
+    } });
+    assert.equal(f.scope.receiveMessages(f.port).outcome, "err");
+    assert.equal(thrown, true);
+    assert.equal(f.tasks.size, 0);
+    assert.equal(f.calls.join.length, 1);
+    assert.equal(f.port.state, "open");
+    f.unwrap(await bounded(f.scope.closeAsync()));
+    const receiver = f.port.receiveStream();
+    await receiver.return();
+  }
 });
