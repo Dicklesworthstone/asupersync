@@ -1038,6 +1038,27 @@ separate from the runtime's scheduling clock (`types::Time`). Existing public
 `format_unix_nanos_rfc3339` and HTTP-date helpers use this checked core while
 preserving their output bytes.
 
+The owned type also parses RFC 3339 through `parse_rfc3339` or `FromStr`, and
+implements serde as a timestamp string:
+
+```rust
+use asupersync::time::UtcTimestamp;
+
+let timestamp: UtcTimestamp = "1969-12-31T18:59:59.999999999-05:00"
+    .parse()
+    .unwrap();
+assert_eq!(timestamp.unix_nanos(), -1);
+assert_eq!(timestamp.to_rfc3339(), "1969-12-31T23:59:59.999999999Z");
+```
+
+Parsing accepts four-digit years, `T`/`t`, `Z`/`z` or numeric offsets, and one
+to nine fractional digits. It checks at most 35 bytes, rejects excess precision
+and invalid dates, and reports a typed error with a byte offset. Numeric offsets
+are normalized to UTC; canonical serialization uses uppercase `T` and `Z` and
+omits trailing fractional zeroes. Serde preserves `Option<UtcTimestamp>` absence
+as `null`. This new serialization contract does not change existing `chrono`
+fields or promise byte-identical output to them.
+
 ---
 
 ## Architecture
