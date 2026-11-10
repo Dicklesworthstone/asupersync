@@ -1568,6 +1568,27 @@ impl NameRegistry {
         self.force_unregister_and_grant(name, now)
     }
 
+    /// Check complete ownership before an adapter transfers its runtime credit.
+    /// The adapter retains its registry lock through `rebind_lease`, so an
+    /// accepted handoff cannot then discover a missing or replaced name.
+    pub(crate) fn validate_lease(&self, lease: &NameLease) -> Result<(), NameLeaseError> {
+        let Some(entry) = self.leases.get(lease.name()) else {
+            return Err(NameLeaseError::NotFound {
+                name: lease.name().to_string(),
+            });
+        };
+        if entry.holder != lease.holder()
+            || entry.region != lease.region()
+            || entry.acquired_at != lease.acquired_at()
+            || entry.identity != lease.identity
+        {
+            return Err(NameLeaseError::PermissionDenied {
+                name: lease.name().to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Rebinds an active lease to a new holder and region.
     ///
     /// This updates the holder identity in the registry so that subsequent lookups
@@ -1585,20 +1606,11 @@ impl NameRegistry {
         new_holder: TaskId,
         new_region: RegionId,
     ) -> Result<(), NameLeaseError> {
-        let Some(entry) = self.leases.get_mut(lease.name()) else {
-            return Err(NameLeaseError::NotFound {
-                name: lease.name().to_string(),
-            });
-        };
-        if entry.holder != lease.holder()
-            || entry.region != lease.region()
-            || entry.acquired_at != lease.acquired_at()
-            || entry.identity != lease.identity
-        {
-            return Err(NameLeaseError::PermissionDenied {
-                name: lease.name().to_string(),
-            });
-        }
+        self.validate_lease(lease)?;
+        let entry = self
+            .leases
+            .get_mut(lease.name())
+            .expect("validated lease remains registered under exclusive access");
         entry.holder = new_holder;
         entry.region = new_region;
         lease.rebind(new_holder, new_region);

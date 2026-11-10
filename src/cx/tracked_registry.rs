@@ -334,7 +334,7 @@ impl TrackedNameLease {
         self.lease.as_ref().expect("live name guard").name()
     }
 
-    /// The original holder; a Rust move does not change this identity.
+    /// The current holder; only `try_transfer`, not a Rust move, changes it.
     #[must_use]
     pub fn holder(&self) -> TaskId {
         self.lease.as_ref().expect("live name guard").holder()
@@ -375,44 +375,69 @@ impl TrackedNameLease {
     /// the registry entry is rebound to `destination.task_id()` and `destination.region_id()`,
     /// and `whereis` / `whereis_cx` will subsequently return the new task ID.
     ///
-    /// If the transfer fails, the lease remains owned by the original task context.
+    /// A returned error leaves the lease owned by the original task context.
     /// A destination in the root region is refused with
     /// [`TrackedNameError::UnscopedRegion`], as acquisition refuses it.
+    ///
+    /// The name and runtime obligation change owners before the destination's
+    /// notification runs, with no registry lock held during that callback. If
+    /// notification panics, the transfer remains committed and this guard still
+    /// owns both resources; releasing or dropping it settles the new owner's
+    /// credit and removes the name.
     pub fn try_transfer(&mut self, destination: &Cx) -> Result<(), TrackedNameError> {
         self.registry.check_runtime(destination)?;
         if destination.region_id().as_u64() == 0 {
             return Err(TrackedNameError::UnscopedRegion);
         }
-        let Some(token) = self.obligation.take() else {
-            return Err(TrackedNameError::Cancelled);
-        };
-        let new_token = match token.try_transfer(destination) {
-            Ok(new_tok) => new_tok,
-            Err(failure) => {
-                let (reason, original_token) = failure.into_parts();
-                self.obligation = Some(original_token);
-                return Err(TrackedNameError::Transfer(reason));
-            }
-        };
+        // A distinct source gateway may lose its last external owner during
+        // transfer. Drop its notifier captures only after the registry unlocks.
+        let _source_gateway = self
+            .obligation
+            .as_ref()
+            .and_then(ObligationToken::retain_gateway);
+        // Region storage can own panic payloads and heap values. Retain both
+        // sides outside the lock block, including on refusal or unwind; these
+        // pins do not authorize admission or replace transfer's live checks.
+        let _source_region = self
+            .obligation
+            .as_ref()
+            .and_then(ObligationToken::retain_region);
+        let _destination_region = destination
+            .obligation_transfer_destination()
+            .ok()
+            .and_then(|(_, admission)| admission.retain_region());
         let Some(lease) = self.lease.as_mut() else {
-            self.obligation = Some(new_token);
             return Err(TrackedNameError::Cancelled);
         };
-        let result = self.registry.inner.lock().rebind_lease(
-            lease,
-            destination.task_id(),
-            destination.region_id(),
-        );
-        match result {
-            Ok(()) => {
-                self.obligation = Some(new_token);
-                Ok(())
-            }
-            Err(err) => {
-                self.obligation = Some(new_token);
-                Err(TrackedNameError::Registry(err))
-            }
-        }
+        let notification = {
+            let mut inner = self.registry.inner.lock();
+            inner
+                .validate_lease(lease)
+                .map_err(TrackedNameError::Registry)?;
+            let Some(token) = self.obligation.take() else {
+                return Err(TrackedNameError::Cancelled);
+            };
+            // Moving credit and rebinding discovery are one publication. No
+            // arbitrary notifier may run while the guard lacks its token or
+            // while discovery still points to the previous owner.
+            let (token, notification) = match token.try_transfer_deferred(destination) {
+                Ok(transferred) => transferred,
+                Err(failure) => {
+                    let (reason, token) = failure.into_parts();
+                    self.obligation = Some(token);
+                    return Err(TrackedNameError::Transfer(reason));
+                }
+            };
+            let holder = token.holder();
+            let region = token.region();
+            self.obligation = Some(token);
+            inner
+                .rebind_lease(lease, holder, region)
+                .expect("lease identity was validated under the same registry lock");
+            notification
+        };
+        notification.notify();
+        Ok(())
     }
 
     fn resolve(&mut self, abort: Option<ObligationAbortReason>) -> Result<(), TrackedNameError> {

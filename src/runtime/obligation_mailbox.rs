@@ -723,6 +723,26 @@ impl ObligationToken {
         self.region
     }
 
+    /// Retain notifier captures until an adapter has released its own locks.
+    ///
+    /// Transfer preparation also upgrades this weak reference. Keeping an
+    /// outer owner prevents that temporary Arc from destroying user captures
+    /// when the last external gateway owner disappears concurrently.
+    #[must_use]
+    pub(crate) fn retain_gateway(&self) -> Option<Arc<ObligationGateway>> {
+        self.gateway.upgrade()
+    }
+
+    /// Keep the checked source region alive across an adapter's lock.
+    #[must_use]
+    pub(crate) fn retain_region(
+        &self,
+    ) -> Option<crate::record::region::ObligationAdmissionRetention> {
+        self.admission
+            .as_ref()
+            .and_then(|admission| admission.handle.retain_region())
+    }
+
     /// Transfer a checked obligation to another live holder in the same runtime.
     ///
     /// This consumes the old token, preserves its logical obligation identity
@@ -737,9 +757,29 @@ impl ObligationToken {
     /// credit; it cannot restore ownership to the consumed source.
     #[allow(clippy::result_large_err)]
     pub fn try_transfer<Caps>(
-        mut self,
+        self,
         destination: &crate::cx::Cx<Caps>,
     ) -> Result<Self, ObligationTransferFailure> {
+        let (mut next, gateway) = self.try_transfer_deferred(destination)?;
+        // The public consuming operation has not returned ownership yet. A
+        // notifier panic must still abort that unreturned destination credit.
+        next.abort_on_drop = true;
+        gateway.notify();
+        next.abort_on_drop = false;
+        Ok(next)
+    }
+
+    /// Transfer ownership without invoking the destination's notification.
+    ///
+    /// Adapters must install the returned token and their corresponding owner
+    /// identity before releasing their locks and notifying the gateway. This
+    /// lets a callback observe one coherent owner and leaves the installed
+    /// guard able to settle even if notification unwinds.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn try_transfer_deferred<Caps>(
+        mut self,
+        destination: &crate::cx::Cx<Caps>,
+    ) -> Result<(Self, Arc<ObligationGateway>), ObligationTransferFailure> {
         match self.prepare_transfer(destination) {
             Err(reason) => Err(ObligationTransferFailure {
                 reason,
@@ -747,9 +787,8 @@ impl ObligationToken {
             }),
             Ok((mut next, gateway)) => {
                 self.resolved = true;
-                gateway.notify();
                 next.abort_on_drop = false;
-                Ok(next)
+                Ok((next, gateway))
             }
         }
     }

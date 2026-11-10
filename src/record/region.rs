@@ -560,6 +560,13 @@ struct RegionInner {
     heap: RegionHeap,
 }
 
+/// Keeps admission-owned payloads alive until an adapter releases its locks.
+/// This is a lifetime pin only; admission still validates the actual region.
+#[derive(Debug)]
+pub(crate) struct ObligationAdmissionRetention {
+    _inner: Arc<RwLock<RegionInner>>,
+}
+
 /// A task-generation capability over the region's actual admission lock.
 /// Weak references avoid retaining region heaps/finalizers through a task Cx.
 #[derive(Debug)]
@@ -602,6 +609,15 @@ impl ObligationAdmissionHandle {
 
     pub(crate) fn region(&self) -> RegionId {
         self.region
+    }
+
+    /// Keep region payload destruction outside a caller's primitive lock.
+    /// A retained region is not evidence that admission remains open or live.
+    #[must_use]
+    pub(crate) fn retain_region(&self) -> Option<ObligationAdmissionRetention> {
+        self.inner
+            .upgrade()
+            .map(|inner| ObligationAdmissionRetention { _inner: inner })
     }
 
     /// Move one accepted credit. Region gates precede the credit decision;
