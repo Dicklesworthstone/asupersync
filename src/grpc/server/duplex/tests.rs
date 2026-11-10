@@ -703,6 +703,16 @@ impl RawPeer {
     }
 
     fn request(&mut self, stream: u32, path: &str, timeout: Option<&str>) {
+        self.request_with_encoding(stream, path, timeout, None);
+    }
+
+    fn request_with_encoding(
+        &mut self,
+        stream: u32,
+        path: &str,
+        timeout: Option<&str>,
+        encoding: Option<&str>,
+    ) {
         self.stream = stream;
         self.body.clear();
         self.fields.clear();
@@ -720,6 +730,9 @@ impl RawPeer {
         }
         if let Some(timeout) = timeout {
             literal(&mut headers, "grpc-timeout", timeout);
+        }
+        if let Some(encoding) = encoding {
+            literal(&mut headers, "grpc-encoding", encoding);
         }
         self.send(1, 4, stream, &headers);
     }
@@ -1170,6 +1183,74 @@ fn native_duplex_listener_preserves_unary_server_streaming_and_auth_refusal() {
             },
         )
     });
+}
+
+#[test]
+fn native_duplex_compression_refusal_advertises_decoders_before_input_and_allows_retry() {
+    for accept_gzip in [false, true] {
+        for path in ["/native.Duplex/Echo", "/native.Duplex/Aggregate"] {
+            bounded_case(move || {
+                raw_case(
+                    1,
+                    move |server| {
+                        if accept_gzip {
+                            server.config.accept_compression.extend([
+                                CompressionEncoding::Gzip,
+                                CompressionEncoding::Gzip,
+                            ]);
+                        }
+                    },
+                    move |address, _, probe, count| {
+                        let gzip = accept_gzip && cfg!(feature = "compression");
+                        let expected = if gzip { "identity,gzip" } else { "identity" };
+                        let mut peer = RawPeer::new(address, 65535);
+                        peer.request_with_encoding(1, path, None, Some("zstd"));
+                        // Refuse from the request head without waiting for a
+                        // message or invoking the application factory.
+                        peer.finish();
+                        assert_eq!(peer.reset, None);
+                        assert_eq!(peer.field("grpc-status"), Some("12"));
+                        assert_eq!(peer.field("grpc-accept-encoding"), Some(expected));
+                        assert_eq!(peer.fields.iter()
+                            .filter(|header| header.name == "grpc-accept-encoding").count(), 1);
+                        assert!(peer.body.is_empty());
+                        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+                        until(|| count.load(Ordering::SeqCst) == 0);
+
+                        let payload = b"retry";
+                        let wire = if gzip {
+                            let compress = CompressionEncoding::Gzip.frame_compressor().unwrap();
+                            let compressed = compress(Bytes::from_static(payload)).unwrap();
+                            let mut wire = vec![1];
+                            wire.extend_from_slice(&u32::try_from(compressed.len()).unwrap().to_be_bytes());
+                            wire.extend_from_slice(&compressed);
+                            wire
+                        } else {
+                            message(payload)
+                        };
+                        peer.request_with_encoding(3, path, None,
+                            Some(if gzip { "gzip" } else { "identity" }));
+                        peer.send(0, 1, 3, &wire);
+                        peer.finish();
+                        assert_eq!(peer.reset, None);
+                        assert_eq!(peer.field("grpc-status"), Some("0"));
+                        assert_eq!(peer.field("grpc-accept-encoding"), Some(expected));
+                        assert_eq!(peer.field("grpc-encoding"), None,
+                            "accepting gzip does not enable response compression");
+                        let expected_body = if path.ends_with("/Aggregate") {
+                            message(&(payload.len() as u64).to_be_bytes())
+                        } else {
+                            message(payload)
+                        };
+                        assert_eq!(peer.body, expected_body);
+                        until(|| count.load(Ordering::SeqCst) == 0);
+                        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+                        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+                    },
+                );
+            });
+        }
+    }
 }
 
 #[test]

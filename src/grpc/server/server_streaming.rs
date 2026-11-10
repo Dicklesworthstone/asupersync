@@ -151,7 +151,7 @@ impl PreparedServerStream {
             head.headers
                 .push(("grpc-encoding".to_owned(), encoding.to_owned()));
         }
-        head
+        self.server.advertise_request_compression(head)
     }
 
     pub(in crate::grpc) async fn run<S: ServerStreamSink>(
@@ -419,7 +419,7 @@ impl Server {
         let prepared = match self.prepare_registered_server_stream(request, Cx::current().as_ref()) {
             Ok(prepared) => prepared,
             Err(status) => {
-                return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
+                return Http2ProducedResponse::buffered(self.http2_dispatch_error(&status));
             }
         };
         // Do not invoke the service factory or create its stream here. The

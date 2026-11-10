@@ -307,6 +307,16 @@ impl Peer {
     }
 
     fn request(&mut self, stream: u32, path: &str, timeout: Option<&str>) {
+        self.request_with_encoding(stream, path, timeout, None);
+    }
+
+    fn request_with_encoding(
+        &mut self,
+        stream: u32,
+        path: &str,
+        timeout: Option<&str>,
+        encoding: Option<&str>,
+    ) {
         assert!(stream > self.stream && stream % 2 == 1);
         self.stream = stream;
         self.reply = WireReply::default();
@@ -323,6 +333,9 @@ impl Peer {
         }
         if let Some(timeout) = timeout {
             literal(&mut headers, "grpc-timeout", timeout);
+        }
+        if let Some(encoding) = encoding {
+            literal(&mut headers, "grpc-encoding", encoding);
         }
         self.send(1, 4, stream, &headers); // HEADERS / END_HEADERS
         self.send(0, 1, stream, &[0, 0, 0, 0, 0]); // one empty request; END_STREAM
@@ -523,6 +536,41 @@ fn native_registered_stream_sends_multiple_framed_messages_and_binary_trailers()
     );
     assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
     assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn native_streaming_compression_refusal_advertises_a_usable_retry_encoding() {
+    let probe = wire_case(
+        Mode::Values, 65_535, "/test.Watch/Values", None, false,
+        |peer, _, retired, probe| {
+            peer.finish();
+            assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
+            assert!(peer.reply.initial.iter().any(|header| {
+                header.name == "grpc-accept-encoding" && header.value == "identity"
+            }));
+            retired.recv_timeout(Duration::from_secs(2)).expect("first stream retired");
+
+            peer.request_with_encoding(3, "/test.Watch/Values", None, Some("zstd"));
+            peer.finish();
+            assert_eq!(peer.reply.reset, None);
+            assert_eq!(peer.reply.trailer("grpc-status"), Some("12"));
+            assert!(peer.reply.body.is_empty());
+            let advertised: Vec<_> = peer.reply.initial.iter()
+                .filter(|header| header.name == "grpc-accept-encoding")
+                .map(|header| header.value.as_str())
+                .collect();
+            assert_eq!(advertised, ["identity"]);
+            assert_eq!(probe.calls.load(Ordering::SeqCst), 1, "refusal precedes service entry");
+
+            peer.request_with_encoding(5, "/test.Watch/Values", None, Some("identity"));
+            peer.finish();
+            assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
+            assert_eq!(peer.reply.messages(), vec![vec![0x11; 3000], vec![0x22; 3000]]);
+            retired.recv_timeout(Duration::from_secs(2)).expect("retry stream retired");
+        },
+    );
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.drops.load(Ordering::SeqCst), 2);
 }
 
 #[test]

@@ -209,7 +209,10 @@ impl Server {
                 let prepared = match server.prepare_registered_server_stream(request, Some(&cx)) {
                     Ok(prepared) => prepared,
                     Err(status) => {
-                        return produced_buffered(error_response(&status, mode, version), streaming);
+                        let response = server.advertise_request_compression(error_response(
+                            &status, mode, version,
+                        ));
+                        return produced_buffered(response, streaming);
                     }
                 };
                 let mut head = prepared.head();

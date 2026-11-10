@@ -497,6 +497,8 @@ pub struct ServerConfig {
     /// `grpc-accept-encoding` lists it.
     pub send_compression: Option<CompressionEncoding>,
     /// Compression encodings accepted by this server.
+    /// Native transports advertise configured encodings whose decoders are
+    /// compiled in through `grpc-accept-encoding`, including error responses.
     pub accept_compression: Vec<CompressionEncoding>,
     /// Maximum aggregate size, in bytes, of the supplied [`Metadata`] block.
     /// Each entry contributes `key.len() + value.byte_len()` bytes.
@@ -1662,7 +1664,7 @@ impl Server {
         }
         let (path, request, trailing_metadata) = match self.decode_http2_unary_request(request) {
             Ok(decoded) => decoded,
-            Err(status) => return Self::http2_status_response(&status),
+            Err(status) => return self.http2_dispatch_error(&status),
         };
         let compression = self.response_compression(request.metadata());
         let result = self
@@ -1677,9 +1679,9 @@ impl Server {
         match result {
             Ok(response) => match self.encode_http2_unary_response(&response, compression) {
                 Ok(response) => response,
-                Err(status) => Self::http2_status_response(&status),
+                Err(status) => self.http2_dispatch_error(&status),
             },
-            Err(status) => Self::http2_status_response(&status),
+            Err(status) => self.http2_dispatch_error(&status),
         }
     }
 
@@ -1690,10 +1692,10 @@ impl Server {
         }
         let (path, request, trailing_metadata) = match self.decode_http2_unary_request(request) {
             Ok(decoded) => decoded,
-            Err(status) => return Self::http2_status_response(&status),
+            Err(status) => return self.http2_dispatch_error(&status),
         };
         let Some(cx) = Cx::current() else {
-            return Self::http2_status_response(&Status::internal(
+            return self.http2_dispatch_error(&Status::internal(
                 "registered gRPC HTTP/2 dispatch requires a runtime Cx",
             ));
         };
@@ -1704,9 +1706,9 @@ impl Server {
         match result {
             Ok(response) => match self.encode_http2_unary_response(&response, compression) {
                 Ok(response) => response,
-                Err(status) => Self::http2_status_response(&status),
+                Err(status) => self.http2_dispatch_error(&status),
             },
-            Err(status) => Self::http2_status_response(&status),
+            Err(status) => self.http2_dispatch_error(&status),
         }
     }
 
@@ -1811,6 +1813,55 @@ impl Server {
         ))
     }
 
+    /// Advertise usable request decoders in the initial response headers.
+    ///
+    /// An unsupported request encoding must return the server's supported
+    /// list with UNIMPLEMENTED so the peer can retry
+    /// (br-asupersync-grpc-client-server-audit-jq0c7j item 4). Advertising the
+    /// same list on successful calls also permits proactive negotiation.
+    /// Deduplicate configuration entries and never advertise a disabled or
+    /// uncompiled decoder. Preserve a unary application's existing explicit
+    /// advertisement rather than adding a contradictory second header.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::grpc) fn advertise_request_compression(
+        &self,
+        mut response: HttpResponse,
+    ) -> HttpResponse {
+        if response
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("grpc-accept-encoding"))
+        {
+            return response;
+        }
+        let identity = self
+            .config
+            .accept_compression
+            .contains(&CompressionEncoding::Identity);
+        let gzip = self
+            .config
+            .accept_compression
+            .contains(&CompressionEncoding::Gzip)
+            && CompressionEncoding::Gzip.frame_decompressor().is_some();
+        let encodings = match (identity, gzip) {
+            (true, true) => "identity,gzip",
+            (true, false) => "identity",
+            (false, true) => "gzip",
+            // An explicitly empty acceptance policy has no usable retry
+            // encoding. Do not invent identity support or emit an empty list.
+            (false, false) => return response,
+        };
+        response
+            .headers
+            .push(("grpc-accept-encoding".to_owned(), encodings.to_owned()));
+        response
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn http2_dispatch_error(&self, status: &Status) -> HttpResponse {
+        self.advertise_request_compression(Self::http2_status_response(status))
+    }
+
     /// The response encoding for a request: `send_compression` when the
     /// client listed it in `grpc-accept-encoding`, otherwise none. A client
     /// that did not list it may have no decompressor (a default `Channel`
@@ -1884,7 +1935,7 @@ impl Server {
         }
         http.trailers
             .push(("grpc-status".to_owned(), "0".to_owned()));
-        Ok(http)
+        Ok(self.advertise_request_compression(http))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

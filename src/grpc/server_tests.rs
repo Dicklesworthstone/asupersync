@@ -228,6 +228,90 @@ mod tests {
         assert_eq!(response.body[0], 1, "compressed frame");
     }
 
+    #[test]
+    fn http2_compression_refusal_advertises_only_configured_and_compiled_decoders() {
+        use CompressionEncoding::{Gzip, Identity};
+
+        let configured_gzip = if cfg!(feature = "compression") {
+            Some("identity,gzip")
+        } else {
+            Some("identity")
+        };
+        for (accepted, expected) in [
+            (vec![Identity], Some("identity")),
+            (vec![Gzip, Identity, Gzip, Identity], configured_gzip),
+            (vec![Gzip], cfg!(feature = "compression").then_some("gzip")),
+            (Vec::new(), None),
+        ] {
+            let server = Server::builder().accept_compressions(accepted).build();
+            let mut request =
+                unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"wire"));
+            request.body[0] = 1;
+            request
+                .headers
+                .push(("grpc-encoding".to_owned(), "zstd".to_owned()));
+            let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = Arc::clone(&called);
+            let response = futures_lite::future::block_on(server.dispatch_http2_unary(
+                request,
+                Arc::new(move |_transport: GrpcTransportRequest| {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    async { Ok(Response::new(Bytes::new())) }
+                }),
+            ));
+            assert_eq!(grpc_status_trailer(&response), Some("12"));
+            assert!(response.body.is_empty(), "refusal must not emit a message");
+            assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+            let advertised: Vec<_> = response
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("grpc-accept-encoding"))
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(advertised, expected.into_iter().collect::<Vec<_>>());
+            assert!(response
+                .trailers
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("grpc-accept-encoding")));
+        }
+    }
+
+    #[test]
+    fn http2_success_advertises_request_decoders_independently_of_response_compression() {
+        let server = Server::builder()
+            .accept_compression(CompressionEncoding::Gzip)
+            .accept_compression(CompressionEncoding::Gzip)
+            .build();
+        let request =
+            unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"ping"));
+        let response = futures_lite::future::block_on(server.dispatch_http2_unary(
+            request,
+            Arc::new(|transport: GrpcTransportRequest| async move {
+                Ok(Response::new(transport.request.into_inner()))
+            }),
+        ));
+        assert_eq!(grpc_status_trailer(&response), Some("0"));
+        assert_eq!(response.body, b"\x00\x00\x00\x00\x04ping");
+        let advertised: Vec<_> = response
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("grpc-accept-encoding"))
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(
+            advertised,
+            [if cfg!(feature = "compression") {
+                "identity,gzip"
+            } else {
+                "identity"
+            }]
+        );
+        assert!(response
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("grpc-encoding")));
+    }
+
     #[cfg(feature = "compression")]
     #[test]
     fn http2_unary_adapter_accepts_plain_and_empty_messages_in_gzip_calls() {

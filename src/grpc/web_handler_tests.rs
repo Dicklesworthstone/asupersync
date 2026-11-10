@@ -158,9 +158,38 @@ fn registered_unary_round_trips_binary_and_text_over_http1_and_http2() {
             assert!(response.headers.iter().any(|(name, value)| {
                 name == "content-length" && value == &response.body.len().to_string()
             }));
+            assert!(response.headers.iter().any(|(name, value)| {
+                name == "grpc-accept-encoding" && value == "identity"
+            }));
         }
     }
     assert_eq!(calls.load(Ordering::SeqCst), 6);
+}
+
+#[test]
+fn web_unary_compression_refusal_keeps_advertisement_in_initial_headers() {
+    let (server, calls) = server();
+    for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+        for encoding in ["gzip", "zstd"] {
+            let mut request = request(mode);
+            let compressed = b"\x01\x00\x00\x00\x04wire";
+            request.body = if mode.is_text_mode() {
+                STANDARD.encode(compressed).into_bytes()
+            } else {
+                compressed.to_vec()
+            };
+            request.headers.push(("grpc-encoding".to_owned(), encoding.to_owned()));
+            let response = run(&server, request, GrpcWebConfig::default());
+            assert_eq!(status(&response), "12");
+            assert_eq!(binary_body(&response)[0], 0x80, "no message on refusal");
+            let advertised: Vec<_> = response.headers.iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("grpc-accept-encoding"))
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(advertised, ["identity"]);
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -957,6 +986,9 @@ fn native_web_stream_delivers_before_source_eof_in_binary_and_padded_text() {
             GrpcWebConfig::default(),
             None,
             |peer, parks, retirements, probe| {
+                assert!(peer.initial.iter().any(|(name, value)| {
+                    name == "grpc-accept-encoding" && value == "identity"
+                }));
                 assert_eq!(peer.frame(), (0, b"first".to_vec()));
                 parks.recv_timeout(Duration::from_secs(2)).expect("source parked after first");
                 assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
@@ -1298,6 +1330,48 @@ fn produced_web_streaming_handler_preserves_registered_unary_dispatch() {
         assert!(binary_body(&response).starts_with(b"\x00\x00\x00\x00\x04ping"));
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn produced_web_stream_compression_refusal_preserves_retry_advertisement() {
+    for content_type in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+        let (server, probe, _parks, _retirements) = web_stream_fixture(WebStreamMode::Never);
+        let cx = Cx::for_testing();
+        let mut request = request(content_type);
+        request.headers.push(("grpc-encoding".to_owned(), "zstd".to_owned()));
+        let input = produced_request(&cx, request, "/web.Watch/Values");
+        let handler = server
+            .registered_grpc_web_streaming_handler(GrpcWebConfig::default(), web_stream_config())
+            .unwrap();
+        let produced = futures_lite::future::block_on(handler(cx.clone(), input));
+        let (mut response, producer) = produced.into_parts(&cx);
+        let advertised: Vec<_> = response.head.headers.iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("grpc-accept-encoding"))
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(advertised, ["identity"]);
+        let collect = async move {
+            let mut bytes = Vec::new();
+            while let Some(frame) = poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await {
+                match frame.expect("produced refusal frame") {
+                    Frame::Data(data) => bytes.extend_from_slice(data.chunk()),
+                    Frame::Trailers(_) => panic!("gRPC-Web status belongs in the body"),
+                }
+            }
+            let mut reply = HttpResponse::new(response.head.status, response.head.reason, bytes);
+            reply.headers = response.head.headers;
+            reply
+        };
+        let (completion, response) = futures_lite::future::block_on(
+            futures_lite::future::zip(producer, collect),
+        );
+        assert!(completion.is_ok());
+        assert_eq!(status(&response), "12");
+        assert_eq!(binary_body(&response)[0], 0x80);
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[test]

@@ -516,18 +516,18 @@ impl Server {
         let (service, client_streaming, server_streaming) = match resolved {
             Ok(method) => method,
             Err(status) => {
-                return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
+                return Http2ProducedResponse::buffered(self.http2_dispatch_error(&status));
             }
         };
         let (path, request) = match self.decode_live_request(request, config.max_request_wire_bytes)
         {
             Ok(request) => request,
             Err(status) => {
-                return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
+                return Http2ProducedResponse::buffered(self.http2_dispatch_error(&status));
             }
         };
         let Some(cx) = Cx::current() else {
-            return Http2ProducedResponse::buffered(Self::http2_status_response(
+            return Http2ProducedResponse::buffered(self.http2_dispatch_error(
                 &Status::internal("gRPC duplex requires a runtime context"),
             ));
         };
@@ -544,7 +544,7 @@ impl Server {
         let (codec, encoding) = match self.streaming_output_codec(compression) {
             Ok(codec) => codec,
             Err(status) => {
-                return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
+                return Http2ProducedResponse::buffered(self.http2_dispatch_error(&status));
             }
         };
         let mut head = HttpResponse::new(200, "OK", Vec::new())
@@ -553,6 +553,7 @@ impl Server {
             head.headers
                 .push(("grpc-encoding".to_owned(), encoding.to_owned()));
         }
+        let head = self.advertise_request_compression(head);
         let defer_headers = server_streaming && service.defer_response_headers(&path);
         let response = Http2ProducedResponse::streaming(
             head,
