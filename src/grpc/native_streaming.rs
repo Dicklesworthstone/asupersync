@@ -398,11 +398,16 @@ where
     fn poll_progress(&mut self, task: &mut Context<'_>, headers_only: bool) -> Poll<Result<(), Status>> {
         for _ in 0..POLL_STEPS {
             self.check_stop(task)?;
+            let previous_body_bytes = self.body.len();
             self.check_keepalive(task)?;
-            // Expiry recovery may have consumed terminal trailers. Return
-            // them before an unrelated control write or transport EOF can
-            // delay or replace the completed call's gRPC status.
-            if self.response.ended || (headers_only && self.response.headers_received) {
+            // Expiry recovery may have consumed terminal trailers or DATA
+            // before its matching ACK. Hand those observations back to the
+            // decoder before an unrelated write/read can park or fail. Only
+            // new body bytes count: an old partial envelope still needs I/O.
+            if self.response.ended
+                || (headers_only && self.response.headers_received)
+                || self.body.len() > previous_body_bytes
+            {
                 return Poll::Ready(Ok(()));
             }
             // Let the caller decode before reading further frames. Incomplete

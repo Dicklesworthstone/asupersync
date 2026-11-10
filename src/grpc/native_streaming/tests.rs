@@ -18,6 +18,7 @@ struct Wire {
     reader: Mutex<Option<Waker>>,
     writer: Mutex<Option<Waker>>,
     eof: AtomicBool,
+    flush_blocked: AtomicBool,
     write_credit: AtomicUsize,
     reads: AtomicUsize,
     drops: AtomicUsize,
@@ -76,7 +77,14 @@ impl AsyncWrite for ScriptIo {
         self.0.write_credit.fetch_sub(n, Ordering::SeqCst);
         Poll::Ready(Ok(n))
     }
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.0.flush_blocked.load(Ordering::SeqCst) {
+            *self.0.writer.lock().unwrap() = Some(cx.waker().clone());
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
 }
 
@@ -146,6 +154,188 @@ fn open(wire: &Arc<Wire>, cx: &Cx) -> Client {
     complete(channel().server_streaming_on(
         cx, ScriptIo(Arc::clone(wire)), "/test.Service/Watch", Request::new(Bytes::new()), IdentityCodec,
     )).unwrap()
+}
+
+fn keepalive_channel_with_policy(progress_aware: bool) -> Channel {
+    let channel = complete(Channel::builder("http://localhost:50051")
+        .keepalive_interval(Duration::from_secs(1))
+        .keepalive_timeout(Duration::from_secs(2))
+        .connect()).unwrap();
+    if progress_aware { channel.with_progress_aware_keepalive() } else { channel }
+}
+
+fn written_frames(wire: &Wire) -> Vec<Frame> {
+    let output = wire.output.lock().unwrap();
+    let mut bytes = BytesMut::from(output.strip_prefix(CLIENT_PREFACE).expect("H2 preface written first"));
+    let mut codec = FrameCodec::new();
+    let mut frames = Vec::new();
+    while let Some(frame) = crate::codec::Decoder::decode(&mut codec, &mut bytes).unwrap() {
+        frames.push(frame);
+    }
+    assert!(bytes.is_empty(), "every observed outbound frame is complete");
+    frames
+}
+
+fn poll_client(client: &mut Client, waker: &Waker) -> Poll<Option<Result<Bytes, Status>>> {
+    Pin::new(client).poll_next(&mut Context::from_waker(waker))
+}
+
+#[test]
+fn channel_keepalive_timer_wakes_a_parked_read_and_matching_ack_rearms_it() {
+    let clock = Arc::new(VirtualClock::new());
+    let cx = context(&clock);
+    let wire = Wire::new(initial());
+    let mut client = open_on(&keepalive_channel_with_policy(false), &wire, &cx);
+    let count = Arc::new(CountWake::default());
+    let waker = Waker::from(Arc::clone(&count));
+    assert!(poll_client(&mut client, &waker).is_pending());
+    assert!(sent_probes(&wire).is_empty());
+
+    clock.advance_to(Time::from_secs(1));
+    let before = count.0.load(Ordering::SeqCst);
+    assert!(cx.timer_driver().unwrap().process_timers() > 0);
+    assert!(count.0.load(Ordering::SeqCst) > before, "no socket event supplied the wake");
+    assert!(poll_client(&mut client, &waker).is_pending());
+    assert_eq!(sent_probes(&wire), vec![1_u64.to_be_bytes()]);
+    wire.append(&frame(6, 1, 0, &1_u64.to_be_bytes()));
+    assert!(poll_client(&mut client, &waker).is_pending());
+
+    clock.advance_to(Time::from_secs(2));
+    assert!(poll_client(&mut client, &waker).is_pending());
+    assert_eq!(sent_probes(&wire), vec![1_u64.to_be_bytes(), 2_u64.to_be_bytes()]);
+    wire.append(&frame(6, 1, 0, &2_u64.to_be_bytes()));
+    wire.append(&frame(0, 0, 1, &envelope(b"live")));
+    wire.append(&header_block(&[("grpc-status", "0")], true));
+    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"live");
+    assert!(complete(client.message()).unwrap().is_none());
+    assert_eq!(client.terminal_status().unwrap().code(), Code::Ok);
+    assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
+    assert!(!cx.is_cancel_requested());
+}
+
+#[test]
+fn channel_keepalive_ready_noise_has_a_bounded_recovery_pass() {
+    let clock = Arc::new(VirtualClock::new());
+    let cx = context(&clock);
+    let wire = Wire::new(initial());
+    let mut client = open_on(&keepalive_channel_with_policy(true), &wire, &cx);
+    clock.advance_to(Time::from_secs(1));
+    assert!(poll_client(&mut client, Waker::noop()).is_pending());
+    for _ in 0..BLOCKED_WRITE_EVENTS {
+        wire.append(&frame(6, 1, 0, &99_u64.to_be_bytes()));
+    }
+    wire.append(&frame(6, 1, 0, &1_u64.to_be_bytes()));
+    clock.advance_to(Time::from_secs(4));
+    assert_eq!(complete(client.message()).unwrap_err().code(), Code::Unavailable);
+    assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn channel_keepalive_deadline_retires_partial_writes_and_parked_flushes() {
+    for progress_aware in [false, true] {
+        for block_flush in [false, true] {
+            let clock = Arc::new(VirtualClock::new());
+            let cx = context(&clock);
+            let wire = Wire::new(initial());
+            let mut client = open_on(&keepalive_channel_with_policy(progress_aware), &wire, &cx);
+            let before = wire.output.lock().unwrap().len();
+            if block_flush {
+                wire.flush_blocked.store(true, Ordering::SeqCst);
+            } else {
+                wire.write_credit.store(3, Ordering::SeqCst);
+            }
+            let count = Arc::new(CountWake::default());
+            let waker = Waker::from(Arc::clone(&count));
+            clock.advance_to(Time::from_secs(1));
+            assert!(poll_client(&mut client, &waker).is_pending());
+            if block_flush {
+                assert_eq!(sent_probes(&wire), vec![1_u64.to_be_bytes()]);
+            } else {
+                assert_eq!(wire.output.lock().unwrap().len(), before + 3);
+            }
+            let wakes = count.0.load(Ordering::SeqCst);
+            assert!(poll_client(&mut client, &waker).is_pending());
+            assert_eq!(count.0.load(Ordering::SeqCst), wakes, "a parked writer must not spin");
+            clock.advance_to(Time::from_secs(3));
+            assert!(cx.timer_driver().unwrap().process_timers() > 0);
+            assert!(count.0.load(Ordering::SeqCst) > wakes);
+            assert_eq!(complete(client.message()).unwrap_err().code(), Code::Unavailable);
+            assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
+            assert!(!cx.is_cancel_requested());
+        }
+    }
+}
+
+#[test]
+fn channel_keepalive_probe_never_splits_a_fragmented_header_block() {
+    let clock = Arc::new(VirtualClock::new());
+    let cx = context(&clock);
+    let wire = Wire::new(Vec::new());
+    let mut request = Request::new(Bytes::new());
+    assert!(request.metadata_mut().insert("x-large", "0123456789abcdef".repeat(3000)));
+    let mut client = NativeServerStream::prepare(&cx, ScriptIo(Arc::clone(&wire)),
+        &keepalive_channel_with_policy(true), "/s/Watch", request, IdentityCodec).unwrap();
+    let mut started_headers = false;
+    for _ in 0..1024 {
+        wire.write_credit.store(1, Ordering::SeqCst);
+        assert!(poll_client(&mut client, Waker::noop()).is_pending());
+        if client.outbound.get(3) == Some(&1) && client.written > 0 {
+            assert_eq!(client.outbound[4] & 4, 0, "fixture must require CONTINUATION");
+            started_headers = true;
+            break;
+        }
+    }
+    assert!(started_headers, "partial HEADERS must be witnessed before queueing a probe");
+    clock.advance_to(Time::from_secs(1));
+    assert!(poll_client(&mut client, Waker::noop()).is_pending());
+    wire.allow_writes();
+    for _ in 0..8 {
+        assert!(poll_client(&mut client, Waker::noop()).is_pending());
+    }
+    let frames = written_frames(&wire);
+    assert!(matches!(frames.first(), Some(Frame::Settings(settings)) if !settings.ack));
+    let mut in_headers = false;
+    let mut probes = 0;
+    for frame in frames {
+        match frame {
+            Frame::Headers(headers) => {
+                assert!(!in_headers);
+                in_headers = !headers.end_headers;
+            }
+            Frame::Continuation(continuation) => {
+                assert!(in_headers);
+                in_headers = !continuation.end_headers;
+            }
+            Frame::Ping(ping) if !ping.ack => {
+                assert!(!in_headers, "PING cannot interrupt a header block");
+                probes += 1;
+            }
+            _ => assert!(!in_headers),
+        }
+    }
+    assert!(!in_headers);
+    assert_eq!(probes, 1);
+}
+
+#[test]
+fn channel_keepalive_cancellation_retires_its_timer_and_owned_transport() {
+    let clock = Arc::new(VirtualClock::new());
+    let cx = context(&clock);
+    let wire = Wire::new(initial());
+    let mut client = open_on(&keepalive_channel_with_policy(true), &wire, &cx);
+    let count = Arc::new(CountWake::default());
+    let waker = Waker::from(Arc::clone(&count));
+    clock.advance_to(Time::from_secs(1));
+    assert!(poll_client(&mut client, &waker).is_pending());
+    assert_eq!(sent_probes(&wire).len(), 1);
+    cx.cancel_with(CancelKind::User, Some("cancel an actual keepalive wait"));
+    assert_eq!(complete(client.message()).unwrap_err().code(), Code::Cancelled);
+    assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
+    let wakes = count.0.load(Ordering::SeqCst);
+    clock.advance_to(Time::from_secs(5));
+    assert_eq!(cx.timer_driver().unwrap().process_timers(), 0);
+    assert_eq!(count.0.load(Ordering::SeqCst), wakes, "retired keepalive must not wake its former owner");
+    assert!(complete(client.message()).unwrap().is_none());
 }
 
 #[test]
@@ -716,5 +906,48 @@ fn supplied_stream_keepalive_rejects_invalid_policy_before_io() {
         assert_eq!(status.code(), Code::InvalidArgument);
         assert!(wire.output.lock().unwrap().is_empty());
         assert_eq!(wire.reads.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn supplied_stream_recovery_yields_data_before_a_matching_ack_without_spinning() {
+    for fragmented in [false, true] {
+        let clock = Arc::new(VirtualClock::new());
+        let cx = context(&clock);
+        let wire = Wire::new(initial());
+        let channel = keepalive_channel().with_progress_aware_keepalive();
+        let mut client = open_on(&channel, &wire, &cx);
+        let count = Arc::new(CountWake::default());
+        let waker = Waker::from(Arc::clone(&count));
+        let mut task = Context::from_waker(&waker);
+        clock.advance_to(Time::from_secs(2));
+        assert!(Pin::new(&mut client).poll_next(&mut task).is_pending());
+        assert_eq!(sent_probes(&wire), vec![1_u64.to_be_bytes()]);
+
+        let message = envelope(b"recovered before ack");
+        let received = if fragmented { 7 } else { message.len() };
+        wire.append(&frame(0, 0, 1, &message[..received]));
+        wire.append(&frame(6, 1, 0, &1_u64.to_be_bytes()));
+        clock.advance_to(Time::from_secs(30));
+
+        // Expiry can first become visible in the inner driver, after the
+        // outer check. DATA read before the recovered ACK must reach the
+        // decoder now, even if no further socket event ever arrives.
+        assert!(matches!(client.poll_progress(&mut task, false), Poll::Ready(Ok(()))));
+        assert_eq!(client.body.as_ref(), &message[..received]);
+        assert!(client.keepalive.as_ref().unwrap().is_idle());
+        if fragmented {
+            let wakes = count.0.load(Ordering::SeqCst);
+            assert!(Pin::new(&mut client).poll_next(&mut task).is_pending());
+            assert_eq!(count.0.load(Ordering::SeqCst), wakes, "old partial DATA must park without spinning");
+            assert!(wire.reader.lock().unwrap().is_some());
+            wire.append(&frame(0, 0, 1, &message[received..]));
+        }
+        assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"recovered before ack");
+        wire.append(&header_block(&[("grpc-status", "0")], true));
+        assert!(complete(client.message()).unwrap().is_none());
+        assert_eq!(client.terminal_status().unwrap().code(), Code::Ok);
+        assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
+        assert!(!cx.is_cancel_requested());
     }
 }

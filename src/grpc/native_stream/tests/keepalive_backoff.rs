@@ -312,12 +312,15 @@ fn native_rejections(shape: Shape, enabled: bool, code: ErrorCode, reason: &'sta
             let mut client = GrpcClient::new(cloned);
             let error = match shape {
                 Shape::SuppliedServer => {
-                    let io = crate::net::TcpStream::connect(address).await.unwrap();
+                    let io = crate::net::TcpStream::connect_timeout(
+                        address, Duration::from_secs(3),
+                    ).await.unwrap();
                     let mut stream = client.channel().server_streaming_on(
                         &cx, io, "/test.Service/Watch",
                         Request::new(Bytes::from_static(b"once")), IdentityCodec,
                     ).await.unwrap();
                     let error = stream.message().await.unwrap_err();
+                    assert_eq!(stream.terminal_status().unwrap().code(), Code::Unavailable);
                     assert!(stream.message().await.unwrap().is_none());
                     error
                 }

@@ -504,6 +504,13 @@ fn native_client_assembles_one_message_larger_than_the_initial_flow_window() {
 }
 
 fn read_request(socket: &mut std::net::TcpStream) {
+    read_request_observing(socket, |_, _| {});
+}
+
+fn read_request_observing(
+    socket: &mut std::net::TcpStream,
+    mut observe: impl FnMut(&[u8; 9], &[u8]),
+) {
     let mut preface = [0_u8; 24];
     socket.read_exact(&mut preface).unwrap();
     assert_eq!(&preface, CLIENT_PREFACE);
@@ -515,6 +522,7 @@ fn read_request(socket: &mut std::net::TcpStream) {
         assert!(length <= FRAME_BYTES);
         let mut payload = vec![0; length];
         socket.read_exact(&mut payload).unwrap();
+        observe(&header, &payload);
         if header[3] == 0 {
             body.extend(payload);
             if header[4] & 1 != 0 {
@@ -524,6 +532,199 @@ fn read_request(socket: &mut std::net::TcpStream) {
         }
     }
     panic!("native request never ended");
+}
+
+fn accept_channel_keepalive_peer(
+    listener: &std::net::TcpListener,
+) -> (std::net::TcpStream, Option<[u8; 8]>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut socket = loop {
+        match listener.accept() {
+            Ok((socket, _)) => break socket,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                assert!(std::time::Instant::now() < deadline, "channel keepalive accept watchdog");
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            Err(error) => panic!("channel keepalive accept: {error}"),
+        }
+    };
+    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    socket.write_all(&frame(4, 0, &[])).unwrap();
+    let mut early_probe = None;
+    read_request_observing(&mut socket, |header, payload| {
+        if header[3] == 6 {
+            let stream = u32::from_be_bytes(header[5..9].try_into().unwrap()) & 0x7fff_ffff;
+            assert_eq!((header[4], stream, payload.len()), (0, 0, 8), "one connection-level non-ACK PING");
+            assert!(early_probe.is_none(), "only one probe may be outstanding");
+            // A delayed first poll can emit its probe before request DATA.
+            // Preserve the token without ACKing: cancellation needs the same
+            // outstanding-probe witness as the ordinary post-request path.
+            early_probe = Some(payload.try_into().unwrap());
+        }
+    });
+    socket.write_all(&headers(
+        &[(":status", "200"), ("content-type", "application/grpc")], false,
+    )).unwrap();
+    (socket, early_probe)
+}
+
+fn read_channel_keepalive_probe(socket: &mut std::net::TcpStream) -> [u8; 8] {
+    for _ in 0..16 {
+        let mut header = [0_u8; 9];
+        socket.read_exact(&mut header).expect("channel keepalive frame header");
+        let length = (usize::from(header[0]) << 16)
+            | (usize::from(header[1]) << 8) | usize::from(header[2]);
+        assert!(length <= FRAME_BYTES);
+        let mut payload = vec![0; length];
+        socket.read_exact(&mut payload).expect("channel keepalive frame payload");
+        let stream = u32::from_be_bytes(header[5..9].try_into().unwrap()) & 0x7fff_ffff;
+        if header[3] == 6 {
+            assert_eq!((header[4], stream, length), (0, 0, 8), "one connection-level non-ACK PING");
+            return payload.try_into().unwrap();
+        }
+        assert!(matches!(header[3], 4 | 8), "the unary request must not be repeated");
+    }
+    panic!("channel keepalive never emitted a PING");
+}
+
+fn channel_keepalive_ack(probe: [u8; 8]) -> Vec<u8> {
+    // Encode independently of the runtime's FrameCodec and use stream zero.
+    let mut bytes = vec![0, 0, 8, 6, 1, 0, 0, 0, 0];
+    bytes.extend_from_slice(&probe);
+    bytes
+}
+
+fn channel_keepalive_eof(socket: &mut std::net::TcpStream) {
+    let mut bytes = [0_u8; 1024];
+    for _ in 0..32 {
+        if socket.read(&mut bytes).expect("channel keepalive transport retirement") == 0 { return; }
+    }
+    panic!("channel keepalive left its dedicated transport open");
+}
+
+#[test]
+fn native_channel_keepalive_rearms_after_ack_and_rejects_wrong_ack() {
+    use crate::grpc::client::Channel;
+
+    for multithread in [false, true] {
+        for acknowledge in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let (mut socket, early_probe) = accept_channel_keepalive_peer(&listener);
+                let first = early_probe.unwrap_or_else(|| read_channel_keepalive_probe(&mut socket));
+                if acknowledge {
+                    socket.write_all(&channel_keepalive_ack(first)).unwrap();
+                    // No DATA or other peer traffic can wake the next demand:
+                    // this second PING requires the rearmed native timer.
+                    let second = read_channel_keepalive_probe(&mut socket);
+                    assert_ne!(first, second, "each probe needs a distinct correlation token");
+                    let mut response = channel_keepalive_ack(second);
+                    response.extend(frame(0, 0, &message(b"after-two-pings")));
+                    response.extend(headers(&[("grpc-status", "0")], true));
+                    socket.write_all(&response).unwrap();
+                } else {
+                    let mut wrong = first;
+                    wrong[0] ^= 0x80;
+                    socket.write_all(&channel_keepalive_ack(wrong)).unwrap();
+                    // A syntactically valid ACK with another token must leave
+                    // the original acknowledgement deadline armed.
+                }
+                channel_keepalive_eof(&mut socket);
+            });
+            let runtime = if multithread {
+                RuntimeBuilder::new().worker_threads(2).build().unwrap()
+            } else { RuntimeBuilder::current_thread().build().unwrap() };
+            let complete = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&complete);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let channel = Channel::builder(format!("http://{address}"))
+                    .timeout(Duration::from_secs(4))
+                    .keepalive_interval(Duration::from_millis(30))
+                    .keepalive_timeout(Duration::from_secs(1))
+                    .connect().await.unwrap();
+                let io = TcpStream::connect_timeout(address, Duration::from_secs(3)).await.unwrap();
+                let mut stream = channel.server_streaming_on(
+                    &cx, io, "/test.Values/Watch",
+                    Request::new(Bytes::from_static(b"native-request")), IdentityCodec,
+                ).await.unwrap();
+                if acknowledge {
+                    assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"after-two-pings");
+                    assert!(stream.message().await.unwrap().is_none());
+                    assert_eq!(stream.terminal_status().unwrap().code(), Code::Ok);
+                } else {
+                    let error = stream.message().await.unwrap_err();
+                    assert_eq!(error.code(), Code::Unavailable);
+                    assert!(error.message().contains("keepalive acknowledgement timed out"));
+                    assert_eq!(stream.terminal_status().unwrap().code(), Code::Unavailable);
+                }
+                assert!(stream.message().await.unwrap().is_none());
+                assert!(!cx.is_cancel_requested(), "peer liveness failure must not cancel the parent");
+                complete.store(true, Ordering::Release);
+            }));
+            peer.join().expect("native channel keepalive peer assertions");
+            assert!(observed.load(Ordering::Acquire), "native channel keepalive assertions did not finish");
+        }
+    }
+}
+
+#[test]
+fn native_channel_keepalive_parent_cancel_wakes_a_parked_call_with_an_outstanding_ping() {
+    use crate::grpc::client::Channel;
+
+    for multithread in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (witness, witnessed) = sync_channel::<Cx>(1);
+        let peer = std::thread::spawn(move || {
+            let (mut socket, early_probe) = accept_channel_keepalive_peer(&listener);
+            let _probe = early_probe.unwrap_or_else(|| read_channel_keepalive_probe(&mut socket));
+            let cx = witnessed.recv_timeout(Duration::from_secs(3))
+                .expect("stream demand reached Pending before cancellation");
+            // Trigger only after the wire proves the outstanding PING and
+            // the caller proves a parked wait; do not substitute a sleep.
+            cx.cancel_with(CancelKind::User, Some("cancel channel keepalive wait"));
+            channel_keepalive_eof(&mut socket);
+        });
+        let runtime = if multithread {
+            RuntimeBuilder::new().worker_threads(2).build().unwrap()
+        } else { RuntimeBuilder::current_thread().build().unwrap() };
+        let complete = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&complete);
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let channel = Channel::builder(format!("http://{address}"))
+                .timeout(Duration::from_secs(4))
+                .keepalive_interval(Duration::from_millis(30))
+                .keepalive_timeout(Duration::from_secs(3))
+                .connect().await.unwrap();
+            let io = TcpStream::connect_timeout(address, Duration::from_secs(3)).await.unwrap();
+            let mut stream = channel.server_streaming_on(
+                &cx, io, "/test.Values/Watch",
+                Request::new(Bytes::from_static(b"native-request")), IdentityCodec,
+            ).await.unwrap();
+            let mut sent = false;
+            let result = poll_fn(|task| {
+                let result = Pin::new(&mut stream).poll_next(task);
+                if result.is_pending() && !sent {
+                    witness.try_send(cx.clone()).unwrap();
+                    sent = true;
+                }
+                result
+            }).await.expect("parent cancellation is a terminal observation").unwrap_err();
+            assert!(sent, "the response owner never parked");
+            assert_eq!(result.code(), Code::Cancelled);
+            assert_eq!(stream.terminal_status().unwrap().code(), Code::Cancelled);
+            assert!(stream.message().await.unwrap().is_none());
+            complete.store(true, Ordering::Release);
+        }));
+        peer.join().expect("cancelled keepalive transport retired");
+        assert!(observed.load(Ordering::Acquire), "cancelled channel assertions did not finish");
+    }
 }
 
 #[test]
