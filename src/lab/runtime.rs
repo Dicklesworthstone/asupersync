@@ -4080,9 +4080,10 @@ impl LabRuntime {
         self.oracles.hydrate_temporal_from_state(&self.state, now);
         // Feed the anytime-valid e-process monitor once per run that advanced
         // the lab. `report()` does not advance execution, so re-reporting the
-        // same state must not count as fresh evidence.
+        // same state must not count as fresh evidence. An oracle with no
+        // observed activity must not turn an unchecked pass into confidence.
         let oracle_report = if steps_delta > 0 {
-            self.oracles.report_and_observe(now)
+            self.oracles.report_and_observe_instrumented(now)
         } else {
             self.oracles.report(now)
         };

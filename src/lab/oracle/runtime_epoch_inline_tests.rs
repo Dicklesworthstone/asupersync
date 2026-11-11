@@ -10,6 +10,40 @@
     use crate::test_utils::init_test_logging;
 
     #[test]
+    fn instrumentation_distinguishes_notifications_from_initial_module_records() {
+        let oracle = RuntimeEpochOracle::with_default_config();
+        assert!(oracle.get_statistics().tracked_modules > 0);
+        assert!(!oracle.has_observed_events());
+        assert!(oracle.check(Time::ZERO).is_ok());
+        assert!(
+            !oracle.has_observed_events(),
+            "checking is not instrumentation"
+        );
+
+        oracle.notify_epoch_update(RuntimeModule::Scheduler, EpochId::new(1), Time::ZERO);
+        assert!(oracle.has_observed_events());
+        assert_eq!(oracle.get_statistics().transitions_tracked, 0);
+
+        oracle.reset();
+        assert!(!oracle.has_observed_events());
+        oracle.notify_epoch_transition_start(RuntimeModule::Scheduler, EpochId::new(1), Time::ZERO);
+        assert!(oracle.has_observed_events());
+        assert_eq!(oracle.get_statistics().transitions_tracked, 0);
+
+        oracle.reset();
+        assert!(!oracle.has_observed_events());
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(2),
+            Time::ZERO,
+        );
+        assert!(oracle.has_observed_events());
+        assert_eq!(oracle.get_statistics().transitions_tracked, 1);
+        oracle.reset();
+        assert!(!oracle.has_observed_events());
+    }
+
+    #[test]
     fn test_normal_epoch_transitions() {
         init_test_logging();
 

@@ -332,7 +332,8 @@ pub struct OracleSuite {
     /// Continuously monitors oracle reports via betting martingales so that
     /// peeking after every scheduling step preserves Type-I error control
     /// (Ville's inequality). When `Some`, initialized with standard invariants
-    /// (task_leak, obligation_leak, quiescence) and fed every oracle report.
+    /// (task_leak, obligation_leak, quiescence). `LabRuntime` feeds it once per
+    /// advancing run, excluding passes from oracles with no observed activity.
     pub eprocess_monitor: Option<EProcessMonitor>,
 }
 
@@ -1233,12 +1234,55 @@ impl OracleSuite {
     /// This closes the loop between oracle observations and statistical
     /// evidence accumulation: each call updates the per-invariant betting
     /// martingales, so that `eprocess_monitor.any_rejected()` provides a
-    /// continuously valid (Ville's inequality) rejection signal.
+    /// continuously valid (Ville's inequality) rejection signal. This legacy
+    /// method observes every reported pass; use
+    /// [`Self::report_and_observe_instrumented`] to exclude unchecked passes.
     #[must_use]
     pub fn report_and_observe(&mut self, now: Time) -> OracleReport {
         let report = self.report(now);
         if let Some(ref mut monitor) = self.eprocess_monitor {
             monitor.observe_report(&report);
+        }
+        report
+    }
+
+    /// Reports all oracles while observing only failures and instrumented passes.
+    ///
+    /// The returned report retains the established fields and counters. Unlike
+    /// [`Self::report_and_observe`], an untouched oracle supplies no statistical
+    /// evidence that its invariant holds. Manually fed oracles remain eligible;
+    /// coverage is based on their activity, not a fixed list of runtime hooks.
+    #[must_use]
+    pub fn report_and_observe_instrumented(&mut self, now: Time) -> OracleReport {
+        let report = self.report(now);
+        let observed: Vec<&str> = report
+            .entries
+            .iter()
+            .filter(|entry| {
+                let has_stats = entry.stats.entities_tracked > 0 || entry.stats.events_recorded > 0;
+                match entry.invariant.as_str() {
+                    // The epoch oracle preallocates its module records. Their
+                    // existence is not evidence that a notification arrived.
+                    "runtime_epoch" => self.runtime_epoch.has_observed_events(),
+                    // Legacy counters omit task-only protocol events and
+                    // registration-only supervision/ordering observations.
+                    "cancellation_protocol" => self.cancellation_protocol.has_observed_events(),
+                    "supervision" => has_stats || self.supervision.supervisor_count() > 0,
+                    "cancel_signal_ordering" => {
+                        has_stats
+                            || self
+                                .cancel_signal_ordering
+                                .get_statistics()
+                                .tracked_relationships
+                                > 0
+                    }
+                    _ => has_stats,
+                }
+            })
+            .map(|entry| entry.invariant.as_str())
+            .collect();
+        if let Some(ref mut monitor) = self.eprocess_monitor {
+            monitor.observe_instrumented_report(&report, &observed);
         }
         report
     }

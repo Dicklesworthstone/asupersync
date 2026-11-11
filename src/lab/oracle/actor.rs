@@ -534,6 +534,12 @@ impl SupervisionOracle {
         self.violations.clear();
     }
 
+    /// Returns the number of explicitly registered supervisors.
+    #[must_use]
+    pub fn supervisor_count(&self) -> usize {
+        self.supervisors.len()
+    }
+
     /// Returns the number of failures recorded.
     #[must_use]
     pub fn failure_count(&self) -> usize {

@@ -24,13 +24,13 @@
 //! - **Order violations**: Modules advancing epochs out of sequence
 
 use crate::epoch::EpochId;
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::types::Time;
 use parking_lot::RwLock;
 use std::backtrace::Backtrace;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Runtime modules that participate in epoch synchronization.
 ///
@@ -442,6 +442,8 @@ pub struct RuntimeEpochOracle {
     transitions_tracked: AtomicU64,
     violations_detected: AtomicU64,
     consistency_checks_performed: AtomicU64,
+    /// Real notifications, distinct from the module records created by `new`.
+    observed_events: AtomicBool,
 }
 
 impl Default for RuntimeEpochOracle {
@@ -462,6 +464,7 @@ impl RuntimeEpochOracle {
             transitions_tracked: AtomicU64::new(0),
             violations_detected: AtomicU64::new(0),
             consistency_checks_performed: AtomicU64::new(0),
+            observed_events: AtomicBool::new(false),
         };
 
         // Initialize all modules to epoch 1
@@ -490,6 +493,7 @@ impl RuntimeEpochOracle {
         from_epoch: EpochId,
         now: Time,
     ) {
+        self.observed_events.store(true, Ordering::Relaxed);
         let violation = {
             let mut states = self.module_states.write();
             states.get_mut(&module).and_then(|state| {
@@ -528,6 +532,7 @@ impl RuntimeEpochOracle {
             },
         }
 
+        self.observed_events.store(true, Ordering::Relaxed);
         let expected_violation;
         let outcome = {
             let mut states = self.module_states.write();
@@ -614,6 +619,7 @@ impl RuntimeEpochOracle {
 
     /// Notify the oracle of a state update using a specific epoch.
     pub fn notify_epoch_update(&self, module: RuntimeModule, update_epoch: EpochId, now: Time) {
+        self.observed_events.store(true, Ordering::Relaxed);
         let current_epoch = {
             let states = self.module_states.read();
             states
@@ -736,6 +742,16 @@ impl RuntimeEpochOracle {
         self.violations_detected.store(0, Ordering::Relaxed);
         self.consistency_checks_performed
             .store(0, Ordering::Relaxed);
+        self.observed_events.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether an epoch notification has arrived since construction or reset.
+    ///
+    /// Initial module records and consistency checks alone are not runtime
+    /// observations. Starts and updates count even before a transition completes.
+    #[must_use]
+    pub fn has_observed_events(&self) -> bool {
+        self.observed_events.load(Ordering::Relaxed)
     }
 
     /// Get the current global epoch.

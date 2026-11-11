@@ -440,6 +440,53 @@
     }
 
     #[test]
+    fn instrumented_report_skips_unobserved_passes_but_never_failures() {
+        let names = ["observed", "untouched", "failed", "absent"];
+        let mut monitor = EProcessMonitor::new(&names, EProcessConfig::default());
+        let mut report = make_violation_report(&names[..3], &["failed"]);
+        for entry in &mut report.entries {
+            entry.stats.entities_tracked = 0;
+            entry.stats.events_recorded = 0;
+        }
+        // Even a nonzero constructor count cannot substitute for coverage.
+        report.entries[1].stats.entities_tracked = 7;
+
+        for _ in 0..20 {
+            monitor.observe_instrumented_report(&report, &["observed", "absent", "unknown"]);
+        }
+
+        let observed = monitor.process("observed").unwrap();
+        assert_eq!(observed.observations, 20);
+        assert!(observed.current < 1.0);
+        assert_eq!(observed.violations_observed, 0);
+        for name in ["untouched", "absent"] {
+            let process = monitor.process(name).unwrap();
+            assert_eq!(process.observations, 0, "{name} supplied no observation");
+            assert_eq!(process.current, 1.0);
+            assert!(process.history.is_empty());
+        }
+        let failed = monitor.process("failed").unwrap();
+        assert_eq!(failed.observations, 20);
+        assert_eq!(failed.violations_observed, 20);
+        assert_eq!(monitor.rejected_invariants(), vec!["failed"]);
+    }
+
+    #[test]
+    fn legacy_report_keeps_observing_zero_counter_passes() {
+        let mut monitor = EProcessMonitor::standard();
+        let mut report = make_clean_report(&["task_leak"]);
+        report.entries[0].stats.entities_tracked = 0;
+        report.entries[0].stats.events_recorded = 0;
+
+        monitor.observe_report(&report);
+
+        let task_leak = monitor.process("task_leak").unwrap();
+        assert_eq!(task_leak.observations, 1);
+        assert!(task_leak.current < 1.0);
+        assert_eq!(monitor.process("quiescence").unwrap().observations, 0);
+    }
+
+    #[test]
     fn monitor_observe_raw() {
         let mut monitor = EProcessMonitor::standard();
 

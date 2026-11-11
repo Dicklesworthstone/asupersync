@@ -384,13 +384,43 @@ impl EProcessMonitor {
     /// Feeds an oracle report into the monitor.
     ///
     /// Each invariant's e-process is updated based on whether a violation
-    /// was detected in the report.
+    /// was detected in the report. This legacy entry point treats every
+    /// reported pass as an observation, including an oracle that received no
+    /// events. Use [`Self::observe_instrumented_report`] when instrumentation
+    /// coverage is known.
     pub fn observe_report(&mut self, report: &OracleReport) {
         for ep in &mut self.processes {
             // Only update invariants that actually appear in the report.
             // A missing entry means the oracle didn't check this invariant,
             // so we must not silently treat it as passing.
             if let Some(entry) = report.entries.iter().find(|e| e.invariant == ep.invariant) {
+                ep.observe(!entry.passed);
+            }
+        }
+    }
+
+    /// Feeds failures and explicitly observed passes into the monitor.
+    ///
+    /// `observed_invariants` identifies the oracles that actually received
+    /// observations for this report. A passing entry outside that set leaves
+    /// its e-process unchanged; it supplies no evidence that the invariant
+    /// holds. A reported failure is always observed, even when its counters
+    /// are zero or its name is absent from the set.
+    ///
+    /// The caller supplies coverage because entity counts can include
+    /// constructor-created placeholders, and legacy event counts do not
+    /// describe every oracle's input. [`super::OracleSuite::report_and_observe_instrumented`]
+    /// derives this set from the suite's actual activity. Neither missing
+    /// entries nor unknown names synthesize observations.
+    pub fn observe_instrumented_report(
+        &mut self,
+        report: &OracleReport,
+        observed_invariants: &[&str],
+    ) {
+        for ep in &mut self.processes {
+            if let Some(entry) = report.entries.iter().find(|e| e.invariant == ep.invariant)
+                && (!entry.passed || observed_invariants.contains(&entry.invariant.as_str()))
+            {
                 ep.observe(!entry.passed);
             }
         }

@@ -638,6 +638,128 @@
     }
 
     #[test]
+    fn instrumented_suite_does_not_turn_untouched_oracles_into_evidence() {
+        let mut suite = OracleSuite::new();
+        suite.eprocess_monitor = Some(EProcessMonitor::all_invariants());
+        let legacy_report = suite.report(Time::ZERO);
+        assert!(
+            legacy_report
+                .entry("runtime_epoch")
+                .unwrap()
+                .stats
+                .entities_tracked
+                > 0
+        );
+
+        let report = suite.report_and_observe_instrumented(Time::ZERO);
+
+        assert_eq!(
+            report.to_json(),
+            legacy_report.to_json(),
+            "report schema and counters stay compatible"
+        );
+        assert!(report.all_passed());
+        for result in suite.eprocess_monitor.as_ref().unwrap().results() {
+            assert_eq!(
+                result.observations, 0,
+                "{} received no activity",
+                result.invariant
+            );
+            assert_eq!(result.e_value, 1.0);
+        }
+
+        // Direct callers of the legacy suite entry point keep its behavior.
+        let _ = suite.report_and_observe(Time::ZERO);
+        for result in suite.eprocess_monitor.as_ref().unwrap().results() {
+            assert_eq!(
+                result.observations, 1,
+                "legacy observation of {}",
+                result.invariant
+            );
+        }
+    }
+
+    #[test]
+    fn instrumented_suite_keeps_real_inputs_missing_from_legacy_counters() {
+        use crate::actor::ActorId;
+        use crate::epoch::EpochId;
+        use crate::supervision::{EscalationPolicy, RestartPolicy};
+        use crate::types::{RegionId, TaskId};
+        use crate::util::ArenaIndex;
+
+        let mut suite = OracleSuite::new();
+        suite.eprocess_monitor = Some(EProcessMonitor::all_invariants());
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let parent = TaskId::from_arena(ArenaIndex::new(0, 0));
+        let child = TaskId::from_arena(ArenaIndex::new(1, 0));
+        suite.cancellation_protocol.on_task_create(child, region);
+        suite.supervision.register_supervisor(
+            ActorId::from_task(parent),
+            RestartPolicy::OneForOne,
+            3,
+            EscalationPolicy::Stop,
+        );
+        suite
+            .cancel_signal_ordering
+            .on_task_spawned(parent, child, region, region);
+        suite.runtime_epoch.notify_epoch_update(
+            RuntimeModule::Scheduler,
+            EpochId::new(1),
+            Time::ZERO,
+        );
+
+        let report = suite.report_and_observe_instrumented(Time::ZERO);
+        assert!(report.all_passed());
+        let observed = [
+            "cancellation_protocol",
+            "supervision",
+            "cancel_signal_ordering",
+            "runtime_epoch",
+        ];
+        for name in observed {
+            assert_eq!(
+                report.entry(name).unwrap().stats.events_recorded,
+                0,
+                "legacy counter for {name}"
+            );
+            let process = suite
+                .eprocess_monitor
+                .as_ref()
+                .unwrap()
+                .process(name)
+                .unwrap();
+            assert_eq!(process.observations, 1, "real input to {name} was observed");
+            assert_eq!(process.violations_observed, 0);
+        }
+        assert_eq!(
+            suite
+                .eprocess_monitor
+                .as_ref()
+                .unwrap()
+                .process("actor_leak")
+                .unwrap()
+                .observations,
+            0
+        );
+
+        suite.reset();
+        let _ = suite.report_and_observe_instrumented(Time::ZERO);
+        for name in observed {
+            assert_eq!(
+                suite
+                    .eprocess_monitor
+                    .as_ref()
+                    .unwrap()
+                    .process(name)
+                    .unwrap()
+                    .observations,
+                1,
+                "reset left no observed {name} input"
+            );
+        }
+    }
+
+    #[test]
     fn oracle_report_debug_clone() {
         let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);

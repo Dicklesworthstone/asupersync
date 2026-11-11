@@ -6391,6 +6391,7 @@
     #[test]
     fn report_feeds_the_oracle_eprocess_monitor() {
         let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(10_000));
+        lab.oracles.eprocess_monitor = Some(crate::lab::oracle::EProcessMonitor::all_invariants());
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (task_id, _handle) = lab
             .state
@@ -6402,14 +6403,11 @@
 
         let run = lab.run_until_quiescent_with_report();
         assert!(run.steps_delta > 0, "the run advanced the lab");
-        let reported: Vec<&str> = ["task_leak", "obligation_leak", "quiescence"]
-            .into_iter()
-            .filter(|name| run.oracle_report.entry(name).is_some())
-            .collect();
-        assert!(
-            !reported.is_empty(),
-            "the report covers a monitored invariant"
-        );
+        let observed = ["task_leak", "quiescence"];
+        for name in observed {
+            let entry = run.oracle_report.entry(name).expect("reported invariant");
+            assert!(entry.stats.events_recorded > 0, "the run fed {name}");
+        }
         let observations = |lab: &LabRuntime, name: &str| {
             lab.oracles
                 .eprocess_monitor
@@ -6419,22 +6417,38 @@
                 .expect("monitored invariant")
                 .observations
         };
-        for name in &reported {
+        for name in observed {
             assert_eq!(
                 observations(&lab, name),
                 1,
                 "{name}: the run is observed once"
             );
         }
+        for name in ["obligation_leak", "actor_leak", "runtime_epoch"] {
+            let entry = run.oracle_report.entry(name).expect("reported invariant");
+            assert!(entry.passed);
+            assert_eq!(
+                entry.stats.events_recorded, 0,
+                "the run did not feed {name}"
+            );
+            assert_eq!(
+                observations(&lab, name),
+                0,
+                "{name}: unchecked passes supply no evidence"
+            );
+        }
 
         // A plain report does not advance the lab, so it adds no evidence.
         let _ = lab.report();
-        for name in &reported {
+        for name in observed {
             assert_eq!(
                 observations(&lab, name),
                 1,
                 "{name}: re-reporting the same state is not a new observation"
             );
+        }
+        for name in ["obligation_leak", "actor_leak", "runtime_epoch"] {
+            assert_eq!(observations(&lab, name), 0);
         }
     }
 
