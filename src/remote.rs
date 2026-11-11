@@ -39,8 +39,11 @@
 //! child region until handler completion, expiry, explicit cancellation, or
 //! transport loss has drained to quiescence. Native TLS builds also expose
 //! `NativeRemoteRuntime` (feature `tls`), which maps the synchronous [`RemoteRuntime`] trait
-//! onto runtime-owned V3 session tasks without blocking the caller or detaching
+//! onto runtime-owned V3/V4 session tasks without blocking the caller or detaching
 //! network work from runtime shutdown.
+//! V4 preserves the V3 lifecycle while transporting remaining deadline duration
+//! instead of an origin-process monotonic timestamp. Native publication deducts
+//! queue, connection, and retry time and keeps the origin deadline active.
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 use crate::channel::mpsc;
@@ -303,6 +306,19 @@ pub trait RemoteRuntime: Send + Sync + fmt::Debug {
         destination: &NodeId,
         envelope: MessageEnvelope<RemoteMessage>,
     ) -> Result<(), RemoteError>;
+
+    /// Sends a message while retaining its origin's clock and cancellation
+    /// context. Transports that serialize relative deadlines use this hook to
+    /// account for time spent waiting for publication or connection setup.
+    /// Existing transports retain their original behavior by default.
+    fn send_message_with_cx(
+        &self,
+        _cx: &Cx,
+        destination: &NodeId,
+        envelope: MessageEnvelope<RemoteMessage>,
+    ) -> Result<(), RemoteError> {
+        self.send_message(destination, envelope)
+    }
 
     /// Registers a pending local task expecting a result.
     fn register_task(
@@ -1167,7 +1183,7 @@ pub fn spawn_remote(
             sender_time,
             RemoteMessage::SpawnRequest(req),
         );
-        if let Err(err) = runtime.send_message(&node, envelope) {
+        if let Err(err) = runtime.send_message_with_cx(cx, &node, envelope) {
             runtime.unregister_task(remote_task_id);
             return Err(err);
         }
@@ -2259,6 +2275,24 @@ impl RemoteProtocolVersion {
     /// connection-owned cancellation and lease renewal. A V3 request must be
     /// handled by the session driver; it must never fall back to V1 execution.
     pub const V3: Self = Self::new(3, 0);
+    /// Session protocol with deadlines relative to request publication.
+    ///
+    /// V4 retains V3's lifecycle and idempotency contract. The wire budget's
+    /// `deadline_nanos` is a remaining duration, rebased onto the authenticated
+    /// receiver's clock. V1–V3 retain their original absolute-clock encoding.
+    /// Transit time cannot be measured between independent monotonic clocks;
+    /// the origin must retain its own deadline and cancel or close the session
+    /// when it expires. V4 is negotiated by exact version match.
+    pub const V4: Self = Self::new(4, 0);
+
+    #[cfg(feature = "tls")]
+    const fn uses_session(self) -> bool {
+        matches!((self.major, self.minor), (3 | 4, 0))
+    }
+
+    const fn uses_relative_deadline(self) -> bool {
+        matches!((self.major, self.minor), (4, 0))
+    }
 
     /// Creates a protocol version.
     #[must_use]
@@ -3208,6 +3242,29 @@ struct RemoteServiceWireBudget {
     priority: u8,
 }
 
+impl RemoteServiceWireBudget {
+    fn from_budget_at(budget: Budget, version: RemoteProtocolVersion, origin_now: Time) -> Self {
+        let mut wire = Self::from(budget);
+        if version.uses_relative_deadline() {
+            wire.deadline_nanos = budget
+                .deadline
+                .map(|deadline| deadline.duration_since(origin_now));
+        }
+        wire
+    }
+
+    #[cfg(feature = "tls")]
+    fn into_budget_at(self, version: RemoteProtocolVersion, receiver_now: Time) -> Budget {
+        let mut budget = Budget::from(self);
+        if version.uses_relative_deadline() {
+            budget.deadline = self
+                .deadline_nanos
+                .map(|remaining| receiver_now.saturating_add_nanos(remaining));
+        }
+        budget
+    }
+}
+
 impl From<Budget> for RemoteServiceWireBudget {
     fn from(budget: Budget) -> Self {
         Self {
@@ -3257,9 +3314,33 @@ pub struct RemoteServiceWireRequest {
 impl RemoteServiceWireRequest {
     /// Builds a wire request after checking the asserted hello identity agrees
     /// with the local spawn request.
+    ///
+    /// Finite V4 deadlines require [`Self::from_spawn_request_at`] because an
+    /// absolute process-local instant cannot be interpreted without its clock.
     pub fn from_spawn_request(
         hello: RemotePeerHello,
         request: &SpawnRequest,
+    ) -> Result<Self, RemoteComputationServiceError> {
+        if hello.protocol_version().uses_relative_deadline()
+            && request.budget.is_some_and(|budget| budget.deadline.is_some())
+        {
+            return Err(Self::missing_origin_clock());
+        }
+        Self::from_spawn_request_at(hello, request, Time::ZERO)
+    }
+
+    /// Builds a request using an explicit reading of the origin's clock.
+    ///
+    /// V4 encodes a saturating remaining duration, including zero for an
+    /// expired deadline. Older versions preserve their absolute wire values.
+    /// Construct finite V4 snapshots immediately before sending on a custom
+    /// transport. Retrying native clients should instead use
+    /// `RemoteComputationClient::start_session_from_spawn_request`, which
+    /// accounts for connection, queue, and retry delays at the actual write.
+    pub fn from_spawn_request_at(
+        hello: RemotePeerHello,
+        request: &SpawnRequest,
+        origin_now: Time,
     ) -> Result<Self, RemoteComputationServiceError> {
         if hello.peer_node() != &request.origin_node {
             return Err(RemoteComputationServiceError::OriginIdentityMismatch {
@@ -3272,6 +3353,7 @@ impl RemoteServiceWireRequest {
             .expect("right-shifted u128 idempotency key fits u64");
         let idempotency_key_low = u64::try_from(idempotency_key & u128::from(u64::MAX))
             .expect("masked u128 idempotency key fits u64");
+        let version = hello.protocol_version();
         Ok(Self {
             hello,
             remote_task_id: request.remote_task_id.raw(),
@@ -3281,10 +3363,25 @@ impl RemoteServiceWireRequest {
             lease_subsec_nanos: request.lease.subsec_nanos(),
             idempotency_key_high,
             idempotency_key_low,
-            budget: request.budget.map(Into::into),
+            budget: request
+                .budget
+                .map(|budget| RemoteServiceWireBudget::from_budget_at(budget, version, origin_now)),
             origin_region: request.origin_region,
             origin_task: request.origin_task,
         })
+    }
+
+    fn missing_origin_clock() -> RemoteComputationServiceError {
+        RemoteComputationServiceError::Transport(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "finite V4 deadlines require the original SpawnRequest and its origin clock",
+        ))
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    fn has_relative_deadline(&self) -> bool {
+        self.hello.protocol_version().uses_relative_deadline()
+            && self.budget.is_some_and(|budget| budget.deadline_nanos.is_some())
     }
 
     /// Peer negotiation metadata presented on the authenticated stream.
@@ -3307,7 +3404,7 @@ impl RemoteServiceWireRequest {
     }
 
     #[cfg(feature = "tls")]
-    fn into_spawn_request(self) -> Result<SpawnRequest, String> {
+    fn into_spawn_request_at(self, receiver_now: Time) -> Result<SpawnRequest, String> {
         if self.lease_subsec_nanos >= 1_000_000_000 {
             return Err(format!(
                 "remote service lease nanoseconds must be below 1000000000, got {}",
@@ -3315,6 +3412,7 @@ impl RemoteServiceWireRequest {
             ));
         }
         let origin_node = self.hello.peer_node().clone();
+        let version = self.hello.protocol_version();
         let idempotency_key =
             (u128::from(self.idempotency_key_high) << 64) | u128::from(self.idempotency_key_low);
         Ok(SpawnRequest {
@@ -3323,7 +3421,9 @@ impl RemoteServiceWireRequest {
             input: RemoteInput::new(self.input),
             lease: Duration::new(self.lease_secs, self.lease_subsec_nanos),
             idempotency_key: IdempotencyKey::from_raw(idempotency_key),
-            budget: self.budget.map(Into::into),
+            budget: self
+                .budget
+                .map(|budget| budget.into_budget_at(version, receiver_now)),
             origin_node,
             origin_region: self.origin_region,
             origin_task: self.origin_task,
@@ -4392,7 +4492,7 @@ impl fmt::Display for RemoteServiceSessionError {
             Self::WrongProtocol { presented } => {
                 write!(
                     f,
-                    "remote computation session requires protocol V3, got {presented}"
+                    "remote computation session requires protocol V3 or V4, got {presented}"
                 )
             }
             Self::InvalidLease => write!(f, "remote computation session lease must be nonzero"),
@@ -4503,6 +4603,8 @@ pub struct RemoteComputationSession<IO> {
     remote_task_id: RemoteTaskId,
     max_frame_bytes: usize,
     next_renewal_id: Option<u64>,
+    #[cfg(not(target_arch = "wasm32"))]
+    origin: Option<RemoteRequestOrigin>,
 }
 
 #[cfg(feature = "tls")]
@@ -4521,7 +4623,11 @@ impl<IO> RemoteComputationSession<IO>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Starts one V3 operation over an already-authenticated transport.
+    /// Starts one V3 or V4 operation over an already-authenticated transport.
+    ///
+    /// A finite V4 request is a publication-time snapshot: construct it with
+    /// `from_spawn_request_at` immediately before this call. The native client
+    /// accepts the original spawn request to account for establishment delays.
     pub async fn start(
         cx: &Cx,
         transport: IO,
@@ -4529,7 +4635,7 @@ where
         limits: RemoteServiceWireLimits,
     ) -> Result<RemoteComputationSessionStart<IO>, RemoteServiceSessionError> {
         let presented = request.hello().protocol_version();
-        if presented != RemoteProtocolVersion::V3 {
+        if !presented.uses_session() {
             return Err(RemoteServiceSessionError::WrongProtocol { presented });
         }
         if request.session_lease().is_none() {
@@ -4554,6 +4660,8 @@ where
                     remote_task_id,
                     max_frame_bytes: limits.max_frame_bytes(),
                     next_renewal_id: Some(1),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    origin: None,
                 }))
             }
             RemoteServiceSessionEvent::Terminal { response } => {
@@ -4691,8 +4799,20 @@ where
                 write_remote_service_frame(cx, framed, command, self.max_frame_bytes).await?;
             }
             read_remote_service_frame(cx, framed).await
-        })
-        .await;
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        let exchange = match self.origin.as_ref() {
+            Some(origin) => {
+                futures_lite::future::race(exchange, async {
+                    origin.cancellation().await;
+                    RemoteSessionIoRace::Cancelled
+                })
+                .await
+            }
+            None => exchange.await,
+        };
+        #[cfg(target_arch = "wasm32")]
+        let exchange = exchange.await;
         match exchange {
             RemoteSessionIoRace::Completed(Ok(event)) => Ok(event),
             RemoteSessionIoRace::Completed(Err(error)) => {
@@ -4922,9 +5042,7 @@ const fn remote_service_protocol_kind(version: RemoteProtocolVersion) -> RemoteS
         && version.minor == RemoteProtocolVersion::V2.minor
     {
         RemoteServiceProtocolKind::V2Idempotent
-    } else if version.major == RemoteProtocolVersion::V3.major
-        && version.minor == RemoteProtocolVersion::V3.minor
-    {
+    } else if version.uses_session() {
         RemoteServiceProtocolKind::V3Session
     } else {
         RemoteServiceProtocolKind::Unsupported
@@ -5085,8 +5203,7 @@ where
     // `LifecycleUnavailable` refusal an inline-mode server sends it; the
     // envelope therefore follows the peer's protocol version, not the
     // server's execution mode.
-    let uses_v3_session_envelope =
-        wire_request.hello().protocol_version() == RemoteProtocolVersion::V3;
+    let uses_v3_session_envelope = wire_request.hello().protocol_version().uses_session();
     // Retain the transport's copy until the response is completely flushed.
     // Lease-bound execution also gives its child region a copy before spawn.
     let mut peer_permit = None;
@@ -5122,7 +5239,9 @@ where
                 }
                 .with_no_commit()
             } else {
-                match wire_request.into_spawn_request() {
+                // Relative deadlines acquire a receiver-local epoch only after
+                // TLS identity, version, registry, and capacity admission.
+                match wire_request.into_spawn_request_at(cx.now()) {
                     Err(diagnostic) => RemoteServiceWireResponse::Rejected {
                         remote_task_id,
                         code: RemoteServiceRejectionCode::MalformedRequest,
@@ -6783,6 +6902,113 @@ where
     .await
 }
 
+/// Local publication state deliberately kept outside the serialized request.
+/// Retaining the absolute deadline prevents retries or scheduler queueing from
+/// refreshing a V4 duration. Retaining the Cx also keeps the origin's clock and
+/// cancellation live after the synchronous spawn call returns.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone)]
+struct RemoteRequestOrigin {
+    cx: Cx,
+    request_deadline: Option<Time>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteRequestOrigin {
+    fn new(cx: &Cx, request: &SpawnRequest) -> Self {
+        Self {
+            cx: cx.clone(),
+            request_deadline: request.budget.and_then(|budget| budget.deadline),
+        }
+    }
+
+    fn request_at_dispatch(&self, request: &RemoteServiceWireRequest) -> RemoteServiceWireRequest {
+        let mut request = request.clone();
+        if request.hello.protocol_version().uses_relative_deadline() {
+            if let Some(budget) = request.budget.as_mut() {
+                budget.deadline_nanos = self
+                    .request_deadline
+                    .map(|deadline| deadline.duration_since(self.cx.now()));
+            }
+        }
+        request
+    }
+
+    fn deadline(&self) -> Option<Time> {
+        match (self.request_deadline, self.cx.budget().deadline) {
+            (Some(request), Some(caller)) => Some(request.min(caller)),
+            (request, caller) => request.or(caller),
+        }
+    }
+
+    fn deadline_reason(&self) -> CancelReason {
+        CancelReason::with_origin(CancelKind::Deadline, self.cx.region_id(), self.cx.now())
+            .with_message("remote origin deadline expired")
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation_reason().is_some()
+    }
+
+    fn cancellation_reason(&self) -> Option<CancelReason> {
+        if self.deadline().is_some_and(|deadline| self.cx.now() >= deadline) {
+            return Some(self.deadline_reason());
+        }
+        self.cx.checkpoint().err().map(|_| {
+            self.cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled)
+        })
+    }
+
+    async fn cancellation(&self) -> CancelReason {
+        if self.deadline().is_some_and(|deadline| self.cx.now() >= deadline) {
+            return self.deadline_reason();
+        }
+        let cancelled = async {
+            remote_client_wait_for_cancellation(&self.cx).await;
+            self.cx
+                .cancel_reason()
+                .unwrap_or_else(CancelReason::parent_cancelled)
+        };
+        match self.deadline() {
+            Some(deadline) => {
+                let mut sleep = std::pin::pin!(self.cx.sleep_until_on_clock(deadline));
+                futures_lite::future::race(cancelled, async {
+                    // Only the origin clock may classify this as Deadline.
+                    // A cancelled ambient driver must not complete the timer
+                    // early and replace its User/Shutdown cancellation cause.
+                    std::future::poll_fn(|task_cx| sleep.as_mut().poll_deadline(task_cx)).await;
+                    self.deadline_reason()
+                })
+                .await
+            }
+            None => cancelled.await,
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_client_race_origin<F>(
+    origin: Option<&RemoteRequestOrigin>,
+    future: F,
+) -> RemoteClientCancelRace<F::Output>
+where
+    F: Future,
+{
+    match origin {
+        Some(origin) => {
+            futures_lite::future::race(
+                async { RemoteClientCancelRace::Completed(future.await) },
+                async {
+                    origin.cancellation().await;
+                    RemoteClientCancelRace::Cancelled
+                },
+            )
+            .await
+        }
+        None => RemoteClientCancelRace::Completed(future.await),
+    }
+}
+
 /// Native TCP+mTLS client for the authenticated remote-computation service.
 ///
 /// Every protocol version retries only failures proven to precede request
@@ -6929,7 +7155,7 @@ impl RemoteComputationClient {
         self.bootstrap_endpoints[(attempt.saturating_sub(1)) % self.bootstrap_endpoints.len()]
     }
 
-    /// Connects, authenticates, and starts one same-connection V3 operation.
+    /// Connects, authenticates, and starts one same-connection V3 or V4 operation.
     ///
     /// The configured attempt timeout bounds TCP, TLS, request delivery, and
     /// the initial accepted/terminal event only. Once returned, the session's
@@ -6945,26 +7171,66 @@ impl RemoteComputationClient {
         RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
         RemoteComputationClientError,
     > {
-        self.start_session_before_dispatch(cx, request, None).await
+        self.start_session_before_dispatch(cx, request, None, None)
+            .await
+    }
+
+    /// Starts a session while preserving the original request's local deadline.
+    ///
+    /// Finite V4 budgets are converted immediately before request publication,
+    /// after TCP, TLS, and any retry backoff. The caller must continue using its
+    /// context while collecting the session outcome: relative wire deadlines
+    /// cannot account for time spent in transit between independent clocks.
+    pub async fn start_session_from_spawn_request(
+        &self,
+        cx: &Cx,
+        hello: RemotePeerHello,
+        request: &SpawnRequest,
+    ) -> Result<
+        RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
+        RemoteComputationClientError,
+    > {
+        let wire = RemoteServiceWireRequest::from_spawn_request_at(hello, request, cx.now())
+            .map_err(|source| RemoteComputationClientError::Session {
+                attempts: 0,
+                source: RemoteServiceSessionError::Service(source),
+            })?;
+        let origin = RemoteRequestOrigin::new(cx, request);
+        let mut started = self
+            .start_session_before_dispatch(cx, &wire, Some(&origin), None)
+            .await?;
+        if let RemoteComputationSessionStart::Running(session) = &mut started {
+            session.origin = Some(origin);
+        }
+        Ok(started)
     }
 
     async fn start_session_before_dispatch(
         &self,
         cx: &Cx,
         request: &RemoteServiceWireRequest,
+        origin: Option<&RemoteRequestOrigin>,
         before_dispatch: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<
         RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
         RemoteComputationClientError,
     > {
-        if cx.checkpoint().is_err() {
+        if cx.checkpoint().is_err() || origin.is_some_and(RemoteRequestOrigin::is_cancelled) {
             return Err(RemoteComputationClientError::Cancelled { attempts: 0 });
         }
         let presented = request.hello().protocol_version();
-        if presented != RemoteProtocolVersion::V3 {
+        if !presented.uses_session() {
             return Err(RemoteComputationClientError::Session {
                 attempts: 0,
                 source: RemoteServiceSessionError::WrongProtocol { presented },
+            });
+        }
+        if request.has_relative_deadline() && origin.is_none() {
+            return Err(RemoteComputationClientError::Session {
+                attempts: 0,
+                source: RemoteServiceSessionError::Service(
+                    RemoteServiceWireRequest::missing_origin_clock(),
+                ),
             });
         }
         if let Err(source) =
@@ -6978,37 +7244,50 @@ impl RemoteComputationClient {
 
         let mut attempts = 0_usize;
         loop {
-            if cx.checkpoint().is_err() {
+            if cx.checkpoint().is_err() || origin.is_some_and(RemoteRequestOrigin::is_cancelled) {
                 return Err(RemoteComputationClientError::Cancelled { attempts });
             }
             attempts = attempts.saturating_add(1);
             let endpoint = self.endpoint_for_attempt(attempts);
-            let attempt = match remote_client_race_cancellation(
-                cx,
-                crate::time::timeout(
-                    cx.now(),
-                    self.config.attempt_timeout,
-                    self.start_session_once(endpoint, cx, request, before_dispatch),
+            let attempt = match remote_client_race_origin(
+                origin,
+                remote_client_race_cancellation(
+                    cx,
+                    crate::time::timeout(
+                        cx.now(),
+                        self.config.attempt_timeout,
+                        self.start_session_once(endpoint, cx, request, origin, before_dispatch),
+                    ),
                 ),
             )
             .await
             {
-                RemoteClientCancelRace::Completed(result) => result.unwrap_or_else(|_| {
-                    Err(RemoteComputationClientAttemptError::Timeout(
-                        self.config.attempt_timeout,
-                    ))
-                }),
-                RemoteClientCancelRace::Cancelled => {
+                RemoteClientCancelRace::Completed(RemoteClientCancelRace::Completed(result)) => {
+                    result.unwrap_or_else(|_| {
+                        Err(RemoteComputationClientAttemptError::Timeout(
+                            self.config.attempt_timeout,
+                        ))
+                    })
+                }
+                RemoteClientCancelRace::Completed(RemoteClientCancelRace::Cancelled)
+                | RemoteClientCancelRace::Cancelled => {
                     return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
                 }
             };
-            if cx.checkpoint().is_err() {
+            if cx.checkpoint().is_err() || origin.is_some_and(RemoteRequestOrigin::is_cancelled) {
                 return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
             }
             match attempt {
                 Ok(started) => return Ok(started),
                 Err(error) if attempts < self.config.max_attempts && error.is_retryable() => {
-                    self.sleep_before_retry(cx, attempts).await?;
+                    match remote_client_race_origin(origin, self.sleep_before_retry(cx, attempts))
+                        .await
+                    {
+                        RemoteClientCancelRace::Completed(result) => result?,
+                        RemoteClientCancelRace::Cancelled => {
+                            return Err(RemoteComputationClientError::Cancelled { attempts });
+                        }
+                    }
                 }
                 Err(error) => return Err(error.into_public(attempts)),
             }
@@ -7023,6 +7302,12 @@ impl RemoteComputationClient {
     ) -> Result<RemoteServiceWireResponse, RemoteComputationClientError> {
         if cx.checkpoint().is_err() {
             return Err(RemoteComputationClientError::Cancelled { attempts: 0 });
+        }
+        if request.has_relative_deadline() {
+            return Err(RemoteComputationClientError::Exchange {
+                attempts: 0,
+                source: RemoteServiceWireRequest::missing_origin_clock(),
+            });
         }
         if let Err(source) =
             encode_remote_service_frame(request, self.config.wire_limits.max_frame_bytes())
@@ -7088,11 +7373,11 @@ impl RemoteComputationClient {
         cx: &Cx,
         request: &RemoteServiceWireRequest,
     ) -> Result<RemoteServiceWireResponse, RemoteComputationClientAttemptError> {
-        if request.hello().protocol_version() == RemoteProtocolVersion::V3 {
+        if request.hello().protocol_version().uses_session() {
             // V3 sends an Accepted/Terminal session envelope, not the bare
             // V1/V2 response. Retain the session's framed decoder through
             // terminal collection so buffered events are not discarded.
-            return match self.start_session_once(endpoint, cx, request, None).await? {
+            return match self.start_session_once(endpoint, cx, request, None, None).await? {
                 RemoteComputationSessionStart::Running(session) => session
                     .wait(cx)
                     .await
@@ -7121,6 +7406,7 @@ impl RemoteComputationClient {
         endpoint: SocketAddr,
         cx: &Cx,
         request: &RemoteServiceWireRequest,
+        origin: Option<&RemoteRequestOrigin>,
         before_dispatch: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<
         RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
@@ -7137,14 +7423,27 @@ impl RemoteComputationClient {
             .connect(&self.server_name, stream)
             .await
             .map_err(RemoteComputationClientAttemptError::Tls)?;
+        if origin.is_some_and(RemoteRequestOrigin::is_cancelled) {
+            return Err(RemoteComputationClientAttemptError::Session(
+                RemoteServiceSessionError::Cancelled,
+            ));
+        }
         if before_dispatch.is_some_and(|admit| !admit()) {
             return Err(RemoteComputationClientAttemptError::Session(
                 RemoteServiceSessionError::Cancelled,
             ));
         }
-        RemoteComputationSession::start(cx, stream, request, self.config.wire_limits)
-            .await
-            .map_err(RemoteComputationClientAttemptError::Session)
+        // No await separates this clock reading from frame serialization. The
+        // original absolute deadline survives every pre-delivery retry.
+        let refreshed = origin.map(|origin| origin.request_at_dispatch(request));
+        RemoteComputationSession::start(
+            cx,
+            stream,
+            refreshed.as_ref().unwrap_or(request),
+            self.config.wire_limits,
+        )
+        .await
+        .map_err(RemoteComputationClientAttemptError::Session)
     }
 
     async fn sleep_before_retry(
@@ -7917,7 +8216,7 @@ impl Default for NativeRemoteRuntimeConfig {
 pub enum NativeRemoteRuntimeBuildError {
     /// A zero operation cap cannot admit remote work.
     ZeroMaxInFlight,
-    /// The route advertised a protocol other than V3.
+    /// The route advertised a protocol other than V3 or V4.
     WrongProtocol {
         /// Destination whose route was invalid.
         destination: NodeId,
@@ -7951,7 +8250,7 @@ impl fmt::Display for NativeRemoteRuntimeBuildError {
                 presented,
             } => write!(
                 f,
-                "native remote route {destination} must advertise protocol V3, got {presented}"
+                "native remote route {destination} must advertise protocol V3 or V4, got {presented}"
             ),
             Self::OriginIdentityMismatch {
                 destination,
@@ -8381,6 +8680,7 @@ struct NativeRemoteDriverGuard {
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 struct NativeRemotePublishedRequest {
     wire: RemoteServiceWireRequest,
+    origin: Option<RemoteRequestOrigin>,
     client: RemoteComputationClient,
     control: Arc<NativeRemoteControl>,
     control_receiver: mpsc::Receiver<()>,
@@ -8432,6 +8732,7 @@ async fn drive_native_remote_session(
     task_id: RemoteTaskId,
     client: &RemoteComputationClient,
     request: &RemoteServiceWireRequest,
+    origin: Option<&RemoteRequestOrigin>,
     control: &NativeRemoteControl,
     control_receiver: &mut mpsc::Receiver<()>,
 ) -> Result<RemoteOutcome, RemoteError> {
@@ -8444,9 +8745,14 @@ async fn drive_native_remote_session(
         true
     };
     let started = client
-        .start_session_before_dispatch(cx, request, Some(&before_dispatch))
+        .start_session_before_dispatch(cx, request, origin, Some(&before_dispatch))
         .await
-        .map_err(|error| map_native_remote_client_error(cx, error))?;
+        .map_err(|error| {
+            origin.and_then(RemoteRequestOrigin::cancellation_reason).map_or_else(
+                || map_native_remote_client_error(cx, error),
+                RemoteError::Cancelled,
+            )
+        })?;
     let mut session = match started {
         RemoteComputationSessionStart::Running(session) => {
             shared.set_running(task_id);
@@ -8855,7 +9161,7 @@ impl NativeRemoteRuntime {
     {
         let mut indexed = BTreeMap::new();
         for route in routes {
-            if route.hello.protocol_version() != RemoteProtocolVersion::V3 {
+            if !route.hello.protocol_version().uses_session() {
                 return Err(NativeRemoteRuntimeBuildError::WrongProtocol {
                     destination: route.destination,
                     presented: route.hello.protocol_version(),
@@ -9050,7 +9356,7 @@ impl NativeRemoteRuntime {
         sender: &NodeId,
         request: SpawnRequest,
     ) -> Result<(), RemoteError> {
-        self.send_spawn_with_admission(destination, sender, request, None)
+        self.send_spawn_with_admission(destination, sender, request, None, None)
     }
 
     fn send_spawn_with_admission(
@@ -9058,6 +9364,7 @@ impl NativeRemoteRuntime {
         destination: &NodeId,
         sender: &NodeId,
         request: SpawnRequest,
+        origin_cx: Option<&Cx>,
         admission: Option<Arc<admission::NativeRemoteCredit>>,
     ) -> Result<(), RemoteError> {
         self.validate_sender(sender)?;
@@ -9070,9 +9377,18 @@ impl NativeRemoteRuntime {
         let route = self
             .effective_route(destination)
             .ok_or_else(|| RemoteError::NodeUnreachable(destination.as_str().to_owned()))?;
-        let wire_request =
-            RemoteServiceWireRequest::from_spawn_request(route.hello.clone(), &request)
-                .map_err(|error| RemoteError::SerializationError(error.to_string()))?;
+        let origin = origin_cx
+            .filter(|_| route.hello.protocol_version().uses_relative_deadline())
+            .map(|cx| RemoteRequestOrigin::new(cx, &request));
+        let wire_request = match origin.as_ref() {
+            Some(origin) => RemoteServiceWireRequest::from_spawn_request_at(
+                route.hello.clone(),
+                &request,
+                origin.cx.now(),
+            ),
+            None => RemoteServiceWireRequest::from_spawn_request(route.hello.clone(), &request),
+        }
+        .map_err(|error| RemoteError::SerializationError(error.to_string()))?;
         let task_id = request.remote_task_id;
         let control_receiver = self.shared.admit(task_id)?;
         let shared = Arc::clone(&self.shared);
@@ -9082,6 +9398,7 @@ impl NativeRemoteRuntime {
         let control = shared.control(task_id)?;
         let mut published = NativeRemotePublishedRequest {
             wire: wire_request,
+            origin,
             client: route.client,
             control,
             control_receiver,
@@ -9090,16 +9407,30 @@ impl NativeRemoteRuntime {
         };
         let spawn = self.runtime.try_spawn_with_cx(move |cx| async move {
             published.guard.shared.attach_driver_cx(task_id, cx.clone());
-            let result = drive_native_remote_session(
+            let driver = drive_native_remote_session(
                 &cx,
                 &published.guard.shared,
                 task_id,
                 &published.client,
                 &published.wire,
+                published.origin.as_ref(),
                 &published.control,
                 &mut published.control_receiver,
-            )
-            .await;
+            );
+            let result = match published.origin.as_ref() {
+                Some(origin) => {
+                    // Keep the original caller clock alive for the full
+                    // operation. Cancellation enters the existing bounded
+                    // drain lane; it never refreshes a remote deadline.
+                    futures_lite::future::race(driver, async {
+                        let reason = origin.cancellation().await;
+                        let _ = published.guard.shared.request_cancel(task_id, reason);
+                        std::future::pending().await
+                    })
+                    .await
+                }
+                None => driver.await,
+            };
             published.guard.finish(result);
             // Keep the complete owner captured by the future, rather than a
             // disjoint capture of `wire` that could release credit too soon.
@@ -9124,6 +9455,20 @@ impl Drop for NativeRemoteRuntime {
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 impl RemoteRuntime for NativeRemoteRuntime {
+    fn send_message_with_cx(
+        &self,
+        cx: &Cx,
+        destination: &NodeId,
+        envelope: MessageEnvelope<RemoteMessage>,
+    ) -> Result<(), RemoteError> {
+        match envelope.payload {
+            RemoteMessage::SpawnRequest(request) => {
+                self.send_spawn_with_admission(destination, &envelope.sender, request, Some(cx), None)
+            }
+            payload => self.send_message(destination, MessageEnvelope { payload, ..envelope }),
+        }
+    }
+
     fn send_message(
         &self,
         destination: &NodeId,
@@ -9203,9 +9548,22 @@ impl RemoteRuntime for NativeRemoteRuntime {
 #[cfg(all(feature = "remote-service", unix))]
 pub const REMOTE_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 2;
 
-/// Stable textual protocol label accepted by the configured service boundary.
+/// Existing textual protocol label accepted by the configured service boundary.
 #[cfg(all(feature = "remote-service", unix))]
 pub const REMOTE_SERVICE_PROTOCOL_LABEL: &str = "3.0";
+
+/// Opt-in protocol label for session deadlines relative to publication.
+#[cfg(all(feature = "remote-service", unix))]
+pub const REMOTE_SERVICE_RELATIVE_DEADLINE_PROTOCOL_LABEL: &str = "4.0";
+
+#[cfg(all(feature = "remote-service", unix))]
+fn configured_remote_protocol(label: &str) -> Option<RemoteProtocolVersion> {
+    match label {
+        REMOTE_SERVICE_PROTOCOL_LABEL => Some(RemoteProtocolVersion::V3),
+        REMOTE_SERVICE_RELATIVE_DEADLINE_PROTOCOL_LABEL => Some(RemoteProtocolVersion::V4),
+        _ => None,
+    }
+}
 
 /// Explicit network-exposure policy for a configured remote service listener.
 #[cfg(all(feature = "remote-service", unix))]
@@ -9433,6 +9791,7 @@ impl std::error::Error for RemoteComputationServiceBootstrapError {
 #[cfg(all(feature = "remote-service", unix))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteComputationServiceIdentity {
+    protocol_version: RemoteProtocolVersion,
     listen_scope: RemoteComputationServiceListenScope,
     registry_fingerprint: ComputationRegistryFingerprint,
     authorized_peers: usize,
@@ -9450,7 +9809,7 @@ impl RemoteComputationServiceIdentity {
     /// Exact remote-service protocol version enforced at admission.
     #[must_use]
     pub const fn protocol_version(&self) -> RemoteProtocolVersion {
-        RemoteProtocolVersion::V3
+        self.protocol_version
     }
 
     /// Explicit configured listener exposure policy.
@@ -9635,8 +9994,10 @@ impl RemoteComputationServiceBootstrap {
             .iter()
             .map(|entry| entry.name().to_owned())
             .collect();
+        let protocol_version = configured_remote_protocol(&config.protocol)
+            .expect("validated configuration has an exact supported protocol");
         let mut policy = RemotePeerAdmissionPolicy::new(
-            RemoteProtocolVersion::V3,
+            protocol_version,
             computations.schema_registry().clone(),
         );
         for peer in &config.peers {
@@ -9681,6 +10042,7 @@ impl RemoteComputationServiceBootstrap {
             service_config = service_config.with_max_exchanges_per_peer(Some(per_peer));
         }
         let identity = RemoteComputationServiceIdentity {
+            protocol_version,
             listen_scope: config.listen_scope,
             registry_fingerprint,
             authorized_peers: config.peers.len(),
@@ -9741,11 +10103,11 @@ fn validate_remote_computation_service_file_config(
             ),
         ));
     }
-    if config.protocol != REMOTE_SERVICE_PROTOCOL_LABEL {
+    if configured_remote_protocol(&config.protocol).is_none() {
         return Err(remote_computation_service_config_invalid(
             path,
             format!(
-                "unsupported protocol '{}'; expected '{REMOTE_SERVICE_PROTOCOL_LABEL}'",
+                "unsupported protocol '{}'; expected '{REMOTE_SERVICE_PROTOCOL_LABEL}' or '{REMOTE_SERVICE_RELATIVE_DEADLINE_PROTOCOL_LABEL}'",
                 config.protocol
             ),
         ));

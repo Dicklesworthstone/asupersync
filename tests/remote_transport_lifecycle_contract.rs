@@ -5372,6 +5372,15 @@ fn configured_remote_service_config_fails_closed_before_bind() {
     RemoteComputationServiceBootstrap::from_toml_file(&duplicate_pin_path, computations.clone())
         .expect("schema v2 duplicate pins must retain prior deduplicating behavior");
 
+    let relative_path = temp.path().join("relative-deadline-v4.toml");
+    fs::write(&relative_path, baseline.replace("protocol = \"3.0\"", "protocol = \"4.0\""))
+        .expect("V4 configuration fixture should be written");
+    let relative = RemoteComputationServiceBootstrap::from_toml_file(
+        &relative_path, computations.clone(),
+    ).expect("explicit V4 configuration should prepare");
+    assert_eq!(relative.identity().protocol_version(), RemoteProtocolVersion::V4);
+    assert_eq!(relative.identity().config_schema_version(), 2);
+
     let network_path = temp.path().join("explicit-network.toml");
     let network = baseline
         .replace("listen = \"127.0.0.1:0\"", "listen = \"0.0.0.0:0\"")
@@ -5806,6 +5815,271 @@ fn native_remote_runtime_uses_static_bootstrap_failover_for_v3() {
         "one_handler_dispatch_and_quiescent_close",
     )
     .emit();
+}
+
+// asupersync-remote-service-audit-pjrlqa M1: independent clock epochs must not
+// enlarge a budget, and publication must deduct queueing and failed handshakes.
+#[cfg(feature = "tls")]
+#[test]
+fn native_remote_v4_rebases_deadline_after_queue_and_tls_retry() {
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+
+    let origin_now = Time::from_secs(1_000_000);
+    let origin_clock = Arc::new(VirtualClock::starting_at(origin_now));
+    let origin_runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .with_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&origin_clock)))
+        .build()
+        .expect("origin clock runtime should build");
+    let observed_remaining = Arc::new(Mutex::new(None));
+    let handler_remaining = Arc::clone(&observed_remaining);
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let handler_dispatches = Arc::clone(&dispatches);
+    let mut computations = RemoteComputationRegistry::new();
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.relative-deadline", move |cx, invocation| {
+            let handler_remaining = Arc::clone(&handler_remaining);
+            let handler_dispatches = Arc::clone(&handler_dispatches);
+            async move {
+                handler_dispatches.fetch_add(1, Ordering::SeqCst);
+                let request = invocation.into_request();
+                let deadline = request.budget.expect("request has a budget")
+                    .deadline.expect("finite request deadline is retained");
+                *handler_remaining.lock() = Some(deadline.duration_since(cx.now()));
+                assert_eq!(cx.budget().deadline, Some(deadline));
+                Ok(RemoteOutcome::Success(request.input.into_data()))
+            }
+        })
+        .expect("deadline handler should register");
+    let origin = NodeId::new("origin-v4-deadline");
+    let destination = NodeId::new("destination-v4-deadline");
+    let certificate = Certificate::from_pem(TEST_CERT_PEM).expect("certificate should parse")
+        .remove(0);
+    let pins = CertificatePinSet::new().with_pin(
+        CertificatePin::compute_spki_sha256(&certificate).expect("certificate pin should compute"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V4,
+        computations.schema_registry().clone(),
+    );
+    policy.grant_tls_peer(origin.clone(), pins, ["proof.relative-deadline"])
+        .expect("V4 peer should be authorized");
+    let hello = policy.hello_for(origin.clone());
+    let (acceptor, direct_connector) = remote_client_test_mtls_pair();
+    let (endpoint, operator, service) =
+        spawn_native_route_service("relative-deadline", acceptor, policy, computations);
+
+    let stalled_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("stalled handshake listener should bind");
+    let stalled_endpoint = stalled_listener.local_addr().expect("stalled address should exist");
+    let (release_stall_tx, release_stall_rx) = std::sync::mpsc::sync_channel(1);
+    let handshake_clock = Arc::clone(&origin_clock);
+    let stalled = thread::spawn(move || {
+        let (stream, _) = stalled_listener.accept().expect("first handshake should connect");
+        // No application request has been sent. The retry must retain this
+        // elapsed origin time even though the destination changes.
+        handshake_clock.advance(2_000_000_000);
+        release_stall_rx.recv_timeout(Duration::from_secs(5))
+            .expect("stalled handshake fixture should be released");
+        drop(stream);
+    });
+    let retry_connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&certificate)
+        .identity(
+            CertificateChain::from_pem(TEST_CERT_PEM).expect("chain should parse"),
+            PrivateKey::from_pem(TEST_KEY_PEM).expect("key should parse"),
+        )
+        .handshake_timeout(Duration::from_millis(100))
+        .build()
+        .expect("bounded retry connector should build");
+    let client = RemoteComputationClient::from_bootstrap_endpoints(
+        [stalled_endpoint, endpoint], "localhost", retry_connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(2)
+            .with_attempt_timeout(Duration::from_secs(2))
+            .with_backoff(Duration::ZERO, Duration::ZERO)
+            .with_full_jitter(false),
+    ).expect("V4 failover client should build");
+    let runtime = RuntimeBuilder::new().worker_threads(1).build()
+        .expect("native publication runtime should build");
+    let (worker_parked_tx, worker_parked_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_worker_tx, release_worker_rx) = std::sync::mpsc::sync_channel(1);
+    runtime.handle().try_spawn_with_cx(move |_| async move {
+        worker_parked_tx.send(()).expect("worker should announce queue barrier");
+        release_worker_rx.recv_timeout(Duration::from_secs(2))
+            .expect("queue barrier should release");
+    }).expect("queue barrier should publish");
+    worker_parked_rx.recv_timeout(Duration::from_secs(2))
+        .expect("native worker should reach queue barrier");
+    let native = Arc::new(NativeRemoteRuntime::new(
+        runtime.handle(), origin.clone(),
+        [NativeRemoteRoute::new(destination.clone(), hello.clone(), client)],
+    ).expect("V4 native route should validate"));
+    let budget = Budget { deadline: Some(origin_now + Duration::from_secs(5)), ..Budget::INFINITE };
+    let cx = origin_runtime.request_cx_with_budget(Budget::INFINITE).with_remote_cap(
+        asupersync::remote::RemoteCap::new()
+            .with_local_node(origin.clone())
+            .with_remote_budget(budget)
+            .with_default_lease(Duration::from_secs(5))
+            .with_runtime(native.clone()),
+    );
+    let mut task = spawn_remote(&cx, destination, ComputationName::new("proof.relative-deadline"),
+        RemoteInput::new(b"remaining-budget".to_vec())).expect("V4 task should publish");
+    origin_clock.advance(1_000_000_000);
+    release_worker_tx.send(()).expect("queued request should be released");
+    let result = runtime.block_on(task.join(&cx)).expect("V4 task should complete");
+    assert!(matches!(result, RemoteOutcome::Success(ref bytes) if bytes == b"remaining-budget"));
+    let remaining = observed_remaining.lock().expect("handler should record its deadline");
+    assert!(remaining > 1_000_000_000 && remaining <= 2_000_000_000,
+        "five seconds minus one queued and two in TLS must reach the handler; got {remaining}ns");
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    release_stall_tx.send(()).expect("stalled peer should release");
+    stalled.join().expect("stalled peer should not panic");
+    assert!(runtime.block_on(native.close(&cx)));
+    assert_eq!(native.active_operations(), 0);
+
+    let direct = RemoteComputationClient::new(endpoint, "localhost", direct_connector,
+        RemoteComputationClientConfig::new().with_max_attempts(1))
+        .expect("direct client should build");
+    let denied = remote_service_wire_request(hello.clone(), "proof.denied", 7420);
+    assert!(matches!(block_on(direct.start_session(&Cx::for_testing(), &denied))
+        .expect("V4 refusal must decode as a session envelope"),
+        RemoteComputationSessionStart::Terminal(RemoteServiceWireResponse::Rejected {
+            code: RemoteServiceRejectionCode::ComputationDenied, ..
+        })));
+    let v3_hello = RemotePeerHello::new(origin.clone(), RemoteProtocolVersion::V3,
+        hello.registry_fingerprint());
+    let mismatched = remote_service_wire_request(v3_hello, "proof.relative-deadline", 7421);
+    assert!(matches!(block_on(direct.start_session(&Cx::for_testing(), &mismatched))
+        .expect("version refusal should retain the presented session envelope"),
+        RemoteComputationSessionStart::Terminal(RemoteServiceWireResponse::Rejected {
+            code: RemoteServiceRejectionCode::AdmissionDenied, ..
+        })));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    let finite_request = SpawnRequest {
+        remote_task_id: RemoteTaskId::from_raw(7422),
+        computation: ComputationName::new("proof.relative-deadline"),
+        input: RemoteInput::new(b"direct-relative-budget".to_vec()),
+        lease: Duration::from_secs(5),
+        idempotency_key: IdempotencyKey::from_raw(7422),
+        budget: Some(budget),
+        origin_node: origin,
+        origin_region: cx.region_id(),
+        origin_task: cx.task_id(),
+    };
+    let snapshot = RemoteServiceWireRequest::from_spawn_request_at(
+        hello.clone(), &finite_request, cx.now(),
+    ).expect("explicit finite snapshot should encode");
+    let stale = block_on(direct.start_session(&cx, &snapshot))
+        .expect_err("retrying client must refuse a finite snapshot without its original clock");
+    assert_eq!(stale.attempts(), 0);
+    assert!(matches!(stale, RemoteComputationClientError::Session {
+        source: RemoteServiceSessionError::Service(RemoteComputationServiceError::Transport(ref error)), ..
+    } if error.kind() == io::ErrorKind::InvalidInput));
+    let stale_call = block_on(direct.call(&cx, &snapshot))
+        .expect_err("one-shot convenience call must also refuse a frozen V4 snapshot");
+    assert_eq!(stale_call.attempts(), 0);
+    let direct_result = runtime.block_on(async {
+        match direct.start_session_from_spawn_request(&cx, hello, &finite_request).await
+            .expect("original request retains its publication clock") {
+            RemoteComputationSessionStart::Running(session) => session.wait(&cx).await
+                .expect("direct V4 session should retain its origin context"),
+            RemoteComputationSessionStart::Terminal(response) => response,
+            _ => panic!("unknown session start variant"),
+        }
+    });
+    assert!(matches!(direct_result, RemoteServiceWireResponse::Outcome {
+        outcome: RemoteServiceWireOutcome::Success(ref bytes), ..
+    } if bytes == b"direct-relative-budget"));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+    drop(cx);
+    drop(native);
+    assert!(runtime.shutdown_timeout(Duration::from_secs(2)));
+    assert!(origin_runtime.shutdown_timeout(Duration::from_secs(2)));
+    assert!(operator.begin_drain());
+    let report = service.join().expect("V4 service should drain");
+    assert_eq!(report.accepted_connections(), 4);
+    assert_eq!(operator.active_connections(), 0);
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn native_remote_v4_origin_deadline_cancels_and_drains_on_its_own_clock() {
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+
+    let origin_now = Time::from_secs(2_000_000);
+    let clock = Arc::new(VirtualClock::starting_at(origin_now));
+    let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+    let origin_runtime = RuntimeBuilder::new().worker_threads(1)
+        .with_timer_driver(timer.clone()).build().expect("origin runtime should build");
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (park_tx, park_rx) = oneshot::channel::<()>();
+    let receiver = Arc::new(Mutex::new(Some(park_rx)));
+    let drained = Arc::new(AtomicBool::new(false));
+    let handler_drained = Arc::clone(&drained);
+    let mut computations = RemoteComputationRegistry::new();
+    computations.register::<Vec<u8>, Vec<u8>, _, _>("proof.origin-expiry", move |cx, _| {
+        let mut receiver = receiver.lock().take().expect("handler dispatches once");
+        let started_tx = started_tx.clone();
+        let handler_drained = Arc::clone(&handler_drained);
+        async move {
+            started_tx.send(()).expect("handler should announce readiness");
+            assert!(receiver.recv(&cx).await.is_err(), "origin expiry must wake the handler");
+            handler_drained.store(true, Ordering::SeqCst);
+            Ok(RemoteOutcome::Cancelled(cx.cancel_reason().expect("cancellation has a cause")))
+        }
+    }).expect("expiry handler should register");
+    let origin = NodeId::new("origin-v4-expiry");
+    let destination = NodeId::new("destination-v4-expiry");
+    let certificate = Certificate::from_pem(TEST_CERT_PEM).expect("certificate should parse")
+        .remove(0);
+    let mut policy = RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V4,
+        computations.schema_registry().clone());
+    policy.grant_tls_peer(origin.clone(), CertificatePinSet::new().with_pin(
+        CertificatePin::compute_spki_sha256(&certificate).expect("pin should compute")),
+        ["proof.origin-expiry"]).expect("expiry peer should be granted");
+    let hello = policy.hello_for(origin.clone());
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let (endpoint, operator, service) =
+        spawn_native_route_service("origin-expiry", acceptor, policy, computations);
+    let client = RemoteComputationClient::new(endpoint, "localhost", connector,
+        RemoteComputationClientConfig::new().with_max_attempts(1))
+        .expect("expiry client should build");
+    let runtime = RuntimeBuilder::new().worker_threads(2).build()
+        .expect("native runtime should build");
+    let native = Arc::new(NativeRemoteRuntime::new(runtime.handle(), origin.clone(),
+        [NativeRemoteRoute::new(destination.clone(), hello, client)])
+        .expect("expiry route should validate"));
+    let cx = origin_runtime.request_cx_with_budget(Budget::INFINITE).with_remote_cap(
+        asupersync::remote::RemoteCap::new().with_local_node(origin)
+            .with_remote_budget(Budget {
+                deadline: Some(origin_now + Duration::from_secs(10)), ..Budget::INFINITE
+            }).with_default_lease(Duration::from_secs(30)).with_runtime(native.clone()));
+    let mut task = spawn_remote(&cx, destination, ComputationName::new("proof.origin-expiry"),
+        RemoteInput::empty()).expect("expiry operation should publish");
+    started_rx.recv_timeout(Duration::from_secs(2)).expect("handler should become live");
+    // The receiver has ten seconds on its own clock. Advance only the origin,
+    // so completion proves that the original lifetime remains live locally.
+    clock.advance(10_000_000_000);
+    timer.process_timers();
+    let cleanup_cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let result = runtime.block_on(task.join(&cleanup_cx)).expect("expiry should drain terminal");
+    assert!(matches!(result, RemoteOutcome::Cancelled(ref reason) if reason.kind == CancelKind::Deadline));
+    assert!(drained.load(Ordering::SeqCst));
+    assert!(runtime.block_on(native.close(&cleanup_cx)));
+    assert_eq!(native.active_operations(), 0);
+    drop(park_tx);
+    drop(cx);
+    drop(native);
+    drop(cleanup_cx);
+    assert!(runtime.shutdown_timeout(Duration::from_secs(2)));
+    assert!(origin_runtime.shutdown_timeout(Duration::from_secs(2)));
+    assert!(operator.begin_drain());
+    let report = service.join().expect("expiry service should drain");
+    assert_eq!(report.accepted_connections(), 1);
+    assert_eq!(report.completed_connections(), 1);
+    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(operator.active_connections(), 0);
 }
 
 #[cfg(feature = "tls")]
@@ -6980,7 +7254,7 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
     let future_request = remote_service_wire_request(
         RemotePeerHello::new(
             NodeId::new(ORIGIN_NODE),
-            RemoteProtocolVersion::new(4, 0),
+            RemoteProtocolVersion::new(5, 0),
             hello.registry_fingerprint(),
         ),
         "proof.echo",

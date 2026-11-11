@@ -3995,6 +3995,19 @@ impl<Caps> Cx<Caps> {
         self.recycle_cancel_waker(retired_waker);
     }
 
+    /// Binds an internal deadline wake to the clock used by this context.
+    ///
+    /// `timer_driver()` hides the driver when TIME is restricted, while
+    /// checkpoint and deadline accounting still use that driver. Internal
+    /// enforcement must keep the same clock even when another context polls
+    /// the returned sleep. This does not expose a public timing capability.
+    pub(crate) fn sleep_until_on_clock(&self, deadline: Time) -> crate::time::Sleep {
+        match self.handles.timer_driver.clone() {
+            Some(driver) => crate::time::Sleep::with_timer_driver(deadline, driver),
+            None => crate::time::Sleep::with_wall_clock(deadline),
+        }
+    }
+
     /// Creates an owned wake for this context's budget deadline.
     ///
     /// Internal enforcement uses the same clock as `checkpoint`, even when
@@ -4005,10 +4018,7 @@ impl<Caps> Cx<Caps> {
     pub(crate) fn budget_deadline_sleep(&self) -> Option<crate::time::Sleep> {
         self.budget()
             .deadline
-            .map(|deadline| match self.handles.timer_driver.clone() {
-                Some(driver) => crate::time::Sleep::with_timer_driver(deadline, driver),
-                None => crate::time::Sleep::with_wall_clock(deadline),
-            })
+            .map(|deadline| self.sleep_until_on_clock(deadline))
     }
 
     /// Arms a timer at this context's budget deadline that cancels it with

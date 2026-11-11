@@ -3119,6 +3119,49 @@
     }
 
     #[test]
+    fn internal_deadline_keeps_masked_origin_clock_under_another_context() {
+        let (origin_clock, origin_timer, origin) = deadline_cx(None);
+        origin_clock.advance_to(Time::from_millis(50));
+        let deadline = Time::from_millis(100);
+        let mut sleep = {
+            let _current = Cx::set_current(Some(origin.clone()));
+            let restricted: Cx<cap::None> = origin.restrict::<cap::None>();
+            let _restriction = restricted.set_current_restricted();
+            let masked = Cx::current().expect("masked origin context");
+            assert!(masked.timer_driver().is_none(), "TIME remains hidden");
+            assert_eq!(masked.now(), Time::from_millis(50));
+            Box::pin(masked.sleep_until_on_clock(deadline))
+        };
+
+        // The poller's clock is already beyond the origin's deadline. It must
+        // neither complete the sleep nor receive the timer registration.
+        let (other_clock, other_timer, other) = deadline_cx(None);
+        other_clock.advance_to(Time::from_millis(1_000));
+        let _poller = Cx::set_current(Some(other));
+        let wakes = Arc::new(DeadlineWakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        assert!(sleep.as_mut().poll_deadline(&mut task_cx).is_pending());
+        assert_eq!(origin_timer.pending_count(), 1);
+        assert_eq!(other_timer.pending_count(), 0);
+
+        origin_clock.advance_to(Time::from_millis(99));
+        assert_eq!(origin_timer.process_timers(), 0);
+        assert!(sleep.as_mut().poll_deadline(&mut task_cx).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+        origin_clock.advance_to(deadline);
+        assert_eq!(origin_timer.process_timers(), 1);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        assert!(sleep.as_mut().poll_deadline(&mut task_cx).is_ready());
+        assert_eq!(origin_timer.pending_count(), 0);
+        assert!(
+            !origin.is_cancel_requested(),
+            "the wake does not cancel its context"
+        );
+    }
+
+    #[test]
     fn budget_deadline_cancels_and_wakes_a_parked_context() {
         let (clock, timer, cx) = deadline_cx(Some(Time::from_millis(50)));
         let wakes = Arc::new(DeadlineWakeCount(AtomicUsize::new(0)));

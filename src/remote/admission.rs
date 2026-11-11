@@ -565,7 +565,13 @@ impl NativeRemoteReservation {
             idempotency_key_high: u64::try_from(key.raw() >> 64).expect("shifted key fits u64"),
             idempotency_key_low: u64::try_from(key.raw() & u128::from(u64::MAX))
                 .expect("masked key fits u64"),
-            budget: budget.map(Into::into),
+            budget: budget.map(|budget| {
+                RemoteServiceWireBudget::from_budget_at(
+                    budget,
+                    route.hello.protocol_version(),
+                    cx.now(),
+                )
+            }),
             origin_region: cx.region_id(),
             origin_task: cx.task_id(),
         };
@@ -595,6 +601,7 @@ impl NativeRemoteReservation {
             &self.node,
             runtime.local_node(),
             request,
+            Some(cx),
             Some(Arc::clone(&self.credit)),
         ) {
             runtime.unregister_task(task_id);

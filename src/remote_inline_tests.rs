@@ -27,6 +27,259 @@
         IdempotencyRequestFingerprint::new(ComputationName::new(name), RemoteInput::empty())
     }
 
+    fn deadline_wire_fixture(
+        version: RemoteProtocolVersion,
+        budget: Option<Budget>,
+    ) -> (RemotePeerHello, SpawnRequest) {
+        let origin = NodeId::new("wire-peer");
+        let hello = RemotePeerHello::new(
+            origin.clone(),
+            version,
+            ComputationRegistryFingerprint::from_bytes([7; 32]),
+        );
+        let request = SpawnRequest {
+            remote_task_id: RemoteTaskId::from_raw(7),
+            computation: ComputationName::new("proof.echo"),
+            input: RemoteInput::new(vec![1, 2, 3]),
+            lease: Duration::new(5, 6),
+            idempotency_key: IdempotencyKey::from_raw((1_u128 << 64) | 2),
+            budget,
+            origin_node: origin,
+            origin_region: RegionId::new_for_test(13, 14),
+            origin_task: TaskId::new_for_test(15, 16),
+        };
+        (hello, request)
+    }
+
+    #[test]
+    fn timed_wire_constructor_preserves_v1_v2_v3_exact_bytes() {
+        // br-asupersync-remote-service-audit-pjrlqa: choosing the new clock-aware
+        // constructor must not reinterpret a shipped protocol's absolute time.
+        const TAIL: &str = concat!(
+            ",\"registry_fingerprint\":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,",
+            "7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]},",
+            "\"remote_task_id\":7,\"computation\":\"proof.echo\",\"input\":[1,2,3],",
+            "\"lease_secs\":5,\"lease_subsec_nanos\":6,",
+            "\"idempotency_key_high\":1,\"idempotency_key_low\":2,",
+            "\"budget\":{\"deadline_nanos\":9,\"poll_quota\":10,\"cost_quota\":11,\"priority\":12},",
+            "\"origin_region\":{\"kind\":\"RegionId\",\"index\":13,\"generation\":14},",
+            "\"origin_task\":{\"kind\":\"TaskId\",\"index\":15,\"generation\":16}}"
+        );
+        for version in [
+            RemoteProtocolVersion::V1,
+            RemoteProtocolVersion::V2,
+            RemoteProtocolVersion::V3,
+        ] {
+            let budget = Budget {
+                deadline: Some(Time::from_nanos(9)),
+                poll_quota: 10,
+                cost_quota: Some(11),
+                priority: 12,
+            };
+            let (hello, request) = deadline_wire_fixture(version, Some(budget));
+            let wire = RemoteServiceWireRequest::from_spawn_request_at(
+                hello.clone(),
+                &request,
+                Time::from_secs(1_000),
+            )
+            .expect("legacy construction retains its original encoding");
+            let legacy = RemoteServiceWireRequest::from_spawn_request(hello, &request).unwrap();
+            let golden = format!(
+                "{{\"hello\":{{\"peer_node\":\"wire-peer\",\"protocol_version\":{{\"major\":{},\"minor\":0}}{TAIL}",
+                version.major(),
+            );
+            assert_eq!(serde_json::to_string(&wire).unwrap(), golden);
+            assert_eq!(wire, legacy);
+            let decoded: RemoteServiceWireRequest = serde_json::from_str(&golden).unwrap();
+            assert_eq!(decoded, wire);
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn relative_wire_deadline_rebases_across_independent_process_clocks() {
+        // The server's epoch can precede or follow the origin's by any amount.
+        // Every example still grants exactly five seconds on the server clock.
+        for (origin_now, origin_deadline, receiver_now, expected_deadline) in [
+            (5, 10, 1_000, 1_005),
+            (1_000, 1_005, 5, 10),
+            (0, 5, 0, 5),
+        ] {
+            let budget = Budget {
+                deadline: Some(Time::from_secs(origin_deadline)),
+                poll_quota: 10,
+                cost_quota: Some(11),
+                priority: 12,
+            };
+            let (hello, request) = deadline_wire_fixture(RemoteProtocolVersion::V4, Some(budget));
+            let wire = RemoteServiceWireRequest::from_spawn_request_at(
+                hello,
+                &request,
+                Time::from_secs(origin_now),
+            )
+            .unwrap();
+            assert_eq!(wire.budget.unwrap().deadline_nanos, Some(5_000_000_000));
+            // Exercise the wire round trip: local-only metadata cannot carry
+            // the clock correction to the receiving process.
+            let encoded = serde_json::to_vec(&wire).unwrap();
+            let decoded: RemoteServiceWireRequest = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, wire);
+            let admitted = decoded
+                .into_spawn_request_at(Time::from_secs(receiver_now))
+                .unwrap();
+            let translated = admitted.budget.unwrap();
+            assert_eq!(translated.deadline, Some(Time::from_secs(expected_deadline)));
+            assert_eq!(translated.poll_quota, budget.poll_quota);
+            assert_eq!(translated.cost_quota, budget.cost_quota);
+            assert_eq!(translated.priority, budget.priority);
+            assert_eq!(admitted.input, request.input);
+            assert_eq!(admitted.origin_node, request.origin_node);
+            assert_eq!(admitted.origin_region, request.origin_region);
+            assert_eq!(admitted.origin_task, request.origin_task);
+            assert_eq!(admitted.idempotency_key, request.idempotency_key);
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn relative_wire_deadline_keeps_expiry_distinct_from_no_deadline() {
+        let receiver_now = Time::from_secs(1_000);
+        for deadline in [Time::ZERO, Time::from_secs(4), Time::from_secs(5)] {
+            let budget = Budget::INFINITE.with_deadline(deadline);
+            let (hello, request) = deadline_wire_fixture(RemoteProtocolVersion::V4, Some(budget));
+            let wire = RemoteServiceWireRequest::from_spawn_request_at(
+                hello,
+                &request,
+                Time::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!(wire.budget.unwrap().deadline_nanos, Some(0));
+            assert_eq!(
+                wire.into_spawn_request_at(receiver_now)
+                    .unwrap()
+                    .budget
+                    .unwrap()
+                    .deadline,
+                Some(receiver_now),
+                "an expired remote budget must not become infinite",
+            );
+        }
+        for budget in [None, Some(Budget::INFINITE.with_poll_quota(17))] {
+            let (hello, request) = deadline_wire_fixture(RemoteProtocolVersion::V4, budget);
+            let timed = RemoteServiceWireRequest::from_spawn_request_at(
+                hello.clone(),
+                &request,
+                Time::MAX,
+            )
+            .unwrap();
+            let untimed = RemoteServiceWireRequest::from_spawn_request(hello, &request).unwrap();
+            assert_eq!(
+                timed, untimed,
+                "an infinite deadline needs no clock conversion"
+            );
+            assert_eq!(
+                timed.into_spawn_request_at(receiver_now).unwrap().budget,
+                budget
+            );
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn relative_wire_deadline_saturates_without_wrapping_or_relaxing_parent() {
+        let (hello, request) = deadline_wire_fixture(
+            RemoteProtocolVersion::V4,
+            Some(Budget::INFINITE.with_deadline(Time::MAX)),
+        );
+        let wire =
+            RemoteServiceWireRequest::from_spawn_request_at(hello, &request, Time::ZERO).unwrap();
+        assert_eq!(wire.budget.unwrap().deadline_nanos, Some(u64::MAX));
+        let requested = wire
+            .into_spawn_request_at(Time::from_nanos(u64::MAX - 1))
+            .unwrap()
+            .budget
+            .unwrap();
+        assert_eq!(requested.deadline, Some(Time::MAX), "addition must saturate");
+        let parent = Budget::INFINITE
+            .with_deadline(Time::from_secs(2))
+            .with_poll_quota(3);
+        let effective = requested.combine(parent);
+        assert_eq!(effective.deadline, parent.deadline);
+        assert_eq!(effective.poll_quota, 3);
+    }
+
+    #[test]
+    fn finite_relative_wire_deadline_requires_an_explicit_origin_clock() {
+        let (hello, request) = deadline_wire_fixture(
+            RemoteProtocolVersion::V4,
+            Some(Budget::INFINITE.with_deadline(Time::from_secs(10))),
+        );
+        assert!(RemoteServiceWireRequest::from_spawn_request(hello.clone(), &request).is_err());
+        let timed = RemoteServiceWireRequest::from_spawn_request_at(
+            hello,
+            &request,
+            Time::from_secs(5),
+        )
+        .expect("the additive constructor supplies the missing clock");
+        assert_eq!(timed.budget.unwrap().deadline_nanos, Some(5_000_000_000));
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn relative_origin_deadline_ignores_ambient_cancellation_and_expires_before_dispatch() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(5)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(13, 14),
+            TaskId::new_for_test(15, 16),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let (hello, request) = deadline_wire_fixture(
+            RemoteProtocolVersion::V4,
+            Some(Budget::INFINITE.with_deadline(Time::from_secs(10))),
+        );
+        let wire =
+            RemoteServiceWireRequest::from_spawn_request_at(hello, &request, cx.now()).unwrap();
+        let origin = RemoteRequestOrigin::new(&cx, &request);
+        assert!(!origin.is_cancelled());
+
+        // Polling under a different, already-cancelled context must not turn
+        // that context's User cancellation into an origin Deadline result.
+        let ambient = Cx::for_testing();
+        ambient.cancel_with(CancelKind::User, Some("unrelated poller cancelled"));
+        let _current = Cx::set_current(Some(ambient));
+        let mut cancellation = Box::pin(origin.cancellation());
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(cancellation.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(timer.pending_count(), 1);
+
+        clock.advance_to(Time::from_secs(10));
+        assert_eq!(timer.process_timers(), 1);
+        let Poll::Ready(reason) = cancellation.as_mut().poll(&mut task_cx) else {
+            panic!("the actual origin deadline must wake cancellation");
+        };
+        assert_eq!(reason.kind(), CancelKind::Deadline);
+        assert!(origin.is_cancelled());
+        assert_eq!(
+            origin.cancellation_reason().unwrap().kind(),
+            CancelKind::Deadline
+        );
+        assert_eq!(
+            origin.request_at_dispatch(&wire).budget.unwrap().deadline_nanos,
+            Some(0),
+            "a delayed publication cannot refresh the expired budget"
+        );
+        assert_eq!(timer.pending_count(), 0);
+        assert!(!cx.is_cancel_requested(), "the remote budget is independent");
+    }
+
     #[cfg(feature = "tls")]
     #[test]
     fn peer_exchange_credits_bound_each_configured_identity_and_release_once() {
@@ -286,11 +539,19 @@ peers = []
             RemoteServiceProtocolKind::V3Session
         );
         assert_eq!(
+            remote_service_protocol_kind(RemoteProtocolVersion::V4),
+            RemoteServiceProtocolKind::V3Session
+        );
+        assert_eq!(
             remote_service_protocol_kind(RemoteProtocolVersion::new(2, 1)),
             RemoteServiceProtocolKind::Unsupported
         );
         assert_eq!(
-            remote_service_protocol_kind(RemoteProtocolVersion::new(4, 0)),
+            remote_service_protocol_kind(RemoteProtocolVersion::new(4, 1)),
+            RemoteServiceProtocolKind::Unsupported
+        );
+        assert_eq!(
+            remote_service_protocol_kind(RemoteProtocolVersion::new(5, 0)),
             RemoteServiceProtocolKind::Unsupported
         );
     }
