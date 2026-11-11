@@ -213,7 +213,7 @@ impl PgTransaction<'_> {
         &'a mut self, cx: &Cx, statement: &PgStatement, params: &[&dyn ToSql],
         config: PgCursorConfig,
     ) -> Outcome<PgCursor<'a>, PgError> {
-        if self.finished { return Outcome::Err(PgError::TransactionFinished); }
+        if let Err(error) = self.check_open() { return Outcome::Err(error); }
         self.conn.query_cursor_prepared(cx, statement, params, config).await
     }
 
@@ -221,7 +221,7 @@ impl PgTransaction<'_> {
     pub async fn query_cursor_params<'a>(
         &'a mut self, cx: &Cx, sql: &str, params: &[&dyn ToSql], config: PgCursorConfig,
     ) -> Outcome<PgCursor<'a>, PgError> {
-        if self.finished { return Outcome::Err(PgError::TransactionFinished); }
+        if let Err(error) = self.check_open() { return Outcome::Err(error); }
         self.conn.query_cursor_params(cx, sql, params, config).await
     }
 }

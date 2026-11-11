@@ -3333,6 +3333,189 @@ mod tests {
         );
     }
 
+    fn run_native_transaction_test(future: impl std::future::Future<Output = ()>) {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+            .build()
+            .expect("native transaction runtime");
+        runtime.block_on(async {
+            crate::time::timeout(
+                crate::time::wall_now(),
+                std::time::Duration::from_secs(10),
+                future,
+            )
+            .await
+            .expect("transaction scenario must finish without waiting for unsent frames");
+        });
+    }
+
+    fn assert_pg_rollback_required<T>(
+        future: impl std::future::Future<Output = Outcome<T, PgError>>,
+    ) {
+        use std::future::Future;
+
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        let Poll::Ready(Outcome::Err(PgError::Protocol(message))) =
+            future.as_mut().poll(&mut context)
+        else {
+            panic!("a poisoned transaction must refuse before starting another wire exchange");
+        };
+        assert!(
+            message.starts_with("transaction must roll back"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn dropped_postgres_savepoint_refuses_all_transaction_entry_points_before_wire_io() {
+        use crate::database::transaction::PgSavepoint;
+
+        run_native_transaction_test(async {
+            let cx = Cx::current().expect("native transaction context");
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            reply_complete(&mut peer, "BEGIN", b'T');
+            reply_complete(&mut peer, "SAVEPOINT", b'T');
+            let mut tx = match conn.begin(&cx).await {
+                Outcome::Ok(tx) => tx,
+                _ => panic!("expected transaction"),
+            };
+            let savepoint = match PgSavepoint::new(&mut tx, &cx, "unfinished").await {
+                Outcome::Ok(savepoint) => savepoint,
+                other => panic!("expected savepoint, got {other:?}"),
+            };
+            drop(savepoint);
+            assert_eq!(tx.conn.inner.transaction_status, b'T');
+            assert!(tx.conn.inner.needs_rollback);
+
+            assert_eq!(read_frontend_frame(&mut peer), (b'Q', b"BEGIN\0".to_vec()));
+            assert_eq!(
+                read_frontend_frame(&mut peer),
+                (b'Q', b"SAVEPOINT unfinished\0".to_vec())
+            );
+            assert_pg_rollback_required(tx.query_unchecked(&cx, "SELECT 1"));
+            assert_pg_rollback_required(tx.execute_unchecked(&cx, "UPDATE t SET v = 1"));
+            assert_pg_rollback_required(tx.query_params(&cx, "SELECT $1", &[&1_i32]));
+            assert_pg_rollback_required(tx.execute_params(&cx, "UPDATE t SET v = $1", &[&1_i32]));
+            let statement = PgStatement {
+                name: "held_statement".to_string(),
+                sql: "SELECT 1".to_string(),
+                param_oids: Vec::new(),
+                columns: Vec::new(),
+                session_generation: tx.conn.inner.session_generation,
+            };
+            assert_pg_rollback_required(tx.query_cursor_prepared(
+                &cx,
+                &statement,
+                &[],
+                PgCursorConfig::default(),
+            ));
+            assert_pg_rollback_required(tx.query_cursor_params(
+                &cx,
+                "SELECT $1",
+                &[&1_i32],
+                PgCursorConfig::default(),
+            ));
+            assert_pg_rollback_required(PgSavepoint::new(&mut tx, &cx, "later"));
+
+            peer.set_nonblocking(true).expect("set peer nonblocking");
+            assert!(matches!(
+                std::io::Read::read(&mut peer, &mut [0u8; 1]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+            peer.set_nonblocking(false).expect("restore peer blocking");
+            assert_eq!(tx.conn.inner.transaction_status, b'T');
+            assert!(tx.conn.inner.needs_rollback);
+
+            // Full rollback remains available. Respond to rollback requests
+            // until ordinary connection reuse resumes, without pinning the
+            // current extra orphan-cleanup rollback to the API contract.
+            let peer_thread = std::thread::spawn(move || {
+                let mut saw_rollback = false;
+                loop {
+                    let (kind, sql) = read_frontend_frame(&mut peer);
+                    assert_eq!(kind, b'Q');
+                    match sql.as_slice() {
+                        b"ROLLBACK\0" => {
+                            saw_rollback = true;
+                            reply_complete(&mut peer, "ROLLBACK", b'I');
+                        }
+                        b"UPDATE t SET v = 2\0" => {
+                            assert!(saw_rollback, "cleanup must precede connection reuse");
+                            reply_complete(&mut peer, "UPDATE 1", b'I');
+                            return;
+                        }
+                        other => panic!("unexpected post-poison request: {other:?}"),
+                    }
+                }
+            });
+            assert!(matches!(tx.rollback(&cx).await, Outcome::Ok(())));
+            assert_eq!(conn.inner.transaction_status, b'I');
+            assert!(!conn.inner.needs_rollback);
+            assert!(!conn.inner.closed);
+            assert!(matches!(
+                conn.execute_unchecked(&cx, "UPDATE t SET v = 2").await,
+                Outcome::Ok(1)
+            ));
+            peer_thread.join().expect("transaction recovery peer");
+        });
+    }
+
+    #[test]
+    fn postgres_savepoint_recovery_remains_usable_in_a_failed_block() {
+        use crate::database::transaction::PgSavepoint;
+        use std::io::Write;
+
+        run_native_transaction_test(async {
+            let cx = Cx::current().expect("native transaction context");
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            reply_complete(&mut peer, "BEGIN", b'T');
+            reply_complete(&mut peer, "SAVEPOINT", b'T');
+            let mut tx = match conn.begin(&cx).await {
+                Outcome::Ok(tx) => tx,
+                _ => panic!("expected transaction"),
+            };
+            let mut savepoint = match PgSavepoint::new(&mut tx, &cx, "recoverable").await {
+                Outcome::Ok(savepoint) => savepoint,
+                other => panic!("expected savepoint, got {other:?}"),
+            };
+            peer.write_all(&error_response_message("23505", "duplicate key"))
+                .expect("write statement error");
+            peer.write_all(&ready_for_query(b'E'))
+                .expect("write failed-block status");
+            assert!(matches!(
+                savepoint
+                    .transaction()
+                    .execute_unchecked(&cx, "INSERT INTO t VALUES (1)")
+                    .await,
+                Outcome::Err(PgError::Server { code, .. }) if code == "23505"
+            ));
+            assert_eq!(savepoint.transaction().conn.inner.transaction_status, b'E');
+            assert!(!savepoint.transaction().conn.inner.needs_rollback);
+            // Session-changing SQL can independently require pool discard.
+            // Neither that flag nor a failed block forbids savepoint recovery.
+            savepoint.transaction().conn.inner.needs_discard = true;
+            reply_complete(&mut peer, "ROLLBACK", b'T');
+            reply_complete(&mut peer, "RELEASE", b'T');
+            assert!(matches!(savepoint.rollback(&cx).await, Outcome::Ok(())));
+            assert_eq!(tx.conn.inner.transaction_status, b'T');
+
+            reply_parse_bind_complete(&mut peer);
+            reply_complete(&mut peer, "UPDATE 1", b'T');
+            assert!(matches!(
+                tx.execute_params(&cx, "UPDATE t SET v = $1", &[&2_i32])
+                    .await,
+                Outcome::Ok(1)
+            ));
+            reply_complete(&mut peer, "COMMIT", b'I');
+            assert!(matches!(tx.commit(&cx).await, Outcome::Ok(())));
+            assert_eq!(conn.inner.transaction_status, b'I');
+            assert!(!conn.inner.needs_rollback);
+            assert!(!conn.inner.closed);
+            assert!(conn.inner.needs_discard);
+        });
+    }
+
     #[test]
     fn commit_with_pending_savepoints_releases_them_via_commit() {
         // br-asupersync-server-stack-hardening-eeexl1.5 AC2 — committing a

@@ -10477,6 +10477,8 @@ fn build_close_msg(target: u8, name: &str) -> Result<Vec<u8>, PgError> {
 /// A PostgreSQL transaction.
 ///
 /// The transaction will be rolled back on drop if not committed.
+/// Dropping an unresolved savepoint requires a full rollback: subsequent
+/// statements through this handle are refused before any SQL is sent.
 pub struct PgTransaction<'a> {
     conn: &'a mut PgConnection,
     finished: bool,
@@ -10535,6 +10537,26 @@ impl PgTransaction<'_> {
     pub(crate) fn poison_for_rollback(&mut self) {
         self.conn.inner.needs_rollback = true;
         self.conn.inner.needs_discard = true;
+    }
+
+    /// Keep a live transaction handle from entering the connection's orphan
+    /// recovery path. A dropped savepoint leaves its changes unresolved and
+    /// poisons the whole transaction. Letting a later statement reach the
+    /// connection would roll the transaction back and run that statement in
+    /// autocommit mode instead of inside this transaction.
+    fn check_open(&self) -> Result<(), PgError> {
+        if self.finished {
+            return Err(PgError::TransactionFinished);
+        }
+        if self.conn.inner.needs_rollback {
+            return Err(PgError::Protocol(
+                "transaction must roll back before executing another statement".to_string(),
+            ));
+        }
+        // A server-side failed block ('E') is still a live transaction:
+        // ROLLBACK TO SAVEPOINT must remain usable to recover it. Likewise,
+        // needs_discard alone concerns pool reuse, not transaction validity.
+        Ok(())
     }
 
     fn mark_finished_if_server_closed_transaction(&mut self, err: &PgError) {
@@ -10659,8 +10681,8 @@ impl PgTransaction<'_> {
     /// trusted literal or fully caller-controlled. Use
     /// [`Self::query_params`] for any value derived from external input.
     pub async fn query_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<PgRow>, PgError> {
-        if self.finished {
-            return Outcome::Err(PgError::TransactionFinished);
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
         }
         self.conn.query_unchecked(cx, sql).await
     }
@@ -10680,8 +10702,8 @@ impl PgTransaction<'_> {
     /// **Security:** see [`PgConnection::execute_unchecked`]. `sql` must be a
     /// trusted literal or fully caller-controlled.
     pub async fn execute_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, PgError> {
-        if self.finished {
-            return Outcome::Err(PgError::TransactionFinished);
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
         }
         self.conn.execute_unchecked(cx, sql).await
     }
@@ -10693,8 +10715,8 @@ impl PgTransaction<'_> {
         sql: &str,
         params: &[&dyn ToSql],
     ) -> Outcome<Vec<PgRow>, PgError> {
-        if self.finished {
-            return Outcome::Err(PgError::TransactionFinished);
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
         }
         self.conn.query_params(cx, sql, params).await
     }
@@ -10706,8 +10728,8 @@ impl PgTransaction<'_> {
         sql: &str,
         params: &[&dyn ToSql],
     ) -> Outcome<u64, PgError> {
-        if self.finished {
-            return Outcome::Err(PgError::TransactionFinished);
+        if let Err(error) = self.check_open() {
+            return Outcome::Err(error);
         }
         self.conn.execute_params(cx, sql, params).await
     }
