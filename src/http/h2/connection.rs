@@ -437,6 +437,10 @@ pub struct Connection {
     remote_settings: Settings,
     /// Whether we've received the peer's settings.
     received_settings: bool,
+    /// Initial SETTINGS frames handed to the transport but not acknowledged.
+    /// Local settings are immutable, so each acknowledgment applies the same
+    /// advertised table limit. Queuing a frame alone does not impose a shrink.
+    local_settings_in_flight: usize,
     /// Stream store.
     streams: StreamStore,
     /// HPACK encoder.
@@ -514,12 +518,15 @@ impl Connection {
         let initial_recv_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
         decoder.set_max_header_list_size(max_header_list_size as usize);
-        // The decoder rejects any peer dynamic-table-size update above
-        // `allowed_table_size`, which MUST equal the SETTINGS_HEADER_TABLE_SIZE
-        // we advertise to the peer (RFC 7541 §6.3). Without this it stays at the
-        // 4096 default, so advertising a larger table would make us kill a
-        // spec-conforming peer with a COMPRESSION_ERROR.
-        decoder.set_allowed_table_size(settings.header_table_size as usize);
+        // Accept our larger advertised allowance immediately, but keep the
+        // protocol's initial 4096-byte allowance for a reduction until the
+        // peer acknowledges it. Its pre-ACK field blocks may already be in
+        // flight using the initial table (RFC 9113 §4.3.1).
+        decoder.set_allowed_table_size(
+            settings
+                .header_table_size
+                .max(super::settings::DEFAULT_HEADER_TABLE_SIZE) as usize,
+        );
         let mut streams = StreamStore::new_with_local_recv_window(
             true,
             initial_send_window,
@@ -533,6 +540,7 @@ impl Connection {
             local_settings: settings,
             remote_settings: Settings::default(),
             received_settings: false,
+            local_settings_in_flight: 0,
             streams,
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
@@ -572,12 +580,15 @@ impl Connection {
         let initial_recv_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
         decoder.set_max_header_list_size(max_header_list_size as usize);
-        // The decoder rejects any peer dynamic-table-size update above
-        // `allowed_table_size`, which MUST equal the SETTINGS_HEADER_TABLE_SIZE
-        // we advertise to the peer (RFC 7541 §6.3). Without this it stays at the
-        // 4096 default, so advertising a larger table would make us kill a
-        // spec-conforming peer with a COMPRESSION_ERROR.
-        decoder.set_allowed_table_size(settings.header_table_size as usize);
+        // Accept our larger advertised allowance immediately, but keep the
+        // protocol's initial 4096-byte allowance for a reduction until the
+        // peer acknowledges it. Its pre-ACK field blocks may already be in
+        // flight using the initial table (RFC 9113 §4.3.1).
+        decoder.set_allowed_table_size(
+            settings
+                .header_table_size
+                .max(super::settings::DEFAULT_HEADER_TABLE_SIZE) as usize,
+        );
         let mut streams = StreamStore::new_with_local_recv_window(
             false,
             initial_send_window,
@@ -591,6 +602,7 @@ impl Connection {
             local_settings: settings,
             remote_settings: Settings::default(),
             received_settings: false,
+            local_settings_in_flight: 0,
             streams,
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
@@ -2099,7 +2111,16 @@ impl Connection {
         frame: &SettingsFrame,
     ) -> Result<Option<ReceivedFrame>, H2Error> {
         if frame.ack {
-            // ACK received for our settings
+            // Only an ACK for an emitted local SETTINGS frame establishes the
+            // resize boundary. Before it, already-sent peer header blocks may
+            // still use the protocol's initial table capacity. Do not evict
+            // here: the peer must signal its selected capacity in HPACK, and
+            // the decoder verifies that the required reduction came first.
+            if self.local_settings_in_flight != 0 {
+                self.local_settings_in_flight -= 1;
+                self.hpack_decoder
+                    .set_allowed_table_size(self.local_settings.header_table_size as usize);
+            }
             return Ok(None);
         }
 
@@ -2393,6 +2414,7 @@ impl Connection {
 
             match op {
                 PendingOp::Settings(frame) => {
+                    self.local_settings_in_flight = self.local_settings_in_flight.saturating_add(1);
                     returned_frame = Some(Frame::Settings(frame));
                     break;
                 }

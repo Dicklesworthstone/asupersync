@@ -865,9 +865,12 @@ const MAX_DECODED_HEADER_LIST_SIZE: usize = 16 * 1024 * 1024;
 pub struct Decoder {
     dynamic_table: DynamicTable,
     max_header_list_size: usize,
-    /// Maximum table size allowed by SETTINGS (from peer).
+    /// Maximum table size allowed by our acknowledged SETTINGS.
     /// Dynamic table size updates must not exceed this.
     allowed_table_size: usize,
+    /// Smallest acknowledged limit below the encoder's last declared size.
+    /// A later increase does not erase the intervening eviction requirement.
+    required_table_size_update: Option<usize>,
 }
 
 impl Decoder {
@@ -885,6 +888,7 @@ impl Decoder {
             dynamic_table: DynamicTable::with_max_size(capped_size),
             max_header_list_size: 16384,
             allowed_table_size: capped_size,
+            required_table_size_update: None,
         }
     }
 
@@ -896,10 +900,22 @@ impl Decoder {
         self.max_header_list_size = size;
     }
 
-    /// Set the allowed table size (from SETTINGS frame).
+    /// Apply an allowed table size after the peer acknowledges our SETTINGS.
+    ///
     /// This limits what the peer can request via dynamic table size updates.
+    /// A reduction below its last declared table size requires the next field
+    /// block to begin with a conformant size update, even if the allowed size
+    /// increases again before that block. Keep the previous allowance until
+    /// acknowledgment so field blocks already in flight remain decodable.
     pub fn set_allowed_table_size(&mut self, size: usize) {
-        self.allowed_table_size = size.min(MAX_ALLOWED_TABLE_SIZE);
+        let capped = size.min(MAX_ALLOWED_TABLE_SIZE);
+        if capped < self.dynamic_table.max_size() {
+            self.required_table_size_update = Some(
+                self.required_table_size_update
+                    .map_or(capped, |required| required.min(capped)),
+            );
+        }
+        self.allowed_table_size = capped;
     }
 
     /// Returns the current dynamic table size in bytes.
@@ -914,7 +930,7 @@ impl Decoder {
         self.dynamic_table.max_size()
     }
 
-    /// Returns the maximum table size currently allowed by peer SETTINGS.
+    /// Returns the maximum table size currently allowed by our acknowledged SETTINGS.
     #[must_use]
     pub fn allowed_table_size(&self) -> usize {
         self.allowed_table_size
@@ -961,6 +977,17 @@ impl Decoder {
         src: &mut Bytes,
         stream_id: Option<u32>,
     ) -> Result<Vec<Header>, H2Error> {
+        // RFC 9113 §4.3.1: after an acknowledged reduction, every kind of
+        // field block must begin with the required eviction, including an
+        // otherwise empty block or one using only literals/static indices.
+        // Leaving the old table resident would also let stale dynamic indices
+        // silently recover values the peer was required to evict.
+        if self.required_table_size_update.is_some() && (src.is_empty() || src[0] & 0xe0 != 0x20) {
+            return Err(H2Error::compression(
+                "missing required dynamic table size update",
+            ));
+        }
+
         let mut headers = Vec::with_capacity(8);
         let mut total_size = 0;
         let mut field_error = None;
@@ -983,7 +1010,16 @@ impl Decoder {
                     "dynamic table size update exceeds allowed maximum",
                 ));
             }
+            if self
+                .required_table_size_update
+                .is_some_and(|required| new_size > required)
+            {
+                return Err(H2Error::compression(
+                    "dynamic table size update omits the required reduction",
+                ));
+            }
             self.dynamic_table.set_max_size(new_size);
+            self.required_table_size_update = None;
         }
 
         let limit = self.max_header_list_size.min(MAX_DECODED_HEADER_LIST_SIZE);

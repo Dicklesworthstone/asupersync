@@ -5011,6 +5011,152 @@
     }
 
     #[test]
+    fn initial_hpack_reduction_waits_for_settings_acknowledgment() {
+        let settings = Settings {
+            header_table_size: 0,
+            ..Settings::default()
+        };
+        let mut server = Connection::server(settings);
+        let mut client = Connection::client(Settings::client());
+        server.queue_initial_settings();
+        client.queue_initial_settings();
+        server.process_frame(client.next_frame().unwrap()).unwrap();
+        let server_settings = server.next_frame().unwrap();
+        assert!(matches!(&server_settings, Frame::Settings(frame) if !frame.ack));
+
+        // A conforming client can send this before seeing the server's zero
+        // limit. An explicit size update exercises the pre-ACK allowance,
+        // rather than merely inserting entries below an unchecked limit.
+        client.hpack_encoder.set_max_table_size(4096);
+        let first = client
+            .open_stream(test_request_header_vec("/in-flight"), true)
+            .unwrap();
+        let received = server.process_frame(client.next_frame().unwrap()).unwrap();
+        assert!(
+            matches!(received, Some(ReceivedFrame::Headers { stream_id, .. }) if stream_id == first)
+        );
+        assert!(server.hpack_decoder.dynamic_table_size() > 0);
+        assert_eq!(server.hpack_decoder.allowed_table_size(), 4096);
+
+        client.process_frame(server_settings).unwrap();
+        let ack = client.next_frame().unwrap();
+        assert!(matches!(&ack, Frame::Settings(frame) if frame.ack));
+        server.process_frame(ack).unwrap();
+        assert_eq!(server.hpack_decoder.allowed_table_size(), 0);
+
+        let expected = test_request_header_vec("/resized");
+        let second = client.open_stream(expected.clone(), true).unwrap();
+        let received = server.process_frame(client.next_frame().unwrap()).unwrap();
+        match received {
+            Some(ReceivedFrame::Headers {
+                stream_id, headers, ..
+            }) => {
+                assert_eq!(stream_id, second);
+                assert_eq!(headers, expected);
+            }
+            other => panic!("expected the resized request, got {other:?}"),
+        }
+        assert_eq!(server.hpack_decoder.dynamic_table_size(), 0);
+        assert_eq!(server.hpack_decoder.dynamic_table_max_size(), 0);
+    }
+
+    #[test]
+    fn acknowledged_hpack_reduction_rejects_missing_update_on_the_connection() {
+        let mut server = Connection::server(Settings {
+            header_table_size: 0,
+            ..Settings::default()
+        });
+        server.queue_initial_settings();
+        server
+            .process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .unwrap();
+        assert!(matches!(server.next_frame(), Some(Frame::Settings(frame)) if !frame.ack));
+        server
+            .process_frame(Frame::Settings(SettingsFrame::ack()))
+            .unwrap();
+
+        let error = server
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                1,
+                test_request_headers("/without-resize"),
+                true,
+                true,
+            )))
+            .expect_err("the peer acknowledged zero table capacity without signaling it");
+        assert_eq!(error.code, ErrorCode::CompressionError);
+        assert_eq!(error.stream_id, None);
+        assert_eq!(error.message, "missing required dynamic table size update");
+    }
+
+    #[test]
+    fn a_hpack_reduction_sent_before_ack_is_not_required_twice() {
+        let mut server = Connection::server(Settings {
+            header_table_size: 0,
+            ..Settings::default()
+        });
+        let mut client = Connection::client(Settings::client());
+        server.queue_initial_settings();
+        client.queue_initial_settings();
+        server.process_frame(client.next_frame().unwrap()).unwrap();
+        let server_settings = server.next_frame().unwrap();
+
+        // A queued request is encoded before the subsequently queued ACK.
+        // Its early voluntary shrink is legal and already synchronizes the
+        // dynamic tables when the ACK later reaches the server.
+        client
+            .open_stream(test_request_header_vec("/before-ack"), true)
+            .unwrap();
+        client.process_frame(server_settings).unwrap();
+        let early_headers = client.next_frame().unwrap();
+        assert!(matches!(&early_headers, Frame::Headers(_)));
+        assert!(matches!(
+            server.process_frame(early_headers).unwrap(),
+            Some(ReceivedFrame::Headers { .. })
+        ));
+        assert_eq!(server.hpack_decoder.dynamic_table_max_size(), 0);
+
+        let ack = client.next_frame().unwrap();
+        assert!(matches!(&ack, Frame::Settings(frame) if frame.ack));
+        server.process_frame(ack).unwrap();
+        client
+            .open_stream(test_request_header_vec("/after-ack"), true)
+            .unwrap();
+        let headers = client.next_frame().unwrap();
+        assert!(matches!(&headers, Frame::Headers(frame) if frame.header_block[0] & 0xe0 != 0x20));
+        assert!(matches!(
+            server.process_frame(headers).unwrap(),
+            Some(ReceivedFrame::Headers { .. })
+        ));
+    }
+
+    #[test]
+    fn hpack_settings_acknowledgment_only_applies_after_frame_emission() {
+        for is_client in [false, true] {
+            let settings = Settings {
+                header_table_size: 64,
+                ..Settings::default()
+            };
+            let mut connection = if is_client {
+                Connection::client(settings)
+            } else {
+                Connection::server(settings)
+            };
+            connection.queue_initial_settings();
+            connection
+                .process_frame(Frame::Settings(SettingsFrame::ack()))
+                .unwrap();
+            assert_eq!(connection.hpack_decoder.allowed_table_size(), 4096);
+
+            assert!(matches!(connection.next_frame(), Some(Frame::Settings(frame)) if !frame.ack));
+            connection
+                .process_frame(Frame::Settings(SettingsFrame::ack()))
+                .unwrap();
+            assert_eq!(connection.hpack_decoder.allowed_table_size(), 64);
+            assert_eq!(connection.local_settings_in_flight, 0);
+        }
+    }
+
+    #[test]
     fn stream_window_update_rejects_zero_increment() {
         let mut conn = Connection::server(Settings::default());
         let err = conn.send_stream_window_update(1, 0).unwrap_err();

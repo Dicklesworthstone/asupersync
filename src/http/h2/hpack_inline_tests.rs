@@ -186,6 +186,96 @@
     }
 
     #[test]
+    fn acknowledged_table_shrink_requires_an_update_for_every_field_block_kind() {
+        for block in [
+            vec![],
+            vec![0x82],                         // Static indexed :method GET.
+            vec![0xbe],                         // The dynamic entry installed below.
+            vec![0x00, 0x01, b'x', 0x01, b'y'], // Literal without indexing.
+        ] {
+            for isolate_stream in [false, true] {
+                let mut encoder = Encoder::new();
+                let mut decoder = Decoder::new();
+                let mut seed = BytesMut::new();
+                encoder.encode(&[Header::new("x-old", "retained")], &mut seed);
+                decoder.decode(&mut seed.freeze()).unwrap();
+                assert!(decoder.dynamic_table_size() > 0);
+
+                decoder.set_allowed_table_size(0);
+                let mut src = Bytes::from(block.clone());
+                let error = if isolate_stream {
+                    decoder.decode_for_stream(&mut src, 1)
+                } else {
+                    decoder.decode(&mut src)
+                }
+                .expect_err("a field block cannot omit an acknowledged table eviction");
+                assert_eq!(error.code, ErrorCode::CompressionError);
+                assert_eq!(error.stream_id, None);
+                assert_eq!(error.message, "missing required dynamic table size update");
+            }
+        }
+    }
+
+    #[test]
+    fn acknowledged_shrink_then_increase_still_requires_the_smallest_size_first() {
+        for first_update in [128, 4096] {
+            let mut decoder = Decoder::new();
+            decoder.set_allowed_table_size(128);
+            decoder.set_allowed_table_size(64);
+            decoder.set_allowed_table_size(4096);
+
+            let mut block = BytesMut::new();
+            encode_integer(&mut block, first_update, 5, 0x20);
+            encode_integer(&mut block, 64, 5, 0x20);
+            block.put_u8(0x82);
+            let error = decoder.decode(&mut block.freeze()).unwrap_err();
+            assert_eq!(error.code, ErrorCode::CompressionError);
+            assert_eq!(
+                error.message,
+                "dynamic table size update omits the required reduction"
+            );
+        }
+    }
+
+    #[test]
+    fn required_zero_update_evicts_old_entries_before_a_later_increase() {
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        let mut seed = BytesMut::new();
+        encoder.encode(&[Header::new("x-old", "retained")], &mut seed);
+        decoder.decode(&mut seed.freeze()).unwrap();
+        assert!(decoder.dynamic_table_size() > 0);
+
+        decoder.set_allowed_table_size(0);
+        decoder.set_allowed_table_size(4096);
+        let mut block = BytesMut::new();
+        encode_integer(&mut block, 0, 5, 0x20);
+        encode_integer(&mut block, 4096, 5, 0x20);
+        assert!(decoder.decode(&mut block.freeze()).unwrap().is_empty());
+        assert_eq!(decoder.dynamic_table_size(), 0);
+        assert_eq!(decoder.dynamic_table_max_size(), 4096);
+
+        // The update-only block satisfied the requirement, but the old entry
+        // cannot be recovered by its former index after capacity is restored.
+        assert_compression_error(decoder.decode(&mut Bytes::from_static(&[0xbe])));
+    }
+
+    #[test]
+    fn a_peer_already_using_the_reduced_capacity_needs_no_second_update() {
+        let mut decoder = Decoder::new();
+        let mut update = BytesMut::new();
+        encode_integer(&mut update, 64, 5, 0x20);
+        decoder.decode(&mut update.freeze()).unwrap();
+        decoder.set_allowed_table_size(64);
+
+        assert!(decoder.decode(&mut Bytes::new()).unwrap().is_empty());
+        assert_eq!(
+            decoder.decode(&mut Bytes::from_static(&[0x82])).unwrap(),
+            vec![Header::new(":method", "GET")]
+        );
+    }
+
+    #[test]
     fn test_dynamic_table_insert() {
         let mut table = DynamicTable::new();
         table.insert(Header::new("custom-header", "custom-value"));
@@ -1451,7 +1541,8 @@
             "first instruction should be size update"
         );
 
-        let mut src = buf.freeze();
+        let mut encoded = buf.freeze();
+        let mut src = encoded.clone();
         let first_update = decode_integer(&mut src, 5).unwrap();
         assert_eq!(first_update, 128);
         assert_eq!(
@@ -1463,8 +1554,9 @@
         assert_eq!(second_update, 256);
 
         let mut decoder = Decoder::new();
+        decoder.set_allowed_table_size(128);
         decoder.set_allowed_table_size(256);
-        let decoded_headers = decoder.decode(&mut src).unwrap();
+        let decoded_headers = decoder.decode(&mut encoded).unwrap();
         assert_eq!(decoded_headers, headers);
     }
 

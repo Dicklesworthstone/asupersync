@@ -312,6 +312,7 @@ fn test_static_table_size_accounting() {
     // Encode headers that reference static table entries
     // These should not consume dynamic table space
     let mut encoder = Encoder::new();
+    encoder.set_max_table_size(32);
     encoder.set_use_huffman(false); // Focus on table accounting, not Huffman
 
     let mut encoded = BytesMut::new();
@@ -340,13 +341,13 @@ fn test_static_table_size_accounting() {
     assert_eq!(decoded_headers[2].value, "200");
     assert_eq!(decoded_headers[3].name, "cache-control");
     assert_eq!(decoded_headers[3].value, "no-cache");
+    assert_eq!(decoder.dynamic_table_size(), 0);
 
-    // Now add a new header that SHOULD use dynamic table space
+    // An oversized literal remains decodable even though it cannot fit in the
+    // negotiated dynamic table.
     let mut encoded2 = BytesMut::new();
     encoder.encode(
-        &[
-            Header::new("custom-header", "custom-value"), // New header, should use dynamic table
-        ],
+        &[Header::new("custom-header", "custom-value")],
         &mut encoded2,
     );
 
@@ -356,6 +357,7 @@ fn test_static_table_size_accounting() {
     assert_eq!(decoded_headers2.len(), 1);
     assert_eq!(decoded_headers2[0].name, "custom-header");
     assert_eq!(decoded_headers2[0].value, "custom-value");
+    assert_eq!(decoder.dynamic_table_size(), 0);
 }
 
 /// Test dynamic table behavior with Huffman-encoded values
