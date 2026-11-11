@@ -245,6 +245,7 @@ fn chunked_symbols(key_seed: u64) -> Vec<AuthenticatedSymbol> {
 enum ChunkedCase {
     Roundtrip,
     AdmittedRoundtrip,
+    QueuedRoundtrip,
     WrongSymbolKey,
     CorruptSymbolTag,
     DropAfterAcceptedChunk,
@@ -255,13 +256,14 @@ enum ChunkedCase {
 // disk durability, remote cancellation/drain, or RaptorQ snapshot recovery.
 fn exercise_chunked(case: ChunkedCase, workers: usize) {
     let receiver_seed = if matches!(case, ChunkedCase::WrongSymbolKey) { 43 } else { 42 };
+    let expected_batches = if matches!(case, ChunkedCase::QueuedRoundtrip) { 2 } else { 1 };
     let store = Arc::new(SymbolReplicaStore::new(
         "replica-a", AuthKey::from_seed(receiver_seed), chunked_batch_limits(),
         SymbolStoreLimits {
-            max_batches: 1,
-            max_bytes: 128 * 1024,
-            max_batches_per_peer: 1,
-            max_bytes_per_peer: 128 * 1024,
+            max_batches: expected_batches,
+            max_bytes: expected_batches * 128 * 1024,
+            max_batches_per_peer: expected_batches,
+            max_bytes_per_peer: expected_batches * 128 * 1024,
         },
     ).unwrap());
     let staged = Arc::new(ChunkedSymbolService::new(
@@ -319,6 +321,12 @@ fn exercise_chunked(case: ChunkedCase, workers: usize) {
                 cx.clone(), hello.clone(), [("replica-a".to_owned(), client.clone())],
                 Arc::new(AuthKey::from_seed(42)), chunked_batch_limits(), 1, CHUNK_BYTES,
             ).unwrap();
+            let transport = if matches!(case, ChunkedCase::QueuedRoundtrip) {
+                assert!(matches!(transport.clone().with_queued_admission(2),
+                    Err(asupersync::distributed::symbol_service::RemoteSymbolError::Configuration)),
+                    "changing a shared domain must not silently split its quota");
+                transport.with_queued_admission(2).unwrap()
+            } else { transport };
             let signed = chunked_symbols(42);
             let encoded = encode_symbol_batch(&signed, chunked_batch_limits()).unwrap();
             let key = encoded.key();
@@ -365,7 +373,7 @@ fn exercise_chunked(case: ChunkedCase, workers: usize) {
                 // correctly signed retry below can use the only per-peer slot.
             }
 
-            if matches!(case, ChunkedCase::DropAfterAcceptedChunk) {
+            if matches!(case, ChunkedCase::DropAfterAcceptedChunk | ChunkedCase::QueuedRoundtrip) {
                 let mut sending = Box::pin(transport.send_symbols("replica-a", signed.clone()));
                 std::future::poll_fn(|task_cx| {
                     use std::future::Future;
@@ -387,24 +395,76 @@ fn exercise_chunked(case: ChunkedCase, workers: usize) {
                         }
                     }
                 }).await;
-                drop(sending);
-                assert_eq!(transport.in_flight(), 0,
-                    "dropping the admitted future returns the clone-shared credit");
-                assert_eq!(client_store.stats().batches, 0);
-                // A lost client cannot synchronously roll back a remote stage.
-                // The service's explicit expiry path reclaims it without
-                // publishing a partial batch or altering existing storage.
-                assert_eq!(client_staged.reap_expired(Time::from_nanos(u64::MAX)), 1);
-                assert_eq!(client_staged.stats().uploads, 0);
-                assert_eq!(client_staged.stats().reserved_bytes, 0);
-                assert_eq!(client_staged.stats().received_bytes, 0);
+                if matches!(case, ChunkedCase::QueuedRoundtrip) {
+                    use asupersync::distributed::symbol_service::RemoteSymbolError;
+                    use std::future::{Future, poll_fn};
+                    use std::task::Poll;
+
+                    let other = transport.clone();
+                    let security = SecurityContext::new(AuthKey::from_seed(42));
+                    let second_symbols: Vec<_> = signed.iter().map(|symbol| {
+                        let raw = symbol.symbol();
+                        security.sign_symbol(&Symbol::new_for_test(72, raw.sbn(), raw.esi(), raw.data()))
+                    }).collect();
+                    let mut second = Box::pin(other.send_symbols("replica-a", second_symbols));
+                    let mut dropped_fetch = Box::pin(other.fetch_symbols("replica-a", key));
+                    poll_fn(|task| {
+                        assert!(second.as_mut().poll(task).is_pending());
+                        assert_eq!((other.in_flight(), other.waiting()), (1, 1));
+                        assert!(dropped_fetch.as_mut().poll(task).is_pending());
+                        assert_eq!((transport.in_flight(), transport.waiting(), transport.max_waiters()), (1, 2, 2));
+                        Poll::Ready(())
+                    }).await;
+                    let mut excess = Box::pin(transport.fetch_symbols("replica-a", key));
+                    poll_fn(|task| {
+                        assert!(matches!(excess.as_mut().poll(task), Poll::Ready(Err(RemoteSymbolError::Admission))));
+                        Poll::Ready(())
+                    }).await;
+                    drop(dropped_fetch);
+                    assert_eq!(transport.waiting(), 1, "drop retires the exact queued fetch");
+                    let oversized = signed.iter().cycle().take(chunked_batch_limits().max_symbols + 1).cloned().collect();
+                    let refused = transport.send_symbols("replica-a", oversized).await.unwrap_err();
+                    assert_eq!(refused.error_kind, asupersync::error::ErrorKind::ProtocolError);
+                    assert_eq!((transport.in_flight(), transport.waiting()), (1, 1),
+                        "oversized queued inputs must be rejected before taking metadata credit");
+                    let mut first_result = None;
+                    let mut second_result = None;
+                    poll_fn(|task| {
+                        if first_result.is_none() && let Poll::Ready(result) = sending.as_mut().poll(task) {
+                            first_result = Some(result);
+                        }
+                        if second_result.is_none() && let Poll::Ready(result) = second.as_mut().poll(task) {
+                            second_result = Some(result);
+                        }
+                        assert!(transport.in_flight() <= 1);
+                        assert!(transport.waiting() <= 2);
+                        if first_result.is_some() && second_result.is_some() { Poll::Ready(()) } else { Poll::Pending }
+                    }).await;
+                    assert_eq!(first_result.unwrap().unwrap().symbols_received, 32);
+                    assert_eq!(second_result.unwrap().unwrap().symbols_received, 32);
+                    assert_eq!((transport.in_flight(), transport.waiting()), (0, 0));
+                    assert_eq!(client_store.stats().batches, 2,
+                        "both distinct publishers must reach authenticated storage through the one shared slot");
+                } else {
+                    drop(sending);
+                    assert_eq!(transport.in_flight(), 0,
+                        "dropping the admitted future returns the clone-shared credit");
+                    assert_eq!(client_store.stats().batches, 0);
+                    // A lost client cannot synchronously roll back a remote stage.
+                    // The service's explicit expiry path reclaims it without
+                    // publishing a partial batch or altering existing storage.
+                    assert_eq!(client_staged.reap_expired(Time::from_nanos(u64::MAX)), 1);
+                    assert_eq!(client_staged.stats().uploads, 0);
+                    assert_eq!(client_staged.stats().reserved_bytes, 0);
+                    assert_eq!(client_staged.stats().received_bytes, 0);
+                }
             }
 
             let ack = transport.send_symbols("replica-a", signed.clone()).await.unwrap();
             assert_eq!(ack.replica_id, "replica-a");
             assert_eq!(ack.symbols_received, 32);
-            assert_eq!(client_store.stats().batches, 1);
-            assert_eq!(client_store.stats().bytes, encoded_len);
+            assert_eq!(client_store.stats().batches, expected_batches);
+            assert_eq!(client_store.stats().bytes, expected_batches * encoded_len);
             assert_eq!(client_staged.stats().uploads, 0);
             assert_eq!(client_staged.stats().reserved_bytes, 0);
             assert_eq!(client_staged.stats().received_bytes, 0);
@@ -418,13 +478,13 @@ fn exercise_chunked(case: ChunkedCase, workers: usize) {
             }
             assert_eq!(transport.in_flight(), 0);
             transport.send_symbols("replica-a", signed).await.unwrap();
-            assert_eq!(client_store.stats().batches, 1,
+            assert_eq!(client_store.stats().batches, expected_batches,
                 "an identical retry remains valid at the retained-store quota");
             let mut wrong_digest = key;
             wrong_digest.digest[0] ^= 1;
             assert!(transport.fetch_symbols("replica-a", wrong_digest).await.is_err());
             assert_eq!(transport.in_flight(), 0);
-            assert_eq!(client_store.stats().bytes, encoded_len);
+            assert_eq!(client_store.stats().bytes, expected_batches * encoded_len);
             assert_eq!(client_staged.stats().uploads, 0);
             assert_eq!(client_staged.stats().reserved_bytes, 0);
         });
@@ -476,6 +536,11 @@ fn chunked_symbol_commit_rejects_wrong_key_and_corrupt_tags_without_storage_cred
 #[test]
 fn dropped_native_chunked_upload_expires_partial_stage_then_reuses_transport_capacity() {
     for workers in [1, 2] { exercise_chunked(ChunkedCase::DropAfterAcceptedChunk, workers); }
+}
+
+#[test]
+fn queued_publishers_share_one_native_mtls_slot_and_dropped_waiters_release_capacity() {
+    for workers in [1, 2] { exercise_chunked(ChunkedCase::QueuedRoundtrip, workers); }
 }
 
 

@@ -141,7 +141,8 @@ impl RemoteSymbolTransport {
         if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
         let maximum = self.chunk_bytes.ok_or(RemoteSymbolError::Configuration)?;
         if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }
-        self.admission.run(|| {
+        self.check_queued_symbols(&symbols)?;
+        self.admission.run_with(&self.cx, || {
             self.with_owner_deadline(self.send_chunked_attempt(replica, symbols, maximum, Some(attempt)))
         }).await
     }
@@ -202,7 +203,7 @@ impl RemoteSymbolTransport {
         }
         if !self.routes.contains_key(&identity.replica) { return Err(RemoteSymbolError::UnknownReplica); }
         self.check_upload_bounds(identity.upload)?;
-        self.admission.run(|| self.with_owner_deadline(async {
+        self.admission.run_with(&self.cx, || self.with_owner_deadline(async {
             let response = self.call_named(&identity.replica, SYMBOL_CHUNKED_SERVICE_COMPUTATION,
                 request(ABORT, &identity.replica, &upload_body(identity.upload))?).await?;
             validate_abort_progress(&response, identity.upload)?;

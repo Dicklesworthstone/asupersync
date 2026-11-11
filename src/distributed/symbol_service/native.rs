@@ -44,10 +44,10 @@ pub enum RemoteSymbolError {
     /// The caller's context observed cancellation before dispatch.
     #[error("symbol transport context is cancelled")]
     Cancelled,
-    /// Clone-shared operation capacity is exhausted; no request was dispatched.
+    /// Clone-shared operation or waiter capacity is exhausted; no request was dispatched.
     #[error("symbol transport admission limit reached")]
     Admission,
-    /// The owning context's deadline elapsed during a multi-frame transfer.
+    /// The owning context's deadline elapsed while queued or during a multi-frame transfer.
     #[error("symbol transfer owner deadline elapsed")]
     Deadline,
 }
@@ -140,6 +140,34 @@ impl RemoteSymbolTransport {
         Ok(transport)
     }
 
+    /// Queue up to `max_waiters` operations when the shared active limit is full.
+    ///
+    /// This opt-in applies to sends, fetches and explicit upload aborts, including
+    /// every subsequent clone. Configure it before cloning: a shared admission
+    /// domain returns `Configuration` instead of silently creating another quota.
+    /// Existing constructors continue to refuse immediately unless this is called.
+    /// Zero waiters preserves immediate refusal; zero active capacity denies all
+    /// operations without parking. Registered waiters acquire in FIFO order.
+    ///
+    /// A wait observes this transport's owner cancellation and deadline; a parked
+    /// deadline requires the owner's timer driver. Dropping the future removes
+    /// its waiter. No task, encoder, payload copy or network operation starts
+    /// before a grant, and the grant lasts through inner-future destruction.
+    /// Each admitted operation holds a checked semaphore obligation under its
+    /// owner. Failure to admit that obligation refuses before dispatch.
+    ///
+    /// Queued sends must fit the batch's symbol, payload and logical decoded
+    /// storage limits before registration. The waiter count bounds retained
+    /// queue metadata; at most `max_waiters` such input batches wait. Caller
+    /// allocation capacities, backing-buffer aliases and allocator overhead are
+    /// outside these logical limits, as are caller-owned unpolled futures.
+    pub fn with_queued_admission(mut self, max_waiters: usize) -> Result<Self, RemoteSymbolError> {
+        Arc::get_mut(&mut self.admission)
+            .ok_or(RemoteSymbolError::Configuration)?
+            .enable_queue(max_waiters);
+        Ok(self)
+    }
+
     /// Admitted send, fetch and explicit abort operations across this transport and its clones.
     #[must_use]
     pub fn in_flight(&self) -> usize { self.admission.active() }
@@ -147,6 +175,35 @@ impl RemoteSymbolTransport {
     /// Shared admission ceiling (`usize::MAX` for the compatibility constructor).
     #[must_use]
     pub fn max_in_flight(&self) -> usize { self.admission.limit() }
+
+    /// Reserved waiter slots, including registration and retirement in progress.
+    #[must_use]
+    pub fn waiting(&self) -> usize { self.admission.waiting() }
+
+    /// Clone-shared waiter ceiling, or zero for immediate-refusal constructors.
+    #[must_use]
+    pub fn max_waiters(&self) -> usize { self.admission.max_waiters() }
+
+    fn check_queued_symbols(&self, symbols: &[AuthenticatedSymbol]) -> Result<(), RemoteSymbolError> {
+        if !self.admission.is_queued() { return Ok(()); }
+        if symbols.is_empty() { return Err(SymbolStoreError::Empty.into()); }
+        if symbols.len() > self.limits.max_symbols {
+            return Err(SymbolStoreError::Limit("symbols").into());
+        }
+        let mut payload = 0usize;
+        for symbol in symbols {
+            payload = payload.checked_add(symbol.symbol().data().len()).ok_or(SymbolStoreError::Overflow)?;
+            if payload > self.limits.max_payload_bytes {
+                return Err(SymbolStoreError::Limit("payload bytes").into());
+            }
+        }
+        let storage = symbols.len().checked_mul(std::mem::size_of::<AuthenticatedSymbol>())
+            .and_then(|metadata| metadata.checked_add(payload)).ok_or(SymbolStoreError::Overflow)?;
+        if storage > self.limits.max_decoded_bytes {
+            return Err(SymbolStoreError::Limit("decoded bytes").into());
+        }
+        Ok(())
+    }
 
     // Reconciliation must use the same authenticated origin for metadata and
     // ordinary symbol reads, with a configured source and bounded batch codec.
@@ -232,7 +289,7 @@ impl RemoteSymbolTransport {
     ) -> Result<Vec<AuthenticatedSymbol>, RemoteSymbolError> {
         if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
         if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }
-        self.admission.run(|| async {
+        self.admission.run_with(&self.cx, || async {
             if let Some(maximum) = self.chunk_bytes {
                 return self.with_owner_deadline(self.fetch_chunked(replica, key, maximum)).await;
             }
@@ -248,7 +305,8 @@ impl RemoteSymbolTransport {
         // Check authority/cancellation before sorting, hashing, or making an input copy.
         if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
         if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }
-        self.admission.run(|| async move {
+        self.check_queued_symbols(&symbols)?;
+        self.admission.run_with(&self.cx, || async move {
             if let Some(maximum) = self.chunk_bytes {
                 return self.with_owner_deadline(self.send_chunked(replica, symbols, maximum)).await;
             }
