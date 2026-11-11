@@ -1342,17 +1342,37 @@ A `VirtualTcp` implementation (`src/net/tcp/virtual_tcp.rs`) provides a fully in
 
 `src/http/h1/` implements HTTP/1.1 with chunked transfer encoding, connection keep-alive, and streaming request/response bodies. `src/http/h2/` implements HTTP/2 frame parsing, HPACK header compression, flow control, and stream multiplexing over a single connection.
 
-The shipped client is HTTP/1.1 only: `asupersync::http::Client` (a re-export
-of `h1::HttpClient`) offers a pooled, redirect-aware fluent request API with a
+The HTTP/1.1 client, `asupersync::http::Client` (a re-export of
+`h1::HttpClient`), offers a pooled, redirect-aware fluent request API with a
 `tls`-feature HTTPS arm, CONNECT tunnelling, and a cookie jar. HTTPS trusts
 the roots selected by `tls-native-roots` / `tls-webpki-roots` plus any root
 installed with `HttpClient::builder().add_root_certificate(cert)`; with plain
 `tls` and no installed root every `https://` request fails closed before a
 ClientHello (`tests/http_client_https_e2e.rs` proves both directions against a
 real TLS listener). Connection pooling (`src/http/pool.rs`) applies to that
-client; the HTTP/1.1 and HTTP/2 servers do not use it, and there is no
-general-purpose HTTP/2 client (gRPC owns a private H2 channel). Optional
-response compression lives in `src/http/compress.rs`.
+client; the HTTP/1.1 and HTTP/2 servers do not use it. Optional response
+compression lives in `src/http/compress.rs`.
+
+The native `asupersync::http::h2::Http2Client` provides bounded HTTP/2 requests
+driven by their calling task. Cleartext endpoints use HTTP/2 prior knowledge;
+HTTPS endpoints require an explicit TLS connector offering `h2` ALPN. With
+`http2-streaming`, its CONNECT builder exposes two owned duplex APIs:
+
+- `connect_proxy_tunnel(cx, target_authority, limits)` opens an ordinary
+  RFC 9113 CONNECT tunnel through a proxy. The request URL selects the proxy
+  endpoint and its TLS identity; `target_authority` names the destination as
+  `host:port` or `[IPv6]:port`. The request carries CONNECT and the target
+  authority without scheme, path, or protocol pseudoheaders, and does not
+  require the extended-CONNECT setting.
+- `connect_tunnel(cx, protocol_name, limits)` opens an RFC 8441 extended
+  CONNECT stream after the peer enables that protocol mechanism.
+
+The corresponding `_on` methods use a caller-supplied transport, including a
+borrowed transport. Both return `Http2Tunnel`, implementing `AsyncRead` and
+`AsyncWrite` with flow control, explicit lifetime byte limits, cancellation,
+and independent read/write half-close. Each tunnel owns its connection and
+retires the transport on cancellation or drop. A proxy tunnel carries raw
+application bytes; TLS to the destination can be layered over it explicitly.
 
 ### WebSocket
 

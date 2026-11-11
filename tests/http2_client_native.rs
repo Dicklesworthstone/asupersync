@@ -24,6 +24,10 @@ use asupersync::types::{Budget, CancelReason};
 
 const LARGE_BODY: usize = 4 * 65_535 + 123;
 
+#[cfg(feature = "http2-streaming")]
+#[path = "http2_client_native/proxy_connect.rs"]
+mod proxy_connect;
+
 fn runtime(workers: usize) -> Runtime {
     let builder = if workers == 1 {
         RuntimeBuilder::current_thread()

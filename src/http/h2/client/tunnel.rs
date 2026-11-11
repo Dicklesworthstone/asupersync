@@ -1,4 +1,4 @@
-//! An owned RFC 8441 tunnel, driven only by its caller.
+//! Owned HTTP/2 CONNECT tunnels, driven only by their callers.
 
 use super::{
     Cancellation, DATA_CHUNK, Http2ClientError, Http2ClientIo, Http2Conn, Http2RequestBuilder,
@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-/// Finite lifetime DATA limits for an extended CONNECT tunnel.
+/// Finite lifetime DATA limits for an ordinary or extended CONNECT tunnel.
 ///
 /// These limits count application bytes in each direction, including protocol
 /// framing carried inside DATA. They do not allocate buffers of the given size.
@@ -58,7 +58,7 @@ impl Http2TunnelConfig {
     }
 }
 
-/// Failure to establish an owned extended CONNECT tunnel.
+/// Failure to establish an owned CONNECT tunnel.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Http2TunnelError {
@@ -95,7 +95,7 @@ impl From<Http2ClientError> for Http2TunnelError {
     }
 }
 
-/// An owned, bounded, bidirectional HTTP/2 extended CONNECT stream.
+/// An owned, bounded, bidirectional HTTP/2 CONNECT stream.
 ///
 /// The tunnel owns its entire connection and drives it during reads, writes,
 /// flushes, and shutdown. It does not spawn a driver, retry, redirect, or use the
@@ -238,41 +238,12 @@ impl Http2RequestBuilder {
         protocol_name: &str,
         config: Http2TunnelConfig,
     ) -> impl Future<Output = Result<Http2Tunnel<Http2ClientIo>, Http2TunnelError>> + use<> {
-        let owner = cx.clone();
-        let protocol_name = bounded_protocol_name(protocol_name);
-        async move {
-            let request = self.prepare_tunnel(&protocol_name?)?;
-            require_native_io(&owner)?;
-            let timeout = self
-                .timeout
-                .unwrap_or(self.client.timeout)
-                .min(self.client.timeout);
-            let mut control = RequestControl::new(&owner, timeout);
-            let mut conn = {
-                let setup = owner.with_ambient(async {
-                    self.client.validate_native_target(&owner, &request.url)?;
-                    let transport = self.client.connect_transport(&request.url).await?;
-                    Http2Conn::start(
-                        transport,
-                        MIN_RECEIVE_WINDOW as usize,
-                        self.client.max_overhead_frames,
-                    )
-                    .await
-                });
-                let mut setup = std::pin::pin!(setup);
-                control
-                    .drive(poll_fn(|task| {
-                        require_native_io(&owner)?;
-                        setup.as_mut().poll(task)
-                    }))
-                    .await?
-            };
-            let (stream_id, response) =
-                open(&mut conn, &mut control, request.headers, true).await?;
-            Ok(Http2Tunnel::new(
-                conn, control, owner, true, config, stream_id, response,
-            ))
-        }
+        self.connect_tunnel_inner(
+            cx.clone(),
+            bounded_protocol_name(protocol_name),
+            ConnectMode::Extended,
+            config,
+        )
     }
 
     /// Establish a tunnel on an owned caller-supplied transport.
@@ -292,53 +263,184 @@ impl Http2RequestBuilder {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let owner = cx.clone();
-        let protocol_name = bounded_protocol_name(protocol_name);
-        async move {
-            let request = self.prepare_tunnel(&protocol_name?)?;
-            let timeout = self
-                .timeout
-                .unwrap_or(self.client.timeout)
-                .min(self.client.timeout);
-            let mut control = RequestControl::new(&owner, timeout);
-            let mut conn = control
-                .drive(owner.with_ambient(Http2Conn::start(
+        self.connect_tunnel_on_inner(
+            cx.clone(),
+            transport,
+            bounded_protocol_name(protocol_name),
+            ConnectMode::Extended,
+            config,
+        )
+    }
+
+    /// Establish an ordinary RFC 9113 CONNECT tunnel through an HTTP/2 proxy.
+    ///
+    /// The builder's URL identifies the proxy to dial and, for HTTPS, its TLS
+    /// identity. `target_authority` identifies the destination the proxy should
+    /// connect to; it must be an ASCII DNS hostname or an IP address followed
+    /// by an explicit, nonzero port. IPv6 literals require brackets, such as
+    /// `[2001:db8::1]:443`. Ambiguous numeric addresses, userinfo, paths, query
+    /// strings, fragments, percent escapes, and whitespace are rejected.
+    /// The resulting tunnel carries raw destination bytes; the caller can layer
+    /// TLS over it when the destination requires a separate TLS session.
+    ///
+    /// The builder must use CONNECT and have no buffered body, Content-Length,
+    /// TE, or Trailer field. A Host field, if supplied, must match the target
+    /// authority, not the proxy. All validation precedes dialing. Regular
+    /// fields such as Proxy-Authorization are sent to the proxy unchanged.
+    /// The target is resolved by the proxy and is never dialed locally.
+    ///
+    /// The request contains only :method and :authority pseudoheaders. It needs
+    /// the ordinary HTTP/2 handshake, without SETTINGS_ENABLE_CONNECT_PROTOCOL.
+    /// A 2xx response must leave the stream open; its Content-Length is ignored.
+    /// Setup deadlines, cancellation, DATA limits, transport ownership, and
+    /// independent half-closes are identical to [`Self::connect_tunnel`].
+    pub fn connect_proxy_tunnel(
+        self,
+        cx: &Cx,
+        target_authority: &str,
+        config: Http2TunnelConfig,
+    ) -> impl Future<Output = Result<Http2Tunnel<Http2ClientIo>, Http2TunnelError>> + use<> {
+        self.connect_tunnel_inner(
+            cx.clone(),
+            bounded_proxy_authority(target_authority),
+            ConnectMode::Proxy,
+            config,
+        )
+    }
+
+    /// Establish an ordinary CONNECT tunnel on a supplied proxy transport.
+    ///
+    /// Starts with the HTTP/2 client preface. The builder's URL identifies the
+    /// proxy, but is not dialed; the caller validates any proxy TLS identity and
+    /// h2 ALPN. Target validation, request fields, and tunnel behavior match
+    /// [`Self::connect_proxy_tunnel`]. The transport can be borrowed or non-Send
+    /// and is dropped on failure or cancellation, even if never polled.
+    pub fn connect_proxy_tunnel_on<T>(
+        self,
+        cx: &Cx,
+        transport: T,
+        target_authority: &str,
+        config: Http2TunnelConfig,
+    ) -> impl Future<Output = Result<Http2Tunnel<T>, Http2TunnelError>> + use<T>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.connect_tunnel_on_inner(
+            cx.clone(),
+            transport,
+            bounded_proxy_authority(target_authority),
+            ConnectMode::Proxy,
+            config,
+        )
+    }
+
+    async fn connect_tunnel_inner(
+        self,
+        owner: Cx,
+        target: Result<String, Http2ClientError>,
+        mode: ConnectMode,
+        config: Http2TunnelConfig,
+    ) -> Result<Http2Tunnel<Http2ClientIo>, Http2TunnelError> {
+        let request = self.prepare_tunnel(&target?, mode)?;
+        require_native_io(&owner)?;
+        let timeout = self
+            .timeout
+            .unwrap_or(self.client.timeout)
+            .min(self.client.timeout);
+        let mut control = RequestControl::new(&owner, timeout);
+        let mut conn = {
+            let setup = owner.with_ambient(async {
+                self.client.validate_native_target(&owner, &request.url)?;
+                let transport = self.client.connect_transport(&request.url).await?;
+                Http2Conn::start(
                     transport,
                     MIN_RECEIVE_WINDOW as usize,
                     self.client.max_overhead_frames,
-                )))
-                .await?;
-            let (stream_id, response) =
-                open(&mut conn, &mut control, request.headers, false).await?;
-            Ok(Http2Tunnel::new(
-                conn, control, owner, false, config, stream_id, response,
-            ))
-        }
+                )
+                .await
+            });
+            let mut setup = std::pin::pin!(setup);
+            control
+                .drive(poll_fn(|task| {
+                    require_native_io(&owner)?;
+                    setup.as_mut().poll(task)
+                }))
+                .await?
+        };
+        let (stream_id, response) =
+            open(&mut conn, &mut control, request.headers, true, mode).await?;
+        Ok(Http2Tunnel::new(
+            conn, control, owner, true, config, stream_id, response,
+        ))
+    }
+
+    async fn connect_tunnel_on_inner<T>(
+        self,
+        owner: Cx,
+        transport: T,
+        target: Result<String, Http2ClientError>,
+        mode: ConnectMode,
+        config: Http2TunnelConfig,
+    ) -> Result<Http2Tunnel<T>, Http2TunnelError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        let request = self.prepare_tunnel(&target?, mode)?;
+        let timeout = self
+            .timeout
+            .unwrap_or(self.client.timeout)
+            .min(self.client.timeout);
+        let mut control = RequestControl::new(&owner, timeout);
+        let mut conn = control
+            .drive(owner.with_ambient(Http2Conn::start(
+                transport,
+                MIN_RECEIVE_WINDOW as usize,
+                self.client.max_overhead_frames,
+            )))
+            .await?;
+        let (stream_id, response) =
+            open(&mut conn, &mut control, request.headers, false, mode).await?;
+        Ok(Http2Tunnel::new(
+            conn, control, owner, false, config, stream_id, response,
+        ))
     }
 
     fn prepare_tunnel(
         &self,
-        protocol_name: &str,
+        target: &str,
+        mode: ConnectMode,
     ) -> Result<super::PreparedRequest, Http2ClientError> {
         if !self.body.is_empty() {
-            return Err(invalid("extended CONNECT cannot contain a buffered body"));
+            return Err(invalid(match mode {
+                ConnectMode::Extended => "extended CONNECT cannot contain a buffered body",
+                ConnectMode::Proxy => "proxy CONNECT cannot contain a buffered body",
+            }));
         }
-        let mut parts = protocol_name.split('/');
+        if mode == ConnectMode::Proxy {
+            return self.prepare_request_target(None, None, Some(target));
+        }
+        let mut parts = target.split('/');
         let token = |part: &str| {
             !part.is_empty()
                 && part
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_\x60|~".contains(&b))
         };
-        if protocol_name.len() > 256
+        if target.len() > 256
             || !parts.next().is_some_and(token)
             || parts.next().is_some_and(|part| !token(part))
             || parts.next().is_some()
         {
             return Err(invalid("invalid extended CONNECT protocol"));
         }
-        self.prepare_request(None, Some(protocol_name))
+        self.prepare_request(None, Some(target))
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectMode {
+    Extended,
+    Proxy,
 }
 
 fn bounded_protocol_name(name: &str) -> Result<String, Http2ClientError> {
@@ -349,11 +451,73 @@ fn bounded_protocol_name(name: &str) -> Result<String, Http2ClientError> {
     }
 }
 
+fn bounded_proxy_authority(authority: &str) -> Result<String, Http2ClientError> {
+    // DNS names need at most 253 bytes, plus an optional final dot, colon,
+    // and five-digit port. Bound before cloning any caller-controlled input.
+    if authority.len() > 260 || !authority.is_ascii() {
+        return Err(invalid("invalid CONNECT target authority"));
+    }
+    let port = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, suffix) = bracketed
+            .split_once(']')
+            .ok_or_else(|| invalid("CONNECT IPv6 target requires closing bracket"))?;
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(invalid("invalid CONNECT IPv6 target"));
+        }
+        suffix
+            .strip_prefix(':')
+            .ok_or_else(|| invalid("CONNECT target requires an explicit port"))?
+    } else {
+        let (host, port) = authority
+            .split_once(':')
+            .ok_or_else(|| invalid("CONNECT target requires an explicit port"))?;
+        let host = host.strip_suffix('.').unwrap_or(host);
+        if host.is_empty()
+            || host.len() > 253
+            || host.split('.').any(|label| {
+                label.is_empty()
+                    || label.len() > 63
+                    || !label.as_bytes()[0].is_ascii_alphanumeric()
+                    || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                    || !label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        {
+            return Err(invalid("invalid CONNECT target hostname"));
+        }
+        // Do not let a proxy interpret a numeric DNS-looking spelling as a
+        // legacy abbreviated, octal, or hexadecimal IPv4 address.
+        let numeric = host.split('.').all(|label| {
+            label.bytes().all(|byte| byte.is_ascii_digit())
+                || label
+                    .strip_prefix("0x")
+                    .or_else(|| label.strip_prefix("0X"))
+                    .is_some_and(|digits| {
+                        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+        });
+        if numeric && host.parse::<std::net::Ipv4Addr>().is_err() {
+            return Err(invalid("ambiguous CONNECT IPv4 target"));
+        }
+        port
+    };
+    if port.is_empty()
+        || port.len() > 5
+        || !port.bytes().all(|byte| byte.is_ascii_digit())
+        || !port.parse::<u16>().is_ok_and(|port| port != 0)
+    {
+        return Err(invalid("CONNECT target port must be in 1..=65535"));
+    }
+    Ok(authority.to_owned())
+}
+
 async fn open<T>(
     conn: &mut Http2Conn<T>,
     control: &mut RequestControl,
     headers: Vec<Header>,
     native: bool,
+    mode: ConnectMode,
 ) -> Result<(u32, ResponseState), Http2TunnelError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
@@ -369,6 +533,7 @@ where
         if let Err(error) = control.check(task) {
             return Poll::Ready(Err(
                 if matches!(error, Http2ClientError::DeadlineExceeded)
+                    && mode == ConnectMode::Extended
                     && conn.connection.state() == ConnectionState::Open
                     && !conn.wire.codec().peer_supports_extended_connect()
                 {
@@ -433,7 +598,7 @@ where
                         }
                         Some(_) => {
                             return Poll::Ready(Err(protocol(
-                                "unexpected frame during extended CONNECT opening",
+                                "unexpected frame during CONNECT opening",
                             )
                             .into()));
                         }
@@ -452,7 +617,7 @@ where
                 Poll::Ready(None) => {
                     return Poll::Ready(Err(Http2ClientError::Io(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
-                        "peer closed during extended CONNECT opening",
+                        "peer closed during CONNECT opening",
                     ))
                     .into()));
                 }
@@ -460,16 +625,19 @@ where
             }
             if stream_id.is_none()
                 && conn.connection.state() == ConnectionState::Open
-                && conn.wire.codec().peer_supports_extended_connect()
+                && (mode == ConnectMode::Proxy
+                    || conn.wire.codec().peer_supports_extended_connect())
                 && conn.connection.remote_settings().max_concurrent_streams != 0
             {
+                let headers = headers.take().expect("opening headers retained");
                 stream_id = Some(
-                    conn.connection
-                        .open_extended_connect(
-                            headers.take().expect("opening headers retained"),
-                            conn.wire.codec(),
-                        )
-                        .map_err(Http2ClientError::from)?,
+                    match mode {
+                        ConnectMode::Extended => conn
+                            .connection
+                            .open_extended_connect(headers, conn.wire.codec()),
+                        ConnectMode::Proxy => conn.connection.open_stream(headers, false),
+                    }
+                    .map_err(Http2ClientError::from)?,
                 );
                 progress = true;
             }
@@ -997,4 +1165,291 @@ fn tunnel_io_error(error: Http2ClientError) -> io::Error {
         ),
     };
     io::Error::new(kind, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Http2Client, Method};
+    use super::*;
+    use std::cell::Cell;
+    use std::task::Waker;
+
+    struct UnpolledTransport<'a>(&'a Cell<usize>);
+
+    impl Drop for UnpolledTransport<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    impl AsyncRead for UnpolledTransport<'_> {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            panic!("invalid CONNECT request polled its transport")
+        }
+    }
+
+    impl AsyncWrite for UnpolledTransport<'_> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            panic!("invalid CONNECT request polled its transport")
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            panic!("invalid CONNECT request polled its transport")
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            panic!("invalid CONNECT request polled its transport")
+        }
+    }
+
+    fn limits() -> Http2TunnelConfig {
+        Http2TunnelConfig::new(
+            NonZeroU64::new(1024).unwrap(),
+            NonZeroU64::new(1024).unwrap(),
+        )
+    }
+
+    #[test]
+    fn proxy_preflight_drops_borrowed_non_send_transport_without_polling_it() {
+        let cx = Cx::for_testing();
+        let client = Http2Client::new();
+        let proxy = "https://proxy.example";
+        for (builder, target) in [
+            (
+                client.request(Method::Connect, proxy),
+                "destination.example",
+            ),
+            (
+                client.request(Method::Get, proxy),
+                "destination.example:443",
+            ),
+            (
+                client.request(Method::Connect, proxy).body("payload"),
+                "destination.example:443",
+            ),
+            (
+                client
+                    .request(Method::Connect, proxy)
+                    .header("Host", "proxy.example"),
+                "destination.example:443",
+            ),
+        ] {
+            let drops = Cell::new(0);
+            let mut future = std::pin::pin!(builder.connect_proxy_tunnel_on(
+                &cx,
+                UnpolledTransport(&drops),
+                target,
+                limits(),
+            ));
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                future.as_mut().poll(&mut task),
+                Poll::Ready(Err(Http2TunnelError::Client(
+                    Http2ClientError::InvalidRequest(_)
+                )))
+            ));
+            assert_eq!(drops.get(), 1);
+        }
+    }
+
+    #[test]
+    fn dropping_unpolled_proxy_open_drops_its_borrowed_transport() {
+        let drops = Cell::new(0);
+        let cx = Cx::for_testing();
+        let future = Http2Client::new()
+            .request(Method::Connect, "https://proxy.example")
+            .connect_proxy_tunnel_on(
+                &cx,
+                UnpolledTransport(&drops),
+                "destination.example:443",
+                limits(),
+            );
+        drop(future);
+        assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn proxy_authority_accepts_explicit_dns_ipv4_and_bracketed_ipv6_targets() {
+        for authority in [
+            "destination.example:443",
+            "EXAMPLE.com.:65535",
+            "localhost:1",
+            "xn--bcher-kva.example:8443",
+            "192.0.2.1:80",
+            "[2001:db8::1]:443",
+            "[::1]:1",
+            "[::ffff:192.0.2.128]:65535",
+        ] {
+            assert_eq!(bounded_proxy_authority(authority).unwrap(), authority);
+        }
+    }
+
+    #[test]
+    fn proxy_authority_rejects_ambiguous_or_non_authority_targets() {
+        for authority in [
+            "",
+            "destination.example",
+            ":443",
+            "destination.example:",
+            "destination.example:0",
+            "destination.example:65536",
+            "destination.example:9999999999999999999999999",
+            "destination.example:+443",
+            "destination.example:-1",
+            "destination.example: 443",
+            "destination.example:443 ",
+            "destination.example:44\t3",
+            "destination.example:443\r\nInjected: value",
+            "destination.example:443/path",
+            "destination.example:443?query",
+            "destination.example:443#fragment",
+            "destination.example:443:8443",
+            "https://destination.example:443",
+            "user@destination.example:443",
+            "user:password@destination.example:443",
+            "destination.example\\other:443",
+            "destination%2eexample:443",
+            "destination.example%00:443",
+            "destination\0.example:443",
+            "déstination.example:443",
+            ".example:443",
+            "destination..example:443",
+            "destination.example..:443",
+            "-destination.example:443",
+            "destination-.example:443",
+            "destination_name.example:443",
+            "127.1:443",
+            "2130706433:443",
+            "0177.0.0.1:443",
+            "0x7f.0.0.1:443",
+            "0x7f000001:443",
+            "256.0.0.1:443",
+            "2001:db8::1:443",
+            "[2001:db8::1]",
+            "[2001:db8::1:443",
+            "[2001:db8::1]:443/",
+            "[2001:db8::1]:0",
+            "[2001:db8::1]extra:443",
+            "[fe80::1%25eth0]:443",
+            "[v1.example]:443",
+            "[127.0.0.1]:443",
+            "[]:443",
+        ] {
+            assert!(
+                matches!(
+                    bounded_proxy_authority(authority),
+                    Err(Http2ClientError::InvalidRequest(_))
+                ),
+                "accepted invalid authority {authority:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_authority_bounds_dns_labels_and_total_length() {
+        let max_host = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let max_authority = format!("{max_host}.:65535");
+        assert_eq!(max_authority.len(), 260);
+        assert_eq!(
+            bounded_proxy_authority(&max_authority).unwrap(),
+            max_authority
+        );
+        assert!(bounded_proxy_authority(&format!("x{max_host}.:65535")).is_err());
+        assert!(bounded_proxy_authority(&format!("{}.example:443", "a".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn proxy_request_keeps_transport_origin_separate_from_destination() {
+        let request = Http2Client::new()
+            .request(
+                Method::Connect,
+                "https://proxy.example:8443/ignored?proxy=1",
+            )
+            .header("Host", "DESTINATION.example:443")
+            .header("Proxy-Authorization", "Basic dXNlcjpwYXNz")
+            .prepare_tunnel("destination.example:443", ConnectMode::Proxy)
+            .unwrap();
+        assert_eq!(request.url.host, "proxy.example");
+        assert_eq!(request.url.port, 8443);
+        let fields: Vec<_> = request
+            .headers
+            .iter()
+            .map(|header| (header.name.as_str(), header.value.as_str()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (":method", "CONNECT"),
+                (":authority", "destination.example:443"),
+                ("proxy-authorization", "Basic dXNlcjpwYXNz"),
+            ]
+        );
+    }
+
+    #[test]
+    fn proxy_request_refuses_non_connect_body_framing_and_conflicting_host() {
+        let client = Http2Client::new();
+        let proxy = "https://proxy.example";
+        for builder in [
+            client.request(Method::Get, proxy),
+            client.request(Method::Connect, proxy).body("payload"),
+            client
+                .request(Method::Connect, proxy)
+                .header("Content-Length", "0"),
+            client
+                .request(Method::Connect, proxy)
+                .header("TE", "trailers"),
+            client
+                .request(Method::Connect, proxy)
+                .header("Trailer", "Digest"),
+            client
+                .request(Method::Connect, proxy)
+                .header("Host", "proxy.example"),
+            client
+                .request(Method::Connect, proxy)
+                .header(":protocol", "websocket"),
+        ] {
+            assert!(matches!(
+                builder.prepare_tunnel("destination.example:443", ConnectMode::Proxy),
+                Err(Http2ClientError::InvalidRequest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn extended_request_keeps_protocol_scheme_and_path() {
+        let request = Http2Client::new()
+            .request(Method::Connect, "https://origin.example/chat?room=1")
+            .prepare_tunnel("websocket", ConnectMode::Extended)
+            .unwrap();
+        let fields: Vec<_> = request
+            .headers
+            .iter()
+            .map(|header| (header.name.as_str(), header.value.as_str()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (":method", "CONNECT"),
+                (":protocol", "websocket"),
+                (":scheme", "https"),
+                (":authority", "origin.example"),
+                (":path", "/chat?room=1"),
+            ]
+        );
+    }
 }

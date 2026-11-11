@@ -540,6 +540,15 @@ impl Http2RequestBuilder {
         exact_length: Option<u64>,
         extended_protocol: Option<&str>,
     ) -> Result<PreparedRequest, Http2ClientError> {
+        self.prepare_request_target(exact_length, extended_protocol, None)
+    }
+
+    fn prepare_request_target(
+        &self,
+        exact_length: Option<u64>,
+        extended_protocol: Option<&str>,
+        proxy_authority: Option<&str>,
+    ) -> Result<PreparedRequest, Http2ClientError> {
         if exact_length.is_some_and(|length| length > self.client.max_request_body as u64) {
             return Err(Http2ClientError::BodyTooLarge {
                 request: true,
@@ -549,13 +558,17 @@ impl Http2RequestBuilder {
         if Method::from_bytes(self.method.as_str().as_bytes()).is_none() {
             return Err(invalid("method is not an HTTP token"));
         }
-        if self.method.as_str() == "CONNECT" && extended_protocol.is_none() {
+        let connect = extended_protocol.is_some() || proxy_authority.is_some();
+        if self.method.as_str() == "CONNECT" && !connect {
             return Err(invalid(
                 "CONNECT tunnels require an owned duplex stream API",
             ));
         }
         if extended_protocol.is_some() && self.method.as_str() != "CONNECT" {
             return Err(invalid("extended CONNECT requires the CONNECT method"));
+        }
+        if proxy_authority.is_some() && self.method.as_str() != "CONNECT" {
+            return Err(invalid("proxy CONNECT requires the CONNECT method"));
         }
         let mut url = ParsedUrl::parse(&self.url).map_err(|error| invalid(error.to_string()))?;
         url.path
@@ -580,20 +593,30 @@ impl Http2RequestBuilder {
             }
             url.host = format!("[{}]", url.host);
         }
-        let authority = url.authority();
-        let mut headers = vec![
-            Header::new(":method", self.method.as_str()),
-            Header::new(
-                ":scheme",
-                if url.scheme == Scheme::Https {
-                    "https"
-                } else {
-                    "http"
-                },
-            ),
-            Header::new(":authority", &authority),
-            Header::new(":path", &url.path),
-        ];
+        // A proxy's transport origin (including TLS identity) and CONNECT's
+        // destination authority are distinct. RFC 9113 section 8.5 excludes
+        // :scheme and :path from ordinary CONNECT requests.
+        let authority = proxy_authority.map_or_else(|| url.authority(), str::to_owned);
+        let mut headers = if proxy_authority.is_some() {
+            vec![
+                Header::new(":method", self.method.as_str()),
+                Header::new(":authority", &authority),
+            ]
+        } else {
+            vec![
+                Header::new(":method", self.method.as_str()),
+                Header::new(
+                    ":scheme",
+                    if url.scheme == Scheme::Https {
+                        "https"
+                    } else {
+                        "http"
+                    },
+                ),
+                Header::new(":authority", &authority),
+                Header::new(":path", &url.path),
+            ]
+        };
         let mut content_length = None;
         if let Some(protocol) = extended_protocol {
             headers.insert(1, Header::new(":protocol", protocol));
@@ -611,7 +634,16 @@ impl Http2RequestBuilder {
             if extended_protocol.is_some()
                 && matches!(header.name.as_str(), "content-length" | "te" | "trailer")
             {
-                return Err(invalid("extended CONNECT cannot declare an HTTP body or trailers"));
+                return Err(invalid(
+                    "extended CONNECT cannot declare an HTTP body or trailers",
+                ));
+            }
+            if proxy_authority.is_some()
+                && matches!(header.name.as_str(), "content-length" | "te" | "trailer")
+            {
+                return Err(invalid(
+                    "proxy CONNECT cannot declare an HTTP body or trailers",
+                ));
             }
             match header.name.as_str() {
                 "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding"
@@ -620,7 +652,11 @@ impl Http2RequestBuilder {
                 }
                 "te" if header.value != "trailers" => return Err(invalid("TE must be trailers")),
                 "host" if !header.value.eq_ignore_ascii_case(&authority) => {
-                    return Err(invalid("Host conflicts with URL authority"));
+                    return Err(invalid(if proxy_authority.is_some() {
+                        "Host conflicts with CONNECT destination authority"
+                    } else {
+                        "Host conflicts with URL authority"
+                    }));
                 }
                 "host" => continue,
                 "content-length" => {
