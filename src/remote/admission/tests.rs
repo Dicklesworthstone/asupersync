@@ -258,6 +258,7 @@ fn discarded_factory_and_unpolled_driver_retire_native_admission() {
             let publication = NativeRemotePublishedRequest {
                 wire: RemoteServiceWireRequest::from_spawn_request(RemotePeerHello::new(NodeId::new("origin"),
                     RemoteProtocolVersion::V3, registry.fingerprint()), &request).unwrap(),
+                origin: None,
                 client: client.clone(), control: shared.control(task).unwrap(), control_receiver,
                 guard, _admission: Some(credit),
             };

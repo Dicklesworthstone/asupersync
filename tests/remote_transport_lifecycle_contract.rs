@@ -5970,8 +5970,9 @@ fn native_remote_v4_rebases_deadline_after_queue_and_tls_retry() {
     let snapshot = RemoteServiceWireRequest::from_spawn_request_at(
         hello.clone(), &finite_request, cx.now(),
     ).expect("explicit finite snapshot should encode");
-    let stale = block_on(direct.start_session(&cx, &snapshot))
-        .expect_err("retrying client must refuse a finite snapshot without its original clock");
+    let Err(stale) = block_on(direct.start_session(&cx, &snapshot)) else {
+        panic!("retrying client must refuse a finite snapshot without its original clock");
+    };
     assert_eq!(stale.attempts(), 0);
     assert!(matches!(stale, RemoteComputationClientError::Session {
         source: RemoteServiceSessionError::Service(RemoteComputationServiceError::Transport(ref error)), ..
