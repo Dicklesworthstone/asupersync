@@ -3,7 +3,10 @@
 //! [`PgReplicationConnection`] negotiates `replication=database` using the
 //! ordinary PostgreSQL TLS and authentication implementation. Starting a stream
 //! uses an existing pgoutput slot and publication names; this API never creates
-//! or drops a slot. [`PgReplicationStream`] owns its socket and retains the
+//! or drops a slot. Protocol 1 remains the default; explicitly enabling
+//! [`PgReplicationConfig::streaming`] negotiates version 2 and delivers changes
+//! from large in-progress transactions before commit. [`PgReplicationStream`]
+//! owns its socket and retains the
 //! starting context's authority, cancellation, and deadline across calls.
 //!
 //! Replication feedback is an application durability decision. Receiving an
@@ -82,7 +85,7 @@ impl FromStr for PgLsn {
     }
 }
 
-/// Options for an existing pgoutput slot, using protocol version 1.
+/// Options for an existing pgoutput slot, using protocol version 1 by default.
 #[derive(Debug, Clone)]
 pub struct PgReplicationConfig {
     slot: String,
@@ -91,6 +94,7 @@ pub struct PgReplicationConfig {
     max_message_bytes: usize,
     binary: bool,
     messages: bool,
+    streaming: bool,
 }
 
 impl PgReplicationConfig {
@@ -142,6 +146,7 @@ impl PgReplicationConfig {
             max_message_bytes: DEFAULT_MAX_REPLICATION_MESSAGE_BYTES,
             binary: false,
             messages: false,
+            streaming: false,
         };
         config.start_command()?;
         Ok(config)
@@ -175,6 +180,37 @@ impl PgReplicationConfig {
         self
     }
 
+    /// Stream large in-progress transactions using pgoutput protocol version 2.
+    ///
+    /// This opt-in requires PostgreSQL 14 or later. There is no silent fallback
+    /// if the server refuses the option. Changes inside Stream Start/Stop
+    /// segments are provisional until Stream Commit; Stream Abort can revoke
+    /// either a transaction or one of its subtransactions. The application must
+    /// retain their ownership and acknowledge only the durability it achieves.
+    ///
+    /// Use one [`Self::pgoutput_decoder`] for all events on this connection and
+    /// [`PgReplicationEvent::pgoutput_with`] to decode the conditional XID fields.
+    /// The stateless version-1 helpers must not decode these streamed payloads.
+    #[must_use]
+    pub fn streaming(mut self, enabled: bool) -> Self {
+        self.streaming = enabled;
+        self
+    }
+
+    /// Create a fresh decoder matching this configuration's wire version.
+    ///
+    /// Retain it across events from the start of the replication stream. Do
+    /// not recreate it for each event or attach it midway through a segment.
+    #[must_use]
+    pub const fn pgoutput_decoder(&self) -> super::pgoutput::PgOutputDecoder {
+        let version = if self.streaming {
+            super::pgoutput::PgOutputProtocolVersion::V2
+        } else {
+            super::pgoutput::PgOutputProtocolVersion::V1
+        };
+        super::pgoutput::PgOutputDecoder::new(version)
+    }
+
     fn start_command(&self) -> Result<String, PgError> {
         let names = self
             .publications
@@ -185,18 +221,22 @@ impl PgReplicationConfig {
         // The replication scanner uses standard strings: embedded single
         // quotes are doubled, and backslashes have no escape semantics.
         let mut command = format!(
-            "START_REPLICATION SLOT {} LOGICAL {} (proto_version '1', publication_names '{}')",
+            "START_REPLICATION SLOT {} LOGICAL {} (proto_version '{}', publication_names '{}')",
             quote_postgres_identifier(&self.slot),
             self.start_lsn,
+            if self.streaming { 2 } else { 1 },
             names.replace('\'', "''"),
         );
-        if self.binary || self.messages {
+        if self.binary || self.messages || self.streaming {
             command.pop();
             if self.binary {
                 command.push_str(", binary 'true'");
             }
             if self.messages {
                 command.push_str(", messages 'true'");
+            }
+            if self.streaming {
+                command.push_str(", streaming 'on'");
             }
             command.push(')');
         }
@@ -243,6 +283,21 @@ impl PgReplicationEvent {
     ) -> Result<Option<super::pgoutput::PgOutputMessage<'_>>, super::pgoutput::PgOutputError> {
         match self {
             Self::XLogData { data, .. } => super::pgoutput::decode_pgoutput(data).map(Some),
+            Self::PrimaryKeepAlive { .. } => Ok(None),
+        }
+    }
+
+    /// Decode with the connection's retained, version-aware pgoutput decoder.
+    ///
+    /// Obtain the decoder from [`PgReplicationConfig::pgoutput_decoder`] before
+    /// starting the stream, and pass every WAL event in order. Keepalives leave
+    /// decoder state untouched. No decoding operation acknowledges WAL progress.
+    pub fn pgoutput_with<'a>(
+        &'a self,
+        decoder: &mut super::pgoutput::PgOutputDecoder,
+    ) -> Result<Option<super::pgoutput::PgOutputEvent<'a>>, super::pgoutput::PgOutputError> {
+        match self {
+            Self::XLogData { data, .. } => decoder.decode(data).map(Some),
             Self::PrimaryKeepAlive { .. } => Ok(None),
         }
     }
@@ -363,7 +418,7 @@ impl PgReplicationConnection {
         }
     }
 
-    /// Start pgoutput version 1 from an existing logical slot.
+    /// Start the configured pgoutput protocol from an existing logical slot.
     ///
     /// The returned stream exclusively owns the connection. Dropping this
     /// future before startup completes closes it, without replaying the command.

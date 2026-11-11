@@ -1,6 +1,8 @@
-use super::*;
-use super::super::pgoutput::PgOutputMessage;
 use super::super::parse_startup_message;
+use super::super::pgoutput::{
+    PgOutputEvent, PgOutputMessage, PgOutputProtocolVersion, PgTupleValue,
+};
+use super::*;
 use crate::runtime::{Runtime, RuntimeBuilder};
 use crate::types::{Budget, RegionId, TaskId};
 use std::io::{Read, Write};
@@ -110,6 +112,15 @@ fn start(socket: &mut TcpStream) {
     socket.write_all(&frame(b'W', &[0, 0, 0])).unwrap();
 }
 
+fn start_streaming(socket: &mut TcpStream) {
+    startup(socket);
+    authenticate(socket);
+    let (tag, data) = receive(socket);
+    assert_eq!(tag, b'Q');
+    assert_eq!(data, b"START_REPLICATION SLOT \"slot_1\" LOGICAL 0/10 (proto_version '2', publication_names '\"pub\"', streaming 'on')\0");
+    socket.write_all(&frame(b'W', &[0, 0, 0])).unwrap();
+}
+
 fn config() -> PgReplicationConfig {
     PgReplicationConfig::new("slot_1", ["pub"], PgLsn::new(0x10)).unwrap()
 }
@@ -192,6 +203,27 @@ fn lsn_configuration_and_feedback_validate_without_sql_injection() {
     let command = PgReplicationConfig::new("safe", ["pub,one", "a\"b's\\c"], PgLsn::new(0))
         .unwrap().binary(true).messages(true).start_command().unwrap();
     assert_eq!(command, "START_REPLICATION SLOT \"safe\" LOGICAL 0/0 (proto_version '1', publication_names '\"pub,one\",\"a\"\"b''s\\c\"', binary 'true', messages 'true')");
+    assert_eq!(
+        config().pgoutput_decoder().protocol_version(),
+        PgOutputProtocolVersion::V1
+    );
+    let streaming = config().streaming(true).binary(true).messages(true);
+    assert_eq!(
+        streaming.pgoutput_decoder().protocol_version(),
+        PgOutputProtocolVersion::V2
+    );
+    assert_eq!(
+        streaming.start_command().unwrap(),
+        "START_REPLICATION SLOT \"slot_1\" LOGICAL 0/10 (proto_version '2', publication_names '\"pub\"', binary 'true', messages 'true', streaming 'on')"
+    );
+    assert_eq!(
+        config()
+            .streaming(true)
+            .streaming(false)
+            .start_command()
+            .unwrap(),
+        config().start_command().unwrap()
+    );
     assert!(config().with_max_message_bytes(24).is_err());
     assert!(config().with_max_message_bytes(MAX_BACKEND_MESSAGE_LEN as usize).is_err());
     assert!(PgReplicationFeedback::new(PgLsn::new(1), PgLsn::new(2), PgLsn::new(0)).is_err());
@@ -316,6 +348,106 @@ fn native_replication_negotiates_mode_decodes_changes_and_acknowledges_only_conf
 }
 
 #[test]
+fn native_streamed_replication_preserves_abort_ownership_and_explicit_commit_feedback() {
+    for workers in [1, 2] {
+        let (listener, url) = listener();
+        let peer = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            start_streaming(&mut socket);
+            let mut data = wal(b"S\0\0\0\x2a\x01");
+            // XID 44 owns this provisional row inside top-level XID 42.
+            data.extend(wal(b"I\0\0\0\x2c\0\0\0\x07N\0\x01t\0\0\0\x03old"));
+            data.extend(wal(b"E"));
+            data.extend(keepalive(0x200, true));
+            socket.write_all(&data).unwrap();
+            assert_feedback(&mut socket, [0, 0, 0]);
+
+            // Abort only subtransaction 44; the next segment of 42 survives.
+            let mut data = wal(b"A\0\0\0\x2a\0\0\0\x2c");
+            data.extend(wal(b"S\0\0\0\x2a\0"));
+            data.extend(wal(b"I\0\0\0\x2a\0\0\0\x07N\0\x01t\0\0\0\x03new"));
+            data.extend(wal(b"E"));
+            data.extend(wal(b"c\0\0\0\x2a\0\0\0\0\0\0\0\0\x80\0\0\0\0\0\0\0\x90\xff\xff\xff\xff\xff\xff\xff\xff"));
+            data.extend(keepalive(0x200, true));
+            socket.write_all(&data).unwrap();
+            // Receiving/decoding a commit still does not claim durability.
+            assert_feedback(&mut socket, [0, 0, 0]);
+            assert_feedback(&mut socket, [0x90, 0x90, 0x90]);
+            finish_peer(&mut socket);
+        });
+        let runtime = runtime(workers);
+        let cx = runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let driver_wake = cancel_waker_tokens(&cx);
+            let config = config().streaming(true);
+            let mut decoder = config.pgoutput_decoder();
+            let connection = ok(PgReplicationConnection::connect(&cx, &url).await);
+            let mut stream = ok(connection.start(&cx, config).await);
+            let expected = [
+                Some(PgOutputEvent::StreamStart {
+                    xid: 42,
+                    first_segment: true,
+                }),
+                Some(PgOutputEvent::Message {
+                    stream_xid: Some(42),
+                    xid: Some(44),
+                    message: PgOutputMessage::Insert {
+                        relation_id: 7,
+                        new_tuple: vec![PgTupleValue::Text(b"old")],
+                    },
+                }),
+                Some(PgOutputEvent::StreamStop { xid: 42 }),
+                None,
+                Some(PgOutputEvent::StreamAbort {
+                    xid: 42,
+                    subxid: 44,
+                }),
+                Some(PgOutputEvent::StreamStart {
+                    xid: 42,
+                    first_segment: false,
+                }),
+                Some(PgOutputEvent::Message {
+                    stream_xid: Some(42),
+                    xid: Some(42),
+                    message: PgOutputMessage::Insert {
+                        relation_id: 7,
+                        new_tuple: vec![PgTupleValue::Text(b"new")],
+                    },
+                }),
+                Some(PgOutputEvent::StreamStop { xid: 42 }),
+                Some(PgOutputEvent::StreamCommit {
+                    xid: 42,
+                    commit_lsn: PgLsn::new(0x80),
+                    end_lsn: PgLsn::new(0x90),
+                    commit_time_micros: -1,
+                }),
+                None,
+            ];
+            for expected in expected {
+                let event = ok(stream.next(&cx).await).unwrap();
+                assert_eq!(event.pgoutput_with(&mut decoder).unwrap(), expected);
+                assert_eq!(stream.feedback(), PgReplicationFeedback::default());
+            }
+            assert_eq!(decoder.active_stream_xid(), None);
+            let committed = PgLsn::new(0x90);
+            ok(stream
+                .send_feedback(
+                    &cx,
+                    PgReplicationFeedback::new(committed, committed, committed).unwrap(),
+                )
+                .await);
+            ok(stream.finish(&cx).await);
+            assert_eq!(cancel_waker_tokens(&cx), driver_wake);
+            cx
+        });
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        drop(cx);
+        peer.join().unwrap();
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[test]
 fn native_partial_wal_wait_can_be_dropped_to_send_feedback_then_resumed() {
     for workers in [1, 2] {
         let (listener, url) = listener();
@@ -361,11 +493,16 @@ fn native_partial_wal_wait_can_be_dropped_to_send_feedback_then_resumed() {
 
 #[test]
 fn native_parked_replication_retains_original_owner_cancellation_and_delivers_cancel_request() {
-    for workers in [1, 2] {
+    for (workers, streaming) in [(1, false), (2, false), (1, true), (2, true)] {
         let (listener, url) = listener();
         let peer = std::thread::spawn(move || {
             let mut socket = accept(&listener);
-            start(&mut socket);
+            if streaming {
+                start_streaming(&mut socket);
+                socket.write_all(&wal(b"S\0\0\0\x2a\x01")).unwrap();
+            } else {
+                start(&mut socket);
+            }
             let mut cancel = accept(&listener);
             let mut bytes = [0; 16];
             cancel.read_exact(&mut bytes).unwrap();
@@ -392,7 +529,14 @@ fn native_parked_replication_retains_original_owner_cancellation_and_delivers_ca
             let driver_wake = cancel_waker_tokens(&poller);
             assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
             let connection = ok(PgReplicationConnection::connect(&owner, &url).await);
-            let mut stream = ok(connection.start(&owner, config()).await);
+            let config = config().streaming(streaming);
+            let mut decoder = config.pgoutput_decoder();
+            let mut stream = ok(connection.start(&owner, config).await);
+            if streaming {
+                let event = ok(stream.next(&poller).await).unwrap();
+                assert_eq!(event.pgoutput_with(&mut decoder).unwrap(),
+                    Some(PgOutputEvent::StreamStart { xid: 42, first_segment: true }));
+            }
             let mut witnessed = false;
             let outcome = {
                 let mut waiting = Box::pin(stream.next(&poller));
@@ -411,6 +555,8 @@ fn native_parked_replication_retains_original_owner_cancellation_and_delivers_ca
                 other => panic!("original owner cancellation was lost: {other:?}"),
             }
             assert!(poller.checkpoint().is_ok());
+            assert_eq!(decoder.active_stream_xid(), streaming.then_some(42));
+            assert_eq!(stream.feedback(), PgReplicationFeedback::default());
             assert!(matches!(stream.next(&poller).await, Outcome::Err(PgError::Protocol(_))));
             drop(stream);
             assert!(owner.inner.read().cancel_waker_registrations.is_empty());

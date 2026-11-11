@@ -1,4 +1,4 @@
-//! Borrowing decoder for PostgreSQL's `pgoutput` protocol version 1.
+//! Borrowing decoders for PostgreSQL's `pgoutput` protocol versions 1 and 2.
 //!
 //! Decode the `data` portion of a replication `XLogData` event, after its WAL
 //! envelope has been removed. Names and tuple payloads borrow that buffer;
@@ -6,10 +6,14 @@
 //! checked against available input before allocation. Tuple text remains raw
 //! bytes, keeping NULL, an unchanged TOAST value, and empty text distinct.
 //!
-//! This module decodes messages, not transaction application or durability.
+//! The stateless helpers retain their version-1 contract. [`PgOutputDecoder`]
+//! additionally decodes version-2 streamed transactions, retaining the active
+//! segment across WAL envelopes so transaction IDs cannot be mistaken for
+//! relation IDs. Streamed changes are provisional until Stream Commit; a
+//! Stream Abort can discard a whole transaction or one of its subtransactions.
 //! The consumer owns relation metadata, transaction assembly, and the decision
-//! to acknowledge a committed LSN. Versions 2 through 4, including streamed
-//! transactions and two-phase commit, are deliberately rejected.
+//! to acknowledge a durably committed LSN. Versions 3 and 4, including two-phase
+//! commit and parallel apply, remain unsupported.
 //!
 //! Wire reference: <https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html>.
 
@@ -32,14 +36,14 @@ pub enum PgOutputError {
         /// Bytes actually available at that offset.
         remaining: usize,
     },
-    /// A field violates the negotiated version-1 representation.
+    /// A field or segment boundary violates the negotiated representation.
     Invalid {
         /// Byte offset of the invalid field.
         offset: usize,
         /// Static format expectation without server-supplied data.
         reason: &'static str,
     },
-    /// This tag is not supported by the version-1 decoder.
+    /// This tag is not supported by the selected protocol decoder.
     UnsupportedMessage {
         /// Byte offset of the message tag.
         offset: usize,
@@ -91,7 +95,7 @@ impl fmt::Display for PgOutputError {
             }
             Self::UnsupportedMessage { offset, tag } => write!(
                 f,
-                "unsupported pgoutput version-1 message tag 0x{tag:02x} at byte {offset}"
+                "unsupported pgoutput message tag 0x{tag:02x} at byte {offset}"
             ),
             Self::TrailingBytes { offset, remaining } => write!(
                 f,
@@ -260,6 +264,205 @@ pub enum PgOutputMessage<'a> {
     },
 }
 
+/// Negotiated `pgoutput` wire version.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PgOutputProtocolVersion {
+    /// Committed transactions only; preserves the stateless decoder contract.
+    #[default]
+    V1,
+    /// Supports streamed in-progress transactions (PostgreSQL 14 or later).
+    V2,
+}
+
+/// A decoded message with version-2 transaction ownership preserved.
+///
+/// Changes in a stream segment may belong to a subtransaction. `stream_xid`
+/// identifies the enclosing top-level transaction; `xid` is the actual wire
+/// transaction ID and must be retained to handle subtransaction aborts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PgOutputEvent<'a> {
+    /// An ordinary message, possibly inside an in-progress stream segment.
+    Message {
+        /// Top-level transaction of the current segment, if one is active.
+        stream_xid: Option<u32>,
+        /// Optional wire transaction ID, including subtransaction IDs.
+        xid: Option<u32>,
+        /// The existing borrowing representation of the message payload.
+        message: PgOutputMessage<'a>,
+    },
+    /// Start or continuation of one transaction's streamed segment.
+    StreamStart {
+        /// Top-level transaction ID.
+        xid: u32,
+        /// Whether this is the first segment sent for this transaction.
+        first_segment: bool,
+    },
+    /// End of a segment, not a transaction commit.
+    StreamStop {
+        /// Top-level transaction ID retained from Stream Start.
+        xid: u32,
+    },
+    /// Commit of a previously streamed transaction.
+    StreamCommit {
+        /// Top-level transaction ID whose provisional changes may be applied.
+        xid: u32,
+        /// Commit record LSN.
+        commit_lsn: PgLsn,
+        /// End of the transaction's WAL record.
+        end_lsn: PgLsn,
+        /// Commit timestamp in PostgreSQL microseconds.
+        commit_time_micros: i64,
+    },
+    /// Abort of previously streamed changes; no commit LSN is implied.
+    StreamAbort {
+        /// Top-level transaction ID.
+        xid: u32,
+        /// Aborted subtransaction, equal to `xid` for a top-level abort.
+        subxid: u32,
+    },
+}
+
+/// Stateful borrowing decoder for one ordered pgoutput connection.
+///
+/// Retain one decoder across all WAL envelopes; do not recreate it per event.
+/// It stores only the active segment's top-level XID, never row data or an
+/// unbounded transaction map. Interleaved segments from different transactions
+/// are supported. Tracking which transactions/subtransactions have been seen,
+/// assembling their changes, and deciding what is durable remain the caller's
+/// responsibility. A decoder cannot be attached in the middle of a segment.
+///
+/// Malformed, truncated, or extra bytes leave the decoder unchanged. This
+/// permits retry after extending an incomplete input, but is not permission
+/// to skip a malformed event and continue a replication stream.
+#[derive(Debug, Default, Clone)]
+pub struct PgOutputDecoder {
+    version: PgOutputProtocolVersion,
+    stream_xid: Option<u32>,
+}
+
+impl PgOutputDecoder {
+    /// Create a decoder matching the protocol negotiated with the publisher.
+    #[must_use]
+    pub const fn new(version: PgOutputProtocolVersion) -> Self {
+        Self {
+            version,
+            stream_xid: None,
+        }
+    }
+
+    /// The protocol version accepted by this decoder.
+    #[must_use]
+    pub const fn protocol_version(&self) -> PgOutputProtocolVersion {
+        self.version
+    }
+
+    /// Top-level XID of the segment currently being decoded, if any.
+    #[must_use]
+    pub const fn active_stream_xid(&self) -> Option<u32> {
+        self.stream_xid
+    }
+
+    /// Decode exactly one message, committing segment state only on success.
+    pub fn decode<'a>(&mut self, data: &'a [u8]) -> Result<PgOutputEvent<'a>, PgOutputError> {
+        let (event, consumed, stream_xid) = self.parse(data)?;
+        if consumed != data.len() {
+            return Err(PgOutputError::TrailingBytes {
+                offset: consumed,
+                remaining: data.len() - consumed,
+            });
+        }
+        self.stream_xid = stream_xid;
+        Ok(event)
+    }
+
+    /// Decode the first message in a buffer and commit its segment state.
+    ///
+    /// The caller must retain the unconsumed suffix and feed messages in order.
+    pub fn decode_prefix<'a>(
+        &mut self,
+        data: &'a [u8],
+    ) -> Result<(PgOutputEvent<'a>, usize), PgOutputError> {
+        let (event, consumed, stream_xid) = self.parse(data)?;
+        self.stream_xid = stream_xid;
+        Ok((event, consumed))
+    }
+
+    fn parse<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> Result<(PgOutputEvent<'a>, usize, Option<u32>), PgOutputError> {
+        let mut input = Input { data, offset: 0 };
+        let tag = input.byte()?;
+        let mut next_stream_xid = self.stream_xid;
+        let boundary_error = |reason| PgOutputError::Invalid { offset: 0, reason };
+        let event = match tag {
+            b'S' | b'E' | b'c' | b'A' if self.version == PgOutputProtocolVersion::V1 => {
+                return Err(PgOutputError::UnsupportedMessage { offset: 0, tag });
+            }
+            b'S' => {
+                if self.stream_xid.is_some() {
+                    return Err(boundary_error("nested stream segment"));
+                }
+                let xid = input.u32()?;
+                let first_segment = input.flags(1)? != 0;
+                next_stream_xid = Some(xid);
+                PgOutputEvent::StreamStart { xid, first_segment }
+            }
+            b'E' => {
+                let xid = self
+                    .stream_xid
+                    .ok_or_else(|| boundary_error("Stream Stop without an active segment"))?;
+                next_stream_xid = None;
+                PgOutputEvent::StreamStop { xid }
+            }
+            b'c' => {
+                if self.stream_xid.is_some() {
+                    return Err(boundary_error("Stream Commit before Stream Stop"));
+                }
+                let xid = input.u32()?;
+                input.flags(0)?;
+                PgOutputEvent::StreamCommit {
+                    xid,
+                    commit_lsn: input.lsn()?,
+                    end_lsn: input.lsn()?,
+                    commit_time_micros: input.i64()?,
+                }
+            }
+            b'A' => {
+                if self.stream_xid.is_some() {
+                    return Err(boundary_error("Stream Abort before Stream Stop"));
+                }
+                PgOutputEvent::StreamAbort {
+                    xid: input.u32()?,
+                    subxid: input.u32()?,
+                }
+            }
+            _ => {
+                if self.stream_xid.is_some() && matches!(tag, b'B' | b'C') {
+                    return Err(boundary_error(
+                        "ordinary transaction boundary inside a stream segment",
+                    ));
+                }
+                let xid = if self.stream_xid.is_some()
+                    && matches!(tag, b'R' | b'Y' | b'I' | b'U' | b'D' | b'T' | b'M')
+                {
+                    Some(input.u32()?)
+                } else {
+                    None
+                };
+                PgOutputEvent::Message {
+                    stream_xid: self.stream_xid,
+                    xid,
+                    message: decode_message(tag, &mut input)?,
+                }
+            }
+        };
+        Ok((event, input.offset, next_stream_xid))
+    }
+}
+
 /// Decode exactly one `pgoutput` version-1 message.
 ///
 /// Extra bytes are rejected. Use [`decode_pgoutput_prefix`] or
@@ -282,6 +485,14 @@ pub fn decode_pgoutput(data: &[u8]) -> Result<PgOutputMessage<'_>, PgOutputError
 pub fn decode_pgoutput_prefix(data: &[u8]) -> Result<(PgOutputMessage<'_>, usize), PgOutputError> {
     let mut input = Input { data, offset: 0 };
     let tag = input.byte()?;
+    let message = decode_message(tag, &mut input)?;
+    Ok((message, input.offset))
+}
+
+fn decode_message<'a>(
+    tag: u8,
+    input: &mut Input<'a>,
+) -> Result<PgOutputMessage<'a>, PgOutputError> {
     let message = match tag {
         b'B' => PgOutputMessage::Begin {
             final_lsn: input.lsn()?,
@@ -359,7 +570,7 @@ pub fn decode_pgoutput_prefix(data: &[u8]) -> Result<(PgOutputMessage<'_>, usize
         }
         tag => return Err(PgOutputError::UnsupportedMessage { offset: 0, tag }),
     };
-    Ok((message, input.offset))
+    Ok(message)
 }
 
 /// Decode consecutive messages from one application buffer without copying
@@ -813,5 +1024,188 @@ mod tests {
         assert!(messages.next().is_none(), "do not skip a bad record and expose a later commit");
         assert!(messages.next().is_none());
         assert!(PgOutputMessages::new(&[]).next().is_none());
+    }
+
+    #[test]
+    fn pgoutput_v2_all_streamed_payload_families_preserve_subtransaction_xids() {
+        let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V2);
+        assert_eq!(
+            decoder.decode(b"S\0\0\0\x2a\x01").unwrap(),
+            PgOutputEvent::StreamStart {
+                xid: 42,
+                first_segment: true
+            }
+        );
+        for wire in [RELATION, TYPE, INSERT, UPDATE, DELETE, TRUNCATE, MESSAGE] {
+            // The v2 form inserts the subtransaction XID immediately after
+            // the tag. The payload is the same independent v1 fixture.
+            let mut streamed = vec![wire[0], 0, 0, 0, 43];
+            streamed.extend_from_slice(&wire[1..]);
+            assert_eq!(
+                decoder.decode(&streamed).unwrap(),
+                PgOutputEvent::Message {
+                    stream_xid: Some(42),
+                    xid: Some(43),
+                    message: decode_pgoutput(wire).unwrap(),
+                }
+            );
+            assert_eq!(decoder.active_stream_xid(), Some(42));
+        }
+        // Origin is the one in-segment metadata family with no XID prefix.
+        assert_eq!(
+            decoder.decode(ORIGIN).unwrap(),
+            PgOutputEvent::Message {
+                stream_xid: Some(42),
+                xid: None,
+                message: decode_pgoutput(ORIGIN).unwrap(),
+            }
+        );
+        assert_eq!(
+            decoder.decode(b"E").unwrap(),
+            PgOutputEvent::StreamStop { xid: 42 }
+        );
+        assert_eq!(decoder.active_stream_xid(), None);
+        assert_eq!(
+            decoder.decode(INSERT).unwrap(),
+            PgOutputEvent::Message {
+                stream_xid: None,
+                xid: None,
+                message: decode_pgoutput(INSERT).unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn pgoutput_v2_stream_boundaries_are_atomic_on_every_truncated_or_extra_byte_input() {
+        let start = b"S\0\0\0\x2a\x01".as_slice();
+        let commit =
+            b"c\0\0\0\x2a\0\0\0\0\0\0\0\0\x10\0\0\0\0\0\0\0\x20\xff\xff\xff\xff\xff\xff\xff\xff"
+                .as_slice();
+        let abort = b"A\0\0\0\x2a\0\0\0\x2b".as_slice();
+        for wire in [start, commit, abort] {
+            let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V2);
+            for length in 0..wire.len() {
+                assert!(
+                    decoder.decode(&wire[..length]).is_err(),
+                    "tag {} prefix {length}",
+                    wire[0]
+                );
+                assert_eq!(decoder.active_stream_xid(), None);
+            }
+            let mut trailing = wire.to_vec();
+            trailing.push(0);
+            assert!(matches!(
+                decoder.decode(&trailing),
+                Err(PgOutputError::TrailingBytes { .. })
+            ));
+            assert_eq!(decoder.active_stream_xid(), None);
+            assert!(decoder.decode(wire).is_ok());
+        }
+        let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V2);
+        decoder.decode(start).unwrap();
+        let mut insert = vec![b'I', 0, 0, 0, 43];
+        insert.extend_from_slice(&INSERT[1..]);
+        for length in 0..insert.len() {
+            assert!(decoder.decode(&insert[..length]).is_err());
+            assert_eq!(decoder.active_stream_xid(), Some(42));
+        }
+        for bad in [
+            b"".as_slice(),
+            b"E\0".as_slice(),
+            start,
+            commit,
+            abort,
+            BEGIN,
+            COMMIT,
+        ] {
+            assert!(decoder.decode(bad).is_err());
+            assert_eq!(decoder.active_stream_xid(), Some(42));
+        }
+        decoder.decode(&insert).unwrap();
+        decoder.decode(b"E").unwrap();
+        assert_eq!(
+            decoder.decode(abort).unwrap(),
+            PgOutputEvent::StreamAbort {
+                xid: 42,
+                subxid: 43
+            }
+        );
+        assert_eq!(
+            decoder.decode(commit).unwrap(),
+            PgOutputEvent::StreamCommit {
+                xid: 42,
+                commit_lsn: PgLsn::new(16),
+                end_lsn: PgLsn::new(32),
+                commit_time_micros: -1,
+            }
+        );
+    }
+
+    #[test]
+    fn pgoutput_v2_prefix_decode_retains_state_between_concatenated_segments() {
+        let bytes = b"S\0\0\0\x2a\x01ES\0\0\0\x2b\x01ES\0\0\0\x2a\0E";
+        let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V2);
+        let mut remaining = bytes.as_slice();
+        for (xid, first_segment) in [(42, true), (43, true), (42, false)] {
+            let (event, consumed) = decoder.decode_prefix(remaining).unwrap();
+            assert_eq!(event, PgOutputEvent::StreamStart { xid, first_segment });
+            assert_eq!(consumed, 6);
+            remaining = &remaining[consumed..];
+            let (event, consumed) = decoder.decode_prefix(remaining).unwrap();
+            assert_eq!(event, PgOutputEvent::StreamStop { xid });
+            assert_eq!(consumed, 1);
+            remaining = &remaining[consumed..];
+        }
+        assert!(remaining.is_empty());
+        assert_eq!(decoder.active_stream_xid(), None);
+    }
+
+    #[test]
+    fn pgoutput_v2_is_opt_in_and_rejects_unnegotiated_flags_and_protocol_extensions() {
+        let mut decoder = PgOutputDecoder::default();
+        assert_eq!(decoder.protocol_version(), PgOutputProtocolVersion::V1);
+        assert_eq!(
+            decoder.decode(BEGIN).unwrap(),
+            PgOutputEvent::Message {
+                stream_xid: None,
+                xid: None,
+                message: decode_pgoutput(BEGIN).unwrap(),
+            }
+        );
+        assert_eq!(
+            decoder.decode(b"S\0\0\0\x2a\x01"),
+            Err(PgOutputError::UnsupportedMessage {
+                offset: 0,
+                tag: b'S'
+            })
+        );
+
+        let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V2);
+        for wire in [
+            b"S\0\0\0\x2a\x02".as_slice(),
+            b"c\0\0\0\x2a\x01".as_slice(),
+            b"E",
+        ] {
+            assert!(matches!(
+                decoder.decode(wire),
+                Err(PgOutputError::Invalid { .. })
+            ));
+            assert_eq!(decoder.active_stream_xid(), None);
+        }
+        for tag in [b'b', b'P', b'K', b'r', b'p'] {
+            assert_eq!(
+                decoder.decode(&[tag]),
+                Err(PgOutputError::UnsupportedMessage { offset: 0, tag })
+            );
+        }
+        // The additional abort LSN/timestamp belong to v4 parallel streaming.
+        let parallel_abort = b"A\0\0\0\x2a\0\0\0\x2a\0\0\0\0\0\0\0\x10\0\0\0\0\0\0\0\x20";
+        assert!(matches!(
+            decoder.decode(parallel_abort),
+            Err(PgOutputError::TrailingBytes {
+                offset: 9,
+                remaining: 16
+            })
+        ));
     }
 }

@@ -1421,6 +1421,40 @@ behavior. Native Windows builds work with the normal platform C toolchain;
 cross-compiling to `x86_64-pc-windows-gnu` also needs MinGW available because
 `libsqlite3-sys` compiles the bundled SQLite C source.
 
+### PostgreSQL Logical Replication
+
+With the `postgres` feature, `database::postgres::replication` provides an
+owned CopyBoth connection for an existing logical slot and publication.
+`PgReplicationConnection` uses the PostgreSQL client's authentication and TLS
+policy; `PgReplicationStream` retains the starting context's cancellation,
+deadline, and I/O authority. Message bodies are bounded before allocation, and
+dropping a `next` wait preserves partially received framing for the next wait.
+
+Protocol 1 remains the default. To receive large in-progress transactions from
+PostgreSQL 14 or later, opt in with `PgReplicationConfig::streaming(true)`. This
+requests `proto_version '2'` and `streaming 'on'`; a server refusal is returned
+without silently downgrading the protocol.
+
+1. Create a `PgReplicationConfig` for the existing slot, publications, and
+   starting LSN, then enable streaming.
+2. Obtain `config.pgoutput_decoder()` before passing the configuration to
+   `PgReplicationConnection::start`.
+3. Retain that decoder and call `event.pgoutput_with(&mut decoder)` for every
+   event returned by `PgReplicationStream::next`, in order. Keepalives leave
+   decoder state unchanged. The older `event.pgoutput()` and
+   `decode_pgoutput` helpers continue to decode protocol 1 only.
+4. Retain provisional changes by their top-level `stream_xid` and wire `xid`.
+   `StreamStop` ends a segment, not the transaction; `StreamCommit` commits it,
+   while `StreamAbort` identifies either a whole transaction or an aborted
+   subtransaction. Send `PgReplicationFeedback` only for progress the
+   application has actually written, durably flushed, and applied.
+
+The borrowing decoder supports interleaved segments, relation/type metadata,
+row changes, truncation, and logical messages. It retains only segment state;
+transaction assembly and storage remain application responsibilities. Failed
+decoding leaves segment state unchanged. Protocols 3 and 4 (two-phase commit
+and parallel apply) are not enabled by this option.
+
 ### Blocking Pool Safety Semantics
 
 `src/runtime/blocking_pool.rs` enforces several invariants that matter under cancellation and panic-heavy workloads:
@@ -2178,7 +2212,7 @@ The active registry covers:
 - **Channel, codec, and capability semantics**: channel cleanup, framing properties, round trips, and `Cx` capability contracts
 - **HTTP and compression surfaces**: active HTTP/1.1, HTTP/2, HTTP/3, HPACK, request-target/protocol, and HTTP/3 control-stream / DATAGRAM / Extended CONNECT suites built against current APIs
 - **gRPC and transport protocol checks**: max-message framing, max-message-size, status mapping, trailer forwarding, gRPC-Web framing, TCP accept/listener, and timeout harnesses
-- **Security and wire-level protocol lanes**: TLS handshake / key-share / SNI / 0-RTT replay (including HelloRetryRequest coverage), QUIC retry (plus QUIC migration when enabled), DNS message parsing, Kafka offsets / record batches, and explicit MySQL AuthSwitch plus PostgreSQL extended-query / COPY / logical-replication coverage. Two of these modules check their own reference models rather than asupersync code: Kafka record batches (the Kafka client wraps librdkafka and has no RecordBatch codec) and PostgreSQL logical replication (the client has no pgoutput decoder). The QUIC retry module checks the Retry header codec; the integrity tag computation is proven by a lib test against RFC 9001 Appendix A.4.
+- **Security and wire-level protocol lanes**: TLS handshake / key-share / SNI / 0-RTT replay (including HelloRetryRequest coverage), QUIC retry (plus QUIC migration when enabled), DNS message parsing, Kafka offsets / record batches, and explicit MySQL AuthSwitch plus PostgreSQL extended-query / COPY / logical-replication coverage. Kafka record-batch tests check their own reference model (the Kafka client wraps librdkafka and has no RecordBatch codec). PostgreSQL logical-replication tests include the public pgoutput decoder under the `postgres` feature, alongside the historical reference harness; native CopyBoth transport tests live with the client. These codec tests do not establish live-server interoperability or durable application of changes. The QUIC retry module checks the Retry header codec; the integrity tag computation is proven by a lib test against RFC 9001 Appendix A.4.
 - **Deterministic invariant suites**: cancel DAG determinism, obligation lifecycle, race loser-drain, trace replay idempotency, broadcast, and consistent-hash regression coverage
 
 Important limitation: the repository also preserves conformance files on disk

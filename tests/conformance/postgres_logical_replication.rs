@@ -18,6 +18,7 @@
 //! - TYPE messages for custom type definitions
 //! - Logical snapshot consistency and transaction ordering
 //! - Binary tuple data format parsing
+//! - Protocol-v2 stream segments, contextual XIDs, and subtransaction aborts
 //!
 //! # PostgreSQL Logical Replication Protocol
 //!
@@ -1958,6 +1959,189 @@ mod tests {
         assert!(messages.next().unwrap().is_ok());
         assert!(messages.next().unwrap().is_err());
         assert!(messages.next().is_none(), "a malformed row cannot expose a later commit");
+    }
+
+    // Encode these fixtures independently of the production codec. The four
+    // contextual XID bytes precede the original payload, not its relation OID.
+    #[cfg(feature = "postgres")]
+    fn stream_start_fixture(xid: u32, first_segment: bool) -> Vec<u8> {
+        let mut wire = vec![b'S'];
+        wire.extend_from_slice(&xid.to_be_bytes());
+        wire.push(u8::from(first_segment));
+        wire
+    }
+
+    #[cfg(feature = "postgres")]
+    fn streamed_payload_fixture(xid: u32, message: &[u8]) -> Vec<u8> {
+        let mut wire = vec![message[0]];
+        wire.extend_from_slice(&xid.to_be_bytes());
+        wire.extend_from_slice(&message[1..]);
+        wire
+    }
+
+    #[cfg(feature = "postgres")]
+    fn stream_abort_fixture(xid: u32, subxid: u32) -> Vec<u8> {
+        let mut wire = vec![b'A'];
+        wire.extend_from_slice(&xid.to_be_bytes());
+        wire.extend_from_slice(&subxid.to_be_bytes());
+        wire
+    }
+
+    #[cfg(feature = "postgres")]
+    fn stream_commit_fixture(xid: u32, lsn: u64, end_lsn: u64, timestamp: i64) -> Vec<u8> {
+        let mut wire = vec![b'c'];
+        wire.extend_from_slice(&xid.to_be_bytes());
+        wire.push(0);
+        wire.extend_from_slice(&lsn.to_be_bytes());
+        wire.extend_from_slice(&end_lsn.to_be_bytes());
+        wire.extend_from_slice(&timestamp.to_be_bytes());
+        wire
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn production_pgoutput_v2_preserves_ownership_for_every_streamed_payload() {
+        use asupersync::database::postgres::pgoutput::{
+            PgOutputDecoder, PgOutputEvent, PgOutputMessage, PgOutputProtocolVersion,
+            PgTupleValue, decode_pgoutput,
+        };
+
+        let harness = PgLogicalReplicationHarness::new();
+        let old = [TupleData::Text("1".into()), TupleData::Text("old".into())];
+        let new = [TupleData::Text("1".into()), TupleData::Binary(vec![0, 255])];
+        let mut application_message = vec![b'M', 1];
+        application_message.extend_from_slice(&0x1234_u64.to_be_bytes());
+        application_message.extend_from_slice(b"application\0");
+        application_message.extend_from_slice(&3_u32.to_be_bytes());
+        application_message.extend_from_slice(&[0, 255, 128]);
+        let messages = [
+            harness.create_relation_message(
+                42, "public", "items", ReplicaIdentity::Full,
+                &[("id", 23, u32::MAX), ("value", 50_000, u32::MAX)],
+            ),
+            harness.create_type_message(50_000, "custom", "opaque"),
+            harness.create_insert_message(42, &new),
+            harness.create_update_message(42, Some(&old), &new),
+            harness.create_delete_message(42, &old),
+            harness.create_truncate_message(&[42, 43], 3),
+            application_message,
+        ];
+
+        let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V2);
+        assert_eq!(
+            decoder.decode(&stream_start_fixture(500, true)).unwrap(),
+            PgOutputEvent::StreamStart { xid: 500, first_segment: true },
+        );
+
+        // PostgreSQL can emit Origin just after Stream Start. Unlike each of
+        // the seven payload families above, Origin has no extra wire XID.
+        let mut origin = vec![b'O'];
+        origin.extend_from_slice(&0x1122_3344_5566_7788_u64.to_be_bytes());
+        origin.extend_from_slice(b"upstream\0");
+        assert!(matches!(decoder.decode(&origin).unwrap(), PgOutputEvent::Message {
+            stream_xid: Some(500), xid: None,
+            message: PgOutputMessage::Origin { origin_lsn, name: "upstream" },
+        } if origin_lsn.as_u64() == 0x1122_3344_5566_7788));
+
+        for message in &messages {
+            let wire = streamed_payload_fixture(501, message);
+            for cut in 0..wire.len() {
+                assert!(decoder.decode(&wire[..cut]).is_err(),
+                    "truncated streamed payload for tag {} at byte {cut}", message[0]);
+                assert_eq!(decoder.active_stream_xid(), Some(500));
+            }
+            let event = decoder.decode(&wire).unwrap();
+            let PgOutputEvent::Message { stream_xid, xid, message: decoded } = event else {
+                panic!("expected a streamed payload for tag {}", message[0]);
+            };
+            assert_eq!(stream_xid, Some(500));
+            assert_eq!(xid, Some(501), "retain the subtransaction separately");
+            assert_eq!(decoded, decode_pgoutput(message).unwrap());
+            if let PgOutputMessage::Insert { new_tuple, .. } = &decoded {
+                let PgTupleValue::Binary(bytes) = new_tuple[1] else {
+                    panic!("expected the binary tuple fixture");
+                };
+                assert_eq!(bytes, &[0, 255]);
+                assert_eq!(bytes.as_ptr(), wire[wire.len() - 2..].as_ptr());
+            }
+        }
+
+        assert_eq!(decoder.decode(b"E").unwrap(), PgOutputEvent::StreamStop { xid: 500 });
+        assert_eq!(decoder.active_stream_xid(), None);
+        decoder.decode(&harness.create_begin_message(100, 200, 600)).unwrap();
+        // The same connection returns to v1-shaped payloads between segments.
+        // A stale contextual-XID mode would corrupt all seven of these.
+        for message in &messages {
+            assert_eq!(decoder.decode(message).unwrap(), PgOutputEvent::Message {
+                stream_xid: None,
+                xid: None,
+                message: decode_pgoutput(message).unwrap(),
+            });
+        }
+        decoder.decode(&harness.create_commit_message(0, 110, 120, 201)).unwrap();
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn production_pgoutput_v2_keeps_interleaved_transactions_and_aborts_distinct() {
+        use asupersync::database::postgres::pgoutput::{
+            PgOutputDecoder, PgOutputEvent, PgOutputMessage, PgOutputProtocolVersion,
+            PgTupleValue,
+        };
+
+        let harness = PgLogicalReplicationHarness::new();
+        let row = harness.create_insert_message(42, &[TupleData::Text("pending".into())]);
+        let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V2);
+        for (top_xid, change_xid) in [(500, 501), (600, 600)] {
+            assert_eq!(decoder.decode(&stream_start_fixture(top_xid, true)).unwrap(),
+                PgOutputEvent::StreamStart { xid: top_xid, first_segment: true });
+            let wire = streamed_payload_fixture(change_xid, &row);
+            assert!(matches!(decoder.decode(&wire).unwrap(), PgOutputEvent::Message {
+                stream_xid: Some(stream_xid), xid: Some(xid),
+                message: PgOutputMessage::Insert { relation_id: 42, .. },
+            } if stream_xid == top_xid && xid == change_xid));
+            assert_eq!(decoder.decode(b"E").unwrap(), PgOutputEvent::StreamStop { xid: top_xid });
+        }
+
+        // A savepoint rollback discards only xid 501, not its parent 500 or
+        // the interleaved transaction 600. Stop alone commits none of them.
+        assert_eq!(decoder.decode(&stream_abort_fixture(500, 501)).unwrap(),
+            PgOutputEvent::StreamAbort { xid: 500, subxid: 501 });
+        assert_eq!(decoder.active_stream_xid(), None);
+
+        // A small committed transaction may arrive while both streams remain
+        // pending, without inheriting either streamed transaction's identity.
+        for ordinary in [
+            harness.create_begin_message(100, 200, 700),
+            row.clone(),
+            harness.create_commit_message(0, 110, 120, 201),
+        ] {
+            assert!(matches!(decoder.decode(&ordinary).unwrap(), PgOutputEvent::Message {
+                stream_xid: None, xid: None, ..
+            }));
+        }
+
+        assert_eq!(decoder.decode(&stream_start_fixture(500, false)).unwrap(),
+            PgOutputEvent::StreamStart { xid: 500, first_segment: false });
+        let surviving_row = harness.create_insert_message(42, &[TupleData::Text("survives".into())]);
+        let wire = streamed_payload_fixture(500, &surviving_row);
+        assert!(matches!(decoder.decode(&wire).unwrap(), PgOutputEvent::Message {
+            stream_xid: Some(500), xid: Some(500),
+            message: PgOutputMessage::Insert { relation_id: 42, new_tuple },
+        } if new_tuple == vec![PgTupleValue::Text(b"survives")]));
+        assert_eq!(decoder.decode(b"E").unwrap(), PgOutputEvent::StreamStop { xid: 500 });
+
+        for xid in [600, 500] {
+            assert!(matches!(decoder.decode(&stream_commit_fixture(xid, 200, 220, -10)).unwrap(),
+                PgOutputEvent::StreamCommit {
+                    xid: committed, commit_lsn, end_lsn, commit_time_micros: -10,
+                } if committed == xid && commit_lsn.as_u64() == 200 && end_lsn.as_u64() == 220));
+        }
+
+        decoder.decode(&stream_start_fixture(800, true)).unwrap();
+        decoder.decode(b"E").unwrap();
+        assert_eq!(decoder.decode(&stream_abort_fixture(800, 800)).unwrap(),
+            PgOutputEvent::StreamAbort { xid: 800, subxid: 800 });
     }
 
     #[test]
