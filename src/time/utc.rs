@@ -52,17 +52,18 @@ impl fmt::Display for UtcError {
                 value,
                 minimum,
                 maximum,
-            } => write!(f, "UTC {component} {value} is outside {minimum}..={maximum}"),
-            Self::TimestampOutOfRange => {
-                f.write_str("UTC timestamp is outside years 0000..=9999")
-            }
+            } => write!(
+                f,
+                "UTC {component} {value} is outside {minimum}..={maximum}"
+            ),
+            Self::TimestampOutOfRange => f.write_str("UTC timestamp is outside years 0000..=9999"),
             Self::NegativeDuration => f.write_str("UTC duration would be negative"),
             Self::SystemTimeOutOfRange => {
                 f.write_str("UTC timestamp is outside the platform SystemTime range")
             }
-            Self::SystemTimePrecisionLoss => {
-                f.write_str("the platform SystemTime cannot preserve this UTC timestamp's precision")
-            }
+            Self::SystemTimePrecisionLoss => f.write_str(
+                "the platform SystemTime cannot preserve this UTC timestamp's precision",
+            ),
         }
     }
 }
@@ -99,7 +100,9 @@ impl fmt::Display for UtcParseErrorKind {
             Self::Expected(token) => write!(f, "expected {token}"),
             Self::InvalidComponent(error) => fmt::Display::fmt(error, f),
             Self::UnsupportedLeapSecond => f.write_str("leap seconds are unsupported"),
-            Self::ExcessPrecision => f.write_str("more than nine fractional digits are unsupported"),
+            Self::ExcessPrecision => {
+                f.write_str("more than nine fractional digits are unsupported")
+            }
             Self::TimestampOutOfRange => {
                 f.write_str("normalized UTC timestamp is outside years 0000..=9999")
             }
@@ -140,7 +143,11 @@ impl UtcParseError {
 
 impl fmt::Display for UtcParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid RFC 3339 timestamp at byte {}: {}", self.byte_offset, self.kind)
+        write!(
+            f,
+            "invalid RFC 3339 timestamp at byte {}: {}",
+            self.byte_offset, self.kind
+        )
     }
 }
 
@@ -411,7 +418,8 @@ impl UtcTimestamp {
             ));
         }
 
-        let year = parse_decimal(bytes, 0, 4)? as i32;
+        let year = i32::try_from(parse_decimal(bytes, 0, 4)?)
+            .map_err(|_| calendar_parse_error(UtcError::TimestampOutOfRange))?;
         expect_rfc3339_byte(bytes, 4, b'-', "'-' after year")?;
         let month = parse_decimal(bytes, 5, 2)? as u8;
         expect_rfc3339_byte(bytes, 7, b'-', "'-' after month")?;
@@ -437,7 +445,10 @@ impl UtcTimestamp {
                     break;
                 }
                 if digits == 9 {
-                    return Err(UtcParseError::new(cursor, UtcParseErrorKind::ExcessPrecision));
+                    return Err(UtcParseError::new(
+                        cursor,
+                        UtcParseErrorKind::ExcessPrecision,
+                    ));
                 }
                 nanosecond = nanosecond * 10 + u32::from(digit - b'0');
                 cursor += 1;
@@ -469,9 +480,11 @@ impl UtcTimestamp {
                 validate_component("offset hour", i64::from(hours), 0, 23).map_err(|error| {
                     UtcParseError::new(cursor + 1, UtcParseErrorKind::InvalidComponent(error))
                 })?;
-                validate_component("offset minute", i64::from(minutes), 0, 59).map_err(|error| {
-                    UtcParseError::new(cursor + 4, UtcParseErrorKind::InvalidComponent(error))
-                })?;
+                validate_component("offset minute", i64::from(minutes), 0, 59).map_err(
+                    |error| {
+                        UtcParseError::new(cursor + 4, UtcParseErrorKind::InvalidComponent(error))
+                    },
+                )?;
                 cursor += 6;
                 let magnitude = i64::from(hours * 3_600 + minutes * 60);
                 if sign == b'-' { -magnitude } else { magnitude }
@@ -498,9 +511,8 @@ impl UtcTimestamp {
             nanosecond,
         })
         .map_err(calendar_parse_error)?;
-        Self::from_unix_parts(local.unix_seconds - offset_seconds, nanosecond).map_err(|_| {
-            UtcParseError::new(offset_start, UtcParseErrorKind::TimestampOutOfRange)
-        })
+        Self::from_unix_parts(local.unix_seconds - offset_seconds, nanosecond)
+            .map_err(|_| UtcParseError::new(offset_start, UtcParseErrorKind::TimestampOutOfRange))
     }
 
     /// Formats canonical RFC 3339 UTC text, omitting trailing fractional zeroes.
@@ -635,7 +647,10 @@ fn parse_decimal(bytes: &[u8], start: usize, count: usize) -> Result<u32, UtcPar
         match bytes.get(offset).copied() {
             Some(digit @ b'0'..=b'9') => value = value * 10 + u32::from(digit - b'0'),
             Some(_) => {
-                return Err(UtcParseError::new(offset, UtcParseErrorKind::Expected("ASCII digit")));
+                return Err(UtcParseError::new(
+                    offset,
+                    UtcParseErrorKind::Expected("ASCII digit"),
+                ));
             }
             None => return Err(UtcParseError::new(offset, UtcParseErrorKind::UnexpectedEnd)),
         }
@@ -651,14 +666,19 @@ fn expect_rfc3339_byte(
 ) -> Result<(), UtcParseError> {
     match bytes.get(offset).copied() {
         Some(byte) if byte == expected => Ok(()),
-        Some(_) => Err(UtcParseError::new(offset, UtcParseErrorKind::Expected(description))),
+        Some(_) => Err(UtcParseError::new(
+            offset,
+            UtcParseErrorKind::Expected(description),
+        )),
         None => Err(UtcParseError::new(offset, UtcParseErrorKind::UnexpectedEnd)),
     }
 }
 
 fn calendar_parse_error(error: UtcError) -> UtcParseError {
     let offset = match error {
-        UtcError::ComponentOutOfRange { component, value, .. } => match component {
+        UtcError::ComponentOutOfRange {
+            component, value, ..
+        } => match component {
             "month" => 5,
             "day" => 8,
             "hour" => 11,
@@ -801,3 +821,50 @@ fn unix_days_from_civil_date(year: i32, month: u8, day: u8) -> i64 {
 #[cfg(test)]
 #[path = "utc_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod year_conversion_tests {
+    use super::{UtcParseErrorKind, UtcTimestamp};
+
+    #[test]
+    fn four_digit_year_boundaries_and_invalid_years() {
+        for (input, seconds) in [
+            ("0000-01-01T00:00:00Z", -62_167_219_200),
+            ("9999-12-31T23:59:59Z", 253_402_300_799),
+        ] {
+            assert_eq!(
+                UtcTimestamp::parse_rfc3339(input).unwrap().unix_seconds(),
+                seconds
+            );
+        }
+        for (input, offset, kind) in [
+            (
+                "00x0-01-01T00:00:00Z",
+                2,
+                UtcParseErrorKind::Expected("ASCII digit"),
+            ),
+            (
+                "10000-01-01T00:00:00Z",
+                4,
+                UtcParseErrorKind::Expected("'-' after year"),
+            ),
+            (
+                "0000-01-01T00:00:00+00:01",
+                19,
+                UtcParseErrorKind::TimestampOutOfRange,
+            ),
+            (
+                "9999-12-31T23:59:59-00:01",
+                19,
+                UtcParseErrorKind::TimestampOutOfRange,
+            ),
+        ] {
+            let error = UtcTimestamp::parse_rfc3339(input).unwrap_err();
+            assert_eq!(
+                (error.byte_offset(), error.kind()),
+                (offset, kind),
+                "{input}"
+            );
+        }
+    }
+}

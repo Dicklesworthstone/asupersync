@@ -504,6 +504,50 @@ fn request_unary_admission_enforces_runtime_obligation_quota() {
 }
 
 #[test]
+fn request_admission_uses_origin_runtime_not_ambient_runtime() {
+    use crate::runtime::RegionLimits;
+    use crate::types::Budget;
+
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Cx>();
+    let runtime_a = RuntimeBuilder::new()
+        .worker_threads(2)
+        .root_region_limits(RegionLimits {
+            max_obligations: Some(1),
+            ..RegionLimits::UNLIMITED
+        })
+        .build()
+        .unwrap();
+    let runtime_b = RuntimeBuilder::new()
+        .worker_threads(2)
+        .root_region_limits(RegionLimits {
+            max_obligations: Some(2),
+            ..RegionLimits::UNLIMITED
+        })
+        .build()
+        .unwrap();
+    let request_a = runtime_a.request_cx_with_budget(Budget::INFINITE);
+    let request_b = runtime_b.request_cx_with_budget(Budget::INFINITE);
+    let admission = UnaryAdmission::new(limits(1, 0));
+
+    runtime_b.block_on(async {
+        let denied = admission.acquire(&request_a).await.err().unwrap();
+        assert_eq!(denied.code(), Code::ResourceExhausted);
+        assert_eq!(admission.total.telemetry_snapshot(0).available_units, 1);
+        let allowed = admission.acquire(&request_b).await.unwrap();
+        drop(allowed);
+    });
+    assert!(runtime_a.shutdown_timeout(WATCHDOG));
+    runtime_b.block_on(async {
+        let expired = admission.acquire(&request_a).await.err().unwrap();
+        assert_eq!(expired.code(), Code::FailedPrecondition);
+        let allowed = admission.acquire(&request_b).await.unwrap();
+        drop(allowed);
+    });
+    assert!(runtime_b.shutdown_timeout(WATCHDOG));
+}
+
+#[test]
 fn request_owner_factory_panic_rolls_back_capacity() {
     let cx = Cx::for_testing();
     let semaphore = Semaphore::new(1);

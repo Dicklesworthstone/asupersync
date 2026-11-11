@@ -6179,9 +6179,28 @@ struct RuntimeInner {
     browser_pump: std::sync::OnceLock<Arc<BrowserWorkerPump>>,
 }
 
+/// An erased registration boundary keeps request contexts independent of the
+/// runtime's concrete scheduler and state types. The weak pointer still
+/// refers to the same runtime allocation and cannot prolong its lifetime.
+trait RequestOwnerFactory: Send + Sync {
+    fn register(
+        self: Arc<Self>,
+        parent: &crate::cx::Cx,
+    ) -> Result<CallerTaskRegistration, SpawnError>;
+}
+
+impl RequestOwnerFactory for RuntimeInner {
+    fn register(
+        self: Arc<Self>,
+        parent: &crate::cx::Cx,
+    ) -> Result<CallerTaskRegistration, SpawnError> {
+        CallerTaskRegistration::new(&self, parent)
+    }
+}
+
 /// Weak provenance carried only by externally constructed request contexts.
 #[derive(Clone)]
-pub(crate) struct RequestRuntime(std::sync::Weak<RuntimeInner>);
+pub(crate) struct RequestRuntime(std::sync::Weak<dyn RequestOwnerFactory>);
 
 impl std::fmt::Debug for RequestRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -6190,12 +6209,17 @@ impl std::fmt::Debug for RequestRuntime {
 }
 
 impl RequestRuntime {
+    fn new(inner: &Arc<RuntimeInner>) -> Self {
+        let weak = Arc::downgrade(inner) as std::sync::Weak<dyn RequestOwnerFactory>;
+        Self(weak)
+    }
+
     pub(crate) fn register(
         &self,
         parent: &crate::cx::Cx,
     ) -> Result<CallerTaskRegistration, SpawnError> {
-        let inner = self.0.upgrade().ok_or(SpawnError::RuntimeUnavailable)?;
-        CallerTaskRegistration::new(&inner, parent)
+        let owner = self.0.upgrade().ok_or(SpawnError::RuntimeUnavailable)?;
+        owner.register(parent)
     }
 }
 
@@ -8086,7 +8110,7 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
     .with_logical_clock(logical_clock)
     .with_spawn_gateway(spawn_gateway)
     .with_pending_spawn_counter(pending_spawns)
-    .with_request_runtime(RequestRuntime(Arc::downgrade(inner)));
+    .with_request_runtime(RequestRuntime::new(inner));
     // While resource sampling runs, the block_on body sees its pressure too.
     let request_cx = match task_pressure {
         Some(pressure) => request_cx.with_pressure(pressure),
