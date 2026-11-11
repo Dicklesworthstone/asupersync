@@ -156,7 +156,12 @@ pub const ALL_REPORTED_ORACLE_NAMES: &[&str] = &[
 /// the DOWN deliveries of runtime monitors (`Cx::monitor`,
 /// `GenServerHandle::monitor`), `supervision` the restart batches and
 /// escalations of managed supervisors, and `reply_linearity` how each
-/// GenServer `Reply` was resolved. No runtime code path sends events to the
+/// GenServer `Reply` was resolved. `cancel_correctness` samples real task
+/// cancellation witnesses across polls and before terminal retirement, checking
+/// identity/epoch/witnessed-phase/reason monotonicity without claiming complete
+/// phase coverage or a fixed cleanup deadline. A sampled cancellation rollback
+/// to Created or Running feeds its actual state pair to `cancellation_protocol`.
+/// No runtime code path sends events to the
 /// other entries of [`ALL_REPORTED_ORACLE_NAMES`]. They observe only what a
 /// caller feeds them by hand, so in a `LabRuntime` report they pass without
 /// having checked anything (br-asupersync-52hxjz).
@@ -169,6 +174,7 @@ pub const LAB_RUNTIME_FED_ORACLE_NAMES: &[&str] = &[
     INVARIANT_REGION_TREE,
     INVARIANT_DEADLINE_MONOTONE,
     INVARIANT_CANCELLATION_PROTOCOL,
+    INVARIANT_CANCEL_CORRECTNESS,
     INVARIANT_DOWN_ORDER,
     INVARIANT_SUPERVISION,
     INVARIANT_REPLY_LINEARITY,

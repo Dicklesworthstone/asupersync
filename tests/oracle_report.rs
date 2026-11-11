@@ -150,7 +150,6 @@ fn unified_report_text_contains_all_oracles() {
 const LAB_UNFED_ORACLES: &[&str] = &[
     "region_leak",
     "ambient_authority",
-    "cancel_correctness",
     "cancel_debt",
     "cancel_signal_ordering",
     "runtime_epoch",
@@ -262,6 +261,297 @@ fn lab_runtime_oracle_feeding_census() {
     }
 
     test_complete!("lab_runtime_oracle_feeding_census");
+}
+
+#[test]
+fn lab_cancel_witnesses_survive_masked_cleanup_late_values_and_panics() {
+    use asupersync::channel::oneshot;
+    use asupersync::lab::{LabConfig, LabRuntime};
+    use asupersync::runtime::JoinError;
+    use asupersync::types::{Budget, CancelReason};
+    use std::sync::{Arc, Mutex};
+    use std::task::Poll;
+
+    init_test_logging();
+
+    for panic_after_cleanup in [false, true] {
+        let mut lab = LabRuntime::new(LabConfig::new(0x52_4a3b).max_steps(10_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (release, mut gate) = oneshot::channel::<()>();
+        let published = Arc::new(Mutex::new(None));
+        let publish = Arc::clone(&published);
+        let (owner, _owner_handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = asupersync::Cx::current().expect("owner Cx");
+                let child = cx
+                    .spawn(move |cx| async move {
+                        std::future::poll_fn(|_| {
+                            // A masked checkpoint cannot acknowledge cancel.
+                            // The unmasked checkpoint in the same poll can.
+                            cx.masked(|| assert!(cx.checkpoint().is_ok()));
+                            if cx.checkpoint().is_err() {
+                                Poll::Ready(())
+                            } else {
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                        gate.recv_uninterruptible().await.expect("cleanup gate");
+                        assert!(!panic_after_cleanup, "panic after acknowledged cleanup");
+                        7_u32
+                    })
+                    .expect("spawn cancellable child");
+                *publish.lock().expect("publish child") = Some(child);
+            })
+            .expect("create owner task");
+        lab.scheduler.lock().schedule(owner, 0);
+        lab.run_until_idle();
+
+        let mut child = published.lock().expect("published child").take().unwrap();
+        let child_id = child.task_id();
+        child.abort_with_reason(CancelReason::timeout());
+        lab.run_until_idle();
+        child.abort_with_reason(CancelReason::shutdown());
+        lab.run_until_idle();
+
+        let report = lab.report();
+        let entry = report.oracle_report.entry("cancel_correctness").unwrap();
+        assert!(entry.passed, "{entry:?}");
+        assert!(entry.stats.events_recorded >= 3, "{entry:?}");
+        assert_eq!(entry.stats.entities_tracked, 1);
+        let witnessed = entry.stats.events_recorded;
+
+        // Report calls do not manufacture observations, and sampling alone
+        // establishes no fixed ten-second deadline for asynchronous cleanup.
+        lab.advance_time(60_000_000_000);
+        let repeated = lab.report();
+        let entry = repeated.oracle_report.entry("cancel_correctness").unwrap();
+        assert!(entry.passed, "{entry:?}");
+        assert_eq!(entry.stats.events_recorded, witnessed);
+
+        release.send_blocking(()).expect("release cleanup");
+        lab.run_until_quiescent();
+        assert!(lab.state.task(child_id).is_none(), "task record retired");
+        if panic_after_cleanup {
+            assert!(matches!(child.try_join(), Err(JoinError::Panicked(_))));
+        } else {
+            // Cx::spawn permits a value after cancellation was acknowledged.
+            assert!(matches!(child.try_join(), Ok(Some(7))));
+        }
+
+        let finished = lab.report();
+        let entry = finished.oracle_report.entry("cancel_correctness").unwrap();
+        assert!(entry.passed, "{entry:?}");
+        assert_eq!(entry.stats.entities_tracked, 0);
+        assert!(entry.stats.events_recorded >= witnessed);
+        let finished_events = entry.stats.events_recorded;
+        let repeated = lab.report();
+        assert_eq!(
+            repeated
+                .oracle_report
+                .entry("cancel_correctness")
+                .unwrap()
+                .stats
+                .events_recorded,
+            finished_events
+        );
+    }
+}
+
+#[test]
+fn lab_cancel_witness_corruption_is_reported_and_survives_retirement() {
+    use asupersync::channel::oneshot;
+    use asupersync::lab::oracle::cancel_correctness::CancelCorrectnessViolation;
+    use asupersync::lab::{LabConfig, LabRuntime};
+    use asupersync::record::task::TaskState;
+    use asupersync::types::{Budget, CancelReason, CancelWitnessError};
+
+    init_test_logging();
+    let mut lab = LabRuntime::new(LabConfig::new(0x52_4a3c).max_steps(10_000));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (release, mut gate) = oneshot::channel::<()>();
+    let (task, handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            gate.recv_uninterruptible().await.expect("release task");
+        })
+        .expect("create task");
+    lab.scheduler.lock().schedule(task, 0);
+    lab.run_until_idle();
+    handle.abort_with_reason(CancelReason::shutdown());
+    lab.run_until_idle();
+
+    let original = lab.state.task(task).expect("cancelled task").state.clone();
+    let epoch = lab.state.task(task).unwrap().cancel_epoch;
+    assert!(epoch > 0);
+    let clean = lab.report();
+    let entry = clean.oracle_report.entry("cancel_correctness").unwrap();
+    assert!(entry.passed && entry.stats.events_recorded > 0, "{entry:?}");
+    let clean_events = entry.stats.events_recorded;
+
+    // Mutate real task records rather than manually injecting oracle events.
+    // A checker that is unwired or reset by report hydration misses both faults.
+    lab.state.task_mut(task).unwrap().cancel_epoch = epoch + 1;
+    let corrupt = lab.report();
+    let entry = corrupt.oracle_report.entry("cancel_correctness").unwrap();
+    assert!(!entry.passed, "epoch corruption must fail: {entry:?}");
+    assert_eq!(entry.stats.events_recorded, clean_events + 1);
+    assert!(matches!(
+        lab.oracles.cancel_correctness.get_recent_violations(1)[0],
+        CancelCorrectnessViolation::WitnessValidationFailed {
+            error: CancelWitnessError::EpochMismatch,
+            ..
+        }
+    ));
+    let repeated = lab.report();
+    assert_eq!(
+        repeated
+            .oracle_report
+            .entry("cancel_correctness")
+            .unwrap()
+            .stats,
+        entry.stats,
+        "an unchanged corrupt record is not another observation"
+    );
+
+    let record = lab.state.task_mut(task).unwrap();
+    record.cancel_epoch = epoch;
+    match &mut record.state {
+        TaskState::CancelRequested { reason, .. } => {
+            *reason = CancelReason::user("deliberately weakened for the oracle test");
+        }
+        state => panic!("expected parked cancellation request, got {state:?}"),
+    }
+    let weakened = lab.report();
+    assert!(
+        !weakened
+            .oracle_report
+            .entry("cancel_correctness")
+            .unwrap()
+            .passed
+    );
+    assert!(matches!(
+        lab.oracles.cancel_correctness.get_recent_violations(1)[0],
+        CancelCorrectnessViolation::WitnessValidationFailed {
+            error: CancelWitnessError::ReasonWeakened { .. },
+            ..
+        }
+    ));
+
+    // Repair the injected fault so ordinary completion retires the task. The
+    // report must retain the failures after the TaskRecord has been recycled.
+    lab.state.task_mut(task).unwrap().state = original;
+    release.send_blocking(()).expect("release task");
+    lab.run_until_quiescent();
+    assert!(lab.state.task(task).is_none());
+    let retired = lab.report();
+    let entry = retired.oracle_report.entry("cancel_correctness").unwrap();
+    assert!(!entry.passed);
+    assert_eq!(entry.stats.entities_tracked, 0);
+    assert_eq!(
+        lab.oracles
+            .cancel_correctness
+            .get_statistics()
+            .violations_detected,
+        2
+    );
+}
+
+#[test]
+fn lab_cancel_state_rollback_is_reported_once_and_survives_retirement() {
+    use asupersync::channel::oneshot;
+    use asupersync::lab::oracle::{CancellationProtocolViolation, TaskStateKind};
+    use asupersync::lab::{LabConfig, LabRuntime};
+    use asupersync::record::task::TaskState;
+    use asupersync::types::{Budget, CancelReason};
+
+    init_test_logging();
+    for observe_in_poll in [false, true] {
+        for rollback in [TaskState::Created, TaskState::Running] {
+            let mut lab = LabRuntime::new(
+                LabConfig::new(0x52_4a3d)
+                    .max_steps(10_000)
+                    .with_cancellation_oracle_warnings(),
+            );
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let (release, mut gate) = oneshot::channel::<()>();
+            let (task, handle) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    gate.recv_uninterruptible().await.expect("release task");
+                })
+                .expect("create task");
+            lab.scheduler.lock().schedule(task, 0);
+            lab.run_until_idle();
+            handle.abort_with_reason(CancelReason::shutdown());
+            lab.run_until_idle();
+
+            let original = lab.state.task(task).unwrap().state.clone();
+            assert!(matches!(original, TaskState::CancelRequested { .. }));
+            let target = TaskStateKind::from_task_state(&rollback);
+            lab.state.task_mut(task).unwrap().state = rollback;
+            if observe_in_poll {
+                // A Created rollback would become Running during this poll;
+                // the pre-poll sample must retain the actual earlier fault.
+                lab.scheduler.lock().schedule(task, 0);
+                lab.run_until_idle();
+            }
+
+            let report = lab.report();
+            let entry = report.oracle_report.entry("cancellation_protocol").unwrap();
+            assert!(!entry.passed, "{entry:?}");
+            assert!(
+                lab.oracles
+                    .cancellation_protocol
+                    .all_violations()
+                    .iter()
+                    .any(|violation| matches!(
+                        violation,
+                        CancellationProtocolViolation::SkippedState {
+                            task: observed_task,
+                            from: TaskStateKind::CancelRequested,
+                            to,
+                            ..
+                        } if *observed_task == task && *to == target
+                    )),
+                "the protocol oracle must preserve the actual rollback"
+            );
+            let rollback_count = |lab: &LabRuntime| {
+                lab.oracles
+                    .cancellation_protocol
+                    .all_violations()
+                    .iter()
+                    .filter(|violation| matches!(
+                        violation,
+                        CancellationProtocolViolation::SkippedState { task: id, .. }
+                            if *id == task
+                    ))
+                    .count()
+            };
+            assert_eq!(rollback_count(&lab), 1);
+            let repeated = lab.report();
+            assert!(!repeated.oracle_report.all_passed());
+            assert_eq!(rollback_count(&lab), 1);
+            assert!(
+                repeated
+                    .oracle_report
+                    .entry("cancel_correctness")
+                    .unwrap()
+                    .passed,
+                "a rollback is reported in the oracle with a full task-state vocabulary"
+            );
+
+            lab.state.task_mut(task).unwrap().state = original;
+            release.send_blocking(()).expect("release task");
+            lab.run_until_quiescent();
+            assert!(lab.state.task(task).is_none());
+            let retired = lab.report();
+            let entry = retired.oracle_report.entry("cancellation_protocol").unwrap();
+            assert!(!entry.passed, "retirement must preserve rollback evidence");
+            assert_eq!(rollback_count(&lab), 1);
+        }
+    }
 }
 
 #[test]

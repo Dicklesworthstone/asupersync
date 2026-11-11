@@ -11,6 +11,183 @@
     use crate::types::{RegionId, TaskId, Time};
 
     #[test]
+    fn runtime_snapshot_observes_zero_epoch_once_and_reset_clears_dedup() {
+        init_test_logging();
+        let oracle = CancelCorrectnessOracle::with_default_config();
+        let mut record = TaskRecord::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            crate::types::Budget::INFINITE,
+        );
+        record.state = TaskState::CancelRequested {
+            reason: CancelReason::shutdown(),
+            cleanup_budget: crate::types::Budget::INFINITE,
+        };
+        assert!(
+            record.cancel_witness().is_none(),
+            "zero epoch is hidden by the ordinary accessor"
+        );
+        assert!(oracle.observe_runtime_task(&record, Time::ZERO).is_none());
+        assert!(
+            oracle
+                .observe_runtime_task(&record, Time::from_nanos(1))
+                .is_none()
+        );
+        let stats = oracle.get_statistics();
+        assert_eq!(stats.witnesses_processed, 1);
+        assert_eq!(stats.violations_detected, 1);
+        assert!(matches!(
+            oracle.get_recent_violations(1)[0],
+            CancelCorrectnessViolation::InvalidInitialWitness {
+                kind: InvalidInitialWitnessKind::ZeroEpoch,
+                ..
+            }
+        ));
+
+        oracle.reset();
+        assert!(
+            oracle
+                .observe_runtime_task(&record, Time::from_nanos(2))
+                .is_none()
+        );
+        assert_eq!(oracle.get_statistics().witnesses_processed, 1);
+        assert_eq!(oracle.get_statistics().violations_detected, 1);
+        record.cancel_epoch = 1;
+        assert!(
+            oracle
+                .observe_runtime_task(&record, Time::from_nanos(3))
+                .is_none()
+        );
+        assert_eq!(oracle.get_statistics().active_tasks, 1);
+    }
+
+    #[test]
+    fn runtime_snapshots_cannot_relax_an_explicit_stream() {
+        init_test_logging();
+        let oracle = CancelCorrectnessOracle::new(CancelCorrectnessConfig {
+            max_phase_duration_ns: 1,
+            capture_stack_traces: false,
+            ..CancelCorrectnessConfig::default()
+        });
+        let mut record = TaskRecord::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            crate::types::Budget::INFINITE,
+        );
+        record.cancel_epoch = 1;
+        record.state = TaskState::CancelRequested {
+            reason: CancelReason::shutdown(),
+            cleanup_budget: crate::types::Budget::INFINITE,
+        };
+        oracle.notify_cancel_witness(record.cancel_witness().unwrap(), Time::ZERO);
+        record.state = TaskState::Finalizing {
+            reason: CancelReason::shutdown(),
+            cleanup_budget: crate::types::Budget::INFINITE,
+        };
+        assert!(
+            oracle
+                .observe_runtime_task(&record, Time::from_nanos(1))
+                .is_none()
+        );
+        assert_eq!(oracle.get_statistics().witnesses_processed, 1);
+        assert_eq!(
+            oracle.tracked_tasks()[0].current_phase,
+            CancelPhase::Requested
+        );
+        assert!(matches!(
+            oracle.check(Time::from_nanos(2)),
+            Err(CancelCorrectnessViolation::StuckCancellation { .. })
+        ));
+
+        record.state = TaskState::Completed(crate::types::Outcome::Ok(()));
+        assert!(
+            oracle
+                .observe_runtime_task(&record, Time::from_nanos(3))
+                .is_none()
+        );
+        assert_eq!(oracle.get_statistics().active_tasks, 1);
+        oracle.notify_task_completed(record.id, Time::from_nanos(3));
+        assert!(matches!(
+            oracle.get_recent_violations(1)[0],
+            CancelCorrectnessViolation::PrematureCompletion { .. }
+        ));
+    }
+
+    #[test]
+    fn runtime_rollback_returns_actual_states_once_per_episode() {
+        use crate::lab::oracle::cancellation_protocol::TaskStateKind;
+
+        init_test_logging();
+        let reason = CancelReason::shutdown();
+        let budget = crate::types::Budget::new()
+            .with_poll_quota(23)
+            .with_priority(77);
+        for original in [
+            TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget: budget,
+            },
+            TaskState::Cancelling {
+                reason: reason.clone(),
+                cleanup_budget: budget,
+            },
+            TaskState::Finalizing {
+                reason: reason.clone(),
+                cleanup_budget: budget,
+            },
+        ] {
+            let oracle = CancelCorrectnessOracle::with_default_config();
+            let mut record = TaskRecord::new(
+                TaskId::testing_default(),
+                RegionId::testing_default(),
+                crate::types::Budget::INFINITE,
+            );
+            record.cancel_epoch = 1;
+            for rollback in [TaskState::Running, TaskState::Created] {
+                record.state = original.clone();
+                assert!(oracle.observe_runtime_task(&record, Time::ZERO).is_none());
+                record.state = rollback.clone();
+                let (from, to) = oracle
+                    .observe_runtime_task(&record, Time::from_nanos(1))
+                    .expect("observed cancellation cannot return to a live uncancelled state");
+                assert_eq!(
+                    TaskStateKind::from_task_state(&from),
+                    TaskStateKind::from_task_state(&original)
+                );
+                assert_eq!(
+                    TaskStateKind::from_task_state(&to),
+                    TaskStateKind::from_task_state(&rollback)
+                );
+                match from {
+                    TaskState::CancelRequested {
+                        reason: observed_reason,
+                        cleanup_budget,
+                    }
+                    | TaskState::Cancelling {
+                        reason: observed_reason,
+                        cleanup_budget,
+                    }
+                    | TaskState::Finalizing {
+                        reason: observed_reason,
+                        cleanup_budget,
+                    } => {
+                        assert_eq!(observed_reason, reason);
+                        assert_eq!(cleanup_budget, budget);
+                    }
+                    state => panic!("expected actual cancellation snapshot, got {state:?}"),
+                }
+                assert!(
+                    oracle
+                        .observe_runtime_task(&record, Time::from_nanos(2))
+                        .is_none(),
+                    "the same rollback is not a second observation"
+                );
+                assert_eq!(oracle.get_statistics().witnesses_processed, 1);
+            }
+        }
+    }
+
+    #[test]
     fn test_normal_cancellation_flow() {
         init_test_logging();
 

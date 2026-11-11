@@ -5010,6 +5010,7 @@ impl LabRuntime {
         };
 
         self.dispatches = self.dispatches.saturating_add(1);
+        self.observe_cancel_correctness(task_id);
 
         // Record task scheduling in certificate and replay recorder
         self.certificate.record(task_id, dispatch_lane, self.steps);
@@ -5043,12 +5044,14 @@ impl LabRuntime {
                 at_nanos: now.as_nanos(),
             })
         {
+            self.observe_cancel_correctness(task_id);
             return Ok(true);
         }
 
         // 2. Pre-poll chaos injection
         if self.inject_pre_poll_chaos(task_id) {
             // Chaos caused the task to be skipped (e.g., cancelled, budget exhausted)
+            self.observe_cancel_correctness(task_id);
             return Ok(true);
         }
 
@@ -5261,6 +5264,7 @@ impl LabRuntime {
         // receipt. A mask may have entered and exited within this single poll.
         self.replay_cancel_observations(task_id, cancel_observer.as_ref());
         let (cancel_ack, cancel_wakes) = self.consume_cancel_ack(task_id).into_parts();
+        self.observe_cancel_correctness(task_id);
 
         // Sample only the admitted task's primary Cx. A derived fiber context
         // can share its TaskId without cancelling this task.
@@ -5403,6 +5407,7 @@ impl LabRuntime {
                 // record. Must happen AFTER state finalization above because
                 // create_task wraps user futures to always return Outcome::Ok(())
                 // — the real severity comes from the cancel protocol state machine.
+                self.observe_cancel_correctness(task_id);
                 let final_severity =
                     self.state
                         .task(task_id)
@@ -5540,6 +5545,24 @@ impl LabRuntime {
         // Keep the observer installed through them, then restore the outer poll.
         self.replay_cancel_observations(task_id, cancel_observer.as_ref());
         Ok(true)
+    }
+
+    /// Sample actual record witnesses in the lab only. Terminal snapshots must
+    /// precede `task_completed`, which can recycle the task's arena generation.
+    fn observe_cancel_correctness(&mut self, task_id: TaskId) {
+        if let Some(record) = self.state.task(task_id)
+            && let Some((from, to)) = self
+                .oracles
+                .cancel_correctness
+                .observe_runtime_task(record, self.virtual_time)
+        {
+            self.oracles.cancellation_protocol.on_transition(
+                task_id,
+                &from,
+                &to,
+                self.virtual_time,
+            );
+        }
     }
 
     fn replay_cancel_observations(

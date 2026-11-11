@@ -395,7 +395,20 @@ impl OracleSuite {
         } else {
             self.cancellation_protocol.snapshot_from_state(state, now);
         }
-        self.cancel_correctness.reset();
+        // Preserve the live witness stream: resetting here would erase an
+        // epoch/reason regression detected before its task record retired.
+        // Parked tasks can receive cancellation between polls, so sample their
+        // current records too. Completed tasks are observed by the lab before
+        // retirement; replaying all historical terminal records is not a feed.
+        for (_, task) in state.tasks_iter() {
+            if !task.state.is_terminal()
+                && let Some((from, to)) =
+                    self.cancel_correctness.observe_runtime_task(task, now)
+            {
+                self.cancellation_protocol
+                    .on_transition(task.id, &from, &to, now);
+            }
+        }
         self.cancel_debt.reset();
         self.cancel_signal_ordering.reset();
         self.runtime_epoch.reset();

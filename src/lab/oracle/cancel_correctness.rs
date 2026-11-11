@@ -19,7 +19,16 @@
 //! - Monitors cancellation state transitions per task/region
 //! - Provides diagnostics with stack traces and cancellation path visualization
 //! - Configurable enforcement modes (warn vs panic)
+//!
+//! `LabRuntime` also feeds actual task-record snapshots before/after polls and
+//! before terminal records retire. That sampled stream checks identity, epoch,
+//! witnessed phase and reason monotonicity; it cannot prove that every intermediate
+//! phase ran or impose a fixed cleanup deadline. A sampled return to Created or
+//! Running is passed, with its actual earlier state, to the cancellation protocol
+//! oracle. The explicit `notify_*` API retains
+//! its stricter complete-stream checks and configured phase-duration bound.
 
+use crate::record::task::{TaskRecord, TaskState};
 use crate::types::{
     CancelPhase, CancelReason, CancelWitness, CancelWitnessError, RegionId, TaskId, Time,
 };
@@ -368,6 +377,18 @@ struct TaskCancelState {
     cancel_reason: CancelReason,
     witness_history: VecDeque<CancelWitness>,
     stuck_violation_reported: bool,
+    /// Runtime snapshots can coalesce phases and do not establish a cleanup
+    /// responsiveness bound. Strict manually supplied streams keep theirs.
+    runtime_snapshots: bool,
+}
+
+/// Actual cancellation state retained alongside its deduplicated witness.
+/// Rollbacks use this state verbatim, including the observed cleanup budget.
+#[derive(Debug)]
+struct RuntimeCancelObservation {
+    witness: CancelWitness,
+    state: TaskState,
+    rollback_reported: bool,
 }
 
 impl TaskCancelState {
@@ -390,6 +411,7 @@ impl TaskCancelState {
             cancel_reason,
             witness_history,
             stuck_violation_reported: false,
+            runtime_snapshots: false,
         }
     }
 
@@ -440,6 +462,10 @@ pub struct CancelCorrectnessOracle {
     /// Current cancellation states tracked by task ID.
     task_states: RwLock<DetHashMap<TaskId, TaskCancelState>>,
 
+    /// Last sampled cancellation state per live task, including rejected
+    /// witnesses. Repeated malformed records are not new evidence.
+    runtime_observations: RwLock<DetHashMap<TaskId, RuntimeCancelObservation>>,
+
     /// Recently completed tasks retained long enough to reject stale late witnesses.
     completed_tasks: RwLock<CompletedTaskCache>,
 
@@ -468,6 +494,7 @@ impl CancelCorrectnessOracle {
             // even without the `test-internals` feature. Keys are internal
             // TaskIds, so the documented HashDoS concern does not apply.
             task_states: RwLock::new(DetHashMap::with_hasher(DetBuildHasher::for_lab())),
+            runtime_observations: RwLock::new(DetHashMap::with_hasher(DetBuildHasher::for_lab())),
             completed_tasks: RwLock::new(CompletedTaskCache::default()),
             violations: RwLock::new(VecDeque::new()),
             witnesses_processed: AtomicU64::new(0),
@@ -484,22 +511,117 @@ impl CancelCorrectnessOracle {
 
     /// Notify the oracle of a cancellation witness.
     ///
-    /// This is the main entry point called by the runtime when cancellation
-    /// state transitions occur.
+    /// This explicit API requires a complete transition stream. Once it is
+    /// used for a task, automatic lab snapshots leave that stream and its
+    /// configured phase-duration bound under the caller's control.
     pub fn notify_cancel_witness(&self, witness: CancelWitness, now: Time) {
-        self.witnesses_processed.fetch_add(1, Ordering::Relaxed);
+        self.observe_witness(witness, now, false);
+    }
 
+    /// Observe the actual lab record, including a malformed zero-epoch state.
+    /// `TaskRecord::cancel_witness` intentionally hides that sentinel, so using
+    /// it here would make corruption of the epoch invisible to this checker.
+    ///
+    /// A snapshot may jump over phases executed within one poll. A terminal
+    /// value or panic can also legitimately win after cancellation was requested;
+    /// neither is a fabricated Cancelled witness or premature-completion fault.
+    /// A return to Created or Running instead yields the actual observed state
+    /// pair for the caller to feed to the cancellation protocol oracle, whose
+    /// state vocabulary includes those non-cancellation states.
+    pub(crate) fn observe_runtime_task(
+        &self,
+        record: &TaskRecord,
+        now: Time,
+    ) -> Option<(TaskState, TaskState)> {
+        if self
+            .task_states
+            .read()
+            .get(&record.id)
+            .is_some_and(|state| !state.runtime_snapshots)
+        {
+            // An explicitly supplied complete stream owns its phase/deadline
+            // and completion checks; hydration must not weaken that contract.
+            return None;
+        }
+        if record.state.is_terminal() && self.completed_tasks.read().contains(record.id) {
+            return None;
+        }
+        if matches!(record.state, TaskState::Created | TaskState::Running) {
+            let mut observations = self.runtime_observations.write();
+            if let Some(previous) = observations.get_mut(&record.id)
+                && !previous.rollback_reported
+            {
+                previous.rollback_reported = true;
+                return Some((previous.state.clone(), record.state.clone()));
+            }
+            return None;
+        }
+        let phase_reason = match &record.state {
+            TaskState::CancelRequested { reason, .. } => Some((CancelPhase::Requested, reason)),
+            TaskState::Cancelling { reason, .. } => Some((CancelPhase::Cancelling, reason)),
+            TaskState::Finalizing { reason, .. } => Some((CancelPhase::Finalizing, reason)),
+            TaskState::Completed(crate::types::Outcome::Cancelled(reason)) => {
+                Some((CancelPhase::Completed, reason))
+            }
+            _ => None,
+        };
+        if let Some((phase, reason)) = phase_reason {
+            let witness = CancelWitness::new(
+                record.id,
+                record.owner,
+                record.cancel_epoch,
+                phase,
+                reason.clone(),
+            );
+            let changed = {
+                let mut observations = self.runtime_observations.write();
+                let changed = observations
+                    .get(&record.id)
+                    .is_none_or(|previous| previous.witness != witness);
+                observations.insert(
+                    record.id,
+                    RuntimeCancelObservation {
+                        witness: witness.clone(),
+                        state: record.state.clone(),
+                        rollback_reported: false,
+                    },
+                );
+                changed
+            };
+            if changed {
+                self.observe_witness(witness, now, true);
+            }
+        }
+        if record.state.is_terminal() {
+            let observed = self.task_states.write().remove(&record.id).is_some();
+            let sampled = self.runtime_observations.write().remove(&record.id).is_some();
+            if observed || sampled {
+                self.completed_tasks
+                    .write()
+                    .remember(record.id, self.completed_task_cache_limit());
+            }
+        }
+        None
+    }
+
+    fn observe_witness(&self, witness: CancelWitness, now: Time, runtime_snapshot: bool) {
         let mut task_states = self.task_states.write();
 
         if let Some(existing_state) = task_states.get_mut(&witness.task_id) {
+            if runtime_snapshot && !existing_state.runtime_snapshots {
+                return;
+            }
+            existing_state.runtime_snapshots &= runtime_snapshot;
+            self.witnesses_processed.fetch_add(1, Ordering::Relaxed);
             // Validate transition
             if self
-                .validate_transition(existing_state, &witness, now)
+                .validate_transition(existing_state, &witness, now, runtime_snapshot)
                 .is_ok()
             {
                 existing_state.update_with_witness(witness, now);
             }
         } else {
+            self.witnesses_processed.fetch_add(1, Ordering::Relaxed);
             if self.completed_tasks.read().contains(witness.task_id) {
                 drop(task_states);
                 self.record_violation(CancelCorrectnessViolation::WitnessAfterCompletion {
@@ -518,7 +640,8 @@ impl CancelCorrectnessOracle {
             // with a non-zero epoch and validate monotone transitions from
             // that point onward.
             if self.validate_initial_witness(&witness, now).is_ok() {
-                let state = TaskCancelState::new(witness, now);
+                let mut state = TaskCancelState::new(witness, now);
+                state.runtime_snapshots = runtime_snapshot;
                 task_states.insert(state.task_id, state);
             }
         }
@@ -536,6 +659,11 @@ impl CancelCorrectnessOracle {
         let max_duration = self.config.max_phase_duration_ns;
 
         for state in task_states.values_mut() {
+            if state.runtime_snapshots {
+                // Virtual time can advance arbitrarily during lawful masked
+                // or asynchronous cleanup. Sampling supplies no 10-second SLA.
+                continue;
+            }
             // Check if task has been in current phase too long
             let duration_ns = now
                 .as_nanos()
@@ -582,6 +710,7 @@ impl CancelCorrectnessOracle {
 
         // Clean up state for completed task
         task_states.remove(&task_id);
+        self.runtime_observations.write().remove(&task_id);
         let mut completed_tasks = self.completed_tasks.write();
         completed_tasks.remember(task_id, self.completed_task_cache_limit());
         drop(completed_tasks);
@@ -654,6 +783,7 @@ impl CancelCorrectnessOracle {
     /// Reset the oracle to its initial state.
     pub fn reset(&self) {
         self.task_states.write().clear();
+        self.runtime_observations.write().clear();
         self.completed_tasks.write().clear();
         self.violations.write().clear();
         self.witnesses_processed.store(0, Ordering::Relaxed);
@@ -672,6 +802,7 @@ impl CancelCorrectnessOracle {
         current_state: &TaskCancelState,
         new_witness: &CancelWitness,
         now: Time,
+        runtime_snapshot: bool,
     ) -> Result<(), ()> {
         if let Some(last_witness) = current_state.witness_history.back() {
             match CancelWitness::validate_transition(Some(last_witness), new_witness) {
@@ -701,6 +832,12 @@ impl CancelCorrectnessOracle {
                     self.record_violation(violation);
                     return Err(());
                 }
+            }
+
+            if runtime_snapshot {
+                // Canonical witnesses permit monotone phase jumps. Only the
+                // explicit complete-stream API can require adjacent phases.
+                return Ok(());
             }
 
             if new_witness.phase != CancelPhase::Completed
