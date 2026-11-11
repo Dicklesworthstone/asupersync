@@ -150,6 +150,157 @@
     }
 
     #[test]
+    fn drained_cancellable_join_preserves_published_result_until_retirement() {
+        use crate::runtime::task_handle::{RetirementBarrier, TaskHandle};
+        use crate::runtime::JoinError;
+        use crate::types::CancelReason;
+
+        let caller = Cx::for_testing();
+        let child = Cx::for_testing();
+        let (sender, receiver) = crate::channel::oneshot::channel();
+        let barrier = RetirementBarrier::pending();
+        let task = TaskHandle::with_retirement_barrier_for_test(
+            child.task_id(),
+            receiver,
+            Arc::downgrade(&child.inner),
+            Arc::clone(&barrier),
+        );
+        let state = DrainedBlockingState::new();
+        state.finish(Ok(73_u8));
+        sender.send_blocking(Ok(())).unwrap();
+        let mut handle = DrainedBlockingHandle::new(task, Arc::clone(&state));
+        let reason = CancelReason::user("blocking result is published but unretired");
+        caller.cancel_with_reason(reason.clone());
+        assert_eq!(
+            future::block_on(handle.join_cancellable(&caller)),
+            Err(JoinError::Cancelled(reason)),
+        );
+        assert!(!handle.is_finished());
+        assert!(!handle.task.terminal_result_consumed());
+        assert_eq!(state.inner.lock().result.as_ref().unwrap(), &Ok(73));
+        assert!(state.inner.lock().cancel.is_none());
+        assert!(!child.is_cancel_requested());
+        barrier.open_and_wake();
+        assert_eq!(future::block_on(handle.join_cancellable(&caller)), Ok(73));
+        assert_eq!(future::block_on(handle.join()), Err(JoinError::PolledAfterCompletion));
+        assert!(state.inner.lock().result.is_none());
+    }
+
+    #[test]
+    fn drained_cancellable_join_does_not_abort_a_pool_result_before_task_publication() {
+        use crate::runtime::task_handle::{RetirementBarrier, TaskHandle};
+        use crate::runtime::JoinError;
+        use crate::types::CancelReason;
+        use std::future::Future as _;
+
+        for drop_wait in [false, true] {
+            let caller = Cx::for_testing();
+            let child = Cx::for_testing();
+            let (sender, receiver) = crate::channel::oneshot::channel();
+            let barrier = RetirementBarrier::pending();
+            let task = TaskHandle::with_retirement_barrier_for_test(
+                child.task_id(),
+                receiver,
+                Arc::downgrade(&child.inner),
+                Arc::clone(&barrier),
+            );
+            let state = DrainedBlockingState::new();
+            let mut handle = DrainedBlockingHandle::new(task, Arc::clone(&state));
+            // No wait is installed or cancelled before the async method starts.
+            drop(handle.join_cancellable(&caller));
+            assert!(state.inner.lock().cancel.is_none());
+            assert!(!child.is_cancel_requested());
+            let mut waiting = Box::pin(handle.join_cancellable(&caller));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(waiting.as_mut().poll(&mut context).is_pending());
+            // The pool finishes before its controller is scheduled again. The
+            // task's result channel is deliberately STILL EMPTY, not just
+            // hidden behind the retirement barrier. Its Cx is part of T.
+            state.finish(Ok(child.clone()));
+            if !drop_wait {
+                let reason = CancelReason::user("pool finished before controller publication");
+                caller.cancel_with_reason(reason.clone());
+                assert!(matches!(waiting.as_mut().poll(&mut context),
+                    Poll::Ready(Err(JoinError::Cancelled(actual))) if actual == reason));
+            }
+            drop(waiting);
+            assert!(!handle.task.terminal_result_consumed());
+            assert!(state.inner.lock().result.is_some());
+            assert!(state.inner.lock().cancel.is_none());
+            assert!(!child.is_cancel_requested(),
+                "drop_wait={drop_wait}: caller observation must not cancel a completed producer");
+            sender.send_blocking(Ok(())).unwrap();
+            barrier.open_and_wake();
+            let returned = future::block_on(handle.join_cancellable(&caller)).unwrap();
+            assert!(!returned.is_cancel_requested());
+            assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+        }
+    }
+
+    #[test]
+    fn drained_cancellable_join_masks_cancel_and_fences_a_dropped_wait() {
+        use crate::runtime::JoinError;
+        use crate::types::CancelReason;
+        use std::future::Future as _;
+
+        for drop_wait in [false, true] {
+            let caller = Cx::for_testing();
+            let child = Cx::for_testing();
+            let (sender, task) = crate::runtime::task_handle::task_handle_channel::<()>(
+                child.task_id(), Arc::downgrade(&child.inner),
+            );
+            let state = DrainedBlockingState::new();
+            let mut handle = DrainedBlockingHandle::new(task, Arc::clone(&state));
+            let reason = CancelReason::user("masked blocking caller");
+            caller.cancel_with_reason(reason.clone());
+            let mut waiting = Box::pin(handle.join_cancellable(&caller));
+            let mut context = Context::from_waker(Waker::noop());
+            caller.masked(|| {
+                assert!(waiting.as_mut().poll(&mut context).is_pending());
+                assert!(state.inner.lock().cancel.is_none());
+                assert!(!child.is_cancel_requested());
+            });
+            if !drop_wait {
+                assert_eq!(
+                    waiting.as_mut().poll(&mut context),
+                    Poll::Ready(Err(JoinError::Cancelled(reason.clone()))),
+                );
+            }
+            drop(waiting);
+            let expected = if drop_wait { CancelReason::user("abort") } else { reason };
+            assert_eq!(state.inner.lock().cancel, Some(expected.clone()));
+            assert_eq!(child.cancel_reason(), Some(expected.clone()));
+            assert!(!handle.task.terminal_result_consumed());
+            assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 0);
+            state.finish(Err(JoinError::Cancelled(expected.clone())));
+            crate::runtime::task_handle::publish_terminal_result(sender, Ok(()));
+            assert_eq!(future::block_on(handle.join()), Err(JoinError::Cancelled(expected)));
+        }
+    }
+
+    #[test]
+    fn drained_cancellable_join_preserves_teardown_terminal_over_late_pool_result() {
+        use crate::runtime::JoinError;
+        let caller = Cx::for_testing();
+        let child = Cx::for_testing();
+        let (sender, task) = crate::runtime::task_handle::task_handle_channel::<()>(
+            child.task_id(), Arc::downgrade(&child.inner),
+        );
+        let state = DrainedBlockingState::new();
+        let mut handle = DrainedBlockingHandle::new(task, Arc::clone(&state));
+        drop(sender);
+        assert!(matches!(future::block_on(handle.join_cancellable(&caller)),
+            Err(JoinError::Cancelled(_))));
+        assert!(handle.task.terminal_result_consumed());
+        state.finish(Ok(91_u8));
+        assert_eq!(
+            future::block_on(handle.join_cancellable(&caller)),
+            Err(JoinError::PolledAfterCompletion),
+        );
+        assert_eq!(state.inner.lock().result.take().unwrap().unwrap(), 91);
+    }
+
+    #[test]
     fn spawn_blocking_returns_result() {
         init_test("spawn_blocking_returns_result");
         future::block_on(async {

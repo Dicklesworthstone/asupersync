@@ -287,6 +287,24 @@ additionally gives spawn adapters a private terminal-result sender with no
 cancellation-aware send method, making publication through the completed
 task's cancelled `Cx` unavailable at the type boundary.
 
+For blocking closures that must stay owned until their work and captures retire,
+use `cx.spawn_blocking_drained(...)`. Its `DrainedBlockingHandle` offers two waits:
+
+- `join().await` waits for actual retirement and returns the closure's result.
+  Dropping this borrowing wait preserves the result for another join.
+- `join_cancellable(&cx).await` also observes the caller's cancellation. It can
+  return `JoinError::Cancelled` promptly while preserving the handle and its
+  eventual result. A later `join().await` still waits for actual retirement.
+
+The cancellable wait respects cancellation masks and wakes when the caller is
+cancelled. It fences a queued closure before requesting task cancellation; an
+already running closure must finish cooperatively. Dropping a polled, pending
+cancellable wait requests cancellation too. Neither path detaches the work:
+region close still waits for the closure and capture destruction, including
+while the blocking pool is saturated. A retired result wins over cancellation;
+a result produced before its controller task retires stays protected behind the
+retirement barrier without a new cancellation being sent to its producer.
+
 Cancellation progress is observable through `ProgressCertificate` where the runtime wires it: today that is the HTTP/1 and HTTP/2 listeners' graceful-drain supervisor (`src/server/shutdown.rs`) and the opt-in scheduler governor; region close and `Runtime::shutdown_timeout` do not consult it. It tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and reports range-bounded Freedman and Azuma candidates plus a separate projected conditional calculation. Under the current range-only variation cap, raw Freedman is never tighter than Azuma, so the selected public envelope equals Azuma. At the current same-history horizon, telescoping makes both candidate tails algebraically `1`; they are not evidence of convergence. The `converging` flag is instead an empirical status over the complete accepted finite non-negative observation history represented by running statistics. It requires positive endpoint net progress, no detected stall, bounded rebound count and magnitude, no latest-step rebound, and no dropped invalid sample. Non-finite or materially negative telemetry is dropped; that suppresses the remaining-step estimate and reports `warmup` instead of an actionable terminal phase until reset. The realized delta variance remains diagnostic-only rather than being reused as predictable variation. This makes the evidence behind "is shutdown actually converging?" inspectable without treating one trace as proof of future drift, termination, or bounded drain time.
 
 ### 3. Two-Phase Effects Prevent Data Loss

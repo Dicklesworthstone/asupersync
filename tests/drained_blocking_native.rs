@@ -465,3 +465,185 @@ fn dropping_a_finished_handle_does_not_cancel_a_returned_cx() {
         }
     });
 }
+
+// asupersync-f954oj: caller release and actual blocking retirement are separate
+// facts. Both the pool closure and its borrowing join are witnessed as parked
+// before cancellation; no sleep is used to infer either state.
+#[test]
+fn cancellable_drained_join_releases_caller_but_keeps_work_and_region_owned() {
+    bounded(|| {
+        for workers in [1, 2] {
+            for cross_thread in [false, true] {
+                let runtime = runtime(workers);
+                runtime.block_on(async {
+                    let root = Cx::current().unwrap();
+                    let region = root.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                    let (started, mut start) = oneshot::channel();
+                    let (parked, mut park) = oneshot::channel();
+                    let (release, wait_release) = mpsc::channel();
+                    let occupied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let worker_occupied = Arc::clone(&occupied);
+                    let mut caller = region.cx().spawn(move |caller_cx| async move {
+                        let mut blocking = caller_cx.spawn_blocking_drained(move |blocking_cx| {
+                            worker_occupied.store(true, Ordering::Release);
+                            started.send_blocking(blocking_cx.clone()).unwrap();
+                            let released = wait_release.recv_timeout(Duration::from_secs(10));
+                            worker_occupied.store(false, Ordering::Release);
+                            released.expect("test releases the occupied pool worker");
+                            blocking_cx.checkpoint().expect_err("the closure observes cancellation");
+                            91_u8
+                        }).unwrap();
+                        let mut waiting = Box::pin(blocking.join_cancellable(&caller_cx));
+                        let mut parked = Some(parked);
+                        let result = poll_fn(|task| {
+                            let poll = waiting.as_mut().poll(task);
+                            if poll.is_pending() && let Some(parked) = parked.take() {
+                                parked.send_blocking(caller_cx.clone()).unwrap();
+                            }
+                            poll
+                        }).await;
+                        drop(waiting);
+                        (result, blocking)
+                    }).unwrap();
+                    let (blocking_cx, caller_cx) = asupersync::time::timeout(
+                        root.now(), Duration::from_secs(5), async {
+                            let blocking = start.recv(&root).await.unwrap();
+                            let caller = park.recv(&root).await.unwrap();
+                            (blocking, caller)
+                        },
+                    ).await.expect("pool-running and join-pending witnesses");
+                    assert!(occupied.load(Ordering::Acquire));
+                    let reason = CancelReason::user("cancel drained blocking caller");
+                    if cross_thread {
+                        let requested = reason.clone();
+                        std::thread::spawn(move || caller_cx.cancel_with_reason(requested))
+                            .join().unwrap();
+                    } else {
+                        region.cancel(reason.clone()).unwrap();
+                    }
+                    let (result, mut blocking) = asupersync::time::timeout(
+                        root.now(), Duration::from_secs(2), caller.join(&root),
+                    ).await.expect("caller release precedes pool retirement")
+                        .expect("acknowledged caller cancellation preserves its returned handle");
+                    assert_eq!(result, Err(JoinError::Cancelled(reason.clone())));
+                    assert!(occupied.load(Ordering::Acquire));
+                    assert!(!blocking.is_finished());
+                    assert_eq!(blocking_cx.cancel_reason(), Some(reason));
+                    let inspector = runtime.task_inspector(TaskInspectorConfig::default());
+                    assert!(inspector.inspect_task(blocking.task_id()).is_some());
+
+                    let mut closing = Box::pin(region.close());
+                    poll_fn(|task| {
+                        assert!(closing.as_mut().poll(task).is_pending(),
+                            "a released caller is not a quiescent blocking region");
+                        Poll::Ready(())
+                    }).await;
+                    let mut retirement = Box::pin(blocking.join());
+                    poll_fn(|task| {
+                        assert!(retirement.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    release.send(()).unwrap();
+                    assert_eq!(asupersync::time::timeout(
+                        root.now(), Duration::from_secs(5), retirement,
+                    ).await.expect("pool retirement completes the resumed wait").unwrap(), 91);
+                    closing.await.unwrap();
+                    assert!(!occupied.load(Ordering::Acquire));
+                    assert!(blocking.is_finished());
+                    assert!(inspector.inspect_task(blocking.task_id()).is_none());
+                    assert!(matches!(blocking.join_cancellable(&root).await,
+                        Err(JoinError::PolledAfterCompletion)));
+                    println!("drained_cancellable_join workers={workers} cross_thread={cross_thread} caller=released_before_closure result=91 region=closed");
+                });
+                drained(&runtime);
+            }
+        }
+    });
+}
+
+#[test]
+fn cancellable_drained_join_precancel_and_dropped_wait_fence_queued_closures() {
+    bounded(|| {
+        for workers in [1, 2] {
+            for drop_wait in [false, true] {
+                let runtime = runtime(workers);
+                let (occupied, wait_occupied) = mpsc::channel();
+                let (release_pool, pool_gate) = mpsc::channel();
+                let occupying = runtime.spawn_blocking(move || {
+                    occupied.send(()).unwrap();
+                    pool_gate.recv_timeout(Duration::from_secs(10)).unwrap();
+                }).unwrap();
+                wait_occupied.recv_timeout(Duration::from_secs(5)).unwrap();
+                let (capture, dropping, release_drop, dropped) = parked_drop();
+                let calls = Arc::new(AtomicUsize::new(0));
+                let called = Arc::clone(&calls);
+                let mut blocking = runtime.spawn_blocking_drained(move |_| {
+                    called.fetch_add(1, Ordering::SeqCst);
+                    drop(capture);
+                    17_u8
+                }).unwrap();
+                let pool = runtime.blocking_handle().unwrap();
+                runtime.block_on(async {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while pool.pending_count() == 0 {
+                        assert!(Instant::now() < deadline, "closure reaches the occupied pool queue");
+                        yield_now().await;
+                    }
+                    let observer = Cx::detached_cancel_context();
+                    if drop_wait {
+                        let mut waiting = Box::pin(blocking.join_cancellable(&observer));
+                        poll_fn(|task| {
+                            assert!(waiting.as_mut().poll(task).is_pending());
+                            Poll::Ready(())
+                        }).await;
+                        drop(waiting);
+                    } else {
+                        let reason = CancelReason::user("precancelled blocking observer");
+                        observer.cancel_with_reason(reason.clone());
+                        assert_eq!(blocking.join_cancellable(&observer).await,
+                            Err(JoinError::Cancelled(reason)));
+                    }
+                });
+                assert!(!blocking.is_finished());
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                release_pool.send(()).unwrap();
+                dropping.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert_eq!(calls.load(Ordering::SeqCst), 0,
+                    "a cancelled wait closes the claim gate before the pool is released");
+                assert_eq!(dropped.load(Ordering::SeqCst), 0);
+                assert_owned_timeout(&runtime);
+                release_drop.send(()).unwrap();
+                drained(&runtime);
+                assert!(occupying.wait_timeout(Duration::from_secs(1)));
+                assert_eq!(dropped.load(Ordering::SeqCst), 1);
+                assert!(matches!(futures_lite::future::block_on(blocking.join()),
+                    Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Shutdown));
+                println!("drained_cancellable_join workers={workers} drop_wait={drop_wait} phase=queued calls=0 capture_drops=1 root=quiescent");
+            }
+        }
+    });
+}
+
+#[test]
+fn cancellable_drained_join_ready_result_precedes_caller_cancellation() {
+    bounded(|| {
+        for workers in [1, 2] {
+            let runtime = runtime(workers);
+            runtime.block_on(async {
+                let mut blocking = runtime.spawn_blocking_drained(|cx| (73_u8, cx)).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !blocking.is_finished() {
+                    assert!(Instant::now() < deadline, "the operation retires before cancellation");
+                    yield_now().await;
+                }
+                let observer = Cx::detached_cancel_context();
+                observer.cancel_with_reason(CancelReason::shutdown());
+                let (value, returned_cx) = blocking.join_cancellable(&observer).await.unwrap();
+                assert_eq!(value, 73);
+                assert!(!returned_cx.is_cancel_requested(), "ready producer is not aborted");
+                assert!(matches!(blocking.join().await, Err(JoinError::PolledAfterCompletion)));
+            });
+            drained(&runtime);
+        }
+    });
+}

@@ -99,8 +99,61 @@ impl<T> DrainedBlockingHandle<T> {
     /// A running closure's exact returned value survives later cancellation,
     /// including a domain-level cancellation result. A closure cancelled before
     /// execution returns `JoinError::Cancelled`; a panic remains `Panicked`.
+    /// Use [`Self::join_cancellable`] to interrupt only the caller's wait while
+    /// preserving this retirement guarantee for the owning region.
     pub async fn join(&mut self) -> Result<T, crate::runtime::JoinError> {
         let terminal = std::future::poll_fn(|cx| self.task.poll_join(cx)).await;
+        self.take_joined_result(terminal)
+    }
+
+    /// Wait for actual retirement, or return promptly on caller cancellation.
+    ///
+    /// A retired result wins over cancellation. Otherwise an unmasked
+    /// cancellation of `cx` closes the queued closure's claim gate, requests
+    /// cancellation of the runtime task, and returns `JoinError::Cancelled`
+    /// with the caller's reason. The same handle retains its eventual result:
+    /// call [`Self::join`] again to wait for actual retirement and retrieve it.
+    /// Cancellation observation and wakeups use [`crate::runtime::TaskHandle::join_cancellable`],
+    /// including checkpoint acknowledgement and cancellation-mask behavior.
+    ///
+    /// An interrupted wait is not a cleanup barrier. A running blocking
+    /// closure is never preempted or detached; its region still owns it and
+    /// cannot close before the closure and its captures retire. Even a queued,
+    /// cancelled closure can retain ownership while the pool is saturated.
+    /// A value already produced behind the task's retirement barrier is kept
+    /// without cancelling the completed producer or exposing the value early.
+    ///
+    /// Dropping a polled, pending wait requests cancellation, unlike dropping
+    /// the ordinary [`Self::join`] wait. It closes the claim gate before the
+    /// underlying task wait sends its abort. The handle and result remain
+    /// available for a later join. Dropping an unpolled future has no effect.
+    ///
+    /// # Errors
+    ///
+    /// A retired operation reports the same errors as [`Self::join`]. An
+    /// interrupted wait reports the caller's cancellation without consuming
+    /// the operation's terminal result.
+    pub async fn join_cancellable(&mut self, cx: &Cx) -> Result<T, crate::runtime::JoinError> {
+        let terminal = DrainedJoinWait {
+            waiting: self.task.join_cancellable(cx),
+            state: &self.state,
+            complete: false,
+        }
+        .await;
+        if !self.task.terminal_result_consumed()
+            && let Err(crate::runtime::JoinError::Cancelled(reason)) = &terminal
+        {
+            // This is only the caller's interrupted wait. Neither a concurrent
+            // pool result nor a newly opened barrier authorizes consuming T.
+            return Err(crate::runtime::JoinError::Cancelled(reason.clone()));
+        }
+        self.take_joined_result(terminal)
+    }
+
+    fn take_joined_result(
+        &mut self,
+        terminal: Result<(), crate::runtime::JoinError>,
+    ) -> Result<T, crate::runtime::JoinError> {
         if matches!(
             terminal,
             Err(crate::runtime::JoinError::PolledAfterCompletion)
@@ -115,6 +168,43 @@ impl<T> DrainedBlockingHandle<T> {
             Ok(()) => Err(crate::runtime::JoinError::Panicked(
                 crate::types::PanicPayload::new("drained blocking task omitted its result"),
             )),
+        }
+    }
+}
+
+struct DrainedJoinWait<'a, T> {
+    waiting: crate::runtime::task_handle::CancellableJoinFuture<'a, ()>,
+    state: &'a DrainedBlockingState<T>,
+    complete: bool,
+}
+
+impl<T> std::future::Future for DrainedJoinWait<'_, T> {
+    type Output = Result<(), crate::runtime::JoinError>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let state = this.state;
+        let result = this
+            .waiting
+            .poll_with_cancel(task, |reason| state.cancel_if_unfinished(reason.clone()));
+        if result.is_ready() {
+            this.complete = true;
+        }
+        result
+    }
+}
+
+impl<T> Drop for DrainedJoinWait<'_, T> {
+    fn drop(&mut self) {
+        // Drop runs before the waiting field: either close the pool claim gate
+        // before task cancellation, or protect a result already produced before
+        // the controller published its own terminal (br-asupersync-67tsr5).
+        if !self.complete
+            && !self
+                .state
+                .cancel_if_unfinished(crate::types::CancelReason::user("abort"))
+        {
+            self.waiting.defuse_drop_abort();
         }
     }
 }
@@ -174,6 +264,22 @@ impl<T> DrainedBlockingState<T> {
         } else {
             state.cancel = Some(reason);
         }
+    }
+
+    /// Linearizes caller cancellation against completion and the pool claim
+    /// gate. A result already produced must not acquire a later task abort just
+    /// because its controller has not published its terminal yet.
+    fn cancel_if_unfinished(&self, reason: crate::types::CancelReason) -> bool {
+        let mut state = self.inner.lock();
+        if state.finished {
+            return false;
+        }
+        if let Some(current) = state.cancel.as_mut() {
+            current.strengthen(&reason);
+        } else {
+            state.cancel = Some(reason);
+        }
+        true
     }
 
     fn finish(&self, result: Result<T, crate::runtime::JoinError>) {

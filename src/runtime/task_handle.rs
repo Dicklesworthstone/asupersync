@@ -913,6 +913,15 @@ impl<T> TaskHandle<T> {
         self.terminal_consumed || self.receiver.is_ready() || self.receiver.is_closed()
     }
 
+    /// Whether a join consumed the authoritative terminal, rather than only
+    /// interrupting its wait. Adapters with separately stored results must not
+    /// infer this from `is_finished()`: retirement can race a cancelled wait.
+    #[inline]
+    #[must_use]
+    pub(crate) const fn terminal_result_consumed(&self) -> bool {
+        self.terminal_consumed
+    }
+
     /// A handle whose retirement barrier is `barrier`, as a runtime spawn
     /// creates it, for tests that need a published but unretired member.
     #[cfg(test)]
@@ -1396,6 +1405,15 @@ pub struct CancellableJoinFuture<'a, T> {
 }
 
 impl<T> CancellableJoinFuture<'_, T> {
+    /// A separately retained producer may have completed before this task
+    /// published its join result. Its owner can suppress a redundant drop abort
+    /// while retaining the ordinary task-retirement wait.
+    pub(crate) fn defuse_drop_abort(&mut self) {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.defuse_drop_abort();
+        }
+    }
+
     fn finish(&mut self, result: Result<T, JoinError>) -> std::task::Poll<Result<T, JoinError>> {
         // Retire only this future's result/barrier waiter. The handle remains
         // usable, including when cancellation left its terminal unconsumed.
@@ -1406,16 +1424,18 @@ impl<T> CancellableJoinFuture<'_, T> {
         self.cancellation.clear();
         std::task::Poll::Ready(result)
     }
-}
 
-impl<T> std::future::Future for CancellableJoinFuture<'_, T> {
-    type Output = Result<T, JoinError>;
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
+    /// Close an adapter's claim gate before cancellation can wake its producer.
+    /// The hook is internal bookkeeping, runs without a runtime lock, and is
+    /// skipped when a terminal was already published. Returning false suppresses
+    /// abort when the adapter's producer has already finished. Ordinary task
+    /// waits return true; drained blocking waits fence their pool envelope here.
+    pub(crate) fn poll_with_cancel(
+        &mut self,
         ctx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let this = self.get_mut();
+        before_cancel: impl FnOnce(&CancelReason) -> bool,
+    ) -> std::task::Poll<Result<T, JoinError>> {
+        let this = self;
         let Some(inner) = this.inner.as_mut() else {
             return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
         };
@@ -1446,11 +1466,23 @@ impl<T> std::future::Future for CancellableJoinFuture<'_, T> {
         if let std::task::Poll::Ready(result) = std::pin::Pin::new(&mut *inner).poll(ctx) {
             return this.finish(result);
         }
+        let abort = !inner.inner.receiver_finished() && before_cancel(&reason);
         inner.defuse_drop_abort();
-        if !inner.inner.receiver_finished() {
+        if abort {
             inner.abort_with_reason(reason.clone());
         }
         this.finish(Err(JoinError::Cancelled(reason)))
+    }
+}
+
+impl<T> std::future::Future for CancellableJoinFuture<'_, T> {
+    type Output = Result<T, JoinError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        ctx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.get_mut().poll_with_cancel(ctx, |_| true)
     }
 }
 
