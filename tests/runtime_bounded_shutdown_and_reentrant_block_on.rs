@@ -26,6 +26,114 @@ use std::future::Future;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn current_thread_browser_host_keeps_entry_and_pump_ownership_separate() {
+    use asupersync::runtime::{BrowserHostServices, JoinError, RootDrainOutcome};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    const NAME: &str = "current_thread_browser_host_keeps_entry_and_pump_ownership_separate";
+    const CHILD: &str = "ASUPERSYNC_CURRENT_THREAD_BROWSER_ENTRY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_teardown_child(
+            NAME,
+            CHILD,
+            "browser-current-thread: task queued before entry",
+            "browser-current-thread: entry returned; pump progressed; state released",
+        );
+        return;
+    }
+
+    struct Capture(Rc<Cell<usize>>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(0, 0)
+        .browser_host_services(Arc::new(BrowserHostServices::new()))
+        .build()
+        .expect("current-thread builder with browser-owned worker");
+    let retained_state = Arc::downgrade(&runtime.resource_monitor());
+    let pump = runtime
+        .browser_pump()
+        .expect("browser pump owns the worker");
+    let polls = Rc::new(Cell::new(0));
+    let polled = Rc::clone(&polls);
+    let local = runtime.spawn_local(async move {
+        polled.set(polled.get() + 1);
+        Rc::new(41_u32)
+    });
+    assert!(!local.is_finished());
+    assert_eq!(polls.get(), 0, "the explicit pump has not run yet");
+    println!("browser-current-thread: task queued before entry");
+
+    // Before the fix, even this ready future waited forever for a worker
+    // handover from a nonexistent native background thread.
+    assert_eq!(runtime.block_on(async { 7_u32 }), 7);
+    assert_eq!(polls.get(), 0, "block_on must not take the pump's worker");
+    assert!(!local.is_finished());
+    assert!(pump.step());
+    assert_eq!(polls.get(), 1);
+    assert_eq!(*runtime.block_on(local).expect("pumped local result"), 41);
+
+    // Reentrant entry still restores its caller's task context. The browser
+    // worker remains exclusively pump-owned at both depths.
+    let nested = runtime.block_on(async {
+        let outer = asupersync::Cx::current().expect("outer entry context");
+        let value = runtime.block_on(async { Rc::new(9_u32) });
+        assert_eq!(
+            asupersync::Cx::current()
+                .expect("restored context")
+                .task_id(),
+            outer.task_id()
+        );
+        value
+    });
+    assert_eq!(*nested, 9);
+
+    let drops = Rc::new(Cell::new(0));
+    let capture = Capture(Rc::clone(&drops));
+    let polled = Rc::clone(&polls);
+    let mut parked = runtime.spawn_local(async move {
+        let _capture = capture;
+        polled.set(polled.get() + 1);
+        std::future::pending::<u8>().await
+    });
+    assert!(pump.step());
+    assert_eq!(
+        polls.get(),
+        2,
+        "the pending local future was actually polled"
+    );
+    assert!(!parked.is_finished());
+    assert_eq!(drops.get(), 0);
+    assert_eq!(
+        runtime.drain_root_region(Duration::ZERO),
+        RootDrainOutcome::TimedOut,
+        "a borrowed drain must not wait for a nonexistent worker handover"
+    );
+    drop(runtime);
+    assert_eq!(
+        drops.get(),
+        1,
+        "teardown retires the pump-owned local future"
+    );
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        std::pin::Pin::new(&mut parked).poll(&mut context),
+        Poll::Ready(Err(JoinError::Cancelled(reason))) if reason.is_shutdown()
+    ));
+    assert_eq!(pump.run_until_idle(), 0);
+    assert_runtime_state_released(&retained_state);
+    println!("browser-current-thread: entry returned; pump progressed; state released");
+}
+
 #[test]
 fn browser_runtime_drop_cancels_queued_and_parked_local_tasks() {
     use asupersync::runtime::{BrowserHostServices, JoinError};

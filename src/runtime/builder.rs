@@ -2908,6 +2908,11 @@ impl RuntimeBuilder {
     }
 
     /// Configures the runtime with browser host services for single-worker execution.
+    ///
+    /// The browser pump owns the worker even when this builder was created by
+    /// [`Self::current_thread`]. On native hosts, drive spawned work through
+    /// [`Runtime::browser_pump`]; `block_on` polls its entry future without
+    /// borrowing the pump's worker or starting a background worker thread.
     #[must_use]
     pub fn browser_host_services(self, host_services: Arc<BrowserHostServices>) -> Self {
         self.host_services(host_services)
@@ -4492,8 +4497,13 @@ impl Runtime {
             }
             // GH#58: install the current-thread driver before the worker
             // thread exists, so that thread runs the loan protocol from its
-            // first dispatch loop.
-            if current_thread && inner.config.worker_threads == 1 {
+            // first dispatch loop. A browser pump owns its worker instead:
+            // installing a loan driver there would wait forever for a native
+            // background thread that BrowserHostServices never starts.
+            if current_thread
+                && inner.config.worker_threads == 1
+                && inner.browser_pump.get().is_none()
+            {
                 let gateway = inner
                     .state
                     .lock()
