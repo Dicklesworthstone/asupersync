@@ -159,8 +159,16 @@ pub(crate) const INITIAL_CRYPTO_REJECTED_CODE: &str = "initial_crypto_rejected";
 /// [`QuicHandshakeDriver::peer_close_error_code`] has the exact code.
 pub(crate) const PEER_CRYPTO_ERROR_CLOSE_CODE: &str = "peer_closed_crypto_error";
 /// Failure code: the peer closed the connection during the handshake with an
-/// error code other than CRYPTO_ERROR.
+/// error code other than CRYPTO_ERROR or CONNECTION_REFUSED.
 pub(crate) const PEER_CLOSE_CODE: &str = "peer_closed";
+/// Failure code: the peer refused the connection during the handshake
+/// (CONNECTION_REFUSED, RFC 9000 section 20.1), for example a server that
+/// serves one peer at a time ([`connection_refused_initial`]). Advisory only:
+/// Initial packets are protected with keys anyone who saw the client's first
+/// Initial can derive, so the refusal authenticates nothing.
+pub(crate) const PEER_CONNECTION_REFUSED_CODE: &str = "peer_connection_refused";
+/// RFC 9000 section 20.1: the server refuses to accept a new connection.
+const CONNECTION_REFUSED: u64 = 0x02;
 /// RFC 9001 section 4.8: CRYPTO_ERROR codes are this base plus the TLS alert.
 const CRYPTO_ERROR_BASE: u64 = 0x0100;
 
@@ -1040,36 +1048,13 @@ impl QuicHandshakeDriver {
         packet_number: u64,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, QuicTlsError> {
-        let first = *header_bytes
-            .first()
-            .ok_or_else(|| handshake_failure("long_header_encode"))?;
-        let packet_number_len = usize::from(first & 0x03) + 1;
-        let packet_number_offset = header_bytes
-            .len()
-            .checked_sub(packet_number_len)
-            .ok_or_else(|| handshake_failure("long_header_encode"))?;
-
-        let protected = self.provider.protect_packet(PacketProtectionRequest {
+        protect_long_header(
+            &mut self.provider,
             space,
-            key_phase: false,
+            header_bytes,
             packet_number,
-            associated_data: header_bytes,
-            payload: plaintext,
-        })?;
-
-        let mut packet = Vec::with_capacity(
-            header_bytes.len() + protected.ciphertext.len() + protected.tag.len(),
-        );
-        packet.extend_from_slice(header_bytes);
-        packet.extend_from_slice(&protected.ciphertext);
-        packet.extend_from_slice(&protected.tag);
-
-        let sample = header_protection_sample(&packet, packet_number_offset)
-            .map_err(|_| handshake_failure("header_protection_sample"))?;
-        let mask = self.provider.header_protection_mask(space, &sample)?;
-        apply_header_protection(&mut packet, packet_number_offset, mask.bytes)
-            .map_err(|_| handshake_failure("header_protection_apply"))?;
-        Ok(packet)
+            plaintext,
+        )
     }
 
     /// Process one UDP datagram of protected long-header (Initial/Handshake)
@@ -1250,6 +1235,8 @@ impl QuicHandshakeDriver {
             let crypto_error = (CRYPTO_ERROR_BASE..CRYPTO_ERROR_BASE + 0x100).contains(&code);
             return Err(handshake_failure(if crypto_error {
                 PEER_CRYPTO_ERROR_CLOSE_CODE
+            } else if code == CONNECTION_REFUSED {
+                PEER_CONNECTION_REFUSED_CODE
             } else {
                 PEER_CLOSE_CODE
             }));
@@ -1947,6 +1934,119 @@ struct SentHandshakeFlight {
     src_cid: ConnectionId,
 }
 
+/// [`QuicHandshakeDriver::protect_long_header_packet`] under `provider`'s
+/// installed keys.
+fn protect_long_header(
+    provider: &mut RustlsQuicCryptoProvider,
+    space: PacketProtectionSpace,
+    header_bytes: &[u8],
+    packet_number: u64,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, QuicTlsError> {
+    let first = *header_bytes
+        .first()
+        .ok_or_else(|| handshake_failure("long_header_encode"))?;
+    let packet_number_len = usize::from(first & 0x03) + 1;
+    let packet_number_offset = header_bytes
+        .len()
+        .checked_sub(packet_number_len)
+        .ok_or_else(|| handshake_failure("long_header_encode"))?;
+
+    let protected = provider.protect_packet(PacketProtectionRequest {
+        space,
+        key_phase: false,
+        packet_number,
+        associated_data: header_bytes,
+        payload: plaintext,
+    })?;
+
+    let mut packet =
+        Vec::with_capacity(header_bytes.len() + protected.ciphertext.len() + protected.tag.len());
+    packet.extend_from_slice(header_bytes);
+    packet.extend_from_slice(&protected.ciphertext);
+    packet.extend_from_slice(&protected.tag);
+
+    let sample = header_protection_sample(&packet, packet_number_offset)
+        .map_err(|_| handshake_failure("header_protection_sample"))?;
+    let mask = provider.header_protection_mask(space, &sample)?;
+    apply_header_protection(&mut packet, packet_number_offset, mask.bytes)
+        .map_err(|_| handshake_failure("header_protection_apply"))?;
+    Ok(packet)
+}
+
+/// The datagram that answers a client's QUIC v1 Initial with an Initial-space
+/// CONNECTION_CLOSE carrying CONNECTION_REFUSED (RFC 9000 sections 10.2.3 and
+/// 20.1), or `None` when `datagram` is not such an Initial.
+///
+/// The client fails its handshake at once with `peer_connection_refused`
+/// instead of retransmitting until its own timeout. Only the invariant header
+/// is read: a v1 long-header Initial in a datagram of at least 1200 bytes
+/// (RFC 9000 section 14.1) whose Destination CID is 8 to 20 bytes (section
+/// 7.2). The Initial is not decrypted; its keys are public anyway, so a valid
+/// one proves nothing more. The answer carries no token, no CRYPTO data and
+/// no state: the client's Source CID becomes its Destination CID and the
+/// client's chosen Destination CID its Source CID. It is about 60 bytes, well
+/// inside the three-times amplification limit (section 8.1).
+pub(crate) fn connection_refused_initial(datagram: &[u8]) -> Option<Vec<u8>> {
+    if datagram.len() < MIN_INITIAL_DATAGRAM_BYTES {
+        return None;
+    }
+    // Long header form, fixed bit, Initial type (RFC 9000 section 17.2.2).
+    let first = *datagram.first()?;
+    if first & 0xf0 != 0xc0 || datagram.get(1..5)? != [0, 0, 0, 1] {
+        return None;
+    }
+    let dcid_len = usize::from(*datagram.get(5)?);
+    if !(8..=20).contains(&dcid_len) {
+        return None;
+    }
+    let dcid = datagram.get(6..6 + dcid_len)?;
+    let scid_len = usize::from(*datagram.get(6 + dcid_len)?);
+    if scid_len > 20 {
+        return None;
+    }
+    let scid = datagram.get(7 + dcid_len..7 + dcid_len + scid_len)?;
+    let mut provider = RustlsQuicCryptoProvider::new_v1(RustlsQuicProviderSide::Server).ok()?;
+    provider
+        .derive_keys(
+            PacketProtectionSpace::Initial,
+            &QuicHandshakeTranscript::new(),
+            dcid,
+        )
+        .ok()?;
+    let mut payload = BytesMut::new();
+    QuicFrame::ConnectionClose {
+        error_code: VarInt::from_u64_unchecked(CONNECTION_REFUSED),
+        frame_type: Some(VarInt::from_u64_unchecked(0)),
+        reason_phrase: Bytes::new(),
+    }
+    .encode(&mut payload)
+    .ok()?;
+    let packet_number = 0;
+    let header = PacketHeader::Long(LongHeader {
+        packet_type: LongPacketType::Initial,
+        version: 1,
+        dst_cid: ConnectionId::new(scid).ok()?,
+        src_cid: ConnectionId::new(dcid).ok()?,
+        token: Vec::new(),
+        payload_length: u64::from(HANDSHAKE_PACKET_NUMBER_LEN)
+            + payload.len() as u64
+            + QUIC_AEAD_TAG_LEN as u64,
+        packet_number,
+        packet_number_len: HANDSHAKE_PACKET_NUMBER_LEN,
+    });
+    let mut header_bytes = Vec::new();
+    header.encode(&mut header_bytes).ok()?;
+    protect_long_header(
+        &mut provider,
+        PacketProtectionSpace::Initial,
+        &header_bytes,
+        packet_number,
+        &payload,
+    )
+    .ok()
+}
+
 /// Drive a client QUIC/TLS-1.3 handshake to completion over `endpoint`.
 ///
 /// This talks to `server_addr`. The connect-side handshake derives Initial keys from
@@ -1956,7 +2056,8 @@ struct SentHandshakeFlight {
 /// A TLS refusal on either side ends the handshake at once: this side's alert
 /// is sent to the server as CONNECTION_CLOSE with CRYPTO_ERROR, and a
 /// CONNECTION_CLOSE from the server fails the handshake with
-/// `peer_closed_crypto_error` or `peer_closed`
+/// `peer_closed_crypto_error`, `peer_connection_refused` (CONNECTION_REFUSED)
+/// or `peer_closed`
 /// ([`QuicHandshakeDriver::peer_close_error_code`] has the code).
 ///
 /// 1-RTT packets that arrive before the handshake completes are dropped, as

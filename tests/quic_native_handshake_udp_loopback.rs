@@ -3063,3 +3063,302 @@ mod managed_quiet {
         println!("MANAGED_QUIC_QUIET_SUMMARY {summary}");
     }
 }
+
+/// One served connection over real loopback UDP, for the refusal tests.
+async fn served_pair(
+    cx: &Cx,
+) -> (
+    asupersync::net::quic_native::NativeQuicUdpConnection,
+    asupersync::net::quic_native::NativeQuicUdpConnection,
+) {
+    use asupersync::net::quic_core::TransportParameters;
+    use asupersync::net::quic_native::NativeQuicUdpConnection;
+
+    let config = QuicUdpEndpointConfig::default();
+    let client_endpoint = QuicUdpEndpoint::bind(cx, "127.0.0.1:0".parse().unwrap(), config.clone())
+        .await
+        .unwrap();
+    let server_endpoint = QuicUdpEndpoint::bind(cx, "127.0.0.1:0".parse().unwrap(), config)
+        .await
+        .unwrap();
+    let server_addr = server_endpoint.local_addr();
+    let mut parameters = Vec::new();
+    TransportParameters {
+        initial_max_data: Some(1 << 20),
+        initial_max_stream_data_uni: Some(1 << 18),
+        initial_max_streams_uni: Some(4),
+        ..TransportParameters::default()
+    }
+    .encode(&mut parameters)
+    .unwrap();
+    let client_driver = QuicHandshakeDriver::client(
+        client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![ATP_QUIC_ALPN.to_vec()]).unwrap(),
+        ServerName::try_from("localhost").unwrap(),
+        parameters.clone(),
+    )
+    .unwrap();
+    let server_driver = QuicHandshakeDriver::server(
+        server_config(
+            vec![parse_one_cert(LEAF_CERT_PEM)],
+            leaf_key(),
+            vec![ATP_QUIC_ALPN.to_vec()],
+        )
+        .unwrap(),
+        parameters,
+    )
+    .unwrap();
+    let initial_cid = ConnectionId::new(b"served-initial").unwrap();
+    let (client, server) = zip(
+        NativeQuicUdpConnection::connect(
+            cx,
+            client_endpoint,
+            server_addr,
+            client_driver,
+            initial_cid,
+            ConnectionId::new(b"served-client").unwrap(),
+            NativeQuicConnectionConfig::default(),
+            ATP_QUIC_ALPN,
+        ),
+        NativeQuicUdpConnection::accept(
+            cx,
+            server_endpoint,
+            server_driver,
+            initial_cid,
+            ConnectionId::new(b"served-server").unwrap(),
+            NativeQuicConnectionConfig::default(),
+            ATP_QUIC_ALPN,
+        ),
+    )
+    .await;
+    (client.unwrap(), server.unwrap())
+}
+
+/// A datagram shaped like a client's first Initial: v1 long header, an
+/// 8-byte Destination CID, a 4-byte Source CID, padded to `len` bytes.
+fn foreign_initial(len: usize) -> Vec<u8> {
+    let mut datagram = vec![0xc3, 0, 0, 0, 1, 8];
+    datagram.extend_from_slice(b"second-d");
+    datagram.push(4);
+    datagram.extend_from_slice(b"scid");
+    datagram.resize(len, 0);
+    datagram
+}
+
+async fn replies(cx: &Cx, socket: &mut QuicUdpEndpoint, wait: Duration) -> Vec<Vec<u8>> {
+    match timeout(wall_now(), wait, socket.receive_batch(cx, 8)).await {
+        Ok(Ok(packets)) => packets.into_iter().map(|packet| packet.data).collect(),
+        Ok(Err(error)) => panic!("receive failed: {error:?}"),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Drive `server` until it has dropped `count` datagrams.
+async fn drop_count(
+    cx: &Cx,
+    server: &mut asupersync::net::quic_native::NativeQuicUdpConnection,
+    count: usize,
+) {
+    let mut dropped = 0;
+    while dropped < count {
+        dropped += server
+            .drive_io_once(cx, Duration::from_millis(200))
+            .await
+            .unwrap()
+            .packets_dropped;
+    }
+}
+
+/// `refuse_foreign_initials`: off by default; once on, another source's
+/// Initial gets one Initial-space answer addressed back by its own CIDs, at
+/// most one per 100 ms, and nothing else (a short datagram, another packet
+/// type, a too-short Destination CID) is answered. The served connection
+/// keeps working.
+#[test]
+fn a_refusing_owner_answers_another_sources_initial_at_most_once_per_interval() {
+    use asupersync::net::quic_core::{LongPacketType, ProtectedHeaderPrefix};
+    use asupersync::net::quic_native::OutgoingPacket;
+
+    block_on(async {
+        let cx = Cx::for_testing();
+        let (mut client, mut server) = served_pair(&cx).await;
+        let server_addr = server.local_addr();
+        let mut foreign = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let send = |data: Vec<u8>| OutgoingPacket {
+            dst_addr: server_addr,
+            data,
+            send_time: None,
+        };
+
+        // Off by default: dropped without an answer.
+        foreign
+            .send_batch(&cx, &[send(foreign_initial(1200))])
+            .await
+            .unwrap();
+        drop_count(&cx, &mut server, 1).await;
+        assert!(
+            replies(&cx, &mut foreign, Duration::from_millis(200))
+                .await
+                .is_empty()
+        );
+
+        server.refuse_foreign_initials();
+        // Not an Initial a client could have sent first: no answer.
+        let mut handshake = foreign_initial(1200);
+        handshake[0] = 0xe3;
+        let mut short_cid = foreign_initial(1200);
+        short_cid[5] = 7;
+        foreign
+            .send_batch(
+                &cx,
+                &[
+                    send(foreign_initial(1199)),
+                    send(handshake),
+                    send(short_cid),
+                ],
+            )
+            .await
+            .unwrap();
+        drop_count(&cx, &mut server, 3).await;
+        assert!(
+            replies(&cx, &mut foreign, Duration::from_millis(200))
+                .await
+                .is_empty()
+        );
+
+        // Two Initials in one burst: one answer.
+        foreign
+            .send_batch(
+                &cx,
+                &[send(foreign_initial(1200)), send(foreign_initial(1252))],
+            )
+            .await
+            .unwrap();
+        drop_count(&cx, &mut server, 2).await;
+        let answers = replies(&cx, &mut foreign, Duration::from_millis(200)).await;
+        assert_eq!(answers.len(), 1);
+        let answer = &answers[0];
+        assert!(answer.len() < 100, "{} bytes", answer.len());
+        let Ok(ProtectedHeaderPrefix::Long(header)) = ProtectedHeaderPrefix::decode(answer, 0)
+        else {
+            panic!("not a long header");
+        };
+        assert_eq!(header.packet_type, LongPacketType::Initial);
+        assert_eq!(header.version, 1);
+        assert_eq!(header.dst_cid, ConnectionId::new(b"scid").unwrap());
+        assert_eq!(header.src_cid, ConnectionId::new(b"second-d").unwrap());
+        assert!(header.token.is_empty());
+
+        // After the 100 ms interval, the next Initial is answered again.
+        thread::sleep(Duration::from_millis(120));
+        foreign
+            .send_batch(&cx, &[send(foreign_initial(1200))])
+            .await
+            .unwrap();
+        drop_count(&cx, &mut server, 1).await;
+        assert_eq!(
+            replies(&cx, &mut foreign, Duration::from_millis(200))
+                .await
+                .len(),
+            1
+        );
+
+        // The served connection is untouched.
+        let stream = client.connection_mut().open_uni_stream(&cx).unwrap();
+        client
+            .connection_mut()
+            .write_stream(&cx, stream, Bytes::from_static(b"still served"), false)
+            .unwrap();
+        assert!(client.flush(&cx).await.unwrap() > 0);
+        let progress = server
+            .drive_io_once(&cx, Duration::from_millis(500))
+            .await
+            .unwrap();
+        assert!(progress.packets_received > 0);
+        assert_eq!(server.peer_addr(), client.local_addr());
+    });
+}
+
+/// End to end: while one client is served, a second real client's handshake
+/// ends at once with `peer_connection_refused` from the refusing owner's
+/// answer, long before its first Initial retransmission (1.5 s handshake PTO)
+/// would even leave.
+#[test]
+fn a_second_client_is_refused_at_once_while_the_first_is_served() {
+    use asupersync::net::quic_core::TransportParameters;
+    use asupersync::net::quic_native::{NativeQuicUdpConnection, NativeQuicUdpConnectionError};
+
+    block_on(async {
+        let cx = Cx::for_testing();
+        let (_client, mut server) = served_pair(&cx).await;
+        server.refuse_foreign_initials();
+        let server_addr = server.local_addr();
+        let socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let mut parameters = Vec::new();
+        TransportParameters::default()
+            .encode(&mut parameters)
+            .unwrap();
+        let driver = QuicHandshakeDriver::client(
+            client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![ATP_QUIC_ALPN.to_vec()])
+                .unwrap(),
+            ServerName::try_from("localhost").unwrap(),
+            parameters,
+        )
+        .unwrap();
+        let done = AtomicBool::new(false);
+        let started = Instant::now();
+        let (second, ()) = zip(
+            async {
+                let result = timeout(
+                    wall_now(),
+                    Duration::from_secs(3),
+                    NativeQuicUdpConnection::connect(
+                        &cx,
+                        socket,
+                        server_addr,
+                        driver,
+                        ConnectionId::new(b"second-initial").unwrap(),
+                        ConnectionId::new(b"second").unwrap(),
+                        NativeQuicConnectionConfig::default(),
+                        ATP_QUIC_ALPN,
+                    ),
+                )
+                .await;
+                done.store(true, Ordering::SeqCst);
+                result
+            },
+            async {
+                while !done.load(Ordering::SeqCst) {
+                    server
+                        .drive_io_once(&cx, Duration::from_millis(50))
+                        .await
+                        .unwrap();
+                }
+            },
+        )
+        .await;
+        let elapsed = started.elapsed();
+        match second {
+            Ok(Err(NativeQuicUdpConnectionError::Handshake(
+                QuicTlsError::CryptoProviderFailure { code, .. },
+            ))) => assert_eq!(code, "peer_connection_refused"),
+            Ok(other) => panic!("not refused: {:?}", other.err()),
+            Err(_) => panic!("no answer within 3 s"),
+        }
+        assert!(
+            elapsed < Duration::from_millis(1_000),
+            "refused only after {elapsed:?}"
+        );
+    });
+}

@@ -44,7 +44,7 @@ use super::endpoint::{
 };
 use super::endpoint_api::QuicConnection;
 use super::handshake_driver::{
-    QuicHandshakeDriver, client_handshake_over_udp_with_early_data,
+    QuicHandshakeDriver, client_handshake_over_udp_with_early_data, connection_refused_initial,
     server_handshake_over_udp_with_early_data,
 };
 use super::managed_endpoint::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
@@ -186,7 +186,12 @@ pub struct NativeQuicUdpConnection {
     // Already protected/accounted packets remain owned across a dropped flush.
     pending_outgoing: Vec<RoutedOutgoingPacket>,
     local_close: Option<LocalClosePacket>,
+    // `Some` once `refuse_foreign_initials` opted in: when the last refusal left.
+    foreign_initial_refusal: Option<Option<Instant>>,
 }
+
+/// At most one CONNECTION_REFUSED answer per interval, whatever the sources.
+const FOREIGN_INITIAL_REFUSAL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// One encrypted close is retained through send failure and reused verbatim
 /// for bounded responses. Reusing ciphertext does not reuse an AEAD nonce for
@@ -355,6 +360,7 @@ impl NativeQuicUdpConnection {
             sent_since_receive,
             pending_outgoing,
             local_close: _,
+            foreign_initial_refusal: _,
         } = self;
         NativeQuicUdpHandoffParts {
             connection,
@@ -407,6 +413,7 @@ impl NativeQuicUdpConnection {
             sent_since_receive,
             pending_outgoing,
             local_close: None,
+            foreign_initial_refusal: None,
         }
     }
 
@@ -601,6 +608,7 @@ impl NativeQuicUdpConnection {
             sent_since_receive: false,
             pending_outgoing: Vec::new(),
             local_close: None,
+            foreign_initial_refusal: None,
         })
     }
 
@@ -1061,6 +1069,49 @@ impl NativeQuicUdpConnection {
         .await
     }
 
+    /// Answer a QUIC v1 Initial from any source other than this connection's
+    /// peer with an Initial-space CONNECTION_CLOSE carrying CONNECTION_REFUSED,
+    /// instead of dropping it silently. Off by default.
+    ///
+    /// A server that serves one connection at a time can opt in so that a
+    /// second client fails at once with `peer_connection_refused` rather than
+    /// retransmitting its Initial until its handshake timeout. The answer is
+    /// advisory (Initial keys are public) and is built from the received
+    /// header alone (`handshake_driver::connection_refused_initial`). This
+    /// connection's peer, keys, packet numbers and timers are untouched. At
+    /// most one answer leaves per 100 ms, and each is about 60 bytes for a
+    /// received datagram of at least 1200, inside RFC 9000's three-times
+    /// amplification limit. A failed send is not retried or reported.
+    pub fn refuse_foreign_initials(&mut self) {
+        self.foreign_initial_refusal.get_or_insert(None);
+    }
+
+    async fn refuse_foreign_initial(&mut self, cx: &Cx, packet: &ReceivedPacket) {
+        let Some(last) = &mut self.foreign_initial_refusal else {
+            return;
+        };
+        if last.is_some_and(|last| {
+            packet.receive_time.saturating_duration_since(last) < FOREIGN_INITIAL_REFUSAL_INTERVAL
+        }) {
+            return;
+        }
+        let Some(data) = connection_refused_initial(&packet.data) else {
+            return;
+        };
+        *last = Some(packet.receive_time);
+        let _ = self
+            .endpoint
+            .send_batch(
+                cx,
+                &[OutgoingPacket {
+                    dst_addr: packet.src_addr,
+                    data,
+                    send_time: None,
+                }],
+            )
+            .await;
+    }
+
     /// Receive at most one bounded UDP batch, deliver authenticated 1-RTT
     /// payloads, service a due loss timer, and flush resulting ACK/application
     /// frames. A quiet timeout is reported as progress rather than an error so
@@ -1122,6 +1173,7 @@ impl NativeQuicUdpConnection {
             }
             if packet.src_addr != self.peer_addr {
                 progress.packets_dropped = progress.packets_dropped.saturating_add(1);
+                self.refuse_foreign_initial(cx, &packet).await;
                 continue;
             }
             if matches!(
