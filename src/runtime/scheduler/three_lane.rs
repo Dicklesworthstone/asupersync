@@ -501,7 +501,7 @@ thread_local! {
 }
 
 /// Installs (or with `None` removes) this thread's standby test hook.
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
 pub(crate) fn set_standby_test_hook(hook: Option<Box<dyn FnMut(StandbyPoint)>>) {
     STANDBY_TEST_HOOK.with(|slot| *slot.borrow_mut() = hook);
 }
@@ -1548,7 +1548,7 @@ impl WorkerCoordinator {
 
     /// Runs this runtime's handoff with another `T`; zero restores the
     /// immediate follower handoff. Set before the workers start.
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
     pub(crate) fn set_standby_nanos_for_test(&self, nanos: u64) {
         self.standby_nanos_for_test.store(nanos, Ordering::Relaxed);
     }

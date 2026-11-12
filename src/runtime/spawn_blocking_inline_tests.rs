@@ -249,7 +249,7 @@
             let (sender, task) = crate::runtime::task_handle::task_handle_channel::<()>(
                 child.task_id(), Arc::downgrade(&child.inner),
             );
-            let state = DrainedBlockingState::new();
+            let state = DrainedBlockingState::<()>::new();
             let mut handle = DrainedBlockingHandle::new(task, Arc::clone(&state));
             let reason = CancelReason::user("masked blocking caller");
             caller.cancel_with_reason(reason.clone());

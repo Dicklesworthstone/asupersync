@@ -441,7 +441,7 @@
                 assert!(writer.poll_flush(
                     &cx, &mut connection, &mut TaskContext::from_waker(Waker::noop()),
                 ).is_pending());
-                assert_eq!(connection.pending_stream_data_bytes(stream), credit as usize);
+                assert_eq!(connection.pending_stream_data_bytes(stream), credit);
                 assert_eq!(sender.prepared_section_count(), usize::from(credit == 0));
                 assert_eq!(sender.outstanding_section_count(stream), credit as usize);
                 drop(writer);
@@ -4147,7 +4147,7 @@
                     let mut task = TaskContext::from_waker(&waker);
                     assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
                     assert!(writer.poll_flush(&cx, &mut connection, &mut task).is_pending());
-                    assert_eq!(connection.pending_stream_data_bytes(stream), credit as usize);
+                    assert_eq!(connection.pending_stream_data_bytes(stream), credit);
                     assert_eq!(connection.inner().streams().stream(stream).unwrap().send_offset, credit);
                     counter.0.store(0, Ordering::SeqCst);
                     if termination != 0 {
